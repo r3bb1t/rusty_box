@@ -1045,11 +1045,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 0);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
+            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *const u8;
-            return Ok(unsafe { *host_at_page_offset(host, laddr) });
+            let v = unsafe { *host_at_page_offset(host, laddr) };
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr_hit, 1, super::instrumentation::MemAccessRW::Read);
+            return Ok(v);
         }
         let paddr = self.translate_data_read(laddr)?;
-        Ok(self.mem_read_byte(paddr))
+        let v = self.mem_read_byte(paddr);
+        #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr, 1, super::instrumentation::MemAccessRW::Read);
+        Ok(v)
     }
 
     /// Read a word given a pre-computed linear address with cross-page handling.
@@ -1059,15 +1067,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 1);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
+            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *const u8;
             let ptr = host_at_page_offset(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            return Ok(read_unaligned_u16(ptr));
+            let v = read_unaligned_u16(ptr);
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr_hit, 2, super::instrumentation::MemAccessRW::Read);
+            return Ok(v);
         }
         let page_offset = laddr & 0xFFF;
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
-            Ok(self.mem_read_word(paddr))
+            let v = self.mem_read_word(paddr);
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr, 2, super::instrumentation::MemAccessRW::Read);
+            Ok(v)
         } else {
             let p0 = self.translate_data_read(laddr)?;
             let b0 = self.mem_read_byte(p0);
@@ -1084,15 +1100,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 3);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
+            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *const u8;
             let ptr = host_at_page_offset(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            return Ok(read_unaligned_u32(ptr));
+            let v = read_unaligned_u32(ptr);
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr_hit, 4, super::instrumentation::MemAccessRW::Read);
+            return Ok(v);
         }
         let page_offset = laddr & 0xFFF;
         if page_offset + 4 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
-            Ok(self.mem_read_dword(paddr))
+            let v = self.mem_read_dword(paddr);
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr, 4, super::instrumentation::MemAccessRW::Read);
+            Ok(v)
         } else {
             let mut buf = [0u8; 4];
             for i in 0..4u64 {
@@ -1110,15 +1134,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 7);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
+            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *const u8;
             let ptr = host_at_page_offset(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            return Ok(read_unaligned_u64(ptr));
+            let v = read_unaligned_u64(ptr);
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr_hit, 8, super::instrumentation::MemAccessRW::Read);
+            return Ok(v);
         }
         let page_offset = laddr & 0xFFF;
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
-            Ok(self.mem_read_qword(paddr))
+            let v = self.mem_read_qword(paddr);
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr, 8, super::instrumentation::MemAccessRW::Read);
+            Ok(v)
         } else {
             let mut buf = [0u8; 8];
             for i in 0..8u64 {
@@ -1140,11 +1172,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.i_cache.smc_write_check(paddr, 1);
             let host = tlb.host_page_addr as *mut u8;
             unsafe { *host_at_page_offset_mut(host, laddr) = val };
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr, 1, super::instrumentation::MemAccessRW::Write);
             return Ok(());
         }
         let paddr = self.translate_data_write(laddr)?;
         self.i_cache.smc_write_check(paddr, 1);
         self.mem_write_byte(paddr, val);
+        #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr, 1, super::instrumentation::MemAccessRW::Write);
         Ok(())
     }
 
@@ -1161,6 +1197,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u16(ptr, val);
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr, 2, super::instrumentation::MemAccessRW::Write);
             return Ok(());
         }
         let page_offset = laddr & 0xFFF;
@@ -1168,6 +1206,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = self.translate_data_write(laddr)?;
             self.i_cache.smc_write_check(paddr, 2);
             self.mem_write_word(paddr, val);
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr, 2, super::instrumentation::MemAccessRW::Write);
         } else {
             let bytes = val.to_le_bytes();
             let p0 = self.translate_data_write(laddr)?;
@@ -1199,6 +1239,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u32(ptr, val);
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr, 4, super::instrumentation::MemAccessRW::Write);
             return Ok(());
         }
         let page_offset = laddr & 0xFFF;
@@ -1206,6 +1248,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = self.translate_data_write(laddr)?;
             self.i_cache.smc_write_check(paddr, 4);
             self.mem_write_dword(paddr, val);
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr, 4, super::instrumentation::MemAccessRW::Write);
         } else {
             let bytes = val.to_le_bytes();
             for i in 0..4u64 {
@@ -1232,6 +1276,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u64(ptr, val);
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr, 8, super::instrumentation::MemAccessRW::Write);
             return Ok(());
         }
         let page_offset = laddr & 0xFFF;
@@ -1239,6 +1285,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = self.translate_data_write(laddr)?;
             self.i_cache.smc_write_check(paddr, 8);
             self.mem_write_qword(paddr, val);
+            #[cfg(feature = "instrumentation")]
+        self.on_lin_access(laddr, paddr, 8, super::instrumentation::MemAccessRW::Write);
         } else {
             let bytes = val.to_le_bytes();
             for i in 0..8u64 {

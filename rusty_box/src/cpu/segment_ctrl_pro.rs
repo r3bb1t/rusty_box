@@ -601,6 +601,10 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         rip: u64,
         cpl: u8,
     ) -> Result<()> {
+        // Capture prev CS before load_cs changes it (BOCHS BX_INSTR_FAR_BRANCH_ORIGIN).
+        #[cfg(feature = "instrumentation")]
+        let prev_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
+
         // Bochs ctrl_xfer_pro.cc
         // In long mode with a 64-bit code segment, do canonical check instead of limit check
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -630,10 +634,27 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         // Update RIP
         // In long mode with L=1, RIP is full 64-bit; otherwise mask to 32 bits
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
-        if self.long_mode() && descriptor.u.segment_l() {
-            self.set_rip(rip);
+        let new_rip = if self.long_mode() && descriptor.u.segment_l() {
+            rip
         } else {
-            self.set_rip(rip & 0xFFFFFFFF);
+            rip & 0xFFFFFFFF
+        };
+        self.set_rip(new_rip);
+
+        // BOCHS BX_INSTR_FAR_BRANCH fires here with generic Jmp kind;
+        // call sites that know the specific kind (CALL, RET, IRET, INT, SYSENTER...)
+        // fire their own far_branch hook with the correct BranchType.
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_branch() {
+            let new_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
+            let src_rip = self.prev_rip;
+            self.instrumentation.fire_far_branch(
+                super::instrumentation::BranchType::Jmp,
+                prev_cs,
+                src_rip,
+                new_cs,
+                new_rip,
+            );
         }
 
         Ok(())

@@ -35,7 +35,7 @@ bx_full = [
 bx_debugger = []
 bx_gdb_stub = []
 bx_large_ram_file = []
-bx_instrumentation = []
+instrumentation = []
 
 bx_support_alignment_check = []
 bx_support_amx = []

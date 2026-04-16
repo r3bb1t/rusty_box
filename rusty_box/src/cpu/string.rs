@@ -148,91 +148,79 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// STOSB - Store AL at ES:DI (16-bit address mode)
-    pub fn stosb16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let di = self.di() as u32;
-        let al = self.al();
-
-        self.write_virtual_byte(BxSegregs::Es, di, al)?;
-
-        if self.get_df() {
-            self.set_di(self.di().wrapping_sub(1));
-        } else {
-            self.set_di(self.di().wrapping_add(1));
-        }
-
-        Ok(())
+    pub fn stosb16(&mut self, _instr: &Instruction) -> super::Result<()> { let di = self.di() as u32;
+    let al = self.al();
+    
+    self.write_virtual_byte(BxSegregs::Es, di, al)?;
+    
+    if self.get_df() {
+        self.set_di(self.di().wrapping_sub(1));
+    } else {
+        self.set_di(self.di().wrapping_add(1));
     }
+    
+    Ok(()) }
 
     /// STOSB - Store AL at ES:EDI (32-bit address mode)
-    pub fn stosb32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let edi = self.edi();
-        let al = self.al();
-
-        self.write_virtual_byte(BxSegregs::Es, edi, al)?;
-
-        let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
-        self.set_rdi(edi.wrapping_add(increment) as u64);
-
-        Ok(())
-    }
+    pub fn stosb32(&mut self, _instr: &Instruction) -> super::Result<()> { let edi = self.edi();
+    let al = self.al();
+    
+    self.write_virtual_byte(BxSegregs::Es, edi, al)?;
+    
+    let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
+    self.set_rdi(edi.wrapping_add(increment) as u64);
+    
+    Ok(()) }
 
     /// STOSW - Store AX at ES:DI (16-bit address mode)
-    pub fn stosw16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let di = self.di() as u32;
-        let ax = self.ax();
-
-        self.write_virtual_word(BxSegregs::Es, di, ax)?;
-
-        if self.get_df() {
-            self.set_di(self.di().wrapping_sub(2));
-        } else {
-            self.set_di(self.di().wrapping_add(2));
-        }
-
-        Ok(())
+    pub fn stosw16(&mut self, _instr: &Instruction) -> super::Result<()> { let di = self.di() as u32;
+    let ax = self.ax();
+    
+    self.write_virtual_word(BxSegregs::Es, di, ax)?;
+    
+    if self.get_df() {
+        self.set_di(self.di().wrapping_sub(2));
+    } else {
+        self.set_di(self.di().wrapping_add(2));
     }
+    
+    Ok(()) }
 
     /// STOSW - Store AX at ES:EDI (32-bit address mode)
-    pub fn stosw32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let edi = self.edi();
-        let ax = self.ax();
-
-        self.write_virtual_word(BxSegregs::Es, edi, ax)?;
-
-        let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
-        self.set_rdi(edi.wrapping_add(increment) as u64);
-
-        Ok(())
-    }
+    pub fn stosw32(&mut self, _instr: &Instruction) -> super::Result<()> { let edi = self.edi();
+    let ax = self.ax();
+    
+    self.write_virtual_word(BxSegregs::Es, edi, ax)?;
+    
+    let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
+    self.set_rdi(edi.wrapping_add(increment) as u64);
+    
+    Ok(()) }
 
     /// STOSD - Store EAX at ES:DI (16-bit address mode)
-    pub fn stosd16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let di = self.di() as u32;
-        let eax = self.eax();
-
-        self.write_virtual_dword(BxSegregs::Es, di, eax)?;
-
-        if self.get_df() {
-            self.set_di(self.di().wrapping_sub(4));
-        } else {
-            self.set_di(self.di().wrapping_add(4));
-        }
-
-        Ok(())
+    pub fn stosd16(&mut self, _instr: &Instruction) -> super::Result<()> { let di = self.di() as u32;
+    let eax = self.eax();
+    
+    self.write_virtual_dword(BxSegregs::Es, di, eax)?;
+    
+    if self.get_df() {
+        self.set_di(self.di().wrapping_sub(4));
+    } else {
+        self.set_di(self.di().wrapping_add(4));
     }
+    
+    Ok(()) }
 
     /// STOSD - Store EAX at ES:EDI (32-bit address mode)
-    pub fn stosd32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let edi = self.edi();
-        let eax = self.eax();
-
-        self.write_virtual_dword(BxSegregs::Es, edi, eax)?;
-
-        let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
-        self.set_rdi(edi.wrapping_add(increment) as u64);
-
-        Ok(())
-    }
+    pub fn stosd32(&mut self, _instr: &Instruction) -> super::Result<()> { let edi = self.edi();
+    let eax = self.eax();
+    
+    self.write_virtual_dword(BxSegregs::Es, edi, eax)?;
+    
+    let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
+    self.set_rdi(edi.wrapping_add(increment) as u64);
+    
+    Ok(()) }
 
     // =========================================================================
     // LODSB - Load String Byte
@@ -457,109 +445,97 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// SCASB - Compare AL with byte at ES:DI (16-bit address mode)
-    pub fn scasb16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let di = self.di() as u32;
-        let al = self.al();
-
-        let op2 = self.read_virtual_byte(BxSegregs::Es, di)?;
-
-        let result = al.wrapping_sub(op2);
-        self.update_flags_sub8(al, op2, result);
-
-        if self.get_df() {
-            self.set_di(self.di().wrapping_sub(1));
-        } else {
-            self.set_di(self.di().wrapping_add(1));
-        }
-
-        Ok(())
+    pub fn scasb16(&mut self, _instr: &Instruction) -> super::Result<()> { let di = self.di() as u32;
+    let al = self.al();
+    
+    let op2 = self.read_virtual_byte(BxSegregs::Es, di)?;
+    
+    let result = al.wrapping_sub(op2);
+    self.update_flags_sub8(al, op2, result);
+    
+    if self.get_df() {
+        self.set_di(self.di().wrapping_sub(1));
+    } else {
+        self.set_di(self.di().wrapping_add(1));
     }
+    
+    Ok(()) }
 
     /// SCASB - Compare AL with byte at ES:EDI (32-bit address mode)
-    pub fn scasb32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let edi = self.edi();
-        let al = self.al();
-
-        let op2 = self.read_virtual_byte(BxSegregs::Es, edi)?;
-
-        let result = al.wrapping_sub(op2);
-        self.update_flags_sub8(al, op2, result);
-
-        let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
-        self.set_rdi(edi.wrapping_add(increment) as u64);
-
-        Ok(())
-    }
+    pub fn scasb32(&mut self, _instr: &Instruction) -> super::Result<()> { let edi = self.edi();
+    let al = self.al();
+    
+    let op2 = self.read_virtual_byte(BxSegregs::Es, edi)?;
+    
+    let result = al.wrapping_sub(op2);
+    self.update_flags_sub8(al, op2, result);
+    
+    let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
+    self.set_rdi(edi.wrapping_add(increment) as u64);
+    
+    Ok(()) }
 
     /// SCASW - Compare AX with word at ES:DI (16-bit address mode)
-    pub fn scasw16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let di = self.di() as u32;
-        let ax = self.ax();
-
-        let op2 = self.read_virtual_word(BxSegregs::Es, di)?;
-
-        let result = ax.wrapping_sub(op2);
-        self.update_flags_sub16(ax, op2, result);
-
-        if self.get_df() {
-            self.set_di(self.di().wrapping_sub(2));
-        } else {
-            self.set_di(self.di().wrapping_add(2));
-        }
-
-        Ok(())
+    pub fn scasw16(&mut self, _instr: &Instruction) -> super::Result<()> { let di = self.di() as u32;
+    let ax = self.ax();
+    
+    let op2 = self.read_virtual_word(BxSegregs::Es, di)?;
+    
+    let result = ax.wrapping_sub(op2);
+    self.update_flags_sub16(ax, op2, result);
+    
+    if self.get_df() {
+        self.set_di(self.di().wrapping_sub(2));
+    } else {
+        self.set_di(self.di().wrapping_add(2));
     }
+    
+    Ok(()) }
 
     /// SCASW - Compare AX with word at ES:EDI (32-bit address mode)
-    pub fn scasw32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let edi = self.edi();
-        let ax = self.ax();
-
-        let op2 = self.read_virtual_word(BxSegregs::Es, edi)?;
-
-        let result = ax.wrapping_sub(op2);
-        self.update_flags_sub16(ax, op2, result);
-
-        let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
-        self.set_rdi(edi.wrapping_add(increment) as u64);
-
-        Ok(())
-    }
+    pub fn scasw32(&mut self, _instr: &Instruction) -> super::Result<()> { let edi = self.edi();
+    let ax = self.ax();
+    
+    let op2 = self.read_virtual_word(BxSegregs::Es, edi)?;
+    
+    let result = ax.wrapping_sub(op2);
+    self.update_flags_sub16(ax, op2, result);
+    
+    let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
+    self.set_rdi(edi.wrapping_add(increment) as u64);
+    
+    Ok(()) }
 
     /// SCASD - Compare EAX with dword at ES:DI (16-bit address mode)
-    pub fn scasd16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let di = self.di() as u32;
-        let eax = self.eax();
-
-        let op2 = self.read_virtual_dword(BxSegregs::Es, di)?;
-
-        let result = eax.wrapping_sub(op2);
-        self.update_flags_sub32(eax, op2, result);
-
-        if self.get_df() {
-            self.set_di(self.di().wrapping_sub(4));
-        } else {
-            self.set_di(self.di().wrapping_add(4));
-        }
-
-        Ok(())
+    pub fn scasd16(&mut self, _instr: &Instruction) -> super::Result<()> { let di = self.di() as u32;
+    let eax = self.eax();
+    
+    let op2 = self.read_virtual_dword(BxSegregs::Es, di)?;
+    
+    let result = eax.wrapping_sub(op2);
+    self.update_flags_sub32(eax, op2, result);
+    
+    if self.get_df() {
+        self.set_di(self.di().wrapping_sub(4));
+    } else {
+        self.set_di(self.di().wrapping_add(4));
     }
+    
+    Ok(()) }
 
     /// SCASD - Compare EAX with dword at ES:EDI (32-bit address mode)
-    pub fn scasd32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let edi = self.edi();
-        let eax = self.eax();
-
-        let op2 = self.read_virtual_dword(BxSegregs::Es, edi)?;
-
-        let result = eax.wrapping_sub(op2);
-        self.update_flags_sub32(eax, op2, result);
-
-        let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
-        self.set_rdi(edi.wrapping_add(increment) as u64);
-
-        Ok(())
-    }
+    pub fn scasd32(&mut self, _instr: &Instruction) -> super::Result<()> { let edi = self.edi();
+    let eax = self.eax();
+    
+    let op2 = self.read_virtual_dword(BxSegregs::Es, edi)?;
+    
+    let result = eax.wrapping_sub(op2);
+    self.update_flags_sub32(eax, op2, result);
+    
+    let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
+    self.set_rdi(edi.wrapping_add(increment) as u64);
+    
+    Ok(()) }
 
     // =========================================================================
     // REP prefix handling — 16-bit address mode
@@ -568,18 +544,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP MOVSB CX times (16-bit)
     pub fn rep_movsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.movsb16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if cx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.movsb16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if cx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -587,18 +560,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP MOVSW CX times (16-bit)
     pub fn rep_movsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.movsw16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if cx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.movsw16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if cx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -606,18 +576,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP MOVSD CX times (16-bit)
     pub fn rep_movsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.movsd16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if cx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.movsd16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if cx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -625,18 +592,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP STOSB CX times (16-bit)
     pub fn rep_stosb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.stosb16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if cx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.stosb16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if cx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -644,18 +608,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP STOSW CX times (16-bit)
     pub fn rep_stosw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.stosw16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if cx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.stosw16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if cx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -663,18 +624,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP STOSD CX times (16-bit)
     pub fn rep_stosd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.stosd16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if cx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.stosd16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if cx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -682,18 +640,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP LODSB CX times (16-bit)
     pub fn rep_lodsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.lodsb16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if cx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.lodsb16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if cx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -701,18 +656,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP LODSW CX times (16-bit)
     pub fn rep_lodsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.lodsw16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if cx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.lodsw16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if cx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -720,18 +672,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP LODSD CX times (16-bit)
     pub fn rep_lodsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.lodsd16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if cx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.lodsd16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if cx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -739,17 +688,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE CMPSB CX (16-bit)
     pub fn repe_cmpsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.cmpsb16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if !self.get_zf() || cx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.cmpsb16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if !self.get_zf() || cx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -757,17 +703,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE CMPSB CX (16-bit)
     pub fn repne_cmpsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.cmpsb16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if self.get_zf() || cx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.cmpsb16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if self.get_zf() || cx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -775,17 +718,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE CMPSW CX (16-bit)
     pub fn repe_cmpsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.cmpsw16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if !self.get_zf() || cx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.cmpsw16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if !self.get_zf() || cx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -793,17 +733,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE CMPSW CX (16-bit)
     pub fn repne_cmpsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.cmpsw16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if self.get_zf() || cx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.cmpsw16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if self.get_zf() || cx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -811,17 +748,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE CMPSD CX (16-bit)
     pub fn repe_cmpsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.cmpsd16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if !self.get_zf() || cx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.cmpsd16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if !self.get_zf() || cx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -829,17 +763,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE CMPSD CX (16-bit)
     pub fn repne_cmpsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.cmpsd16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if self.get_zf() || cx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.cmpsd16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if self.get_zf() || cx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -847,17 +778,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE SCASB CX (16-bit)
     pub fn repe_scasb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.scasb16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if !self.get_zf() || cx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.scasb16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if !self.get_zf() || cx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -865,17 +793,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE SCASB CX (16-bit)
     pub fn repne_scasb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.scasb16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if self.get_zf() || cx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.scasb16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if self.get_zf() || cx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -883,17 +808,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE SCASW CX (16-bit)
     pub fn repe_scasw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.scasw16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if !self.get_zf() || cx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.scasw16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if !self.get_zf() || cx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -901,17 +823,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE SCASW CX (16-bit)
     pub fn repne_scasw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.scasw16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if self.get_zf() || cx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.scasw16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if self.get_zf() || cx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -919,17 +838,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE SCASD CX (16-bit)
     pub fn repe_scasd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.scasd16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if !self.get_zf() || cx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.scasd16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if !self.get_zf() || cx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -937,17 +853,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE SCASD CX (16-bit)
     pub fn repne_scasd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.scasd16(instr)?;
-            cx = cx.wrapping_sub(1);
-            self.set_cx(cx);
-            if self.get_zf() || cx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while cx != 0 { self.on_repeat_iteration(instr); self.scasd16(instr)?; cx = cx.wrapping_sub(1);
+        self.set_cx(cx);
+        if self.get_zf() || cx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -997,18 +910,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             break;
         }
 
-        while ecx != 0 {
-            self.movsb32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if ecx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.movsb32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if ecx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1054,18 +964,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             break;
         }
 
-        while ecx != 0 {
-            self.movsw32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if ecx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.movsw32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if ecx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1111,198 +1018,177 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             break;
         }
 
-        while ecx != 0 {
-            self.movsd32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if ecx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.movsd32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if ecx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     /// REP STOSB ECX times (32-bit)
-    pub fn rep_stosb32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let mut ecx = self.ecx();
-        let df = self.get_df();
-        let al = self.al();
-
-        // FastRep: try bulk memset when DF=0 (Bochs faststring.cc)
-        while ecx != 0 && !df && self.async_event == 0 {
-            let edi = self.edi();
-            let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
-
-            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-                let count = (ecx as usize).min(dst_rem)
-                    .min(self.ticks_left_next_event() as usize);
-                if count > 0 {
-                    host_fill_bytes(dst_ptr, al, count);
-                    self.set_rdi(edi.wrapping_add(count as u32) as u64);
-                    self.icount += count as u64 - 1;
-                    self.tickn_fastrep(count);
-                    ecx -= count as u32;
-                    self.set_ecx(ecx);
-                    if ecx != 0 && self.async_event != 0 {
-                        self.set_rip(self.prev_rip);
-                        self.set_rcx(self.ecx() as u64);
-                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                        return Ok(());
-                    }
-                    continue;
+    pub fn rep_stosb32(&mut self, instr: &Instruction) -> super::Result<()> { let mut ecx = self.ecx();
+    let df = self.get_df();
+    let al = self.al();
+    
+    // FastRep: try bulk memset when DF=0 (Bochs faststring.cc)
+    while ecx != 0 && !df && self.async_event == 0 {
+        let edi = self.edi();
+        let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+    
+        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+            let count = (ecx as usize).min(dst_rem)
+                .min(self.ticks_left_next_event() as usize);
+            if count > 0 {
+                host_fill_bytes(dst_ptr, al, count);
+                self.set_rdi(edi.wrapping_add(count as u32) as u64);
+                self.icount += count as u64 - 1;
+                self.tickn_fastrep(count);
+                ecx -= count as u32;
+                self.set_ecx(ecx);
+                if ecx != 0 && self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    self.set_rcx(self.ecx() as u64);
+                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                    return Ok(());
                 }
+                continue;
             }
+        }
+        break;
+    }
+    
+    while ecx != 0 { self.on_repeat_iteration(instr); self.stosb32(instr)?; ecx = ecx.wrapping_sub(1);
+    self.set_ecx(ecx);
+    if ecx != 0 {
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
             break;
         }
-
-        while ecx != 0 {
-            self.stosb32(_instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if ecx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
-            }
-        }
-        self.set_rcx(self.ecx() as u64);
-        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-        Ok(())
-    }
+        self.icount += 1;
+    } }
+    self.set_rcx(self.ecx() as u64);
+    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+    Ok(()) }
 
     /// REP STOSW ECX times (32-bit)
-    pub fn rep_stosw32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let mut ecx = self.ecx();
-        let df = self.get_df();
-        let ax = self.ax();
-
-        // FastRep: try bulk word fill when DF=0 (Bochs faststring.cc)
-        while ecx != 0 && !df && self.async_event == 0 {
-            let edi = self.edi();
-            let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
-
-            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-                let max_bytes = (ecx as usize) * 2;
-                let count_bytes = max_bytes.min(dst_rem) & !1;
-                let count_words = (count_bytes / 2)
-                    .min(self.ticks_left_next_event() as usize);
-                if count_words > 0 {
-                    let dst_slice = unsafe { super::access::host_slice_mut_u16(dst_ptr, count_words) };
-                    for w in dst_slice.iter_mut() {
-                        *w = ax;
-                    }
-                    self.set_rdi(edi.wrapping_add((count_words * 2) as u32) as u64);
-                    self.icount += count_words as u64 - 1;
-                    self.tickn_fastrep(count_words);
-                    ecx -= count_words as u32;
-                    self.set_ecx(ecx);
-                    if ecx != 0 && self.async_event != 0 {
-                        self.set_rip(self.prev_rip);
-                        self.set_rcx(self.ecx() as u64);
-                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                        return Ok(());
-                    }
-                    continue;
+    pub fn rep_stosw32(&mut self, instr: &Instruction) -> super::Result<()> { let mut ecx = self.ecx();
+    let df = self.get_df();
+    let ax = self.ax();
+    
+    // FastRep: try bulk word fill when DF=0 (Bochs faststring.cc)
+    while ecx != 0 && !df && self.async_event == 0 {
+        let edi = self.edi();
+        let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+    
+        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+            let max_bytes = (ecx as usize) * 2;
+            let count_bytes = max_bytes.min(dst_rem) & !1;
+            let count_words = (count_bytes / 2)
+                .min(self.ticks_left_next_event() as usize);
+            if count_words > 0 {
+                let dst_slice = unsafe { super::access::host_slice_mut_u16(dst_ptr, count_words) };
+                for w in dst_slice.iter_mut() {
+                    *w = ax;
                 }
+                self.set_rdi(edi.wrapping_add((count_words * 2) as u32) as u64);
+                self.icount += count_words as u64 - 1;
+                self.tickn_fastrep(count_words);
+                ecx -= count_words as u32;
+                self.set_ecx(ecx);
+                if ecx != 0 && self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    self.set_rcx(self.ecx() as u64);
+                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                    return Ok(());
+                }
+                continue;
             }
+        }
+        break;
+    }
+    
+    while ecx != 0 { self.on_repeat_iteration(instr); self.stosw32(instr)?; ecx = ecx.wrapping_sub(1);
+    self.set_ecx(ecx);
+    if ecx != 0 {
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
             break;
         }
-
-        while ecx != 0 {
-            self.stosw32(_instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if ecx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
-            }
-        }
-        self.set_rcx(self.ecx() as u64);
-        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-        Ok(())
-    }
+        self.icount += 1;
+    } }
+    self.set_rcx(self.ecx() as u64);
+    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+    Ok(()) }
 
     /// REP STOSD ECX times (32-bit)
-    pub fn rep_stosd32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let mut ecx = self.ecx();
-        let df = self.get_df();
-        let eax = self.eax();
-
-        // FastRep: try bulk dword fill when DF=0 (Bochs faststring.cc)
-        while ecx != 0 && !df && self.async_event == 0 {
-            let edi = self.edi();
-            let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
-
-            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-                let max_bytes = (ecx as usize) * 4;
-                let count_bytes = max_bytes.min(dst_rem) & !3;
-                let count_dwords = (count_bytes / 4)
-                    .min(self.ticks_left_next_event() as usize);
-                if count_dwords > 0 {
-                    let dst_slice = unsafe { super::access::host_slice_mut_u32(dst_ptr, count_dwords) };
-                    for d in dst_slice.iter_mut() {
-                        *d = eax;
-                    }
-                    self.set_rdi(edi.wrapping_add((count_dwords * 4) as u32) as u64);
-                    self.icount += count_dwords as u64 - 1;
-                    self.tickn_fastrep(count_dwords);
-                    ecx -= count_dwords as u32;
-                    self.set_ecx(ecx);
-                    if ecx != 0 && self.async_event != 0 {
-                        self.set_rip(self.prev_rip);
-                        self.set_rcx(self.ecx() as u64);
-                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                        return Ok(());
-                    }
-                    continue;
+    pub fn rep_stosd32(&mut self, instr: &Instruction) -> super::Result<()> { let mut ecx = self.ecx();
+    let df = self.get_df();
+    let eax = self.eax();
+    
+    // FastRep: try bulk dword fill when DF=0 (Bochs faststring.cc)
+    while ecx != 0 && !df && self.async_event == 0 {
+        let edi = self.edi();
+        let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+    
+        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+            let max_bytes = (ecx as usize) * 4;
+            let count_bytes = max_bytes.min(dst_rem) & !3;
+            let count_dwords = (count_bytes / 4)
+                .min(self.ticks_left_next_event() as usize);
+            if count_dwords > 0 {
+                let dst_slice = unsafe { super::access::host_slice_mut_u32(dst_ptr, count_dwords) };
+                for d in dst_slice.iter_mut() {
+                    *d = eax;
                 }
+                self.set_rdi(edi.wrapping_add((count_dwords * 4) as u32) as u64);
+                self.icount += count_dwords as u64 - 1;
+                self.tickn_fastrep(count_dwords);
+                ecx -= count_dwords as u32;
+                self.set_ecx(ecx);
+                if ecx != 0 && self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    self.set_rcx(self.ecx() as u64);
+                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                    return Ok(());
+                }
+                continue;
             }
+        }
+        break;
+    }
+    
+    while ecx != 0 { self.on_repeat_iteration(instr); self.stosd32(instr)?; ecx = ecx.wrapping_sub(1);
+    self.set_ecx(ecx);
+    if ecx != 0 {
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
             break;
         }
-
-        while ecx != 0 {
-            self.stosd32(_instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if ecx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
-            }
-        }
-        self.set_rcx(self.ecx() as u64);
-        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-        Ok(())
-    }
+        self.icount += 1;
+    } }
+    self.set_rcx(self.ecx() as u64);
+    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+    Ok(()) }
 
     /// REP LODSB ECX times (32-bit)
     pub fn rep_lodsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.lodsb32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if ecx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.lodsb32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if ecx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1311,18 +1197,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP LODSW ECX times (32-bit)
     pub fn rep_lodsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.lodsw32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if ecx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.lodsw32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if ecx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1331,18 +1214,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP LODSD ECX times (32-bit)
     pub fn rep_lodsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.lodsd32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if ecx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.lodsd32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if ecx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1351,17 +1231,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE CMPSB ECX (32-bit)
     pub fn repe_cmpsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.cmpsb32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if !self.get_zf() || ecx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.cmpsb32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if !self.get_zf() || ecx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1370,17 +1247,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE CMPSB ECX (32-bit)
     pub fn repne_cmpsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.cmpsb32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if self.get_zf() || ecx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.cmpsb32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if self.get_zf() || ecx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1389,17 +1263,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE CMPSW ECX (32-bit)
     pub fn repe_cmpsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.cmpsw32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if !self.get_zf() || ecx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.cmpsw32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if !self.get_zf() || ecx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1408,17 +1279,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE CMPSW ECX (32-bit)
     pub fn repne_cmpsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.cmpsw32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if self.get_zf() || ecx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.cmpsw32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if self.get_zf() || ecx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1427,17 +1295,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE CMPSD ECX (32-bit)
     pub fn repe_cmpsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.cmpsd32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if !self.get_zf() || ecx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.cmpsd32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if !self.get_zf() || ecx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1446,17 +1311,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE CMPSD ECX (32-bit)
     pub fn repne_cmpsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.cmpsd32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if self.get_zf() || ecx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.cmpsd32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if self.get_zf() || ecx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1465,17 +1327,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE SCASB ECX (32-bit)
     pub fn repe_scasb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.scasb32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if !self.get_zf() || ecx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.scasb32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if !self.get_zf() || ecx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1484,17 +1343,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE SCASB ECX (32-bit)
     pub fn repne_scasb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.scasb32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if self.get_zf() || ecx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.scasb32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if self.get_zf() || ecx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1503,17 +1359,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE SCASW ECX (32-bit)
     pub fn repe_scasw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.scasw32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if !self.get_zf() || ecx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.scasw32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if !self.get_zf() || ecx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1522,17 +1375,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE SCASW ECX (32-bit)
     pub fn repne_scasw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.scasw32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if self.get_zf() || ecx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.scasw32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if self.get_zf() || ecx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1541,17 +1391,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE SCASD ECX (32-bit)
     pub fn repe_scasd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.scasd32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if !self.get_zf() || ecx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.scasd32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if !self.get_zf() || ecx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1560,17 +1407,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE SCASD ECX (32-bit)
     pub fn repne_scasd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.scasd32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
-            if self.get_zf() || ecx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while ecx != 0 { self.on_repeat_iteration(instr); self.scasd32(instr)?; ecx = ecx.wrapping_sub(1);
+        self.set_ecx(ecx);
+        if self.get_zf() || ecx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2125,18 +1969,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             break; // TLB miss — fall through to per-byte loop
         }
 
-        while rcx != 0 {
-            self.movsb64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if rcx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.movsb64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if rcx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2191,18 +2032,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             break;
         }
 
-        while rcx != 0 {
-            self.movsw64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if rcx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.movsw64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if rcx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2257,18 +2095,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             break;
         }
 
-        while rcx != 0 {
-            self.movsd64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if rcx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.movsd64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if rcx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2276,185 +2111,164 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ---- STOSB/W/D 64-bit ----
 
     /// STOSB with 64-bit addressing
-    pub fn stosb64(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn stosb64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
+    let al = self.al();
+    self.write_virtual_byte_64(BxSegregs::Es, rdi, al)?;
+    let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
+    self.set_rdi(rdi.wrapping_add(delta));
+    Ok(()) }
+
+    pub fn rep_stosb64(&mut self, instr: &Instruction) -> super::Result<()> { let mut rcx = self.rcx();
+    let df = self.get_df();
+    let al = self.al();
+    
+    // FastRep: try bulk memset when DF=0 (Bochs faststring.cc)
+    while rcx != 0 && !df && self.async_event == 0 {
         let rdi = self.rdi();
-        let al = self.al();
-        self.write_virtual_byte_64(BxSegregs::Es, rdi, al)?;
-        let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
-        self.set_rdi(rdi.wrapping_add(delta));
-        Ok(())
-    }
-
-    pub fn rep_stosb64(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let mut rcx = self.rcx();
-        let df = self.get_df();
-        let al = self.al();
-
-        // FastRep: try bulk memset when DF=0 (Bochs faststring.cc)
-        while rcx != 0 && !df && self.async_event == 0 {
-            let rdi = self.rdi();
-            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
-
-            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-                let count = (rcx as usize).min(dst_rem)
-                    .min(self.ticks_left_next_event() as usize);
-                if count > 0 {
-                    host_fill_bytes(dst_ptr, al, count);
-                    self.set_rdi(rdi.wrapping_add(count as u64));
-                    self.icount += count as u64 - 1;
-                    self.tickn_fastrep(count);
-                    rcx -= count as u64;
-                    self.set_rcx(rcx);
-                    if rcx != 0 && self.async_event != 0 {
-                        self.set_rip(self.prev_rip);
-                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                        return Ok(());
-                    }
-                    continue;
+        let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+    
+        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+            let count = (rcx as usize).min(dst_rem)
+                .min(self.ticks_left_next_event() as usize);
+            if count > 0 {
+                host_fill_bytes(dst_ptr, al, count);
+                self.set_rdi(rdi.wrapping_add(count as u64));
+                self.icount += count as u64 - 1;
+                self.tickn_fastrep(count);
+                rcx -= count as u64;
+                self.set_rcx(rcx);
+                if rcx != 0 && self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                    return Ok(());
                 }
+                continue;
             }
+        }
+        break;
+    }
+    
+    while rcx != 0 { self.on_repeat_iteration(instr); self.stosb64(instr)?; rcx = rcx.wrapping_sub(1);
+    self.set_rcx(rcx);
+    if rcx != 0 {
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
             break;
         }
-
-        while rcx != 0 {
-            self.stosb64(_instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if rcx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
-            }
-        }
-        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-        Ok(())
-    }
+        self.icount += 1;
+    } }
+    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+    Ok(()) }
 
     /// STOSW with 64-bit addressing
-    pub fn stosw64(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn stosw64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
+    let ax = self.ax();
+    self.write_virtual_word_64(BxSegregs::Es, rdi, ax)?;
+    let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
+    self.set_rdi(rdi.wrapping_add(delta));
+    Ok(()) }
+
+    pub fn rep_stosw64(&mut self, instr: &Instruction) -> super::Result<()> { let mut rcx = self.rcx();
+    let df = self.get_df();
+    let ax = self.ax();
+    
+    // FastRep: try bulk word fill when DF=0 (Bochs faststring.cc)
+    while rcx != 0 && !df && self.async_event == 0 {
         let rdi = self.rdi();
-        let ax = self.ax();
-        self.write_virtual_word_64(BxSegregs::Es, rdi, ax)?;
-        let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
-        self.set_rdi(rdi.wrapping_add(delta));
-        Ok(())
-    }
-
-    pub fn rep_stosw64(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let mut rcx = self.rcx();
-        let df = self.get_df();
-        let ax = self.ax();
-
-        // FastRep: try bulk word fill when DF=0 (Bochs faststring.cc)
-        while rcx != 0 && !df && self.async_event == 0 {
-            let rdi = self.rdi();
-            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
-
-            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-                let max_bytes = (rcx as usize) * 2;
-                let count_bytes = max_bytes.min(dst_rem) & !1;
-                let count_words = (count_bytes / 2)
-                    .min(self.ticks_left_next_event() as usize);
-                if count_words > 0 {
-                    let dst_slice = unsafe { super::access::host_slice_mut_u16(dst_ptr, count_words) };
-                    for w in dst_slice.iter_mut() {
-                        *w = ax;
-                    }
-                    self.set_rdi(rdi.wrapping_add((count_words * 2) as u64));
-                    self.icount += count_words as u64 - 1;
-                    self.tickn_fastrep(count_words);
-                    rcx -= count_words as u64;
-                    self.set_rcx(rcx);
-                    if rcx != 0 && self.async_event != 0 {
-                        self.set_rip(self.prev_rip);
-                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                        return Ok(());
-                    }
-                    continue;
+        let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+    
+        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+            let max_bytes = (rcx as usize) * 2;
+            let count_bytes = max_bytes.min(dst_rem) & !1;
+            let count_words = (count_bytes / 2)
+                .min(self.ticks_left_next_event() as usize);
+            if count_words > 0 {
+                let dst_slice = unsafe { super::access::host_slice_mut_u16(dst_ptr, count_words) };
+                for w in dst_slice.iter_mut() {
+                    *w = ax;
                 }
+                self.set_rdi(rdi.wrapping_add((count_words * 2) as u64));
+                self.icount += count_words as u64 - 1;
+                self.tickn_fastrep(count_words);
+                rcx -= count_words as u64;
+                self.set_rcx(rcx);
+                if rcx != 0 && self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                    return Ok(());
+                }
+                continue;
             }
+        }
+        break;
+    }
+    
+    while rcx != 0 { self.on_repeat_iteration(instr); self.stosw64(instr)?; rcx = rcx.wrapping_sub(1);
+    self.set_rcx(rcx);
+    if rcx != 0 {
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
             break;
         }
-
-        while rcx != 0 {
-            self.stosw64(_instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if rcx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
-            }
-        }
-        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-        Ok(())
-    }
+        self.icount += 1;
+    } }
+    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+    Ok(()) }
 
     /// STOSD with 64-bit addressing
-    pub fn stosd64(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn stosd64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
+    let eax = self.eax();
+    self.write_virtual_dword_64(BxSegregs::Es, rdi, eax)?;
+    let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
+    self.set_rdi(rdi.wrapping_add(delta));
+    Ok(()) }
+
+    pub fn rep_stosd64(&mut self, instr: &Instruction) -> super::Result<()> { let mut rcx = self.rcx();
+    let df = self.get_df();
+    let eax = self.eax();
+    
+    // FastRep: try bulk dword fill when DF=0 (Bochs faststring.cc)
+    while rcx != 0 && !df && self.async_event == 0 {
         let rdi = self.rdi();
-        let eax = self.eax();
-        self.write_virtual_dword_64(BxSegregs::Es, rdi, eax)?;
-        let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
-        self.set_rdi(rdi.wrapping_add(delta));
-        Ok(())
-    }
-
-    pub fn rep_stosd64(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let mut rcx = self.rcx();
-        let df = self.get_df();
-        let eax = self.eax();
-
-        // FastRep: try bulk dword fill when DF=0 (Bochs faststring.cc)
-        while rcx != 0 && !df && self.async_event == 0 {
-            let rdi = self.rdi();
-            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
-
-            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-                let max_bytes = (rcx as usize) * 4;
-                let count_bytes = max_bytes.min(dst_rem) & !3;
-                let count_dwords = (count_bytes / 4)
-                    .min(self.ticks_left_next_event() as usize);
-                if count_dwords > 0 {
-                    let dst_slice = unsafe { super::access::host_slice_mut_u32(dst_ptr, count_dwords) };
-                    for d in dst_slice.iter_mut() {
-                        *d = eax;
-                    }
-                    self.set_rdi(rdi.wrapping_add((count_dwords * 4) as u64));
-                    self.icount += count_dwords as u64 - 1;
-                    self.tickn_fastrep(count_dwords);
-                    rcx -= count_dwords as u64;
-                    self.set_rcx(rcx);
-                    if rcx != 0 && self.async_event != 0 {
-                        self.set_rip(self.prev_rip);
-                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                        return Ok(());
-                    }
-                    continue;
+        let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+    
+        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+            let max_bytes = (rcx as usize) * 4;
+            let count_bytes = max_bytes.min(dst_rem) & !3;
+            let count_dwords = (count_bytes / 4)
+                .min(self.ticks_left_next_event() as usize);
+            if count_dwords > 0 {
+                let dst_slice = unsafe { super::access::host_slice_mut_u32(dst_ptr, count_dwords) };
+                for d in dst_slice.iter_mut() {
+                    *d = eax;
                 }
+                self.set_rdi(rdi.wrapping_add((count_dwords * 4) as u64));
+                self.icount += count_dwords as u64 - 1;
+                self.tickn_fastrep(count_dwords);
+                rcx -= count_dwords as u64;
+                self.set_rcx(rcx);
+                if rcx != 0 && self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                    return Ok(());
+                }
+                continue;
             }
+        }
+        break;
+    }
+    
+    while rcx != 0 { self.on_repeat_iteration(instr); self.stosd64(instr)?; rcx = rcx.wrapping_sub(1);
+    self.set_rcx(rcx);
+    if rcx != 0 {
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
             break;
         }
-
-        while rcx != 0 {
-            self.stosd64(_instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if rcx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
-            }
-        }
-        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-        Ok(())
-    }
+        self.icount += 1;
+    } }
+    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+    Ok(()) }
 
     // ---- LODSB/W/D 64-bit ----
 
@@ -2470,18 +2284,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn rep_lodsb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.lodsb64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if rcx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.lodsb64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if rcx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2498,18 +2309,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn rep_lodsw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.lodsw64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if rcx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.lodsw64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if rcx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2527,18 +2335,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn rep_lodsd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.lodsd64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if rcx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.lodsd64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if rcx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2561,34 +2366,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn repe_cmpsb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.cmpsb64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if !self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.cmpsb64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if !self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     pub fn repne_cmpsb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.cmpsb64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.cmpsb64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2609,34 +2408,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn repe_cmpsw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.cmpsw64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if !self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.cmpsw64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if !self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     pub fn repne_cmpsw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.cmpsw64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.cmpsw64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2657,34 +2450,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn repe_cmpsd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.cmpsd64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if !self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.cmpsd64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if !self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     pub fn repne_cmpsd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.cmpsd64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.cmpsd64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2692,139 +2479,115 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ---- SCASB/W/D 64-bit ----
 
     /// SCASB with 64-bit addressing
-    pub fn scasb64(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let rdi = self.rdi();
-        let al = self.al();
-        let op2 = self.read_virtual_byte_64(BxSegregs::Es, rdi)?;
-        let result = al.wrapping_sub(op2);
-        self.update_flags_sub8(al, op2, result);
-        let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
-        self.set_rdi(rdi.wrapping_add(delta));
-        Ok(())
-    }
+    pub fn scasb64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
+    let al = self.al();
+    let op2 = self.read_virtual_byte_64(BxSegregs::Es, rdi)?;
+    let result = al.wrapping_sub(op2);
+    self.update_flags_sub8(al, op2, result);
+    let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
+    self.set_rdi(rdi.wrapping_add(delta));
+    Ok(()) }
 
     pub fn repe_scasb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.scasb64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if !self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.scasb64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if !self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     pub fn repne_scasb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.scasb64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.scasb64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     /// SCASW with 64-bit addressing
-    pub fn scasw64(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let rdi = self.rdi();
-        let ax = self.ax();
-        let op2 = self.read_virtual_word_64(BxSegregs::Es, rdi)?;
-        let result = ax.wrapping_sub(op2);
-        self.update_flags_sub16(ax, op2, result);
-        let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
-        self.set_rdi(rdi.wrapping_add(delta));
-        Ok(())
-    }
+    pub fn scasw64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
+    let ax = self.ax();
+    let op2 = self.read_virtual_word_64(BxSegregs::Es, rdi)?;
+    let result = ax.wrapping_sub(op2);
+    self.update_flags_sub16(ax, op2, result);
+    let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
+    self.set_rdi(rdi.wrapping_add(delta));
+    Ok(()) }
 
     pub fn repe_scasw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.scasw64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if !self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.scasw64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if !self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     pub fn repne_scasw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.scasw64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.scasw64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     /// SCASD with 64-bit addressing
-    pub fn scasd64(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let rdi = self.rdi();
-        let eax = self.eax();
-        let op2 = self.read_virtual_dword_64(BxSegregs::Es, rdi)?;
-        let result = eax.wrapping_sub(op2);
-        self.update_flags_sub32(eax, op2, result);
-        let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
-        self.set_rdi(rdi.wrapping_add(delta));
-        Ok(())
-    }
+    pub fn scasd64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
+    let eax = self.eax();
+    let op2 = self.read_virtual_dword_64(BxSegregs::Es, rdi)?;
+    let result = eax.wrapping_sub(op2);
+    self.update_flags_sub32(eax, op2, result);
+    let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
+    self.set_rdi(rdi.wrapping_add(delta));
+    Ok(()) }
 
     pub fn repe_scasd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.scasd64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if !self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.scasd64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if !self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     pub fn repne_scasd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.scasd64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.scasd64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -2885,84 +2648,74 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             break;
         }
 
-        while rcx != 0 {
-            self.movsq64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if rcx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.movsq64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if rcx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     /// STOSQ -- Store RAX to [RDI] (64-bit addressing)
-    pub fn stosq64(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let rdi = self.rdi();
-        let rax = self.rax();
-        self.write_virtual_qword_64(BxSegregs::Es, rdi, rax)?;
-        let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
-        self.set_rdi(rdi.wrapping_add(delta));
-        Ok(())
-    }
+    pub fn stosq64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
+    let rax = self.rax();
+    self.write_virtual_qword_64(BxSegregs::Es, rdi, rax)?;
+    let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
+    self.set_rdi(rdi.wrapping_add(delta));
+    Ok(()) }
 
     /// REP STOSQ -- Store RAX to RCX qwords at [RDI]
-    pub fn rep_stosq64(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let mut rcx = self.rcx();
-        let df = self.get_df();
-        let rax = self.rax();
-
-        // FastRep: try bulk qword fill when DF=0 (Bochs faststring.cc granularity=8)
-        while rcx != 0 && !df && self.async_event == 0 {
-            let rdi = self.rdi();
-            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
-
-            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-                let max_bytes = (rcx as usize) * 8;
-                let count_bytes = max_bytes.min(dst_rem) & !7;
-                let count_qwords = (count_bytes / 8)
-                    .min(self.ticks_left_next_event() as usize);
-                if count_qwords > 0 {
-                    let dst_slice = unsafe { super::access::host_slice_mut_u64(dst_ptr, count_qwords) };
-                    for q in dst_slice.iter_mut() {
-                        *q = rax;
-                    }
-                    self.set_rdi(rdi.wrapping_add((count_qwords * 8) as u64));
-                    self.icount += count_qwords as u64 - 1;
-                    self.tickn_fastrep(count_qwords);
-                    rcx -= count_qwords as u64;
-                    self.set_rcx(rcx);
-                    if rcx != 0 && self.async_event != 0 {
-                        self.set_rip(self.prev_rip);
-                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                        return Ok(());
-                    }
-                    continue;
+    pub fn rep_stosq64(&mut self, instr: &Instruction) -> super::Result<()> { let mut rcx = self.rcx();
+    let df = self.get_df();
+    let rax = self.rax();
+    
+    // FastRep: try bulk qword fill when DF=0 (Bochs faststring.cc granularity=8)
+    while rcx != 0 && !df && self.async_event == 0 {
+        let rdi = self.rdi();
+        let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+    
+        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+            let max_bytes = (rcx as usize) * 8;
+            let count_bytes = max_bytes.min(dst_rem) & !7;
+            let count_qwords = (count_bytes / 8)
+                .min(self.ticks_left_next_event() as usize);
+            if count_qwords > 0 {
+                let dst_slice = unsafe { super::access::host_slice_mut_u64(dst_ptr, count_qwords) };
+                for q in dst_slice.iter_mut() {
+                    *q = rax;
                 }
+                self.set_rdi(rdi.wrapping_add((count_qwords * 8) as u64));
+                self.icount += count_qwords as u64 - 1;
+                self.tickn_fastrep(count_qwords);
+                rcx -= count_qwords as u64;
+                self.set_rcx(rcx);
+                if rcx != 0 && self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                    return Ok(());
+                }
+                continue;
             }
+        }
+        break;
+    }
+    
+    while rcx != 0 { self.on_repeat_iteration(instr); self.stosq64(instr)?; rcx = rcx.wrapping_sub(1);
+    self.set_rcx(rcx);
+    if rcx != 0 {
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
             break;
         }
-
-        while rcx != 0 {
-            self.stosq64(_instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if rcx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
-            }
-        }
-        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-        Ok(())
-    }
+        self.icount += 1;
+    } }
+    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+    Ok(()) }
 
     /// LODSQ -- Load qword from [RSI] into RAX (64-bit addressing)
     pub fn lodsq64(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -2977,18 +2730,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP LODSQ -- Load RCX qwords from [RSI] into RAX
     pub fn rep_lodsq64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.lodsq64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if rcx != 0 {
-                if self.async_event != 0 {
-                    self.set_rip(self.prev_rip);
-                    break;
-                }
-                self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.lodsq64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if rcx != 0 {
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
             }
-        }
+            self.icount += 1;
+        } }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3010,17 +2760,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPE CMPSQ -- Compare RCX qwords, stop if not equal
     pub fn repe_cmpsq64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.cmpsq64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if !self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.cmpsq64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if !self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3028,47 +2775,39 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE CMPSQ -- Compare RCX qwords, stop if equal
     pub fn repne_cmpsq64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.cmpsq64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.cmpsq64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     /// SCASQ -- Compare RAX with qword at [RDI] (64-bit addressing)
-    pub fn scasq64(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let rdi = self.rdi();
-        let rax = self.rax();
-        let op2 = self.read_virtual_qword_64(BxSegregs::Es, rdi)?;
-        let result = rax.wrapping_sub(op2);
-        self.update_flags_sub64(rax, op2, result);
-        let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
-        self.set_rdi(rdi.wrapping_add(delta));
-        Ok(())
-    }
+    pub fn scasq64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
+    let rax = self.rax();
+    let op2 = self.read_virtual_qword_64(BxSegregs::Es, rdi)?;
+    let result = rax.wrapping_sub(op2);
+    self.update_flags_sub64(rax, op2, result);
+    let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
+    self.set_rdi(rdi.wrapping_add(delta));
+    Ok(()) }
 
     /// REPE SCASQ -- Scan RCX qwords, stop if not equal
     pub fn repe_scasq64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.scasq64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if !self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.scasq64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if !self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -3076,17 +2815,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REPNE SCASQ -- Scan RCX qwords, stop if equal
     pub fn repne_scasq64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.scasq64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
-            if self.get_zf() || rcx == 0 { break; }
-            if self.async_event != 0 {
-                self.set_rip(self.prev_rip);
-                break;
-            }
-            self.icount += 1;
+        while rcx != 0 { self.on_repeat_iteration(instr); self.scasq64(instr)?; rcx = rcx.wrapping_sub(1);
+        self.set_rcx(rcx);
+        if self.get_zf() || rcx == 0 { break; }
+        if self.async_event != 0 {
+            self.set_rip(self.prev_rip);
+            break;
         }
+        self.icount += 1; }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }

@@ -9,6 +9,8 @@ mod config;
 pub mod cpu;
 mod crc;
 pub mod emulator;
+pub mod emulator_api;
+pub use emulator_api::StopHandle;
 pub mod gui;
 pub mod iodev;
 pub mod memory;

@@ -350,43 +350,34 @@ fn run_alpine() -> Result<()> {
     // =========================================================================
     // Instrumentation: awk field-splitting debug hook
     // =========================================================================
-    #[cfg(feature = "bx_instrumentation")]
+    #[cfg(feature = "instrumentation")]
     {
-        use rusty_box::cpu::{CpuSnapshot, Instrumentation};
+        use rusty_box::cpu::{decoder::Instruction, Instrumentation};
 
         /// Traces awk_split FS dispatch to find why field splitting fails.
-        /// Watches for CmpEbIb (FS==space check) and TestAlib (Phase 2 whitespace)
-        /// by matching decoded opcode + register values.
+        /// Counts its own icount locally so callbacks receive only (rip, &Instruction).
         struct AwkFieldSplitTracer {
+            icount: u64,
             hits: u32,
         }
         impl Instrumentation for AwkFieldSplitTracer {
-            fn before_execution(&mut self, rip: u64, opcode: u16, _ilen: u8, snap: &CpuSnapshot) {
-                if snap.icount < 3_000_000_000 || rip < 0x400000 { return; }
+            fn before_execution(&mut self, rip: u64, instr: &Instruction) {
+                self.icount += 1;
+                if self.icount < 3_000_000_000 || rip < 0x400000 { return; }
                 if self.hits >= 100 { return; }
 
-                let al = (snap.rax & 0xFF) as u8;
-                let bpl = (snap.rbp & 0xFF) as u8;
-
-                // Print actual opcode values on first call for verification
-                if self.hits == 0 {
-                    let test_alib_val = rusty_box_decoder::opcode::Opcode::TestAlib as u16;
-                    let cmp_ebib_val = rusty_box_decoder::opcode::Opcode::CmpEbIb as u16;
-                    let cmp_alib_val = rusty_box_decoder::opcode::Opcode::CmpAlib as u16;
-                    eprintln!("[INSTR-VALS] TestAlib={} CmpEbIb={} CmpAlib={} cur={}",
-                        test_alib_val, cmp_ebib_val, cmp_alib_val, opcode);
-                    self.hits = 1;
-                }
-                // Match opcodes
+                let opcode = instr.get_ia_opcode() as u16;
+                // Match opcodes of interest (CmpEbIb=42, CmpAlib=70, TestAlib=38).
                 if (opcode == 42 || opcode == 70 || opcode == 38) && self.hits < 30 {
-                    let ch = if al >= 0x20 && al < 0x7f { al as char } else { '.' };
-                    eprintln!("[INSTR] op={} RIP={:#x} AL={:#04x} '{}' BPL={:#04x} i={}",
-                        opcode, rip, al, ch, bpl, snap.icount);
+                    eprintln!(
+                        "[INSTR] op={} RIP={:#x} ilen={} icount={}",
+                        opcode, rip, instr.ilen(), self.icount
+                    );
                     self.hits += 1;
                 }
             }
         }
-        emu.cpu_mut().set_instrumentation(Box::new(AwkFieldSplitTracer { hits: 0 }));
+        let _ = emu.cpu_mut().set_instrumentation(Box::new(AwkFieldSplitTracer { icount: 0, hits: 0 }));
         println!("Instrumentation: AwkFieldSplitTracer installed");
     }
 

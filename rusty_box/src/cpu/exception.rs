@@ -281,6 +281,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 error_code = (error_code & 0xfffe) | (u16::from(self.ext));
             }
 
+        // BOCHS BX_INSTR_EXCEPTION(cpu_id, vector, error_code)
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_exception() {
+            self.instrumentation
+                .fire_exception(vector as u8, error_code as u32);
+        }
+
         // Reduce verbosity for common exceptions (#GP(0) is very common during boot)
         if vector != Exception::Gp || error_code != 0 {
             tracing::trace!("exception({:?}): error_code={:#x}", vector, error_code);

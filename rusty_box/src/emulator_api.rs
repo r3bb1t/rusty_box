@@ -1,0 +1,1049 @@
+//! Public API extensions for [`Emulator`]: Unicorn-style hook registration,
+//! register/memory read-write, `emu_start`/`emu_stop` execution control, and
+//! direct-binary CPU-mode builders.
+//!
+//! This module lives in its own file to keep the core orchestration in
+//! `emulator.rs` readable. Everything here operates purely on the public
+//! `&mut Emulator` surface.
+
+use alloc::{boxed::Box, vec::Vec};
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(feature = "instrumentation")]
+use core::ops::RangeBounds;
+
+#[cfg(feature = "instrumentation")]
+use crate::cpu::decoder::Instruction;
+#[cfg(feature = "instrumentation")]
+use crate::cpu::instrumentation::{
+    BranchEvent, HookHandle, HwInterruptEvent, InstrumentationError, IoHookEvent, IoHookType,
+    MemHookEvent, MemHookType,
+};
+use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, EmuStopReason, X86Reg};
+use crate::cpu::{BxCpuIdTrait, ResetReason};
+use crate::emulator::{Emulator, EmulatorConfig};
+use crate::{Error, Result};
+
+
+// ─────────────────────────── StopHandle ───────────────────────────
+
+/// Clonable cross-thread handle that stops a running [`Emulator`].
+///
+/// Obtain one with [`Emulator::stop_handle`] on the owning thread, move the
+/// clone to another thread, and call [`StopHandle::stop`] to break the next
+/// batch boundary of `emu_start`.
+///
+/// Backed by `Arc<AtomicBool>` with `Ordering::Relaxed` — single mov on x86
+/// with no fence. See the plan's "Atomic Performance Analysis" section.
+#[derive(Clone)]
+pub struct StopHandle(pub(crate) Arc<AtomicBool>);
+
+impl StopHandle {
+    /// Signal the Emulator to stop at the next batch boundary. Non-blocking.
+    #[inline]
+    pub fn stop(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Clear the stop signal (rare — intended for scenarios where the same
+    /// Emulator is reused after a stop).
+    #[inline]
+    pub fn reset(&self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+
+    /// True once `stop()` has been called and the flag hasn't been cleared.
+    #[inline]
+    pub fn is_stopping(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+// ─────────────────────────── Hook registration ───────────────────────────
+//
+// All hook_add_* methods require the `instrumentation` feature because they
+// populate the [`InstrumentationRegistry`] on the CPU, which is itself
+// feature-gated. When the feature is off, the methods simply do not exist.
+
+#[cfg(feature = "instrumentation")]
+impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
+    /// Register a hook fired before each instruction whose RIP is in `range`.
+    /// Callback receives `(rip, &Instruction)`.
+    pub fn hook_add_code<R, F>(&mut self, range: R, cb: F) -> HookHandle
+    where
+        R: RangeBounds<u64>,
+        F: FnMut(u64, &Instruction) + Send + 'static,
+    {
+        self.cpu.instrumentation.add_code(range, Box::new(cb))
+    }
+
+    /// Register a hook fired AFTER each instruction whose RIP is in `range`.
+    pub fn hook_add_code_after<R, F>(&mut self, range: R, cb: F) -> HookHandle
+    where
+        R: RangeBounds<u64>,
+        F: FnMut(u64, &Instruction) + Send + 'static,
+    {
+        self.cpu.instrumentation.add_code_after(range, Box::new(cb))
+    }
+
+    /// Register a memory access hook.
+    pub fn hook_add_mem<R, F>(
+        &mut self,
+        hook_type: MemHookType,
+        range: R,
+        cb: F,
+    ) -> HookHandle
+    where
+        R: RangeBounds<u64>,
+        F: FnMut(&MemHookEvent) + Send + 'static,
+    {
+        self.cpu
+            .instrumentation
+            .add_mem(hook_type, range, Box::new(cb))
+    }
+
+    /// Register a software-interrupt hook (INT n / INT3 / INTO).
+    /// Callback receives the vector.
+    pub fn hook_add_interrupt<F>(&mut self, cb: F) -> HookHandle
+    where
+        F: FnMut(u8) + Send + 'static,
+    {
+        self.cpu.instrumentation.add_interrupt(Box::new(cb))
+    }
+
+    /// Register a hardware-interrupt hook (external IRQ delivery).
+    pub fn hook_add_hwinterrupt<F>(&mut self, cb: F) -> HookHandle
+    where
+        F: FnMut(&HwInterruptEvent) + Send + 'static,
+    {
+        self.cpu.instrumentation.add_hw_interrupt(Box::new(cb))
+    }
+
+    /// Register a CPU-exception hook.
+    /// Callback receives `(vector, error_code)`.
+    pub fn hook_add_exception<F>(&mut self, cb: F) -> HookHandle
+    where
+        F: FnMut(u8, u32) + Send + 'static,
+    {
+        self.cpu.instrumentation.add_exception(Box::new(cb))
+    }
+
+    /// Register an I/O port hook (IN/OUT instructions).
+    pub fn hook_add_io<R, F>(
+        &mut self,
+        hook_type: IoHookType,
+        range: R,
+        cb: F,
+    ) -> HookHandle
+    where
+        R: RangeBounds<u16>,
+        F: FnMut(&IoHookEvent) + Send + 'static,
+    {
+        self.cpu
+            .instrumentation
+            .add_io(hook_type, range, Box::new(cb))
+    }
+
+    /// Register a branch hook. Fires for conditional, unconditional, and
+    /// far branches; the variant in [`BranchEvent`] tells them apart.
+    pub fn hook_add_branch<R, F>(&mut self, range: R, cb: F) -> HookHandle
+    where
+        R: RangeBounds<u64>,
+        F: FnMut(&BranchEvent) + Send + 'static,
+    {
+        self.cpu.instrumentation.add_branch(range, Box::new(cb))
+    }
+
+    /// Remove a previously registered hook.
+    /// Returns `Err(InvalidHandle)` if the handle was already removed or
+    /// never valid.
+    pub fn hook_del(&mut self, handle: HookHandle) -> core::result::Result<(), InstrumentationError> {
+        self.cpu.instrumentation.remove(handle)
+    }
+
+    /// Install a BOCHS-style trait instrumentation object. Returns any
+    /// previously-installed trait object. Closure hooks from `hook_add_*`
+    /// are unaffected — both APIs can be live simultaneously.
+    pub fn set_instrumentation(
+        &mut self,
+        instr: Box<dyn crate::cpu::Instrumentation>,
+    ) -> Option<Box<dyn crate::cpu::Instrumentation>> {
+        self.cpu.set_instrumentation(instr)
+    }
+
+    /// Remove any installed BOCHS-style trait instrumentation. Returns it
+    /// if present.
+    pub fn clear_instrumentation(
+        &mut self,
+    ) -> Option<Box<dyn crate::cpu::Instrumentation>> {
+        self.cpu.clear_instrumentation()
+    }
+}
+
+// ─────────────────────────── reg_read / reg_write ───────────────────────────
+
+impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
+    /// Read any register by enum tag. Narrower registers are zero-extended
+    /// into the returned `u64`.
+    pub fn reg_read(&self, reg: X86Reg) -> Result<u64> {
+        let cpu = &self.cpu;
+        let v: u64 = match reg {
+            X86Reg::Rax => cpu.rax(),
+            X86Reg::Rcx => cpu.rcx(),
+            X86Reg::Rdx => cpu.rdx(),
+            X86Reg::Rbx => cpu.rbx(),
+            X86Reg::Rsp => cpu.rsp(),
+            X86Reg::Rbp => cpu.rbp(),
+            X86Reg::Rsi => cpu.rsi(),
+            X86Reg::Rdi => cpu.rdi(),
+            X86Reg::R8 => cpu.r8(),
+            X86Reg::R9 => cpu.r9(),
+            X86Reg::R10 => cpu.r10(),
+            X86Reg::R11 => cpu.r11(),
+            X86Reg::R12 => cpu.r12(),
+            X86Reg::R13 => cpu.r13(),
+            X86Reg::R14 => cpu.r14(),
+            X86Reg::R15 => cpu.r15(),
+
+            X86Reg::Eax => cpu.rax() as u32 as u64,
+            X86Reg::Ecx => cpu.rcx() as u32 as u64,
+            X86Reg::Edx => cpu.rdx() as u32 as u64,
+            X86Reg::Ebx => cpu.rbx() as u32 as u64,
+            X86Reg::Esp => cpu.rsp() as u32 as u64,
+            X86Reg::Ebp => cpu.rbp() as u32 as u64,
+            X86Reg::Esi => cpu.rsi() as u32 as u64,
+            X86Reg::Edi => cpu.rdi() as u32 as u64,
+            X86Reg::R8d => cpu.r8() as u32 as u64,
+            X86Reg::R9d => cpu.r9() as u32 as u64,
+            X86Reg::R10d => cpu.r10() as u32 as u64,
+            X86Reg::R11d => cpu.r11() as u32 as u64,
+            X86Reg::R12d => cpu.r12() as u32 as u64,
+            X86Reg::R13d => cpu.r13() as u32 as u64,
+            X86Reg::R14d => cpu.r14() as u32 as u64,
+            X86Reg::R15d => cpu.r15() as u32 as u64,
+
+            X86Reg::Ax => cpu.get_gpr16(0) as u64,
+            X86Reg::Cx => cpu.get_gpr16(1) as u64,
+            X86Reg::Dx => cpu.get_gpr16(2) as u64,
+            X86Reg::Bx => cpu.get_gpr16(3) as u64,
+            X86Reg::Sp => cpu.get_gpr16(4) as u64,
+            X86Reg::Bp => cpu.get_gpr16(5) as u64,
+            X86Reg::Si => cpu.get_gpr16(6) as u64,
+            X86Reg::Di => cpu.get_gpr16(7) as u64,
+            X86Reg::R8w => cpu.get_gpr16(8) as u64,
+            X86Reg::R9w => cpu.get_gpr16(9) as u64,
+            X86Reg::R10w => cpu.get_gpr16(10) as u64,
+            X86Reg::R11w => cpu.get_gpr16(11) as u64,
+            X86Reg::R12w => cpu.get_gpr16(12) as u64,
+            X86Reg::R13w => cpu.get_gpr16(13) as u64,
+            X86Reg::R14w => cpu.get_gpr16(14) as u64,
+            X86Reg::R15w => cpu.get_gpr16(15) as u64,
+
+            X86Reg::Al => cpu.get_gpr8(0) as u64,
+            X86Reg::Cl => cpu.get_gpr8(1) as u64,
+            X86Reg::Dl => cpu.get_gpr8(2) as u64,
+            X86Reg::Bl => cpu.get_gpr8(3) as u64,
+            X86Reg::Ah => cpu.get_gpr8(4) as u64,
+            X86Reg::Ch => cpu.get_gpr8(5) as u64,
+            X86Reg::Dh => cpu.get_gpr8(6) as u64,
+            X86Reg::Bh => cpu.get_gpr8(7) as u64,
+            X86Reg::Spl => cpu.get_gpr8(4) as u64,
+            X86Reg::Bpl => cpu.get_gpr8(5) as u64,
+            X86Reg::Sil => cpu.get_gpr8(6) as u64,
+            X86Reg::Dil => cpu.get_gpr8(7) as u64,
+            X86Reg::R8b => cpu.get_gpr8(8) as u64,
+            X86Reg::R9b => cpu.get_gpr8(9) as u64,
+            X86Reg::R10b => cpu.get_gpr8(10) as u64,
+            X86Reg::R11b => cpu.get_gpr8(11) as u64,
+            X86Reg::R12b => cpu.get_gpr8(12) as u64,
+            X86Reg::R13b => cpu.get_gpr8(13) as u64,
+            X86Reg::R14b => cpu.get_gpr8(14) as u64,
+            X86Reg::R15b => cpu.get_gpr8(15) as u64,
+
+            X86Reg::Rip => cpu.rip(),
+            X86Reg::Eip => cpu.eip() as u64,
+            X86Reg::Ip => (cpu.rip() as u16) as u64,
+
+            X86Reg::Rflags => cpu.rflags_for_api(),
+            X86Reg::Eflags => (cpu.rflags_for_api() as u32) as u64,
+            X86Reg::Flags => (cpu.rflags_for_api() as u16) as u64,
+
+            X86Reg::Cs => cpu.get_cs_selector() as u64,
+            X86Reg::Ss => cpu.get_ss_selector() as u64,
+            X86Reg::Ds => cpu.get_ds_selector() as u64,
+            X86Reg::Es => cpu.seg_selector_for_api(0) as u64, // ES
+            X86Reg::Fs => cpu.seg_selector_for_api(4) as u64, // FS
+            X86Reg::Gs => cpu.seg_selector_for_api(5) as u64, // GS
+
+            X86Reg::FsBase => cpu.msr_fsbase(),
+            X86Reg::GsBase => cpu.msr_gsbase(),
+
+            X86Reg::Cr0 => cpu.get_cr0_val() as u64,
+            X86Reg::Cr2 => cpu.cr2_for_api(),
+            X86Reg::Cr3 => cpu.get_cr3_val(),
+            X86Reg::Cr4 => cpu.cr4_for_api(),
+            X86Reg::Cr8 => cpu.cr8_for_api(),
+
+            X86Reg::Dr0 => cpu.dr_for_api(0),
+            X86Reg::Dr1 => cpu.dr_for_api(1),
+            X86Reg::Dr2 => cpu.dr_for_api(2),
+            X86Reg::Dr3 => cpu.dr_for_api(3),
+            X86Reg::Dr6 => cpu.dr6_for_api(),
+            X86Reg::Dr7 => cpu.dr7_for_api(),
+
+            X86Reg::GdtrBase => cpu.gdtr_base_for_api(),
+            X86Reg::GdtrLimit => cpu.gdtr_limit_for_api(),
+            X86Reg::IdtrBase => cpu.idtr_base_for_api(),
+            X86Reg::IdtrLimit => cpu.idtr_limit_for_api(),
+            X86Reg::LdtrSelector => cpu.ldtr_selector_for_api() as u64,
+            X86Reg::TrSelector => cpu.tr_selector_for_api() as u64,
+
+            X86Reg::Tsc => cpu.tsc_for_api(),
+            X86Reg::Efer => cpu.efer_for_api(),
+        };
+        Ok(v)
+    }
+
+    /// Write any register by enum tag. Width semantics:
+    /// - 64-bit GPRs: replace full 64 bits.
+    /// - 32-bit GPRs: replace low 32 bits, zero upper (x86-64 rule).
+    /// - 16-bit GPRs: replace low 16 bits, preserve upper bits.
+    /// - 8-bit GPRs: replace low/high byte, preserve rest.
+    /// - RIP/EIP/IP: written to `rip`, truncated per width.
+    /// - Segment selectors: updated without descriptor-cache reload.
+    ///   For correct protected-mode operation use
+    ///   `setup_cpu_mode` instead.
+    pub fn reg_write(&mut self, reg: X86Reg, val: u64) -> Result<()> {
+        let cpu = &mut self.cpu;
+        match reg {
+            X86Reg::Rax => cpu.set_rax(val),
+            X86Reg::Rcx => cpu.set_rcx(val),
+            X86Reg::Rdx => cpu.set_rdx(val),
+            X86Reg::Rbx => cpu.set_rbx(val),
+            X86Reg::Rsp => cpu.set_rsp(val),
+            X86Reg::Rbp => cpu.set_rbp(val),
+            X86Reg::Rsi => cpu.set_rsi(val),
+            X86Reg::Rdi => cpu.set_rdi(val),
+            X86Reg::R8 => cpu.set_r8(val),
+            X86Reg::R9 => cpu.set_r9(val),
+            X86Reg::R10 => cpu.set_r10(val),
+            X86Reg::R11 => cpu.set_r11(val),
+            X86Reg::R12 => cpu.set_r12(val),
+            X86Reg::R13 => cpu.set_r13(val),
+            X86Reg::R14 => cpu.set_r14(val),
+            X86Reg::R15 => cpu.set_r15(val),
+
+            X86Reg::Eax => cpu.set_rax((val as u32) as u64),
+            X86Reg::Ecx => cpu.set_rcx((val as u32) as u64),
+            X86Reg::Edx => cpu.set_rdx((val as u32) as u64),
+            X86Reg::Ebx => cpu.set_rbx((val as u32) as u64),
+            X86Reg::Esp => cpu.set_rsp((val as u32) as u64),
+            X86Reg::Ebp => cpu.set_rbp((val as u32) as u64),
+            X86Reg::Esi => cpu.set_rsi((val as u32) as u64),
+            X86Reg::Edi => cpu.set_rdi((val as u32) as u64),
+            X86Reg::R8d => cpu.set_r8((val as u32) as u64),
+            X86Reg::R9d => cpu.set_r9((val as u32) as u64),
+            X86Reg::R10d => cpu.set_r10((val as u32) as u64),
+            X86Reg::R11d => cpu.set_r11((val as u32) as u64),
+            X86Reg::R12d => cpu.set_r12((val as u32) as u64),
+            X86Reg::R13d => cpu.set_r13((val as u32) as u64),
+            X86Reg::R14d => cpu.set_r14((val as u32) as u64),
+            X86Reg::R15d => cpu.set_r15((val as u32) as u64),
+
+            X86Reg::Ax => cpu.set_gpr16(0, val as u16),
+            X86Reg::Cx => cpu.set_gpr16(1, val as u16),
+            X86Reg::Dx => cpu.set_gpr16(2, val as u16),
+            X86Reg::Bx => cpu.set_gpr16(3, val as u16),
+            X86Reg::Sp => cpu.set_gpr16(4, val as u16),
+            X86Reg::Bp => cpu.set_gpr16(5, val as u16),
+            X86Reg::Si => cpu.set_gpr16(6, val as u16),
+            X86Reg::Di => cpu.set_gpr16(7, val as u16),
+            X86Reg::R8w => cpu.set_gpr16(8, val as u16),
+            X86Reg::R9w => cpu.set_gpr16(9, val as u16),
+            X86Reg::R10w => cpu.set_gpr16(10, val as u16),
+            X86Reg::R11w => cpu.set_gpr16(11, val as u16),
+            X86Reg::R12w => cpu.set_gpr16(12, val as u16),
+            X86Reg::R13w => cpu.set_gpr16(13, val as u16),
+            X86Reg::R14w => cpu.set_gpr16(14, val as u16),
+            X86Reg::R15w => cpu.set_gpr16(15, val as u16),
+
+            X86Reg::Al => cpu.set_gpr8(0, val as u8),
+            X86Reg::Cl => cpu.set_gpr8(1, val as u8),
+            X86Reg::Dl => cpu.set_gpr8(2, val as u8),
+            X86Reg::Bl => cpu.set_gpr8(3, val as u8),
+            X86Reg::Ah => cpu.set_gpr8(4, val as u8),
+            X86Reg::Ch => cpu.set_gpr8(5, val as u8),
+            X86Reg::Dh => cpu.set_gpr8(6, val as u8),
+            X86Reg::Bh => cpu.set_gpr8(7, val as u8),
+            X86Reg::Spl => cpu.set_gpr8(4, val as u8),
+            X86Reg::Bpl => cpu.set_gpr8(5, val as u8),
+            X86Reg::Sil => cpu.set_gpr8(6, val as u8),
+            X86Reg::Dil => cpu.set_gpr8(7, val as u8),
+            X86Reg::R8b => cpu.set_gpr8(8, val as u8),
+            X86Reg::R9b => cpu.set_gpr8(9, val as u8),
+            X86Reg::R10b => cpu.set_gpr8(10, val as u8),
+            X86Reg::R11b => cpu.set_gpr8(11, val as u8),
+            X86Reg::R12b => cpu.set_gpr8(12, val as u8),
+            X86Reg::R13b => cpu.set_gpr8(13, val as u8),
+            X86Reg::R14b => cpu.set_gpr8(14, val as u8),
+            X86Reg::R15b => cpu.set_gpr8(15, val as u8),
+
+            X86Reg::Rip => cpu.set_rip(val),
+            X86Reg::Eip => cpu.set_eip(val as u32),
+            X86Reg::Ip => {
+                // Preserve upper bits of RIP when writing 16-bit IP.
+                let upper = cpu.rip() & !0xFFFF;
+                cpu.set_rip(upper | (val & 0xFFFF));
+            }
+
+            X86Reg::Rflags => cpu.set_rflags_for_api(val),
+            X86Reg::Eflags => cpu.set_rflags_for_api(val as u32 as u64),
+            X86Reg::Flags => {
+                let preserved = cpu.rflags_for_api() & !0xFFFF;
+                cpu.set_rflags_for_api(preserved | (val & 0xFFFF));
+            }
+
+            X86Reg::Cs
+            | X86Reg::Ss
+            | X86Reg::Ds
+            | X86Reg::Es
+            | X86Reg::Fs
+            | X86Reg::Gs => {
+                // Raw selector write without descriptor-cache reload. Callers
+                // should use `setup_cpu_mode` for correct protected-mode setup.
+                cpu.set_seg_selector_raw_for_api(reg, val as u16);
+            }
+
+            X86Reg::FsBase => cpu.set_msr_fsbase(val),
+            X86Reg::GsBase => cpu.set_msr_gsbase(val),
+
+            X86Reg::Cr0 => cpu.set_cr0_raw_for_api(val as u32),
+            X86Reg::Cr2 => cpu.set_cr2_for_api(val),
+            X86Reg::Cr3 => cpu.set_cr3_raw_for_api(val),
+            X86Reg::Cr4 => cpu.set_cr4_raw_for_api(val as u32),
+            X86Reg::Cr8 => cpu.set_cr8_for_api(val),
+
+            X86Reg::Dr0 => cpu.set_dr_for_api(0, val),
+            X86Reg::Dr1 => cpu.set_dr_for_api(1, val),
+            X86Reg::Dr2 => cpu.set_dr_for_api(2, val),
+            X86Reg::Dr3 => cpu.set_dr_for_api(3, val),
+            X86Reg::Dr6 => cpu.set_dr6_for_api(val),
+            X86Reg::Dr7 => cpu.set_dr7_for_api(val),
+
+            X86Reg::GdtrBase => cpu.set_gdtr_base_for_api(val),
+            X86Reg::GdtrLimit => cpu.set_gdtr_limit_for_api(val as u32),
+            X86Reg::IdtrBase => cpu.set_idtr_base_for_api(val),
+            X86Reg::IdtrLimit => cpu.set_idtr_limit_for_api(val as u32),
+            X86Reg::LdtrSelector => cpu.set_ldtr_selector_for_api(val as u16),
+            X86Reg::TrSelector => cpu.set_tr_selector_for_api(val as u16),
+
+            X86Reg::Tsc => cpu.set_tsc_for_api(val),
+            X86Reg::Efer => cpu.set_efer_for_api(val),
+        }
+        Ok(())
+    }
+
+    /// Read an MSR by index. Returns Err if the MSR is not modeled.
+    pub fn msr_read(&self, msr: u32) -> Result<u64> {
+        self.cpu.read_msr_for_api(msr).map_err(Error::Cpu)
+    }
+
+    /// Write an MSR by index. Returns Err if the MSR is not writable.
+    pub fn msr_write(&mut self, msr: u32, val: u64) -> Result<()> {
+        self.cpu.write_msr_for_api(msr, val).map_err(Error::Cpu)
+    }
+
+    /// Build a CPU snapshot on demand. Not invoked by instrumentation — see
+    /// [`CpuSnapshot`] docs for the design rationale (callbacks use
+    /// primitives, not snapshots).
+    pub fn cpu_snapshot(&self) -> CpuSnapshot {
+        let cpu = &self.cpu;
+        CpuSnapshot {
+            rax: cpu.rax(),
+            rbx: cpu.rbx(),
+            rcx: cpu.rcx(),
+            rdx: cpu.rdx(),
+            rsi: cpu.rsi(),
+            rdi: cpu.rdi(),
+            rbp: cpu.rbp(),
+            rsp: cpu.rsp(),
+            r8: cpu.r8(),
+            r9: cpu.r9(),
+            r10: cpu.r10(),
+            r11: cpu.r11(),
+            r12: cpu.r12(),
+            r13: cpu.r13(),
+            r14: cpu.r14(),
+            r15: cpu.r15(),
+            rip: cpu.rip(),
+            eflags: cpu.rflags_for_api() as u32,
+            cs: cpu.get_cs_selector(),
+            ss: cpu.get_ss_selector(),
+            ds: cpu.get_ds_selector(),
+            es: cpu.seg_selector_for_api(0),
+            fs: cpu.seg_selector_for_api(4),
+            gs: cpu.seg_selector_for_api(5),
+            cr0: cpu.get_cr0_val() as u64,
+            cr2: cpu.cr2_for_api(),
+            cr3: cpu.get_cr3_val(),
+            cr4: cpu.cr4_for_api(),
+            cpl: cpu.cpl_for_api(),
+            icount: cpu.icount_for_api(),
+        }
+    }
+}
+
+// ─────────────────────────── mem_read / mem_write ───────────────────────────
+
+impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
+    /// Read bytes from guest physical memory into the caller's buffer.
+    /// Returns the number of bytes read (always `buf.len()` on success).
+    /// Bypasses MMIO handlers — matches Unicorn `uc_mem_read` semantics.
+    pub fn mem_read(&self, addr: u64, buf: &mut [u8]) -> Result<usize> {
+        let ram = self.memory.ram_slice();
+        let start = addr as usize;
+        let end = start
+            .checked_add(buf.len())
+            .ok_or_else(|| Error::Memory(crate::memory::MemoryError::ReadPhysicalPage {
+                addr: addr as u64,
+                len: buf.len(),
+            }))?;
+        if end > ram.len() {
+            return Err(Error::Memory(crate::memory::MemoryError::ReadPhysicalPage {
+                addr: addr as u64,
+                len: buf.len(),
+            }));
+        }
+        buf.copy_from_slice(&ram[start..end]);
+        Ok(buf.len())
+    }
+
+    /// Read `size` bytes into a freshly-allocated `Vec`.
+    pub fn mem_read_vec(&self, addr: u64, size: usize) -> Result<Vec<u8>> {
+        let mut v = alloc::vec![0u8; size];
+        self.mem_read(addr, &mut v)?;
+        Ok(v)
+    }
+
+    /// Write bytes to guest physical memory.
+    /// Bypasses MMIO handlers — matches Unicorn `uc_mem_write` semantics.
+    pub fn mem_write(&mut self, addr: u64, data: &[u8]) -> Result<()> {
+        let (ptr, cap) = self.memory.get_ram_base_ptr();
+        let start = addr as usize;
+        let end = start.checked_add(data.len()).ok_or_else(|| {
+            Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
+                addr: addr as u64,
+                len: data.len(),
+            })
+        })?;
+        if end > cap {
+            return Err(Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
+                addr: addr as u64,
+                len: data.len(),
+            }));
+        }
+        // SAFETY: bounds-checked above; write to owned guest RAM.
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(start), data.len());
+        }
+        Ok(())
+    }
+
+    /// Fill `size` bytes of guest memory with `byte`.
+    pub fn mem_fill(&mut self, addr: u64, size: usize, byte: u8) -> Result<()> {
+        let (ptr, cap) = self.memory.get_ram_base_ptr();
+        let start = addr as usize;
+        let end = start.checked_add(size).ok_or_else(|| {
+            Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
+                addr: addr as u64,
+                len: size,
+            })
+        })?;
+        if end > cap {
+            return Err(Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
+                addr: addr as u64,
+                len: size,
+            }));
+        }
+        // SAFETY: bounds-checked above; write to owned guest RAM.
+        unsafe { core::ptr::write_bytes(ptr.add(start), byte, size) };
+        Ok(())
+    }
+
+    /// Guest memory size in bytes.
+    pub fn mem_size(&self) -> usize {
+        self.memory.ram_slice().len()
+    }
+
+    // Typed helpers — reduce noise when loaders build page tables, GDT/IDT
+    // entries, stack frames, or TEB/PEB scaffolding.
+
+    pub fn mem_read_u8(&self, addr: u64) -> Result<u8> {
+        let mut b = [0u8; 1];
+        self.mem_read(addr, &mut b)?;
+        Ok(b[0])
+    }
+
+    pub fn mem_read_u16_le(&self, addr: u64) -> Result<u16> {
+        let mut b = [0u8; 2];
+        self.mem_read(addr, &mut b)?;
+        Ok(u16::from_le_bytes(b))
+    }
+
+    pub fn mem_read_u32_le(&self, addr: u64) -> Result<u32> {
+        let mut b = [0u8; 4];
+        self.mem_read(addr, &mut b)?;
+        Ok(u32::from_le_bytes(b))
+    }
+
+    pub fn mem_read_u64_le(&self, addr: u64) -> Result<u64> {
+        let mut b = [0u8; 8];
+        self.mem_read(addr, &mut b)?;
+        Ok(u64::from_le_bytes(b))
+    }
+
+    pub fn mem_write_u8(&mut self, addr: u64, val: u8) -> Result<()> {
+        self.mem_write(addr, &[val])
+    }
+
+    pub fn mem_write_u16_le(&mut self, addr: u64, val: u16) -> Result<()> {
+        self.mem_write(addr, &val.to_le_bytes())
+    }
+
+    pub fn mem_write_u32_le(&mut self, addr: u64, val: u32) -> Result<()> {
+        self.mem_write(addr, &val.to_le_bytes())
+    }
+
+    pub fn mem_write_u64_le(&mut self, addr: u64, val: u64) -> Result<()> {
+        self.mem_write(addr, &val.to_le_bytes())
+    }
+}
+
+// ─────────────────────────── emu_start / emu_stop ───────────────────────────
+
+impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
+    /// Obtain a cross-thread [`StopHandle`] that breaks the `emu_start` loop
+    /// at its next batch boundary.
+    pub fn stop_handle(&self) -> StopHandle {
+        StopHandle(self.stop_flag.clone())
+    }
+
+    /// Signal the running `emu_start` to stop. Call from within a hook
+    /// callback (same thread that owns `&mut self`) or via `StopHandle` from
+    /// another thread.
+    pub fn emu_stop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+    }
+
+    /// Execute starting at `begin`. Every limit is optional — pass `None`
+    /// for "no limit". Returns when:
+    /// - RIP reaches `until` (if set)
+    /// - `count` instructions executed (if set)
+    /// - `timeout` wall-clock elapsed (if set, std-only)
+    /// - `emu_stop`/`StopHandle::stop` was called
+    /// - CPU enters HLT/MWAIT with no pending interrupts
+    /// - CPU triple-faults into shutdown
+    pub fn emu_start(
+        &mut self,
+        begin: u64,
+        until: Option<u64>,
+        timeout: Option<core::time::Duration>,
+        count: Option<u64>,
+    ) -> Result<EmuStopReason>
+    where
+        'a: 'static,
+    {
+        // Reset any prior stop signal and jump to entry.
+        self.stop_flag.store(false, Ordering::Relaxed);
+        self.cpu.set_rip(begin);
+
+        #[cfg(feature = "std")]
+        let start = std::time::Instant::now();
+        #[cfg(not(feature = "std"))]
+        {
+            if timeout.is_some() {
+                return Err(Error::Cpu(crate::cpu::CpuError::UnimplementedInstruction));
+            }
+        }
+
+        let mut executed: u64 = 0;
+        const BATCH: u64 = 4096;
+
+        loop {
+            if self.stop_flag.load(Ordering::Relaxed) {
+                return Ok(EmuStopReason::Stopped);
+            }
+            if count.is_some_and(|c| executed >= c) {
+                return Ok(EmuStopReason::CountExhausted);
+            }
+            #[cfg(feature = "std")]
+            if timeout.is_some_and(|t| start.elapsed() >= t) {
+                return Ok(EmuStopReason::TimedOut);
+            }
+            if self.cpu.is_in_shutdown() {
+                return Ok(EmuStopReason::Shutdown);
+            }
+
+            let budget = match count {
+                Some(c) => BATCH.min(c - executed),
+                None => BATCH,
+            };
+            let (n, _shutdown) = self.step_batch(budget)?;
+            executed = executed.saturating_add(n);
+
+            if until.is_some_and(|a| self.cpu.rip() == a) {
+                return Ok(EmuStopReason::ReachedUntil);
+            }
+            if n == 0 && self.cpu.is_waiting_for_event() {
+                return Ok(EmuStopReason::Halted);
+            }
+        }
+    }
+
+    /// Execute exactly one instruction from the current RIP.
+    pub fn step_one(&mut self) -> Result<()>
+    where
+        'a: 'static,
+    {
+        self.stop_flag.store(false, Ordering::Relaxed);
+        // step_batch respects the budget
+        let _ = self.step_batch(1)?;
+        Ok(())
+    }
+}
+
+// ─────────────────────────── CpuSetupMode builders ───────────────────────────
+
+impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
+    /// Create a new emulator with guest memory allocated but no BIOS loaded,
+    /// pre-configured for the given CPU mode. See [`CpuSetupMode`].
+    ///
+    /// Returns `Box<Self>` because `Emulator` is ~1.4 MB — stack allocation
+    /// would silently overflow on most platforms.
+    pub fn new_with_mode(config: EmulatorConfig, mode: CpuSetupMode) -> Result<Box<Self>> {
+        let mut emu = Self::new(config)?;
+        // Minimal init: memory + CPU registers + async event flags. We skip
+        // load_bios + pc_system.start etc. since the user will not run a BIOS.
+        let cfg = emu.config_ref().clone();
+        emu.memory.init_memory(
+            cfg.guest_memory_size,
+            cfg.host_memory_size,
+            cfg.memory_block_size,
+        )?;
+        emu.memory.set_a20_mask(emu.pc_system.a20_mask());
+        emu.pc_system.initialize(cfg.ips);
+        // Bring the CPU to its reset state before applying the mode.
+        emu.cpu.reset(ResetReason::Hardware);
+        emu.setup_cpu_mode(mode)?;
+        Ok(emu)
+    }
+
+    /// Reconfigure an existing emulator for the given CPU mode, skipping BIOS.
+    /// Must be called after `initialize()` (or from `new_with_mode`).
+    pub fn setup_cpu_mode(&mut self, mode: CpuSetupMode) -> Result<()> {
+        match mode {
+            CpuSetupMode::RealMode => self.setup_real_mode(),
+            CpuSetupMode::Protected16 => self.setup_protected16(),
+            CpuSetupMode::FlatProtected32 => self.setup_flat_protected32(),
+            CpuSetupMode::FlatLong64 => self.setup_flat_long64(),
+        }
+    }
+
+    /// Real mode (default after reset). Ensures A20 enabled and EFLAGS sane.
+    fn setup_real_mode(&mut self) -> Result<()> {
+        // Reset already puts us in real mode; just enable A20 and IF.
+        self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
+        self.cpu.set_rflags_for_api(0x0000_0202); // IF=1, bit1 reserved=1
+        Ok(())
+    }
+
+    /// Build a minimal GDT, set descriptor caches, and switch to CR0.PE=1
+    /// with 16-bit limits. Rarely used — most callers want `FlatProtected32`.
+    fn setup_protected16(&mut self) -> Result<()> {
+        self.install_flat_gdt()?;
+        // CS 16-bit, limit 64KB
+        self.cpu.set_seg_for_api(
+            crate::cpu::instrumentation::X86Reg::Cs,
+            0x08,
+            0,
+            0xFFFF,
+            /*code16*/ true,
+            /*long*/ false,
+        );
+        // Data selectors, 16-bit
+        for reg in [
+            X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs,
+        ] {
+            self.cpu.set_seg_for_api(reg, 0x10, 0, 0xFFFF, false, false);
+        }
+        self.cpu.enter_protected_mode_for_api();
+        self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
+        self.cpu.set_rflags_for_api(0x0000_0202);
+        Ok(())
+    }
+
+    /// Flat 32-bit protected mode: CR0.PE=1, segments base=0 limit=4GB,
+    /// 32-bit default operand/address size.
+    fn setup_flat_protected32(&mut self) -> Result<()> {
+        self.install_flat_gdt()?;
+        // CS 32-bit, 4GB flat
+        self.cpu.set_seg_for_api(
+            X86Reg::Cs,
+            0x08,
+            0,
+            0xFFFFFFFF,
+            /*code16*/ false,
+            /*long*/ false,
+        );
+        for reg in [
+            X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs,
+        ] {
+            self.cpu
+                .set_seg_for_api(reg, 0x10, 0, 0xFFFFFFFF, false, false);
+        }
+        self.cpu.enter_protected_mode_for_api();
+        self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
+        self.cpu.set_rflags_for_api(0x0000_0202);
+        Ok(())
+    }
+
+    /// Flat 64-bit long mode with identity-mapped 2 MiB pages at CR3.
+    /// Suitable for PE64, ELF64, kernel snapshots.
+    fn setup_flat_long64(&mut self) -> Result<()> {
+        // Page-table layout: at `PT_BASE` we place PML4, PDPT, then 4 PDs
+        // (each covering 1 GiB, giving 4 GiB of identity-mapped RAM).
+        const PT_BASE: u64 = 0x1000;
+        const PML4: u64 = PT_BASE;
+        const PDPT: u64 = PT_BASE + 0x1000;
+        const PD0: u64 = PT_BASE + 0x2000;
+
+        // PML4[0] = PDPT | P | RW
+        self.mem_write_u64_le(PML4, PDPT | 0x3)?;
+
+        // PDPT[0..4] = PD_i | P | RW  (covers 4 GiB)
+        for i in 0..4u64 {
+            self.mem_write_u64_le(PDPT + i * 8, (PD0 + i * 0x1000) | 0x3)?;
+        }
+
+        // Each PD has 512 entries of 2 MiB pages: P | RW | PS
+        for i in 0..4u64 {
+            let pd = PD0 + i * 0x1000;
+            for j in 0..512u64 {
+                let phys = (i * 512 + j) * 0x0020_0000;
+                self.mem_write_u64_le(pd + j * 8, phys | 0x83)?;
+            }
+        }
+
+        self.install_flat_gdt()?;
+        // CS in long mode: L=1, D=0
+        self.cpu.set_seg_for_api(
+            X86Reg::Cs,
+            0x08,
+            0,
+            0xFFFFFFFF,
+            /*code16*/ false,
+            /*long*/ true,
+        );
+        for reg in [
+            X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs,
+        ] {
+            self.cpu
+                .set_seg_for_api(reg, 0x10, 0, 0xFFFFFFFF, false, false);
+        }
+
+        self.cpu.enter_long_mode_for_api(PML4);
+        self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
+        self.cpu.set_rflags_for_api(0x0000_0202);
+        Ok(())
+    }
+
+    /// Install a minimal flat GDT at 0x800 with null/code/data/TSS
+    /// descriptors. Shared by all protected-mode setups.
+    fn install_flat_gdt(&mut self) -> Result<()> {
+        const GDT_BASE: u64 = 0x0800;
+
+        // Null descriptor
+        self.mem_write_u64_le(GDT_BASE, 0)?;
+
+        // Code selector at index 1 (selector 0x08):
+        // base=0 limit=0xFFFFF G=1 (4 KiB pages → 4 GiB) P=1 DPL=0 S=1
+        // type=1010 (code, readable, non-conforming) D=1 L=0 AVL=0
+        // For FlatLong64 we overwrite this entry below in enter_long_mode path
+        // via set_seg_for_api which writes descriptor caches directly — the
+        // GDT itself needs a plausible entry so IRET/syscall paths succeed.
+        let code_desc: u64 = 0x00CF9A000000FFFF;
+        self.mem_write_u64_le(GDT_BASE + 0x08, code_desc)?;
+
+        // Data selector at index 2 (selector 0x10):
+        // base=0 limit=0xFFFFF G=1 P=1 DPL=0 S=1 type=0010 (data, writable)
+        let data_desc: u64 = 0x00CF92000000FFFF;
+        self.mem_write_u64_le(GDT_BASE + 0x10, data_desc)?;
+
+        self.cpu.set_gdtr_base_for_api(GDT_BASE);
+        self.cpu.set_gdtr_limit_for_api(0x1F);
+        Ok(())
+    }
+}
+
+
+// ─────────────────────────── Tests ───────────────────────────
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use crate::cpu::core_i7_skylake::Corei7SkylakeX;
+
+    /// Reg read/write round-trip on a fresh emulator.
+    #[test]
+    fn reg_read_write_round_trip() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF_CAFE_BABE).unwrap();
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rax).unwrap(),
+                    0xDEAD_BEEF_CAFE_BABE
+                );
+                assert_eq!(
+                    emu.reg_read(X86Reg::Eax).unwrap(),
+                    0xCAFE_BABE
+                );
+                assert_eq!(emu.reg_read(X86Reg::Ax).unwrap(), 0xBABE);
+                assert_eq!(emu.reg_read(X86Reg::Al).unwrap(), 0xBE);
+                assert_eq!(emu.reg_read(X86Reg::Ah).unwrap(), 0xBA);
+                emu.reg_write(X86Reg::Rip, 0x1234).unwrap();
+                assert_eq!(emu.reg_read(X86Reg::Rip).unwrap(), 0x1234);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// mem_write then mem_read returns the same bytes.
+    #[test]
+    fn mem_read_write_round_trip() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.initialize().unwrap();
+                let data: [u8; 16] = [
+                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+                ];
+                emu.mem_write(0x20_000, &data).unwrap();
+                let mut buf = [0u8; 16];
+                emu.mem_read(0x20_000, &mut buf).unwrap();
+                assert_eq!(buf, data);
+
+                // Typed helpers
+                emu.mem_write_u64_le(0x20_000, 0xCAFE_BABE_DEAD_BEEF).unwrap();
+                assert_eq!(
+                    emu.mem_read_u64_le(0x20_000).unwrap(),
+                    0xCAFE_BABE_DEAD_BEEF
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// StopHandle is Send + Sync + Clone. Static assertion.
+    #[test]
+    fn stop_handle_trait_bounds() {
+        fn assert_send_sync<T: Send + Sync + Clone>() {}
+        assert_send_sync::<StopHandle>();
+    }
+
+    /// Emulator is Send. Static assertion that `stop_handle` returns the
+    /// Arc<AtomicBool> backing store (not a borrow).
+    #[test]
+    fn stop_handle_stops_flag() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig::default();
+                let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let handle = emu.stop_handle();
+                assert!(!handle.is_stopping());
+                handle.stop();
+                assert!(handle.is_stopping());
+                assert!(emu.stop_flag.load(Ordering::Relaxed));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// CpuSetupMode::FlatProtected32 puts the CPU into PM with flat segments.
+    #[test]
+    fn flat_protected32_setup() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cfg = EmulatorConfig::default();
+                let emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    cfg,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                // CR0.PE should be set
+                let cr0 = emu.reg_read(X86Reg::Cr0).unwrap();
+                assert!(cr0 & 0x1 != 0, "CR0.PE not set after FlatProtected32 setup: {:#x}", cr0);
+                // CS should be 0x08, DS 0x10
+                assert_eq!(emu.reg_read(X86Reg::Cs).unwrap(), 0x08);
+                assert_eq!(emu.reg_read(X86Reg::Ds).unwrap(), 0x10);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// CpuSetupMode::FlatLong64 enables CR0.PG, CR4.PAE, EFER.LME/LMA, CS.L=1.
+    #[test]
+    fn flat_long64_setup() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cfg = EmulatorConfig::default();
+                let emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    cfg,
+                    CpuSetupMode::FlatLong64,
+                )
+                .unwrap();
+                let cr0 = emu.reg_read(X86Reg::Cr0).unwrap();
+                assert!(cr0 & 0x1 != 0, "CR0.PE not set");
+                assert!(cr0 & 0x8000_0000 != 0, "CR0.PG not set: {:#x}", cr0);
+                let cr4 = emu.reg_read(X86Reg::Cr4).unwrap();
+                assert!(cr4 & (1 << 5) != 0, "CR4.PAE not set: {:#x}", cr4);
+                let efer = emu.reg_read(X86Reg::Efer).unwrap();
+                assert!(efer & (1 << 8) != 0, "EFER.LME not set: {:#x}", efer);
+                assert!(efer & (1 << 10) != 0, "EFER.LMA not set: {:#x}", efer);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Hook registration and deletion round-trip.
+    #[cfg(feature = "instrumentation")]
+    #[test]
+    fn hook_add_del_roundtrip() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cfg = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let h = emu.hook_add_code(.., |_, _| {});
+                assert!(emu.hook_del(h).is_ok());
+                assert!(emu.hook_del(h).is_err(), "double-delete must fail");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}

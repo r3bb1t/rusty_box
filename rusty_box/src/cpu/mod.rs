@@ -1,10 +1,15 @@
 pub mod error;
 pub use error::{CpuError, Result};
 
-#[cfg(feature = "bx_instrumentation")]
 pub mod instrumentation;
-#[cfg(feature = "bx_instrumentation")]
-pub use instrumentation::{CpuSnapshot, Instrumentation};
+pub use instrumentation::{
+    BranchEvent, BranchType, CacheCntrl, CodeSize, CpuSetupMode, CpuSnapshot, EmuStopReason,
+    HookHandle, HookMask, HwInterruptEvent, Instrumentation, InstrumentationError,
+    InvEptType, InvPcidType, IoHookEvent, IoHookType, MemAccessRW, MemHookEvent, MemHookType,
+    MemType, MwaitFlags, PrefetchHint, ResetType, TlbCntrl, X86Reg,
+};
+
+pub(crate) mod api_bridge;
 
 pub(super) mod access;
 pub(super) mod aes;

@@ -184,7 +184,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Get current system ticks from pc_system (Bochs: bx_pc_system.time_ticks()).
     /// Falls back to icount when pc_system is not wired (unit tests).
     #[inline]
-    fn system_ticks(&self) -> u64 {
+    pub(crate) fn system_ticks(&self) -> u64 {
         if let Some(ps) = self.pc_system_ptr {
             // SAFETY: PcSystem pointer valid for emulator lifetime; single-threaded access
             unsafe { ps.as_ref().time_ticks() }
@@ -211,6 +211,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::debug!("WBINVD: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
+        // BOCHS BX_INSTR_CACHE_CNTRL(cpu_id, BX_INSTR_WBINVD)
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_cache() {
+            self.instrumentation
+                .fire_cache_cntrl(super::instrumentation::CacheCntrl::Wbinvd);
+        }
+
         // No-op functionally (no cache to write back)
         Ok(())
     }
@@ -225,6 +232,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::debug!("INVD: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
+        // BOCHS BX_INSTR_CACHE_CNTRL(cpu_id, BX_INSTR_INVD)
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_cache() {
+            self.instrumentation
+                .fire_cache_cntrl(super::instrumentation::CacheCntrl::Invd);
+        }
+
         // Bochs proc_ctrl.cc: flushICaches() — invalidate instruction cache
         self.invalidate_prefetch_q();
         self.i_cache.flush_all();
@@ -253,6 +267,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.itlb.invlpg(laddr);
         // Bochs paging.cc — iCache.breakLinks()
         self.i_cache.break_links();
+
+        // BOCHS BX_INSTR_TLB_CNTRL with INVLPG kind.
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_tlb() {
+            self.instrumentation
+                .fire_tlb_cntrl(super::instrumentation::TlbCntrl::Invlpg { laddr });
+        }
+
 
         Ok(())
     }
@@ -387,6 +409,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
             return self.exception(super::cpu::Exception::Gp, 0);
         }
+        // BOCHS BX_INSTR_MWAIT(cpu_id, addr, len, flags)
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_hlt_mwait() {
+            let flags = super::instrumentation::MwaitFlags::from_bits_truncate(self.ecx());
+            let addr = {
+                #[cfg(feature = "bx_support_monitor_mwait")]
+                { self.monitor.monitor_addr }
+                #[cfg(not(feature = "bx_support_monitor_mwait"))]
+                { 0u64 }
+            };
+            self.instrumentation.fire_mwait(addr, 0, flags);
+        }
+
 
         // Bochs mwait.cc: If monitor not armed, just return
         #[cfg(feature = "bx_support_monitor_mwait")]
@@ -453,9 +488,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub(super) fn clflush(
         &mut self,
-        _instr: &super::decoder::Instruction,
+        instr: &super::decoder::Instruction,
     ) -> crate::cpu::Result<()> {
-        // NOP — no cache to flush
+        // BOCHS BX_INSTR_CLFLUSH(cpu_id, laddr, paddr).
+        // We don't actually flush a cache (no D-cache modeled), but we surface
+        // the linear/physical addresses so users can track flushed lines.
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_tlb() {
+            let seg = super::decoder::BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            let laddr: u64 = if self.long64_mode() {
+                self.get_laddr64(seg as usize, eaddr)
+            } else {
+                self.get_laddr32(seg as usize, eaddr as u32) as u64
+            };
+            // Best-effort physical resolution — if translation faults, skip the hook.
+            let paddr = self.translate_data_read(laddr).unwrap_or(0);
+            self.instrumentation.fire_clflush(laddr, paddr);
+        }
+        #[cfg(not(feature = "instrumentation"))]
+        let _ = instr;
         Ok(())
     }
 
@@ -631,6 +683,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let msr = self.ecx();
         let val = ((self.edx() as u64) << 32) | (self.eax() as u64);
+
+        // BOCHS BX_INSTR_WRMSR(cpu_id, addr, value)
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_cpuid_msr() {
+            self.instrumentation.fire_wrmsr(msr, val);
+        }
 
         match msr {
             BX_MSR_TSC => self.set_tsc(val, self.system_ticks()),

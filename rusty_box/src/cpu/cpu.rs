@@ -685,13 +685,12 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     #[cfg(feature = "bx_debugger")]
     pub(super) guard_found: BxGuardFound,
 
-    #[cfg(feature = "bx_instrumentation")]
-    pub(super) far_branch: FarBranch,
 
-    /// Bochs-style instrumentation (instrument/instrumentation.txt).
-    /// Install via `set_instrumentation()`. Feature-gated by `bx_instrumentation`.
-    #[cfg(feature = "bx_instrumentation")]
-    pub(crate) instrumentation: Option<alloc::boxed::Box<dyn super::Instrumentation>>,
+    /// Instrumentation hooks: BOCHS-style trait object + Unicorn-style closures.
+    /// Install via `Emulator::set_instrumentation()` / `Emulator::hook_add_*`.
+    /// Feature-gated by `instrumentation`.
+    #[cfg(feature = "instrumentation")]
+    pub(crate) instrumentation: super::instrumentation::InstrumentationRegistry,
 
     pub(crate) dtlb: Tlb<BX_DTLB_SIZE>,
     pub(super) itlb: Tlb<BX_ITLB_SIZE>,
@@ -930,11 +929,7 @@ pub(super) struct PdptrCache {
     pub(crate) entry: [u64; 4],
 }
 
-#[derive(Debug, Default)]
-pub(super) struct FarBranch {
-    pub(crate) rev_cs: u16,
-    pub(crate) rev_rip: BxAddress,
-}
+
 
 #[derive(Debug, Default)]
 pub struct BxRegsMsr {
@@ -1218,12 +1213,180 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.io_bus = None;
     }
 
-    /// Install instrumentation hooks (Bochs instrument/instrumentation.txt).
-    /// Implement the `Instrumentation` trait and pass a boxed instance.
-    #[cfg(feature = "bx_instrumentation")]
-    pub fn set_instrumentation(&mut self, instr: alloc::boxed::Box<dyn super::Instrumentation>) {
-        self.instrumentation = Some(instr);
+    /// Install BOCHS-style trait instrumentation. Returns any previously-installed
+    /// trait object. Closure hooks registered via `hook_add_*` are unaffected.
+    #[cfg(feature = "instrumentation")]
+    pub fn set_instrumentation(
+        &mut self,
+        instr: alloc::boxed::Box<dyn super::Instrumentation>,
+    ) -> Option<alloc::boxed::Box<dyn super::Instrumentation>> {
+        self.instrumentation.set_bochs(instr)
     }
+
+    /// Remove BOCHS-style trait instrumentation. Returns it if present.
+    /// Closure hooks registered via `hook_add_*` are unaffected.
+    #[cfg(feature = "instrumentation")]
+    pub fn clear_instrumentation(
+        &mut self,
+    ) -> Option<alloc::boxed::Box<dyn super::Instrumentation>> {
+        self.instrumentation.clear_bochs()
+    }
+    // ── Instrumentation helpers (no-op when `instrumentation` feature disabled) ──
+
+    /// Fire the `repeat_iteration` hook for string/IO REP instructions.
+    /// Invoked at each iteration; compiles to nothing without the feature.
+    #[inline(always)]
+    pub(crate) fn on_repeat_iteration(
+        &mut self,
+        #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
+        instr: &super::decoder::Instruction,
+    ) {
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_exec() {
+            let rip = self.prev_rip;
+            self.instrumentation.fire_repeat_iteration(rip, instr);
+        }
+    }
+
+    /// Conditional near branch (16-bit). Fires `cnear_branch_taken`/
+    /// `cnear_branch_not_taken` hooks. RIP is already at fallthrough when this
+    /// helper is called (cpu_loop increments RIP before execute).
+    #[inline(always)]
+    pub(crate) fn conditional_branch16(&mut self, taken: bool, new_ip: u16) -> Result<()> {
+        if taken {
+            self.branch_near16(new_ip)?;
+            #[cfg(feature = "instrumentation")]
+            if self.instrumentation.active.has_branch() {
+                let src = self.prev_rip;
+                self.instrumentation
+                    .fire_cnear_branch_taken(src, new_ip as u64);
+            }
+        } else {
+            #[cfg(feature = "instrumentation")]
+            if self.instrumentation.active.has_branch() {
+                let src = self.prev_rip;
+                let fall = self.rip();
+                self.instrumentation
+                    .fire_cnear_branch_not_taken(src, fall);
+            }
+        }
+        Ok(())
+    }
+
+    /// Conditional near branch (32-bit). See `conditional_branch16`.
+    #[inline(always)]
+    pub(crate) fn conditional_branch32(&mut self, taken: bool, new_eip: u32) -> Result<()> {
+        if taken {
+            self.branch_near32(new_eip)?;
+            #[cfg(feature = "instrumentation")]
+            if self.instrumentation.active.has_branch() {
+                let src = self.prev_rip;
+                self.instrumentation
+                    .fire_cnear_branch_taken(src, new_eip as u64);
+            }
+        } else {
+            #[cfg(feature = "instrumentation")]
+            if self.instrumentation.active.has_branch() {
+                let src = self.prev_rip;
+                let fall = self.rip();
+                self.instrumentation
+                    .fire_cnear_branch_not_taken(src, fall);
+            }
+        }
+        Ok(())
+    }
+
+    /// Conditional near branch (64-bit). See `conditional_branch16`.
+    /// Takes `&Instruction` because `branch_near64` extracts the displacement
+    /// from the instruction itself.
+    #[inline(always)]
+    pub(crate) fn conditional_branch64(
+        &mut self,
+        taken: bool,
+        instr: &super::decoder::Instruction,
+    ) -> Result<()> {
+        if taken {
+            self.branch_near64(instr)?;
+            #[cfg(feature = "instrumentation")]
+            if self.instrumentation.active.has_branch() {
+                let src = self.prev_rip;
+                let dst = self.rip();
+                self.instrumentation.fire_cnear_branch_taken(src, dst);
+            }
+        } else {
+            #[cfg(feature = "instrumentation")]
+            if self.instrumentation.active.has_branch() {
+                let src = self.prev_rip;
+                let fall = self.rip();
+                self.instrumentation
+                    .fire_cnear_branch_not_taken(src, fall);
+            }
+        }
+        Ok(())
+    }
+
+    /// Fire an unconditional near branch hook (JMP/CALL/RET/LOOP).
+    /// Call AFTER the branch_near* sets the new IP.
+    #[inline(always)]
+    pub(crate) fn on_ucnear_branch(&mut self, what: super::instrumentation::BranchType, new_rip: u64) {
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_branch() {
+            let src = self.prev_rip;
+            self.instrumentation.fire_ucnear_branch(what, src, new_rip);
+        }
+        #[cfg(not(feature = "instrumentation"))]
+        {
+            let _ = (what, new_rip);
+        }
+    }
+
+    /// Fire a far branch hook (inter-segment). Call AFTER the new CS:IP is set.
+    #[inline(always)]
+    pub(crate) fn on_far_branch(
+        &mut self,
+        what: super::instrumentation::BranchType,
+        prev_cs: u16,
+        new_cs: u16,
+        new_rip: u64,
+    ) {
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_branch() {
+            let src_rip = self.prev_rip;
+            self.instrumentation
+                .fire_far_branch(what, prev_cs, src_rip, new_cs, new_rip);
+        }
+        #[cfg(not(feature = "instrumentation"))]
+        {
+            let _ = (what, prev_cs, new_cs, new_rip);
+        }
+    }
+
+    /// Fire the BOCHS `lin_access` hook. No-op when the feature is disabled
+    /// or no memory hooks are registered.
+    #[inline(always)]
+    pub(crate) fn on_lin_access(
+        &mut self,
+        laddr: u64,
+        paddr: u64,
+        len: usize,
+        rw: super::instrumentation::MemAccessRW,
+    ) {
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_mem() {
+            self.instrumentation.fire_lin_access(
+                laddr,
+                paddr,
+                len,
+                super::instrumentation::MemType::Wb,
+                rw,
+            );
+        }
+        #[cfg(not(feature = "instrumentation"))]
+        {
+            let _ = (laddr, paddr, len, rw);
+        }
+    }
+
 
     #[inline]
     pub(crate) fn set_pc_system_ptr(&mut self, ps: NonNull<crate::pc_system::BxPcSystemC>) {
@@ -1403,6 +1566,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         #[cfg(debug_assertions)] {
             self.diag_inject_ext_intr_count += 1;
             self.diag_inject_ext_intr_vectors[vector as usize] += 1;
+        }
+
+        // BOCHS BX_INSTR_HWINTERRUPT(cpu_id, vector, cs, eip)
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_hw_interrupt() {
+            let cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
+            let rip = self.rip();
+            self.instrumentation.fire_hwinterrupt(vector, cs, rip);
         }
 
         // Wake from halt/wait state.
@@ -1693,24 +1864,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 #[cfg(debug_assertions)] { self.diag_current_opcode = opcode as u16; }
 
                 // Bochs BX_INSTR_BEFORE_EXECUTION(cpu_id, i)
-                #[cfg(feature = "bx_instrumentation")]
-                if self.instrumentation.is_some() {
-                    if self.icount == 50_000_001 {
-                        tracing::trace!("[INSTR-ALIVE] instrumentation callback active at icount={}", self.icount);
-                    }
-                    let snap = super::CpuSnapshot {
-                        rax: self.rax(), rbx: self.rbx(), rcx: self.rcx(), rdx: self.rdx(),
-                        rsi: self.rsi(), rdi: self.rdi(), rbp: self.rbp(), rsp: self.rsp(),
-                        r8: self.r8(), r9: self.r9(), r10: self.r10(), r11: self.r11(),
-                        r12: self.r12(), r13: self.r13(), r14: self.r14(), r15: self.r15(),
-                        eflags: self.eflags.bits(), icount: self.icount,
-                    };
+                #[cfg(feature = "instrumentation")]
+                if self.instrumentation.active.has_exec() {
                     let rip_before = self.prev_rip;
-                    // Immutable borrows of `self` (via getters) are now done.
-                    // Safe to take mutable borrow of the instrumentation field.
-                    if let Some(cb) = self.instrumentation.as_mut() {
-                        cb.before_execution(rip_before, opcode as u16, ilen_val, &snap);
-                    }
+                    self.instrumentation
+                        .fire_before_execution(rip_before, instr_ref());
                 }
 
                 match self.execute_instruction(instr_ref()) {
@@ -1736,6 +1894,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         self.handle_execution_error(e, instr_ref())?;
                         break 'cpu_loop Err(crate::cpu::CpuError::CpuNotInitialized);
                     }
+                }
+
+                // Bochs BX_INSTR_AFTER_EXECUTION(cpu_id, i)
+                // Use prev_rip BEFORE updating it — that's the address of the instruction
+                // we just executed (matches BOCHS semantics).
+                #[cfg(feature = "instrumentation")]
+                if self.instrumentation.active.has_exec() {
+                    let executed_rip = self.prev_rip;
+                    self.instrumentation
+                        .fire_after_execution(executed_rip, instr_ref());
                 }
 
                 // Bochs cpu.cc — prev_rip = RIP AFTER execution ("commit new RIP")

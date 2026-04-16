@@ -16,26 +16,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Branch to a near 16-bit address
     /// Matching C++ ctrl_xfer16.cc branch_near16
-    fn branch_near16(&mut self, new_ip: u16) -> super::Result<()> {
-        // Check CS limit (matching C++ line 32-36)
-        // Bochs: exception(BX_GP_EXCEPTION, 0) which longjmps
-        let limit = self.get_segment_limit(BxSegregs::Cs);
-        if (new_ip as u32) > limit {
-            tracing::error!(
-                "branch_near16: offset {:#06x} outside of CS limits {:#010x}",
-                new_ip,
-                limit
-            );
-            return self.exception(super::cpu::Exception::Gp, 0);
-        }
-
-        // Matching C++ line 38: EIP = new_IP;
-        self.set_eip(new_ip as u32);
-
-        // Matching C++ lines 40-43: Set STOP_TRACE when handlers chaining is disabled
-        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-        Ok(())
+    pub(super) fn branch_near16(&mut self, new_ip: u16) -> super::Result<()> { // Check CS limit (matching C++ line 32-36)
+    // Bochs: exception(BX_GP_EXCEPTION, 0) which longjmps
+    let limit = self.get_segment_limit(BxSegregs::Cs);
+    if (new_ip as u32) > limit {
+        tracing::error!(
+            "branch_near16: offset {:#06x} outside of CS limits {:#010x}",
+            new_ip,
+            limit
+        );
+        return self.exception(super::cpu::Exception::Gp, 0);
     }
+    
+    // Matching C++ line 38: EIP = new_IP;
+    self.set_eip(new_ip as u32);
+    
+    // Matching C++ lines 40-43: Set STOP_TRACE when handlers chaining is disabled
+    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+    Ok(()) }
 
     // =========================================================================
     // Flag getters for conditional jumps
@@ -50,41 +48,33 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// JMP rel8 - Short jump with 8-bit signed displacement
-    pub fn jmp_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        let disp = instr.ib() as i8;
-        let ip = self.get_ip();
-        let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-        self.branch_near16(new_ip)?;
-        Ok(())
-    }
+    pub fn jmp_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8;
+    let ip = self.get_ip();
+    let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
+    self.branch_near16(new_ip)?;
+    self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, self.rip()); Ok(()) }
 
     /// JMP rel16 - Near jump with 16-bit signed displacement
-    pub fn jmp_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let disp = instr.iw() as i16;
-        let ip = self.get_ip();
-        let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-        self.branch_near16(new_ip)?;
-        Ok(())
-    }
+    pub fn jmp_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16;
+    let ip = self.get_ip();
+    let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
+    self.branch_near16(new_ip)?;
+    self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, self.rip()); Ok(()) }
 
     /// JMP r16 - Indirect jump through register (register form)
     /// Matching Bochs ctrl_xfer16.cc JMP_EwR
-    pub fn jmp_ew_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let dst = instr.dst() as usize;
-        let new_ip = self.get_gpr16(dst);
-        self.branch_near16(new_ip)?;
-        Ok(())
-    }
+    pub fn jmp_ew_r(&mut self, instr: &Instruction) -> super::Result<()> { let dst = instr.dst() as usize;
+    let new_ip = self.get_gpr16(dst);
+    self.branch_near16(new_ip)?;
+    self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip()); Ok(()) }
 
     /// JMP m16 - Indirect jump through memory (memory form)
     /// Matching Bochs ctrl_xfer16.cc JMP_EwM
-    pub fn jmp_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let new_ip = self.v_read_word(seg, eaddr)?;
-        self.branch_near16(new_ip)?;
-        Ok(())
-    }
+    pub fn jmp_ew_m(&mut self, instr: &Instruction) -> super::Result<()> { let eaddr = self.resolve_addr(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let new_ip = self.v_read_word(seg, eaddr)?;
+    self.branch_near16(new_ip)?;
+    self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip()); Ok(()) }
 
     /// JMP r/m16 - Unified dispatch (checks mod_c0)
     pub fn jmp_ew(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -100,42 +90,36 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// CALL rel16 - Near call with 16-bit displacement
-    pub fn call_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let disp = instr.iw() as i16;
-        let ip = self.get_ip();
-
-        // Push return address
-        self.push_16(ip)?;
-
-        let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-        self.branch_near16(new_ip)?;
-        Ok(())
-    }
+    pub fn call_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16;
+    let ip = self.get_ip();
+    
+    // Push return address
+    self.push_16(ip)?;
+    
+    let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
+    self.branch_near16(new_ip)?;
+    self.on_ucnear_branch(super::instrumentation::BranchType::Call, self.rip()); Ok(()) }
 
     /// CALL r16 - Indirect call through register (register form)
     /// Matching Bochs ctrl_xfer16.cc CALL_EwR
-    pub fn call_ew_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let dst = instr.dst() as usize;
-        let new_ip = self.get_gpr16(dst);
-        let ip = self.get_ip();
-
-        self.push_16(ip)?;
-        self.branch_near16(new_ip)?;
-        Ok(())
-    }
+    pub fn call_ew_r(&mut self, instr: &Instruction) -> super::Result<()> { let dst = instr.dst() as usize;
+    let new_ip = self.get_gpr16(dst);
+    let ip = self.get_ip();
+    
+    self.push_16(ip)?;
+    self.branch_near16(new_ip)?;
+    self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip()); Ok(()) }
 
     /// CALL m16 - Indirect call through memory (memory form)
     /// Matching Bochs ctrl_xfer16.cc CALL_EwM
-    pub fn call_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let new_ip = self.v_read_word(seg, eaddr)?;
-        let ip = self.get_ip();
-
-        self.push_16(ip)?;
-        self.branch_near16(new_ip)?;
-        Ok(())
-    }
+    pub fn call_ew_m(&mut self, instr: &Instruction) -> super::Result<()> { let eaddr = self.resolve_addr(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let new_ip = self.v_read_word(seg, eaddr)?;
+    let ip = self.get_ip();
+    
+    self.push_16(ip)?;
+    self.branch_near16(new_ip)?;
+    self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip()); Ok(()) }
 
     /// CALL r/m16 - Unified dispatch (checks mod_c0)
     pub fn call_ew(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -151,390 +135,130 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// RET near - Return from procedure (16-bit)
-    pub fn ret_near16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let return_ip = self.pop_16()?;
-        self.branch_near16(return_ip)?;
-        Ok(())
-    }
+    pub fn ret_near16(&mut self, _instr: &Instruction) -> super::Result<()> { let return_ip = self.pop_16()?;
+    self.branch_near16(return_ip)?;
+    self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip()); Ok(()) }
 
     /// RET near imm16 - Return and pop imm16 bytes (16-bit)
-    pub fn ret_near16_iw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let return_ip = self.pop_16()?;
-        let imm16 = instr.iw();
-
-        self.branch_near16(return_ip)?;
-
-        // Pop additional bytes from stack
-        let ss_d_b = self.get_segment_d_b(BxSegregs::Ss);
-        if ss_d_b {
-            let esp = self.get_gpr32(4);
-            self.set_gpr32(4, esp.wrapping_add(imm16 as u32));
-        } else {
-            let sp = self.get_gpr16(4);
-            self.set_gpr16(4, sp.wrapping_add(imm16));
-        }
-        Ok(())
+    pub fn ret_near16_iw(&mut self, instr: &Instruction) -> super::Result<()> { let return_ip = self.pop_16()?;
+    let imm16 = instr.iw();
+    
+    self.branch_near16(return_ip)?;
+    
+    // Pop additional bytes from stack
+    let ss_d_b = self.get_segment_d_b(BxSegregs::Ss);
+    if ss_d_b {
+        let esp = self.get_gpr32(4);
+        self.set_gpr32(4, esp.wrapping_add(imm16 as u32));
+    } else {
+        let sp = self.get_gpr16(4);
+        self.set_gpr16(4, sp.wrapping_add(imm16));
     }
+    self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip()); Ok(()) }
 
     // =========================================================================
     // Conditional JMP instructions (16-bit)
     // =========================================================================
 
     /// JO rel8 - Jump if overflow (OF=1)
-    pub fn jo_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_of() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jo_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_of(), new_ip) }
 
     /// JNO rel8 - Jump if not overflow (OF=0)
-    pub fn jno_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_of() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jno_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_of(), new_ip) }
 
     /// JB/JC/JNAE rel8 - Jump if below/carry (CF=1)
-    pub fn jb_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_cf() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jb_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_cf(), new_ip) }
 
     /// JNB/JNC/JAE rel8 - Jump if not below/no carry (CF=0)
-    pub fn jnb_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_cf() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jnb_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_cf(), new_ip) }
 
     /// JZ/JE rel8 - Jump if zero/equal (ZF=1)
-    pub fn jz_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_zf() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jz_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_zf(), new_ip) }
 
     /// JNZ/JNE rel8 - Jump if not zero/not equal (ZF=0)
-    pub fn jnz_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_zf() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jnz_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_zf(), new_ip) }
 
     /// JBE/JNA rel8 - Jump if below or equal (CF=1 or ZF=1)
-    pub fn jbe_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_cf() || self.get_zf() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jbe_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_cf() || self.get_zf(), new_ip) }
 
     /// JNBE/JA rel8 - Jump if not below or equal/above (CF=0 and ZF=0)
-    pub fn jnbe_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_cf() && !self.get_zf() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jnbe_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_cf() && !self.get_zf(), new_ip) }
 
     /// JS rel8 - Jump if sign (SF=1)
-    pub fn js_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_sf() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn js_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_sf(), new_ip) }
 
     /// JNS rel8 - Jump if not sign (SF=0)
-    pub fn jns_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_sf() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jns_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_sf(), new_ip) }
 
     /// JP/JPE rel8 - Jump if parity/parity even (PF=1)
-    pub fn jp_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_pf() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jp_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_pf(), new_ip) }
 
     /// JNP/JPO rel8 - Jump if no parity/parity odd (PF=0)
-    pub fn jnp_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_pf() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jnp_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_pf(), new_ip) }
 
     /// JL/JNGE rel8 - Jump if less (SF != OF)
-    pub fn jl_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_sf() != self.get_of() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jl_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_sf() != self.get_of(), new_ip) }
 
     /// JNL/JGE rel8 - Jump if not less/greater or equal (SF == OF)
-    pub fn jnl_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_sf() == self.get_of() {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jnl_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_sf() == self.get_of(), new_ip) }
 
     /// JLE/JNG rel8 - Jump if less or equal (ZF=1 or SF!=OF)
-    pub fn jle_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_zf() || (self.get_sf() != self.get_of()) {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jle_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_zf() || (self.get_sf() != self.get_of()), new_ip) }
 
     /// JNLE/JG rel8 - Jump if not less or equal/greater (ZF=0 and SF==OF)
-    pub fn jnle_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_zf() && (self.get_sf() == self.get_of()) {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jnle_jb(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_zf() && (self.get_sf() == self.get_of()), new_ip) }
 
     // =========================================================================
     // Conditional JMP instructions (16-bit displacement)
     // =========================================================================
 
     /// JZ/JE rel16 - Jump if zero/equal (ZF=1)
-    pub fn jz_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_zf() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jz_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_zf(), new_ip) }
 
     /// JNZ/JNE rel16 - Jump if not zero/not equal (ZF=0)
-    pub fn jnz_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_zf() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jnz_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_zf(), new_ip) }
 
     /// JO rel16 - Jump if overflow (OF=1)
-    pub fn jo_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_of() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jo_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_of(), new_ip) }
 
     /// JNO rel16 - Jump if not overflow (OF=0)
-    pub fn jno_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_of() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jno_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_of(), new_ip) }
 
     /// JB/JC/JNAE rel16 - Jump if below/carry (CF=1)
-    pub fn jb_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_cf() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jb_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_cf(), new_ip) }
 
     /// JNB/JNC/JAE rel16 - Jump if not below/no carry (CF=0)
-    pub fn jnb_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_cf() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jnb_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_cf(), new_ip) }
 
     /// JBE/JNA rel16 - Jump if below or equal (CF=1 or ZF=1)
-    pub fn jbe_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_cf() || self.get_zf() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jbe_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_cf() || self.get_zf(), new_ip) }
 
     /// JNBE/JA rel16 - Jump if not below or equal/above (CF=0 and ZF=0)
-    pub fn jnbe_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_cf() && !self.get_zf() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jnbe_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_cf() && !self.get_zf(), new_ip) }
 
     /// JS rel16 - Jump if sign (SF=1)
-    pub fn js_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_sf() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn js_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_sf(), new_ip) }
 
     /// JNS rel16 - Jump if not sign (SF=0)
-    pub fn jns_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_sf() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jns_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_sf(), new_ip) }
 
     /// JP/JPE rel16 - Jump if parity/parity even (PF=1)
-    pub fn jp_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_pf() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jp_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_pf(), new_ip) }
 
     /// JNP/JPO rel16 - Jump if no parity/parity odd (PF=0)
-    pub fn jnp_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_pf() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jnp_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_pf(), new_ip) }
 
     /// JL/JNGE rel16 - Jump if less (SF != OF)
-    pub fn jl_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_sf() != self.get_of() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jl_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_sf() != self.get_of(), new_ip) }
 
     /// JNL/JGE rel16 - Jump if not less/greater or equal (SF == OF)
-    pub fn jnl_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_sf() == self.get_of() {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jnl_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_sf() == self.get_of(), new_ip) }
 
     /// JLE/JNG rel16 - Jump if less or equal (ZF=1 or SF!=OF)
-    pub fn jle_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.get_zf() || (self.get_sf() != self.get_of()) {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jle_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(self.get_zf() || (self.get_sf() != self.get_of()), new_ip) }
 
     /// JNLE/JG rel16 - Jump if not less or equal/greater (ZF=0 and SF==OF)
-    pub fn jnle_jw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if !self.get_zf() && (self.get_sf() == self.get_of()) {
-            let disp = instr.iw() as i16;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
-        Ok(())
-    }
+    pub fn jnle_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(!self.get_zf() && (self.get_sf() == self.get_of()), new_ip) }
 
     // =========================================================================
     // LOOP instructions
@@ -549,23 +273,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if as32l {
             let count = self.get_gpr32(1).wrapping_sub(1);
 
-            if count != 0 {
-                let disp = instr.ib() as i8;
-                let ip = self.get_ip();
-                let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip)?;
-            }
+            { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(count != 0, new_ip)?; }
 
             self.set_gpr32(1, count);
         } else {
             let count = self.get_gpr16(1).wrapping_sub(1);
 
-            if count != 0 {
-                let disp = instr.ib() as i8;
-                let ip = self.get_ip();
-                let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip)?;
-            }
+            { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(count != 0, new_ip)?; }
 
             self.set_gpr16(1, count);
         }
@@ -580,23 +294,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if as32l {
             let count = self.get_gpr32(1).wrapping_sub(1);
 
-            if count != 0 && self.get_zf() {
-                let disp = instr.ib() as i8;
-                let ip = self.get_ip();
-                let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip)?;
-            }
+            { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(count != 0 && self.get_zf(), new_ip)?; }
 
             self.set_gpr32(1, count);
         } else {
             let count = self.get_gpr16(1).wrapping_sub(1);
 
-            if count != 0 && self.get_zf() {
-                let disp = instr.ib() as i8;
-                let ip = self.get_ip();
-                let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip)?;
-            }
+            { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(count != 0 && self.get_zf(), new_ip)?; }
 
             self.set_gpr16(1, count);
         }
@@ -611,23 +315,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if as32l {
             let count = self.get_gpr32(1).wrapping_sub(1);
 
-            if count != 0 && !self.get_zf() {
-                let disp = instr.ib() as i8;
-                let ip = self.get_ip();
-                let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip)?;
-            }
+            { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(count != 0 && !self.get_zf(), new_ip)?; }
 
             self.set_gpr32(1, count);
         } else {
             let count = self.get_gpr16(1).wrapping_sub(1);
 
-            if count != 0 && !self.get_zf() {
-                let disp = instr.ib() as i8;
-                let ip = self.get_ip();
-                let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip)?;
-            }
+            { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(count != 0 && !self.get_zf(), new_ip)?; }
 
             self.set_gpr16(1, count);
         }
@@ -643,12 +337,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.get_gpr16(1) as u32
         };
 
-        if count == 0 {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-        }
+        { let disp = instr.ib() as i8; let ip = self.get_ip(); let new_ip = (ip as i32).wrapping_add(disp as i32) as u16; self.conditional_branch16(count == 0, new_ip)?; }
         Ok(())
     }
 
@@ -663,12 +352,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.get_gpr16(1) as u32
         };
 
-        if count == 0 {
-            let disp = instr.id() as i32; // sign-extended byte displacement
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
+        let disp = instr.id() as i32; // sign-extended byte displacement
+        let eip = self.eip();
+        let new_eip = (eip as i32).wrapping_add(disp) as u32;
+        self.conditional_branch32(count == 0, new_eip)?;
         Ok(())
     }
 

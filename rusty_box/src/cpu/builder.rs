@@ -154,10 +154,9 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             show_flag: Default::default(),
             #[cfg(feature = "bx_debugger")]
             guard_found: Default::default(),
-            #[cfg(feature = "bx_instrumentation")]
-            far_branch: Default::default(),
-            #[cfg(feature = "bx_instrumentation")]
-            instrumentation: None,
+
+            #[cfg(feature = "instrumentation")]
+            instrumentation: super::instrumentation::InstrumentationRegistry::new(),
             dtlb: Tlb::new(),
             itlb: Tlb::new(),
             pdptrcache: Default::default(),

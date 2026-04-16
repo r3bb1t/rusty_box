@@ -855,6 +855,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Bochs crregs.cc
         self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
 
+        // BOCHS BX_INSTR_TLB_CNTRL with MovCr0 kind
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_tlb() {
+            self.instrumentation.fire_tlb_cntrl(
+                super::instrumentation::TlbCntrl::MovCr0 { new_value: val_32 as u64 },
+            );
+        }
+
         tracing::debug!(
             "MOV CR0, r32: {:#010x} -> {:#010x} (PE={}, PG={}, LMA={})",
             old_cr0,
@@ -909,6 +917,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // but that requires the kernel to INVLPG global pages when PTEs change.
         // Our kernel doesn't INVLPG the GDT page after remapping RW→RO.
         self.tlb_flush();
+
+
+        // BOCHS BX_INSTR_TLB_CNTRL with MovCr3 kind
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_tlb() {
+            self.instrumentation.fire_tlb_cntrl(
+                super::instrumentation::TlbCntrl::MovCr3 { new_value: val },
+            );
+        }
 
 
         Ok(())
@@ -974,6 +991,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.handle_fpu_mmx_mode_change();
         self.handle_sse_mode_change();
         self.handle_avx_mode_change();
+
+        // BOCHS BX_INSTR_TLB_CNTRL with MovCr4 kind
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_tlb() {
+            self.instrumentation.fire_tlb_cntrl(
+                super::instrumentation::TlbCntrl::MovCr4 { new_value: val_32 as u64 },
+            );
+        }
 
         // Bochs: update linaddr_width based on LA57 (5-level paging support)
         self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };

@@ -867,6 +867,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         }
     }
 
+    /// Read-only access to this emulator's configuration.
+    pub fn config_ref(&self) -> &EmulatorConfig {
+        &self.config
+    }
+
     /// Check if the emulator has been initialized
     pub fn is_initialized(&self) -> bool {
         self.initialized

@@ -41,6 +41,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 "protected"
             }
         );
+        // BOCHS BX_INSTR_INTERRUPT(cpu_id, vector)
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_interrupt() {
+            self.instrumentation.fire_interrupt(vector);
+        }
+
 
         // Discard any traps and inhibits for new context (matches Bochs line 800-801)
         self.debug_trap = 0;
@@ -946,6 +952,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
+        // BOCHS BX_INSTR_HLT(cpu_id)
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_hlt_mwait() {
+            self.instrumentation.fire_hlt();
+        }
+
         // Set activity state to halted (matches Bochs enter_sleep_state)
         self.activity_state = CpuActivityState::Hlt;
 
@@ -1012,6 +1024,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Returns CPU identification and feature information in EAX, EBX, ECX, EDX
     /// Input: EAX = function number, ECX = sub-function (for some functions)
     pub fn cpuid(&mut self, _instr: &Instruction) {
+        // BOCHS BX_INSTR_CPUID(cpu_id)
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_cpuid_msr() {
+            self.instrumentation.fire_cpuid();
+        }
+
         let function = self.eax();
         let sub_function = self.ecx();
 

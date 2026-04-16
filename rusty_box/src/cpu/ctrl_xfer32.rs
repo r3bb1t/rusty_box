@@ -91,6 +91,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eip = self.eip();
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
         self.branch_near32(new_eip)?;
+        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, self.rip());
         Ok(())
     }
 
@@ -100,6 +101,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.dst() as usize;
         let new_eip = self.get_gpr32(dst);
         self.branch_near32(new_eip)?;
+        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip());
         Ok(())
     }
 
@@ -110,6 +112,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let new_eip = self.v_read_dword(seg, eaddr)?;
         self.branch_near32(new_eip)?;
+        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip());
         Ok(())
     }
 
@@ -137,6 +140,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
 
         self.branch_near32(new_eip)?;
+        self.on_ucnear_branch(super::instrumentation::BranchType::Call, self.rip());
         Ok(())
     }
 
@@ -149,6 +153,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.push_32(eip)?;
         self.branch_near32(new_eip)?;
+        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip());
         Ok(())
     }
 
@@ -165,6 +170,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         self.push_32(eip)?;
         self.branch_near32(new_eip)?;
+        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip());
         Ok(())
     }
 
@@ -188,6 +194,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::debug!("RET32: return_eip={:#010x} from RIP={:#010x} ESP={:#010x}", return_eip, self.prev_rip, self.get_gpr32(4));
         }
         self.branch_near32(return_eip)?;
+        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip());
         Ok(())
     }
 
@@ -197,6 +204,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let imm16 = instr.iw();
 
         self.branch_near32(return_eip)?;
+        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip());
 
         let ss_d_b = self.get_segment_d_b(BxSegregs::Ss);
         if ss_d_b {
@@ -214,180 +222,52 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// JO rel32 - Jump if overflow (OF=1)
-    pub fn jo_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_of() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jo_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(self.get_of(), new_eip) }
 
     /// JNO rel32 - Jump if not overflow (OF=0)
-    pub fn jno_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_of() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jno_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(!self.get_of(), new_eip) }
 
     /// JB/JC/JNAE rel32 - Jump if below/carry (CF=1)
-    pub fn jb_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_cf() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jb_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(self.get_cf(), new_eip) }
 
     /// JNB/JNC/JAE rel32 - Jump if not below/no carry (CF=0)
-    pub fn jnb_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_cf() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jnb_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(!self.get_cf(), new_eip) }
 
     /// JZ/JE rel32 - Jump if zero/equal (ZF=1)
-    pub fn jz_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_zf() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jz_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(self.get_zf(), new_eip) }
 
     /// JNZ/JNE rel32 - Jump if not zero/not equal (ZF=0)
-    pub fn jnz_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_zf() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jnz_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(!self.get_zf(), new_eip) }
 
     /// JBE/JNA rel32 - Jump if below or equal (CF=1 or ZF=1)
-    pub fn jbe_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_cf() || self.get_zf() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jbe_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(self.get_cf() || self.get_zf(), new_eip) }
 
     /// JNBE/JA rel32 - Jump if not below or equal/above (CF=0 and ZF=0)
-    pub fn jnbe_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_cf() && !self.get_zf() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jnbe_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(!self.get_cf() && !self.get_zf(), new_eip) }
 
     /// JS rel32 - Jump if sign (SF=1)
-    pub fn js_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_sf() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn js_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(self.get_sf(), new_eip) }
 
     /// JNS rel32 - Jump if not sign (SF=0)
-    pub fn jns_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_sf() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jns_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(!self.get_sf(), new_eip) }
 
     /// JP/JPE rel32 - Jump if parity/parity even (PF=1)
-    pub fn jp_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_pf() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jp_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(self.get_pf(), new_eip) }
 
     /// JNP/JPO rel32 - Jump if no parity/parity odd (PF=0)
-    pub fn jnp_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_pf() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jnp_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(!self.get_pf(), new_eip) }
 
     /// JL/JNGE rel32 - Jump if less (SF != OF)
-    pub fn jl_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_sf() != self.get_of() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jl_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(self.get_sf() != self.get_of(), new_eip) }
 
     /// JNL/JGE rel32 - Jump if not less/greater or equal (SF == OF)
-    pub fn jnl_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_sf() == self.get_of() {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jnl_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(self.get_sf() == self.get_of(), new_eip) }
 
     /// JLE/JNG rel32 - Jump if less or equal (ZF=1 or SF!=OF)
-    pub fn jle_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_zf() || (self.get_sf() != self.get_of()) {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jle_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(self.get_zf() || (self.get_sf() != self.get_of()), new_eip) }
 
     /// JNLE/JG rel32 - Jump if not less or equal/greater (ZF=0 and SF==OF)
-    pub fn jnle_jd(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_zf() && (self.get_sf() == self.get_of()) {
-            let disp = instr.id() as i32;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip)?;
-        }
-        Ok(())
-    }
+    pub fn jnle_jd(&mut self, instr: &Instruction) -> Result<()> { let disp = instr.id() as i32; let eip = self.eip(); let new_eip = (eip as i32).wrapping_add(disp) as u32; self.conditional_branch32(!self.get_zf() && (self.get_sf() == self.get_of()), new_eip) }
 
     // =========================================================================
     // JmpfAp - Far jump absolute pointer (16/32-bit operand size dispatch)
@@ -419,17 +299,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.as32_l() != 0 {
             let count = self.ecx().wrapping_sub(1);
             self.set_ecx(count);
-            if count != 0 {
-                let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32;
-                self.branch_near32(new_eip)?;
-            }
+            { let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32; self.conditional_branch32(count != 0, new_eip)?; }
         } else {
             let count = self.cx().wrapping_sub(1);
             self.set_cx(count);
-            if count != 0 {
-                let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32;
-                self.branch_near32(new_eip)?;
-            }
+            { let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32; self.conditional_branch32(count != 0, new_eip)?; }
         }
         Ok(())
     }
@@ -439,17 +313,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.as32_l() != 0 {
             let count = self.ecx().wrapping_sub(1);
             self.set_ecx(count);
-            if count != 0 && self.get_zf() {
-                let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32;
-                self.branch_near32(new_eip)?;
-            }
+            { let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32; self.conditional_branch32(count != 0 && self.get_zf(), new_eip)?; }
         } else {
             let count = self.cx().wrapping_sub(1);
             self.set_cx(count);
-            if count != 0 && self.get_zf() {
-                let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32;
-                self.branch_near32(new_eip)?;
-            }
+            { let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32; self.conditional_branch32(count != 0 && self.get_zf(), new_eip)?; }
         }
         Ok(())
     }
@@ -459,17 +327,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.as32_l() != 0 {
             let count = self.ecx().wrapping_sub(1);
             self.set_ecx(count);
-            if count != 0 && !self.get_zf() {
-                let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32;
-                self.branch_near32(new_eip)?;
-            }
+            { let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32; self.conditional_branch32(count != 0 && !self.get_zf(), new_eip)?; }
         } else {
             let count = self.cx().wrapping_sub(1);
             self.set_cx(count);
-            if count != 0 && !self.get_zf() {
-                let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32;
-                self.branch_near32(new_eip)?;
-            }
+            { let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32; self.conditional_branch32(count != 0 && !self.get_zf(), new_eip)?; }
         }
         Ok(())
     }

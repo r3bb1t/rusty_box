@@ -67,6 +67,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // RSP_COMMIT (matching C++ line 128)
         self.speculative_rsp = false;
+        self.on_ucnear_branch(super::instrumentation::BranchType::Call, new_rip);
         Ok(())
     }
 
@@ -93,6 +94,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // RSP_COMMIT (matching C++ line 160)
         self.speculative_rsp = false;
+        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, new_rip);
         Ok(())
     }
 
@@ -158,6 +160,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // BX_LINK_TRACE(i) — without handler chaining, equivalent to BX_NEXT_TRACE (STOP_TRACE)
         // Matching C++ ctrl_xfer64.cc
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        self.on_ucnear_branch(super::instrumentation::BranchType::Jmp, new_rip);
         Ok(())
     }
 
@@ -175,6 +178,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // BX_NEXT_TRACE(i) — matching C++ ctrl_xfer64.cc
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, new_rip);
         Ok(())
     }
 
@@ -242,6 +246,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // RSP_COMMIT — matching CALL_EqR (C++ ctrl_xfer64.cc)
         self.speculative_rsp = false;
+        self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, new_rip);
         Ok(())
     }
 
@@ -270,6 +275,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // BX_NEXT_TRACE(i) — matching JMP_EqR pattern (C++ ctrl_xfer64.cc)
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, new_rip);
         Ok(())
     }
 
@@ -304,6 +310,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // RSP_COMMIT (matching C++ line 71)
         self.speculative_rsp = false;
+        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, return_rip);
         Ok(())
     }
 
@@ -378,100 +385,52 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Note: trace can continue over non-taken branch (matching C++ comment)
 
     /// Jump if overflow (OF=1)
-    pub fn jo_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_of() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jo_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(self.get_of(), instr) }
 
     /// Jump if not overflow (OF=0)
-    pub fn jno_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_of() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jno_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(!self.get_of(), instr) }
 
     /// Jump if below/carry (CF=1)
-    pub fn jb_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_cf() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jb_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(self.get_cf(), instr) }
 
     /// Jump if not below/no carry (CF=0)
-    pub fn jnb_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_cf() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jnb_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(!self.get_cf(), instr) }
 
     /// Jump if zero/equal (ZF=1)
-    pub fn jz_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_zf() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jz_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(self.get_zf(), instr) }
 
     /// Jump if not zero/not equal (ZF=0)
-    pub fn jnz_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_zf() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jnz_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(!self.get_zf(), instr) }
 
     /// Jump if below or equal (CF=1 or ZF=1)
-    pub fn jbe_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_cf() || self.get_zf() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jbe_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(self.get_cf() || self.get_zf(), instr) }
 
     /// Jump if not below or equal/above (CF=0 and ZF=0)
-    pub fn jnbe_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_cf() && !self.get_zf() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jnbe_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(!self.get_cf() && !self.get_zf(), instr) }
 
     /// Jump if sign (SF=1)
-    pub fn js_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_sf() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn js_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(self.get_sf(), instr) }
 
     /// Jump if not sign (SF=0)
-    pub fn jns_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_sf() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jns_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(!self.get_sf(), instr) }
 
     /// Jump if parity/parity even (PF=1)
-    pub fn jp_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_pf() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jp_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(self.get_pf(), instr) }
 
     /// Jump if no parity/parity odd (PF=0)
-    pub fn jnp_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_pf() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jnp_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(!self.get_pf(), instr) }
 
     /// Jump if less (SF != OF)
-    pub fn jl_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_sf() != self.get_of() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jl_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(self.get_sf() != self.get_of(), instr) }
 
     /// Jump if not less/greater or equal (SF == OF)
-    pub fn jnl_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_sf() == self.get_of() { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jnl_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(self.get_sf() == self.get_of(), instr) }
 
     /// Jump if less or equal (ZF=1 or SF!=OF)
-    pub fn jle_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if self.get_zf() || (self.get_sf() != self.get_of()) { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jle_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(self.get_zf() || (self.get_sf() != self.get_of()), instr) }
 
     /// Jump if not less or equal/greater (ZF=0 and SF==OF)
-    pub fn jnle_jq(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.get_zf() && (self.get_sf() == self.get_of()) { self.branch_near64(instr)?; }
-        Ok(())
-    }
+    pub fn jnle_jq(&mut self, instr: &Instruction) -> Result<()> { self.conditional_branch64(!self.get_zf() && (self.get_sf() == self.get_of()), instr) }
 
     // =========================================================================
     // LOOP instructions (64-bit mode)
@@ -488,11 +447,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn loop64_jb(&mut self, instr: &Instruction) -> Result<()> {
         if instr.as64_l() != 0 {
             let count = self.get_gpr64(1).wrapping_sub(1);
-            if count != 0 { self.branch_near64(instr)?; }
+            self.conditional_branch64(count != 0, instr)?;
             self.set_gpr64(1, count);
         } else {
             let count = self.get_gpr32(1).wrapping_sub(1);
-            if count != 0 { self.branch_near64(instr)?; }
+            self.conditional_branch64(count != 0, instr)?;
             self.set_gpr32(1, count);
         }
         Ok(())
@@ -503,11 +462,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn loope64_jb(&mut self, instr: &Instruction) -> Result<()> {
         if instr.as64_l() != 0 {
             let count = self.get_gpr64(1).wrapping_sub(1);
-            if count != 0 && self.get_zf() { self.branch_near64(instr)?; }
+            self.conditional_branch64(count != 0 && self.get_zf(), instr)?;
             self.set_gpr64(1, count);
         } else {
             let count = self.get_gpr32(1).wrapping_sub(1);
-            if count != 0 && self.get_zf() { self.branch_near64(instr)?; }
+            self.conditional_branch64(count != 0 && self.get_zf(), instr)?;
             self.set_gpr32(1, count);
         }
         Ok(())
@@ -518,11 +477,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn loopne64_jb(&mut self, instr: &Instruction) -> Result<()> {
         if instr.as64_l() != 0 {
             let count = self.get_gpr64(1).wrapping_sub(1);
-            if count != 0 && !self.get_zf() { self.branch_near64(instr)?; }
+            self.conditional_branch64(count != 0 && !self.get_zf(), instr)?;
             self.set_gpr64(1, count);
         } else {
             let count = self.get_gpr32(1).wrapping_sub(1);
-            if count != 0 && !self.get_zf() { self.branch_near64(instr)?; }
+            self.conditional_branch64(count != 0 && !self.get_zf(), instr)?;
             self.set_gpr32(1, count);
         }
         Ok(())
@@ -536,7 +495,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             self.get_gpr32(1) as u64
         };
-        if temp_rcx == 0 { self.branch_near64(instr)?; }
+        self.conditional_branch64(temp_rcx == 0, instr)?;
         Ok(())
     }
 

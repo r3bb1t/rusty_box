@@ -447,33 +447,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn rep_insb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.insb16(instr)?;
-            cx -= 1;
-            self.set_cx(cx);
-        }
+        while cx != 0 { self.on_repeat_iteration(instr); self.insb16(instr)?; cx -= 1;
+        self.set_cx(cx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_insw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.insw16(instr)?;
-            cx -= 1;
-            self.set_cx(cx);
-        }
+        while cx != 0 { self.on_repeat_iteration(instr); self.insw16(instr)?; cx -= 1;
+        self.set_cx(cx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_insd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.insd16(instr)?;
-            cx -= 1;
-            self.set_cx(cx);
-        }
+        while cx != 0 { self.on_repeat_iteration(instr); self.insd16(instr)?; cx -= 1;
+        self.set_cx(cx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -482,11 +473,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn rep_insb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.insb32(instr)?;
-            ecx -= 1;
-            self.set_ecx(ecx);
-        }
+        while ecx != 0 { self.on_repeat_iteration(instr); self.insb32(instr)?; ecx -= 1;
+        self.set_ecx(ecx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -593,11 +581,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
         // Per-word fallback (handles DF=1, non-TLB-resolvable pages, or remainder)
-        while ecx != 0 {
-            self.insw32(instr)?;
-            ecx -= 1;
-            self.set_ecx(ecx);
-        }
+        while ecx != 0 { self.on_repeat_iteration(instr); self.insw32(instr)?; ecx -= 1;
+        self.set_ecx(ecx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -708,11 +693,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
         // Per-dword fallback (handles DF=1, non-TLB-resolvable pages, or remainder)
-        while ecx != 0 {
-            self.insd32(instr)?;
-            ecx -= 1;
-            self.set_ecx(ecx);
-        }
+        while ecx != 0 { self.on_repeat_iteration(instr); self.insd32(instr)?; ecx -= 1;
+        self.set_ecx(ecx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -721,33 +703,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn rep_outsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.outsb16(instr)?;
-            cx -= 1;
-            self.set_cx(cx);
-        }
+        while cx != 0 { self.on_repeat_iteration(instr); self.outsb16(instr)?; cx -= 1;
+        self.set_cx(cx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_outsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.outsw16(instr)?;
-            cx -= 1;
-            self.set_cx(cx);
-        }
+        while cx != 0 { self.on_repeat_iteration(instr); self.outsw16(instr)?; cx -= 1;
+        self.set_cx(cx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_outsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 {
-            self.outsd16(instr)?;
-            cx -= 1;
-            self.set_cx(cx);
-        }
+        while cx != 0 { self.on_repeat_iteration(instr); self.outsd16(instr)?; cx -= 1;
+        self.set_cx(cx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -756,33 +729,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn rep_outsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.outsb32(instr)?;
-            ecx -= 1;
-            self.set_ecx(ecx);
-        }
+        while ecx != 0 { self.on_repeat_iteration(instr); self.outsb32(instr)?; ecx -= 1;
+        self.set_ecx(ecx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_outsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.outsw32(instr)?;
-            ecx -= 1;
-            self.set_ecx(ecx);
-        }
+        while ecx != 0 { self.on_repeat_iteration(instr); self.outsw32(instr)?; ecx -= 1;
+        self.set_ecx(ecx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_outsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 {
-            self.outsd32(instr)?;
-            ecx -= 1;
-            self.set_ecx(ecx);
-        }
+        while ecx != 0 { self.on_repeat_iteration(instr); self.outsd32(instr)?; ecx -= 1;
+        self.set_ecx(ecx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -911,11 +875,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn rep_insb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.insb64(instr)?;
-            rcx -= 1;
-            self.set_rcx(rcx);
-        }
+        while rcx != 0 { self.on_repeat_iteration(instr); self.insb64(instr)?; rcx -= 1;
+        self.set_rcx(rcx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1016,11 +977,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
         // Per-word fallback
-        while rcx != 0 {
-            self.insw64(instr)?;
-            rcx -= 1;
-            self.set_rcx(rcx);
-        }
+        while rcx != 0 { self.on_repeat_iteration(instr); self.insw64(instr)?; rcx -= 1;
+        self.set_rcx(rcx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1123,11 +1081,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
         // Per-dword fallback
-        while rcx != 0 {
-            self.insd64(instr)?;
-            rcx -= 1;
-            self.set_rcx(rcx);
-        }
+        while rcx != 0 { self.on_repeat_iteration(instr); self.insd64(instr)?; rcx -= 1;
+        self.set_rcx(rcx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1136,33 +1091,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn rep_outsb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.outsb64(instr)?;
-            rcx -= 1;
-            self.set_rcx(rcx);
-        }
+        while rcx != 0 { self.on_repeat_iteration(instr); self.outsb64(instr)?; rcx -= 1;
+        self.set_rcx(rcx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_outsw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.outsw64(instr)?;
-            rcx -= 1;
-            self.set_rcx(rcx);
-        }
+        while rcx != 0 { self.on_repeat_iteration(instr); self.outsw64(instr)?; rcx -= 1;
+        self.set_rcx(rcx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_outsd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 {
-            self.outsd64(instr)?;
-            rcx -= 1;
-            self.set_rcx(rcx);
-        }
+        while rcx != 0 { self.on_repeat_iteration(instr); self.outsd64(instr)?; rcx -= 1;
+        self.set_rcx(rcx); }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1282,21 +1228,34 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Otherwise it falls back to conservative defaults (useful for unit tests
     /// that don't wire devices and never execute real firmware).
     fn port_in(&mut self, port: u16, len: u8) -> u32 {
-        let icount = self.icount;
-        if let Some(io) = self.io_bus_mut() {
-            let value = io.inp(port, len, icount);
-            self.sync_pic_flags();
-            return value;
+        // BOCHS BX_INSTR_INP(addr, len) — fires before the port read.
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_io() {
+            self.instrumentation.fire_inp(port, len);
         }
 
-        // Fallback (no bus wired)
-        
-        match len {
-            1 => 0xFF,
-            2 => 0xFFFF,
-            4 => 0xFFFFFFFF,
-            _ => 0xFF,
+        let icount = self.icount;
+        let value = if let Some(io) = self.io_bus_mut() {
+            let v = io.inp(port, len, icount);
+            self.sync_pic_flags();
+            v
+        } else {
+            // Fallback (no bus wired)
+            match len {
+                1 => 0xFF,
+                2 => 0xFFFF,
+                4 => 0xFFFFFFFF,
+                _ => 0xFF,
+            }
+        };
+
+        // BOCHS BX_INSTR_INP2(addr, len, val) — fires after the read with the value.
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_io() {
+            self.instrumentation.fire_inp2(port, len, value);
         }
+
+        value
     }
 
     /// Write to I/O port.
@@ -1304,6 +1263,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// When the emulator wires an I/O bus, this dispatches to `BxDevicesC::outp`.
     /// Otherwise it is ignored (useful for unit tests without devices).
     fn port_out(&mut self, port: u16, value: u32, len: u8) {
+        // BOCHS BX_INSTR_OUTP(addr, len, val) — fires at the port write.
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_io() {
+            self.instrumentation.fire_outp(port, len, value);
+        }
+
         // Log BIOS diagnostic ports at debug level so RUST_LOG=debug catches them
         // even if something goes wrong before the device handler is reached.
         // Include RIP so we can trace which BIOS function is writing.
