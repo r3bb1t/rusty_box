@@ -155,6 +155,35 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         self.cpu.instrumentation.add_branch(range, Box::new(cb))
     }
 
+    /// Register a block hook. Fires at the start of each basic block (trace)
+    /// whose RIP is in range.
+    pub fn hook_add_block<R, F>(&mut self, range: R, cb: F) -> HookHandle
+    where
+        R: RangeBounds<u64>,
+        F: FnMut(u64, u16) + Send + 'static,
+    {
+        self.cpu.instrumentation.add_block(range, Box::new(cb))
+    }
+
+    /// Register an invalid-instruction hook. Fires before #UD for
+    /// unrecognized opcodes. Return `true` from the callback to suppress
+    /// the exception.
+    pub fn hook_add_invalid_insn<F>(&mut self, cb: F) -> HookHandle
+    where
+        F: FnMut(u64) -> bool + Send + 'static,
+    {
+        self.cpu.instrumentation.add_invalid_insn(Box::new(cb))
+    }
+
+    /// Register an unmapped-memory hook. Fires before page fault for
+    /// not-present pages. Return `true` to suppress the fault.
+    pub fn hook_add_mem_unmapped<F>(&mut self, cb: F) -> HookHandle
+    where
+        F: FnMut(u64, usize, crate::cpu::instrumentation::MemAccessRW) -> bool + Send + 'static,
+    {
+        self.cpu.instrumentation.add_mem_unmapped(Box::new(cb))
+    }
+
     /// Remove a previously registered hook.
     /// Returns `Err(InvalidHandle)` if the handle was already removed or
     /// never valid.
@@ -1423,5 +1452,165 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// FPU register round-trip: write FP80 bytes, read back.
+    #[test]
+    fn fpu_reg_round_trip() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cfg = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let val: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 0x00, 0x40]; // ~2.0 in FP80
+                emu.reg_write_fp80(X86Reg::Fpr0, val);
+                let read_back = emu.reg_read_fp80(X86Reg::Fpr0);
+                assert_eq!(read_back, val, "FPU ST(0) round-trip failed");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// XMM register round-trip.
+    #[test]
+    fn xmm_reg_round_trip() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cfg = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let val: [u8; 16] = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+                                      0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+                emu.reg_write_xmm(X86Reg::Xmm5, val);
+                assert_eq!(emu.reg_read_xmm(X86Reg::Xmm5), val, "XMM5 round-trip failed");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// YMM register round-trip (256-bit).
+    #[test]
+    fn ymm_reg_round_trip() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cfg = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let mut val = [0u8; 32];
+                for (i, b) in val.iter_mut().enumerate() { *b = i as u8; }
+                emu.reg_write_ymm(X86Reg::Ymm3, val);
+                assert_eq!(emu.reg_read_ymm(X86Reg::Ymm3), val, "YMM3 round-trip failed");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// ExitSet basic operations.
+    #[test]
+    fn exit_set_operations() {
+        use crate::cpu::instrumentation::ExitSet;
+        let mut es = ExitSet::new();
+        assert!(es.is_empty());
+        assert!(es.add(0x1000));
+        assert!(es.add(0x2000));
+        assert!(!es.is_empty());
+        assert!(es.contains(0x1000));
+        assert!(es.contains(0x2000));
+        assert!(!es.contains(0x3000));
+        assert!(es.remove(0x1000));
+        assert!(!es.contains(0x1000));
+        es.clear();
+        assert!(es.is_empty());
+    }
+
+    /// Multiple exits via set_exits.
+    #[test]
+    fn exit_set_bulk() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cfg = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                emu.set_exits(&[0x1000, 0x2000, 0x3000]);
+                emu.remove_exit(0x2000);
+                emu.add_exit(0x4000);
+                emu.clear_exits();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Block hook registration round-trip.
+    #[cfg(feature = "instrumentation")]
+    #[test]
+    fn hook_add_block_round_trip() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cfg = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let h = emu.hook_add_block(.., |_rip, _size| {});
+                assert!(emu.hook_del(h).is_ok());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Invalid instruction hook registration.
+    #[cfg(feature = "instrumentation")]
+    #[test]
+    fn hook_add_invalid_insn() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cfg = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let h = emu.hook_add_invalid_insn(|_rip| false);
+                assert!(emu.hook_del(h).is_ok());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Memory permissions basic operations.
+    #[cfg(feature = "instrumentation")]
+    #[test]
+    fn mem_permissions_basic() {
+        use crate::memory::permissions::PagePermissions;
+        use crate::cpu::instrumentation::MemPerms;
+        let mut pp = PagePermissions::new(0x10_0000); // 1MB
+        // Default: all permissions
+        assert!(pp.check(0x1000, MemPerms::READ));
+        assert!(pp.check(0x1000, MemPerms::WRITE));
+        assert!(pp.check(0x1000, MemPerms::EXEC));
+        // Restrict to read-only
+        pp.set(0x1000, 0x1000, MemPerms::READ);
+        assert!(pp.check(0x1000, MemPerms::READ));
+        assert!(!pp.check(0x1000, MemPerms::WRITE));
+        assert!(!pp.check(0x1000, MemPerms::EXEC));
+    }
+
+    /// MMIO registry map/unmap.
+    #[test]
+    fn mmio_registry_map_unmap() {
+        use crate::memory::mmio::MmioRegistry;
+        let mut reg = MmioRegistry::new();
+        assert!(reg.is_empty());
+        reg.map(0xFEC0_0000, 0x1000,
+            Box::new(|_addr, _size| 0),
+            Box::new(|_addr, _size, _val| {}),
+        );
+        assert!(!reg.is_empty());
+        assert!(reg.find_mut(0xFEC0_0000).is_some());
+        assert!(reg.find_mut(0xFEC0_0FFF).is_some());
+        assert!(reg.find_mut(0xFEC0_1000).is_none()); // past end
+        reg.unmap(0xFEC0_0000, 0x1000);
+        assert!(reg.is_empty());
     }
 }
