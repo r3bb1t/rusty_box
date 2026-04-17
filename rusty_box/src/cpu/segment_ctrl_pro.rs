@@ -648,12 +648,14 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         if self.instrumentation.active.has_branch() {
             let new_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
             let src_rip = self.prev_rip;
-            self.instrumentation.fire_far_branch(
-                super::instrumentation::BranchType::Jmp,
-                prev_cs,
-                src_rip,
-                new_cs,
-                new_rip,
+            self.instrumentation.fire_branch(
+                &super::instrumentation::BranchEvent::Far {
+                    kind: super::instrumentation::BranchType::Jmp,
+                    src_cs: prev_cs,
+                    src_rip,
+                    dst_cs: new_cs,
+                    dst_rip: new_rip,
+                },
             );
         }
 

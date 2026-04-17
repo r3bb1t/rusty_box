@@ -2330,7 +2330,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                         _ => PrefetchHint::Nta, // PrefetchMb, PrefetchwMb
                     };
                     let offset = self.resolve_addr(instr);
-                    self.instrumentation.fire_prefetch_hint(hint, instr.seg(), offset);
+                    let ev = super::instrumentation::PrefetchEvent {
+                        what: hint,
+                        seg: instr.seg(),
+                        offset,
+                    };
+                    self.instrumentation.fire_prefetch_hint(&ev);
                 }
                 Ok(())
             }

@@ -689,6 +689,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// With `T = ()` and no closures registered, this is 4 bytes (the bitmask).
     pub(crate) instrumentation: super::instrumentation::InstrumentationRegistry<T>,
 
+
     #[cfg(feature = "instrumentation")]
     pub(crate) page_permissions: Option<crate::memory::permissions::PagePermissions>,
 
@@ -1235,16 +1236,24 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_branch() {
                 let src = self.prev_rip;
-                self.instrumentation
-                    .fire_cnear_branch_taken(src, new_ip as u64);
+                self.instrumentation.fire_branch(
+                    &super::instrumentation::BranchEvent::CnearTaken {
+                        src_rip: src,
+                        dst_rip: new_ip as u64,
+                    },
+                );
             }
         } else {
             #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_branch() {
                 let src = self.prev_rip;
                 let fall = self.rip();
-                self.instrumentation
-                    .fire_cnear_branch_not_taken(src, fall);
+                self.instrumentation.fire_branch(
+                    &super::instrumentation::BranchEvent::CnearNotTaken {
+                        src_rip: src,
+                        fallthrough_rip: fall,
+                    },
+                );
             }
         }
         Ok(())
@@ -1258,16 +1267,24 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_branch() {
                 let src = self.prev_rip;
-                self.instrumentation
-                    .fire_cnear_branch_taken(src, new_eip as u64);
+                self.instrumentation.fire_branch(
+                    &super::instrumentation::BranchEvent::CnearTaken {
+                        src_rip: src,
+                        dst_rip: new_eip as u64,
+                    },
+                );
             }
         } else {
             #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_branch() {
                 let src = self.prev_rip;
                 let fall = self.rip();
-                self.instrumentation
-                    .fire_cnear_branch_not_taken(src, fall);
+                self.instrumentation.fire_branch(
+                    &super::instrumentation::BranchEvent::CnearNotTaken {
+                        src_rip: src,
+                        fallthrough_rip: fall,
+                    },
+                );
             }
         }
         Ok(())
@@ -1288,15 +1305,21 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             if self.instrumentation.active.has_branch() {
                 let src = self.prev_rip;
                 let dst = self.rip();
-                self.instrumentation.fire_cnear_branch_taken(src, dst);
+                self.instrumentation.fire_branch(
+                    &super::instrumentation::BranchEvent::CnearTaken { src_rip: src, dst_rip: dst },
+                );
             }
         } else {
             #[cfg(feature = "instrumentation")]
             if self.instrumentation.active.has_branch() {
                 let src = self.prev_rip;
                 let fall = self.rip();
-                self.instrumentation
-                    .fire_cnear_branch_not_taken(src, fall);
+                self.instrumentation.fire_branch(
+                    &super::instrumentation::BranchEvent::CnearNotTaken {
+                        src_rip: src,
+                        fallthrough_rip: fall,
+                    },
+                );
             }
         }
         Ok(())
@@ -1309,7 +1332,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_branch() {
             let src = self.prev_rip;
-            self.instrumentation.fire_ucnear_branch(what, src, new_rip);
+            self.instrumentation.fire_branch(
+                &super::instrumentation::BranchEvent::Ucnear {
+                    kind: what,
+                    src_rip: src,
+                    dst_rip: new_rip,
+                },
+            );
         }
         #[cfg(not(feature = "instrumentation"))]
         {
@@ -1329,8 +1358,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_branch() {
             let src_rip = self.prev_rip;
-            self.instrumentation
-                .fire_far_branch(what, prev_cs, src_rip, new_cs, new_rip);
+            self.instrumentation.fire_branch(
+                &super::instrumentation::BranchEvent::Far {
+                    kind: what,
+                    src_cs: prev_cs,
+                    src_rip,
+                    dst_cs: new_cs,
+                    dst_rip: new_rip,
+                },
+            );
         }
         #[cfg(not(feature = "instrumentation"))]
         {
@@ -1345,22 +1381,23 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         &mut self,
         laddr: u64,
         paddr: u64,
-        len: usize,
+        data: &[u8],
         rw: super::instrumentation::MemAccessRW,
     ) {
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_mem() {
-            self.instrumentation.fire_lin_access(
-                laddr,
-                paddr,
-                len,
-                super::instrumentation::MemType::Wb,
+            let ev = super::instrumentation::LinAccess {
+                lin: laddr,
+                phy: paddr,
+                data,
+                memtype: super::instrumentation::MemType::Wb,
                 rw,
-            );
+            };
+            self.instrumentation.fire_lin_access(&ev);
         }
         #[cfg(not(feature = "instrumentation"))]
         {
-            let _ = (laddr, paddr, len, rw);
+            let _ = (laddr, paddr, data, rw);
         }
     }
 
@@ -1550,7 +1587,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if self.instrumentation.active.has_hw_interrupt() {
             let cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
             let rip = self.rip();
-            self.instrumentation.fire_hwinterrupt(vector, cs, rip);
+            let ev = super::instrumentation::HwInterruptEvent { vector, cs, rip };
+            self.instrumentation.fire_hwinterrupt(&ev);
         }
 
         // Wake from halt/wait state.
@@ -1726,6 +1764,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     tracing::error!("[cpu_loop] BAILOUT after {} outer loops", outer_loop_count);
                     break Ok(iteration);
                 }
+            }
+
+            // Cooperative stop request (Bochs kill_bochs_request analogue):
+            // any hook may set `stop_request` to break out of the batch. Latency
+            // is at most one trace (~10-20 instructions).
+            if self.instrumentation.stop_request {
+                self.instrumentation.stop_request = false;
+                break Ok(iteration);
             }
 
             // Safety limit - pause when instruction limit is reached

@@ -6,7 +6,9 @@ pub use instrumentation::{
     BranchEvent, BranchType, CacheCntrl, CodeSize, CpuSetupMode, CpuSnapshot, EmuStopReason,
     ExitSet, HookMask, HwInterruptEvent, Instrumentation,
     InvEptType, InvPcidType, IoHookEvent, MemAccessRW, MemHookEvent,
-    MemPerms, MemType, MwaitFlags, PrefetchHint, ResetType, TlbCntrl, X86Reg,
+    HookCtx, InstrAction, MemPerms, MemType, MwaitFlags, PrefetchHint, ResetType,
+    LinAccess, MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess,
+    PrefetchEvent, TlbCntrl, X86Reg,
 };
 #[cfg(feature = "instrumentation")]
 pub use instrumentation::{HookHandle, InstrumentationError, IoHookType, MemHookType};

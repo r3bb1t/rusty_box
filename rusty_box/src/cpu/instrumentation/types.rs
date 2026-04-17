@@ -7,6 +7,35 @@
 
 use bitflags::bitflags;
 
+// ─────────────────────────── InstrAction ───────────────────────────
+
+/// Return value from `pre_*` hook methods. Controls whether the CPU executes
+/// the instruction architecturally, skips it (Unicorn-style intercept),
+/// stops after executing, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InstrAction {
+    /// Execute the instruction architecturally. Default — Bochs-faithful
+    /// observation. Hooks that only want to watch return this.
+    #[default]
+    Continue,
+
+    /// Skip the architectural semantics. For SYSCALL this means no CS/RIP
+    /// transition to MSR_LSTAR — RIP advances past the opcode bytes, all
+    /// other registers untouched (except any the hook itself modified via
+    /// `HookCtx::reg_write`). Use in user-mode emulation where there's no
+    /// kernel to service the instruction.
+    Skip,
+
+    /// Execute the instruction architecturally, then request the CPU loop
+    /// to stop at the next trace boundary. Analogue of Bochs
+    /// `kill_bochs_request`.
+    Stop,
+
+    /// Skip the architectural semantics AND request stop.
+    SkipAndStop,
+}
+
+
 // ─────────────────────────── Hook handle ───────────────────────────
 
 #[cfg(feature = "instrumentation")]
@@ -469,6 +498,86 @@ impl BranchEvent {
             | Self::Far { src_rip, .. } => *src_rip,
         }
     }
+}
+
+// ─────────────────────────── Trait hook event structs ───────────────────────────
+//
+// Every multi-argument trait callback in `Instrumentation` takes an event
+// struct by reference. Keeps signatures tight, makes fields self-documenting,
+// and lets us extend events without breaking impls. Single-arg or
+// primitive-tuple hooks (exception(vector, err), clflush(laddr, paddr), ...)
+// stay positional.
+
+use crate::cpu::decoder::Instruction;
+
+/// Payload for `Instrumentation::opcode` — fires when the decoder produces
+/// an instruction. `bytes` are the raw opcode bytes as they appeared in
+/// memory; `instr` is the decoded form.
+#[derive(Debug, Copy, Clone)]
+pub struct OpcodeEvent<'a> {
+    pub rip: u64,
+    pub instr: &'a Instruction,
+    pub bytes: &'a [u8],
+    pub size: CodeSize,
+}
+
+/// Payload for `Instrumentation::mwait`. `len` is the monitor region size
+/// hint (not a byte count of data).
+#[derive(Debug, Copy, Clone)]
+pub struct MwaitEvent {
+    pub addr: u64,
+    pub len: u32,
+    pub flags: MwaitFlags,
+}
+
+/// Linear memory access event. `data` is the actual bytes touched by the
+/// access — for reads it's the bytes loaded, for writes the bytes stored.
+/// Length is implicit (`data.len()`).
+#[derive(Debug, Copy, Clone)]
+pub struct LinAccess<'a> {
+    pub lin: u64,
+    pub phy: u64,
+    pub data: &'a [u8],
+    pub memtype: MemType,
+    pub rw: MemAccessRW,
+}
+
+/// Physical memory access event (e.g. page-table walks, INVLPG side effects).
+/// Same shape as [`LinAccess`] but without a linear address.
+#[derive(Debug, Copy, Clone)]
+pub struct PhyAccess<'a> {
+    pub phy: u64,
+    pub data: &'a [u8],
+    pub memtype: MemType,
+    pub rw: MemAccessRW,
+}
+
+/// Payload for `Instrumentation::prefetch_hint`.
+#[derive(Debug, Copy, Clone)]
+pub struct PrefetchEvent {
+    pub what: PrefetchHint,
+    pub seg: u8,
+    pub offset: u64,
+}
+
+/// Payload for `Instrumentation::mem_unmapped` — the access that was about
+/// to fault on a not-present page. Return `true` from the hook to suppress
+/// the fault.
+#[derive(Debug, Copy, Clone)]
+pub struct MemUnmapped {
+    pub laddr: u64,
+    pub size: usize,
+    pub rw: MemAccessRW,
+}
+
+/// Payload for `Instrumentation::mem_perm_violation` — access denied by the
+/// per-page `PagePermissions` bitmap. Return `true` to suppress the fault.
+#[derive(Debug, Copy, Clone)]
+pub struct MemPermViolation {
+    pub laddr: u64,
+    pub size: usize,
+    pub rw: MemAccessRW,
+    pub required: MemPerms,
 }
 
 // ─────────────────────────── CpuSnapshot ───────────────────────────

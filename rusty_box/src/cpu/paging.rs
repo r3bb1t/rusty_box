@@ -479,7 +479,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                         _ => crate::cpu::instrumentation::MemAccessRW::Read,
                     };
                     // size=0 since translate_linear doesn't know the access size
-                    if self.instrumentation.fire_mem_unmapped(laddr, 0, instr_rw) {
+                    let ev = crate::cpu::instrumentation::MemUnmapped {
+                        laddr,
+                        size: 0,
+                        rw: instr_rw,
+                    };
+                    if self.instrumentation.fire_mem_unmapped(&ev) {
                         // Hook suppressed the fault — return dummy address
                         return Ok(0);
                     }
@@ -1271,6 +1276,36 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let paddr = ppf | (laddr & offset_mask);
         Ok(paddr & self.a20_mask)
+    }
+
+    /// Translate a linear address using a caller-supplied CR3 instead of
+    /// the current `self.cr3`. Used to read user-space strings after the
+    /// kernel has swapped CR3 for KPTI. Long mode only.
+    pub(super) fn translate_linear_with_cr3(&self, laddr: u64, cr3: u64) -> Option<u64> {
+        if !self.cr0.pg() {
+            return Some(laddr & self.a20_mask);
+        }
+        if !self.long_mode() {
+            return None;
+        }
+        let start_leaf = if self.cr4.la57() { BX_LEVEL_PML5 } else { BX_LEVEL_PML4 };
+        let mut ppf = cr3 & BX_CR3_PAGING_MASK_PAE;
+        let mut offset_mask = (1u64 << self.linaddr_width as u64) - 1;
+        let mut leaf = start_leaf;
+        loop {
+            let entry_addr = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
+            let entry = PteBits::from_raw(self.page_walk_read_qword(entry_addr));
+            offset_mask >>= 9;
+            if !entry.contains(PteBits::PRESENT) { return None; }
+            ppf = entry.bits() & 0x000F_FFFF_FFFF_F000;
+            if leaf == BX_LEVEL_PTE { break; }
+            if entry.contains(PteBits::PS) {
+                ppf &= 0x000F_FFFF_FFFF_E000;
+                break;
+            }
+            leaf -= 1;
+        }
+        Some((ppf | (laddr & offset_mask)) & self.a20_mask)
     }
 
     /// Diagnostic-only: translate a linear address to physical without raising exceptions.

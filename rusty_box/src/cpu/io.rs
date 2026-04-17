@@ -1252,7 +1252,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // BOCHS BX_INSTR_INP2(addr, len, val) — fires after the read with the value.
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_io() {
-            self.instrumentation.fire_inp2(port, len, value);
+            let ev = super::instrumentation::IoHookEvent {
+                port, size: len, value, access: super::instrumentation::MemAccessRW::Read,
+            };
+            self.instrumentation.fire_inp2(&ev);
         }
 
         value
@@ -1266,7 +1269,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // BOCHS BX_INSTR_OUTP(addr, len, val) — fires at the port write.
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_io() {
-            self.instrumentation.fire_outp(port, len, value);
+            let ev = super::instrumentation::IoHookEvent {
+                port, size: len, value, access: super::instrumentation::MemAccessRW::Write,
+            };
+            self.instrumentation.fire_outp(&ev);
         }
 
         // Log BIOS diagnostic ports at debug level so RUST_LOG=debug catches them

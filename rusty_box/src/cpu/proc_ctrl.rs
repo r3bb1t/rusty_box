@@ -413,7 +413,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.instrumentation.active.has_hlt_mwait() {
             let flags = super::instrumentation::MwaitFlags::from_bits_truncate(self.ecx());
             let addr = self.monitor.monitor_addr;
-            self.instrumentation.fire_mwait(addr, 0, flags);
+            let ev = super::instrumentation::MwaitEvent { addr, len: 0, flags };
+            self.instrumentation.fire_mwait(&ev);
         }
 
 
@@ -1186,6 +1187,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_eip(self.msr.sysenter_eip_msr as u32);
         }
 
+        // Bochs: BX_INSTR_FAR_BRANCH(BX_CPU_ID, BX_INSTR_IS_SYSENTER, ...)
+        let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
+        self.on_far_branch(super::instrumentation::BranchType::Sysenter, 0, new_cs, self.rip());
+
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1290,6 +1295,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.sregs[ss_idx].cache.u.set_segment_d_b(true);
         self.sregs[ss_idx].cache.u.set_segment_avl(false);
         self.sregs[ss_idx].cache.u.set_segment_l(false);
+
+        // Bochs: BX_INSTR_FAR_BRANCH(BX_CPU_ID, BX_INSTR_IS_SYSEXIT, ...)
+        let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
+        self.on_far_branch(super::instrumentation::BranchType::Sysexit, 0, new_cs, self.rip());
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1460,6 +1469,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.diag_syscall_ring_idx += 1;
             self.diag_syscall_count += 1;
         }
+        // Fire the `pre_syscall` hook BEFORE the CS/RIP transition. The hook
+        // reads registers / memory / CR3 via `HookCtx` (user state is still
+        // intact). Returns an `InstrAction` controlling whether we execute
+        // the architectural transition, skip it (Unicorn-style intercept),
+        // stop the CPU loop, or both.
+        #[cfg(feature = "instrumentation")]
+        let action = self.fire_pre_syscall();
+        #[cfg(not(feature = "instrumentation"))]
+        let action = crate::cpu::instrumentation::InstrAction::Continue;
+
+        
+        if action.is_stop() {
+            self.instrumentation.stop_request = true;
+        }
+        if action.is_skip() {
+            // Skip the architectural CS/RIP transition. RIP has already been
+            // advanced past the SYSCALL opcode bytes by the decoder /
+            // dispatcher wrapper before this handler runs, so there's nothing
+            // to do here — just return.
+            return Ok(());
+        }
         self.invalidate_prefetch_q();
 
         let seg_valid =
@@ -1573,6 +1603,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.clear_rf();
             self.set_rip(temp_rip as u64);
         }
+
+        // Bochs: BX_INSTR_FAR_BRANCH(BX_CPU_ID, BX_INSTR_IS_SYSCALL, ...)
+        let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
+        self.on_far_branch(super::instrumentation::BranchType::Syscall, 0, new_cs, self.rip());
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1728,6 +1762,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Bochs proc_ctrl.cc — RIP = temp_RIP (set AFTER all mode changes)
         self.set_rip(temp_rip);
+
+        // Bochs: BX_INSTR_FAR_BRANCH(BX_CPU_ID, BX_INSTR_IS_SYSRET, ...)
+        let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
+        self.on_far_branch(super::instrumentation::BranchType::Sysret, 0, new_cs, self.rip());
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;

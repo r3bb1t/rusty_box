@@ -1,84 +1,86 @@
 #![allow(dead_code)]
-/////////////////////////////////////////////////////////////////////////
-// $Id$
-/////////////////////////////////////////////////////////////////////////
-//
-//  I grabbed these CRC routines from the following source:
-//    http://www.landfield.com/faqs/compression-faq/part1/section-25.html
-//
-//  These routines are very useful, so I'm including them in bochs.
-//  They are not covered by the license, as they are not my doing.
-//  My gratitude to the author for offering them on the 'net.
-//
-//  I only changed the u_long to Bit32u, and u_char to Bit8u, and gave
-//  the functions prototypes.
-//
-//  -Kevin
-//
-//  **************************************************************************
-//  The following C code (by Rob Warnock <rpw3@sgi.com>) does CRC-32 in
-//  BigEndian/BigEndian byte/bit order.  That is, the data is sent most
-//  significant byte first, and each of the bits within a byte is sent most
-//  significant bit first, as in FDDI. You will need to twiddle with it to do
-//  Ethernet CRC, i.e., BigEndian/LittleEndian byte/bit order. [Left as an
-//  exercise for the reader.]
-//
-//  The CRCs this code generates agree with the vendor-supplied Verilog models
-//  of several of the popular FDDI "MAC" chips.
-//  **************************************************************************
+//! CRC-32 port of Bochs's `crc.cc`.
+//!
+//! Source credit: Rob Warnock <rpw3@sgi.com>, FDDI CRC-32 in BE/BE byte/bit
+//! order. Polynomial: AUTODIN II / Ethernet / FDDI (0x04c11db7).
+//!
+//! Bochs computed the 256-entry table lazily on first call. We compute it at
+//! compile time via `const fn`, which eliminates the runtime lock and lets us
+//! drop the `spin` dependency.
 
-#[cfg(feature = "std")]
-use std::sync::OnceLock;
-
-#[cfg(not(feature = "std"))]
-use spin::Once;
-
-/// Initialized first time "crc32()" is called. If you prefer, you can
-/// statically initialize it at compile time. [Another exercise.]
-#[cfg(feature = "std")]
-static CRC32_TABLE: OnceLock<[u32; 256]> = OnceLock::new();
-#[cfg(not(feature = "std"))]
-static CRC32_TABLE: Once<[u32; 256]> = Once::new();
-
-pub fn crc32_table() -> &'static [u32; 256] {
-    #[cfg(feature = "std")]
-    return CRC32_TABLE.get_or_init(init_crc32_table);
-    #[cfg(not(feature = "std"))]
-    return CRC32_TABLE.call_once(init_crc32_table);
-}
-
-// Build auxiliary table for parallel byte-at-a-time CRC-32.
-/// AUTODIN II, Ethernet, & FDDI
+/// AUTODIN II / Ethernet / FDDI polynomial.
 const CRC32_POLY: u32 = 0x04c11db7;
 
-fn init_crc32_table() -> [u32; 256] {
-    let mut crc32_table = [0u32; 256]; // Create a vector with 256 elements initialized to 0
-
-    (0..256usize).for_each(|i| {
-        // i is in 0..256 so i<<24 fits in u32 (max 255<<24 = 0xFF000000)
-        let mut c: u32 = (i << 24) as u32;
-        for _ in 0..8 {
-            c = if c & 0x80000000 != 0 {
-                (c << 1) ^ CRC32_POLY // If the MSB is set, shift left and XOR with the polynomial
+/// Build the auxiliary table for parallel byte-at-a-time CRC-32.
+/// `const fn` — evaluated at compile time, table baked into .rodata.
+const fn build_crc32_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut i: usize = 0;
+    while i < 256 {
+        // Bochs: `c = i << 24` — seed with byte in the top 8 bits.
+        let mut c: u32 = (i as u32) << 24;
+        let mut j = 0;
+        while j < 8 {
+            // Bochs: `c = c & 0x80000000 ? (c << 1) ^ CRC32_POLY : (c << 1)`.
+            c = if c & 0x8000_0000 != 0 {
+                (c << 1) ^ CRC32_POLY
             } else {
-                c << 1 // Otherwise, just shift left
+                c << 1
             };
+            j += 1;
         }
-        crc32_table[i] = c; // Store the result in the table
-    });
-
-    crc32_table // Return the initialized table
+        table[i] = c;
+        i += 1;
+    }
+    table
 }
 
-// NOTE: i'm not 100% sure that it's correct. But most likely, it is
-// TODO: Revisit it because of "as" casts
-pub fn crc32(buf: &[u8]) -> u32 {
-    let crc32_table = crc32_table();
-    let mut crc: u32 = 0xffffffff; // preload shift register, per CRC-32 spec
+/// Precomputed CRC-32 table, baked into the binary.
+static CRC32_TABLE: [u32; 256] = build_crc32_table();
 
-    for byte in buf {
-        crc = (crc << 8) ^ crc32_table[(crc >> 24) as usize ^ (*byte as usize)];
+/// Access the CRC-32 table. Kept as a function to preserve the old call shape.
+#[inline]
+pub fn crc32_table() -> &'static [u32; 256] {
+    &CRC32_TABLE
+}
+
+/// CRC-32 over `buf`, per FDDI / AUTODIN II / Ethernet.
+///
+/// Matches Bochs `crc32(buf, len)` exactly:
+/// - preload shift register to `0xFFFF_FFFF`
+/// - `crc = (crc << 8) ^ table[(crc >> 24) ^ byte]` per byte
+/// - transmit complement (`~crc`)
+pub fn crc32(buf: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in buf {
+        let idx = ((crc >> 24) as u8 ^ byte) as usize;
+        crc = (crc << 8) ^ CRC32_TABLE[idx];
+    }
+    !crc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sanity: table[0] must be 0 and table[1] must be the polynomial shifted
+    /// appropriately. Bochs uses `crc32_table[1]` as its "initialized" sentinel.
+    #[test]
+    fn table_well_formed() {
+        assert_eq!(CRC32_TABLE[0], 0);
+        assert_ne!(CRC32_TABLE[1], 0, "table[1] is Bochs's init sentinel");
     }
 
-    !crc // transmit complement, per CRC-32 spec
+    /// "123456789" is the canonical CRC-32 test vector.
+    /// AUTODIN II (MSB-first, non-reflected) checksum of "123456789" is 0xFC891918.
+    #[test]
+    fn canonical_vector() {
+        assert_eq!(crc32(b"123456789"), 0xFC891918);
+    }
+
+    /// Empty input should return the complement of the initial register (0).
+    #[test]
+    fn empty_input() {
+        assert_eq!(crc32(b""), 0x0000_0000);
+    }
 }

@@ -365,6 +365,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.translate_linear_system_read(laddr)
     }
 
+    pub(crate) fn translate_linear_with_cr3_for_api(&self, laddr: u64, cr3: u64) -> Option<u64> {
+        self.translate_linear_with_cr3(laddr, cr3)
+    }
+
     // ── FPU read/write ─────────────────────────────────────────────
 
     /// Read an x87 FPU register as 10 raw bytes (80-bit extended precision).
@@ -437,4 +441,435 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(crate) fn set_fpu_tag_for_api(&mut self, v: u16) { self.the_i387.twd = v; }
     pub(crate) fn mxcsr_for_api(&self) -> u32 { self.mxcsr.mxcsr }
     pub(crate) fn set_mxcsr_for_api(&mut self, v: u32) { self.mxcsr.mxcsr = v; }
+
+    // ── Generic register read/write by enum tag ──
+    //
+    // Single source of truth for `Emulator::reg_read` / `reg_write` and for
+    // `CpuAccess::reg_read` / `reg_write` used by HookCtx. All register width
+    // views (64/32/16/8-bit, segments, CRs, DRs, FPU scalars) go through
+    // this dispatch.
+
+    pub(crate) fn api_reg_read(&self, reg: X86Reg) -> u64 {
+        match reg {
+            X86Reg::Rax => self.rax(),
+            X86Reg::Rcx => self.rcx(),
+            X86Reg::Rdx => self.rdx(),
+            X86Reg::Rbx => self.rbx(),
+            X86Reg::Rsp => self.rsp(),
+            X86Reg::Rbp => self.rbp(),
+            X86Reg::Rsi => self.rsi(),
+            X86Reg::Rdi => self.rdi(),
+            X86Reg::R8 => self.r8(),
+            X86Reg::R9 => self.r9(),
+            X86Reg::R10 => self.r10(),
+            X86Reg::R11 => self.r11(),
+            X86Reg::R12 => self.r12(),
+            X86Reg::R13 => self.r13(),
+            X86Reg::R14 => self.r14(),
+            X86Reg::R15 => self.r15(),
+
+            X86Reg::Eax => self.rax() & 0xFFFF_FFFF,
+            X86Reg::Ecx => self.rcx() & 0xFFFF_FFFF,
+            X86Reg::Edx => self.rdx() & 0xFFFF_FFFF,
+            X86Reg::Ebx => self.rbx() & 0xFFFF_FFFF,
+            X86Reg::Esp => self.rsp() & 0xFFFF_FFFF,
+            X86Reg::Ebp => self.rbp() & 0xFFFF_FFFF,
+            X86Reg::Esi => self.rsi() & 0xFFFF_FFFF,
+            X86Reg::Edi => self.rdi() & 0xFFFF_FFFF,
+            X86Reg::R8d => self.r8() & 0xFFFF_FFFF,
+            X86Reg::R9d => self.r9() & 0xFFFF_FFFF,
+            X86Reg::R10d => self.r10() & 0xFFFF_FFFF,
+            X86Reg::R11d => self.r11() & 0xFFFF_FFFF,
+            X86Reg::R12d => self.r12() & 0xFFFF_FFFF,
+            X86Reg::R13d => self.r13() & 0xFFFF_FFFF,
+            X86Reg::R14d => self.r14() & 0xFFFF_FFFF,
+            X86Reg::R15d => self.r15() & 0xFFFF_FFFF,
+
+            X86Reg::Ax => u64::from(self.get_gpr16(0)),
+            X86Reg::Cx => u64::from(self.get_gpr16(1)),
+            X86Reg::Dx => u64::from(self.get_gpr16(2)),
+            X86Reg::Bx => u64::from(self.get_gpr16(3)),
+            X86Reg::Sp => u64::from(self.get_gpr16(4)),
+            X86Reg::Bp => u64::from(self.get_gpr16(5)),
+            X86Reg::Si => u64::from(self.get_gpr16(6)),
+            X86Reg::Di => u64::from(self.get_gpr16(7)),
+            X86Reg::R8w => u64::from(self.get_gpr16(8)),
+            X86Reg::R9w => u64::from(self.get_gpr16(9)),
+            X86Reg::R10w => u64::from(self.get_gpr16(10)),
+            X86Reg::R11w => u64::from(self.get_gpr16(11)),
+            X86Reg::R12w => u64::from(self.get_gpr16(12)),
+            X86Reg::R13w => u64::from(self.get_gpr16(13)),
+            X86Reg::R14w => u64::from(self.get_gpr16(14)),
+            X86Reg::R15w => u64::from(self.get_gpr16(15)),
+
+            X86Reg::Al => u64::from(self.get_gpr8(0)),
+            X86Reg::Cl => u64::from(self.get_gpr8(1)),
+            X86Reg::Dl => u64::from(self.get_gpr8(2)),
+            X86Reg::Bl => u64::from(self.get_gpr8(3)),
+            X86Reg::Ah => u64::from(self.get_gpr8(4)),
+            X86Reg::Ch => u64::from(self.get_gpr8(5)),
+            X86Reg::Dh => u64::from(self.get_gpr8(6)),
+            X86Reg::Bh => u64::from(self.get_gpr8(7)),
+            X86Reg::Spl => u64::from(self.get_gpr8(4)),
+            X86Reg::Bpl => u64::from(self.get_gpr8(5)),
+            X86Reg::Sil => u64::from(self.get_gpr8(6)),
+            X86Reg::Dil => u64::from(self.get_gpr8(7)),
+            X86Reg::R8b => u64::from(self.get_gpr8(8)),
+            X86Reg::R9b => u64::from(self.get_gpr8(9)),
+            X86Reg::R10b => u64::from(self.get_gpr8(10)),
+            X86Reg::R11b => u64::from(self.get_gpr8(11)),
+            X86Reg::R12b => u64::from(self.get_gpr8(12)),
+            X86Reg::R13b => u64::from(self.get_gpr8(13)),
+            X86Reg::R14b => u64::from(self.get_gpr8(14)),
+            X86Reg::R15b => u64::from(self.get_gpr8(15)),
+
+            X86Reg::Rip => self.rip(),
+            X86Reg::Eip => u64::from(self.eip()),
+            X86Reg::Ip => self.rip() & 0xFFFF,
+            X86Reg::Rflags => self.rflags_for_api(),
+            X86Reg::Eflags => self.rflags_for_api() & 0xFFFF_FFFF,
+            X86Reg::Flags => self.rflags_for_api() & 0xFFFF,
+
+            X86Reg::Cs => u64::from(self.get_cs_selector()),
+            X86Reg::Ss => u64::from(self.get_ss_selector()),
+            X86Reg::Ds => u64::from(self.get_ds_selector()),
+            X86Reg::Es => u64::from(self.seg_selector_for_api(0)),
+            X86Reg::Fs => u64::from(self.seg_selector_for_api(4)),
+            X86Reg::Gs => u64::from(self.seg_selector_for_api(5)),
+            X86Reg::FsBase => self.msr_fsbase(),
+            X86Reg::GsBase => self.msr_gsbase(),
+
+            X86Reg::Cr0 => u64::from(self.get_cr0_val()),
+            X86Reg::Cr2 => self.cr2_for_api(),
+            X86Reg::Cr3 => self.get_cr3_val(),
+            X86Reg::Cr4 => self.cr4_for_api(),
+            X86Reg::Cr8 => self.cr8_for_api(),
+
+            X86Reg::Dr0 => self.dr_for_api(0),
+            X86Reg::Dr1 => self.dr_for_api(1),
+            X86Reg::Dr2 => self.dr_for_api(2),
+            X86Reg::Dr3 => self.dr_for_api(3),
+            X86Reg::Dr6 => self.dr6_for_api(),
+            X86Reg::Dr7 => self.dr7_for_api(),
+
+            X86Reg::GdtrBase => self.gdtr_base_for_api(),
+            X86Reg::GdtrLimit => self.gdtr_limit_for_api(),
+            X86Reg::IdtrBase => self.idtr_base_for_api(),
+            X86Reg::IdtrLimit => self.idtr_limit_for_api(),
+            X86Reg::LdtrSelector => u64::from(self.ldtr_selector_for_api()),
+            X86Reg::TrSelector => u64::from(self.tr_selector_for_api()),
+
+            X86Reg::Tsc => self.tsc_for_api(),
+            X86Reg::Efer => self.efer_for_api(),
+
+            X86Reg::FpSw => u64::from(self.fpu_sw_for_api()),
+            X86Reg::FpCw => u64::from(self.fpu_cw_for_api()),
+            X86Reg::FpTag => u64::from(self.fpu_tag_for_api()),
+            X86Reg::Mxcsr => u64::from(self.mxcsr_for_api()),
+            X86Reg::Opmask0 => self.opmask_read_for_api(0),
+            X86Reg::Opmask1 => self.opmask_read_for_api(1),
+            X86Reg::Opmask2 => self.opmask_read_for_api(2),
+            X86Reg::Opmask3 => self.opmask_read_for_api(3),
+            X86Reg::Opmask4 => self.opmask_read_for_api(4),
+            X86Reg::Opmask5 => self.opmask_read_for_api(5),
+            X86Reg::Opmask6 => self.opmask_read_for_api(6),
+            X86Reg::Opmask7 => self.opmask_read_for_api(7),
+
+            // Wide registers handled by dedicated reg_read_{fp80,xmm,ymm,zmm} —
+            // scalar path returns 0 as sentinel.
+            X86Reg::Fpr0 | X86Reg::Fpr1 | X86Reg::Fpr2 | X86Reg::Fpr3
+            | X86Reg::Fpr4 | X86Reg::Fpr5 | X86Reg::Fpr6 | X86Reg::Fpr7
+            | X86Reg::Xmm0 | X86Reg::Xmm1 | X86Reg::Xmm2 | X86Reg::Xmm3
+            | X86Reg::Xmm4 | X86Reg::Xmm5 | X86Reg::Xmm6 | X86Reg::Xmm7
+            | X86Reg::Xmm8 | X86Reg::Xmm9 | X86Reg::Xmm10 | X86Reg::Xmm11
+            | X86Reg::Xmm12 | X86Reg::Xmm13 | X86Reg::Xmm14 | X86Reg::Xmm15
+            | X86Reg::Ymm0 | X86Reg::Ymm1 | X86Reg::Ymm2 | X86Reg::Ymm3
+            | X86Reg::Ymm4 | X86Reg::Ymm5 | X86Reg::Ymm6 | X86Reg::Ymm7
+            | X86Reg::Ymm8 | X86Reg::Ymm9 | X86Reg::Ymm10 | X86Reg::Ymm11
+            | X86Reg::Ymm12 | X86Reg::Ymm13 | X86Reg::Ymm14 | X86Reg::Ymm15
+            | X86Reg::Zmm0 | X86Reg::Zmm1 | X86Reg::Zmm2 | X86Reg::Zmm3
+            | X86Reg::Zmm4 | X86Reg::Zmm5 | X86Reg::Zmm6 | X86Reg::Zmm7
+            | X86Reg::Zmm8 | X86Reg::Zmm9 | X86Reg::Zmm10 | X86Reg::Zmm11
+            | X86Reg::Zmm12 | X86Reg::Zmm13 | X86Reg::Zmm14 | X86Reg::Zmm15
+            | X86Reg::Zmm16 | X86Reg::Zmm17 | X86Reg::Zmm18 | X86Reg::Zmm19
+            | X86Reg::Zmm20 | X86Reg::Zmm21 | X86Reg::Zmm22 | X86Reg::Zmm23
+            | X86Reg::Zmm24 | X86Reg::Zmm25 | X86Reg::Zmm26 | X86Reg::Zmm27
+            | X86Reg::Zmm28 | X86Reg::Zmm29 | X86Reg::Zmm30 | X86Reg::Zmm31 => 0,
+        }
+    }
+
+    pub(crate) fn api_reg_write(&mut self, reg: X86Reg, val: u64) {
+        match reg {
+            X86Reg::Rax => self.set_rax(val),
+            X86Reg::Rcx => self.set_rcx(val),
+            X86Reg::Rdx => self.set_rdx(val),
+            X86Reg::Rbx => self.set_rbx(val),
+            X86Reg::Rsp => self.set_rsp(val),
+            X86Reg::Rbp => self.set_rbp(val),
+            X86Reg::Rsi => self.set_rsi(val),
+            X86Reg::Rdi => self.set_rdi(val),
+            X86Reg::R8 => self.set_r8(val),
+            X86Reg::R9 => self.set_r9(val),
+            X86Reg::R10 => self.set_r10(val),
+            X86Reg::R11 => self.set_r11(val),
+            X86Reg::R12 => self.set_r12(val),
+            X86Reg::R13 => self.set_r13(val),
+            X86Reg::R14 => self.set_r14(val),
+            X86Reg::R15 => self.set_r15(val),
+
+            // 32-bit writes: x86-64 rule — low 32 replaces, upper 32 zeros.
+            // `val & 0xFFFF_FFFF` gives exactly that in u64 form.
+            X86Reg::Eax => self.set_rax(val & 0xFFFF_FFFF),
+            X86Reg::Ecx => self.set_rcx(val & 0xFFFF_FFFF),
+            X86Reg::Edx => self.set_rdx(val & 0xFFFF_FFFF),
+            X86Reg::Ebx => self.set_rbx(val & 0xFFFF_FFFF),
+            X86Reg::Esp => self.set_rsp(val & 0xFFFF_FFFF),
+            X86Reg::Ebp => self.set_rbp(val & 0xFFFF_FFFF),
+            X86Reg::Esi => self.set_rsi(val & 0xFFFF_FFFF),
+            X86Reg::Edi => self.set_rdi(val & 0xFFFF_FFFF),
+            X86Reg::R8d => self.set_r8(val & 0xFFFF_FFFF),
+            X86Reg::R9d => self.set_r9(val & 0xFFFF_FFFF),
+            X86Reg::R10d => self.set_r10(val & 0xFFFF_FFFF),
+            X86Reg::R11d => self.set_r11(val & 0xFFFF_FFFF),
+            X86Reg::R12d => self.set_r12(val & 0xFFFF_FFFF),
+            X86Reg::R13d => self.set_r13(val & 0xFFFF_FFFF),
+            X86Reg::R14d => self.set_r14(val & 0xFFFF_FFFF),
+            X86Reg::R15d => self.set_r15(val & 0xFFFF_FFFF),
+
+            // 16-bit writes: low 16 replaces, upper 48 preserved.
+            // `set_gpr16` requires u16; truncation here is architectural.
+            X86Reg::Ax => self.set_gpr16(0, trunc_u16(val)),
+            X86Reg::Cx => self.set_gpr16(1, trunc_u16(val)),
+            X86Reg::Dx => self.set_gpr16(2, trunc_u16(val)),
+            X86Reg::Bx => self.set_gpr16(3, trunc_u16(val)),
+            X86Reg::Sp => self.set_gpr16(4, trunc_u16(val)),
+            X86Reg::Bp => self.set_gpr16(5, trunc_u16(val)),
+            X86Reg::Si => self.set_gpr16(6, trunc_u16(val)),
+            X86Reg::Di => self.set_gpr16(7, trunc_u16(val)),
+            X86Reg::R8w => self.set_gpr16(8, trunc_u16(val)),
+            X86Reg::R9w => self.set_gpr16(9, trunc_u16(val)),
+            X86Reg::R10w => self.set_gpr16(10, trunc_u16(val)),
+            X86Reg::R11w => self.set_gpr16(11, trunc_u16(val)),
+            X86Reg::R12w => self.set_gpr16(12, trunc_u16(val)),
+            X86Reg::R13w => self.set_gpr16(13, trunc_u16(val)),
+            X86Reg::R14w => self.set_gpr16(14, trunc_u16(val)),
+            X86Reg::R15w => self.set_gpr16(15, trunc_u16(val)),
+
+            X86Reg::Al => self.set_gpr8(0, trunc_u8(val)),
+            X86Reg::Cl => self.set_gpr8(1, trunc_u8(val)),
+            X86Reg::Dl => self.set_gpr8(2, trunc_u8(val)),
+            X86Reg::Bl => self.set_gpr8(3, trunc_u8(val)),
+            X86Reg::Ah => self.set_gpr8(4, trunc_u8(val)),
+            X86Reg::Ch => self.set_gpr8(5, trunc_u8(val)),
+            X86Reg::Dh => self.set_gpr8(6, trunc_u8(val)),
+            X86Reg::Bh => self.set_gpr8(7, trunc_u8(val)),
+            X86Reg::Spl => self.set_gpr8(4, trunc_u8(val)),
+            X86Reg::Bpl => self.set_gpr8(5, trunc_u8(val)),
+            X86Reg::Sil => self.set_gpr8(6, trunc_u8(val)),
+            X86Reg::Dil => self.set_gpr8(7, trunc_u8(val)),
+            X86Reg::R8b => self.set_gpr8(8, trunc_u8(val)),
+            X86Reg::R9b => self.set_gpr8(9, trunc_u8(val)),
+            X86Reg::R10b => self.set_gpr8(10, trunc_u8(val)),
+            X86Reg::R11b => self.set_gpr8(11, trunc_u8(val)),
+            X86Reg::R12b => self.set_gpr8(12, trunc_u8(val)),
+            X86Reg::R13b => self.set_gpr8(13, trunc_u8(val)),
+            X86Reg::R14b => self.set_gpr8(14, trunc_u8(val)),
+            X86Reg::R15b => self.set_gpr8(15, trunc_u8(val)),
+
+            X86Reg::Rip => self.set_rip(val),
+            X86Reg::Eip => self.set_eip(trunc_u32(val)),
+            X86Reg::Ip => {
+                // Preserve upper bits of RIP when writing 16-bit IP.
+                let upper = self.rip() & !0xFFFF;
+                self.set_rip(upper | (val & 0xFFFF));
+            }
+
+            X86Reg::Rflags => self.set_rflags_for_api(val),
+            X86Reg::Eflags => self.set_rflags_for_api(val & 0xFFFF_FFFF),
+            X86Reg::Flags => {
+                let preserved = self.rflags_for_api() & !0xFFFF;
+                self.set_rflags_for_api(preserved | (val & 0xFFFF));
+            }
+
+            X86Reg::Cs | X86Reg::Ss | X86Reg::Ds
+            | X86Reg::Es | X86Reg::Fs | X86Reg::Gs => {
+                // Raw selector write without descriptor-cache reload. Callers
+                // should use `setup_cpu_mode` for correct protected-mode setup.
+                self.set_seg_selector_raw_for_api(reg, trunc_u16(val));
+            }
+
+            X86Reg::FsBase => self.set_msr_fsbase(val),
+            X86Reg::GsBase => self.set_msr_gsbase(val),
+
+            X86Reg::Cr0 => self.set_cr0_raw_for_api(trunc_u32(val)),
+            X86Reg::Cr2 => self.set_cr2_for_api(val),
+            X86Reg::Cr3 => self.set_cr3_raw_for_api(val),
+            X86Reg::Cr4 => self.set_cr4_raw_for_api(trunc_u32(val)),
+            X86Reg::Cr8 => self.set_cr8_for_api(val),
+
+            X86Reg::Dr0 => self.set_dr_for_api(0, val),
+            X86Reg::Dr1 => self.set_dr_for_api(1, val),
+            X86Reg::Dr2 => self.set_dr_for_api(2, val),
+            X86Reg::Dr3 => self.set_dr_for_api(3, val),
+            X86Reg::Dr6 => self.set_dr6_for_api(val),
+            X86Reg::Dr7 => self.set_dr7_for_api(val),
+
+            X86Reg::GdtrBase => self.set_gdtr_base_for_api(val),
+            X86Reg::GdtrLimit => self.set_gdtr_limit_for_api(trunc_u32(val)),
+            X86Reg::IdtrBase => self.set_idtr_base_for_api(val),
+            X86Reg::IdtrLimit => self.set_idtr_limit_for_api(trunc_u32(val)),
+            X86Reg::LdtrSelector => self.set_ldtr_selector_for_api(trunc_u16(val)),
+            X86Reg::TrSelector => self.set_tr_selector_for_api(trunc_u16(val)),
+
+            X86Reg::Tsc => self.set_tsc_for_api(val),
+            X86Reg::Efer => self.set_efer_for_api(val),
+
+            X86Reg::FpSw => self.set_fpu_sw_for_api(trunc_u16(val)),
+            X86Reg::FpCw => self.set_fpu_cw_for_api(trunc_u16(val)),
+            X86Reg::FpTag => self.set_fpu_tag_for_api(trunc_u16(val)),
+            X86Reg::Mxcsr => self.set_mxcsr_for_api(trunc_u32(val)),
+            X86Reg::Opmask0 => self.opmask_write_for_api(0, val),
+            X86Reg::Opmask1 => self.opmask_write_for_api(1, val),
+            X86Reg::Opmask2 => self.opmask_write_for_api(2, val),
+            X86Reg::Opmask3 => self.opmask_write_for_api(3, val),
+            X86Reg::Opmask4 => self.opmask_write_for_api(4, val),
+            X86Reg::Opmask5 => self.opmask_write_for_api(5, val),
+            X86Reg::Opmask6 => self.opmask_write_for_api(6, val),
+            X86Reg::Opmask7 => self.opmask_write_for_api(7, val),
+
+            // Wide registers — use dedicated reg_write_{fp80,xmm,ymm,zmm}.
+            // Scalar path ignores.
+            X86Reg::Fpr0 | X86Reg::Fpr1 | X86Reg::Fpr2 | X86Reg::Fpr3
+            | X86Reg::Fpr4 | X86Reg::Fpr5 | X86Reg::Fpr6 | X86Reg::Fpr7
+            | X86Reg::Xmm0 | X86Reg::Xmm1 | X86Reg::Xmm2 | X86Reg::Xmm3
+            | X86Reg::Xmm4 | X86Reg::Xmm5 | X86Reg::Xmm6 | X86Reg::Xmm7
+            | X86Reg::Xmm8 | X86Reg::Xmm9 | X86Reg::Xmm10 | X86Reg::Xmm11
+            | X86Reg::Xmm12 | X86Reg::Xmm13 | X86Reg::Xmm14 | X86Reg::Xmm15
+            | X86Reg::Ymm0 | X86Reg::Ymm1 | X86Reg::Ymm2 | X86Reg::Ymm3
+            | X86Reg::Ymm4 | X86Reg::Ymm5 | X86Reg::Ymm6 | X86Reg::Ymm7
+            | X86Reg::Ymm8 | X86Reg::Ymm9 | X86Reg::Ymm10 | X86Reg::Ymm11
+            | X86Reg::Ymm12 | X86Reg::Ymm13 | X86Reg::Ymm14 | X86Reg::Ymm15
+            | X86Reg::Zmm0 | X86Reg::Zmm1 | X86Reg::Zmm2 | X86Reg::Zmm3
+            | X86Reg::Zmm4 | X86Reg::Zmm5 | X86Reg::Zmm6 | X86Reg::Zmm7
+            | X86Reg::Zmm8 | X86Reg::Zmm9 | X86Reg::Zmm10 | X86Reg::Zmm11
+            | X86Reg::Zmm12 | X86Reg::Zmm13 | X86Reg::Zmm14 | X86Reg::Zmm15
+            | X86Reg::Zmm16 | X86Reg::Zmm17 | X86Reg::Zmm18 | X86Reg::Zmm19
+            | X86Reg::Zmm20 | X86Reg::Zmm21 | X86Reg::Zmm22 | X86Reg::Zmm23
+            | X86Reg::Zmm24 | X86Reg::Zmm25 | X86Reg::Zmm26 | X86Reg::Zmm27
+            | X86Reg::Zmm28 | X86Reg::Zmm29 | X86Reg::Zmm30 | X86Reg::Zmm31 => {}
+        }
+    }
+}
+
+// Explicit truncation helpers. The only place in the CPU API surface where
+// `as` is used — it's architectural (x86 register writes silently truncate)
+// and concentrating it in named helpers makes every callsite self-documenting.
+#[inline] fn trunc_u16(v: u64) -> u16 { (v & 0xFFFF) as u16 }
+#[inline] fn trunc_u8(v: u64) -> u8 { (v & 0xFF) as u8 }
+#[inline] fn trunc_u32(v: u64) -> u32 { (v & 0xFFFF_FFFF) as u32 }
+
+// ─────────────────────────── CpuAccess impl for HookCtx ───────────────────────────
+//
+// `CpuAccess` is the type-erased view of the CPU passed into hook callbacks
+// via `HookCtx`. Delegates reg_read / reg_write to the `api_reg_*` dispatch
+// above — one source of truth for every Rust client of the CPU.
+
+use crate::cpu::instrumentation::CpuAccess;
+
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> CpuAccess for BxCpuC<'_, I, T> {
+    fn reg_read(&self, reg: X86Reg) -> u64 {
+        self.api_reg_read(reg)
+    }
+
+    fn reg_write(&mut self, reg: X86Reg, val: u64) {
+        self.api_reg_write(reg, val)
+    }
+
+    fn mem_read(&self, addr: u64, buf: &mut [u8]) -> bool {
+        for (i, slot) in buf.iter_mut().enumerate() {
+            *slot = self.mem_read_byte(addr + i as u64);
+        }
+        true
+    }
+
+    fn mem_write(&mut self, addr: u64, data: &[u8]) -> bool {
+        for (i, &byte) in data.iter().enumerate() {
+            self.mem_write_byte(addr + i as u64, byte);
+        }
+        true
+    }
+
+    fn virt_read(&self, vaddr: u64, buf: &mut [u8]) -> bool {
+        virt_read_chunked(buf, vaddr, |va| self.translate_linear_for_diag(va),
+                          |pa| self.mem_read_byte(pa))
+    }
+
+    fn virt_read_with_cr3(&self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool {
+        virt_read_chunked(buf, vaddr, |va| self.translate_linear_with_cr3(va, cr3),
+                          |pa| self.mem_read_byte(pa))
+    }
+
+    fn stop(&mut self) {
+        self.instrumentation.stop_request = true;
+    }
+
+    fn rip(&self) -> u64 { BxCpuC::rip(self) }
+    fn icount(&self) -> u64 { self.icount }
+    fn cr3(&self) -> u64 { self.cr3 }
+}
+
+/// Page-aware chunked virtual memory read. Walks `buf` page-by-page, calling
+/// `translate(va) -> Option<pa>` once per page and `read_byte(pa) -> u8` for
+/// each byte. Returns `true` on success, `false` if any page translation
+/// fails (partial read leaves earlier pages populated).
+fn virt_read_chunked<Tr, Rd>(
+    buf: &mut [u8],
+    start_va: u64,
+    translate: Tr,
+    read_byte: Rd,
+) -> bool
+where
+    Tr: Fn(u64) -> Option<u64>,
+    Rd: Fn(u64) -> u8,
+{
+    let mut off: usize = 0;
+    while off < buf.len() {
+        let va = start_va.wrapping_add(off as u64);
+        let page_off = usize::try_from(va & 0xFFF).expect("page offset fits usize");
+        let chunk = (0x1000 - page_off).min(buf.len() - off);
+        let Some(pa) = translate(va) else { return false; };
+        for i in 0..chunk {
+            buf[off + i] = read_byte(pa + i as u64);
+        }
+        off += chunk;
+    }
+    true
+}
+
+// ─────────────────────────── pre_* hook firing ───────────────────────────
+//
+// These methods live on BxCpuC (not on the registry) because they need to
+// build a `HookCtx` wrapping `&mut BxCpuC` while simultaneously calling into
+// the tracer. We split-borrow by `take()`-ing the tracer out of the registry
+// Option slot, running the hook, then putting it back. `None` is visible
+// only during the hook call — user code can't observe it.
+
+use crate::cpu::instrumentation::{HookCtx, InstrAction};
+
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+    /// Fire the `pre_syscall` trait hook. Called from `syscall()` /
+    /// `sysenter()` BEFORE the architectural CS/RIP transition. The hook
+    /// returns an `InstrAction` which the caller inspects to decide whether
+    /// to execute the transition, skip it, stop the loop, or both.
+    pub(crate) fn fire_pre_syscall(&mut self) -> InstrAction {
+        let Some(mut tracer) = self.instrumentation.tracer.take() else {
+            return InstrAction::Continue;
+        };
+        let action = {
+            let mut ctx = HookCtx::new(self);
+            tracer.pre_syscall(&mut ctx)
+        };
+        self.instrumentation.tracer = Some(tracer);
+        action
+    }
 }

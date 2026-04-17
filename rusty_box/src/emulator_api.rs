@@ -192,14 +192,19 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 
     /// Direct typed reference to the installed tracer. Zero-cost field access.
+    /// Panics only if called while a hook is mid-dispatch (the tracer is
+    /// temporarily taken for borrow-splitting) — user code can't observe this.
     pub fn instrumentation(&self) -> &T {
-        &self.cpu.instrumentation.tracer
+        self.cpu.instrumentation.tracer.as_ref()
+            .expect("tracer absent only during hook dispatch")
     }
 
-    /// Mutable reference to the installed tracer. Zero-cost field access.
+    /// Mutable reference to the installed tracer.
     pub fn instrumentation_mut(&mut self) -> &mut T {
-        &mut self.cpu.instrumentation.tracer
+        self.cpu.instrumentation.tracer.as_mut()
+            .expect("tracer absent only during hook dispatch")
     }
+
 
     /// Recompute the active hook mask from the tracer's `active_hooks()`.
     /// Call this after mutating tracer state that changes which categories are active.
@@ -214,156 +219,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Read any register by enum tag. Narrower registers are zero-extended
     /// into the returned `u64`.
     pub fn reg_read(&self, reg: X86Reg) -> u64 {
-        let cpu = &self.cpu;
-        let v: u64 = match reg {
-            X86Reg::Rax => cpu.rax(),
-            X86Reg::Rcx => cpu.rcx(),
-            X86Reg::Rdx => cpu.rdx(),
-            X86Reg::Rbx => cpu.rbx(),
-            X86Reg::Rsp => cpu.rsp(),
-            X86Reg::Rbp => cpu.rbp(),
-            X86Reg::Rsi => cpu.rsi(),
-            X86Reg::Rdi => cpu.rdi(),
-            X86Reg::R8 => cpu.r8(),
-            X86Reg::R9 => cpu.r9(),
-            X86Reg::R10 => cpu.r10(),
-            X86Reg::R11 => cpu.r11(),
-            X86Reg::R12 => cpu.r12(),
-            X86Reg::R13 => cpu.r13(),
-            X86Reg::R14 => cpu.r14(),
-            X86Reg::R15 => cpu.r15(),
-
-            X86Reg::Eax => cpu.rax() as u32 as u64,
-            X86Reg::Ecx => cpu.rcx() as u32 as u64,
-            X86Reg::Edx => cpu.rdx() as u32 as u64,
-            X86Reg::Ebx => cpu.rbx() as u32 as u64,
-            X86Reg::Esp => cpu.rsp() as u32 as u64,
-            X86Reg::Ebp => cpu.rbp() as u32 as u64,
-            X86Reg::Esi => cpu.rsi() as u32 as u64,
-            X86Reg::Edi => cpu.rdi() as u32 as u64,
-            X86Reg::R8d => cpu.r8() as u32 as u64,
-            X86Reg::R9d => cpu.r9() as u32 as u64,
-            X86Reg::R10d => cpu.r10() as u32 as u64,
-            X86Reg::R11d => cpu.r11() as u32 as u64,
-            X86Reg::R12d => cpu.r12() as u32 as u64,
-            X86Reg::R13d => cpu.r13() as u32 as u64,
-            X86Reg::R14d => cpu.r14() as u32 as u64,
-            X86Reg::R15d => cpu.r15() as u32 as u64,
-
-            X86Reg::Ax => cpu.get_gpr16(0) as u64,
-            X86Reg::Cx => cpu.get_gpr16(1) as u64,
-            X86Reg::Dx => cpu.get_gpr16(2) as u64,
-            X86Reg::Bx => cpu.get_gpr16(3) as u64,
-            X86Reg::Sp => cpu.get_gpr16(4) as u64,
-            X86Reg::Bp => cpu.get_gpr16(5) as u64,
-            X86Reg::Si => cpu.get_gpr16(6) as u64,
-            X86Reg::Di => cpu.get_gpr16(7) as u64,
-            X86Reg::R8w => cpu.get_gpr16(8) as u64,
-            X86Reg::R9w => cpu.get_gpr16(9) as u64,
-            X86Reg::R10w => cpu.get_gpr16(10) as u64,
-            X86Reg::R11w => cpu.get_gpr16(11) as u64,
-            X86Reg::R12w => cpu.get_gpr16(12) as u64,
-            X86Reg::R13w => cpu.get_gpr16(13) as u64,
-            X86Reg::R14w => cpu.get_gpr16(14) as u64,
-            X86Reg::R15w => cpu.get_gpr16(15) as u64,
-
-            X86Reg::Al => cpu.get_gpr8(0) as u64,
-            X86Reg::Cl => cpu.get_gpr8(1) as u64,
-            X86Reg::Dl => cpu.get_gpr8(2) as u64,
-            X86Reg::Bl => cpu.get_gpr8(3) as u64,
-            X86Reg::Ah => cpu.get_gpr8(4) as u64,
-            X86Reg::Ch => cpu.get_gpr8(5) as u64,
-            X86Reg::Dh => cpu.get_gpr8(6) as u64,
-            X86Reg::Bh => cpu.get_gpr8(7) as u64,
-            X86Reg::Spl => cpu.get_gpr8(4) as u64,
-            X86Reg::Bpl => cpu.get_gpr8(5) as u64,
-            X86Reg::Sil => cpu.get_gpr8(6) as u64,
-            X86Reg::Dil => cpu.get_gpr8(7) as u64,
-            X86Reg::R8b => cpu.get_gpr8(8) as u64,
-            X86Reg::R9b => cpu.get_gpr8(9) as u64,
-            X86Reg::R10b => cpu.get_gpr8(10) as u64,
-            X86Reg::R11b => cpu.get_gpr8(11) as u64,
-            X86Reg::R12b => cpu.get_gpr8(12) as u64,
-            X86Reg::R13b => cpu.get_gpr8(13) as u64,
-            X86Reg::R14b => cpu.get_gpr8(14) as u64,
-            X86Reg::R15b => cpu.get_gpr8(15) as u64,
-
-            X86Reg::Rip => cpu.rip(),
-            X86Reg::Eip => cpu.eip() as u64,
-            X86Reg::Ip => (cpu.rip() as u16) as u64,
-
-            X86Reg::Rflags => cpu.rflags_for_api(),
-            X86Reg::Eflags => (cpu.rflags_for_api() as u32) as u64,
-            X86Reg::Flags => (cpu.rflags_for_api() as u16) as u64,
-
-            X86Reg::Cs => cpu.get_cs_selector() as u64,
-            X86Reg::Ss => cpu.get_ss_selector() as u64,
-            X86Reg::Ds => cpu.get_ds_selector() as u64,
-            X86Reg::Es => cpu.seg_selector_for_api(0) as u64, // ES
-            X86Reg::Fs => cpu.seg_selector_for_api(4) as u64, // FS
-            X86Reg::Gs => cpu.seg_selector_for_api(5) as u64, // GS
-
-            X86Reg::FsBase => cpu.msr_fsbase(),
-            X86Reg::GsBase => cpu.msr_gsbase(),
-
-            X86Reg::Cr0 => cpu.get_cr0_val() as u64,
-            X86Reg::Cr2 => cpu.cr2_for_api(),
-            X86Reg::Cr3 => cpu.get_cr3_val(),
-            X86Reg::Cr4 => cpu.cr4_for_api(),
-            X86Reg::Cr8 => cpu.cr8_for_api(),
-
-            X86Reg::Dr0 => cpu.dr_for_api(0),
-            X86Reg::Dr1 => cpu.dr_for_api(1),
-            X86Reg::Dr2 => cpu.dr_for_api(2),
-            X86Reg::Dr3 => cpu.dr_for_api(3),
-            X86Reg::Dr6 => cpu.dr6_for_api(),
-            X86Reg::Dr7 => cpu.dr7_for_api(),
-
-            X86Reg::GdtrBase => cpu.gdtr_base_for_api(),
-            X86Reg::GdtrLimit => cpu.gdtr_limit_for_api(),
-            X86Reg::IdtrBase => cpu.idtr_base_for_api(),
-            X86Reg::IdtrLimit => cpu.idtr_limit_for_api(),
-            X86Reg::LdtrSelector => cpu.ldtr_selector_for_api() as u64,
-            X86Reg::TrSelector => cpu.tr_selector_for_api() as u64,
-
-            X86Reg::Tsc => cpu.tsc_for_api(),
-            X86Reg::Efer => cpu.efer_for_api(),
-
-            // FPU scalar registers
-            X86Reg::FpSw => cpu.fpu_sw_for_api() as u64,
-            X86Reg::FpCw => cpu.fpu_cw_for_api() as u64,
-            X86Reg::FpTag => cpu.fpu_tag_for_api() as u64,
-            X86Reg::Mxcsr => cpu.mxcsr_for_api() as u64,
-            X86Reg::Opmask0 => cpu.opmask_read_for_api(0),
-            X86Reg::Opmask1 => cpu.opmask_read_for_api(1),
-            X86Reg::Opmask2 => cpu.opmask_read_for_api(2),
-            X86Reg::Opmask3 => cpu.opmask_read_for_api(3),
-            X86Reg::Opmask4 => cpu.opmask_read_for_api(4),
-            X86Reg::Opmask5 => cpu.opmask_read_for_api(5),
-            X86Reg::Opmask6 => cpu.opmask_read_for_api(6),
-            X86Reg::Opmask7 => cpu.opmask_read_for_api(7),
-
-            // Wide registers handled by dedicated methods — return 0 from scalar path
-            X86Reg::Fpr0 | X86Reg::Fpr1 | X86Reg::Fpr2 | X86Reg::Fpr3
-            | X86Reg::Fpr4 | X86Reg::Fpr5 | X86Reg::Fpr6 | X86Reg::Fpr7
-            | X86Reg::Xmm0 | X86Reg::Xmm1 | X86Reg::Xmm2 | X86Reg::Xmm3
-            | X86Reg::Xmm4 | X86Reg::Xmm5 | X86Reg::Xmm6 | X86Reg::Xmm7
-            | X86Reg::Xmm8 | X86Reg::Xmm9 | X86Reg::Xmm10 | X86Reg::Xmm11
-            | X86Reg::Xmm12 | X86Reg::Xmm13 | X86Reg::Xmm14 | X86Reg::Xmm15
-            | X86Reg::Ymm0 | X86Reg::Ymm1 | X86Reg::Ymm2 | X86Reg::Ymm3
-            | X86Reg::Ymm4 | X86Reg::Ymm5 | X86Reg::Ymm6 | X86Reg::Ymm7
-            | X86Reg::Ymm8 | X86Reg::Ymm9 | X86Reg::Ymm10 | X86Reg::Ymm11
-            | X86Reg::Ymm12 | X86Reg::Ymm13 | X86Reg::Ymm14 | X86Reg::Ymm15
-            | X86Reg::Zmm0 | X86Reg::Zmm1 | X86Reg::Zmm2 | X86Reg::Zmm3
-            | X86Reg::Zmm4 | X86Reg::Zmm5 | X86Reg::Zmm6 | X86Reg::Zmm7
-            | X86Reg::Zmm8 | X86Reg::Zmm9 | X86Reg::Zmm10 | X86Reg::Zmm11
-            | X86Reg::Zmm12 | X86Reg::Zmm13 | X86Reg::Zmm14 | X86Reg::Zmm15
-            | X86Reg::Zmm16 | X86Reg::Zmm17 | X86Reg::Zmm18 | X86Reg::Zmm19
-            | X86Reg::Zmm20 | X86Reg::Zmm21 | X86Reg::Zmm22 | X86Reg::Zmm23
-            | X86Reg::Zmm24 | X86Reg::Zmm25 | X86Reg::Zmm26 | X86Reg::Zmm27
-            | X86Reg::Zmm28 | X86Reg::Zmm29 | X86Reg::Zmm30 | X86Reg::Zmm31 => 0,
-        };
-        v
+        self.cpu.api_reg_read(reg)
     }
 
     /// Write any register by enum tag. Width semantics:
@@ -376,167 +232,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     ///   For correct protected-mode operation use
     ///   `setup_cpu_mode` instead.
     pub fn reg_write(&mut self, reg: X86Reg, val: u64) {
-        let cpu = &mut self.cpu;
-        match reg {
-            X86Reg::Rax => cpu.set_rax(val),
-            X86Reg::Rcx => cpu.set_rcx(val),
-            X86Reg::Rdx => cpu.set_rdx(val),
-            X86Reg::Rbx => cpu.set_rbx(val),
-            X86Reg::Rsp => cpu.set_rsp(val),
-            X86Reg::Rbp => cpu.set_rbp(val),
-            X86Reg::Rsi => cpu.set_rsi(val),
-            X86Reg::Rdi => cpu.set_rdi(val),
-            X86Reg::R8 => cpu.set_r8(val),
-            X86Reg::R9 => cpu.set_r9(val),
-            X86Reg::R10 => cpu.set_r10(val),
-            X86Reg::R11 => cpu.set_r11(val),
-            X86Reg::R12 => cpu.set_r12(val),
-            X86Reg::R13 => cpu.set_r13(val),
-            X86Reg::R14 => cpu.set_r14(val),
-            X86Reg::R15 => cpu.set_r15(val),
-
-            X86Reg::Eax => cpu.set_rax((val as u32) as u64),
-            X86Reg::Ecx => cpu.set_rcx((val as u32) as u64),
-            X86Reg::Edx => cpu.set_rdx((val as u32) as u64),
-            X86Reg::Ebx => cpu.set_rbx((val as u32) as u64),
-            X86Reg::Esp => cpu.set_rsp((val as u32) as u64),
-            X86Reg::Ebp => cpu.set_rbp((val as u32) as u64),
-            X86Reg::Esi => cpu.set_rsi((val as u32) as u64),
-            X86Reg::Edi => cpu.set_rdi((val as u32) as u64),
-            X86Reg::R8d => cpu.set_r8((val as u32) as u64),
-            X86Reg::R9d => cpu.set_r9((val as u32) as u64),
-            X86Reg::R10d => cpu.set_r10((val as u32) as u64),
-            X86Reg::R11d => cpu.set_r11((val as u32) as u64),
-            X86Reg::R12d => cpu.set_r12((val as u32) as u64),
-            X86Reg::R13d => cpu.set_r13((val as u32) as u64),
-            X86Reg::R14d => cpu.set_r14((val as u32) as u64),
-            X86Reg::R15d => cpu.set_r15((val as u32) as u64),
-
-            X86Reg::Ax => cpu.set_gpr16(0, val as u16),
-            X86Reg::Cx => cpu.set_gpr16(1, val as u16),
-            X86Reg::Dx => cpu.set_gpr16(2, val as u16),
-            X86Reg::Bx => cpu.set_gpr16(3, val as u16),
-            X86Reg::Sp => cpu.set_gpr16(4, val as u16),
-            X86Reg::Bp => cpu.set_gpr16(5, val as u16),
-            X86Reg::Si => cpu.set_gpr16(6, val as u16),
-            X86Reg::Di => cpu.set_gpr16(7, val as u16),
-            X86Reg::R8w => cpu.set_gpr16(8, val as u16),
-            X86Reg::R9w => cpu.set_gpr16(9, val as u16),
-            X86Reg::R10w => cpu.set_gpr16(10, val as u16),
-            X86Reg::R11w => cpu.set_gpr16(11, val as u16),
-            X86Reg::R12w => cpu.set_gpr16(12, val as u16),
-            X86Reg::R13w => cpu.set_gpr16(13, val as u16),
-            X86Reg::R14w => cpu.set_gpr16(14, val as u16),
-            X86Reg::R15w => cpu.set_gpr16(15, val as u16),
-
-            X86Reg::Al => cpu.set_gpr8(0, val as u8),
-            X86Reg::Cl => cpu.set_gpr8(1, val as u8),
-            X86Reg::Dl => cpu.set_gpr8(2, val as u8),
-            X86Reg::Bl => cpu.set_gpr8(3, val as u8),
-            X86Reg::Ah => cpu.set_gpr8(4, val as u8),
-            X86Reg::Ch => cpu.set_gpr8(5, val as u8),
-            X86Reg::Dh => cpu.set_gpr8(6, val as u8),
-            X86Reg::Bh => cpu.set_gpr8(7, val as u8),
-            X86Reg::Spl => cpu.set_gpr8(4, val as u8),
-            X86Reg::Bpl => cpu.set_gpr8(5, val as u8),
-            X86Reg::Sil => cpu.set_gpr8(6, val as u8),
-            X86Reg::Dil => cpu.set_gpr8(7, val as u8),
-            X86Reg::R8b => cpu.set_gpr8(8, val as u8),
-            X86Reg::R9b => cpu.set_gpr8(9, val as u8),
-            X86Reg::R10b => cpu.set_gpr8(10, val as u8),
-            X86Reg::R11b => cpu.set_gpr8(11, val as u8),
-            X86Reg::R12b => cpu.set_gpr8(12, val as u8),
-            X86Reg::R13b => cpu.set_gpr8(13, val as u8),
-            X86Reg::R14b => cpu.set_gpr8(14, val as u8),
-            X86Reg::R15b => cpu.set_gpr8(15, val as u8),
-
-            X86Reg::Rip => cpu.set_rip(val),
-            X86Reg::Eip => cpu.set_eip(val as u32),
-            X86Reg::Ip => {
-                // Preserve upper bits of RIP when writing 16-bit IP.
-                let upper = cpu.rip() & !0xFFFF;
-                cpu.set_rip(upper | (val & 0xFFFF));
-            }
-
-            X86Reg::Rflags => cpu.set_rflags_for_api(val),
-            X86Reg::Eflags => cpu.set_rflags_for_api(val as u32 as u64),
-            X86Reg::Flags => {
-                let preserved = cpu.rflags_for_api() & !0xFFFF;
-                cpu.set_rflags_for_api(preserved | (val & 0xFFFF));
-            }
-
-            X86Reg::Cs
-            | X86Reg::Ss
-            | X86Reg::Ds
-            | X86Reg::Es
-            | X86Reg::Fs
-            | X86Reg::Gs => {
-                // Raw selector write without descriptor-cache reload. Callers
-                // should use `setup_cpu_mode` for correct protected-mode setup.
-                cpu.set_seg_selector_raw_for_api(reg, val as u16);
-            }
-
-            X86Reg::FsBase => cpu.set_msr_fsbase(val),
-            X86Reg::GsBase => cpu.set_msr_gsbase(val),
-
-            X86Reg::Cr0 => cpu.set_cr0_raw_for_api(val as u32),
-            X86Reg::Cr2 => cpu.set_cr2_for_api(val),
-            X86Reg::Cr3 => cpu.set_cr3_raw_for_api(val),
-            X86Reg::Cr4 => cpu.set_cr4_raw_for_api(val as u32),
-            X86Reg::Cr8 => cpu.set_cr8_for_api(val),
-
-            X86Reg::Dr0 => cpu.set_dr_for_api(0, val),
-            X86Reg::Dr1 => cpu.set_dr_for_api(1, val),
-            X86Reg::Dr2 => cpu.set_dr_for_api(2, val),
-            X86Reg::Dr3 => cpu.set_dr_for_api(3, val),
-            X86Reg::Dr6 => cpu.set_dr6_for_api(val),
-            X86Reg::Dr7 => cpu.set_dr7_for_api(val),
-
-            X86Reg::GdtrBase => cpu.set_gdtr_base_for_api(val),
-            X86Reg::GdtrLimit => cpu.set_gdtr_limit_for_api(val as u32),
-            X86Reg::IdtrBase => cpu.set_idtr_base_for_api(val),
-            X86Reg::IdtrLimit => cpu.set_idtr_limit_for_api(val as u32),
-            X86Reg::LdtrSelector => cpu.set_ldtr_selector_for_api(val as u16),
-            X86Reg::TrSelector => cpu.set_tr_selector_for_api(val as u16),
-
-            X86Reg::Tsc => cpu.set_tsc_for_api(val),
-            X86Reg::Efer => cpu.set_efer_for_api(val),
-
-            // FPU scalar registers
-            X86Reg::FpSw => cpu.set_fpu_sw_for_api(val as u16),
-            X86Reg::FpCw => cpu.set_fpu_cw_for_api(val as u16),
-            X86Reg::FpTag => cpu.set_fpu_tag_for_api(val as u16),
-            X86Reg::Mxcsr => cpu.set_mxcsr_for_api(val as u32),
-            X86Reg::Opmask0 => cpu.opmask_write_for_api(0, val),
-            X86Reg::Opmask1 => cpu.opmask_write_for_api(1, val),
-            X86Reg::Opmask2 => cpu.opmask_write_for_api(2, val),
-            X86Reg::Opmask3 => cpu.opmask_write_for_api(3, val),
-            X86Reg::Opmask4 => cpu.opmask_write_for_api(4, val),
-            X86Reg::Opmask5 => cpu.opmask_write_for_api(5, val),
-            X86Reg::Opmask6 => cpu.opmask_write_for_api(6, val),
-            X86Reg::Opmask7 => cpu.opmask_write_for_api(7, val),
-
-            // Wide registers — use dedicated methods, ignore from scalar path
-            X86Reg::Fpr0 | X86Reg::Fpr1 | X86Reg::Fpr2 | X86Reg::Fpr3
-            | X86Reg::Fpr4 | X86Reg::Fpr5 | X86Reg::Fpr6 | X86Reg::Fpr7
-            | X86Reg::Xmm0 | X86Reg::Xmm1 | X86Reg::Xmm2 | X86Reg::Xmm3
-            | X86Reg::Xmm4 | X86Reg::Xmm5 | X86Reg::Xmm6 | X86Reg::Xmm7
-            | X86Reg::Xmm8 | X86Reg::Xmm9 | X86Reg::Xmm10 | X86Reg::Xmm11
-            | X86Reg::Xmm12 | X86Reg::Xmm13 | X86Reg::Xmm14 | X86Reg::Xmm15
-            | X86Reg::Ymm0 | X86Reg::Ymm1 | X86Reg::Ymm2 | X86Reg::Ymm3
-            | X86Reg::Ymm4 | X86Reg::Ymm5 | X86Reg::Ymm6 | X86Reg::Ymm7
-            | X86Reg::Ymm8 | X86Reg::Ymm9 | X86Reg::Ymm10 | X86Reg::Ymm11
-            | X86Reg::Ymm12 | X86Reg::Ymm13 | X86Reg::Ymm14 | X86Reg::Ymm15
-            | X86Reg::Zmm0 | X86Reg::Zmm1 | X86Reg::Zmm2 | X86Reg::Zmm3
-            | X86Reg::Zmm4 | X86Reg::Zmm5 | X86Reg::Zmm6 | X86Reg::Zmm7
-            | X86Reg::Zmm8 | X86Reg::Zmm9 | X86Reg::Zmm10 | X86Reg::Zmm11
-            | X86Reg::Zmm12 | X86Reg::Zmm13 | X86Reg::Zmm14 | X86Reg::Zmm15
-            | X86Reg::Zmm16 | X86Reg::Zmm17 | X86Reg::Zmm18 | X86Reg::Zmm19
-            | X86Reg::Zmm20 | X86Reg::Zmm21 | X86Reg::Zmm22 | X86Reg::Zmm23
-            | X86Reg::Zmm24 | X86Reg::Zmm25 | X86Reg::Zmm26 | X86Reg::Zmm27
-            | X86Reg::Zmm28 | X86Reg::Zmm29 | X86Reg::Zmm30 | X86Reg::Zmm31 => {},
-        }
-
+        self.cpu.api_reg_write(reg, val);
     }
 
     /// Read an MSR by index. Returns Err if the MSR is not modeled.
@@ -909,6 +605,24 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             let page_offset = (va & 0xFFF) as usize;
             let chunk = (0x1000 - page_offset).min(buf.len() - offset);
             let pa = self.virt_to_phys(va)?;
+            self.mem_read(pa, &mut buf[offset..offset + chunk])?;
+            offset += chunk;
+        }
+        Ok(())
+    }
+
+    /// Read bytes from guest virtual memory using an explicit CR3 for
+    /// translation instead of the current CR3. Useful for reading user-space
+    /// strings after the kernel has swapped CR3 (KPTI).
+    /// Long mode only. Returns `Err` on translation failure.
+    pub fn virt_read_with_cr3(&self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> Result<()> {
+        let mut offset = 0;
+        while offset < buf.len() {
+            let va = vaddr + offset as u64;
+            let page_offset = (va & 0xFFF) as usize;
+            let chunk = (0x1000 - page_offset).min(buf.len() - offset);
+            let pa = self.cpu.translate_linear_with_cr3_for_api(va, cr3)
+                .ok_or_else(|| Error::Memory(crate::memory::MemoryError::PageNotPresent))?;
             self.mem_read(pa, &mut buf[offset..offset + chunk])?;
             offset += chunk;
         }

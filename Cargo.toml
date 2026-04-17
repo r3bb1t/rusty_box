@@ -15,7 +15,6 @@ homepage = "https://github.com/r3bb1t/rusty_box"
 tracing = { version = "0.1", default-features = false, features = ["max_level_trace", "release_max_level_info"] }
 thiserror = "2"
 byteorder = "1.5"
-spin = { version = "0.10", default-features = false, features = ["once"] }
 bitflags = "2"
 paste = "1.0"
 tracing-subscriber = { version = "0.3" }

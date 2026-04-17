@@ -763,12 +763,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         } else {
                             super::instrumentation::CodeSize::Bits16
                         };
-                        self.instrumentation.fire_opcode(
+                        let ev = super::instrumentation::OpcodeEvent {
                             rip,
-                            &self.i_cache.mpool[current_mpindex],
+                            instr: &self.i_cache.mpool[current_mpindex],
                             bytes,
                             size,
-                        );
+                        };
+                        self.instrumentation.fire_opcode(&ev);
                     }
 
                     // Update trace mask
@@ -1105,7 +1106,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             } else {
                 super::instrumentation::CodeSize::Bits16
             };
-            self.instrumentation.fire_opcode(rip, &instr, bytes, size);
+            let ev = super::instrumentation::OpcodeEvent { rip, instr: &instr, bytes, size };
+            self.instrumentation.fire_opcode(&ev);
         }
 
         Ok(instr)

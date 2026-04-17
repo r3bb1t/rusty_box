@@ -31,7 +31,6 @@ tracing.workspace = true
 thiserror.workspace = true
 byteorder.workspace = true
 tempfile = { version = "3.20", optional = true }
-spin.workspace = true
 bitflags.workspace = true
 paste.workspace = true
 rusty_box_decoder = { path = "../rusty_box_decoder" }
@@ -41,22 +40,27 @@ eframe = { workspace = true, optional = true, features = ["default_fonts", "glow
 
 [[example]]
 name = "alpine"
-path = "examples/alpine.rs"
-required-features = ["std"]
-
-[[example]]
-name = "dlxlinux"
-path = "examples/dlxlinux.rs"
+path = "examples/alpine/alpine.rs"
 required-features = ["std"]
 
 [[example]]
 name = "alpine_direct"
-path = "examples/alpine_direct.rs"
+path = "examples/alpine/alpine_direct.rs"
+required-features = ["std"]
+
+[[example]]
+name = "alpine_strace"
+path = "examples/alpine/alpine_strace.rs"
+required-features = ["std", "instrumentation"]
+
+[[example]]
+name = "dlxlinux"
+path = "examples/dlxlinux/dlxlinux.rs"
 required-features = ["std"]
 
 [[example]]
 name = "dlxlinux_egui"
-path = "examples/gui/dlxlinux_egui.rs"
+path = "examples/dlxlinux/dlxlinux_egui.rs"
 required-features = ["std", "gui-egui"]
 
 [[example]]
@@ -65,13 +69,8 @@ path = "examples/gui/rusty_box_egui.rs"
 required-features = ["std", "gui-egui"]
 
 [[example]]
-name = "alpine_strace"
-path = "examples/alpine_strace.rs"
-required-features = ["std", "instrumentation"]
-
-[[example]]
 name = "shellcode_trace"
-path = "examples/shellcode_trace.rs"
+path = "examples/shellcode/shellcode_trace.rs"
 required-features = ["std", "instrumentation"]
 
 
