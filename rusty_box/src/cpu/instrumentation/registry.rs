@@ -31,10 +31,11 @@ use crate::cpu::decoder::Instruction;
 use super::bochs::Instrumentation;
 #[cfg(feature = "instrumentation")]
 use super::hooks::{
-    AddrRange, BranchHook, CodeHook, ExceptionHook, HwIntrHook, IntrHook, IoHook, MemHook,
+    AddrRange, BlockHook, BranchHook, CodeHook, ExceptionHook, HwIntrHook, IntrHook,
+    InvalidInsnHook, IoHook, MemHook, MemUnmappedHook,
 };
 use super::types::{
-    BranchType, CacheCntrl, CodeSize, HookMask, MemAccessRW, MemType, MwaitFlags, PrefetchHint,
+    BranchType, CacheCntrl, CodeSize, HookMask, MemAccessRW, MemPerms, MemType, MwaitFlags, PrefetchHint,
     ResetType, TlbCntrl,
 };
 #[cfg(feature = "instrumentation")]
@@ -75,6 +76,12 @@ pub struct InstrumentationRegistry<T: Instrumentation = ()> {
     pub(crate) io_hooks: Vec<IoHook>,
     #[cfg(feature = "instrumentation")]
     pub(crate) branch_hooks: Vec<BranchHook>,
+    #[cfg(feature = "instrumentation")]
+    pub(crate) block_hooks: Vec<BlockHook>,
+    #[cfg(feature = "instrumentation")]
+    pub(crate) invalid_insn_hooks: Vec<InvalidInsnHook>,
+    #[cfg(feature = "instrumentation")]
+    pub(crate) mem_unmapped_hooks: Vec<MemUnmappedHook>,
 
     /// Monotonic handle counter. Starts at 1; zero is reserved as "never
     /// returned" so future sentinel use is possible.
@@ -112,6 +119,12 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
             #[cfg(feature = "instrumentation")]
             branch_hooks: Vec::new(),
             #[cfg(feature = "instrumentation")]
+            block_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            invalid_insn_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
+            mem_unmapped_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
             next_handle: 1,
         };
         reg.refresh_active();
@@ -145,6 +158,15 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
             }
             if !self.io_hooks.is_empty() {
                 m |= HookMask::IO;
+            }
+            if !self.block_hooks.is_empty() {
+                m |= HookMask::BLOCK;
+            }
+            if !self.invalid_insn_hooks.is_empty() {
+                m |= HookMask::INVALID_INSN;
+            }
+            if !self.mem_unmapped_hooks.is_empty() {
+                m |= HookMask::MEM_UNMAPPED;
             }
         }
 
@@ -276,6 +298,44 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
         handle
     }
 
+    #[cfg(feature = "instrumentation")]
+    pub fn add_block<R: RangeBounds<u64>>(
+        &mut self,
+        range: R,
+        cb: Box<dyn FnMut(u64, u16) + Send>,
+    ) -> HookHandle {
+        let handle = self.mint_handle();
+        self.block_hooks.push(BlockHook {
+            handle,
+            range: AddrRange::<u64>::from_bounds(range),
+            cb,
+        });
+        self.active |= HookMask::BLOCK;
+        handle
+    }
+
+    #[cfg(feature = "instrumentation")]
+    pub fn add_invalid_insn(
+        &mut self,
+        cb: Box<dyn FnMut(u64) -> bool + Send>,
+    ) -> HookHandle {
+        let handle = self.mint_handle();
+        self.invalid_insn_hooks.push(InvalidInsnHook { handle, cb });
+        self.active |= HookMask::INVALID_INSN;
+        handle
+    }
+
+    #[cfg(feature = "instrumentation")]
+    pub fn add_mem_unmapped(
+        &mut self,
+        cb: Box<dyn FnMut(u64, usize, MemAccessRW) -> bool + Send>,
+    ) -> HookHandle {
+        let handle = self.mint_handle();
+        self.mem_unmapped_hooks.push(MemUnmappedHook { handle, cb });
+        self.active |= HookMask::MEM_UNMAPPED;
+        handle
+    }
+
     /// Remove any hook by handle. Searches every category; returns
     /// `Err(InvalidHandle)` if not found.
     #[cfg(feature = "instrumentation")]
@@ -299,6 +359,9 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
         try_remove!(self.exception_hooks);
         try_remove!(self.io_hooks);
         try_remove!(self.branch_hooks);
+        try_remove!(self.block_hooks);
+        try_remove!(self.invalid_insn_hooks);
+        try_remove!(self.mem_unmapped_hooks);
         Err(InstrumentationError::InvalidHandle(handle.raw()))
     }
 
@@ -576,6 +639,51 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     #[inline]
     pub fn fire_vmexit(&mut self, reason: u32, qualification: u64) {
         self.tracer.vmexit(reason, qualification);
+    }
+
+    #[inline]
+    pub fn fire_block_start(&mut self, rip: u64, block_size: u16) {
+        self.tracer.block_start(rip, block_size);
+        #[cfg(feature = "instrumentation")]
+        for hook in &mut self.block_hooks {
+            if hook.range.contains(rip) {
+                (hook.cb)(rip, block_size);
+            }
+        }
+    }
+
+    #[inline]
+    pub fn fire_invalid_instruction(&mut self, rip: u64) -> bool {
+        if self.tracer.invalid_instruction(rip) {
+            return true;
+        }
+        #[cfg(feature = "instrumentation")]
+        for hook in &mut self.invalid_insn_hooks {
+            if (hook.cb)(rip) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[inline]
+    pub fn fire_mem_unmapped(&mut self, laddr: u64, size: usize, rw: MemAccessRW) -> bool {
+        if self.tracer.mem_unmapped(laddr, size, rw) {
+            return true;
+        }
+        #[cfg(feature = "instrumentation")]
+        for hook in &mut self.mem_unmapped_hooks {
+            if (hook.cb)(laddr, size, rw) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[inline]
+    pub fn fire_mem_perm_violation(&mut self, laddr: u64, size: usize, rw: MemAccessRW, required: MemPerms) -> bool {
+        self.tracer.mem_perm_violation(laddr, size, rw, required)
+        // No closure hooks for perm violation — trait-only for now
     }
 }
 

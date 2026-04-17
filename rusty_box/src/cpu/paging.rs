@@ -465,6 +465,26 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 Ok(paddr)
             }
             Err(e) => {
+                // Check if this is a not-present fault (unmapped memory)
+                let is_not_present = !matches!(&e,
+                    super::CpuError::Memory(crate::memory::MemoryError::PageProtectionViolation) |
+                    super::CpuError::Memory(crate::memory::MemoryError::PageReservedBitViolation)
+                );
+
+                #[cfg(feature = "instrumentation")]
+                if is_not_present && self.instrumentation.active.has_mem_unmapped() {
+                    let instr_rw = match rw {
+                        MemoryAccessType::Write => crate::cpu::instrumentation::MemAccessRW::Write,
+                        MemoryAccessType::Execute => crate::cpu::instrumentation::MemAccessRW::Execute,
+                        _ => crate::cpu::instrumentation::MemAccessRW::Read,
+                    };
+                    // size=0 since translate_linear doesn't know the access size
+                    if self.instrumentation.fire_mem_unmapped(laddr, 0, instr_rw) {
+                        // Hook suppressed the fault — return dummy address
+                        return Ok(0);
+                    }
+                }
+
                 // Handle page fault - set CR2 and raise exception
                 // Based on BX_CPU_C::page_fault in paging.cc
                 self.cr2 = laddr;

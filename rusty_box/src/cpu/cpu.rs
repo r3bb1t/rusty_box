@@ -1800,6 +1800,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             }
             let is_real = self.real_mode();
 
+            // Unicorn-inspired: fire block hook at trace (basic block) start
+            #[cfg(feature = "instrumentation")]
+            if self.instrumentation.active.has_block() {
+                let block_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
+                let block_len = (trace_end - instr_idx) as u16;
+                self.instrumentation.fire_block_start(block_rip, block_len);
+            }
+
             let mut trace_iter = 0u64;
             'trace: loop {
                 trace_iter += 1;
@@ -1928,6 +1936,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     };
                     instr_idx = start;
                     trace_end = start + tlen;
+
+                    // Unicorn-inspired: fire block hook at trace (basic block) start
+                    #[cfg(feature = "instrumentation")]
+                    if self.instrumentation.active.has_block() {
+                        let block_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
+                        let block_len = (trace_end - instr_idx) as u16;
+                        self.instrumentation.fire_block_start(block_rip, block_len);
+                    }
                 }
             }
 
@@ -2713,6 +2729,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if (self.boot_debug_flags & 0x01) == 0 {
             self.boot_debug_flags |= 0x01;
             self.debug_puts(b"[UD]\n");
+        }
+
+        // Unicorn-inspired: give hooks a chance to suppress #UD for unrecognized opcodes
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_invalid_insn() {
+            if self.instrumentation.fire_invalid_instruction(self.prev_rip) {
+                return Ok(());
+            }
         }
 
         self.exception(Exception::Ud, 0)?;

@@ -299,6 +299,40 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
             X86Reg::Tsc => cpu.tsc_for_api(),
             X86Reg::Efer => cpu.efer_for_api(),
+
+            // FPU scalar registers
+            X86Reg::FpSw => cpu.fpu_sw_for_api() as u64,
+            X86Reg::FpCw => cpu.fpu_cw_for_api() as u64,
+            X86Reg::FpTag => cpu.fpu_tag_for_api() as u64,
+            X86Reg::Mxcsr => cpu.mxcsr_for_api() as u64,
+            X86Reg::Opmask0 => cpu.opmask_read_for_api(0),
+            X86Reg::Opmask1 => cpu.opmask_read_for_api(1),
+            X86Reg::Opmask2 => cpu.opmask_read_for_api(2),
+            X86Reg::Opmask3 => cpu.opmask_read_for_api(3),
+            X86Reg::Opmask4 => cpu.opmask_read_for_api(4),
+            X86Reg::Opmask5 => cpu.opmask_read_for_api(5),
+            X86Reg::Opmask6 => cpu.opmask_read_for_api(6),
+            X86Reg::Opmask7 => cpu.opmask_read_for_api(7),
+
+            // Wide registers handled by dedicated methods — return 0 from scalar path
+            X86Reg::Fpr0 | X86Reg::Fpr1 | X86Reg::Fpr2 | X86Reg::Fpr3
+            | X86Reg::Fpr4 | X86Reg::Fpr5 | X86Reg::Fpr6 | X86Reg::Fpr7
+            | X86Reg::Xmm0 | X86Reg::Xmm1 | X86Reg::Xmm2 | X86Reg::Xmm3
+            | X86Reg::Xmm4 | X86Reg::Xmm5 | X86Reg::Xmm6 | X86Reg::Xmm7
+            | X86Reg::Xmm8 | X86Reg::Xmm9 | X86Reg::Xmm10 | X86Reg::Xmm11
+            | X86Reg::Xmm12 | X86Reg::Xmm13 | X86Reg::Xmm14 | X86Reg::Xmm15
+            | X86Reg::Ymm0 | X86Reg::Ymm1 | X86Reg::Ymm2 | X86Reg::Ymm3
+            | X86Reg::Ymm4 | X86Reg::Ymm5 | X86Reg::Ymm6 | X86Reg::Ymm7
+            | X86Reg::Ymm8 | X86Reg::Ymm9 | X86Reg::Ymm10 | X86Reg::Ymm11
+            | X86Reg::Ymm12 | X86Reg::Ymm13 | X86Reg::Ymm14 | X86Reg::Ymm15
+            | X86Reg::Zmm0 | X86Reg::Zmm1 | X86Reg::Zmm2 | X86Reg::Zmm3
+            | X86Reg::Zmm4 | X86Reg::Zmm5 | X86Reg::Zmm6 | X86Reg::Zmm7
+            | X86Reg::Zmm8 | X86Reg::Zmm9 | X86Reg::Zmm10 | X86Reg::Zmm11
+            | X86Reg::Zmm12 | X86Reg::Zmm13 | X86Reg::Zmm14 | X86Reg::Zmm15
+            | X86Reg::Zmm16 | X86Reg::Zmm17 | X86Reg::Zmm18 | X86Reg::Zmm19
+            | X86Reg::Zmm20 | X86Reg::Zmm21 | X86Reg::Zmm22 | X86Reg::Zmm23
+            | X86Reg::Zmm24 | X86Reg::Zmm25 | X86Reg::Zmm26 | X86Reg::Zmm27
+            | X86Reg::Zmm28 | X86Reg::Zmm29 | X86Reg::Zmm30 | X86Reg::Zmm31 => 0,
         };
         v
     }
@@ -438,6 +472,40 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
             X86Reg::Tsc => cpu.set_tsc_for_api(val),
             X86Reg::Efer => cpu.set_efer_for_api(val),
+
+            // FPU scalar registers
+            X86Reg::FpSw => cpu.set_fpu_sw_for_api(val as u16),
+            X86Reg::FpCw => cpu.set_fpu_cw_for_api(val as u16),
+            X86Reg::FpTag => cpu.set_fpu_tag_for_api(val as u16),
+            X86Reg::Mxcsr => cpu.set_mxcsr_for_api(val as u32),
+            X86Reg::Opmask0 => cpu.opmask_write_for_api(0, val),
+            X86Reg::Opmask1 => cpu.opmask_write_for_api(1, val),
+            X86Reg::Opmask2 => cpu.opmask_write_for_api(2, val),
+            X86Reg::Opmask3 => cpu.opmask_write_for_api(3, val),
+            X86Reg::Opmask4 => cpu.opmask_write_for_api(4, val),
+            X86Reg::Opmask5 => cpu.opmask_write_for_api(5, val),
+            X86Reg::Opmask6 => cpu.opmask_write_for_api(6, val),
+            X86Reg::Opmask7 => cpu.opmask_write_for_api(7, val),
+
+            // Wide registers — use dedicated methods, ignore from scalar path
+            X86Reg::Fpr0 | X86Reg::Fpr1 | X86Reg::Fpr2 | X86Reg::Fpr3
+            | X86Reg::Fpr4 | X86Reg::Fpr5 | X86Reg::Fpr6 | X86Reg::Fpr7
+            | X86Reg::Xmm0 | X86Reg::Xmm1 | X86Reg::Xmm2 | X86Reg::Xmm3
+            | X86Reg::Xmm4 | X86Reg::Xmm5 | X86Reg::Xmm6 | X86Reg::Xmm7
+            | X86Reg::Xmm8 | X86Reg::Xmm9 | X86Reg::Xmm10 | X86Reg::Xmm11
+            | X86Reg::Xmm12 | X86Reg::Xmm13 | X86Reg::Xmm14 | X86Reg::Xmm15
+            | X86Reg::Ymm0 | X86Reg::Ymm1 | X86Reg::Ymm2 | X86Reg::Ymm3
+            | X86Reg::Ymm4 | X86Reg::Ymm5 | X86Reg::Ymm6 | X86Reg::Ymm7
+            | X86Reg::Ymm8 | X86Reg::Ymm9 | X86Reg::Ymm10 | X86Reg::Ymm11
+            | X86Reg::Ymm12 | X86Reg::Ymm13 | X86Reg::Ymm14 | X86Reg::Ymm15
+            | X86Reg::Zmm0 | X86Reg::Zmm1 | X86Reg::Zmm2 | X86Reg::Zmm3
+            | X86Reg::Zmm4 | X86Reg::Zmm5 | X86Reg::Zmm6 | X86Reg::Zmm7
+            | X86Reg::Zmm8 | X86Reg::Zmm9 | X86Reg::Zmm10 | X86Reg::Zmm11
+            | X86Reg::Zmm12 | X86Reg::Zmm13 | X86Reg::Zmm14 | X86Reg::Zmm15
+            | X86Reg::Zmm16 | X86Reg::Zmm17 | X86Reg::Zmm18 | X86Reg::Zmm19
+            | X86Reg::Zmm20 | X86Reg::Zmm21 | X86Reg::Zmm22 | X86Reg::Zmm23
+            | X86Reg::Zmm24 | X86Reg::Zmm25 | X86Reg::Zmm26 | X86Reg::Zmm27
+            | X86Reg::Zmm28 | X86Reg::Zmm29 | X86Reg::Zmm30 | X86Reg::Zmm31 => {},
         }
 
     }
@@ -488,6 +556,11 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             cr4: cpu.cr4_for_api(),
             cpl: cpu.cpl_for_api(),
             icount: cpu.icount_for_api(),
+            fpu_regs: core::array::from_fn(|i| cpu.fpu_read_st(i)),
+            fpu_sw: cpu.fpu_sw_for_api(),
+            fpu_cw: cpu.fpu_cw_for_api(),
+            mxcsr: cpu.mxcsr_for_api(),
+            xmm: core::array::from_fn(|i| cpu.xmm_read_for_api(i)),
         }
     }
 
@@ -525,6 +598,111 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         self.reg_write(X86Reg::Cr3, snap.cr3);
         self.reg_write(X86Reg::Cr4, snap.cr4);
     }
+}
+
+// ─────────────────────────── Wide register read/write ───────────────────────────
+
+impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+    /// Read an x87 FPU register as 10 bytes (80-bit extended precision).
+    /// `reg` must be Fpr0..Fpr7.
+    pub fn reg_read_fp80(&self, reg: X86Reg) -> [u8; 10] {
+        let index = match reg {
+            X86Reg::Fpr0 => 0, X86Reg::Fpr1 => 1, X86Reg::Fpr2 => 2, X86Reg::Fpr3 => 3,
+            X86Reg::Fpr4 => 4, X86Reg::Fpr5 => 5, X86Reg::Fpr6 => 6, X86Reg::Fpr7 => 7,
+            _ => return [0u8; 10],
+        };
+        self.cpu.fpu_read_st(index)
+    }
+
+    pub fn reg_write_fp80(&mut self, reg: X86Reg, val: [u8; 10]) {
+        let index = match reg {
+            X86Reg::Fpr0 => 0, X86Reg::Fpr1 => 1, X86Reg::Fpr2 => 2, X86Reg::Fpr3 => 3,
+            X86Reg::Fpr4 => 4, X86Reg::Fpr5 => 5, X86Reg::Fpr6 => 6, X86Reg::Fpr7 => 7,
+            _ => return,
+        };
+        self.cpu.fpu_write_st(index, val);
+    }
+
+    pub fn reg_read_xmm(&self, reg: X86Reg) -> [u8; 16] {
+        let index = match reg {
+            X86Reg::Xmm0 => 0, X86Reg::Xmm1 => 1, X86Reg::Xmm2 => 2, X86Reg::Xmm3 => 3,
+            X86Reg::Xmm4 => 4, X86Reg::Xmm5 => 5, X86Reg::Xmm6 => 6, X86Reg::Xmm7 => 7,
+            X86Reg::Xmm8 => 8, X86Reg::Xmm9 => 9, X86Reg::Xmm10 => 10, X86Reg::Xmm11 => 11,
+            X86Reg::Xmm12 => 12, X86Reg::Xmm13 => 13, X86Reg::Xmm14 => 14, X86Reg::Xmm15 => 15,
+            _ => return [0u8; 16],
+        };
+        self.cpu.xmm_read_for_api(index)
+    }
+
+    pub fn reg_write_xmm(&mut self, reg: X86Reg, val: [u8; 16]) {
+        let index = match reg {
+            X86Reg::Xmm0 => 0, X86Reg::Xmm1 => 1, X86Reg::Xmm2 => 2, X86Reg::Xmm3 => 3,
+            X86Reg::Xmm4 => 4, X86Reg::Xmm5 => 5, X86Reg::Xmm6 => 6, X86Reg::Xmm7 => 7,
+            X86Reg::Xmm8 => 8, X86Reg::Xmm9 => 9, X86Reg::Xmm10 => 10, X86Reg::Xmm11 => 11,
+            X86Reg::Xmm12 => 12, X86Reg::Xmm13 => 13, X86Reg::Xmm14 => 14, X86Reg::Xmm15 => 15,
+            _ => return,
+        };
+        self.cpu.xmm_write_for_api(index, val);
+    }
+
+    pub fn reg_read_ymm(&self, reg: X86Reg) -> [u8; 32] {
+        let index = match reg {
+            X86Reg::Ymm0 => 0, X86Reg::Ymm1 => 1, X86Reg::Ymm2 => 2, X86Reg::Ymm3 => 3,
+            X86Reg::Ymm4 => 4, X86Reg::Ymm5 => 5, X86Reg::Ymm6 => 6, X86Reg::Ymm7 => 7,
+            X86Reg::Ymm8 => 8, X86Reg::Ymm9 => 9, X86Reg::Ymm10 => 10, X86Reg::Ymm11 => 11,
+            X86Reg::Ymm12 => 12, X86Reg::Ymm13 => 13, X86Reg::Ymm14 => 14, X86Reg::Ymm15 => 15,
+            _ => return [0u8; 32],
+        };
+        self.cpu.ymm_read_for_api(index)
+    }
+
+    pub fn reg_write_ymm(&mut self, reg: X86Reg, val: [u8; 32]) {
+        let index = match reg {
+            X86Reg::Ymm0 => 0, X86Reg::Ymm1 => 1, X86Reg::Ymm2 => 2, X86Reg::Ymm3 => 3,
+            X86Reg::Ymm4 => 4, X86Reg::Ymm5 => 5, X86Reg::Ymm6 => 6, X86Reg::Ymm7 => 7,
+            X86Reg::Ymm8 => 8, X86Reg::Ymm9 => 9, X86Reg::Ymm10 => 10, X86Reg::Ymm11 => 11,
+            X86Reg::Ymm12 => 12, X86Reg::Ymm13 => 13, X86Reg::Ymm14 => 14, X86Reg::Ymm15 => 15,
+            _ => return,
+        };
+        self.cpu.ymm_write_for_api(index, val);
+    }
+
+    pub fn reg_read_zmm(&self, reg: X86Reg) -> [u8; 64] {
+        let index = match reg {
+            X86Reg::Zmm0 => 0, X86Reg::Zmm1 => 1, X86Reg::Zmm2 => 2, X86Reg::Zmm3 => 3,
+            X86Reg::Zmm4 => 4, X86Reg::Zmm5 => 5, X86Reg::Zmm6 => 6, X86Reg::Zmm7 => 7,
+            X86Reg::Zmm8 => 8, X86Reg::Zmm9 => 9, X86Reg::Zmm10 => 10, X86Reg::Zmm11 => 11,
+            X86Reg::Zmm12 => 12, X86Reg::Zmm13 => 13, X86Reg::Zmm14 => 14, X86Reg::Zmm15 => 15,
+            X86Reg::Zmm16 => 16, X86Reg::Zmm17 => 17, X86Reg::Zmm18 => 18, X86Reg::Zmm19 => 19,
+            X86Reg::Zmm20 => 20, X86Reg::Zmm21 => 21, X86Reg::Zmm22 => 22, X86Reg::Zmm23 => 23,
+            X86Reg::Zmm24 => 24, X86Reg::Zmm25 => 25, X86Reg::Zmm26 => 26, X86Reg::Zmm27 => 27,
+            X86Reg::Zmm28 => 28, X86Reg::Zmm29 => 29, X86Reg::Zmm30 => 30, X86Reg::Zmm31 => 31,
+            _ => return [0u8; 64],
+        };
+        self.cpu.zmm_read_for_api(index)
+    }
+
+    pub fn reg_write_zmm(&mut self, reg: X86Reg, val: [u8; 64]) {
+        let index = match reg {
+            X86Reg::Zmm0 => 0, X86Reg::Zmm1 => 1, X86Reg::Zmm2 => 2, X86Reg::Zmm3 => 3,
+            X86Reg::Zmm4 => 4, X86Reg::Zmm5 => 5, X86Reg::Zmm6 => 6, X86Reg::Zmm7 => 7,
+            X86Reg::Zmm8 => 8, X86Reg::Zmm9 => 9, X86Reg::Zmm10 => 10, X86Reg::Zmm11 => 11,
+            X86Reg::Zmm12 => 12, X86Reg::Zmm13 => 13, X86Reg::Zmm14 => 14, X86Reg::Zmm15 => 15,
+            X86Reg::Zmm16 => 16, X86Reg::Zmm17 => 17, X86Reg::Zmm18 => 18, X86Reg::Zmm19 => 19,
+            X86Reg::Zmm20 => 20, X86Reg::Zmm21 => 21, X86Reg::Zmm22 => 22, X86Reg::Zmm23 => 23,
+            X86Reg::Zmm24 => 24, X86Reg::Zmm25 => 25, X86Reg::Zmm26 => 26, X86Reg::Zmm27 => 27,
+            X86Reg::Zmm28 => 28, X86Reg::Zmm29 => 29, X86Reg::Zmm30 => 30, X86Reg::Zmm31 => 31,
+            _ => return,
+        };
+        self.cpu.zmm_write_for_api(index, val);
+    }
+
+    // ── Exit set API ─────────────────────────────────────────────────────
+
+    pub fn set_exits(&mut self, addrs: &[u64]) { self.exit_set.set(addrs); }
+    pub fn clear_exits(&mut self) { self.exit_set.clear(); }
+    pub fn add_exit(&mut self, addr: u64) -> bool { self.exit_set.add(addr) }
+    pub fn remove_exit(&mut self, addr: u64) -> bool { self.exit_set.remove(addr) }
 }
 
 // ─────────────────────────── mem_read / mem_write ───────────────────────────
@@ -829,6 +1007,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
             if until.is_some_and(|a| self.cpu.rip() == a) {
                 return Ok(EmuStopReason::ReachedUntil);
+            }
+            // Check exit addresses
+            if !self.exit_set.is_empty() {
+                let rip = self.cpu.rip();
+                if self.exit_set.contains(rip) {
+                    return Ok(EmuStopReason::ReachedExit(rip));
+                }
             }
             if n == 0 && self.cpu.is_waiting_for_event() {
                 return Ok(EmuStopReason::Halted);

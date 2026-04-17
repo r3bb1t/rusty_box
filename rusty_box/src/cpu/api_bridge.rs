@@ -364,4 +364,77 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(crate) fn translate_linear_for_api(&self, laddr: u64) -> super::Result<u64> {
         self.translate_linear_system_read(laddr)
     }
+
+    // ── FPU read/write ─────────────────────────────────────────────
+
+    /// Read an x87 FPU register as 10 raw bytes (80-bit extended precision).
+    /// `index` is 0-7 (ST(0) through ST(7), physical index = (tos + index) & 7).
+    pub(crate) fn fpu_read_st(&self, index: usize) -> [u8; 10] {
+        let phys = (self.the_i387.tos as usize + index) & 7;
+        let reg = self.the_i387.st_space[phys];
+        let mut buf = [0u8; 10];
+        buf[..8].copy_from_slice(&reg.signif.to_le_bytes());
+        buf[8..10].copy_from_slice(&reg.sign_exp.to_le_bytes());
+        buf
+    }
+
+    /// Write an x87 FPU register from 10 raw bytes.
+    pub(crate) fn fpu_write_st(&mut self, index: usize, val: [u8; 10]) {
+        use super::softfloat3e::softfloat_types::floatx80;
+        let phys = (self.the_i387.tos as usize + index) & 7;
+        let signif = u64::from_le_bytes(val[..8].try_into().unwrap());
+        let sign_exp = u16::from_le_bytes(val[8..10].try_into().unwrap());
+        self.the_i387.st_space[phys] = floatx80 { signif, sign_exp };
+    }
+
+    // ── XMM/YMM/ZMM read/write ─────────────────────────────────────
+
+    pub(crate) fn xmm_read_for_api(&self, index: usize) -> [u8; 16] {
+        self.vmm[index].zmm128(0).bytes
+    }
+
+    pub(crate) fn xmm_write_for_api(&mut self, index: usize, val: [u8; 16]) {
+        use super::xmm::BxPackedXmmRegister;
+        let xmm = BxPackedXmmRegister { bytes: val };
+        self.vmm[index].set_zmm128(0, xmm);
+    }
+
+    pub(crate) fn ymm_read_for_api(&self, index: usize) -> [u8; 32] {
+        self.vmm[index].zmm256(0).bytes
+    }
+
+    pub(crate) fn ymm_write_for_api(&mut self, index: usize, val: [u8; 32]) {
+        use super::xmm::BxPackedYmmRegister;
+        let ymm = BxPackedYmmRegister { bytes: val };
+        // Clear upper 256 bits, then set lower 256
+        self.vmm[index].clear();
+        self.vmm[index].set_zmm256(0, ymm);
+    }
+
+    pub(crate) fn zmm_read_for_api(&self, index: usize) -> [u8; 64] {
+        self.vmm[index].bytes
+    }
+
+    pub(crate) fn zmm_write_for_api(&mut self, index: usize, val: [u8; 64]) {
+        self.vmm[index].bytes = val;
+    }
+
+    pub(crate) fn opmask_read_for_api(&self, index: usize) -> u64 {
+        self.opmask[index].rrx()
+    }
+
+    pub(crate) fn opmask_write_for_api(&mut self, index: usize, val: u64) {
+        self.opmask[index].set_rrx(val);
+    }
+
+    // ── FPU scalar register access ───────────────────────────────────
+
+    pub(crate) fn fpu_sw_for_api(&self) -> u16 { self.the_i387.swd }
+    pub(crate) fn set_fpu_sw_for_api(&mut self, v: u16) { self.the_i387.swd = v; }
+    pub(crate) fn fpu_cw_for_api(&self) -> u16 { self.the_i387.cwd }
+    pub(crate) fn set_fpu_cw_for_api(&mut self, v: u16) { self.the_i387.cwd = v; }
+    pub(crate) fn fpu_tag_for_api(&self) -> u16 { self.the_i387.twd }
+    pub(crate) fn set_fpu_tag_for_api(&mut self, v: u16) { self.the_i387.twd = v; }
+    pub(crate) fn mxcsr_for_api(&self) -> u32 { self.mxcsr.mxcsr }
+    pub(crate) fn set_mxcsr_for_api(&mut self, v: u32) { self.mxcsr.mxcsr = v; }
 }

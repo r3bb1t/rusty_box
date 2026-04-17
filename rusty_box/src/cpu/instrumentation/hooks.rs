@@ -123,6 +123,22 @@ mod alloc_hooks {
         pub(crate) range: AddrRange<u64>,
         pub(crate) cb: Box<dyn FnMut(&BranchEvent) + Send>,
     }
+
+    pub(crate) struct BlockHook {
+        pub(crate) handle: HookHandle,
+        pub(crate) range: AddrRange<u64>,
+        pub(crate) cb: Box<dyn FnMut(u64, u16) + Send>,
+    }
+
+    pub(crate) struct InvalidInsnHook {
+        pub(crate) handle: HookHandle,
+        pub(crate) cb: Box<dyn FnMut(u64) -> bool + Send>,
+    }
+
+    pub(crate) struct MemUnmappedHook {
+        pub(crate) handle: HookHandle,
+        pub(crate) cb: Box<dyn FnMut(u64, usize, crate::cpu::instrumentation::types::MemAccessRW) -> bool + Send>,
+    }
 }
 
 #[cfg(feature = "instrumentation")]

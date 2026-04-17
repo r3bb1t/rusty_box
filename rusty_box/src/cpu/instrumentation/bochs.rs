@@ -42,7 +42,7 @@
 //! registers through globals).
 
 use super::types::{
-    BranchType, CacheCntrl, CodeSize, HookMask, MemAccessRW, MemType, MwaitFlags,
+    BranchType, CacheCntrl, CodeSize, HookMask, MemAccessRW, MemPerms, MemType, MwaitFlags,
     PrefetchHint, ResetType, TlbCntrl,
 };
 use crate::cpu::decoder::Instruction;
@@ -177,12 +177,32 @@ pub trait Instrumentation {
 
     /// VMX exit event. BOCHS: `BX_INSTR_VMEXIT(cpu_id, reason, qualification)`.
     fn vmexit(&mut self, reason: u32, qualification: u64) {}
+
+    // ── Block ──
+    /// Called at start of each basic block.
+    fn block_start(&mut self, rip: u64, block_size: u16) {}
+
+    // ── Invalid instruction ──
+    /// Called before #UD is raised. Return true to suppress the exception.
+    fn invalid_instruction(&mut self, rip: u64) -> bool { false }
+
+    // ── Unmapped memory ──
+    /// Called when accessing unmapped memory. Return true to suppress fault.
+    fn mem_unmapped(&mut self, laddr: u64, size: usize, rw: MemAccessRW) -> bool { false }
+
+    // ── Permission violation ──
+    /// Called on memory permission violation. Return true to suppress fault.
+    fn mem_perm_violation(&mut self, laddr: u64, size: usize, rw: MemAccessRW, required: MemPerms) -> bool { false }
 }
 
 // ── Unit impl (no-op sentinel) ──────────────────────────────────────────
 
 impl Instrumentation for () {
     fn active_hooks(&self) -> HookMask { HookMask::empty() }
+    fn block_start(&mut self, _rip: u64, _block_size: u16) {}
+    fn invalid_instruction(&mut self, _rip: u64) -> bool { false }
+    fn mem_unmapped(&mut self, _laddr: u64, _size: usize, _rw: MemAccessRW) -> bool { false }
+    fn mem_perm_violation(&mut self, _laddr: u64, _size: usize, _rw: MemAccessRW, _required: MemPerms) -> bool { false }
 }
 
 // ── Tuple composition ───────────────────────────────────────────────────
@@ -338,6 +358,26 @@ macro_rules! impl_instrumentation_tuple {
             fn vmexit(&mut self, reason: u32, qualification: u64) {
                 let ($($T,)+) = self;
                 $($T.vmexit(reason, qualification);)+
+            }
+
+            fn block_start(&mut self, rip: u64, block_size: u16) {
+                let ($($T,)+) = self;
+                $($T.block_start(rip, block_size);)+
+            }
+
+            fn invalid_instruction(&mut self, rip: u64) -> bool {
+                let ($($T,)+) = self;
+                false $(|| $T.invalid_instruction(rip))+
+            }
+
+            fn mem_unmapped(&mut self, laddr: u64, size: usize, rw: MemAccessRW) -> bool {
+                let ($($T,)+) = self;
+                false $(|| $T.mem_unmapped(laddr, size, rw))+
+            }
+
+            fn mem_perm_violation(&mut self, laddr: u64, size: usize, rw: MemAccessRW, required: MemPerms) -> bool {
+                let ($($T,)+) = self;
+                false $(|| $T.mem_perm_violation(laddr, size, rw, required))+
             }
         }
     }

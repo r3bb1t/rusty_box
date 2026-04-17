@@ -4,9 +4,9 @@ pub mod decoder;
 
 pub use instrumentation::{
     BranchEvent, BranchType, CacheCntrl, CodeSize, CpuSetupMode, CpuSnapshot, EmuStopReason,
-    HookMask, HwInterruptEvent, Instrumentation,
+    ExitSet, HookMask, HwInterruptEvent, Instrumentation,
     InvEptType, InvPcidType, IoHookEvent, MemAccessRW, MemHookEvent,
-    MemType, MwaitFlags, PrefetchHint, ResetType, TlbCntrl, X86Reg,
+    MemPerms, MemType, MwaitFlags, PrefetchHint, ResetType, TlbCntrl, X86Reg,
 };
 #[cfg(feature = "instrumentation")]
 pub use instrumentation::{HookHandle, InstrumentationError, IoHookType, MemHookType};

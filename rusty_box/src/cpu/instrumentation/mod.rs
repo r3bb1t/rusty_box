@@ -40,8 +40,8 @@ pub use registry::InstrumentationRegistry;
 pub use registry::InstrumentationError;
 pub use types::{
     BranchEvent, BranchType, CacheCntrl, CodeSize, CpuSetupMode, CpuSnapshot, EmuStopReason,
-    HookMask, HwInterruptEvent, InvEptType, InvPcidType, IoHookEvent,
-    MemAccessRW, MemHookEvent, MemType, MwaitFlags, PrefetchHint, ResetType,
+    ExitSet, HookMask, HwInterruptEvent, InvEptType, InvPcidType, IoHookEvent,
+    MemAccessRW, MemHookEvent, MemPerms, MemType, MwaitFlags, PrefetchHint, ResetType,
     TlbCntrl, X86Reg,
 };
 #[cfg(feature = "instrumentation")]

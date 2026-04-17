@@ -106,6 +106,8 @@ pub struct Emulator<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrum
     #[cfg(feature = "std")]
     bios_output_file: Option<std::fs::File>,
     /// Shared stop flag: when set to true by the GUI thread, run_interactive exits the loop
+    /// Exit addresses for emu_start.
+    pub(crate) exit_set: crate::cpu::instrumentation::ExitSet,
     pub stop_flag: Arc<AtomicBool>,
 }
 
@@ -217,6 +219,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             gui: None,
             #[cfg(feature = "std")]
             bios_output_file: None,
+            exit_set: crate::cpu::instrumentation::ExitSet::new(),
             stop_flag: Arc::new(AtomicBool::new(false)),
         }))
     }
