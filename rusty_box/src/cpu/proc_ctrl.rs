@@ -412,9 +412,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_hlt_mwait() {
             let flags = super::instrumentation::MwaitFlags::from_bits_truncate(self.ecx());
-            let addr = {
-                { self.monitor.monitor_addr }
-            };
+            let addr = self.monitor.monitor_addr;
             self.instrumentation.fire_mwait(addr, 0, flags);
         }
 

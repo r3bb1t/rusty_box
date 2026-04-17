@@ -1,3 +1,7 @@
+// AddrRange and helpers are used by alloc_hooks (instrumentation feature).
+// Without the feature, they appear dead but are part of the public API surface.
+#![allow(dead_code)]
+
 //! Closure-based hook storage (Unicorn-style).
 //!
 //! Each hook category has a small struct holding:

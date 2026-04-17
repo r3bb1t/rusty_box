@@ -24,6 +24,7 @@ gui-egui = ["dep:egui", "dep:eframe"]
 bx_debugger = []
 bx_gdb_stub = []
 instrumentation = ["alloc"]
+profiling = ["std"]
 [dependencies]
 tracing.workspace = true
 thiserror.workspace = true

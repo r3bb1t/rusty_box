@@ -24,6 +24,7 @@
 
 #[cfg(feature = "instrumentation")]
 use alloc::{boxed::Box, vec::Vec};
+#[cfg(feature = "instrumentation")]
 use core::ops::RangeBounds;
 
 use crate::cpu::decoder::Instruction;
@@ -134,6 +135,7 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     /// Recompute `active` from the tracer's active hooks and closure vec
     /// occupancy. Call after any mutation that changes what's installed.
     pub fn refresh_active(&mut self) {
+        #[allow(unused_mut)]
         let mut m = self.tracer.active_hooks();
 
         #[cfg(feature = "instrumentation")]
@@ -171,11 +173,6 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
         }
 
         self.active = m;
-    }
-
-    /// Recompute `active` from the current hook vecs + tracer active hooks.
-    fn recompute_active(&mut self) {
-        self.refresh_active();
     }
 
     // ─────────────────── Hook registration (alloc only) ───────────────────
@@ -346,7 +343,7 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
             ($vec:expr) => {{
                 if let Some(pos) = $vec.iter().position(|h| h.handle == target) {
                     $vec.swap_remove(pos);
-                    self.recompute_active();
+                    self.refresh_active();
                     return Ok(());
                 }
             }};
@@ -439,7 +436,7 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     }
 
     #[inline]
-    pub fn fire_cnear_branch_not_taken(&mut self, branch_rip: u64, fallthrough_rip: u64) {
+    pub fn fire_cnear_branch_not_taken(&mut self, branch_rip: u64, #[allow(unused)] fallthrough_rip: u64) {
         self.tracer.cnear_branch_not_taken(branch_rip);
         #[cfg(feature = "instrumentation")]
         if !self.branch_hooks.is_empty() {
