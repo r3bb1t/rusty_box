@@ -249,7 +249,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // NMI can always wake from HLT (Bochs event.cc)
         if self.pending_event & Self::BX_EVENT_NMI != 0 {
             // Bochs event.cc: reset monitor when waking from MWAIT
-            #[cfg(feature = "bx_support_monitor_mwait")]
             if in_mwait {
                 self.monitor.reset_monitor();
             }
@@ -262,7 +261,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0
             && (self.eflags.contains(EFlags::IF_) || mwait_if) {
                 // Bochs event.cc: reset monitor when waking from MWAIT
-                #[cfg(feature = "bx_support_monitor_mwait")]
                 if in_mwait {
                     self.monitor.reset_monitor();
                 }
@@ -275,7 +273,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if (self.pending_event & Self::BX_EVENT_PENDING_LAPIC_INTR != 0 || self.lapic.intr)
             && (self.eflags.contains(EFlags::IF_) || mwait_if) {
                 // Bochs event.cc: reset monitor when waking from MWAIT
-                #[cfg(feature = "bx_support_monitor_mwait")]
                 if in_mwait {
                     self.monitor.reset_monitor();
                 }

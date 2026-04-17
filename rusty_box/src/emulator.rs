@@ -295,7 +295,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             .init(&mut self.devices, &mut self.memory)?;
         // Initialize PCI bridge DRAM row boundaries from RAM size,
         // and wire PCI bridge to memory_type for immediate PAM updates.
-        #[cfg(feature = "bx_support_pci")]
         {
             let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
             self.device_manager.pci_bridge.init_dram(ramsize_mb);
@@ -358,7 +357,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
         // Register LAPIC timer with pc_system (matches Bochs apic.cc)
         // Timer is registered inactive; activated when LAPIC timer ICR is written.
-        #[cfg(feature = "bx_support_apic")]
         {
             let timer_handle = self.pc_system.register_timer(
                 crate::pc_system::TimerOwner::Lapic,
@@ -472,7 +470,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             .init(&mut self.devices, &mut self.memory)?;
 
         // Initialize PCI bridge DRAM row boundaries from RAM size.
-        #[cfg(feature = "bx_support_pci")]
         {
             let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
             self.device_manager.pci_bridge.init_dram(ramsize_mb);
@@ -530,7 +527,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
         // Register LAPIC timer with pc_system (matches Bochs apic.cc)
         // Timer is registered inactive; activated when LAPIC timer ICR is written.
-        #[cfg(feature = "bx_support_apic")]
         {
             let timer_handle = self.pc_system.register_timer(
                 crate::pc_system::TimerOwner::Lapic,
@@ -965,7 +961,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             return true;
         }
         // APIC path: check LAPIC for pending interrupts
-        #[cfg(feature = "bx_support_apic")]
         if self.cpu.lapic_has_intr() {
             return true;
         }
@@ -986,7 +981,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         // delay and calls ready_to_send_atapi(). We process it here during
         // the next tick, providing the minimum 1-tick delay that separates
         // the PACKET CDB write from the data-ready interrupt.
-        #[cfg(feature = "bx_support_pci")]
         {
             let dm = &mut self.device_manager;
             for ch in 0..2 {
@@ -997,19 +991,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                 }
             }
         }
-        #[cfg(not(feature = "bx_support_pci"))]
-        {
-            for ch in 0..2 {
-                if self.device_manager.harddrv.seek_complete_pending[ch] {
-                    self.device_manager.harddrv.seek_complete_pending[ch] = false;
-                    let crate::iodev::devices::DeviceManager { ref mut harddrv, ref mut pic, .. } = self.device_manager;
-                    let mut stub_pci_ide = crate::iodev::pci_ide::BxPciIde::new();
-                    harddrv.ready_to_send_atapi(ch, pic, &mut stub_pci_ide);
-                }
-            }
-        }
         // Process any deferred PCI port re-registrations and PAM changes
-        #[cfg(feature = "bx_support_pci")]
         self.device_manager
             .process_pci_deferred(&mut self.devices, &mut self.memory);
     }
@@ -1030,7 +1012,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                     self.device_manager.pci_ide.timer(1);
                 }
                 crate::pc_system::TimerOwner::Lapic => {
-                    #[cfg(feature = "bx_support_apic")]
                     {
                         self.cpu.lapic.timer_fired = true;
                     }
@@ -1064,7 +1045,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             self.cpu.lapic.intr_pending = false;
         }
         // IOAPIC: drain pending deliveries to LAPIC
-        #[cfg(feature = "bx_support_apic")]
         {
             let (deliveries, count) = self.device_manager.ioapic.take_pending_deliveries();
             if count > 0 {
@@ -1665,7 +1645,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             let result = unsafe { self.run_cpu_batch(batch_size) };
 
             // Apply PAM register changes immediately (BIOS needs this before next batch)
-            #[cfg(feature = "bx_support_pci")]
             if self.device_manager.pam_needs_update {
                 self.device_manager.process_pci_deferred(&mut self.devices, &mut self.memory);
             }
@@ -1924,7 +1903,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                     break;
                                 }
                                 // 1. Process pending LAPIC requests FIRST so timers are active
-                                #[cfg(feature = "bx_support_apic")]
                                 {
                                     if self.cpu.lapic.timer_fired {
                                         self.cpu.lapic.timer_fired = false;
@@ -1977,7 +1955,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                             }
 
                             // If LAPIC has a pending interrupt, signal CPU
-                            #[cfg(feature = "bx_support_apic")]
                             if self.cpu.lapic_has_intr() {
                                 self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
                             }
@@ -2021,7 +1998,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                     self.dispatch_timer_fires();
                                     self.sync_event_flags();
                                     // LAPIC sync
-                                    #[cfg(feature = "bx_support_apic")]
                                     {
                                         let tn = self.pc_system.time_ticks();
                                         self.cpu.lapic.current_ticks = tn;
@@ -2056,7 +2032,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                 let mut hlt2 = 0u64;
                                 while hlt2 < 100_000_000 {
                                     if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if2) { break; }
-                                    #[cfg(feature = "bx_support_apic")]
                                     {
                                         if self.cpu.lapic.timer_fired { self.cpu.lapic.timer_fired = false; let t = self.pc_system.time_ticks(); self.cpu.lapic.periodic(t); }
                                         if self.cpu.lapic.timer_deactivate_request {
@@ -2079,7 +2054,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                     self.tick_devices(du);
                                     self.sync_event_flags();
                                 }
-                                #[cfg(feature = "bx_support_apic")]
                                 if self.cpu.lapic_has_intr() { self.cpu.signal_event(1 << 2); }
                             }
                         } else {
@@ -2104,7 +2078,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                     // IMPORTANT: The lapic borrow must not be held across calls to
                     // check_timers() / dispatch_timer_fires() / sync_event_flags(),
                     // because the timer callback also accesses BxLocalApic.
-                    #[cfg(feature = "bx_support_apic")]
                     {
                         // Sync LAPIC tick tracking for live timer reads
                         let ticks_now = self.pc_system.time_ticks();
@@ -2451,7 +2424,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             self.sync_event_flags();
 
             // --- LAPIC timer catchup ---
-            #[cfg(feature = "bx_support_apic")]
             {
                 let ticks_now = self.pc_system.time_ticks();
                 self.cpu.lapic.current_ticks = ticks_now;
@@ -2513,7 +2485,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                 let hlt_wall_start = std::time::Instant::now();
                 while hlt_budget < 100_000_000 {
                     if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) { break; }
-                    #[cfg(feature = "bx_support_apic")]
                     {
                         if self.cpu.lapic.timer_fired {
                             self.cpu.lapic.timer_fired = false;
@@ -2559,7 +2530,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                         }
                     }
                 }
-                #[cfg(feature = "bx_support_apic")]
                 if self.cpu.lapic_has_intr() {
                     self.cpu.signal_event(1 << 2);
                 }

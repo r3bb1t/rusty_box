@@ -121,7 +121,6 @@ pub struct BxDevicesC {
     /// PCI enabled flag
     pci_enabled: bool,
     /// PCI configuration address register (port 0xCF8)
-    #[cfg(feature = "bx_support_pci")]
     pci_conf_addr: u32,
 
     /// Bochs BIOS/debug output ports (always-on).
@@ -184,7 +183,6 @@ impl BxDevicesC {
             read_handlers,
             write_handlers,
             pci_enabled: false,
-            #[cfg(feature = "bx_support_pci")]
             pci_conf_addr: 0,
             port_e9_output: VecDeque::new(),
             port80_output: VecDeque::new(),
@@ -271,7 +269,6 @@ impl BxDevicesC {
             if let Some(dm) = self.device_manager_mut() {
                 let result = Self::dispatch_read(dm, device_id, port, io_len, icount);
                 // Drain PIC IOAPIC forwarding queue after device handler
-                #[cfg(feature = "bx_support_apic")]
                 {
                     let (fwds, count) = dm.pic.take_ioapic_forwards();
                     for &(irq, level) in &fwds[..count] {
@@ -279,7 +276,6 @@ impl BxDevicesC {
                             irq,
                             level,
                             None,
-                            #[cfg(feature = "bx_support_apic")]
                             None,
                         );
                     }
@@ -317,7 +313,6 @@ impl BxDevicesC {
             let dispatched = if let Some(dm) = self.device_manager_mut() {
                 Self::dispatch_write(dm, device_id, port, value, io_len);
                 // Drain PIC IOAPIC forwarding queue after device handler
-                #[cfg(feature = "bx_support_apic")]
                 {
                     let (fwds, count) = dm.pic.take_ioapic_forwards();
                     for &(irq, level) in &fwds[..count] {
@@ -325,7 +320,6 @@ impl BxDevicesC {
                             irq,
                             level,
                             None,
-                            #[cfg(feature = "bx_support_apic")]
                             None,
                         );
                     }
@@ -341,7 +335,6 @@ impl BxDevicesC {
             if pic_cleared { self.pic_irq_cleared = true; }
             // dm borrow dropped; apply PAM update with fresh borrows
             if dispatched {
-                #[cfg(feature = "bx_support_pci")]
                 self.apply_pending_pam();
                 return;
             }
@@ -366,16 +359,9 @@ impl BxDevicesC {
             return 0;
         }
         if let Some(dm) = self.device_manager_mut() {
-            #[cfg(feature = "bx_support_pci")]
             {
                 let devices::DeviceManager { ref mut harddrv, ref mut pic, ref mut pci_ide, .. } = *dm;
                 harddrv.bulk_read_data(port, buf, pic, pci_ide)
-            }
-            #[cfg(not(feature = "bx_support_pci"))]
-            {
-                let devices::DeviceManager { ref mut harddrv, ref mut pic, .. } = *dm;
-                let mut stub_pci_ide = super::pci_ide::BxPciIde::new();
-                harddrv.bulk_read_data(port, buf, pic, &mut stub_pci_ide)
             }
         } else {
             0
@@ -496,7 +482,6 @@ impl BxDevicesC {
     /// Requires simultaneous access to device_manager (for pci_bridge) and mem,
     /// so the two NonNull derefs are centralized here rather than using the
     /// individual accessors (which would conflict on `&mut self`).
-    #[cfg(feature = "bx_support_pci")]
     #[inline(always)]
     fn apply_pending_pam(&mut self) {
         // SAFETY: both pointers set by emulator for execution duration; single-threaded.
@@ -524,29 +509,16 @@ impl BxDevicesC {
                 let devices::DeviceManager { ref mut keyboard, ref mut pit, .. } = *dm;
                 keyboard.read(port, io_len, icount, Some(pit))
             }
-            #[cfg(feature = "bx_support_pci")]
             DeviceId::HardDrive => {
                 let devices::DeviceManager { ref mut harddrv, ref mut pic, ref mut pci_ide, .. } = *dm;
                 harddrv.read(port, io_len, pic, pci_ide)
             }
-            #[cfg(not(feature = "bx_support_pci"))]
-            DeviceId::HardDrive => {
-                let devices::DeviceManager { ref mut harddrv, ref mut pic, .. } = *dm;
-                let mut stub_pci_ide = super::pci_ide::BxPciIde::new();
-                harddrv.read(port, io_len, pic, &mut stub_pci_ide)
-            }
             DeviceId::Serial => dm.serial.read(port, io_len),
             DeviceId::Vga => dm.vga.read_port(port, io_len, icount),
             DeviceId::Port92 => dm.port92_read(port, io_len),
-            #[cfg(feature = "bx_support_pci")]
             DeviceId::Pci => dm.pci_read(port, io_len),
-            #[cfg(feature = "bx_support_pci")]
             DeviceId::Acpi => dm.acpi_read(port, io_len),
-            #[cfg(feature = "bx_support_pci")]
             DeviceId::PciIde => dm.pci_ide_read(port, io_len),
-            // Without PCI feature, these variants are unreachable but must compile
-            #[cfg(not(feature = "bx_support_pci"))]
-            DeviceId::Pci | DeviceId::Acpi | DeviceId::PciIde => 0xFFFF_FFFF,
             DeviceId::Ioapic => 0xFF, // IOAPIC uses MMIO, not port I/O
             DeviceId::None => 0xFFFF_FFFF,
         }
@@ -564,28 +536,16 @@ impl BxDevicesC {
                 let devices::DeviceManager { ref mut keyboard, ref mut pit, .. } = *dm;
                 keyboard.write(port, value, io_len, Some(pit))
             }
-            #[cfg(feature = "bx_support_pci")]
             DeviceId::HardDrive => {
                 let devices::DeviceManager { ref mut harddrv, ref mut pic, ref mut pci_ide, .. } = *dm;
                 harddrv.write(port, value, io_len, pic, pci_ide)
             }
-            #[cfg(not(feature = "bx_support_pci"))]
-            DeviceId::HardDrive => {
-                let devices::DeviceManager { ref mut harddrv, ref mut pic, .. } = *dm;
-                let mut stub_pci_ide = super::pci_ide::BxPciIde::new();
-                harddrv.write(port, value, io_len, pic, &mut stub_pci_ide)
-            }
             DeviceId::Serial => dm.serial.write(port, value, io_len),
             DeviceId::Vga => dm.vga.write_port(port, value, io_len),
             DeviceId::Port92 => dm.port92_write(port, value, io_len),
-            #[cfg(feature = "bx_support_pci")]
             DeviceId::Pci => dm.pci_write(port, value, io_len),
-            #[cfg(feature = "bx_support_pci")]
             DeviceId::Acpi => dm.acpi_write(port, value, io_len),
-            #[cfg(feature = "bx_support_pci")]
             DeviceId::PciIde => dm.pci_ide_write(port, value, io_len),
-            #[cfg(not(feature = "bx_support_pci"))]
-            DeviceId::Pci | DeviceId::Acpi | DeviceId::PciIde => {},
             DeviceId::Ioapic | DeviceId::None => {},
         }
     }

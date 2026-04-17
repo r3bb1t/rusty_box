@@ -460,7 +460,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
 
     pub(super) msr: BxRegsMsr,
 
-    #[cfg(feature = "bx_configure_msrs")]
     pub(super) msrs: [MSR; BX_MSR_MAX_INDEX],
 
     pub(super) amx: Option<AMX>,
@@ -788,13 +787,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Check LAPIC IRR/ISR for a specific vector (immutable access for diagnostics).
-    #[cfg(feature = "bx_support_apic")]
     pub(crate) fn lapic_vector_state(&self, vector: u8) -> (bool, bool) {
         self.lapic.vector_state(vector)
     }
 
     /// Check if the LAPIC has a pending interrupt (immutable access).
-    #[cfg(feature = "bx_support_apic")]
     pub(crate) fn lapic_has_intr(&self) -> bool {
         self.lapic.intr
     }
@@ -1043,23 +1040,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 }
 
-#[cfg(feature = "bx_support_monitor_mwait")]
 #[derive(Debug, Default)]
 pub struct MonitorAddr {
     pub(super) monitor_addr: BxPhyAddress,
     armed_by: u32,
 }
 
-#[cfg(feature = "bx_support_monitor_mwait")]
 pub(super) const BX_MONITOR_NOT_ARMED: u32 = 0;
-#[cfg(feature = "bx_support_monitor_mwait")]
 pub(super) const BX_MONITOR_ARMED_BY_MONITOR: u32 = 1;
-#[cfg(feature = "bx_support_monitor_mwait")]
 pub(super) const BX_MONITOR_ARMED_BY_MONITORX: u32 = 2;
-#[cfg(feature = "bx_support_monitor_mwait")]
 pub(super) const BX_MONITOR_ARMED_BY_UMONITOR: u32 = 3;
 
-#[cfg(feature = "bx_support_monitor_mwait")]
 impl MonitorAddr {
     const CACHE_LINE_SIZE: u64 = 64;
 
@@ -2770,7 +2761,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Matches BX_CPU_C::BxNoSSE from proc_ctrl.cc
     /// Only available if CPU_LEVEL >= 6
     /// Raises #UD if CR0.EM is set or CR4.OSFXSR is clear, #NM if CR0.TS is set
-    #[cfg(feature = "bx_support_sse")]
     pub(super) fn bx_no_sse(&mut self, instr: &Instruction) -> Result<()> {
         let cr0 = self.cr0.get32();
         let cr4 = self.cr4.get32();
@@ -2796,7 +2786,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Only available if BX_SUPPORT_AVX
     /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
     /// Raises #NM if CR0.TS is set
-    #[cfg(feature = "bx_support_avx")]
     pub(super) fn bx_no_avx(&mut self, instr: &Instruction) -> Result<()> {
         // Check if in protected mode (CR0.PE = 1)
         let cr0 = self.cr0.get32();
@@ -2838,7 +2827,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Only available if BX_SUPPORT_EVEX
     /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
     /// Raises #NM if CR0.TS is set
-    #[cfg(feature = "bx_support_evex")]
     pub(super) fn bx_no_opmask(&mut self, instr: &Instruction) -> Result<()> {
         // Check if in protected mode (CR0.PE = 1)
         let cr0 = self.cr0.get32();
@@ -2883,7 +2871,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Only available if BX_SUPPORT_EVEX
     /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
     /// Raises #NM if CR0.TS is set
-    #[cfg(feature = "bx_support_evex")]
     pub(super) fn bx_no_evex(&mut self, instr: &Instruction) -> Result<()> {
         // Check if in protected mode (CR0.PE = 1)
         let cr0 = self.cr0.get32();
@@ -2938,7 +2925,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Matches BX_CPU_C::BxNoAMX from proc_ctrl.cc
     /// Only available if BX_SUPPORT_AMX
     /// Raises #UD if not in long64 mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
-    #[cfg(feature = "bx_support_amx")]
     pub(super) fn bx_no_amx(&mut self, instr: &Instruction) -> Result<()> {
         if !self.long64_mode() {
             self.exception(Exception::Ud, 0)?;
@@ -3019,7 +3005,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         // Handler assignment logic (matching original lines 2045-2061)
         let mut selected_handler: Option<InstructionHandler<I, T>> = None;
-        let is_bx_error = false; // Track if BxError handler was assigned
+        let mut is_bx_error = false; // Track if BxError handler was assigned
 
         if let Some(entry) = &opcode_entry {
             // Handler assignment from table
@@ -3056,7 +3042,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         // EVEX-specific checks (matching lines 2067-2084)
         // These checks assign BxError IMMEDIATELY if EVEX rules are violated
-        #[cfg(feature = "bx_support_evex")]
         {
             if op_flags.contains(OpFlags::PREPARE_EVEX) {
                 if instr.get_evex_b() != 0 {
@@ -3068,7 +3053,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                                 ia_opcode
                             );
                             // Matching C++ line 2073: assign BxError immediately
-                            selected_handler = Some(Self::bx_error);
+                            selected_handler = Some(super::opcodes_table::bx_error_wrapper);
                             is_bx_error = true;
                         }
                     } else {
@@ -3079,8 +3064,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                                 ia_opcode
                             );
                             // Matching C++ line 2079: assign BxError immediately
-                            use super::opcodes_table::bx_error_wrapper;
-                            selected_handler = Some(bx_error_wrapper);
+                            selected_handler = Some(super::opcodes_table::bx_error_wrapper);
                             is_bx_error = true;
                         }
                     }
@@ -3111,7 +3095,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
 
         // Check SSE availability (CPU_LEVEL >= 6)
-        #[cfg(feature = "bx_support_sse")]
         {
             if !fetch_mode_mask.contains(FetchModeMask::SSE_OK) {
                 if op_flags.contains(OpFlags::PREPARE_SSE) {
@@ -3126,7 +3109,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
 
         // Check AVX availability
-        #[cfg(feature = "bx_support_avx")]
         {
             if !fetch_mode_mask.contains(FetchModeMask::AVX_OK) {
                 if op_flags.contains(OpFlags::PREPARE_AVX) {
@@ -3141,7 +3123,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
 
         // Check OPMASK availability
-        #[cfg(feature = "bx_support_evex")]
         {
             if !fetch_mode_mask.contains(FetchModeMask::OPMASK_OK) {
                 if op_flags.contains(OpFlags::PREPARE_OPMASK) {
@@ -3156,7 +3137,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
 
         // Check EVEX availability
-        #[cfg(feature = "bx_support_evex")]
         {
             if !fetch_mode_mask.contains(FetchModeMask::EVEX_OK) {
                 if op_flags.contains(OpFlags::PREPARE_EVEX) {
@@ -3171,7 +3151,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
 
         // Check AMX availability
-        #[cfg(feature = "bx_support_amx")]
         {
             if !fetch_mode_mask.contains(FetchModeMask::AMX_OK)
                 && op_flags.contains(OpFlags::PREPARE_AMX) {

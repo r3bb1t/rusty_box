@@ -487,7 +487,6 @@ impl BxIoApic {
         address: BxPhyAddress,
         value: u32,
         pic: Option<&mut super::pic::BxPicC>,
-        #[cfg(feature = "bx_support_apic")]
         lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
     ) {
         let offset = (address as u32) & 0xFF;
@@ -559,7 +558,6 @@ impl BxIoApic {
                     // Bochs: service_ioapic(); (ioapic.cc)
                     self.service_ioapic(
                         pic,
-                        #[cfg(feature = "bx_support_apic")]
                         lapic,
                     );
                 } else {
@@ -644,7 +642,6 @@ impl BxIoApic {
         mut int_in: u8,
         level: bool,
         pic: Option<&mut super::pic::BxPicC>,
-        #[cfg(feature = "bx_support_apic")]
         lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
     ) {
         // Bochs: if (int_in == 0) int_in = 2; // timer connected to pin #2 (ioapic.cc)
@@ -677,7 +674,6 @@ impl BxIoApic {
                     self.irr |= bit;
                     self.service_ioapic(
                         pic,
-                        #[cfg(feature = "bx_support_apic")]
                         lapic,
                     );
                 } else {
@@ -693,7 +689,6 @@ impl BxIoApic {
                         self.irr |= bit;
                         self.service_ioapic(
                             pic,
-                            #[cfg(feature = "bx_support_apic")]
                             lapic,
                         );
                     }
@@ -738,7 +733,6 @@ impl BxIoApic {
     fn service_ioapic(
         &mut self,
         mut pic: Option<&mut super::pic::BxPicC>,
-        #[cfg(feature = "bx_support_apic")]
         mut lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
     ) {
         tracing::debug!("IOAPIC: servicing (irr={:#010x})", self.irr);
@@ -782,7 +776,6 @@ impl BxIoApic {
             };
 
             // Attempt delivery via APIC bus → Local APIC
-            #[cfg(feature = "bx_support_apic")]
             let done = if let Some(lapic) = lapic.as_deref_mut() {
                 // Single-CPU: deliver directly to the LAPIC.
                 let trigger = entry.trigger_mode();
@@ -790,12 +783,6 @@ impl BxIoApic {
                 true
             } else {
                 // No LAPIC available (MMIO path) — enqueue for later delivery
-                let trigger = entry.trigger_mode();
-                self.enqueue_delivery(vector, entry.delivery_mode(), trigger);
-                true
-            };
-            #[cfg(not(feature = "bx_support_apic"))]
-            let done = {
                 let trigger = entry.trigger_mode();
                 self.enqueue_delivery(vector, entry.delivery_mode(), trigger);
                 true
@@ -953,7 +940,6 @@ impl BxIoApic {
                 addr,
                 value,
                 None, // no PIC available in MMIO callback
-                #[cfg(feature = "bx_support_apic")]
                 None, // no LAPIC available in MMIO callback
             );
         } else {
@@ -982,7 +968,6 @@ impl BxIoApic {
                 addr,
                 value,
                 None, // no PIC available in MMIO callback
-                #[cfg(feature = "bx_support_apic")]
                 None, // no LAPIC available in MMIO callback
             );
         }
@@ -1131,7 +1116,7 @@ mod tests {
 
         // Write low word of entry 0 (IOREGSEL = 0x10)
         ioapic.ioregsel = 0x10;
-        ioapic.write_aligned(0xFEC00010, 0x00000042, None, #[cfg(feature = "bx_support_apic")] None); // vector=0x42, unmasked
+        ioapic.write_aligned(0xFEC00010, 0x00000042, None, None); // vector=0x42, unmasked
 
         // Read it back
         ioapic.ioregsel = 0x10;
@@ -1141,7 +1126,7 @@ mod tests {
 
         // Write high word of entry 0 (IOREGSEL = 0x11)
         ioapic.ioregsel = 0x11;
-        ioapic.write_aligned(0xFEC00010, 0x03000000, None, #[cfg(feature = "bx_support_apic")] None); // dest = 3
+        ioapic.write_aligned(0xFEC00010, 0x03000000, None, None); // dest = 3
 
         // Read it back
         ioapic.ioregsel = 0x11;
@@ -1156,13 +1141,13 @@ mod tests {
         ioapic.ioredtbl[2].set_lo_part(0x00000020); // vector=0x20, unmasked
 
         // Assert IRQ 0 — should be remapped to pin 2
-        ioapic.set_irq_level(0, true, None, #[cfg(feature = "bx_support_apic")] None);
+        ioapic.set_irq_level(0, true, None, None);
         assert_eq!(ioapic.intin & (1 << 2), 1 << 2);
         // IRR is cleared because service_ioapic() delivered successfully (edge-triggered)
         assert_eq!(ioapic.irr & (1 << 2), 0);
 
         // Deassert
-        ioapic.set_irq_level(0, false, None, #[cfg(feature = "bx_support_apic")] None);
+        ioapic.set_irq_level(0, false, None, None);
         assert_eq!(ioapic.intin & (1 << 2), 0);
     }
 
@@ -1174,13 +1159,13 @@ mod tests {
 
         // Rising edge triggers interrupt — delivery succeeds immediately (stub)
         // so IRR is cleared for edge-triggered entries after service_ioapic().
-        ioapic.set_irq_level(5, true, None, #[cfg(feature = "bx_support_apic")] None);
+        ioapic.set_irq_level(5, true, None, None);
         assert_ne!(ioapic.intin & (1 << 5), 0);
         // IRR was cleared by service_ioapic (delivery succeeded via stub)
         assert_eq!(ioapic.irr & (1 << 5), 0);
 
         // Falling edge clears input
-        ioapic.set_irq_level(5, false, None, #[cfg(feature = "bx_support_apic")] None);
+        ioapic.set_irq_level(5, false, None, None);
         assert_eq!(ioapic.intin & (1 << 5), 0);
     }
 
@@ -1191,12 +1176,12 @@ mod tests {
         ioapic.ioredtbl[10].set_lo_part(0x0000802A); // bit 15 set
 
         // Assert level
-        ioapic.set_irq_level(10, true, None, #[cfg(feature = "bx_support_apic")] None);
+        ioapic.set_irq_level(10, true, None, None);
         assert_ne!(ioapic.intin & (1 << 10), 0);
         assert_ne!(ioapic.irr & (1 << 10), 0);
 
         // Deassert level — both intin and irr cleared
-        ioapic.set_irq_level(10, false, None, #[cfg(feature = "bx_support_apic")] None);
+        ioapic.set_irq_level(10, false, None, None);
         assert_eq!(ioapic.intin & (1 << 10), 0);
         assert_eq!(ioapic.irr & (1 << 10), 0);
     }
@@ -1208,7 +1193,7 @@ mod tests {
         assert!(ioapic.ioredtbl[3].is_masked());
 
         // Rising edge sets intin but NOT irr (because masked)
-        ioapic.set_irq_level(3, true, None, #[cfg(feature = "bx_support_apic")] None);
+        ioapic.set_irq_level(3, true, None, None);
         assert_ne!(ioapic.intin & (1 << 3), 0);
         assert_eq!(ioapic.irr & (1 << 3), 0); // Not set because masked
     }

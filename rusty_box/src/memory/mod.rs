@@ -18,7 +18,7 @@ pub use error::*;
 
 use core::cell::{Cell, UnsafeCell};
 
-#[cfg(all(feature = "bx_large_ram_file", feature = "std"))]
+#[cfg(feature = "std")]
 use std::fs::File;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -50,12 +50,10 @@ pub struct BxMemoryStubC {
     /// Zero-initialized 4KB scratch buffer for APIC MMIO (0xFEE00000-0xFEEFFFFF)
     apic_scratch: [u8; 4096],
 
-    #[cfg(feature = "bx_large_ram_file")]
     next_swapout_idx: Cell<usize>,
-    #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
+    #[cfg(feature = "std")]
     //overflow_file: Option<Arc<Mutex<std::fs::File>>>,
     overflow_file: UnsafeCell<File>,
-    //#[cfg(feature = "bx_large_ram_file")]
     //swapped_out: *const u8,
 }
 
@@ -233,7 +231,7 @@ impl BxMemoryStubC {
     }
 
     /// Get a mutable reference to a memory block by index
-    #[cfg(all(feature = "bx_large_ram_file", feature = "std"))]
+    #[cfg(feature = "std")]
     #[allow(clippy::mut_from_ref)]
     pub fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
         if let Some(Block::Block { offset }) = self.blocks_offsets().get(index) {
@@ -249,7 +247,7 @@ impl BxMemoryStubC {
         }
     }
 
-    #[cfg(all(feature = "bx_large_ram_file", feature = "std"))]
+    #[cfg(feature = "std")]
     #[allow(clippy::mut_from_ref)]
     fn overflow_file_mut(&self) -> &mut File {
         unsafe { &mut *self.overflow_file.get() }
@@ -265,7 +263,6 @@ impl<'m> BxMemC<'m> {
         self.inherited_memory_stub.get_vector(addr, cpus)
     }
 
-    #[cfg(feature = "bx_support_monitor_mwait")]
     pub(super) fn is_monitor<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         cpus: &[&BxCpuC<I, T>],
         begin_addr: BxPhyAddress,

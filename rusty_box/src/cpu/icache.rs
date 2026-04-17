@@ -518,7 +518,6 @@ fn flush_smc(e: &mut BxICacheEntry) {
 
         // If handlers chaining speedups are enabled, generate dummy entry
         // (matching C++ line 66-72)
-        #[cfg(feature = "bx_support_handlers_chaining_speedups")]
         {
             // TODO: Check if debugger is active (matching C++ line 67)
             // For now, always generate dummy entry
@@ -656,15 +655,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         let mut trace_mask = 0u32;
 
-        // Check if this is the stack page and invalidate stack cache if needed
-        // (matching C++ line 115-118: #if BX_SUPPORT_SMP == 0)
-        // Note: In SMP mode, this check is skipped in C++
-        #[cfg(not(feature = "bx_support_smp"))]
-        {
-            if ppf_of(p_addr) == self.p_addr_stack_page {
-                self.invalidate_stack_cache();
-            }
-        }
 
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let is_32_bit_mode = self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
@@ -958,7 +948,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
                     // Add end-of-trace opcode if not in debugger (matching C++ line 158-163)
                     // TODO: Check debugger active state
-                    #[cfg(feature = "bx_support_handlers_chaining_speedups")]
                     {
                         if current_mpindex < BX_ICACHE_MEM_POOL {
                             let entry = &mut self.i_cache.entry[entry_idx];
@@ -987,7 +976,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         // Add end-of-trace opcode if not in debugger (matching C++ line 210-214)
         // TODO: Check debugger active state
-        #[cfg(feature = "bx_support_handlers_chaining_speedups")]
         {
             // Check bounds before accessing mpool
             if current_mpindex < BX_ICACHE_MEM_POOL {
@@ -1157,18 +1145,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // determine max amount of instruction to take from another entry (matching C++ line 231)
         let max_length = cached_tlen;
 
-        #[cfg(feature = "bx_support_handlers_chaining_speedups")]
         {
             if max_length + current_tlen > BX_MAX_TRACE_LENGTH {
-                return false;
-            }
-        }
-        #[cfg(not(feature = "bx_support_handlers_chaining_speedups"))]
-        {
-            if max_length + current_tlen > BX_MAX_TRACE_LENGTH {
-                max_length = BX_MAX_TRACE_LENGTH - current_tlen;
-            }
-            if max_length == 0 {
                 return false;
             }
         }

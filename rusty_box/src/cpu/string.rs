@@ -1448,7 +1448,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     #[inline(never)]
     fn mem_read_byte_slow(&self, addr: u64) -> u8 {
         // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
-        #[cfg(feature = "bx_support_apic")]
         {
             let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
             if self.lapic.is_selected(a20_addr) {
@@ -1513,7 +1512,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     #[inline(never)]
     fn mem_write_byte_slow(&mut self, addr: u64, value: u8) {
         // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
-        #[cfg(feature = "bx_support_apic")]
         {
             let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
             if self.lapic.is_selected(a20_addr) {
@@ -1607,7 +1605,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         // LAPIC MMIO intercept: 32-bit aligned register access
         // Bochs apic.cc read() — LAPIC registers are always dword-accessed.
-        #[cfg(feature = "bx_support_apic")]
         if self.lapic.is_selected(a20_addr as BxPhyAddress) {
             return self.lapic.read(a20_addr as BxPhyAddress, 4, self.icount);
         }
@@ -1639,7 +1636,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         // LAPIC MMIO intercept: 32-bit aligned register access
         // Bochs apic.cc write() — LAPIC registers are always dword-accessed.
-        #[cfg(feature = "bx_support_apic")]
         if self.lapic.is_selected(a20_addr as BxPhyAddress) {
             self.lapic.write(a20_addr as BxPhyAddress, value, 4);
             return;

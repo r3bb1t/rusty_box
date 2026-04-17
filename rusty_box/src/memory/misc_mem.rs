@@ -83,7 +83,6 @@ impl<'c> BxMemC<'c> {
         let is_bios =
             (0xE0000..0x100000).contains(&a20_addr) || a20_addr >= self.bios_rom_addr.into();
 
-        #[cfg(feature = "bx_phy_address_long")]
         let is_bios = if a20_addr > 0xffffffffu64 {
             false
         } else {
@@ -101,7 +100,6 @@ impl<'c> BxMemC<'c> {
                 }
         }
 
-        #[cfg(feature = "bx_support_monitor_mwait")]
         if write && Self::is_monitor(cpus, a20_addr & !(0xfff as BxPhyAddress), 0xfff) {
             // Vetoed! Write monitored page !
             return Ok(None);
@@ -129,7 +127,7 @@ impl<'c> BxMemC<'c> {
             if (0x000a0000..0x000c0000).contains(&a20_addr) {
                 // VGA memory area - vetoed (no handler registered)
                 Ok(None)
-            } else if cfg!(feature = "bx_support_pci")
+            } else if true
                 && self.pci_enabled
                 && (0x000c0000..0x00100000).contains(&a20_addr)
             {
@@ -175,7 +173,7 @@ impl<'c> BxMemC<'c> {
                             .try_into()?..],
                     ))
                 }
-            } else if cfg!(feature = "bx_phy_address_long") && a20_addr > 0xffffffffu64 {
+            } else if true && a20_addr > 0xffffffffu64 {
                 // Error, requested addr is out of bounds.
                 Ok(Some(
                     &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff).try_into()?..],
@@ -209,7 +207,7 @@ impl<'c> BxMemC<'c> {
                 Ok(None)
             } else if (0x000a0000..0x000c0000).contains(&a20_addr) {
                 Ok(None) // Vetoed!  Mem mapped IO (VGA)
-            } else if cfg!(feature = "bx_support_pci")
+            } else if true
                 && (self.pci_enabled && (0x000c0000..0x00100000).contains(&a20_addr))
             {
                 // Veto direct writes to this area. Otherwise, there is a chance
@@ -459,14 +457,12 @@ impl BxMemC<'_> {
             return Err(super::MemoryError::WritePhysicalPage { addr, len }.into());
         }
 
-        #[cfg(feature = "bx_support_monitor_mwait")]
         Self::is_monitor(cpus, a20_addr, len.try_into()?);
 
         // Match Bochs: 0xE0000-0xFFFFF is ALWAYS BIOS ROM, plus addresses >= bios_rom_addr
         // This is critical for rombios32 which is linked to run at 0xE0000!
         let is_bios =
             (0xE0000..0x100000).contains(&a20_addr) || a20_addr >= self.bios_rom_addr.into();
-        #[cfg(feature = "bx_phy_address_long")]
         let is_bios = if a20_addr > 0xffffffffu64 {
             false
         } else {
@@ -559,7 +555,6 @@ impl BxMemC<'_> {
                 }
 
                 // Adapter ROM (0xC0000..0xDFFFF) and ROM BIOS memory (0xE0000..0xFFFFF)
-                #[cfg(feature = "bx_support_pci")]
                 if self.pci_enabled && ((a20_addr & 0xfffc0000) == 0x000c0000) {
                     let area = ((a20_addr >> 14) & 0x0f) as usize;
                     let area = area.min(MemoryAreaT::F0000 as usize);
@@ -592,16 +587,6 @@ impl BxMemC<'_> {
                             data_byte
                         );
                     }
-                }
-
-                #[cfg(not(feature = "bx_support_pci"))]
-                {
-                    // Without PCI support, ignore writes to ROM
-                    tracing::debug!(
-                        "Write to ROM ignored (no PCI): address {:#x}, data {:02x}",
-                        a20_addr,
-                        data_byte
-                    );
                 }
 
                 a20_addr += 1;
@@ -651,7 +636,6 @@ impl BxMemC<'_> {
         // This is critical for rombios32 which is linked to run at 0xE0000!
         let is_bios =
             (0xE0000..0x100000).contains(&a20_addr) || a20_addr >= self.bios_rom_addr.into();
-        #[cfg(feature = "bx_phy_address_long")]
         let is_bios = if a20_addr > 0xffffffffu64 {
             false
         } else {
@@ -695,7 +679,6 @@ impl BxMemC<'_> {
                             unreachable!("unknown MMIO handler device")
                         };
                         if handled {
-                            #[cfg(feature = "bx_support_pci")]
                             if self.pci_enabled && ((a20_addr & 0xfffc0000) == 0x000c0000) {
                                 let area = ((a20_addr >> 14) & 0x0f) as usize;
                                 let area = area.min(MemoryAreaT::F0000 as usize);
@@ -746,7 +729,6 @@ impl BxMemC<'_> {
                 }
 
                 // ROM area (0xC0000..0xFFFFF)
-                #[cfg(feature = "bx_support_pci")]
                 if self.pci_enabled && ((a20_addr & 0xfffc0000) == 0x000c0000) {
                     let area = ((a20_addr >> 14) & 0x0f) as usize;
                     let area = area.min(MemoryAreaT::F0000 as usize);
@@ -780,34 +762,6 @@ impl BxMemC<'_> {
                     }
                 }
 
-                #[cfg(not(feature = "bx_support_pci"))]
-                {
-                    // Without PCI support, read from ROM
-                    if (a20_addr & 0xfffc0000) != 0x000c0000 {
-                        let vector = self.get_vector(cpus, a20_addr)?;
-                        if let Some(byte) = vector.get(0) {
-                            *data_byte = *byte;
-                        }
-                    } else if (a20_addr & 0xfffe0000) == 0x000e0000 {
-                        // Last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF
-                        let rom_offset = bios_map_last128k(a20_addr as usize);
-                        if rom_offset < BIOSROMSZ {
-                            let rom = self.inherited_memory_stub.rom();
-                            if let Some(byte) = rom.get(rom_offset) {
-                                *data_byte = *byte;
-                            }
-                        }
-                    } else {
-                        // Expansion ROM (0xC0000-0xDFFFF)
-                        let rom_offset =
-                            ((a20_addr & EXROM_MASK as u64) + BIOSROMSZ as u64) as usize;
-                        let rom = self.inherited_memory_stub.rom();
-                        if let Some(byte) = rom.get(rom_offset) {
-                            *data_byte = *byte;
-                        }
-                    }
-                }
-
                 a20_addr += 1;
             }
 
@@ -815,7 +769,6 @@ impl BxMemC<'_> {
         } else {
             // Access outside limits of physical memory
 
-            #[cfg(feature = "bx_phy_address_long")]
             if a20_addr > 0xffffffffu64 {
                 data.fill(0xFF);
                 return Ok(());

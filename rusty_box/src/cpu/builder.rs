@@ -82,7 +82,6 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             lapic: Default::default(),
             smbase: Default::default(),
             msr: Default::default(),
-            #[cfg(feature = "bx_configure_msrs")]
             msrs: [Default::default(); BX_MSR_MAX_INDEX],
             amx: Default::default(),
             in_vmx: Default::default(),

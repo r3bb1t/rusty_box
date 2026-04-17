@@ -40,7 +40,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // clear monitor
         self.monitor.reset_monitor();
         // deactivate mwaitx timer if was active to avoid its redundant firing
-        #[cfg(feature = "bx_support_apic")]
         {
             self.lapic.deactivate_mwaitx_timer();
         }

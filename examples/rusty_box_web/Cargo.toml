@@ -8,7 +8,7 @@ repository = "https://github.com/r3bb1t/rusty_box"
 description = "Rusty Box x86 emulator — web frontend"
 
 [dependencies]
-rusty_box = { path = "../../rusty_box", default-features = false, features = ["bx_full", "instrumentation"] }
+rusty_box = { path = "../../rusty_box", default-features = false, features = ["alloc", "instrumentation"] }
 eframe = { workspace = true, features = ["glow", "default_fonts"] }
 egui.workspace = true
 log = "0.4"

@@ -111,7 +111,7 @@ impl BxMemoryStubC {
             0
         };
 
-        #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
+        #[cfg(feature = "std")]
         let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
         Ok(Self {
             actual_vector,
@@ -125,9 +125,8 @@ impl BxMemoryStubC {
 
             used_blocks: Cell::new(used_blocks),
             apic_scratch: [0u8; 4096],
-            #[cfg(feature = "bx_large_ram_file")]
             next_swapout_idx: Cell::new(0),
-            #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
+            #[cfg(feature = "std")]
             overflow_file: UnsafeCell::new(overflow_file),
             //swapped_out,
         })
@@ -158,7 +157,7 @@ impl BxMemoryStubC {
         }
     }
 
-    #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
+    #[cfg(feature = "std")]
     fn read_block(&self, block: usize) -> Result<()> {
         let block_address = block * self.block_size;
         let chosen_block = self.block_by_index(block)
@@ -172,7 +171,7 @@ impl BxMemoryStubC {
     }
 
     pub fn allocate_block<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(&self, block: usize, cpus: &[&BxCpuC<'_, I, T>]) -> Result<()> {
-        #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
+        #[cfg(feature = "std")]
         {
             let max_blocks = self.allocated / self.block_size;
             let used_blocks = self.used_blocks.get();
@@ -248,23 +247,6 @@ impl BxMemoryStubC {
                     self.next_swapout_idx.get()
                 )
             }
-        }
-
-        #[cfg(not(feature = "bx_large_ram_file"))]
-        {
-            // Legacy default allocator
-            if self.used_blocks.get() >= max_blocks {
-                return Err(MemoryError::AllAvailibleMemoryAllocated.into());
-            } else {
-                //BX_MEM_THIS blocks[block] = BX_MEM_THIS vector + (BX_MEM_THIS used_blocks * BX_MEM_THIS block_size);
-                let old_used_blocks = self.used_blocks.get();
-                self.used_blocks.set(old_used_blocks + 1);
-            }
-            tracing::debug!(
-                "allocate_block: used_blocks={:X} of {:X}",
-                self.used_blocks.get(),
-                max_blocks
-            );
         }
 
         Ok(())
@@ -368,7 +350,6 @@ impl BxMemoryStubC {
 
         let write = rw & 1 != 0;
 
-        #[cfg(feature = "bx_support_monitor_mwait")]
         if write && Self::is_monitor(cpus, a20_addr & !0xfff, 0xfff) {
             // TODO: Consider actually returning error
 
@@ -405,7 +386,6 @@ impl BxMemoryStubC {
             return Err(MemoryError::WritePhysicalPage { addr, len }.into());
         }
 
-        #[cfg(feature = "bx_support_monitor_mwait")]
         Self::is_monitor(cpus, a20_addr, len.try_into()?);
 
         if a20_addr < self.len.try_into()? {
@@ -575,7 +555,6 @@ impl BxMemoryStubC {
         }
     }
 
-    #[cfg(feature = "bx_support_monitor_mwait")]
     pub(super) fn is_monitor<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         cpus: &[&BxCpuC<I, T>],
         begin_addr: BxPhyAddress,
@@ -584,7 +563,6 @@ impl BxMemoryStubC {
         cpus.iter().any(|cpu| cpu.is_monitor(begin_addr, len))
     }
 
-    #[cfg(feature = "bx_support_monitor_mwait")]
     fn check_monitor<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         cpus: &mut [BxCpuC<I, T>],
         begin_addr: BxPhyAddress,

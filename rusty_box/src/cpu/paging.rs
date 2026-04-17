@@ -155,13 +155,11 @@ const PRIV_CHECK: [u8; 32] = [
 ];
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
-    #[cfg(feature = "bx_large_ram_file")]
     pub(crate) fn check_addr_in_tlb_buffers(&self, addr: usize, end: usize) -> bool {
         let addr_ptr = addr;
         let end_ptr = end;
 
         // Check VMCS host pointer if VMX is active
-        #[cfg(feature = "bx_support_vmx")]
         {
             // TODO: Implement vmcshostptr when VMX is fully implemented
             // if self.in_vmx_guest && self.vmcshostptr != 0 {
@@ -173,7 +171,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Check VMCB host pointer if SVM is active
-        #[cfg(feature = "bx_support_svm")]
         {
             if self.in_svm_guest && self.vmcbhostptr != 0 {
                 let vmcbhostptr = self.vmcbhostptr as usize;

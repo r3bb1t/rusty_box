@@ -7,6 +7,14 @@
 use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, Result};
 use bitflags::bitflags;
 
+/// Error handler wrapper — lives at module level so cpu.rs can import it.
+pub(super) fn bx_error_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
+    instr: &Instruction,
+) -> Result<()> {
+    cpu.bx_error(instr)
+}
+
 /// Helper macro to create a type-safe wrapper for a handler function
 ///
 /// This macro creates a wrapper function that can be stored in the opcodes table.
@@ -1508,7 +1516,6 @@ pub(super) fn bx_no_mmx_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation:
     cpu.bx_no_mmx(instr)
 }
 
-#[cfg(feature = "bx_support_sse")]
 pub(super) fn bx_no_sse_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
@@ -1516,7 +1523,6 @@ pub(super) fn bx_no_sse_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation:
     cpu.bx_no_sse(instr)
 }
 
-#[cfg(feature = "bx_support_avx")]
 pub(super) fn bx_no_avx_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
@@ -1524,7 +1530,6 @@ pub(super) fn bx_no_avx_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation:
     cpu.bx_no_avx(instr)
 }
 
-#[cfg(feature = "bx_support_evex")]
 pub(super) fn bx_no_opmask_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
@@ -1532,7 +1537,6 @@ pub(super) fn bx_no_opmask_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentati
     cpu.bx_no_opmask(instr)
 }
 
-#[cfg(feature = "bx_support_evex")]
 pub(super) fn bx_no_evex_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
@@ -1540,7 +1544,6 @@ pub(super) fn bx_no_evex_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation
     cpu.bx_no_evex(instr)
 }
 
-#[cfg(feature = "bx_support_amx")]
 pub(super) fn bx_no_amx_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,

@@ -15,13 +15,13 @@ pub enum MemoryError {
     InsufficientRam,
     #[error("Memory is not a multiply of 1 megabyte")]
     MemorySizeIsNotAMultiplyOf1Megabyte,
-    #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
+    #[cfg(feature = "std")]
     #[error("Unable to allocate memory overflow file: {0}")]
     UnableToCreateTempFile(std::io::Error),
-    #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
+    #[cfg(feature = "std")]
     #[error("FATAL ERROR: Could not seek to {0:x} in overflow file! {1}")]
     CantSeekToAddressOverflowFile(usize, std::io::Error),
-    #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
+    #[cfg(feature = "std")]
     #[error("FATAL ERROR: Could not write at {0:x} in overflow file! {1}")]
     FailedToWriteToOverflowFIle(usize, std::io::Error),
     #[error("Internal memory error: {0}")]

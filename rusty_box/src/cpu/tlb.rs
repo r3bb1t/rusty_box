@@ -10,10 +10,7 @@ pub type BxHostpageaddr = BxPtrEquiv;
 
 pub const LPF_MASK: BxAddress = 0xfffffffffffff000u64;
 
-#[cfg(feature = "bx_phy_address_long")]
 const PPF_MASK: BxPhyAddress = 0xfffffffffffff000u64;
-#[cfg(not(feature = "bx_phy_address_long"))]
-const PPF_MASK: BxPhyAddress = 0xfffff000;
 
 const TLB_GLOBAL_PAGE: u32 = 0x80000000;
 
@@ -27,11 +24,9 @@ pub(crate) struct TLBEntry {
     pub(crate) ppf: BxPhyAddress,
     pub(crate) host_page_addr: BxHostpageaddr,
     pub(crate) access_bits: u32,
-    #[cfg(feature = "bx_support_pkeys")]
     pub(super) pkey: u32,
     // linear address mask of the page size
     pub(crate) lpf_mask: u32,
-    #[cfg(feature = "bx_support_memtype")]
     pub(super) memtype: MemType, // (note from bochs)  // keep it Bit32u for alignment
 }
 
@@ -57,12 +52,10 @@ impl TLBEntry {
         let ppf = 0;
         let host_page_addr = 0;
 
-        #[cfg(feature = "bx_support_pkeys")]
         let pkey = 0;
 
         let lpf_mask = 0;
 
-        #[cfg(feature = "bx_support_memtype")]
         let memtype = MemType::default();
 
         Self {
@@ -70,10 +63,8 @@ impl TLBEntry {
             ppf,
             host_page_addr,
             access_bits,
-            #[cfg(feature = "bx_support_pkeys")]
             pkey,
             lpf_mask,
-            #[cfg(feature = "bx_support_memtype")]
             memtype,
         }
     }
@@ -88,14 +79,8 @@ impl TLBEntry {
     }
 
     fn get_memtype(&self) -> MemType {
-        #[cfg(feature = "bx_support_memtype")]
         {
             self.memtype
-        }
-        #[cfg(not(feature = "bx_support_memtype"))]
-        {
-            // emulate the `#else #define MEMTYPE(x) (BX_MEMTYPE_UC)`
-            MemType::UC
         }
     }
 }

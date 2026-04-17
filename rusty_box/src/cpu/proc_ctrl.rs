@@ -366,7 +366,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // on every memory write.)
 
         // Bochs mwait.cc: arm the monitor with the physical address
-        #[cfg(feature = "bx_support_monitor_mwait")]
         {
             self.monitor
                 .arm(paddr, super::cpu::BX_MONITOR_ARMED_BY_MONITOR);
@@ -414,17 +413,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.instrumentation.active.has_hlt_mwait() {
             let flags = super::instrumentation::MwaitFlags::from_bits_truncate(self.ecx());
             let addr = {
-                #[cfg(feature = "bx_support_monitor_mwait")]
                 { self.monitor.monitor_addr }
-                #[cfg(not(feature = "bx_support_monitor_mwait"))]
-                { 0u64 }
             };
             self.instrumentation.fire_mwait(addr, 0, flags);
         }
 
 
         // Bochs mwait.cc: If monitor not armed, just return
-        #[cfg(feature = "bx_support_monitor_mwait")]
         {
             if !self.monitor.armed_by_monitor() {
                 tracing::debug!("MWAIT: monitor not armed or already triggered, returning");
@@ -587,10 +582,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let msr = self.ecx();
         let val: u64 = match msr {
             BX_MSR_TSC => self.get_tsc(self.system_ticks()),
-            #[cfg(feature = "bx_support_apic")]
             BX_MSR_APICBASE => self.msr.apicbase,
-            #[cfg(not(feature = "bx_support_apic"))]
-            BX_MSR_APICBASE => BX_MSR_APICBASE_DEFAULT,
             BX_MSR_BIOS_SIGN_ID => 0x02000065, // Skylake-X microcode revision
             BX_MSR_MTRRCAP => BX_MSR_MTRRCAP_DEFAULT,
             BX_MSR_PMC0..=BX_MSR_PMC7 => 0, // Performance counters — return 0
@@ -692,7 +684,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         match msr {
             BX_MSR_TSC => self.set_tsc(val, self.system_ticks()),
-            #[cfg(feature = "bx_support_apic")]
             BX_MSR_APICBASE => self.msr.apicbase = val as _,
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr = val as u32,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr = val,

@@ -150,25 +150,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// task priority register on the local APIC. Return the LAPIC TPR >> 4.
     #[inline]
     pub(crate) fn cr8_for_api(&self) -> u64 {
-        #[cfg(feature = "bx_support_apic")]
         {
             (self.lapic.get_tpr() as u64) >> 4
-        }
-        #[cfg(not(feature = "bx_support_apic"))]
-        {
-            0
         }
     }
 
     #[inline]
     pub(crate) fn set_cr8_for_api(&mut self, v: u64) {
-        #[cfg(feature = "bx_support_apic")]
         {
             self.lapic.set_tpr(((v & 0xF) << 4) as u8);
-        }
-        #[cfg(not(feature = "bx_support_apic"))]
-        {
-            let _ = v;
         }
     }
 
@@ -319,10 +309,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `Err(UnimplementedInstruction)` for unknown MSRs.
     pub(crate) fn read_msr_for_api(&self, msr: u32) -> super::Result<u64> {
         use super::msr::*;
-        #[cfg(feature = "bx_support_apic")]
         let apicbase = self.msr.apicbase as u64;
-        #[cfg(not(feature = "bx_support_apic"))]
-        let apicbase: u64 = 0;
         let v = match msr {
             BX_MSR_TSC => self.get_tsc(self.system_ticks()),
             BX_MSR_APICBASE => apicbase,
@@ -352,7 +339,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 let t = self.system_ticks();
                 self.set_tsc(val, t);
             }
-            #[cfg(feature = "bx_support_apic")]
             BX_MSR_APICBASE => {
                 self.msr.apicbase = val as _;
             }

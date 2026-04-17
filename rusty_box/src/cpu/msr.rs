@@ -106,6 +106,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn init_msrs(&mut self) {
         // Bochs zeroes the configurable MSR array here (BX_MSR_MAX_INDEX entries).
         // Our MSR struct fields are initialized via Default, so no additional work needed.
-        // The #[cfg(feature = "bx_configure_msrs")] path in reset() handles re-zeroing.
+        // The configurable MSR path in reset() handles re-zeroing.
     }
 }

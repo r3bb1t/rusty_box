@@ -4,7 +4,6 @@ use alloc::vec::Vec;
 use tracing::info;
 
 use super::Result;
-#[cfg(feature = "bx_support_amx")]
 use crate::cpu::avx::AMX;
 
 use crate::{
@@ -71,7 +70,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.xsave_xrestor_init();
 
-        #[cfg(feature = "bx_support_amx")]
         {
             self.amx = if self.bx_cpuid_support_isa_extension(X86Feature::IsaAmx) {
                 Some(AMX::default())
@@ -337,7 +335,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // All configurable MSRs do not change on INIT
-        #[cfg(feature = "bx_configure_msrs")]
         {
             self.msrs
                 .iter_mut()
@@ -357,10 +354,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.esp_page_window_size = 0;
         self.esp_host_ptr = None;
 
-        #[cfg(not(feature = "bx_support_smp"))]
-        {
-            self.esp_page_fine_granularity_mapping = 0;
-        }
 
         #[cfg(feature = "bx_debugger")]
         {
