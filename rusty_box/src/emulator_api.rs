@@ -703,6 +703,27 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     pub fn clear_exits(&mut self) { self.exit_set.clear(); }
     pub fn add_exit(&mut self, addr: u64) -> bool { self.exit_set.add(addr) }
     pub fn remove_exit(&mut self, addr: u64) -> bool { self.exit_set.remove(addr) }
+
+    // ── MMIO API ─────────────────────────────────────────────────────────
+
+    /// Register an MMIO region. Physical addresses in [addr, addr+size)
+    /// dispatch to callbacks instead of RAM.
+    #[cfg(feature = "alloc")]
+    pub fn mmio_map(
+        &mut self,
+        addr: u64,
+        size: u64,
+        read_cb: alloc::boxed::Box<dyn FnMut(u64, usize) -> u64 + Send>,
+        write_cb: alloc::boxed::Box<dyn FnMut(u64, usize, u64) + Send>,
+    ) {
+        self.mmio.map(addr, size, read_cb, write_cb);
+    }
+
+    /// Remove MMIO regions overlapping [addr, addr+size).
+    #[cfg(feature = "alloc")]
+    pub fn mmio_unmap(&mut self, addr: u64, size: u64) {
+        self.mmio.unmap(addr, size);
+    }
 }
 
 // ─────────────────────────── mem_read / mem_write ───────────────────────────
@@ -785,6 +806,17 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Guest memory size in bytes.
     pub fn mem_size(&self) -> usize {
         self.memory.ram_slice().len()
+    }
+
+    /// Set memory permissions for a physical address range.
+    /// Creates the permissions bitmap on first call, sizing it to physical memory.
+    #[cfg(feature = "instrumentation")]
+    pub fn mem_protect(&mut self, addr: u64, size: usize, perms: crate::cpu::instrumentation::MemPerms) {
+        let mem_len = self.memory.get_memory_len();
+        let pp = self.page_permissions.get_or_insert_with(|| {
+            crate::memory::permissions::PagePermissions::new(mem_len as u64)
+        });
+        pp.set(addr, size, perms);
     }
 
     // Typed helpers — reduce noise when loaders build page tables, GDT/IDT

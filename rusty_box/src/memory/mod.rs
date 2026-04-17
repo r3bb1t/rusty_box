@@ -4,6 +4,10 @@ mod error;
 pub(crate) mod memory_rusty_box;
 pub mod memory_stub;
 pub mod misc_mem;
+#[cfg(feature = "alloc")]
+pub mod permissions;
+#[cfg(feature = "alloc")]
+pub mod mmio;
 
 //#[cfg(test)]
 //mod tests;
