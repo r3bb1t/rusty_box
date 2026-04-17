@@ -22,6 +22,7 @@
 //! - `MAX_INSTRUCTIONS`    — cap (default 4_000_000_000)
 //! - `STRACE_FROM_ICOUNT`  — only log events after this many icount (skip BIOS POST noise)
 //! - `STRACE_LIMIT`        — max events to log (default unlimited)
+//! - `STRACE_LOG`           — output file path (default: strace.log)
 //! - `STRACE_PORTS`        — `1` to log port I/O (default off — very noisy)
 //! - `STRACE_IRQS`         — `1` to log hardware interrupts (default off)
 //! - `STRACE_EXCEPTIONS`   — `1` to log CPU exceptions (default on)
@@ -454,10 +455,17 @@ fn run() -> Result<()> {
         std::env::var("RUSTY_BOX_BOOT").unwrap_or_else(|_| "bios".to_string());
     let bios_boot = boot_mode != "direct";
 
+    // Route strace output to a log file so it doesn't interleave with VGA terminal output.
+    let log_path = std::env::var("STRACE_LOG").unwrap_or_else(|_| "strace.log".into());
+    let file_appender = tracing_appender::rolling::never(".", &log_path);
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .with_target(false)
+        .with_ansi(false)
+        .with_writer(non_blocking)
         .init();
+    eprintln!("Strace output -> {log_path}");
 
     tracing::info!("Reading ISO: {iso_path}");
     let iso_data = std::fs::read(&iso_path).unwrap_or_else(|e| {
