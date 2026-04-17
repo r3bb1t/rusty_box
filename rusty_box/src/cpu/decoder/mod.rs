@@ -8,9 +8,11 @@ pub use rusty_box_decoder::instruction::{
 pub use rusty_box_decoder::opcode::Opcode;
 pub use rusty_box_decoder::features::X86Feature;
 
-// Keep the impl BxCpuC block in the main crate
+// BxCpuC impl block requires alloc (BxCpuC lives behind alloc gate)
+#[cfg(feature = "alloc")]
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
+#[cfg(feature = "alloc")]
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Validate CPU feature bitmask and configure decode tables.
     ///

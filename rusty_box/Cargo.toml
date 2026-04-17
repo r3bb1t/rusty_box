@@ -16,11 +16,11 @@ name = "rusty_box"
 path = "src/lib.rs"
 
 [features]
-default = ["bx_full", "std"]
+default = ["std"]
 
-std = ["tracing/std", "tempfile", "crossterm"]
+alloc = []
+std = ["tracing/std", "tempfile", "crossterm", "alloc"]
 gui-egui = ["dep:egui", "dep:eframe"]
-
 bx_full = [
     "bx_large_ram_file",
     "bx_phy_address_long",
@@ -36,7 +36,7 @@ bx_full = [
 bx_debugger = []
 bx_gdb_stub = []
 bx_large_ram_file = []
-instrumentation = []
+instrumentation = ["alloc"]
 
 bx_support_alignment_check = []
 bx_support_amx = []

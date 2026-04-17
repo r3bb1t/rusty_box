@@ -2613,6 +2613,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         Ok((total_executed, shutdown))
     }
 
+    #[cfg(not(feature = "std"))]
     /// Attach a CD-ROM ISO from in-memory data (for no_std / WASM environments).
     pub fn attach_cdrom_data(
         &mut self,
@@ -2625,6 +2626,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             .attach_cdrom_data(channel, drive, data);
     }
 
+    #[cfg(not(feature = "std"))]
     /// Attach a hard disk from in-memory data (for no_std / WASM environments).
     ///
     /// Wraps `HardDrive::attach_disk_data()` which stores the disk image
