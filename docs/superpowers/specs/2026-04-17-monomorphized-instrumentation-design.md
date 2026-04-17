@@ -41,10 +41,10 @@ let emu = Emulator::<Corei7SkylakeX, SyscallTracer>::new_with_instrumentation(
 
 ### `Instrumentation` trait
 
-Unchanged from the current design, except the `Send` bound loosens to allow `!Send` tracers in single-threaded contexts (the `Emulator` itself is `Send` only when `T: Send`):
+No supertraits. No `Any`, no `Send`, no `'static`. Just the callbacks with default no-ops:
 
 ```rust
-pub trait Instrumentation: core::any::Any {
+pub trait Instrumentation {
     fn before_execution(&mut self, rip: u64, instr: &Instruction) {}
     fn after_execution(&mut self, rip: u64, instr: &Instruction) {}
     // ... all 25+ callbacks with default no-ops
@@ -54,7 +54,7 @@ pub trait Instrumentation: core::any::Any {
 impl Instrumentation for () {}
 ```
 
-Drop the `Send` bound from the trait itself. `Emulator<'a, I, T>` auto-derives `Send` when `T: Send`.
+`Emulator<'a, I, T>` auto-derives `Send` when `T: Send`. No trait-level constraint needed.
 
 ### Tuple composition
 
