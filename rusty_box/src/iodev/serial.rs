@@ -923,13 +923,13 @@ impl BxSerialC {
                 if new_enable && !s.fifo_cntl.enable {
                     // Enabling FIFOs
                     s.fifo_cntl.enable = true;
-                    tracing::debug!("COM{}: FIFO enabled", port_idx + 1);
+                    tracing::trace!("COM{}: FIFO enabled", port_idx + 1);
                 } else if !new_enable && s.fifo_cntl.enable {
                     // Disabling FIFOs
                     s.fifo_cntl.enable = false;
                     s.rx_fifo.clear();
                     s.tx_fifo.clear();
-                    tracing::debug!("COM{}: FIFO disabled", port_idx + 1);
+                    tracing::trace!("COM{}: FIFO disabled", port_idx + 1);
                 }
 
                 // Reset RX FIFO (bit 1, self-clearing)
@@ -974,7 +974,7 @@ impl BxSerialC {
                         let s = &mut self.ports[port_idx];
                         if new_baudrate != s.baudrate {
                             s.baudrate = new_baudrate;
-                            tracing::debug!(
+                            tracing::trace!(
                                 "COM{}: baud rate set to {} (divisor={})",
                                 port_idx + 1,
                                 new_baudrate,
@@ -988,13 +988,13 @@ impl BxSerialC {
                         s.databyte_usec = (1_000_000.0 / s.baudrate as f64
                             * (s.line_cntl.wordlen_sel as f64 + 7.0))
                             as u32;
-                        tracing::debug!(
+                        tracing::trace!(
                             "COM{}: databyte_usec={}",
                             port_idx + 1,
                             s.databyte_usec
                         );
                     } else {
-                        tracing::debug!(
+                        tracing::trace!(
                             "COM{}: ignoring invalid baud rate divisor",
                             port_idx + 1
                         );

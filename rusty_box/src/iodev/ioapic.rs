@@ -366,7 +366,7 @@ impl BxIoApic {
     /// This registers memory handlers for the MMIO range at `base_addr`.
     /// The `mem` parameter is the memory subsystem used for handler registration.
     pub fn init(&mut self, mem: &mut BxMemC) -> crate::Result<()> {
-        tracing::info!("initializing I/O APIC");
+        tracing::debug!("initializing I/O APIC");
         // Bochs: set_enabled(1, 0x0000) (ioapic.cc)
         self.set_enabled_with_mem(true, 0x0000, mem)?;
         Ok(())
@@ -411,7 +411,7 @@ impl BxIoApic {
     /// Bochs: `Bit32u bx_ioapic_c::read_aligned(bx_phy_address address)` (ioapic.cc)
     pub fn read_aligned(&self, address: BxPhyAddress) -> u32 {
         let offset = (address as u32) & 0xFF;
-        tracing::debug!(
+        tracing::trace!(
             "IOAPIC: read aligned addr={:#010x} offset={:#04x}",
             address,
             offset
@@ -445,7 +445,7 @@ impl BxIoApic {
             IOREGSEL_ARB_ID => {
                 // Arbitration ID — not meaningfully implemented in Bochs
                 // Bochs: BX_INFO(("IOAPIC: arbitration ID unsupported, returned 0")); (ioapic.cc)
-                tracing::info!("IOAPIC: arbitration ID unsupported, returned 0");
+                tracing::debug!("IOAPIC: arbitration ID unsupported, returned 0");
                 0
             }
             _ => {
@@ -490,7 +490,7 @@ impl BxIoApic {
         lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
     ) {
         let offset = (address as u32) & 0xFF;
-        tracing::debug!(
+        tracing::trace!(
             "IOAPIC: write aligned addr={:#010x} offset={:#04x} data={:#010x}",
             address,
             offset,
@@ -517,14 +517,14 @@ impl BxIoApic {
                 // Set APIC ID from bits [27:24]
                 // Bochs: Bit8u newid = (value >> 24) & apic_id_mask; (ioapic.cc)
                 let new_id = (value >> 24) & APIC_ID_MASK;
-                tracing::info!("IOAPIC: setting id to {:#x}", new_id);
+                tracing::debug!("IOAPIC: setting id to {:#x}", new_id);
                 self.id = new_id;
             }
             IOREGSEL_VERSION | IOREGSEL_ARB_ID => {
                 // Version and arbitration ID are read-only
                 // Bochs: BX_INFO(("IOAPIC: could not write, IOREGSEL=0x%02x", ioregsel));
                 // (ioapic.cc)
-                tracing::info!(
+                tracing::debug!(
                     "IOAPIC: could not write, IOREGSEL={:#04x} (read-only)",
                     self.ioregsel
                 );
@@ -541,7 +541,7 @@ impl BxIoApic {
                     } else {
                         entry.set_lo_part(value);
                     }
-                    tracing::debug!(
+                    tracing::trace!(
                         "IOAPIC: entry[{}]: dest={:#04x} masked={} trig={} remote_irr={} \
                          polarity={} deliv_status={} dest_mode={} deliv_mode={} vector={:#04x}",
                         raw_index,
@@ -614,7 +614,7 @@ impl BxIoApic {
             )?;
         }
 
-        tracing::info!(
+        tracing::debug!(
             "IOAPIC {}abled (base address = {:#010x})",
             if self.enabled { "en" } else { "dis" },
             self.base_addr,
@@ -659,7 +659,7 @@ impl BxIoApic {
         // Only act on a change in pin level
         // Bochs: if (((Bit32u)level<<int_in) != (intin & bit)) { ... } (ioapic.cc)
         if level_bit != (self.intin & bit) {
-            tracing::debug!(
+            tracing::trace!(
                 "IOAPIC: set_irq_level(): INTIN{}: level={}",
                 int_in,
                 level as u8
@@ -706,7 +706,7 @@ impl BxIoApic {
     ///
     /// Bochs: `void bx_ioapic_c::receive_eoi(Bit8u vector)` (ioapic.cc)
     pub fn receive_eoi(&mut self, vector: u8) {
-        tracing::debug!("IOAPIC: received EOI for vector {}", vector);
+        tracing::trace!("IOAPIC: received EOI for vector {}", vector);
         // In a full implementation, we would clear the remote_irr bit for
         // any redirect table entry whose vector matches and that is level-triggered.
         // Bochs doesn't do this either — it just logs.
@@ -735,7 +735,7 @@ impl BxIoApic {
         mut pic: Option<&mut super::pic::BxPicC>,
         mut lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
     ) {
-        tracing::debug!("IOAPIC: servicing (irr={:#010x})", self.irr);
+        tracing::trace!("IOAPIC: servicing (irr={:#010x})", self.irr);
 
         for pin in 0..IOAPIC_NUM_PINS {
             let mask: u32 = 1 << pin;
@@ -745,7 +745,7 @@ impl BxIoApic {
 
             let entry = &self.ioredtbl[pin];
             if entry.is_masked() {
-                tracing::debug!("IOAPIC: service_ioapic(): INTIN{} is masked", pin);
+                tracing::trace!("IOAPIC: service_ioapic(): INTIN{} is masked", pin);
                 continue;
             }
 
@@ -756,7 +756,7 @@ impl BxIoApic {
                 // ExtINT: Bochs calls DEV_pic_iac() for the vector (ioapic.cc).
                 if let Some(pic) = pic.as_deref_mut() {
                     let v = pic.iac();
-                    tracing::debug!(
+                    tracing::trace!(
                         "IOAPIC: ExtINT mode on pin {} — PIC IAC vector {:#04x}",
                         pin,
                         v
@@ -764,7 +764,7 @@ impl BxIoApic {
                     v
                 } else {
                     // Fallback: no PIC reference, use entry vector
-                    tracing::debug!(
+                    tracing::trace!(
                         "IOAPIC: ExtINT mode on pin {} — no PIC, using entry vector {:#04x}",
                         pin,
                         entry.vector()
@@ -801,7 +801,7 @@ impl BxIoApic {
                 entry.set_delivery_status();
                 self.stuck_count += 1;
                 if self.stuck_count > 5 {
-                    tracing::info!("IOAPIC: vector {:#04x} stuck?", vector);
+                    tracing::debug!("IOAPIC: vector {:#04x} stuck?", vector);
                 }
             }
         }
@@ -829,12 +829,12 @@ impl BxIoApic {
 
     /// Dump IOAPIC state for HLT diagnostics.
     pub fn dump_hlt_state(&self) {
-        tracing::debug!("[HLT-STATE] IOAPIC: irr={:#010x} intin={:#010x}", self.irr, self.intin);
+        tracing::trace!("[HLT-STATE] IOAPIC: irr={:#010x} intin={:#010x}", self.irr, self.intin);
         for pin in 0..IOAPIC_NUM_PINS {
             let entry = &self.ioredtbl[pin];
             // Only show non-default entries (unmasked or configured)
             if !entry.is_masked() || entry.vector() != 0 {
-                tracing::debug!("[HLT-STATE]   pin {:2}: lo={:#010x} hi={:#010x} vec={:#04x} masked={} trigger={} deliv={}",
+                tracing::trace!("[HLT-STATE]   pin {:2}: lo={:#010x} hi={:#010x} vec={:#04x} masked={} trigger={} deliv={}",
                     pin, entry.get_lo_part(), entry.get_hi_part(), entry.vector(),
                     entry.is_masked(), entry.trigger_mode(), entry.delivery_mode());
             }

@@ -599,7 +599,7 @@ impl BxVgaC {
 
     /// Initialize VGA device
     pub(crate) fn init(&mut self, io: &mut BxDevicesC, mem: &mut BxMemC) -> Result<()> {
-        tracing::info!("Initializing VGA text mode");
+        tracing::debug!("Initializing VGA text mode");
 
         // Register I/O port handlers
         use super::DeviceId;
@@ -645,7 +645,7 @@ impl BxVgaC {
             VGA_WINDOW_GRAPHICS_END,
         )?;
 
-        tracing::info!("VGA initialized (80x25 text mode)");
+        tracing::debug!("VGA initialized (80x25 text mode)");
         Ok(())
     }
 
@@ -1108,7 +1108,7 @@ impl BxVgaC {
                         let new_mapping =
                             (value >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
                         if old_mapping != new_mapping {
-                            tracing::info!(
+                            tracing::debug!(
                                 "VGA memory_mapping changed: {:?} -> {:?} (value: {:#04x} -> {:#04x})",
                                 VgaMemoryMapping::from_u8(old_mapping),
                                 VgaMemoryMapping::from_u8(new_mapping),
@@ -1147,7 +1147,7 @@ impl BxVgaC {
                 self.misc_output = value;
                 // Bochs vgacore.cc
                 self.calculate_retrace_timing();
-                tracing::info!(
+                tracing::debug!(
                     "VGA Misc Output Write: {:#04x} (color_emulation={}, enable_ram={})",
                     value,
                     self.misc_color_emulation,
@@ -1158,7 +1158,7 @@ impl BxVgaC {
             // VGA Enable
             VGA_ENABLE => {
                 self.vga_enabled = (value & 0x01) != 0;
-                tracing::debug!("VGA Enable: {}", self.vga_enabled);
+                tracing::trace!("VGA Enable: {}", self.vga_enabled);
             }
 
             // PEL Mask

@@ -52,7 +52,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let dword1 = raw_descriptor as u32;
         let dword2 = (raw_descriptor >> 32) as u32;
         if vector < 32 {
-            tracing::debug!(
+            tracing::trace!(
                 "PM_INT: IDT[{:#04x}] @ {:#010x}: dword1={:#010x} dword2={:#010x}",
                 vector,
                 gate_addr,
@@ -255,7 +255,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             || super::descriptor::is_data_segment(cs_descriptor.r#type)
             || cs_descriptor.dpl > cpl
         {
-            tracing::debug!(
+            tracing::trace!(
                 "handle_interrupt_trap_gate(): not accessible or not code segment cs={:#04x} \
                  valid={} segment={} type={:#x} dpl={} cpl={} icount={}",
                 cs_selector.value,
@@ -293,7 +293,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             || cs_descriptor.dpl == cpl
         {
             // INTERRUPT TO SAME PRIVILEGE LEVEL
-            tracing::debug!("handle_interrupt_trap_gate(): INTERRUPT TO SAME PRIVILEGE");
+            tracing::trace!("handle_interrupt_trap_gate(): INTERRUPT TO SAME PRIVILEGE");
 
             // v8086 mode check (Bochs exception.cc): #GP(cs_selector+EXT)
             if self.v8086_mode()
@@ -436,7 +436,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         push_error: bool,
         error_code: u16,
     ) -> Result<()> {
-        tracing::debug!("handle_interrupt_to_inner_privilege(): INTERRUPT TO INNER PRIVILEGE");
+        tracing::trace!("handle_interrupt_to_inner_privilege(): INTERRUPT TO INNER PRIVILEGE");
 
         // Get SS and ESP from TSS for the new privilege level (matches line 446)
         let (ss_for_cpl_x, esp_for_cpl_x) = self.get_ss_esp_from_tss(cs_descriptor.dpl)?;
@@ -929,7 +929,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
 
         if gate_descriptor.valid == 0 || gate_descriptor.segment {
-            tracing::debug!(
+            tracing::trace!(
                 "long_mode_int(): gate descriptor is not valid sys seg: vector={} type={:#x} dword1={:#010x} dword2={:#010x} dword3={:#010x} idt_addr={:#x} icount={}",
                 { vector }, gate_descriptor.r#type, dword1, dword2, dword3, idt_entry_addr, self.icount
             );
@@ -1053,10 +1053,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             && cs_descriptor.dpl < cpl
         {
             // INTERRUPT TO INNER PRIVILEGE
-            tracing::debug!("long_mode_int(): INTERRUPT TO INNER PRIVILEGE");
+            tracing::trace!("long_mode_int(): INTERRUPT TO INNER PRIVILEGE");
 
             if ist > 0 {
-                tracing::debug!("long_mode_int(): trap to IST, vector = {}", ist);
+                tracing::trace!("long_mode_int(): trap to IST, vector = {}", ist);
                 rsp_for_cpl_x = self.get_rsp_from_tss(ist + 3)?;
             } else {
                 rsp_for_cpl_x = self.get_rsp_from_tss(cs_descriptor.dpl)?;
@@ -1091,10 +1091,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             || cs_descriptor.dpl == cpl
         {
             // INTERRUPT TO SAME PRIVILEGE LEVEL
-            tracing::debug!("long_mode_int(): INTERRUPT TO SAME PRIVILEGE");
+            tracing::trace!("long_mode_int(): INTERRUPT TO SAME PRIVILEGE");
 
             if ist > 0 {
-                tracing::debug!("long_mode_int(): trap to IST, vector = {}", ist);
+                tracing::trace!("long_mode_int(): trap to IST, vector = {}", ist);
                 rsp_for_cpl_x = self.get_rsp_from_tss(ist + 3)?;
             } else {
                 rsp_for_cpl_x = old_rsp;

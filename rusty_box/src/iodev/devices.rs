@@ -163,7 +163,7 @@ impl DeviceManager {
     /// 6. Keyboard (line 262)
     /// 7. Hard drive (line 275-277)
     pub fn init(&mut self, io: &mut BxDevicesC, mem: &mut BxMemC) -> Result<()> {
-        tracing::info!("Initializing device manager");
+        tracing::debug!("Initializing device manager");
 
         // Initialize each device in original Bochs order
         // 1. CMOS
@@ -206,13 +206,13 @@ impl DeviceManager {
             self.register_pci_ide_bmdma_ports(io);
         }
 
-        tracing::info!("Device manager initialization complete");
+        tracing::debug!("Device manager initialization complete");
         Ok(())
     }
 
     /// Reset all devices
     pub fn reset(&mut self, reset_type: ResetReason) -> Result<()> {
-        tracing::info!("Device manager reset: {:?}", reset_type);
+        tracing::debug!("Device manager reset: {:?}", reset_type);
 
         self.pic.reset();
         self.pit.reset();
@@ -453,7 +453,7 @@ impl DeviceManager {
                 io.register_io_handler(DeviceId::Pci, base + offset, "PCI IDE BM-DMA", mask);
             }
         }
-        tracing::info!("PCI IDE BM-DMA ports registered at base {:#06x}", base);
+        tracing::debug!("PCI IDE BM-DMA ports registered at base {:#06x}", base);
     }
 
     /// Process deferred PCI port re-registrations.
@@ -740,7 +740,7 @@ impl DeviceManager {
                 if address == 0x00B2 {
                     self.acpi.generate_smi(value as u8);
                     self.pci2isa.apms = 0;
-                    tracing::debug!(
+                    tracing::trace!(
                         "APM command {:#04x}: forwarded to ACPI, apms cleared (no SMM)",
                         value
                     );
@@ -793,12 +793,12 @@ impl BxDevicesC {
         &mut self,
         _mem: &mut BxMemC,
     ) -> Result<()> {
-        tracing::info!("Initializing device subsystem");
+        tracing::debug!("Initializing device subsystem");
 
         // Register Port 92h - System Control Port (A20 gate, fast reset)
         self.register_io_handler(DeviceId::Port92, PORT_92H, "Port 92h System Control", 0x1);
 
-        tracing::info!("Device initialization complete");
+        tracing::debug!("Device initialization complete");
         Ok(())
     }
 
@@ -822,7 +822,7 @@ impl BxDevicesC {
     pub fn reset(&mut self, reset_type: ResetReason) -> Result<()> {
         match reset_type {
             ResetReason::Hardware => {
-                tracing::info!("Device hardware reset");
+                tracing::debug!("Device hardware reset");
                 {
                     // Clear PCI configuration address (line 402)
                     self.pci_conf_addr = 0;
@@ -833,7 +833,7 @@ impl BxDevicesC {
                 // Note: paste.stop = 1 at line 409 - paste buffer stop not yet implemented
             }
             ResetReason::Software => {
-                tracing::info!("Device software reset");
+                tracing::debug!("Device software reset");
             }
         }
         Ok(())
@@ -841,7 +841,7 @@ impl BxDevicesC {
 
     /// Register device state for save/restore functionality
     pub fn register_state(&mut self) -> Result<()> {
-        tracing::debug!("Device state registered");
+        tracing::trace!("Device state registered");
         Ok(())
     }
 }

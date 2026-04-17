@@ -31,7 +31,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         push_error: bool,
         error_code: u16,
     ) -> super::Result<()> {
-        tracing::debug!(
+        tracing::trace!(
             "interrupt(): vector={:#04x} soft_int={} mode={}",
             vector,
             soft_int,
@@ -90,7 +90,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     error_code: new_error_code,
                 }) => {
                     // Delivery failed — raise the indicated exception.
-                    tracing::debug!(
+                    tracing::trace!(
                         "interrupt({:#04x}) PM delivery failed, raising {:?} error_code={:#x}; icount={}",
                         vector,
                         new_vector,
@@ -130,7 +130,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// INT3 - Breakpoint interrupt (vector 3)
     /// Based on Bochs INT3 in soft_int.cc
     pub fn int3(&mut self, _instr: &Instruction) -> super::Result<()> {
-        tracing::debug!("INT3 (breakpoint)");
+        tracing::trace!("INT3 (breakpoint)");
         // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code
         self.interrupt(3, true, false, 0)
     }
@@ -139,7 +139,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Based on Bochs INTO in soft_int.cc
     pub fn into(&mut self, _instr: &Instruction) -> super::Result<()> {
         if self.get_of() {
-            tracing::debug!("INTO: overflow detected, calling INT 4");
+            tracing::trace!("INTO: overflow detected, calling INT 4");
             // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code
             return self.interrupt(4, true, false, 0);
         }
@@ -149,7 +149,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// INT1 (ICEBP) - In-circuit emulator breakpoint (vector 1)
     /// Based on Bochs INT1 in soft_int.cc
     pub fn int1(&mut self, _instr: &Instruction) -> super::Result<()> {
-        tracing::debug!(
+        tracing::trace!(
             "INT1 (ICEBP) at RIP={:#x} CS={:#x}",
             self.rip(),
             self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
@@ -195,7 +195,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Check if value is outside bounds
         if op1_16 < bound_min || op1_16 > bound_max {
-            tracing::debug!(
+            tracing::trace!(
                 "BOUND: fails bounds test (value {} not in [{}, {}])",
                 op1_16,
                 bound_min,
@@ -236,7 +236,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Check if value is outside bounds
         if op1_32 < bound_min || op1_32 > bound_max {
-            tracing::debug!(
+            tracing::trace!(
                 "BOUND: fails bounds test (value {} not in [{}, {}])",
                 op1_32,
                 bound_min,
@@ -290,7 +290,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let cs_val = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
             if cs_val == 0xF000 {
                 let cf = new_flags & 1;
-                tracing::debug!(
+                tracing::trace!(
                     "IRET from BIOS: CS:IP={:04x}:{:04x} → {:04x}:{:04x} FLAGS={:04x} CF={} AH={:#04x} icount={}",
                     cs_val, self.rip() as u16, new_cs, new_ip, new_flags, cf, self.ah(), self.icount
                 );
@@ -320,7 +320,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // RSP_COMMIT
         self.speculative_rsp = false;
 
-        tracing::debug!(
+        tracing::trace!(
             "IRET16: returning to {:04x}:{:04x}, flags={:04x}",
             new_cs,
             new_ip,
@@ -380,7 +380,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // RSP_COMMIT
         self.speculative_rsp = false;
 
-        tracing::debug!(
+        tracing::trace!(
             "IRET32: returning to {:04x}:{:08x}, eflags={:08x}",
             new_cs,
             new_eip,
@@ -400,7 +400,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Nested Task (NT) — task-switch IRET
         // Based on Bochs iret.cc
         if self.eflags.contains(EFlags::NT) {
-            tracing::debug!("IRET: nested task return (NT=1)");
+            tracing::trace!("IRET: nested task return (NT=1)");
 
             // Read back-link selector from current TSS offset 0
             let tss_base = self.tr.cache.u.segment_base();
@@ -546,7 +546,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let new_cpl = cs_selector.rpl;
         if new_cpl == cpl {
             // ── Same privilege level ─────────────────────────────────────────
-            tracing::debug!(
+            tracing::trace!(
                 "IRET32(PM): same-priv return to CS={:#06x} EIP={:#010x} EFLAGS={:#010x}",
                 raw_cs_raw,
                 new_eip,
@@ -574,7 +574,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         } else {
             // ── Privilege change (returning to outer/less-privileged ring) ────
-            tracing::debug!(
+            tracing::trace!(
                 "IRET32(PM): privilege change to CS={:#06x} EIP={:#010x} EFLAGS={:#010x}",
                 raw_cs_raw,
                 new_eip,
@@ -663,7 +663,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Nested Task (NT) — same as 32-bit path
         if self.eflags.contains(EFlags::NT) {
-            tracing::debug!("IRET16(PM): nested task return (NT=1)");
+            tracing::trace!("IRET16(PM): nested task return (NT=1)");
             let tss_base = self.tr.cache.u.segment_base();
             let raw_link_selector = self.system_read_word(tss_base)?;
             let mut link_selector = BxSelector::default();
@@ -894,7 +894,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Only log non-exception interrupts to reduce spam (exceptions are logged in exception.rs)
         if vector != 0x0d && vector != 0x0e && vector != 0x08 && vector < 0x20 {
-            tracing::debug!(
+            tracing::trace!(
                 "INT {:#04x}: vector at {:04x}:{:04x}",
                 vector,
                 new_cs,
@@ -903,7 +903,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         // Log INT 15h calls (memory detection) — AH=88h returns extended memory in AX
         if vector == 0x15 {
-            tracing::debug!(
+            tracing::trace!(
                 "INT 15h: AH={:#04x} AX={:#06x} → handler at {:04x}:{:04x}, caller was {:04x}:{:04x}",
                 self.ah(), self.ax(), new_cs, new_ip, cs, ip
             );
@@ -921,13 +921,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // CPL is always 0 in real mode
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         if cpl != 0 {
-            tracing::debug!("HLT: CPL={} != 0, #GP(0)", cpl);
+            tracing::trace!("HLT: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
         // Check if interrupts are disabled (IF=0) - matches Bochs proc_ctrl.cc
         if !self.eflags.contains(EFlags::IF_) {
-            tracing::debug!("HLT: CPU halted with IF=0 (interrupts disabled) - CPU will be stuck!");
+            tracing::trace!("HLT: CPU halted with IF=0 (interrupts disabled) - CPU will be stuck!");
         }
 
         #[cfg(debug_assertions)] {

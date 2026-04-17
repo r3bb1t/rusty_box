@@ -35,7 +35,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
         push_error: bool,
         error_code: u32,
     ) -> Result<()> {
-        tracing::debug!("task_switch(): ENTER, source={}", source);
+        tracing::trace!("task_switch(): ENTER, source={}", source);
 
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
@@ -283,7 +283,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
         // CR3 change — after commit point (Bochs tasking.cc)
         if tss_descriptor.r#type >= 9 && self.cr0.pg()
             && new_cr3 != 0 && (new_cr3 as u64) != self.cr3 {
-                tracing::debug!("task_switch(): changing CR3 to {:#x}", new_cr3);
+                tracing::trace!("task_switch(): changing CR3 to {:#x}", new_cr3);
                 self.cr3 = new_cr3 as u64;
                 if self.cr4.pge() {
                     self.tlb_flush_non_global();
@@ -312,7 +312,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
         self.set_gpr32(5, new_ebp); // EBP
         self.set_gpr32(6, new_esi); // ESI
         self.set_gpr32(7, new_edi); // EDI
-        tracing::debug!(
+        tracing::trace!(
             "task_switch(): Loaded new EIP={:#x}, EFLAGS={:#x}, EAX={:#x}, ECX={:#x}",
             new_eip,
             final_eflags,
@@ -543,7 +543,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
         if tss_descriptor.r#type >= 9 && (trap_word & 0x1) != 0 {
             self.debug_trap |= Self::BX_DEBUG_TRAP_TASK_SWITCH_BIT;
             self.async_event = 1;
-            tracing::info!("task_switch: T bit set in new TSS");
+            tracing::debug!("task_switch: T bit set in new TSS");
         }
 
         // Instruction pointer must be in CS limit, else #GP(0) (Bochs tasking.cc)
@@ -564,7 +564,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
         // RSP commit (Bochs tasking.cc)
         self.speculative_rsp = false;
 
-        tracing::debug!(
+        tracing::trace!(
             "task_switch(): completed, new CS={:#06x} EIP={:#010x} SS={:#06x} ESP={:#010x}",
             raw_cs_selector,
             new_eip,

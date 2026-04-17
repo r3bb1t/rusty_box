@@ -40,7 +40,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let has_long_mode = self.bx_cpuid_support_isa_extension(X86Feature::IsaLongMode);
         let has_lzcnt = self.bx_cpuid_support_isa_extension(X86Feature::IsaLzcnt);
 
-        tracing::info!(
+        tracing::debug!(
             "CPU ISA features: SSE={} SSE2={} AVX={} AVX2={} BMI1={} BMI2={} AES={} LM={} LZCNT={}",
             has_sse, has_sse2, has_avx, has_avx2, has_bmi1, has_bmi2, has_aes, has_long_mode, has_lzcnt
         );

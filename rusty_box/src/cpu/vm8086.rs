@@ -88,7 +88,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Initialize V8086 segment caches (vm8086.cc)
         self.init_v8086_mode();
 
-        tracing::debug!(
+        tracing::trace!(
             "stack_return_to_v86: CS:EIP={:04x}:{:04x} SS:ESP={:04x}:{:08x} EFLAGS={:08x}",
             raw_cs_selector as u16,
             new_eip & 0xFFFF,
@@ -110,7 +110,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // IOPL < 3 without VME → trap to V86 monitor (vm8086.cc)
         if iopl < 3 && !self.cr4.vme() {
-            tracing::debug!("IRET16 in V86 with IOPL != 3, VME = 0");
+            tracing::trace!("IRET16 in V86 with IOPL != 3, VME = 0");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -124,7 +124,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if ((flags16 as u32 & EFlags::IF_.bits()) != 0 && self.eflags.contains(EFlags::VIP))
                 || (flags16 as u32 & EFlags::TF.bits()) != 0
             {
-                tracing::debug!("iret16_stack_return_from_v86(): #GP(0) in VME mode");
+                tracing::trace!("iret16_stack_return_from_v86(): #GP(0) in VME mode");
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
 
@@ -165,7 +165,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn iret32_stack_return_from_v86(&mut self) -> super::Result<()> {
         // IOPL must be 3, else trap to V86 monitor (vm8086.cc)
         if self.eflags.iopl() < 3 {
-            tracing::debug!("IRET32 in V86 with IOPL != 3");
+            tracing::trace!("IRET32 in V86 with IOPL != 3");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -276,7 +276,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Interrupt is not redirected or VME is OFF (vm8086.cc)
         if self.eflags.iopl() < 3 {
-            tracing::debug!(
+            tracing::trace!(
                 "v86_redirect_interrupt(): interrupt cannot be redirected, generate #GP(0)"
             );
             return self.exception(super::cpu::Exception::Gp, 0).map(|_| false);

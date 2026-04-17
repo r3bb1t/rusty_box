@@ -67,7 +67,7 @@ impl BxMemoryStubC {
 
         let (mut actual_vector, vector_offset) =
             Self::alloc_vector_aligned(host + BIOSROMSZ + EXROMSIZE + 4096, BX_MEM_VECTOR_ALIGN);
-        tracing::info!(
+        tracing::debug!(
             "allocated memory at {:p}. after alignment, vector={:p}, block_size = {}k",
             actual_vector.as_ptr(),
             actual_vector[vector_offset..].as_ptr(),
@@ -92,8 +92,8 @@ impl BxMemoryStubC {
         assert!((len / block_size) <= 0xffffffff);
 
         let num_blocks = len / block_size;
-        tracing::info!("{:.2}MB", len as f64 / (1024.0 * 1024.0));
-        tracing::info!("mem block size = {:8X}, blocks={}", block_size, num_blocks);
+        tracing::debug!("{:.2}MB", len as f64 / (1024.0 * 1024.0));
+        tracing::debug!("mem block size = {:8X}, blocks={}", block_size, num_blocks);
 
         let mut blocks = Vec::with_capacity(num_blocks);
         let used_blocks = if false {
@@ -241,7 +241,7 @@ impl BxMemoryStubC {
                 self.blocks_offsets()[block] = buffer;
 
                 self.read_block(block)?;
-                tracing::debug!(
+                tracing::trace!(
                     "allocate_block: block={:#x}, replaced {:#x}",
                     block,
                     self.next_swapout_idx.get()

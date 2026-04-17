@@ -214,7 +214,7 @@ impl BxCmosC {
 
     /// Initialize the CMOS/RTC
     pub fn init(&mut self) {
-        tracing::info!("CMOS: Initializing CMOS/RTC");
+        tracing::debug!("CMOS: Initializing CMOS/RTC");
         self.init_defaults();
     }
 
@@ -534,7 +534,7 @@ impl BxCmosC {
                     }
                     REG_SHUTDOWN => {
                         let val = self.ram[addr];
-                        tracing::info!("CMOS: Read shutdown status [{:#04x}] = {:#04x}", addr, val);
+                        tracing::debug!("CMOS: Read shutdown status [{:#04x}] = {:#04x}", addr, val);
                         val
                     }
                     _ => {

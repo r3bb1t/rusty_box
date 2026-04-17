@@ -209,7 +209,7 @@ impl BxDevicesC {
         entry.device_id = device_id;
         entry.name = String::from(name);
         entry.mask = mask;
-        tracing::debug!(
+        tracing::trace!(
             "Registered I/O read handler for port {:#06x}: {}",
             port,
             name
@@ -228,7 +228,7 @@ impl BxDevicesC {
         entry.device_id = device_id;
         entry.name = String::from(name);
         entry.mask = mask;
-        tracing::debug!(
+        tracing::trace!(
             "Registered I/O write handler for port {:#06x}: {}",
             port,
             name
@@ -389,7 +389,7 @@ impl BxDevicesC {
     fn default_write_handler(&mut self, address: u16, value: u32, io_len: u8) {
         // Bochs-style BIOS POST code port (0x80). Some BIOSes also use 0x84.
         if io_len == 1 && matches!(address, 0x0080 | 0x0084) {
-            tracing::debug!("BIOS POST code port {:#06x}: {:#04x}", address, value as u8);
+            tracing::trace!("BIOS POST code port {:#06x}: {:#04x}", address, value as u8);
             const PORT80_CAPACITY: usize = 4096;
             if self.port80_output.len() >= PORT80_CAPACITY {
                 self.port80_output.pop_front();
@@ -404,7 +404,7 @@ impl BxDevicesC {
         // - 0x402/0x403: Bochs rombios INFO/DEBUG ports (cpp_orig/bochs/bios/rombios.h)
         // - 0x500: VGABIOS info port (cpp_orig/bochs/bios/VGABIOS-lgpl-README)
         if io_len == 1 && matches!(address, 0x00E9 | 0x0402 | 0x0403 | 0x0500) {
-            tracing::debug!(
+            tracing::trace!(
                 "BIOS output port {:#06x}: {:?}",
                 address,
                 value as u8 as char

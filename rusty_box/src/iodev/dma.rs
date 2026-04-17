@@ -194,7 +194,7 @@ impl BxDmaC {
 
     /// Initialize the DMA controllers (Bochs dma.cc)
     pub fn init(&mut self) {
-        tracing::info!("DMA: Initializing 8237 DMA Controllers");
+        tracing::debug!("DMA: Initializing 8237 DMA Controllers");
 
         for i in 0..2 {
             for j in 0..4 {
@@ -224,7 +224,7 @@ impl BxDmaC {
 
         // Channel 4 is cascade (Bochs dma.cc)
         self.s[1].chan[0].used = true;
-        tracing::info!("DMA: channel 4 used by cascade");
+        tracing::debug!("DMA: channel 4 used by cascade");
     }
 
     /// Set RAM pointer for physical DMA transfers.
@@ -274,7 +274,7 @@ impl BxDmaC {
             tracing::error!("registerDMA8Channel: channel({}) already in use", channel);
             return false;
         }
-        tracing::info!("DMA: channel {} used by {}", channel, name);
+        tracing::debug!("DMA: channel {} used by {}", channel, name);
         self.handlers[channel].dma_read8 = Some(dma_read);
         self.handlers[channel].dma_write8 = Some(dma_write);
         self.s[0].chan[channel].used = true;
@@ -301,7 +301,7 @@ impl BxDmaC {
             tracing::error!("registerDMA16Channel: channel({}) already in use", channel);
             return false;
         }
-        tracing::info!("DMA: channel {} used by {}", channel, name);
+        tracing::debug!("DMA: channel {} used by {}", channel, name);
         self.handlers[ch].dma_read16 = Some(dma_read);
         self.handlers[ch].dma_write16 = Some(dma_write);
         self.s[1].chan[ch].used = true;
@@ -313,7 +313,7 @@ impl BxDmaC {
         let ma_sl = if channel > 3 { 1 } else { 0 };
         let ch = channel & 0x03;
         self.s[ma_sl].chan[ch].used = false;
-        tracing::info!("DMA: channel {} no longer used", channel);
+        tracing::debug!("DMA: channel {} no longer used", channel);
         true
     }
 
@@ -370,12 +370,12 @@ impl BxDmaC {
         };
         let boundary_mask: u32 = 0x7fff0000 << ma_sl;
         if (dma_base & boundary_mask) != (dma_roof & boundary_mask) {
-            tracing::info!("dma_base = {:#010x}", dma_base);
-            tracing::info!(
+            tracing::debug!("dma_base = {:#010x}", dma_base);
+            tracing::debug!(
                 "dma_base_count = {:#010x}",
                 self.s[ma_sl].chan[ch].base_count
             );
-            tracing::info!("dma_roof = {:#010x}", dma_roof);
+            tracing::debug!("dma_roof = {:#010x}", dma_roof);
             tracing::warn!("request outside {}k boundary", 64 << ma_sl);
         }
 
@@ -723,7 +723,7 @@ impl BxDmaC {
 
             // Temporary register (Bochs dma.cc)
             0x0D | 0xDA => {
-                tracing::debug!(
+                tracing::trace!(
                     "DMA-{}: read of temporary register always returns 0",
                     ma_sl + 1
                 );
@@ -744,7 +744,7 @@ impl BxDmaC {
 
             // Extra page registers (Bochs dma.cc)
             0x0080 | 0x0084 | 0x0085 | 0x0086 | 0x0088 | 0x008C | 0x008D | 0x008E => {
-                tracing::debug!(
+                tracing::trace!(
                     "DMA: read extra page register {:#06x} (unused)",
                     address
                 );
@@ -761,7 +761,7 @@ impl BxDmaC {
             }
 
             _ => {
-                tracing::debug!("DMA: read unsupported address={:#06x}", address);
+                tracing::trace!("DMA: read unsupported address={:#06x}", address);
                 0
             }
         }
@@ -780,7 +780,7 @@ impl BxDmaC {
                 self.write(address + 1, value >> 8, 1);
                 return;
             }
-            tracing::debug!(
+            tracing::trace!(
                 "DMA: io write to address {:#010x}, len={}",
                 address,
                 io_len
@@ -827,7 +827,7 @@ impl BxDmaC {
             // Command register (Bochs dma.cc)
             0x08 | 0xD0 => {
                 if (value & 0xFB) != 0x00 {
-                    tracing::debug!(
+                    tracing::trace!(
                         "DMA: write to command register: value {:#04x} not supported",
                         value
                     );
@@ -843,7 +843,7 @@ impl BxDmaC {
                 if value & 0x04 != 0 {
                     // Set request bit in status reg
                     self.s[ma_sl].status_reg |= 1 << (channel + 4);
-                    tracing::debug!(
+                    tracing::trace!(
                         "DMA-{}: set request bit for channel {}",
                         ma_sl + 1,
                         channel
@@ -851,7 +851,7 @@ impl BxDmaC {
                 } else {
                     // Clear request bit in status reg
                     self.s[ma_sl].status_reg &= !(1 << (channel + 4));
-                    tracing::debug!(
+                    tracing::trace!(
                         "DMA-{}: cleared request bit for channel {}",
                         ma_sl + 1,
                         channel
@@ -864,7 +864,7 @@ impl BxDmaC {
             0x0A | 0xD4 => {
                 let channel = (value & 0x03) as usize;
                 self.s[ma_sl].mask[channel] = (value & 0x04) != 0;
-                tracing::debug!(
+                tracing::trace!(
                     "DMA-{}: set_mask_bit={}, channel={}, mask now={:#04x}",
                     ma_sl + 1,
                     (value & 0x04) != 0,
@@ -881,7 +881,7 @@ impl BxDmaC {
                 self.s[ma_sl].chan[channel].mode.address_decrement = (value >> 5) & 0x01 != 0;
                 self.s[ma_sl].chan[channel].mode.autoinit_enable = (value >> 4) & 0x01 != 0;
                 self.s[ma_sl].chan[channel].mode.transfer_type = (value >> 2) & 0x03;
-                tracing::debug!(
+                tracing::trace!(
                     "DMA-{}: mode register[{}] = {:#04x}",
                     ma_sl + 1,
                     channel,
@@ -891,26 +891,26 @@ impl BxDmaC {
 
             // Clear byte flip/flop (Bochs dma.cc)
             0x0C | 0xD8 => {
-                tracing::debug!("DMA-{}: clear flip/flop", ma_sl + 1);
+                tracing::trace!("DMA-{}: clear flip/flop", ma_sl + 1);
                 self.s[ma_sl].flip_flop = false;
             }
 
             // Master clear (Bochs dma.cc)
             0x0D | 0xDA => {
-                tracing::debug!("DMA-{}: master clear", ma_sl + 1);
+                tracing::trace!("DMA-{}: master clear", ma_sl + 1);
                 self.reset_controller(ma_sl);
             }
 
             // Clear mask register (Bochs dma.cc)
             0x0E | 0xDC => {
-                tracing::debug!("DMA-{}: clear mask register", ma_sl + 1);
+                tracing::trace!("DMA-{}: clear mask register", ma_sl + 1);
                 self.s[ma_sl].mask = [false, false, false, false];
                 self.control_hrq(ma_sl);
             }
 
             // Write all mask bits (Bochs dma.cc)
             0x0F | 0xDE => {
-                tracing::debug!("DMA-{}: write all mask bits", ma_sl + 1);
+                tracing::trace!("DMA-{}: write all mask bits", ma_sl + 1);
                 let mut v = value;
                 self.s[ma_sl].mask[0] = v & 0x01 != 0;
                 v >>= 1;
@@ -926,24 +926,24 @@ impl BxDmaC {
             0x81 | 0x82 | 0x83 | 0x87 => {
                 let channel = CHANNEL_INDEX[(address - 0x81) as usize] as usize;
                 self.s[0].chan[channel].page_reg = value;
-                tracing::debug!("DMA-1: page register {} = {:#04x}", channel, value);
+                tracing::trace!("DMA-1: page register {} = {:#04x}", channel, value);
             }
 
             // DMA2 page registers (Bochs dma.cc)
             0x89 | 0x8A | 0x8B | 0x8F => {
                 let channel = CHANNEL_INDEX[(address - 0x89) as usize] as usize;
                 self.s[1].chan[channel].page_reg = value;
-                tracing::debug!("DMA-2: page register {} = {:#04x}", channel + 4, value);
+                tracing::trace!("DMA-2: page register {} = {:#04x}", channel + 4, value);
             }
 
             // Extra page registers (Bochs dma.cc)
             0x0080 | 0x0084 | 0x0085 | 0x0086 | 0x0088 | 0x008C | 0x008D | 0x008E => {
-                tracing::debug!("DMA: write extra page register {:#06x} (unused)", address);
+                tracing::trace!("DMA: write extra page register {:#06x} (unused)", address);
                 self.ext_page_reg[(address & 0x0F) as usize] = value;
             }
 
             _ => {
-                tracing::debug!(
+                tracing::trace!(
                     "DMA: write ignored: {:#06x} = {:#04x}",
                     address,
                     value

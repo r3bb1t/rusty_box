@@ -219,7 +219,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                         flags &= !(EFlags::IF_.bits() as u16);
                     }
                 } else {
-                    tracing::debug!("PUSHFW: #GP(0) in v8086 (no VME) mode");
+                    tracing::trace!("PUSHFW: #GP(0) in v8086 (no VME) mode");
                     self.exception(super::cpu::Exception::Gp, 0)?;
                 }
             }
@@ -256,7 +256,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                         && self.eflags.contains(EFlags::VIP))
                         || (flags16 as u32 & EFlags::TF.bits()) != 0
                     {
-                        tracing::debug!("POPFW: #GP(0) in VME mode");
+                        tracing::trace!("POPFW: #GP(0) in VME mode");
                         self.exception(super::cpu::Exception::Gp, 0)?;
                     }
                     // IF, IOPL unchanged; VIF = flags16.IF
@@ -268,7 +268,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     self.write_eflags(flags32, change_mask);
                     return Ok(());
                 }
-                tracing::debug!("POPFW: #GP(0) in v8086 (no VME) mode");
+                tracing::trace!("POPFW: #GP(0) in v8086 (no VME) mode");
                 self.exception(super::cpu::Exception::Gp, 0)?;
             }
             change_mask |= EFlags::IF_.bits();

@@ -88,7 +88,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// BSWAP r16 — undefined behavior, zeroes register
     /// Bochs bit.cc (BSWAP_RX)
     pub fn bswap_rx(&mut self, instr: &Instruction) {
-        tracing::debug!("BSWAP with 16-bit opsize: undefined behavior!");
+        tracing::trace!("BSWAP with 16-bit opsize: undefined behavior!");
         self.set_gpr16(instr.dst() as usize, 0);
     }
 

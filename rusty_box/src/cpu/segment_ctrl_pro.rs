@@ -28,7 +28,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             // GDT
             let index_offset = index * 8 + 7;
             if index_offset > self.gdtr.limit as u32 {
-                tracing::debug!(
+                tracing::trace!(
                     "fetch_raw_descriptor: GDT: index ({}) {} > limit ({}) GDTR.base={:#x}",
                     index_offset,
                     index,
@@ -44,7 +44,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         } else {
             // LDT
             if self.ldtr.cache.valid == 0 {
-                tracing::debug!("fetch_raw_descriptor: LDTR.valid=0");
+                tracing::trace!("fetch_raw_descriptor: LDTR.valid=0");
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
                     error_code: (selector.value & 0xfffc),
@@ -54,7 +54,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             let ldt_limit = self.ldtr.cache.u.segment_limit_scaled();
             let index_offset = index * 8 + 7;
             if index_offset > ldt_limit {
-                tracing::debug!(
+                tracing::trace!(
                     "fetch_raw_descriptor: LDT: index ({}) {} > limit ({})",
                     index_offset,
                     index,
@@ -270,7 +270,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let limit_scaled = self.tr.cache.u.segment_limit_scaled();
         if (tss_stackaddr + 7) > limit_scaled {
-            tracing::debug!("get_rsp_from_tss: TSSstackaddr > TSS.LIMIT");
+            tracing::trace!("get_rsp_from_tss: TSSstackaddr > TSS.LIMIT");
             let err_code = self.tr.selector.value & 0xfffc;
             self.exception(Exception::Ts, err_code)?;
             unreachable!("exception() always returns Err");
@@ -667,7 +667,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
 
         // Selector must not be null
         if (cs_raw & 0xFFFC) == 0 {
-            tracing::debug!("jump_protected: null selector cs={:#06x}", cs_raw);
+            tracing::trace!("jump_protected: null selector cs={:#06x}", cs_raw);
             return self.exception(Exception::Gp, 0);
         }
 
@@ -675,7 +675,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         let mut selector = BxSelector::default();
         parse_selector(cs_raw, &mut selector);
 
-        tracing::debug!(
+        tracing::trace!(
             "jump_protected: selector index={}, ti={}, rpl={}, GDTR base={:#010x} limit={:#06x}",
             selector.index,
             selector.ti,
@@ -694,7 +694,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         };
         let mut descriptor = self.parse_descriptor(dword1, dword2)?;
 
-        tracing::info!("jump_protected: descriptor segment={}, type={:#x}, dpl={}, p={}, base={:#010x}, limit={:#010x}",
+        tracing::trace!("jump_protected: descriptor segment={}, type={:#x}, dpl={}, p={}, base={:#010x}, limit={:#010x}",
                       descriptor.segment, descriptor.r#type, descriptor.dpl, descriptor.p,
                       descriptor.u.segment_base(), descriptor.u.segment_limit_scaled());
 
@@ -738,7 +738,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             match descriptor.r#type {
                 0x1 | 0x9 => {
                     // Available 286/386 TSS — JMP to TSS
-                    tracing::debug!("jump_protected: JMP to TSS type={:#x}", descriptor.r#type);
+                    tracing::trace!("jump_protected: JMP to TSS type={:#x}", descriptor.r#type);
                     if descriptor.valid == 0 || selector.ti != 0 {
                         tracing::error!("jump_protected: bad TSS selector");
                         return self.exception(Exception::Gp, cs_raw & 0xfffc);
@@ -761,13 +761,13 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 }
                 0x5 => {
                     // Task gate
-                    tracing::debug!("jump_protected: JMP via task gate");
+                    tracing::trace!("jump_protected: JMP via task gate");
                     self.task_gate_jmp(&selector, &descriptor)?;
                     Ok(())
                 }
                 0x4 | 0xC => {
                     // 286/386 call gate — JMP through call gate
-                    tracing::debug!(
+                    tracing::trace!(
                         "jump_protected: JMP via call gate type={:#x}",
                         descriptor.r#type
                     );
@@ -879,7 +879,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 // Load SS with selector and descriptor (this sets D_B bit!)
                 self.load_ss(&mut selector, &mut descriptor, cpl)?;
 
-                tracing::debug!(
+                tracing::trace!(
                     "load_seg_reg(SS): loaded selector {:#06x}, d_b={}",
                     new_value,
                     self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b()
@@ -971,7 +971,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 self.sregs[seg_idx].cache = descriptor;
                 self.sregs[seg_idx].cache.valid = super::descriptor::SEG_VALID_CACHE;
 
-                tracing::debug!(
+                tracing::trace!(
                     "load_seg_reg({:?}): loaded selector {:#06x}",
                     seg,
                     new_value
@@ -1022,7 +1022,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             self.invalidate_stack_cache();
         }
 
-        tracing::debug!(
+        tracing::trace!(
             "load_null_selector({:?}): selector {:#06x}, cleared all cache fields",
             seg,
             value
@@ -1035,7 +1035,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         // Must be in protected mode (catches both real mode and v8086)
         // Based on Bochs protect_ctrl.cc
         if !self.protected_mode() {
-            tracing::debug!("LLDT: not recognized outside protected mode");
+            tracing::trace!("LLDT: not recognized outside protected mode");
             self.exception(Exception::Ud, 0)?;
             return Ok(());
         }
@@ -1135,7 +1135,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         // Must be in protected mode (catches both real mode and v8086)
         // Based on Bochs protect_ctrl.cc
         if !self.protected_mode() {
-            tracing::debug!("LTR: not recognized outside protected mode");
+            tracing::trace!("LTR: not recognized outside protected mode");
             self.exception(Exception::Ud, 0)?;
             return Ok(());
         }
@@ -1469,7 +1469,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         // Check: non-conforming and DPL < CPL → more privilege (inner privilege call)
         if is_code_segment_non_conforming(cs_descriptor.r#type) && cs_descriptor.dpl < cpl {
             // ── CALL GATE TO MORE PRIVILEGE ──
-            tracing::debug!(
+            tracing::trace!(
                 "call_gate: to MORE privilege (DPL={} < CPL={})",
                 cs_descriptor.dpl,
                 cpl
@@ -1706,7 +1706,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             }
         } else {
             // ── CALL GATE TO SAME PRIVILEGE ──
-            tracing::debug!("call_gate: to SAME privilege");
+            tracing::trace!("call_gate: to SAME privilege");
 
             if gate_descriptor.r#type == 0xC {
                 // 386 call gate
@@ -1830,7 +1830,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
 
         if cs_selector.rpl == cpl {
             // ── Same privilege return ──
-            tracing::debug!(
+            tracing::trace!(
                 "return_protected: same-priv return CS={:#06x} EIP={:#010x}",
                 raw_cs_raw,
                 return_eip
@@ -1853,7 +1853,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             }
         } else {
             // ── Outer privilege return ──
-            tracing::debug!(
+            tracing::trace!(
                 "return_protected: outer-priv return CS={:#06x} EIP={:#010x}",
                 raw_cs_raw,
                 return_eip
@@ -2005,7 +2005,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     fn jmp_call_gate64(&mut self, gate_selector: &BxSelector) -> Result<()> {
         use super::descriptor::is_data_segment;
 
-        tracing::debug!("jmp_call_gate64: jump to CALL GATE 64");
+        tracing::trace!("jmp_call_gate64: jump to CALL GATE 64");
 
         let (dword1, dword2, dword3) = self.fetch_raw_descriptor_64(gate_selector)?;
         let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
@@ -2133,7 +2133,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         disp: u64,
     ) -> Result<()> {
         if (cs_raw & 0xfffc) == 0 {
-            tracing::debug!("call_protected_64: CS selector null");
+            tracing::trace!("call_protected_64: CS selector null");
             return self.exception(Exception::Gp, 0);
         }
 
@@ -2295,7 +2295,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     fn call_gate64(&mut self, gate_selector: &BxSelector) -> Result<()> {
         use super::descriptor::{is_code_segment_non_conforming, is_data_segment};
 
-        tracing::debug!("call_gate64: CALL 64bit call gate");
+        tracing::trace!("call_gate64: CALL 64bit call gate");
 
         let (dword1, dword2, dword3) = self.fetch_raw_descriptor_64(gate_selector)?;
         let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
@@ -2350,7 +2350,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
 
         // CALL GATE TO MORE PRIVILEGE
         if is_code_segment_non_conforming(cs_descriptor.r#type) && cs_descriptor.dpl < cpl {
-            tracing::debug!("CALL GATE64 TO MORE PRIVILEGE LEVEL");
+            tracing::trace!("CALL GATE64 TO MORE PRIVILEGE LEVEL");
 
             let rsp_for_cpl_x = self.get_rsp_from_tss(cs_descriptor.dpl)?;
             let old_ss = self.sregs[BxSegregs::Ss as usize].selector.value as u64;
@@ -2390,7 +2390,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             self.set_rsp(new_rsp);
         } else {
             // CALL GATE64 TO SAME PRIVILEGE
-            tracing::debug!("CALL GATE64 TO SAME PRIVILEGE");
+            tracing::trace!("CALL GATE64 TO SAME PRIVILEGE");
 
             // Push to 64-bit stack
             self.write_new_stack_qword_64(self.rsp().wrapping_sub(8), cpl, old_cs)?;
@@ -2467,7 +2467,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
 
         // RETURN TO SAME PRIVILEGE LEVEL
         if cs_selector.rpl == cpl {
-            tracing::debug!("return_protected_64: return to SAME PRIVILEGE LEVEL");
+            tracing::trace!("return_protected_64: return to SAME PRIVILEGE LEVEL");
 
             self.branch_far(&mut cs_selector, &mut cs_descriptor, return_rip, cpl)?;
 
@@ -2493,7 +2493,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             }
         } else {
             // RETURN TO OUTER PRIVILEGE LEVEL
-            tracing::debug!("return_protected_64: return to OUTER PRIVILEGE LEVEL");
+            tracing::trace!("return_protected_64: return to OUTER PRIVILEGE LEVEL");
 
             let (raw_ss_selector, return_rsp): (u16, u64) = if instr.os64_l() != 0 {
                 let ss = self
@@ -2615,7 +2615,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     pub(super) fn long_iret(&mut self, instr: &super::decoder::Instruction) -> Result<()> {
         use super::eflags::EFlags;
 
-        tracing::debug!("LONG MODE IRET");
+        tracing::trace!("LONG MODE IRET");
 
         if self.eflags.contains(EFlags::NT) {
             tracing::error!("iret64: return from nested task in x86-64 mode!");
@@ -2682,7 +2682,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
 
         // INTERRUPT RETURN TO SAME PRIVILEGE LEVEL (only when not os64)
         if cs_selector.rpl == cpl && instr.os64_l() == 0 {
-            tracing::debug!("LONG MODE INTERRUPT RETURN TO SAME PRIVILEGE LEVEL");
+            tracing::trace!("LONG MODE INTERRUPT RETURN TO SAME PRIVILEGE LEVEL");
 
             // Load CS:RIP from stack
             self.branch_far(&mut cs_selector, &mut cs_descriptor, new_rip, cpl)?;
@@ -2723,7 +2723,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             }
         } else {
             // INTERRUPT RETURN TO OUTER PRIVILEGE LEVEL or 64-BIT MODE
-            tracing::debug!("LONG MODE INTERRUPT RETURN TO OUTER PRIVILEGE LEVEL or 64 BIT MODE");
+            tracing::trace!("LONG MODE INTERRUPT RETURN TO OUTER PRIVILEGE LEVEL or 64 BIT MODE");
 
             // Read SS and RSP from stack
             let (raw_ss_selector, new_rsp): (u16, u64) = if instr.os64_l() != 0 {

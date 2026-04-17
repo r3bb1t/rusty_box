@@ -40,7 +40,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Check IOPL >= CPL
             let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl as u32;
             if iopl < cpl {
-                tracing::debug!("CLI: IOPL < CPL in protected mode");
+                tracing::trace!("CLI: IOPL < CPL in protected mode");
                 self.exception(super::cpu::Exception::Gp, 0)?;
             }
         } else if self.v8086_mode()
@@ -50,7 +50,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     self.eflags.remove(EFlags::VIF);
                     return Ok(());
                 }
-                tracing::debug!("CLI: IOPL != 3 in v8086 mode");
+                tracing::trace!("CLI: IOPL != 3 in v8086 mode");
                 self.exception(super::cpu::Exception::Gp, 0)?;
             }
 
@@ -75,14 +75,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                         self.eflags.insert(EFlags::VIF);
                         return Ok(());
                     }
-                    tracing::debug!("STI: #GP(0) in VME mode");
+                    tracing::trace!("STI: #GP(0) in VME mode");
                     self.exception(super::cpu::Exception::Gp, 0)?;
                 }
             }
             // Check CPL <= IOPL
             let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl as u32;
             if cpl > iopl {
-                tracing::debug!("STI: CPL > IOPL in protected mode");
+                tracing::trace!("STI: CPL > IOPL in protected mode");
                 self.exception(super::cpu::Exception::Gp, 0)?;
             }
         } else if self.v8086_mode()
@@ -92,7 +92,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     self.eflags.insert(EFlags::VIF);
                     return Ok(());
                 }
-                tracing::debug!("STI: IOPL != 3 in v8086 mode");
+                tracing::trace!("STI: IOPL != 3 in v8086 mode");
                 self.exception(super::cpu::Exception::Gp, 0)?;
             }
 

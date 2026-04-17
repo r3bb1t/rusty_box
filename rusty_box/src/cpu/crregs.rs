@@ -759,11 +759,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs check_CR0(): PG without PE is illegal, NW without CD is illegal
         let new_cr0 = BxCr0::from_bits_retain(val_32);
         if new_cr0.contains(BxCr0::PG) && !new_cr0.contains(BxCr0::PE) {
-            tracing::debug!("MOV CR0: PG=1 without PE=1, #GP(0)");
+            tracing::trace!("MOV CR0: PG=1 without PE=1, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         if new_cr0.contains(BxCr0::NW) && !new_cr0.contains(BxCr0::CD) {
-            tracing::debug!("MOV CR0: NW=1 without CD=1, #GP(0)");
+            tracing::trace!("MOV CR0: NW=1 without CD=1, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -774,7 +774,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if !self.cr0.pg() && pg {
             if self.efer.lme() {
                 if !self.cr4.pae() {
-                    tracing::debug!(
+                    tracing::trace!(
                         "MOV CR0: attempt to enter long mode without CR4.PAE, #GP(0)"
                     );
                     return self.exception(super::cpu::Exception::Gp, 0);
@@ -785,30 +785,30 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     .u
                     .segment_l();
                 if cs_l {
-                    tracing::debug!("MOV CR0: attempt to enter long mode with CS.L=1, #GP(0)");
+                    tracing::trace!("MOV CR0: attempt to enter long mode with CS.L=1, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 // TSS must be 386 or later (type > 3)
                 if self.tr.cache.r#type <= 3 {
-                    tracing::debug!(
+                    tracing::trace!(
                         "MOV CR0: attempt to enter long mode with TSS286 in TR, #GP(0)"
                     );
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 // Bochs crregs.cc — set EFER.LMA=1
                 self.efer.set_lma(1);
-                tracing::debug!("MOV CR0: Long mode activated (EFER.LMA=1)");
+                tracing::trace!("MOV CR0: Long mode activated (EFER.LMA=1)");
             }
         } else if self.cr0.pg() && !pg {
             // When disabling paging (PG: 1→0) with EFER.LMA=1: deactivate long mode
             if self.cpu_mode == super::cpu::CpuMode::Long64 {
-                tracing::debug!("MOV CR0: attempt to leave 64-bit mode directly, #GP(0)");
+                tracing::trace!("MOV CR0: attempt to leave 64-bit mode directly, #GP(0)");
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
             if self.efer.lma() {
                 // Bochs crregs.cc — clear EFER.LMA
                 self.efer.set_lma(0);
-                tracing::debug!("MOV CR0: Long mode deactivated (EFER.LMA=0)");
+                tracing::trace!("MOV CR0: Long mode deactivated (EFER.LMA=0)");
             }
         }
 
@@ -863,7 +863,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             );
         }
 
-        tracing::debug!(
+        tracing::trace!(
             "MOV CR0, r32: {:#010x} -> {:#010x} (PE={}, PG={}, LMA={})",
             old_cr0,
             val_32,
@@ -943,7 +943,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs check_CR4(): reject unsupported bits using cr4_suppmask
         // computed at reset from CPUID features (matches crregs.cc)
         if (val_32 & !self.cr4_suppmask) != 0 {
-            tracing::debug!(
+            tracing::trace!(
                 "MOV CR4: unsupported bits set {:#010x} (mask={:#010x}), #GP(0)",
                 val_32 & !self.cr4_suppmask,
                 self.cr4_suppmask
@@ -956,19 +956,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs crregs.cc — long-mode checks
         // (1) Cannot clear CR4.PAE when EFER.LMA=1
         if self.efer.lma() && !new_cr4.contains(BxCr4::PAE) {
-            tracing::debug!("MOV CR4: attempt to clear PAE while EFER.LMA=1, #GP(0)");
+            tracing::trace!("MOV CR4: attempt to clear PAE while EFER.LMA=1, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // (2) Cannot change CR4.LA57 when EFER.LMA=1
         if self.efer.lma()
             && (new_cr4.contains(BxCr4::LA57) != self.cr4.contains(BxCr4::LA57))
         {
-            tracing::debug!("MOV CR4: attempt to change LA57 while EFER.LMA=1, #GP(0)");
+            tracing::trace!("MOV CR4: attempt to change LA57 while EFER.LMA=1, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // (3) Cannot set CR4.PCIDE when EFER.LMA=0
         if !self.efer.lma() && new_cr4.contains(BxCr4::PCIDE) {
-            tracing::debug!("MOV CR4: attempt to set PCIDE while EFER.LMA=0, #GP(0)");
+            tracing::trace!("MOV CR4: attempt to set PCIDE while EFER.LMA=0, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -1019,7 +1019,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Bochs check_CR0(): upper 32 bits must be zero
         if (val_64 >> 32) != 0 {
-            tracing::debug!("MOV CR0 (64-bit): upper 32 bits non-zero {:#018x}, #GP(0)", val_64);
+            tracing::trace!("MOV CR0 (64-bit): upper 32 bits non-zero {:#018x}, #GP(0)", val_64);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -1032,11 +1032,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs check_CR0(): PG without PE is illegal, NW without CD is illegal
         let new_cr0 = BxCr0::from_bits_retain(val_32);
         if new_cr0.contains(BxCr0::PG) && !new_cr0.contains(BxCr0::PE) {
-            tracing::debug!("MOV CR0 (64-bit): PG=1 without PE=1, #GP(0)");
+            tracing::trace!("MOV CR0 (64-bit): PG=1 without PE=1, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         if new_cr0.contains(BxCr0::NW) && !new_cr0.contains(BxCr0::CD) {
-            tracing::debug!("MOV CR0 (64-bit): NW=1 without CD=1, #GP(0)");
+            tracing::trace!("MOV CR0 (64-bit): NW=1 without CD=1, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -1068,7 +1068,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Bochs check_CR4(): upper 32 bits must be zero
         if (val_64 >> 32) != 0 {
-            tracing::debug!("MOV CR4 (64-bit): upper 32 bits non-zero {:#018x}, #GP(0)", val_64);
+            tracing::trace!("MOV CR4 (64-bit): upper 32 bits non-zero {:#018x}, #GP(0)", val_64);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -1088,7 +1088,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             .selector
             .rpl;
         if cpl != 0 {
-            tracing::debug!("LMSW: CPL={} != 0, #GP(0)", cpl);
+            tracing::trace!("LMSW: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -1127,7 +1127,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // handleAlignmentCheck + handleCpuModeChange (Bochs crregs.cc)
         self.handle_cpu_context_change();
 
-        tracing::debug!(
+        tracing::trace!(
             "LMSW: msw={:#06x}, CR0={:#010x} (PE={})",
             msw,
             cr0_val,

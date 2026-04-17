@@ -25,7 +25,7 @@ fn stub_creates_successfully() {
     vector[3] = b's';
     let rom = mem_stub.rom();
 
-    tracing::info!(
+    tracing::debug!(
         "Pointers: \n actual vector: {:#?} ,\n vector: {:#?} \n rom: {:p}",
         &actual_vector[0..10],
         &vector[0..10],
@@ -58,7 +58,7 @@ fn init_memory_with_address_assertions() {
     let rom_ptr = rom.as_ptr();
 
     // allocated memory at 0x72c626200010. after alignment, vector=0x72c626201000, block_size = 128K
-    tracing::info!(
+    tracing::debug!(
         "Pointers: \n actual vector: {:p} ,\n vector: {:p} \n rom: {:p}",
         actual_vector_ptr,
         vector_ptr,

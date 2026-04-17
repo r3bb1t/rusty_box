@@ -73,7 +73,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 // Native FPU error reporting — raise #MF
                 return self.exception(Exception::Mf, 0u16);
             } else {
-                tracing::info!("math_abort: MSDOS compatibility FPU exception");
+                tracing::debug!("math_abort: MSDOS compatibility FPU exception");
             }
         }
         Ok(())

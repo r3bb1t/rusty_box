@@ -253,7 +253,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Log the caller site for #GP to identify spurious exceptions during debugging
         if vector == Exception::Gp && !self.real_mode() {
             let caller = core::panic::Location::caller();
-            tracing::debug!(
+            tracing::trace!(
                 "GP_CALLER: {}:{} icount={} RIP={:#x}",
                 caller.file(),
                 caller.line(),
@@ -402,11 +402,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             {
                 // For #PF, include CR2 (the faulting linear address).
                 if vector == Exception::Pf {
-                    tracing::debug!("EXCEPTION: vec={:?}({:#x}) error_code={:#x} CR2={:#010x} RIP={:#x} ESP={:#x} icount={}",
+                    tracing::trace!("EXCEPTION: vec={:?}({:#x}) error_code={:#x} CR2={:#010x} RIP={:#x} ESP={:#x} icount={}",
                         vector, vector as u8, error_code, self.cr2,
                         self.rip(), self.esp(), self.icount);
                 } else {
-                    tracing::debug!("EXCEPTION: vec={:?}({:#x}) error_code={:#x} push_error={} RIP={:#x} icount={}",
+                    tracing::trace!("EXCEPTION: vec={:?}({:#x}) error_code={:#x} push_error={} RIP={:#x} icount={}",
                         vector, vector as u8, error_code, push_error,
                         self.rip(), self.icount);
                 }
@@ -428,7 +428,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 }) => {
                     // Delivery failed — raise the indicated exception.
                     // Double-fault / triple-fault detection is in the recursive call.
-                    tracing::debug!(
+                    tracing::trace!(
                         "protected_mode_int({:?}) failed, raising {:?} error_code={:#x}; icount={}",
                         vector,
                         new_vector,
@@ -441,7 +441,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     crate::memory::MemoryError::PageNotPresent,
                 )) => {
                     // Exception delivery hit an unmapped page — escalate to #DF
-                    tracing::debug!("Exception delivery: PageNotPresent for vec={:?} CR3={:#x} — escalating to #DF", vector, self.cr3);
+                    tracing::trace!("Exception delivery: PageNotPresent for vec={:?} CR3={:#x} — escalating to #DF", vector, self.cr3);
                     return self.exception(Exception::Df, 0);
                 }
                 Err(e) => return Err(e),

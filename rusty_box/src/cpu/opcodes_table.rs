@@ -1029,11 +1029,11 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait, T: crate::cpu::instrumentation::
         // or if the 32-bit value is significantly different from 16-bit, use 32-bit
         if instr.ilen() >= 6 && offset32 != offset16 {
             // 32-bit far jump
-            tracing::debug!("JmpfAp(w): FAR JMP 32-BIT to {:04x}:{:08x}", segment, offset32);
+            tracing::trace!("JmpfAp(w): FAR JMP 32-BIT to {:04x}:{:08x}", segment, offset32);
             cpu.jmp_far32(instr, segment, offset32)?;
         } else {
             // 16-bit far jump
-            tracing::debug!("JmpfAp(w): FAR JMP 16-BIT to {:04x}:{:04x}", segment, offset16);
+            tracing::trace!("JmpfAp(w): FAR JMP 16-BIT to {:04x}:{:04x}", segment, offset16);
             cpu.jmp_far16(instr, segment, offset16 as u16)?;
         }
 

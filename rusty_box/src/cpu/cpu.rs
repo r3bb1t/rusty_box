@@ -1701,7 +1701,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         let mut prof_icache_ns = 0u64;
 
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
-        tracing::info!(
+        tracing::trace!(
             "CPU loop starting at CS:IP = {:04X}:{:08X}",
             self.cs_selector_value(),
             self.rip()
@@ -1713,7 +1713,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             outer_loop_count += 1;
             // Detect spinning: log every 100K outer-loop iterations
             if outer_loop_count.is_multiple_of(100_000) {
-                tracing::debug!(
+                tracing::trace!(
                     "[cpu_loop-spin] outer={} iter={}/{} RIP={:#010x} async={} activity={:?}",
                     outer_loop_count,
                     iteration,
@@ -1732,7 +1732,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             // Use >= so each batch runs exactly max_instructions, not max_instructions+1.
             if iteration >= max_instructions {
                 #[cfg(feature = "profiling")]
-                tracing::debug!(
+                tracing::trace!(
                     "CPU-LOOP-STATS: {} instr, icache={}ms assign={}ms exec={}ms",
                     iteration,
                     prof_icache_ns / 1_000_000,
@@ -1868,7 +1868,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         self.speculative_rsp = false;
                         // If triple fault set Shutdown, exit cleanly instead of restarting.
                         if matches!(self.activity_state, CpuActivityState::Shutdown) {
-                            tracing::debug!("CPU shutdown — exiting cpu_loop");
+                            tracing::trace!("CPU shutdown — exiting cpu_loop");
                             break 'cpu_loop Ok(iteration);
                         }
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
@@ -2076,7 +2076,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         tracing::error!("prefetch retry limit exceeded, RIP={:#x}", self.rip());
                         return Err(crate::cpu::CpuError::CpuNotInitialized);
                     }
-                    tracing::debug!(
+                    tracing::trace!(
                         "prefetch queue invalidated after exception, retrying (attempt {})",
                         retry_count
                     );
@@ -2086,7 +2086,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
 
                 if eip_biased >= self.eip_page_window_size {
-                    tracing::debug!("eip_biased ({}) >= eip_page_window_size ({}) after prefetch, RIP={:#x}, retrying",
+                    tracing::trace!("eip_biased ({}) >= eip_page_window_size ({}) after prefetch, RIP={:#x}, retrying",
                         eip_biased, self.eip_page_window_size, self.rip());
                     self.eip_fetch_ptr = None;
                     self.eip_page_window_size = 0;
@@ -2504,7 +2504,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
             laddr = BxAddress::from(self.get_laddr32(BxSegregs::Cs as _, eip));
             let cs_base = self.sregs[BxSegregs::Cs as usize].cache.u.segment_base();
-            tracing::debug!(
+            tracing::trace!(
                 "prefetch: CS.base={:#x}, EIP={:#x}, laddr={:#x}",
                 cs_base,
                 eip,
@@ -2617,7 +2617,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 Ok(p_addr) => {
                     self.p_addr_fetch_page = ppf_of(p_addr);
                     itlb_should_update = true;
-                    tracing::debug!(
+                    tracing::trace!(
                         "prefetch: translate_linear OK, p_addr={:#x}, p_addr_fetch_page={:#x}",
                         p_addr,
                         self.p_addr_fetch_page
@@ -2669,7 +2669,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 }
                 Err(_e) => {
                     // Log the error and treat as no direct access
-                    tracing::debug!("Failed to get host mem addr for fetch: {:?}", _e);
+                    tracing::trace!("Failed to get host mem addr for fetch: {:?}", _e);
                     self.eip_fetch_ptr = None;
                 }
             }
@@ -2692,7 +2692,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             let p_addr: BxPhyAddress = self.p_addr_fetch_page + u64::from(page_offset);
             if self.eip_fetch_ptr.is_none() && p_addr >= mem_len.try_into()? {
                 // Address is beyond available memory - set to no direct access
-                tracing::debug!("prefetch: address {p_addr:#x} beyond memory limit {mem_len:#x} and no ROM mapping");
+                tracing::trace!("prefetch: address {p_addr:#x} beyond memory limit {mem_len:#x} and no ROM mapping");
                 self.eip_fetch_ptr = None;
             }
         }
@@ -2725,9 +2725,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         let opcode = instr.get_ia_opcode();
 
         if opcode == crate::cpu::decoder::Opcode::IaError {
-            tracing::debug!("BxError: Encountered an unknown instruction (signalling #UD)");
+            tracing::trace!("BxError: Encountered an unknown instruction (signalling #UD)");
         } else {
-            tracing::debug!("{:?}: instruction not supported - signalling #UD", opcode);
+            tracing::trace!("{:?}: instruction not supported - signalling #UD", opcode);
         }
 
         // Boot diagnostic: report the first unsupported opcode via port 0xE9.
@@ -3078,7 +3078,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     if !is_reg_form {
                         // Memory form: check NO_BROADCAST
                         if op_flags.contains(OpFlags::PREPARE_EVEX_NO_BROADCAST) {
-                            tracing::debug!(
+                            tracing::trace!(
                                 "{:?}: broadcast is not supported for this instruction",
                                 ia_opcode
                             );
@@ -3089,7 +3089,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     } else {
                         // Register form: check NO_SAE
                         if op_flags.contains(OpFlags::PREPARE_EVEX_NO_SAE) {
-                            tracing::debug!(
+                            tracing::trace!(
                                 "{:?}: EVEX.b in reg form is not allowed for instructions which cannot cause floating point exception",
                                 ia_opcode
                             );

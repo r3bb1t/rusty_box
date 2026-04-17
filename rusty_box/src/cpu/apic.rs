@@ -1717,21 +1717,21 @@ impl BxLocalApic {
         };
         let timer_masked = timervec.contains(LvtBits::MASKED);
         let timer_vector = timervec.vector();
-        tracing::debug!("--- LAPIC State ---");
-        tracing::debug!("  mode={:?} sw_enabled={} base={:#x} id={}",
+        tracing::trace!("--- LAPIC State ---");
+        tracing::trace!("  mode={:?} sw_enabled={} base={:#x} id={}",
             self.mode, self.software_enabled, self.base_addr, self.apic_id);
-        tracing::debug!("  TPR={:#x} PPR={:#x} spurious_vec={:#x}",
+        tracing::trace!("  TPR={:#x} PPR={:#x} spurious_vec={:#x}",
             self.task_priority, self.get_ppr(), self.spurious_vector);
-        tracing::debug!("  LVT[Timer]={:#010x} (vec={:#x} mode={} masked={})",
+        tracing::trace!("  LVT[Timer]={:#010x} (vec={:#x} mode={} masked={})",
             timervec.bits(), timer_vector, timer_mode, timer_masked);
-        tracing::debug!("  LVT[LINT0]={:#010x} LVT[LINT1]={:#010x}",
+        tracing::trace!("  LVT[LINT0]={:#010x} LVT[LINT1]={:#010x}",
             self.lvt[3].bits(), self.lvt[4].bits());
-        tracing::debug!("  timer: initial={} current={} active={} div_factor={} period={}",
+        tracing::trace!("  timer: initial={} current={} active={} div_factor={} period={}",
             self.timer_initial, self.timer_current, self.timer_active,
             self.timer_divide_factor,
             self.timer_initial as u64 * self.timer_divide_factor as u64);
-        tracing::debug!("  ticks_initial={} current_ticks={}", self.ticks_initial, self.current_ticks);
-        tracing::debug!("  intr={} timer_fired={} timer_activate_req={} timer_deact_req={}",
+        tracing::trace!("  ticks_initial={} current_ticks={}", self.ticks_initial, self.current_ticks);
+        tracing::trace!("  intr={} timer_fired={} timer_activate_req={} timer_deact_req={}",
             self.intr, self.timer_fired,
             self.timer_activate_request.is_some(), self.timer_deactivate_request);
         // Show IRR/ISR summary - which vectors are pending/in-service
@@ -1741,8 +1741,8 @@ impl BxLocalApic {
             if Self::get_vector(&self.irr, i) { irr_vecs.push(i); }
             if Self::get_vector(&self.isr, i) { isr_vecs.push(i); }
         }
-        tracing::debug!("  IRR vectors: {:?}", irr_vecs);
-        tracing::debug!("  ISR vectors: {:?}", isr_vecs);
+        tracing::trace!("  IRR vectors: {:?}", irr_vecs);
+        tracing::trace!("  ISR vectors: {:?}", isr_vecs);
     }
 }
 

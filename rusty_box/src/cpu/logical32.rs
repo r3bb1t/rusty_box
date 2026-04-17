@@ -99,7 +99,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Trace '%' comparisons in kernel space
         if op2 == 0x25 && op1 == 0x25 && self.rip() > 0xC0000000 {
             let zf = (self.eflags.bits() >> 6) & 1;
-            tracing::debug!(
+            tracing::trace!(
                 "CMP EAX=0x25, Id=0x25 at RIP={:#x} ZF={} eflags={:#x} icount={}",
                 self.rip(),
                 zf,

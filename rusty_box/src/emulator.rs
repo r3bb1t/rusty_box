@@ -249,15 +249,15 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// See main.cc for the correct sequence.
     pub fn initialize(&mut self) -> Result<()> {
         if self.initialized {
-            tracing::debug!("Emulator already initialized");
+            tracing::trace!("Emulator already initialized");
             return Ok(());
         }
 
-        tracing::info!("Initializing emulator");
+        tracing::debug!("Initializing emulator");
 
         // Step 1: Initialize PC system with IPS (line 1201)
         self.pc_system.initialize(self.config.ips);
-        tracing::debug!("PC system initialized with {} IPS", self.config.ips);
+        tracing::trace!("PC system initialized with {} IPS", self.config.ips);
 
         // Step 2: Memory initialization (line 1312)
         // In original: BX_MEM(0)->init_memory(memSize, hostMemSize, memBlockSize);
@@ -269,7 +269,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
         // Sync A20 mask from PC system (after memory init, matching original)
         self.memory.set_a20_mask(self.pc_system.a20_mask());
-        tracing::debug!("Memory initialized and A20 mask synced");
+        tracing::trace!("Memory initialized and A20 mask synced");
 
         // Step 3-5: BIOS/ROM/RAM loading should happen HERE (after memory init, before CPU init)
         // But since this method doesn't have BIOS data, it's loaded separately after this call.
@@ -277,15 +277,15 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
         // Step 6: Initialize CPU (line 1337)
         self.cpu.initialize(self.config.cpu_params.clone())?;
-        tracing::debug!("CPU initialized");
+        tracing::trace!("CPU initialized");
 
         // Step 7: CPU sanity checks (line 1338) - separate call to match original
         self.cpu.sanity_checks()?;
-        tracing::debug!("CPU sanity checks passed");
+        tracing::trace!("CPU sanity checks passed");
 
         // Step 8: Register CPU state (line 1339)
         self.cpu.register_state();
-        tracing::debug!("CPU state registered");
+        tracing::trace!("CPU state registered");
 
         // Note: BX_INSTR_INITIALIZE(0) at line 1340 is instrumentation initialization
         // This is optional and not yet implemented in Rust version
@@ -301,9 +301,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         {
             let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
             self.device_manager.pci_bridge.init_dram(ramsize_mb);
-            tracing::debug!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
+            tracing::trace!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
         }
-        tracing::debug!("Devices initialized");
+        tracing::trace!("Devices initialized");
 
 
         // Wire DMA→memory for physical DMA transfers
@@ -326,7 +326,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             ) {
                 Ok(handle) => {
                     self.device_manager.pci_ide.bmdma[0].timer_index = Some(handle);
-                    tracing::debug!("PCI IDE ch0 timer registered with handle {}", handle);
+                    tracing::trace!("PCI IDE ch0 timer registered with handle {}", handle);
                 }
                 Err(e) => {
                     tracing::error!("Failed to register PCI IDE ch0 timer: {}", e);
@@ -342,7 +342,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             ) {
                 Ok(handle) => {
                     self.device_manager.pci_ide.bmdma[1].timer_index = Some(handle);
-                    tracing::debug!("PCI IDE ch1 timer registered with handle {}", handle);
+                    tracing::trace!("PCI IDE ch1 timer registered with handle {}", handle);
                 }
                 Err(e) => {
                     tracing::error!("Failed to register PCI IDE ch1 timer: {}", e);
@@ -371,7 +371,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             match timer_handle {
                 Ok(handle) => {
                     self.cpu.lapic.timer_handle = Some(handle);
-                    tracing::debug!("LAPIC timer registered with handle {}", handle);
+                    tracing::trace!("LAPIC timer registered with handle {}", handle);
                 }
                 Err(e) => {
                     tracing::error!("Failed to register LAPIC timer: {}", e);
@@ -387,13 +387,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
         // Step 11: Device register state (line 1357)
         self.devices.register_state()?;
-        tracing::debug!("State registered");
+        tracing::trace!("State registered");
 
         // Note: bx_set_log_actions_by_device(1) at line 1359 sets up logging per device
         // This is only called if not restoring state, and is optional logging setup
 
         self.initialized = true;
-        tracing::info!("Emulator initialization complete");
+        tracing::debug!("Emulator initialization complete");
 
         // Note: Steps 12-14 (Reset, GUI signal handlers, Start timers) are done via:
         // - reset() method (called after BIOS loading)
@@ -413,15 +413,15 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// This matches the original Bochs sequence: Memory init → Load BIOS → CPU init → Device init.
     pub fn init_memory_and_pc_system(&mut self) -> Result<()> {
         if self.initialized {
-            tracing::debug!("Emulator already initialized");
+            tracing::trace!("Emulator already initialized");
             return Ok(());
         }
 
-        tracing::info!("Initializing hardware...");
+        tracing::debug!("Initializing hardware...");
 
         // Step 1: Initialize PC system with IPS (line 1201)
         self.pc_system.initialize(self.config.ips);
-        tracing::debug!("PC system initialized with {} IPS", self.config.ips);
+        tracing::trace!("PC system initialized with {} IPS", self.config.ips);
 
         // Step 2: Memory initialization (line 1312)
         // In original: BX_MEM(0)->init_memory(memSize, hostMemSize, memBlockSize);
@@ -433,7 +433,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
         // Sync A20 mask from PC system (after memory init, matching original)
         self.memory.set_a20_mask(self.pc_system.a20_mask());
-        tracing::debug!("Memory initialized and A20 mask synced");
+        tracing::trace!("Memory initialized and A20 mask synced");
 
         Ok(())
     }
@@ -452,15 +452,15 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     pub fn init_cpu_and_devices(&mut self) -> Result<()> {
         // Step 6: Initialize CPU (line 1337)
         self.cpu.initialize(self.config.cpu_params.clone())?;
-        tracing::debug!("CPU initialized");
+        tracing::trace!("CPU initialized");
 
         // Step 7: CPU sanity checks (line 1338) - separate call to match original
         self.cpu.sanity_checks()?;
-        tracing::debug!("CPU sanity checks passed");
+        tracing::trace!("CPU sanity checks passed");
 
         // Step 8: Register CPU state (line 1339)
         self.cpu.register_state();
-        tracing::debug!("CPU state registered");
+        tracing::trace!("CPU state registered");
 
         // Note: BX_INSTR_INITIALIZE(0) at line 1340 is instrumentation initialization
         // This is optional and not yet implemented in Rust version
@@ -476,9 +476,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         {
             let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
             self.device_manager.pci_bridge.init_dram(ramsize_mb);
-            tracing::debug!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
+            tracing::trace!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
         }
-        tracing::info!("Device initialization complete");
+        tracing::debug!("Device initialization complete");
 
 
         // Wire DMA→memory for physical DMA transfers
@@ -501,7 +501,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             ) {
                 Ok(handle) => {
                     self.device_manager.pci_ide.bmdma[0].timer_index = Some(handle);
-                    tracing::debug!("PCI IDE ch0 timer registered with handle {}", handle);
+                    tracing::trace!("PCI IDE ch0 timer registered with handle {}", handle);
                 }
                 Err(e) => {
                     tracing::error!("Failed to register PCI IDE ch0 timer: {}", e);
@@ -517,7 +517,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             ) {
                 Ok(handle) => {
                     self.device_manager.pci_ide.bmdma[1].timer_index = Some(handle);
-                    tracing::debug!("PCI IDE ch1 timer registered with handle {}", handle);
+                    tracing::trace!("PCI IDE ch1 timer registered with handle {}", handle);
                 }
                 Err(e) => {
                     tracing::error!("Failed to register PCI IDE ch1 timer: {}", e);
@@ -541,7 +541,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             match timer_handle {
                 Ok(handle) => {
                     self.cpu.lapic.timer_handle = Some(handle);
-                    tracing::debug!("LAPIC timer registered with handle {}", handle);
+                    tracing::trace!("LAPIC timer registered with handle {}", handle);
                 }
                 Err(e) => {
                     tracing::error!("Failed to register LAPIC timer: {}", e);
@@ -557,13 +557,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
         // Step 11: Device register state (line 1357)
         self.devices.register_state()?;
-        tracing::debug!("State registered");
+        tracing::trace!("State registered");
 
         // Note: bx_set_log_actions_by_device(1) at line 1359 sets up logging per device
         // This is only called if not restoring state, and is optional logging setup
 
         self.initialized = true;
-        tracing::info!("Emulator initialization complete");
+        tracing::debug!("Emulator initialization complete");
 
         // Note: Steps 12-14 (Reset, GUI signal handlers, Start timers) are done via:
         // - reset() method (called after BIOS loading)
@@ -578,7 +578,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Based on load_and_init_display_lib() in main.cc
     pub fn set_gui<G: BxGui + 'static>(&mut self, gui: G) {
         self.gui = Some(Box::new(gui));
-        tracing::info!("GUI set");
+        tracing::debug!("GUI set");
     }
 
     /// Initialize the GUI
@@ -594,9 +594,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             // Connect keyboard callback if GUI supports it
             self.connect_keyboard_callback();
 
-            tracing::info!("GUI initialized (signal handlers will be set up after reset)");
+            tracing::debug!("GUI initialized (signal handlers will be set up after reset)");
         } else {
-            tracing::debug!("No GUI set, running headless");
+            tracing::trace!("No GUI set, running headless");
         }
         Ok(())
     }
@@ -684,7 +684,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// * `address` - Load address (typically 0xfffe0000 for 128KB BIOS)
     pub fn load_bios(&mut self, bios_data: &[u8], address: u64) -> Result<()> {
         self.memory.load_ROM(bios_data, address, 0)?;
-        tracing::info!("Loaded BIOS ({} bytes) at {:#x}", bios_data.len(), address);
+        tracing::debug!("Loaded BIOS ({} bytes) at {:#x}", bios_data.len(), address);
         Ok(())
     }
 
@@ -695,7 +695,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// * `address` - Load address (must be in 0xC0000-0xFFFFF range)
     pub fn load_optional_rom(&mut self, rom_data: &[u8], address: u64) -> Result<()> {
         self.memory.load_ROM(rom_data, address, 2)?;
-        tracing::info!(
+        tracing::debug!(
             "Loaded optional ROM ({} bytes) at {:#x}",
             rom_data.len(),
             address
@@ -712,7 +712,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// * `address` - Load address in physical memory
     pub fn load_ram(&mut self, ram_data: &[u8], address: u64) -> Result<()> {
         self.memory.load_RAM(ram_data, address)?;
-        tracing::info!(
+        tracing::debug!(
             "Loaded RAM image ({} bytes) at {:#x}",
             ram_data.len(),
             address
@@ -727,7 +727,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// # Arguments
     /// * `reset_type` - Type of reset (Hardware or Software)
     pub fn reset(&mut self, reset_type: ResetReason) -> Result<()> {
-        tracing::info!("Emulator reset ({:?})", reset_type);
+        tracing::debug!("Emulator reset ({:?})", reset_type);
 
         // Reset PC system (enables A20)
         self.pc_system.reset(reset_type)?;
@@ -779,7 +779,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     pub fn init_gui_signal_handlers(&mut self) {
         if let Some(ref mut gui) = self.gui {
             gui.init_signal_handlers();
-            tracing::debug!("GUI signal handlers initialized");
+            tracing::trace!("GUI signal handlers initialized");
         }
     }
 
@@ -787,7 +787,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Note: Timers are now started in reset(), so this is mostly for compatibility
     pub fn start(&mut self) {
         self.pc_system.start_timers();
-        tracing::debug!("Timers started");
+        tracing::trace!("Timers started");
     }
 
     /// Check if the emulator is ready to run
@@ -804,7 +804,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     ///
     /// Call this before entering the CPU loop.
     pub fn prepare_run(&mut self) {
-        tracing::info!("Starting CPU execution at RIP={:#x}", self.cpu.rip());
+        tracing::trace!("Starting CPU execution at RIP={:#x}", self.cpu.rip());
 
 
 
@@ -1203,7 +1203,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             bzimage[0x260], bzimage[0x261], bzimage[0x262], bzimage[0x263],
         ]) as u64;
 
-        tracing::info!(
+        tracing::debug!(
             "bzImage: protocol {}.{}, setup={}B, kernel={}B, entry={:#x}, pref={:#x}, init_size={:#x}",
             boot_version >> 8, boot_version & 0xFF,
             setup_size, pm_kernel.len(), code32_start, pref_address, init_size
@@ -1237,7 +1237,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         // identity mappings on demand for any unmapped physical address.
         let boot_params_addr: u64 = 0x10000;
         let cmdline_addr: u64 = 0x20000;
-        tracing::info!(
+        tracing::debug!(
             "boot_params at {:#x}, cmdline at {:#x} (pref={:#x}, init_size={:#x})",
             boot_params_addr, cmdline_addr, pref_address, init_size
         );
@@ -1309,7 +1309,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             // This prevents the kernel decompressor from overwriting the initramfs
             let initrd_load_addr = (max_addr - initrd_data.len() as u64) & !0xFFF;
 
-            tracing::info!(
+            tracing::debug!(
                 "BOOT LAYOUT: kernel={} bytes at {:#x}..{:#x}, init_size={:#x}, initrd={} bytes at {:#x}..{:#x}, RAM top={:#x}, initrd_addr_max={:#x}",
                 pm_kernel.len(), code32_start, kernel_end,
                 init_size,
@@ -1367,7 +1367,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         let mut cmdline_buf = alloc::vec![0u8; cmdline_len + 1]; // null-terminated
         cmdline_buf[..cmdline_len].copy_from_slice(&cmdline_bytes[..cmdline_len]);
         self.memory.load_RAM(&cmdline_buf, cmdline_addr)?;
-        tracing::info!("Command line: {}", cmdline);
+        tracing::debug!("Command line: {}", cmdline);
 
         // =====================================================================
         // Create minimal ACPI tables (RSDP → XSDT → MADT)
@@ -1481,7 +1481,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             rsdp[32] = 0u8.wrapping_sub(v2_sum);
             self.memory.load_RAM(&rsdp, RSDP_ADDR)?;
 
-            tracing::info!(
+            tracing::debug!(
                 "ACPI tables: RSDP at {:#x}, XSDT at {:#x}, MADT at {:#x} ({}B)",
                 RSDP_ADDR, XSDT_ADDR, MADT_ADDR, madt_len
             );
@@ -1519,13 +1519,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
             // Do NOT program PIT — kernel will set up its own timer via time_init().
             // quick_pit_calibrate() programs PIT C2 via port 0x43/0x42 directly.
-            tracing::info!("Direct boot: PIC initialized (master=0x20, slave=0x28), all IRQs masked");
+            tracing::debug!("Direct boot: PIC initialized (master=0x20, slave=0x28), all IRQs masked");
         }
 
         // =====================================================================
         // Load protected-mode kernel at code32_start
         // =====================================================================
-        tracing::info!(
+        tracing::debug!(
             "Loading kernel ({} bytes) at {:#x}",
             pm_kernel.len(), code32_start
         );
@@ -1541,7 +1541,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         self.cpu.set_rsp(0x20000); // Temporary stack (kernel sets its own early)
         self.cpu.set_rsi(boot_params_addr); // ESI = pointer to boot_params
 
-        tracing::info!(
+        tracing::debug!(
             "Direct boot ready: EIP={:#x}, ESI={:#x}, ESP={:#x}",
             code32_start, boot_params_addr, 0x20000u32
         );
@@ -1569,18 +1569,18 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         {
             // Check through ROM area (not RAM)
             let rom_bytes = self.memory.peek_ram(0xC0000, 4);
-            tracing::debug!(
+            tracing::trace!(
                 "VGA ROM check via peek_ram(0xC0000): {:02X?} (expect [55, AA, ...])",
                 rom_bytes
             );
             // Also verify IPL table area is writable
             let ipl_bytes = self.memory.peek_ram(0x9FF00, 4);
-            tracing::debug!(
+            tracing::trace!(
                 "IPL table check at 0x9FF00: {:02X?} (expect zeros before POST)",
                 ipl_bytes
             );
             // Check total memory size
-            tracing::debug!("Memory len={:#x}", self.memory.get_memory_len());
+            tracing::trace!("Memory len={:#x}", self.memory.get_memory_len());
         }
 
         // Force initial GUI update to show initial state
@@ -1608,10 +1608,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         const PROGRESS_LOG_INTERVAL: u64 = 10_000_000;
         let mut next_progress_log: i64 = PROGRESS_LOG_INTERVAL as i64;
 
-        tracing::info!("Starting interactive execution loop");
-        tracing::debug!(
-            "[Emulator] Starting execution... (instructions will be processed in batches)"
-        );
+        tracing::trace!("Starting interactive execution loop");
 
         #[cfg(debug_assertions)]
         let mut last_rip: u64 = u64::MAX;
@@ -1664,7 +1661,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                     // Milestone progress print every 500K instructions
                     #[cfg(debug_assertions)]
                     if instructions_executed % 500_000 < INSTRUCTION_BATCH_SIZE {
-                        tracing::debug!(
+                        tracing::trace!(
                             "[{}k instr] RIP={:#010x} CS={:#06x} mode={} batch_returned={} activity={:?}",
                             instructions_executed / 1000,
                             self.cpu.rip(),
@@ -1692,7 +1689,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                             // kernel recovers (timer/NMI wakes CPU). Breaking here would
                             // prevent headless Alpine from reaching modloop phase.
                             if hlt_if0_count == 1000 {
-                                tracing::debug!(
+                                tracing::trace!(
                                     "[ZERO-BATCH] HLT/MWAIT with IF=0 for 1000 consecutive batches at RIP={:#x} CS={:#06x} activity={:?} — continuing (egui-match)",
                                     self.cpu.rip(), self.cpu.get_cs_selector(), self.cpu.activity_state,
                                 );
@@ -1761,7 +1758,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                     next_progress_log -= executed as i64;
                     if next_progress_log <= 0 {
                         next_progress_log += PROGRESS_LOG_INTERVAL as i64;
-                        tracing::info!(
+                        tracing::debug!(
                             "Progress: {}M instructions, RIP={:#x}",
                             instructions_executed / 1_000_000,
                             current_rip
@@ -1785,7 +1782,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                         } else {
                             0
                         };
-                        tracing::debug!(
+                        tracing::trace!(
                             "EIP trace: {} instr, CS:IP={:#06x}:{:#06x}, mode={}, IPL_count={}, IPL0_type={}",
                             instructions_executed,
                             self.cpu.get_cs_selector(),
@@ -1822,7 +1819,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                 } else {
                                     0
                                 };
-                                tracing::debug!(
+                                tracing::trace!(
                                     "STUCK at RIP={:#x} after {}k instructions, last I/O read: port={:#06x} value={:#x}, CS={:#06x} mode={}, BP={:#06x} AX={:#06x} [BP+2]={:#06x} [BP+4]={:#06x} [BP+6]={:#06x}",
                                     current_rip,
                                     instructions_executed / 1000,
@@ -2190,7 +2187,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                 0
                             }
                         };
-                        tracing::debug!("BATCH-DIAG: executed={}, total={}k, RIP={:#x}, PIT_count={}, activity={:?}, BDA_ticks={}",
+                        tracing::trace!("BATCH-DIAG: executed={}, total={}k, RIP={:#x}, PIT_count={}, activity={:?}, BDA_ticks={}",
                             executed, instructions_executed / 1000, self.cpu.rip(), pit_c0_count,
                             self.cpu.activity_state, bda_ticks);
                     }
@@ -2202,7 +2199,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                         let if_flag = self.cpu.get_b_if();
                         let rip = self.cpu.rip();
                         let pit_c0 = &self.device_manager.pit.counters[0];
-                        tracing::debug!(
+                        tracing::trace!(
                             "IRQ-DIAG: {}M instr, RIP={:#x}, IF={}, has_int={}, PIC_imr={:#04x}, PIC_irr={:#04x}, PIT_c0: mode={:?} inlatch={} count={} count_written={} gate={} output={}",
                             instructions_executed / 1_000_000,
                             rip,
@@ -2236,7 +2233,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
                         match &inject_result {
                             Ok(()) => {
-                                tracing::debug!(
+                                tracing::trace!(
                                     "INT-INJECT: OK! activity_after={:?}, RIP={:#x}",
                                     self.cpu.activity_state,
                                     self.cpu.rip()
@@ -2267,7 +2264,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                 }
                 Err(e) => {
                     tracing::error!("CPU execution error: {:?}", e);
-                    tracing::debug!("[Emulator] ERROR: {:?}", e);
+                    tracing::trace!("[Emulator] ERROR: {:?}", e);
                     return Err(crate::Error::Cpu(e));
                 }
             };
@@ -2325,7 +2322,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                 };
                 last_mips_log_instructions = instructions_executed;
                 last_mips_log_update = std::time::Instant::now();
-                tracing::info!(
+                tracing::debug!(
                     target: "mips",
                     "[{:>6}M instr] {:>6.2} MIPS  RIP={:#010x}  CS={:#06x}  mode={}",
                     instructions_executed / 1_000_000,
@@ -2363,7 +2360,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             // TODO: Add shutdown flag check
         }
 
-        tracing::debug!(
+        tracing::trace!(
             "Interactive execution completed: {} instructions",
             instructions_executed
         );
@@ -2380,7 +2377,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             let tlb_pct = if tlb_total > 0 { tlb_h as f64 / tlb_total as f64 * 100.0 } else { 0.0 };
             // icount = instruction count (REP iterations count as separate ticks)
             let bochs_ticks = self.cpu.icount;
-            tracing::info!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
+            tracing::debug!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
         }
 
         Ok(instructions_executed)
@@ -2642,7 +2639,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                     .count();
                 let first_16: Vec<u8> =
                     update_result.text_buffer.iter().take(32).copied().collect();
-                tracing::debug!(
+                tracing::trace!(
                     "VGA update: dim_changed={}, needs_update={}, buf_non_zero={}, first_32={:02x?}, start_addr={}",
                     update_result.dimension_changed,
                     update_result.needs_update,
@@ -2893,27 +2890,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
     /// Dump comprehensive diagnostic state (for Alpine debugging).
     #[cfg(all(feature = "std", debug_assertions))]
     pub fn dump_alpine_diag(&mut self) {
-        tracing::debug!("\n=== DIAGNOSTIC DUMP ===");
-        tracing::debug!("RIP={:#018x} RSP={:#018x} RBP={:#018x}",
+        tracing::trace!("\n=== DIAGNOSTIC DUMP ===");
+        tracing::trace!("RIP={:#018x} RSP={:#018x} RBP={:#018x}",
             self.cpu.rip(), self.cpu.rsp(), self.cpu.rbp());
-        tracing::debug!("RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
+        tracing::trace!("RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
             self.cpu.rax(), self.cpu.rbx(), self.cpu.rcx(), self.cpu.rdx());
-        tracing::debug!("RSI={:#018x} RDI={:#018x} R8={:#018x}  R9={:#018x}",
+        tracing::trace!("RSI={:#018x} RDI={:#018x} R8={:#018x}  R9={:#018x}",
             self.cpu.rsi(), self.cpu.rdi(), self.cpu.r8(), self.cpu.r9());
-        tracing::debug!("CS={:#06x} mode={} IF={}",
+        tracing::trace!("CS={:#06x} mode={} IF={}",
             self.cpu.get_cs_selector(), self.get_cpu_mode_str(),
             if self.cpu.get_b_if() != 0 { 1 } else { 0 });
-        tracing::debug!("CR0={:#010x} CR3={:#018x}",
+        tracing::trace!("CR0={:#010x} CR3={:#018x}",
             self.cpu.cr0.bits(), self.cpu.cr3);
-        tracing::debug!("pending_event={:#010x} event_mask={:#010x} async_event={}",
+        tracing::trace!("pending_event={:#010x} event_mask={:#010x} async_event={}",
             self.cpu.pending_event, self.cpu.event_mask, self.cpu.async_event);
         #[cfg(debug_assertions)]
         {
-            tracing::debug!("diag: intr_delivered={} if_blocked={} pic_empty={}",
+            tracing::trace!("diag: intr_delivered={} if_blocked={} pic_empty={}",
                 self.cpu.diag_hae_intr_delivered, self.cpu.diag_hae_intr_if_blocked,
                 self.cpu.diag_hae_intr_pic_empty);
             // SYSCALL ring buffer
-            tracing::debug!("--- Last {} SYSCALLs (total={}, sysret={}, blocked={}) ---",
+            tracing::trace!("--- Last {} SYSCALLs (total={}, sysret={}, blocked={}) ---",
                 self.cpu.diag_syscall_ring_idx.min(32),
                 self.cpu.diag_syscall_count,
                 self.cpu.diag_sysret_count,
@@ -2923,52 +2920,52 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
                 let start = self.cpu.diag_syscall_ring_idx.saturating_sub(32);
                 for i in start..self.cpu.diag_syscall_ring_idx {
                     let (nr, arg0, ic) = self.cpu.diag_syscall_ring[i % 32];
-                    tracing::debug!("  syscall nr={} arg0={:#x} icount={}", nr, arg0, ic);
+                    tracing::trace!("  syscall nr={} arg0={:#x} icount={}", nr, arg0, ic);
                 }
             }
         }
         // PIC state
-        tracing::debug!("--- PIC State ---");
-        tracing::debug!("  master: IMR={:#04x} IRR={:#04x} ISR={:#04x} has_int={}",
+        tracing::trace!("--- PIC State ---");
+        tracing::trace!("  master: IMR={:#04x} IRR={:#04x} ISR={:#04x} has_int={}",
             self.device_manager.pic.master.imr,
             self.device_manager.pic.master.irr,
             self.device_manager.pic.master.isr,
             self.device_manager.pic.has_interrupt());
-        tracing::debug!("  slave:  IMR={:#04x} IRR={:#04x} ISR={:#04x}",
+        tracing::trace!("  slave:  IMR={:#04x} IRR={:#04x} ISR={:#04x}",
             self.device_manager.pic.slave.imr,
             self.device_manager.pic.slave.irr,
             self.device_manager.pic.slave.isr);
         // PIT state
         let pit_c0 = &self.device_manager.pit.counters[0];
-        tracing::debug!("--- PIT State ---");
-        tracing::debug!("  C0: mode={:?} count={} gate={} output={}",
+        tracing::trace!("--- PIT State ---");
+        tracing::trace!("  C0: mode={:?} count={} gate={} output={}",
             pit_c0.mode, pit_c0.count, pit_c0.gate, pit_c0.output);
         // Device tick diagnostics
-        tracing::debug!("--- Device Tick Diag ---");
-        tracing::debug!("  tick_count={} total_usec={} pit_fires={} irq0_latched={} iac_count={}",
+        tracing::trace!("--- Device Tick Diag ---");
+        tracing::trace!("  tick_count={} total_usec={} pit_fires={} irq0_latched={} iac_count={}",
             self.device_manager.diag_tick_count,
             self.device_manager.diag_total_usec,
             self.device_manager.diag_pit_fires,
             self.device_manager.diag_irq0_latched,
             self.device_manager.diag_iac_count);
-        tracing::debug!("  lapic_timer_fires={} set_initial_count={} timer_masked={}",
+        tracing::trace!("  lapic_timer_fires={} set_initial_count={} timer_masked={}",
             self.cpu.lapic.diag_timer_fires, self.cpu.lapic.diag_set_initial_count,
             self.cpu.lapic.diag_timer_masked);
         // Show pc_system timer state for LAPIC timer
         if let Some(handle) = self.cpu.lapic.timer_handle {
             let t = &self.pc_system.timers[handle];
-            tracing::debug!("  pc_system_timer[{}]: flags={:?} time_to_fire={} period={} ticks_total={}",
+            tracing::trace!("  pc_system_timer[{}]: flags={:?} time_to_fire={} period={} ticks_total={}",
                 handle, t.flags, t.time_to_fire, t.period,
                 self.pc_system.time_ticks());
         }
         self.cpu.lapic.dump_state();
         // ATA channel diagnostics
-        tracing::debug!("--- ATA Diag ---");
-        tracing::debug!("  cmd_history (last 10):");
+        tracing::trace!("--- ATA Diag ---");
+        tracing::trace!("  cmd_history (last 10):");
         let hist = &self.device_manager.harddrv.cmd_history;
         let start = if hist.len() > 10 { hist.len() - 10 } else { 0 };
         for (ch, cmd, lba) in &hist[start..] {
-            tracing::debug!("    ch={} cmd={:#04x} lba={}", ch, cmd, lba);
+            tracing::trace!("    ch={} cmd={:#04x} lba={}", ch, cmd, lba);
         }
         // Dump key code addresses from memory
         {
@@ -2984,10 +2981,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
                 let p = *paddr as usize;
                 if p + 48 <= ram.len() {
                     let code = &ram[p..p+48];
-                    tracing::debug!("--- {} (phys={:#010x}) ---", label, paddr);
+                    tracing::trace!("--- {} (phys={:#010x}) ---", label, paddr);
                     for row in 0..3 {
                         let off = row * 16;
-                        tracing::debug!("  +{:02x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                        tracing::trace!("  +{:02x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                             off,
                             code[off], code[off+1], code[off+2], code[off+3],
                             code[off+4], code[off+5], code[off+6], code[off+7],
@@ -3026,12 +3023,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
                 if pte & 1 == 0 { return 0; }
                 safe_read((pte & 0xFFFFF_FFFFF000) | page_off)
             };
-            tracing::debug!("--- Stack at RSP={:#018x} ---", rsp);
+            tracing::trace!("--- Stack at RSP={:#018x} ---", rsp);
             for i in 0..16 {
                 let addr = rsp.wrapping_add(i * 8);
                 let val = read_u64(addr);
                 let marker = if val > 0xffffffff81000000 && val < 0xffffffff82000000 { " <-- kernel text?" } else { "" };
-                tracing::debug!("  [{:+4}] {:#018x}{}", i * 8, val, marker);
+                tracing::trace!("  [{:+4}] {:#018x}{}", i * 8, val, marker);
             }
         }
         // Dump 64 bytes of code at current RIP via manual page walk
@@ -3070,10 +3067,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
                     };
                     if paddr != 0 && (paddr as usize) + 64 <= ram.len() {
                         let code = &ram[paddr as usize..(paddr as usize) + 64];
-                        tracing::debug!("--- Code at RIP={:#018x} (phys={:#010x}) ---", rip, paddr);
+                        tracing::trace!("--- Code at RIP={:#018x} (phys={:#010x}) ---", rip, paddr);
                         for row in 0..4 {
                             let off = row * 16;
-                            tracing::debug!("  {:016x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                            tracing::trace!("  {:016x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                                 rip + off as u64,
                                 code[off], code[off+1], code[off+2], code[off+3],
                                 code[off+4], code[off+5], code[off+6], code[off+7],
@@ -3084,7 +3081,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
                 }
             }
         }
-        tracing::debug!("=== END DIAGNOSTIC ===");
+        tracing::trace!("=== END DIAGNOSTIC ===");
     }
 }
 

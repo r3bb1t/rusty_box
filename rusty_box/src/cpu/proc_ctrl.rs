@@ -208,7 +208,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             .selector
             .rpl;
         if cpl != 0 {
-            tracing::debug!("WBINVD: CPL={} != 0, #GP(0)", cpl);
+            tracing::trace!("WBINVD: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // BOCHS BX_INSTR_CACHE_CNTRL(cpu_id, BX_INSTR_WBINVD)
@@ -229,7 +229,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             .selector
             .rpl;
         if cpl != 0 {
-            tracing::debug!("INVD: CPL={} != 0, #GP(0)", cpl);
+            tracing::trace!("INVD: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // BOCHS BX_INSTR_CACHE_CNTRL(cpu_id, BX_INSTR_INVD)
@@ -286,7 +286,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             .selector
             .rpl;
         if cpl != 0 {
-            tracing::debug!("CLTS: CPL={} != 0, #GP(0)", cpl);
+            tracing::trace!("CLTS: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let cr0_val = self.cr0.get32();
@@ -303,14 +303,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         &mut self,
         instr: &super::decoder::Instruction,
     ) -> crate::cpu::Result<()> {
-        tracing::debug!("MONITOR: RAX={:#x}", self.rax());
+        tracing::trace!("MONITOR: RAX={:#x}", self.rax());
 
         // Bochs mwait.cc: MONITOR requires CPL==0 (CPL always 0 in real mode)
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .rpl;
         if cpl != 0 {
-            tracing::debug!("MONITOR: CPL={} != 0, #UD", cpl);
+            tracing::trace!("MONITOR: CPL={} != 0, #UD", cpl);
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
@@ -369,7 +369,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         {
             self.monitor
                 .arm(paddr, super::cpu::BX_MONITOR_ARMED_BY_MONITOR);
-            tracing::debug!(
+            tracing::trace!(
                 "MONITOR: armed for phys_addr={:#x}",
                 self.monitor.monitor_addr
             );
@@ -384,14 +384,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
 
     pub(super) fn mwait(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
-        tracing::debug!("MWAIT: ECX={:#x}", self.ecx());
+        tracing::trace!("MWAIT: ECX={:#x}", self.ecx());
 
         // Bochs mwait.cc: MWAIT requires CPL==0 (CPL always 0 in real mode)
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .rpl;
         if cpl != 0 {
-            tracing::debug!("MWAIT: CPL={} != 0, #UD", cpl);
+            tracing::trace!("MWAIT: CPL={} != 0, #UD", cpl);
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
@@ -420,7 +420,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs mwait.cc: If monitor not armed, just return
         {
             if !self.monitor.armed_by_monitor() {
-                tracing::debug!("MWAIT: monitor not armed or already triggered, returning");
+                tracing::trace!("MWAIT: monitor not armed or already triggered, returning");
                 return Ok(());
             }
         }
@@ -433,10 +433,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Matches the pattern in hlt() — set activity state and async event
         if mwait_if {
             self.activity_state = super::cpu::CpuActivityState::MwaitIf;
-            tracing::debug!("MWAIT: entering sleep state MwaitIf (wake on interrupt even if IF=0)");
+            tracing::trace!("MWAIT: entering sleep state MwaitIf (wake on interrupt even if IF=0)");
         } else {
             self.activity_state = super::cpu::CpuActivityState::Mwait;
-            tracing::debug!("MWAIT: entering sleep state Mwait");
+            tracing::trace!("MWAIT: entering sleep state Mwait");
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE | Self::BX_ASYNC_EVENT_SLEEP;
 
@@ -544,7 +544,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 .selector
                 .rpl;
             if cpl != 0 {
-                tracing::debug!("RDTSC: CR4.TSD=1 and CPL={}, #GP(0)", cpl);
+                tracing::trace!("RDTSC: CR4.TSD=1 and CPL={}, #GP(0)", cpl);
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
         }
@@ -573,7 +573,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             .selector
             .rpl;
         if cpl != 0 {
-            tracing::debug!("RDMSR: CPL={} != 0, #GP(0)", cpl);
+            tracing::trace!("RDMSR: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -644,13 +644,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             _ => {
                 // Bochs: unknown MSRs raise #GP(0)
                 if !self.ignore_bad_msrs {
-                    tracing::debug!("RDMSR: unknown MSR={:#010x}, #GP(0)", msr);
+                    tracing::trace!("RDMSR: unknown MSR={:#010x}, #GP(0)", msr);
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 0
             }
         };
-        tracing::debug!("RDMSR: MSR={:#010x} -> {:#018x}", msr, val);
+        tracing::trace!("RDMSR: MSR={:#010x} -> {:#018x}", msr, val);
         self.set_rax((val & 0xFFFF_FFFF) as u64);
         self.set_rdx((val >> 32) as u64);
         Ok(())
@@ -665,7 +665,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             .selector
             .rpl;
         if cpl != 0 {
-            tracing::debug!("WRMSR: CPL={} != 0, #GP(0)", cpl);
+            tracing::trace!("WRMSR: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -714,7 +714,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             BX_MSR_MTRRCAP => {
                 // MTRRCAP is read-only (Bochs msr.cc)
-                tracing::debug!("WRMSR: MTRRCAP is read-only, #GP(0)");
+                tracing::trace!("WRMSR: MTRRCAP is read-only, #GP(0)");
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
             // Long-mode MSRs (Bochs msr.cc)
@@ -723,7 +723,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 let val32 = val as u32;
                 // Check reserved bits against efer_suppmask
                 if (val32 & !self.efer_suppmask) != 0 {
-                    tracing::debug!(
+                    tracing::trace!(
                         "WRMSR EFER: attempt to set reserved bits {:#010x} (mask={:#010x}), #GP(0)",
                         val32 & !self.efer_suppmask,
                         self.efer_suppmask
@@ -732,7 +732,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 }
                 // Cannot change LME when CR0.PG=1 (Bochs crregs.cc)
                 if self.efer.lme() != ((val32 >> 8) & 1 != 0) && self.cr0.pg() {
-                    tracing::debug!("WRMSR EFER: attempt to change LME when CR0.PG=1, #GP(0)");
+                    tracing::trace!("WRMSR EFER: attempt to change LME when CR0.PG=1, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 // Keep LMA untouched — it's controlled by CR0.PG + EFER.LME
@@ -747,14 +747,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_STAR => self.msr.star = val,
             BX_MSR_LSTAR => {
                 if !self.is_canonical(val) {
-                    tracing::debug!("WRMSR: non-canonical value for MSR_LSTAR, #GP(0)");
+                    tracing::trace!("WRMSR: non-canonical value for MSR_LSTAR, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.msr.lstar = val;
             }
             BX_MSR_CSTAR => {
                 if !self.is_canonical(val) {
-                    tracing::debug!("WRMSR: non-canonical value for MSR_CSTAR, #GP(0)");
+                    tracing::trace!("WRMSR: non-canonical value for MSR_CSTAR, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.msr.cstar = val;
@@ -762,21 +762,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_FMASK => self.msr.fmask = val as u32,
             BX_MSR_FSBASE => {
                 if !self.is_canonical(val) {
-                    tracing::debug!("WRMSR: non-canonical value for MSR_FSBASE, #GP(0)");
+                    tracing::trace!("WRMSR: non-canonical value for MSR_FSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.set_segment_base(super::decoder::BxSegregs::Fs, val);
             }
             BX_MSR_GSBASE => {
                 if !self.is_canonical(val) {
-                    tracing::debug!("WRMSR: non-canonical value for MSR_GSBASE, #GP(0)");
+                    tracing::trace!("WRMSR: non-canonical value for MSR_GSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.set_segment_base(super::decoder::BxSegregs::Gs, val);
             }
             BX_MSR_KERNELGSBASE => {
                 if !self.is_canonical(val) {
-                    tracing::debug!("WRMSR: non-canonical value for MSR_KERNELGSBASE, #GP(0)");
+                    tracing::trace!("WRMSR: non-canonical value for MSR_KERNELGSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.msr.kernelgsbase = val;
@@ -785,12 +785,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             _ => {
                 // Bochs: unknown MSRs raise #GP(0)
                 if !self.ignore_bad_msrs {
-                    tracing::debug!("WRMSR: unknown MSR={:#010x}, #GP(0)", msr);
+                    tracing::trace!("WRMSR: unknown MSR={:#010x}, #GP(0)", msr);
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
             }
         }
-        tracing::debug!("WRMSR: MSR={:#010x} = {:#018x}", msr, val);
+        tracing::trace!("WRMSR: MSR={:#010x} = {:#018x}", msr, val);
         Ok(())
     }
 
@@ -1742,7 +1742,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn xgetbv(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
         // CR4.OSXSAVE must be set
         if !self.cr4.osxsave() {
-            tracing::debug!("XGETBV: CR4.OSXSAVE not set, #UD");
+            tracing::trace!("XGETBV: CR4.OSXSAVE not set, #UD");
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
@@ -1763,7 +1763,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return Ok(());
         }
 
-        tracing::debug!("XGETBV: invalid XCR{}, #GP(0)", ecx);
+        tracing::trace!("XGETBV: invalid XCR{}, #GP(0)", ecx);
         self.exception(super::cpu::Exception::Gp, 0)
     }
 
@@ -1775,7 +1775,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn xsetbv(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
         // CR4.OSXSAVE must be set
         if !self.cr4.osxsave() {
-            tracing::debug!("XSETBV: CR4.OSXSAVE not set, #UD");
+            tracing::trace!("XSETBV: CR4.OSXSAVE not set, #UD");
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
@@ -1784,13 +1784,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             .selector
             .rpl;
         if cpl != 0 {
-            tracing::debug!("XSETBV: CPL={} != 0, #GP(0)", cpl);
+            tracing::trace!("XSETBV: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
         let ecx = self.ecx();
         if ecx != 0 {
-            tracing::debug!("XSETBV: invalid XCR{}, #GP(0)", ecx);
+            tracing::trace!("XSETBV: invalid XCR{}, #GP(0)", ecx);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -1800,7 +1800,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // EDX must be 0 for XCR0 (only 32-bit features supported)
         // EAX must not set unsupported bits, and FPU bit (bit 0) must be set
         if edx != 0 || (eax & !self.xcr0_suppmask) != 0 || (eax & 0x1) == 0 {
-            tracing::debug!(
+            tracing::trace!(
                 "XSETBV: invalid value EDX:EAX={:#010x}:{:#010x} suppmask={:#010x}, #GP(0)",
                 edx,
                 eax,
@@ -1811,7 +1811,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // AVX requires SSE: if YMM bit set, SSE must also be set
         if (eax & 0x4) != 0 && (eax & 0x2) == 0 {
-            tracing::debug!("XSETBV: attempt to enable AVX without SSE, #GP(0)");
+            tracing::trace!("XSETBV: attempt to enable AVX without SSE, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -1820,14 +1820,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // bits 5,6,7 = OPMASK, ZMM_HI256, HI_ZMM
             let avx512_mask = 0x01 | 0x02 | 0x04 | 0x20 | 0x40 | 0x80; // FPU+SSE+YMM+OPMASK+ZMM_HI256+HI_ZMM
             if (eax & avx512_mask) != avx512_mask {
-                tracing::debug!("XSETBV: AVX-512 partial enable without all dependencies, #GP(0)");
+                tracing::trace!("XSETBV: AVX-512 partial enable without all dependencies, #GP(0)");
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
         }
 
         self.xcr0.set32(eax);
         self.handle_avx_mode_change();
-        tracing::debug!("XSETBV: XCR0={:#010x}", eax);
+        tracing::trace!("XSETBV: XCR0={:#010x}", eax);
 
         Ok(())
     }
@@ -1859,7 +1859,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.get_laddr32(seg as usize, eaddr as u32) as u64
         };
         if (laddr & 0x3F) != 0 {
-            tracing::debug!("XSAVE: not 64-byte aligned, #GP(0)");
+            tracing::trace!("XSAVE: not 64-byte aligned, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 

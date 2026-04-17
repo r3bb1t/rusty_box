@@ -42,7 +42,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Bochs: clear_event(BX_EVENT_SMI); enter_system_management_mode();
         if self.is_unmasked_event_pending(Self::BX_EVENT_SMI) {
             self.clear_event(Self::BX_EVENT_SMI);
-            tracing::debug!("SMI event cleared (SMM not implemented)");
+            tracing::trace!("SMI event cleared (SMM not implemented)");
         }
 
         // INIT (Bochs event.cc): reset CPU via reset(BX_RESET_SOFTWARE).
@@ -51,7 +51,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Bochs: clear_event(BX_EVENT_INIT); reset(BX_RESET_SOFTWARE);
         if self.is_unmasked_event_pending(Self::BX_EVENT_INIT) {
             self.clear_event(Self::BX_EVENT_INIT);
-            tracing::debug!("INIT event cleared (SMP not implemented)");
+            tracing::trace!("INIT event cleared (SMP not implemented)");
         }
 
         // Priority 4: Debug trap exceptions (TF single-step, data/I/O breakpoints)
@@ -159,7 +159,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
               if let Some(pic) = pic {
                 if pic.has_interrupt() {
                     let vector = pic.iac();
-                    tracing::debug!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
+                    tracing::trace!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
                         vector, self.rip(), self.sregs[0].selector.value,
                         self.cpu_mode, self.eflags.contains(super::eflags::EFlags::IF_));
                     // Wake from halt if needed
@@ -227,7 +227,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     fn handle_wait_for_event(&mut self, dma: Option<&mut crate::iodev::dma::BxDmaC>) -> bool {
         // For WAIT_FOR_SIPI, just return (matches Bochs event.cc)
         if matches!(self.activity_state, CpuActivityState::WaitForSipi) {
-            tracing::debug!("CPU in WAIT_FOR_SIPI state, returning from cpu_loop");
+            tracing::trace!("CPU in WAIT_FOR_SIPI state, returning from cpu_loop");
             return true;
         }
 
@@ -283,7 +283,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         // Monitor triggered by a write (wakeup_monitor set activity_state to Active)
         if matches!(self.activity_state, CpuActivityState::Active) {
-            tracing::debug!("CPU activity_state became ACTIVE, waking up");
+            tracing::trace!("CPU activity_state became ACTIVE, waking up");
             self.inhibit_mask = 0;
             return false;
         }

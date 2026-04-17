@@ -166,7 +166,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eip = self.eip();
 
         if new_eip > 0x1000_0000 {
-            tracing::debug!("CALL m32: [{:?}:{:#010x}] -> EIP={:#010x} from RIP={:#010x}", seg, eaddr, new_eip, self.prev_rip);
+            tracing::trace!("CALL m32: [{:?}:{:#010x}] -> EIP={:#010x} from RIP={:#010x}", seg, eaddr, new_eip, self.prev_rip);
         }
         self.push_32(eip)?;
         self.branch_near32(new_eip)?;
@@ -191,7 +191,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn ret_near32(&mut self, _instr: &Instruction) -> Result<()> {
         let return_eip = self.pop_32()?;
         if return_eip > 0x1000_0000 {
-            tracing::debug!("RET32: return_eip={:#010x} from RIP={:#010x} ESP={:#010x}", return_eip, self.prev_rip, self.get_gpr32(4));
+            tracing::trace!("RET32: return_eip={:#010x} from RIP={:#010x} ESP={:#010x}", return_eip, self.prev_rip, self.get_gpr32(4));
         }
         self.branch_near32(return_eip)?;
         self.on_ucnear_branch(super::instrumentation::BranchType::Ret, self.rip());
@@ -278,11 +278,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let segment = instr.iw2();
         if instr.os32_l() != 0 {
             let offset32 = instr.id();
-            tracing::debug!("JmpfAp: FAR JMP 32-BIT to {:04x}:{:08x}", segment, offset32);
+            tracing::trace!("JmpfAp: FAR JMP 32-BIT to {:04x}:{:08x}", segment, offset32);
             self.jmp_far32(instr, segment, offset32)?;
         } else {
             let offset16 = instr.iw();
-            tracing::debug!("JmpfAp: FAR JMP 16-BIT to {:04x}:{:04x}", segment, offset16);
+            tracing::trace!("JmpfAp: FAR JMP 16-BIT to {:04x}:{:04x}", segment, offset16);
             self.jmp_far16(instr, segment, offset16)?;
         }
         Ok(())

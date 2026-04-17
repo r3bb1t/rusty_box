@@ -14,7 +14,7 @@ fn no_avx_mode() -> bool {
     *NO_AVX.get_or_init(|| {
         let active = std::env::var("RUSTY_BOX_NO_AVX").is_ok();
         if active {
-            tracing::info!("[CPUID] RUSTY_BOX_NO_AVX: stripping AVX/AVX2/FMA/BMI1/BMI2/AVX-512");
+            tracing::debug!("[CPUID] RUSTY_BOX_NO_AVX: stripping AVX/AVX2/FMA/BMI1/BMI2/AVX-512");
         }
         active
     })

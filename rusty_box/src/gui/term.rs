@@ -65,7 +65,7 @@ impl Default for TermGui {
 
 impl BxGui for TermGui {
     fn specific_init(&mut self, _argc: i32, _argv: &[String], _header_bar_y: u32) {
-        tracing::info!("TermGUI: Initialized (terminal text mode)");
+        tracing::debug!("TermGUI: Initialized (terminal text mode)");
         print!("\x1b[2J\x1b[H");
         self.setup_raw_mode();
     }
@@ -126,7 +126,7 @@ impl BxGui for TermGui {
         }
         let buf_size = (self.screen_width * self.screen_height * 2) as usize;
         self.text_buffer.resize(buf_size, 0);
-        tracing::debug!(
+        tracing::trace!(
             "TermGUI: Dimensions updated to {}x{} ({}x{} pixels, font {}x{})",
             self.screen_width,
             self.screen_height,
@@ -167,12 +167,12 @@ impl BxGui for TermGui {
     fn exit(&mut self) {
         self.restore_terminal_mode();
         print!("\x1b[0m\x1b[2J\x1b[H");
-        tracing::info!("TermGUI: Exiting");
+        tracing::debug!("TermGUI: Exiting");
     }
 
     fn set_display_mode(&mut self, mode: DisplayMode) {
         self.display_mode = mode;
-        tracing::debug!("TermGUI: Display mode changed to {:?}", mode);
+        tracing::trace!("TermGUI: Display mode changed to {:?}", mode);
     }
 
     fn show_ips(&mut self, _ips_count: u32) {

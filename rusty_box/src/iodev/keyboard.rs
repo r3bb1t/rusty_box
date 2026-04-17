@@ -652,7 +652,7 @@ impl BxKeyboardC {
 
     /// Initialize the keyboard controller
     pub fn init(&mut self) {
-        tracing::info!("Keyboard: Initializing 8042 PS/2 Controller");
+        tracing::debug!("Keyboard: Initializing 8042 PS/2 Controller");
         self.resetinternals(true);
     }
 
@@ -753,7 +753,7 @@ impl BxKeyboardC {
             // Bochs keyboard.cc: DEV_pic_lower_irq(12)
             self.irq12_lower_pending = true;
             self.activate_timer();
-            tracing::debug!("Keyboard: Read port 0x60 [mouse] = {:#04x}", val);
+            tracing::trace!("Keyboard: Read port 0x60 [mouse] = {:#04x}", val);
             val as u32
         } else if self.kbd_controller.outb {
             // Keyboard byte available
@@ -781,13 +781,13 @@ impl BxKeyboardC {
             self.irq1_lower_pending = true;
             self.activate_timer();
             self.diag_port60_last_value = val;
-            tracing::debug!("Keyboard: Read port 0x60 [kbd] = {:#04x}", val);
+            tracing::trace!("Keyboard: Read port 0x60 [kbd] = {:#04x}", val);
             val as u32
         } else {
             // Nothing ready — return last value
             let val = self.kbd_controller.kbd_output_buffer;
             self.diag_port60_last_value = val;
-            tracing::debug!(
+            tracing::trace!(
                 "Keyboard: Read port 0x60 (outb empty) = {:#04x}",
                 val
             );
@@ -853,7 +853,7 @@ impl BxKeyboardC {
 
     /// Port 0x60 write — keyboard.cc
     fn write_port_60(&mut self, value: u8) {
-        tracing::debug!("Keyboard: Write port 0x60 = {:#04x}", value);
+        tracing::trace!("Keyboard: Write port 0x60 = {:#04x}", value);
 
         if self.kbd_controller.expecting_port60h != 0 {
             // Bochs keyboard.cc — warn if input buffer still full
@@ -881,7 +881,7 @@ impl BxKeyboardC {
                         self.kbd_controller.irq1_requested = true;
                     }
                     self.kbd_controller.scancodes_translate = scan_convert;
-                    tracing::debug!(
+                    tracing::trace!(
                         "Keyboard: CCB written: irq1={}, irq12={}, xlat={}, sysf={}, kbd_clk={}, aux_clk={}",
                         self.kbd_controller.allow_irq1,
                         self.kbd_controller.allow_irq12,
@@ -893,16 +893,16 @@ impl BxKeyboardC {
                 }
                 CTRL_CMD_WRITE_KBD_MODE => {
                     // Write keyboard controller mode
-                    tracing::debug!("Keyboard: Write controller mode {:#04x}", value);
+                    tracing::trace!("Keyboard: Write controller mode {:#04x}", value);
                 }
                 CTRL_CMD_WRITE_OUTPUT_PORT => {
                     // Write output port — keyboard.cc
-                    tracing::debug!("Keyboard: Write output port {:#04x}", value);
+                    tracing::trace!("Keyboard: Write output port {:#04x}", value);
                     let new_a20 = (value & OUT_PORT_A20_GATE) != 0;
                     if self.a20_enabled != new_a20 {
                         self.a20_enabled = new_a20;
                         self.a20_change_pending = true;
-                        tracing::debug!("Keyboard: A20 gate = {} via output port", new_a20);
+                        tracing::trace!("Keyboard: A20 gate = {} via output port", new_a20);
                     }
                     if (value & OUT_PORT_CPU_RESET) == 0 {
                         tracing::warn!("Keyboard: Processor reset requested via output port!");
@@ -941,7 +941,7 @@ impl BxKeyboardC {
 
     /// Port 0x64 write — keyboard.cc
     fn write_port_64(&mut self, value: u8) {
-        tracing::debug!("Keyboard: Write command 0x64 = {:#04x}", value);
+        tracing::trace!("Keyboard: Write command 0x64 = {:#04x}", value);
 
         // Command byte written to port 64h
         self.kbd_controller.c_d = true;
@@ -974,12 +974,12 @@ impl BxKeyboardC {
             CTRL_CMD_DISABLE_AUX => {
                 // Disable aux device — keyboard.cc
                 self.set_aux_clock_enable(false);
-                tracing::debug!("Keyboard: Aux device disabled");
+                tracing::trace!("Keyboard: Aux device disabled");
             }
             CTRL_CMD_ENABLE_AUX => {
                 // Enable aux device — keyboard.cc
                 self.set_aux_clock_enable(true);
-                tracing::debug!("Keyboard: Aux device enabled");
+                tracing::trace!("Keyboard: Aux device enabled");
             }
             CTRL_CMD_TEST_MOUSE_PORT => {
                 // Test mouse port — keyboard.cc
@@ -1002,7 +1002,7 @@ impl BxKeyboardC {
                 }
                 self.kbd_controller.sysf = true; // self test complete
                 self.controller_enq(KBD_RESP_SELF_TEST_OK, 0);
-                tracing::debug!("Keyboard: Self-test passed");
+                tracing::trace!("Keyboard: Self-test passed");
             }
             CTRL_CMD_INTERFACE_TEST => {
                 // Interface test — keyboard.cc
@@ -1015,12 +1015,12 @@ impl BxKeyboardC {
             CTRL_CMD_DISABLE_KBD => {
                 // Disable keyboard — keyboard.cc
                 self.set_kbd_clock_enable(false);
-                tracing::debug!("Keyboard: Keyboard disabled");
+                tracing::trace!("Keyboard: Keyboard disabled");
             }
             CTRL_CMD_ENABLE_KBD => {
                 // Enable keyboard — keyboard.cc
                 self.set_kbd_clock_enable(true);
-                tracing::debug!("Keyboard: Keyboard enabled");
+                tracing::trace!("Keyboard: Keyboard enabled");
             }
             CTRL_CMD_GET_VERSION => {
                 // Get controller version — not supported
@@ -1073,13 +1073,13 @@ impl BxKeyboardC {
                 // Disable A20 Address Line — keyboard.cc
                 self.a20_enabled = false;
                 self.a20_change_pending = true;
-                tracing::debug!("Keyboard: A20 disabled via 0xDD");
+                tracing::trace!("Keyboard: A20 disabled via 0xDD");
             }
             CTRL_CMD_ENABLE_A20 => {
                 // Enable A20 Address Line — keyboard.cc
                 self.a20_enabled = true;
                 self.a20_change_pending = true;
-                tracing::debug!("Keyboard: A20 enabled via 0xDF");
+                tracing::trace!("Keyboard: A20 enabled via 0xDF");
             }
             CTRL_CMD_SYSTEM_RESET => {
                 // System reset — keyboard.cc
@@ -1118,7 +1118,7 @@ impl BxKeyboardC {
     /// to read on the next port 0x60 read. `inpb` is cleared since the
     /// controller is no longer busy processing input.
     fn controller_enq(&mut self, data: u8, source: u8) {
-        tracing::debug!("Keyboard: controller_enQ({:#04x}) source={}", data, source);
+        tracing::trace!("Keyboard: controller_enQ({:#04x}) source={}", data, source);
 
         if self.kbd_controller.outb {
             // Output buffer full — queue for later
@@ -1246,7 +1246,7 @@ impl BxKeyboardC {
     /// | 0xF6 | Reset + enable scanning  | ACK                             |
     /// | 0xFF | Reset + BAT              | ACK + 0xAA (BAT passed)         |
     fn kbd_ctrl_to_kbd(&mut self, value: u8) {
-        tracing::debug!("Keyboard: kbd_ctrl_to_kbd({:#04x})", value);
+        tracing::trace!("Keyboard: kbd_ctrl_to_kbd({:#04x})", value);
 
         if self.kbd_internal_buffer.expecting_typematic {
             self.kbd_internal_buffer.expecting_typematic = false;
@@ -1345,7 +1345,7 @@ impl BxKeyboardC {
             }
             KBD_CMD_RESET => {
                 // Reset keyboard + BAT — keyboard.cc
-                tracing::debug!("Keyboard: Reset command received");
+                tracing::trace!("Keyboard: Reset command received");
                 self.resetinternals(true);
                 self.kbd_enq(KBD_RESP_ACK);
                 self.kbd_controller.bat_in_progress = true;
@@ -1401,7 +1401,7 @@ impl BxKeyboardC {
         let is_ps2 = self.mouse.mouse_type == BX_MOUSE_TYPE_PS2
             || self.mouse.mouse_type == BX_MOUSE_TYPE_IMPS2;
 
-        tracing::debug!("Keyboard: kbd_ctrl_to_mouse({:#04x})", value);
+        tracing::trace!("Keyboard: kbd_ctrl_to_mouse({:#04x})", value);
 
         if self.kbd_controller.expecting_mouse_parameter != 0 {
             self.kbd_controller.expecting_mouse_parameter = 0;
@@ -1564,7 +1564,7 @@ impl BxKeyboardC {
             }
             0xBB => {
                 // OS/2 Warp 3 compatibility — Bochs logs and ignores this command
-                tracing::debug!("Keyboard: mouse command 0xBB (OS/2 Warp 3 compat), ignoring");
+                tracing::trace!("Keyboard: mouse command 0xBB (OS/2 Warp 3 compat), ignoring");
                 self.controller_enq(KBD_RESP_ACK, 1);
             }
             MOUSE_CMD_READ_DATA => {

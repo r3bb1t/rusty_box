@@ -1273,7 +1273,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // even if something goes wrong before the device handler is reached.
         // Include RIP so we can trace which BIOS function is writing.
         if matches!(port, 0x80 | 0x84 | 0xE9 | 0x402 | 0x403 | 0x500) {
-            tracing::debug!(
+            tracing::trace!(
                 "port_out: port={:#06x} value={:#04x} len={} RIP={:#010x}",
                 port,
                 value as u8,

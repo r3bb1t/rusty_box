@@ -47,7 +47,7 @@ pub enum ResetReason {
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     pub fn initialize(&mut self, config: BxParams) -> Result<()> {
-        tracing::info!("Initialized cpu model {}", self.cpuid.get_name());
+        tracing::debug!("Initialized cpu model {}", self.cpuid.get_name());
 
         let _cpuid_features: Vec<X86Feature> = config
             .cpu_include_features
@@ -599,7 +599,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// In Bochs this registers parameter tree nodes for save/restore.
     /// Our snapshot mechanism uses cpu/snapshot.rs save_snapshot_state() instead.
     pub fn register_state(&self) {
-        tracing::debug!("CPU state registered");
+        tracing::trace!("CPU state registered");
     }
 
     /// Sets the VMCS pointer and performs associated memory mapping setup

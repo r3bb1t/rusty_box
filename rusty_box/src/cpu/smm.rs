@@ -239,11 +239,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub(super) fn rsm(&mut self, _instr: &Instruction) -> Result<()> {
         if !self.smm_mode() {
-            tracing::debug!("RSM: not in SMM mode, #UD");
+            tracing::trace!("RSM: not in SMM mode, #UD");
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        tracing::debug!("RSM: resuming from SMM (smbase={:#010x})", self.smbase);
+        tracing::trace!("RSM: resuming from SMM (smbase={:#010x})", self.smbase);
 
         // Read 128 dwords from SMRAM at smbase + 0x10000 (counting down)
         let mut saved_state = [0u32; SMRAM_STATE_SIZE];
@@ -272,7 +272,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     pub(super) fn enter_system_management_mode(&mut self) {
-        tracing::debug!("enter_system_management_mode: smbase={:#010x}", self.smbase);
+        tracing::trace!("enter_system_management_mode: smbase={:#010x}", self.smbase);
 
         // Set SMM active
         self.in_smm = true;

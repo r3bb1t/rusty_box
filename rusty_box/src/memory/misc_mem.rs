@@ -250,7 +250,7 @@ impl BxMemC<'_> {
             for i in 64..65 {
                 self.rom_present[i] = true;
             }
-            tracing::info!(
+            tracing::debug!(
                 "BIOS loaded: rom_address={:#x}, offset={:#x}, size={}, bios_rom_addr={:#x}",
                 rom_address,
                 offset,
@@ -267,7 +267,7 @@ impl BxMemC<'_> {
                         offset
                     );
                 } else {
-                    tracing::info!(
+                    tracing::debug!(
                         "BIOS first 16 bytes at offset {:#x}: {:02x?}",
                         offset,
                         first_bytes
@@ -281,7 +281,7 @@ impl BxMemC<'_> {
                 if check_offset < rom.len() {
                     let check_bytes =
                         &rom[check_offset..check_offset + 16.min(rom.len() - check_offset)];
-                    tracing::info!(
+                    tracing::debug!(
                         "BIOS bytes at offset {:#x} (corresponds to 0xFF55A): {:02x?}",
                         check_offset,
                         check_bytes
@@ -294,7 +294,7 @@ impl BxMemC<'_> {
                 if check_offset < rom.len() {
                     let check_bytes =
                         &rom[check_offset..check_offset + 16.min(rom.len() - check_offset)];
-                    tracing::info!(
+                    tracing::debug!(
                         "BIOS bytes at offset {:#x} (corresponds to 0xFFFF0, reset vector): {:02x?}",
                         check_offset,
                         check_bytes
@@ -304,7 +304,7 @@ impl BxMemC<'_> {
                         let expected = [0xEA, 0x5B, 0xE0, 0x00, 0xF0];
                         let matches = check_bytes[0..5] == expected;
                         if matches {
-                            tracing::info!("Reset vector at 0xFFFF0 is correct!");
+                            tracing::debug!("Reset vector at 0xFFFF0 is correct!");
                         } else {
                             tracing::warn!(
                                 "Reset vector at 0xFFFF0 mismatch! Expected {:02x?}, got {:02x?}",
@@ -339,7 +339,7 @@ impl BxMemC<'_> {
         rom[offset..offset + size].copy_from_slice(rom_data);
 
         // === ROM Content Verification Logging ===
-        tracing::info!(
+        tracing::debug!(
             "ROM loaded: type={}, address={:#x}, size={:#x}, offset={:#x}",
             rom_type,
             rom_address,
@@ -349,7 +349,7 @@ impl BxMemC<'_> {
 
         // Log first 16 bytes of ROM
         let display_size = 16.min(size);
-        tracing::info!(
+        tracing::debug!(
             "ROM first 16 bytes at offset {:#x}: {:02X?}",
             offset,
             &rom[offset..offset + display_size]
@@ -360,12 +360,12 @@ impl BxMemC<'_> {
             && size >= 4 {
                 let signature = u16::from_le_bytes([rom[offset], rom[offset + 1]]);
                 if signature == 0xAA55 {
-                    tracing::info!("✓ Option ROM signature valid (55 AA)");
+                    tracing::debug!("✓ Option ROM signature valid (55 AA)");
 
                     // ROM entry point is at offset +3
                     let init_size_blocks = rom[offset + 2];
                     let init_offset = init_size_blocks as usize * 512;
-                    tracing::info!(
+                    tracing::debug!(
                         "  ROM init size: {} blocks ({} bytes)",
                         init_size_blocks,
                         init_offset
@@ -373,7 +373,7 @@ impl BxMemC<'_> {
 
                     // Calculate entry point address
                     let entry_point = rom_address + 3;
-                    tracing::info!("  ROM entry point: {:#x}", entry_point);
+                    tracing::debug!("  ROM entry point: {:#x}", entry_point);
                 } else {
                     tracing::warn!(
                         "⚠ Invalid option ROM signature: {:#04x} (expected 0xAA55)",
@@ -388,7 +388,7 @@ impl BxMemC<'_> {
             if reset_vec[0] == 0xEA {
                 let target_offset = u16::from_le_bytes([reset_vec[1], reset_vec[2]]);
                 let target_segment = u16::from_le_bytes([reset_vec[3], reset_vec[4]]);
-                tracing::info!(
+                tracing::debug!(
                     "✓ BIOS reset vector: JMP FAR {:04X}:{:04X}",
                     target_segment,
                     target_offset
@@ -433,7 +433,7 @@ impl BxMemC<'_> {
 
         vector[offset..offset + size].copy_from_slice(ram_data);
 
-        tracing::info!("ram at {:#05x}/{} ({})", ram_address, size, "RAM image");
+        tracing::debug!("ram at {:#05x}/{} ({})", ram_address, size, "RAM image");
 
         Ok(())
     }
@@ -561,7 +561,7 @@ impl BxMemC<'_> {
 
                     if self.memory_type[area][1] {
                         // Writes to ShadowRAM
-                        tracing::debug!(
+                        tracing::trace!(
                             "Writing to ShadowRAM: address {:#x}, data {:02x}",
                             a20_addr,
                             data_byte
@@ -581,7 +581,7 @@ impl BxMemC<'_> {
                         }
                     } else {
                         // Writes to ROM, Inhibit
-                        tracing::debug!(
+                        tracing::trace!(
                             "Write to ROM ignored: address {:#x}, data {:02x}",
                             a20_addr,
                             data_byte
@@ -819,7 +819,7 @@ impl BxMemC<'_> {
             return Err(MemoryError::InvalidAddressRange.into());
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Register memory access handlers: {:#x} - {:#x}",
             begin_addr,
             end_addr
@@ -983,11 +983,11 @@ impl BxMemC<'_> {
                         self.flash_status &= !0x40;
                         self.flash_wsm_state = FLASH_ERASE;
                     } else {
-                        tracing::debug!("flash_write(): unexpected ERASE CONFIRM / ERASE RESUME");
+                        tracing::trace!("flash_write(): unexpected ERASE CONFIRM / ERASE RESUME");
                     }
                 }
                 _ => {
-                    tracing::debug!("flash_write(): unsupported code {:#04x}", data);
+                    tracing::trace!("flash_write(): unsupported code {:#04x}", data);
                 }
             }
         }

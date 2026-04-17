@@ -221,7 +221,7 @@ impl BxPciBridge {
                     if value8 != oldval {
                         self.pci_conf[addr] = value8;
                         pam_changed = true;
-                        tracing::info!(
+                        tracing::debug!(
                             "i440FX PAM register {:#04x} = {:#04x} (memory shadowing changed)",
                             addr,
                             value8
@@ -257,7 +257,7 @@ impl BxPciBridge {
         }
 
         if self.dram_detect > 0 {
-            tracing::debug!(
+            tracing::trace!(
                 "DRAM module detection triggered (detect={:#04x})",
                 self.dram_detect
             );
@@ -285,7 +285,7 @@ impl BxPciBridge {
             mem.set_memory_type(base_area + 1, 1, (pam_val >> 5) & 0x1 != 0);
         }
 
-        tracing::info!("PAM registers applied to memory subsystem (deferred)");
+        tracing::debug!("PAM registers applied to memory subsystem (deferred)");
     }
 
     /// Read from PCI configuration space.
@@ -313,17 +313,17 @@ impl BxPciBridge {
 
         if (v & 0x08) == 0 {
             // SMRAME=0: disable SMRAM
-            tracing::debug!("SMRAM disabled");
+            tracing::trace!("SMRAM disabled");
         } else {
             let dopen = (v & 0x40) != 0;
             let dcls = (v & 0x20) != 0;
             if dopen && dcls {
                 tracing::warn!("SMRAM: DOPEN and DCLS both set (invalid)");
             }
-            tracing::debug!("SMRAM enabled: DOPEN={}, DCLS={}", dopen, dcls);
+            tracing::trace!("SMRAM enabled: DOPEN={}, DCLS={}", dopen, dcls);
         }
 
-        tracing::info!("SMRAM control register set to {:#04x}", v);
+        tracing::debug!("SMRAM control register set to {:#04x}", v);
         self.pci_conf[0x72] = v;
     }
 }

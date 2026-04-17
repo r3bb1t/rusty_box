@@ -371,7 +371,7 @@ impl BxAcpiCtrl {
                     }
                 }
             }
-            tracing::debug!(
+            tracing::trace!(
                 "ACPI PM read reg={:#04x} value={:#010x} len={}",
                 reg,
                 value,
@@ -412,10 +412,10 @@ impl BxAcpiCtrl {
                 }
                 _ => {
                     value = 0;
-                    tracing::debug!("ACPI SMBus read reg={:#04x} not implemented", reg);
+                    tracing::trace!("ACPI SMBus read reg={:#04x} not implemented", reg);
                 }
             }
-            tracing::debug!("ACPI SMBus read reg={:#04x} value={:#010x}", reg, value);
+            tracing::trace!("ACPI SMBus read reg={:#04x} value={:#010x}", reg, value);
         }
 
         value
@@ -430,7 +430,7 @@ impl BxAcpiCtrl {
                 return;
             }
             let reg = (address as u32 & 0x3F) as u8;
-            tracing::debug!(
+            tracing::trace!(
                 "ACPI PM write reg={:#04x} value={:#010x} len={}",
                 reg,
                 value,
@@ -461,11 +461,11 @@ impl BxAcpiCtrl {
                         match sus_typ {
                             0 => {
                                 // Soft power off (acpi.cc)
-                                tracing::info!("ACPI: soft power off requested");
+                                tracing::debug!("ACPI: soft power off requested");
                             }
                             1 => {
                                 // Suspend to RAM (acpi.cc)
-                                tracing::info!("ACPI: suspend to RAM requested");
+                                tracing::debug!("ACPI: suspend to RAM requested");
                                 self.pmsts |=
                                     PmStatus::RSM_STS.bits() | PmStatus::PWRBTN_STS.bits();
                             }
@@ -500,7 +500,7 @@ impl BxAcpiCtrl {
                 return;
             }
             let reg = (address as u32 & 0x0F) as u8;
-            tracing::debug!("ACPI SMBus write reg={:#04x} value={:#04x}", reg, value);
+            tracing::trace!("ACPI SMBus write reg={:#04x} value={:#04x}", reg, value);
             match reg {
                 // SMBus status — clear on write (acpi.cc)
                 0x00 => {
@@ -532,12 +532,12 @@ impl BxAcpiCtrl {
                     };
                 }
                 _ => {
-                    tracing::debug!("ACPI SMBus write reg={:#04x} not implemented", reg);
+                    tracing::trace!("ACPI SMBus write reg={:#04x} not implemented", reg);
                 }
             }
         } else {
             // Debug port (0xB044) — Bochs acpi.cc
-            tracing::debug!("ACPI DBG: {:#010x}", value);
+            tracing::trace!("ACPI DBG: {:#010x}", value);
         }
     }
 
@@ -610,7 +610,7 @@ impl BxAcpiCtrl {
                 self.pci_conf[0x43],
             ]) & 0xFFC0; // Mask to 64-port alignment
             self.pm_base = new_base;
-            tracing::info!("ACPI: new PM base address: {:#06x}", self.pm_base);
+            tracing::debug!("ACPI: new PM base address: {:#06x}", self.pm_base);
         }
 
         if sm_base_change {
@@ -621,7 +621,7 @@ impl BxAcpiCtrl {
                 self.pci_conf[0x93],
             ]) & 0xFFF0; // Mask to 16-port alignment
             self.sm_base = new_base;
-            tracing::info!("ACPI: new SM base address: {:#06x}", self.sm_base);
+            tracing::debug!("ACPI: new SM base address: {:#06x}", self.sm_base);
         }
 
         (pm_base_change, sm_base_change)

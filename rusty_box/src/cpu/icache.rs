@@ -472,7 +472,7 @@ impl BxICache {
     fn handle_smc_scan(&mut self, p_addr: BxPhyAddress, mask: u32) {
         let target_page_index = Self::stamp_hash(p_addr);
 
-        tracing::debug!(
+        tracing::trace!(
             "SMC detected: p_addr={:#x}, page_index={:#x}, mask={:#010b}",
             p_addr,
             target_page_index,
@@ -668,7 +668,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // all new traces get tlen=0 and point to stale decoded instructions, causing
         // the CPU to execute wrong opcodes (e.g., RET decoded as POP).
         if self.i_cache.mpindex + BX_MAX_TRACE_LENGTH >= BX_ICACHE_MEM_POOL {
-            tracing::debug!(
+            tracing::trace!(
                 "mpool nearly full (mpindex={}), flushing icache and resetting",
                 self.i_cache.mpindex
             );
@@ -709,7 +709,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             if current_mpindex >= BX_ICACHE_MEM_POOL {
                 // Only log once per trace to reduce spam - mpool full is handled gracefully
                 if current_mpindex == BX_ICACHE_MEM_POOL {
-                    tracing::debug!(
+                    tracing::trace!(
                         "mpool full, stopping trace (this is normal if cache is heavily used)"
                     );
                 }
@@ -841,7 +841,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     // For n=0, this equals original_remaining_in_page
                     // For later instructions (if we ever get here), it would be decremented
                     let current_remaining = remaining as usize;
-                    tracing::debug!(
+                    tracing::trace!(
                         "DECODE-ERR n=0: remaining={} RIP={:#x} p_addr={:#x} err={:?}",
                         current_remaining,
                         self.rip(),
@@ -884,7 +884,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                                 // The IaError instruction will be executed normally in the
                                 // inner trace loop, where prev_rip is correctly set.
                                 // This matches Bochs fetchdecode behavior.
-                                tracing::debug!(
+                                tracing::trace!(
                                     "Illegal opcode at RIP={:#x}, storing IaError in trace",
                                     self.rip()
                                 );
@@ -911,7 +911,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     }
 
                     // Debug logging before boundary_fetch
-                    tracing::debug!(
+                    tracing::trace!(
                         "boundary_fetch: n={}, current_remaining={}, p_addr={:#x}",
                         n,
                         current_remaining,
@@ -925,7 +925,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
                     // Store instruction in mpool (check bounds first)
                     if current_mpindex >= BX_ICACHE_MEM_POOL {
-                        tracing::debug!("mpool full before boundary_instr, stopping trace");
+                        tracing::trace!("mpool full before boundary_instr, stopping trace");
                         break;
                     }
                     self.i_cache.mpool[current_mpindex] = boundary_instr;
@@ -1011,7 +1011,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     ) -> Result<Instruction> {
         let mut fetch_buffer = [0u8; 32];
 
-        tracing::debug!(
+        tracing::trace!(
             "boundary_fetch: remaining_in_page={} RIP={:#x} icount={}",
             remaining_in_page,
             self.rip(),

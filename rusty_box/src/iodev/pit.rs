@@ -723,7 +723,7 @@ impl BxPitC {
 
     /// Initialize the PIT
     pub fn init(&mut self) {
-        tracing::info!("PIT: Initializing 8254 Programmable Interval Timer");
+        tracing::debug!("PIT: Initializing 8254 Programmable Interval Timer");
         self.reset();
     }
 
@@ -887,7 +887,7 @@ impl BxPitC {
         }
         ctr.next_change_time = 0;
 
-        tracing::debug!(
+        tracing::trace!(
             "PIT: Counter {} configured: mode={}, rw={}, bcd={}",
             sc,
             ctr.mode,

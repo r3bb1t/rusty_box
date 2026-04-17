@@ -216,7 +216,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Based on Bochs flag_ctrl.cc PUSHF_Fd
     pub fn pushf_fd(&mut self, _instr: &Instruction) -> super::Result<()> {
         if self.v8086_mode() && self.eflags.iopl() < 3 {
-            tracing::debug!("PUSHFD: #GP(0) in v8086 mode");
+            tracing::trace!("PUSHFD: #GP(0) in v8086 mode");
             self.exception(super::cpu::Exception::Gp, 0)?;
         }
 
@@ -256,7 +256,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         } else if self.v8086_mode() {
             if self.eflags.iopl() < 3 {
-                tracing::debug!("POPFD: #GP(0) in v8086 mode");
+                tracing::trace!("POPFD: #GP(0) in v8086 mode");
                 self.exception(super::cpu::Exception::Gp, 0)?;
             }
             // v8086-mode: VM, IOPL, VIP, VIF are unaffected

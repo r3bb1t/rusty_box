@@ -28,7 +28,7 @@ impl Default for NoGui {
 
 impl BxGui for NoGui {
     fn specific_init(&mut self, _argc: i32, _argv: &[String], _header_bar_y: u32) {
-        tracing::info!("NoGUI: Initialized (no visual output)");
+        tracing::debug!("NoGUI: Initialized (no visual output)");
     }
 
     fn text_update(
@@ -103,12 +103,12 @@ impl BxGui for NoGui {
     }
 
     fn exit(&mut self) {
-        tracing::info!("NoGUI: Exiting");
+        tracing::debug!("NoGUI: Exiting");
     }
 
     fn set_display_mode(&mut self, mode: DisplayMode) {
         self.display_mode = mode;
-        tracing::debug!("NoGUI: Display mode changed to {:?}", mode);
+        tracing::trace!("NoGUI: Display mode changed to {:?}", mode);
     }
 
     fn is_headless(&self) -> bool {

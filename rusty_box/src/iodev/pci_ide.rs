@@ -216,19 +216,19 @@ impl BxPciIde {
             0x00 => {
                 let value = (self.bmdma[channel].cmd_ssbm as u32)
                     | ((self.bmdma[channel].cmd_rwcon as u32) << 3);
-                tracing::debug!("BM-DMA read command ch={}, val={:#04x}", channel, value);
+                tracing::trace!("BM-DMA read command ch={}, val={:#04x}", channel, value);
                 value
             }
             // Status register (pci_ide.cc)
             0x02 => {
                 let value = self.bmdma[channel].status as u32;
-                tracing::debug!("BM-DMA read status ch={}, val={:#04x}", channel, value);
+                tracing::trace!("BM-DMA read status ch={}, val={:#04x}", channel, value);
                 value
             }
             // Descriptor Table Pointer (pci_ide.cc)
             0x04 => {
                 let value = self.bmdma[channel].dtpr;
-                tracing::debug!("BM-DMA read DTPR ch={}, val={:#010x}", channel, value);
+                tracing::trace!("BM-DMA read DTPR ch={}, val={:#010x}", channel, value);
                 value
             }
             _ => 0xFFFF_FFFF,
@@ -254,7 +254,7 @@ impl BxPciIde {
         match reg {
             // Command register (pci_ide.cc)
             0x00 => {
-                tracing::debug!("BM-DMA write command ch={}, val={:#04x}", channel, value);
+                tracing::trace!("BM-DMA write command ch={}, val={:#04x}", channel, value);
                 self.bmdma[channel].cmd_rwcon = (value >> 3) & 1 != 0;
                 if (value & 0x01 != 0) && !self.bmdma[channel].cmd_ssbm {
                     // Start DMA — Bochs pci_ide.cc
@@ -263,7 +263,7 @@ impl BxPciIde {
                     self.bmdma[channel].prd_current = self.bmdma[channel].dtpr;
                     self.bmdma[channel].buffer_top = 0;
                     self.bmdma[channel].buffer_idx = 0;
-                    tracing::info!(
+                    tracing::debug!(
                         "BM-DMA start ch={}, DTPR={:#010x}, rwcon={}",
                         channel,
                         self.bmdma[channel].dtpr,
@@ -276,12 +276,12 @@ impl BxPciIde {
                     self.bmdma[channel].cmd_ssbm = false;
                     self.bmdma[channel].status &= !0x01;
                     self.bmdma[channel].data_ready = false;
-                    tracing::info!("BM-DMA stop ch={}", channel);
+                    tracing::debug!("BM-DMA stop ch={}", channel);
                 }
             }
             // Status register — write (pci_ide.cc)
             0x02 => {
-                tracing::debug!("BM-DMA write status ch={}, val={:#04x}", channel, value);
+                tracing::trace!("BM-DMA write status ch={}, val={:#04x}", channel, value);
                 // Bits 5-6 (simplex): writable
                 // Bit 0 (active): read-only (preserved)
                 // Bits 1-2 (error/IRQ): write-1-to-clear
@@ -292,7 +292,7 @@ impl BxPciIde {
             // Descriptor Table Pointer (pci_ide.cc)
             0x04 => {
                 self.bmdma[channel].dtpr = value & 0xFFFF_FFFC; // aligned to 4 bytes
-                tracing::debug!(
+                tracing::trace!(
                     "BM-DMA write DTPR ch={}, val={:#010x}",
                     channel,
                     self.bmdma[channel].dtpr
@@ -371,7 +371,7 @@ impl BxPciIde {
             ]) & 0xFFF0; // Align to 16 ports
             if new_base != self.bmdma_base {
                 self.bmdma_base = new_base;
-                tracing::info!("PCI IDE: new BM-DMA base address: {:#06x}", self.bmdma_base);
+                tracing::debug!("PCI IDE: new BM-DMA base address: {:#06x}", self.bmdma_base);
             }
         }
 

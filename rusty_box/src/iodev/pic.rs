@@ -424,7 +424,7 @@ impl BxPicC {
 
     /// Initialize the PIC (called during device init)
     pub fn init(&mut self) {
-        tracing::info!("PIC: Initializing 8259 Programmable Interrupt Controller");
+        tracing::debug!("PIC: Initializing 8259 Programmable Interrupt Controller");
         self.reset();
     }
 
@@ -538,13 +538,13 @@ impl BxPicC {
                 self.elcr[0] = value & 0xF8; // IRQ0-2 are edge-triggered only
                                              // Sync ELCR to master PIC edge_level (Bochs pic.cc set_mode)
                 self.master.edge_level = self.elcr[0];
-                tracing::debug!("PIC: ELCR1 = {:#04x}", value);
+                tracing::trace!("PIC: ELCR1 = {:#04x}", value);
             }
             PIC_ELCR2 => {
                 self.elcr[1] = value & 0xDE; // IRQ8,13 are edge-triggered only
                                              // Sync ELCR to slave PIC edge_level (Bochs pic.cc set_mode)
                 self.slave.edge_level = self.elcr[1];
-                tracing::debug!("PIC: ELCR2 = {:#04x}", value);
+                tracing::trace!("PIC: ELCR2 = {:#04x}", value);
             }
             _ => {
                 tracing::warn!("PIC: Unknown write port {:#06x} value={:#04x}", port, value);
@@ -573,7 +573,7 @@ impl BxPicC {
     fn write_cmd(&mut self, value: u8, is_master: bool) {
         if (value & 0x10) != 0 {
             // ICW1 — Initialization Command Word 1 (Bochs pic.cc)
-            tracing::debug!(
+            tracing::trace!(
                 "PIC: ICW1 = {:#04x} ({})",
                 value,
                 if is_master { "master" } else { "slave" }
@@ -770,7 +770,7 @@ impl BxPicC {
             2 => {
                 // ICW2 — Interrupt vector offset (top 5 bits)
                 pic.interrupt_offset = value & 0xF8;
-                tracing::debug!(
+                tracing::trace!(
                     "PIC: ICW2 = {:#04x} (offset = {:#04x})",
                     value,
                     pic.interrupt_offset
@@ -779,7 +779,7 @@ impl BxPicC {
             }
             3 => {
                 // ICW3 — Cascade configuration
-                tracing::debug!("PIC: ICW3 = {:#04x}", value);
+                tracing::trace!("PIC: ICW3 = {:#04x}", value);
                 if pic.init.requires_4 {
                     pic.init.byte_expected = 4;
                 } else {
@@ -788,7 +788,7 @@ impl BxPicC {
             }
             4 => {
                 // ICW4 — Mode configuration
-                tracing::debug!("PIC: ICW4 = {:#04x}", value);
+                tracing::trace!("PIC: ICW4 = {:#04x}", value);
                 pic.auto_eoi = (value & 0x02) != 0;
                 pic.buffered_mode = (value & 0x04) != 0;
                 pic.master_slave = (value & 0x08) != 0;

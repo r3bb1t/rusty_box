@@ -42,7 +42,7 @@ mod bridge_impl {
 
     impl BxGui for BridgeGui {
         fn specific_init(&mut self, _argc: i32, _argv: &[String], _header_bar_y: u32) {
-            tracing::info!("BridgeGui: Initialized");
+            tracing::debug!("BridgeGui: Initialized");
         }
 
         fn text_update(
@@ -140,7 +140,7 @@ mod bridge_impl {
             if let Ok(mut display) = self.shared.lock() {
                 display.emu_running = false;
             }
-            tracing::info!("BridgeGui: Exiting");
+            tracing::debug!("BridgeGui: Exiting");
         }
 
         fn set_display_mode(&mut self, mode: DisplayMode) {

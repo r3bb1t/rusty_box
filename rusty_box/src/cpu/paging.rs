@@ -273,7 +273,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Check present bit
         if (entry[BX_LEVEL_PDE] & pte_bits32::PRESENT) == 0 {
-            tracing::debug!("PDE not present: PDE={:#010x}", entry[BX_LEVEL_PDE]);
+            tracing::trace!("PDE not present: PDE={:#010x}", entry[BX_LEVEL_PDE]);
             // Set CR2 and raise page fault exception
             // Note: We can't modify self here, so we'll return an error that the caller will convert
             return Err(super::CpuError::Memory(
@@ -288,7 +288,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if (entry[BX_LEVEL_PDE] & pte_bits32::PS) != 0 && self.cr4.pse() {
             // Bochs paging.cc: check reserved bits in PSE PDE
             if (entry[BX_LEVEL_PDE] & PAGING_PDE4M_RESERVED_BITS) != 0 {
-                tracing::debug!(
+                tracing::trace!(
                     "PSE PDE4M: reserved bit is set: PDE={:#010x}",
                     entry[BX_LEVEL_PDE]
                 );
@@ -303,7 +303,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let priv_index =
                 ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);
             if PRIV_CHECK[priv_index as usize] == 0 {
-                tracing::debug!(
+                tracing::trace!(
                     "4MB page protection violation: laddr={:#x}, priv_index={}",
                     laddr,
                     priv_index
@@ -336,7 +336,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Check present bit
         if (entry[BX_LEVEL_PTE] & pte_bits32::PRESENT) == 0 {
-            tracing::debug!("PTE not present: PTE={:#010x}", entry[BX_LEVEL_PTE]);
+            tracing::trace!("PTE not present: PTE={:#010x}", entry[BX_LEVEL_PTE]);
             // Set CR2 and raise page fault exception
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageNotPresent,
@@ -355,7 +355,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             | (is_write as u32);
 
         if PRIV_CHECK[priv_index as usize] == 0 {
-            tracing::debug!(
+            tracing::trace!(
                 "Page protection violation: laddr={:#x}, priv_index={}",
                 laddr,
                 priv_index
@@ -627,7 +627,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     8,
                     &mut data.clone(),
                 ) {
-                    tracing::debug!("A/D bit update failed for PDE at {:#x}: {e}", entry_addr[BX_LEVEL_PDE]);
+                    tracing::trace!("A/D bit update failed for PDE at {:#x}: {e}", entry_addr[BX_LEVEL_PDE]);
                 }
             }
             return Ok(ppf | (laddr & 0x1FFFFF));
@@ -702,7 +702,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 8,
                 &mut data.clone(),
             ) {
-                tracing::debug!("A/D bit update failed for PDE at {:#x}: {e}", entry_addr[BX_LEVEL_PDE]);
+                tracing::trace!("A/D bit update failed for PDE at {:#x}: {e}", entry_addr[BX_LEVEL_PDE]);
             }
         }
         let pte_needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
@@ -717,7 +717,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 8,
                 &mut data.clone(),
             ) {
-                tracing::debug!("A/D bit update failed for PTE at {:#x}: {e}", entry_addr[BX_LEVEL_PTE]);
+                tracing::trace!("A/D bit update failed for PTE at {:#x}: {e}", entry_addr[BX_LEVEL_PTE]);
             }
         }
 
@@ -874,7 +874,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     8,
                     &mut data.clone(),
                 ) {
-                    tracing::debug!("A/D bit update failed at level {} addr {:#x}: {e}", level, entry_addr[level]);
+                    tracing::trace!("A/D bit update failed at level {} addr {:#x}: {e}", level, entry_addr[level]);
                 }
             }
         }
@@ -890,7 +890,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 8,
                 &mut data.clone(),
             ) {
-                tracing::debug!("A/D bit update failed for leaf at {:#x}: {e}", entry_addr[leaf]);
+                tracing::trace!("A/D bit update failed for leaf at {:#x}: {e}", entry_addr[leaf]);
             }
         }
 
@@ -937,7 +937,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let pde = self.page_walk_read_dword(pde_addr);
 
         if (pde & pte_bits32::PRESENT) == 0 {
-            tracing::debug!(
+            tracing::trace!(
                 "system_write page walk: PDE not present at {:#x}, laddr={:#x}",
                 pde_addr,
                 laddr
@@ -950,7 +950,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if (pde & pte_bits32::PS) != 0 && self.cr4.pse() {
             // Bochs paging.cc: check reserved bits in PSE PDE
             if (pde & PAGING_PDE4M_RESERVED_BITS) != 0 {
-                tracing::debug!(
+                tracing::trace!(
                     "system_write PSE PDE4M: reserved bit set: PDE={:#010x}",
                     pde
                 );
@@ -974,7 +974,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let pte = self.page_walk_read_dword(pte_addr);
 
         if (pte & pte_bits32::PRESENT) == 0 {
-            tracing::debug!(
+            tracing::trace!(
                 "system_write page walk: PTE not present at {:#x}, laddr={:#x}",
                 pte_addr,
                 laddr
@@ -1156,7 +1156,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let pde = self.page_walk_read_dword_ro(pde_addr);
 
         if (pde & pte_bits32::PRESENT) == 0 {
-            tracing::debug!(
+            tracing::trace!(
                 "system_read page walk: PDE not present at {:#x}, laddr={:#x}",
                 pde_addr,
                 laddr
@@ -1180,7 +1180,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let pte = self.page_walk_read_dword_ro(pte_addr);
 
         if (pte & pte_bits32::PRESENT) == 0 {
-            tracing::debug!(
+            tracing::trace!(
                 "system_read page walk: PTE not present at {:#x}, laddr={:#x}",
                 pte_addr,
                 laddr
@@ -1567,7 +1567,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if pde & pte_bits32::PS != 0 && self.cr4.pse() {
             // Bochs paging.cc: check reserved bits in PSE PDE
             if (pde & PAGING_PDE4M_RESERVED_BITS) != 0 {
-                tracing::debug!("PSE PDE4M: reserved bit is set: PDE={:#010x}", pde);
+                tracing::trace!("PSE PDE4M: reserved bit is set: PDE={:#010x}", pde);
                 self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
@@ -1649,7 +1649,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // PDPTE reserved bit check is done at CR3 load time (CheckPDPTR),
         // but also verify here for safety.
         if pdpte.bits() & PAGING_PAE_PDPTE_RESERVED_BITS != 0 {
-            tracing::debug!("PAE PDPTE: reserved bit set: {:#018x}", pdpte.bits());
+            tracing::trace!("PAE PDPTE: reserved bit set: {:#018x}", pdpte.bits());
             self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
@@ -1672,7 +1672,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Check reserved bits
         if entry[BX_LEVEL_PDE].bits() & reserved != 0 {
-            tracing::debug!(
+            tracing::trace!(
                 "PAE PDE: reserved bit set: {:#018x} (reserved mask: {:#018x})",
                 entry[BX_LEVEL_PDE].bits(),
                 entry[BX_LEVEL_PDE].bits() & reserved
@@ -1693,7 +1693,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if entry[BX_LEVEL_PDE].contains(PteBits::PS) {
             // Check 2MB PDE reserved bits (bits 20:13 must be zero)
             if entry[BX_LEVEL_PDE].bits() & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
-                tracing::debug!("PAE PDE2M: reserved bit set: {:#018x}", entry[BX_LEVEL_PDE].bits());
+                tracing::trace!("PAE PDE2M: reserved bit set: {:#018x}", entry[BX_LEVEL_PDE].bits());
                 self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
@@ -1746,7 +1746,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Check reserved bits
         if entry[BX_LEVEL_PTE].bits() & reserved != 0 {
-            tracing::debug!("PAE PTE: reserved bit set: {:#018x}", entry[BX_LEVEL_PTE].bits());
+            tracing::trace!("PAE PTE: reserved bit set: {:#018x}", entry[BX_LEVEL_PTE].bits());
             self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }

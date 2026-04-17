@@ -577,7 +577,7 @@ impl AtaDrive {
         let size = file.metadata()?.len();
         let max_lba = (size / CDROM_SECTOR_SIZE as u64) as u32;
 
-        tracing::info!(
+        tracing::debug!(
             "ATAPI: Attached CD-ROM '{}' ({} sectors, {} MB)",
             path,
             max_lba,
@@ -603,7 +603,7 @@ impl AtaDrive {
         let size = file.metadata()?.len() as u32;
         self.geometry.total_sectors = size / SECTOR_SIZE as u32;
 
-        tracing::info!(
+        tracing::debug!(
             "ATA: Attached image '{}' ({} sectors, {} MB)",
             path,
             self.geometry.total_sectors,
@@ -619,7 +619,7 @@ impl AtaDrive {
     #[cfg(not(feature = "std"))]
     pub fn attach_data(&mut self, data: Vec<u8>) {
         self.geometry.total_sectors = (data.len() / SECTOR_SIZE) as u32;
-        tracing::info!(
+        tracing::debug!(
             "ATA: Attached disk data ({} sectors, {} KB)",
             self.geometry.total_sectors,
             data.len() / 1024
@@ -632,7 +632,7 @@ impl AtaDrive {
     pub fn attach_cdrom_data(&mut self, data: Vec<u8>) {
         let size = data.len() as u64;
         let max_lba = (size / CDROM_SECTOR_SIZE as u64) as u32;
-        tracing::info!(
+        tracing::debug!(
             "ATAPI: Attached CD-ROM data ({} sectors, {} MB)",
             max_lba,
             size / (1024 * 1024)
@@ -915,13 +915,13 @@ impl AtaDrive {
                 return false;
             }
 
-            tracing::debug!("ATA: read LBA {}", lba);
+            tracing::trace!("ATA: read LBA {}", lba);
 
             self.increment_address();
             buf_offset += SECTOR_SIZE;
         }
 
-        tracing::debug!(
+        tracing::trace!(
             "ATA: ide_read_sector: read {} sector(s), num_sectors remaining={}",
             sector_count,
             self.controller.num_sectors
@@ -1363,7 +1363,7 @@ impl BxHardDriveC {
 
     /// Initialize the hard drive controller
     pub fn init(&mut self) {
-        tracing::info!("HardDrive: Initializing ATA/IDE Controller");
+        tracing::debug!("HardDrive: Initializing ATA/IDE Controller");
         self.reset();
     }
 
@@ -1722,7 +1722,7 @@ impl BxHardDriveC {
                 // Bochs harddrv.cc — data port read
                 // Bochs harddrv.cc: DRQ check
                 if !drive.controller.status.contains(AtaStatus::DRQ) {
-                    tracing::debug!(
+                    tracing::trace!(
                         "ATA: IO read(0x{:04x}) with drq == 0: last cmd was {:02x}",
                         port,
                         drive.controller.current_command
@@ -1949,7 +1949,7 @@ impl BxHardDriveC {
                     // Bochs DEV_pic_lower_irq() — PIC forwards to IOAPIC synchronously.
                     pic.lower_irq(irq);
                 }
-                tracing::debug!(
+                tracing::trace!(
                     "ATA: Status read {:#04x} (port={:#06x}) cmd={:#04x} drq={}",
                     status.bits(),
                     port,
@@ -2366,7 +2366,7 @@ impl BxHardDriveC {
 
                 // Bochs harddrv.cc: ignore command if slave selected but not present
                 if channel.drive_select == 1 && channel.drives[1].device_type == DeviceType::None {
-                    tracing::debug!(
+                    tracing::trace!(
                         "ATA ch{}: command {:#04x} ignored, slave not present",
                         channel_num,
                         value
@@ -2392,7 +2392,7 @@ impl BxHardDriveC {
                 // Bochs harddrv.cc: check BSY before executing command
                 let drive = channel.selected_drive();
                 if drive.controller.status.contains(AtaStatus::BSY) {
-                    tracing::debug!(
+                    tracing::trace!(
                         "ATA ch{}: command {:#04x} sent while BSY, ignoring",
                         channel_num,
                         value
@@ -2409,7 +2409,7 @@ impl BxHardDriveC {
                 let prev_nien = (channel.drives[0].controller.control & 0x02) != 0;
                 let new_nien = (value & 0x02) != 0;
                 if new_nien != prev_nien {
-                    tracing::debug!(
+                    tracing::trace!(
                         "ATA: nIEN ch{} {} → {} (ctrl={:#04x})",
                         channel_num,
                         if prev_nien { "1" } else { "0" },
@@ -2446,7 +2446,7 @@ impl BxHardDriveC {
                 // Software reset — affects both drives
                 if (value & 0x04) != 0 && prev_reset == 0 {
                     // Transition 0→1: Assert SRST (Bochs harddrv.cc)
-                    tracing::debug!("ATA: Software reset asserted ch={}", channel_num);
+                    tracing::trace!("ATA: Software reset asserted ch={}", channel_num);
                     for d in 0..2 {
                         // Bochs: BSY=1, DRDY=0, WF=0, DSC=1, DRQ=0, CORR=0, ERR=0
                         channel.drives[d].controller.status = AtaStatus::BSY | AtaStatus::DSC;
@@ -2466,7 +2466,7 @@ impl BxHardDriveC {
                     pic.lower_irq(irq);
                 } else if (value & 0x04) == 0 && channel.drives[0].controller.reset_in_progress {
                     // Transition 1→0: Deassert SRST (Bochs harddrv.cc)
-                    tracing::debug!("ATA: Software reset deasserted ch={}", channel_num);
+                    tracing::trace!("ATA: Software reset deasserted ch={}", channel_num);
                     for d in 0..2 {
                         channel.drives[d].controller.reset_in_progress = false;
                         channel.drives[d].controller.status = AtaStatus::DRDY | AtaStatus::DSC;
@@ -2609,7 +2609,7 @@ impl BxHardDriveC {
 
         // Bochs harddrv.cc: DMA vs PIO branch
         if drive.controller.packet_dma {
-            tracing::debug!("ATAPI: ready_to_send_atapi DMA path ch={}", channel_num);
+            tracing::trace!("ATAPI: ready_to_send_atapi DMA path ch={}", channel_num);
             pci_ide.bmdma_start_transfer(channel_num as u8);
         } else {
             self.raise_interrupt(channel_num, pic, pci_ide);
@@ -2623,7 +2623,7 @@ impl BxHardDriveC {
         drive.controller.buffer_size = CDROM_SECTOR_SIZE;
 
 
-        tracing::debug!("ATAPI: cmd={:#04x} ch={} sc={}", atapi_command, channel_num, drive.status_changed);
+        tracing::trace!("ATAPI: cmd={:#04x} ch={} sc={}", atapi_command, channel_num, drive.status_changed);
 
         // Clear sense unless REQUEST SENSE
         if atapi_command != 0x03 {
@@ -2814,7 +2814,7 @@ impl BxHardDriveC {
                     return;
                 }
 
-                tracing::debug!(
+                tracing::trace!(
                     "ATAPI: READ({}) LBA={} len={} sectors",
                     if atapi_command == 0x28 { 10 } else { 12 },
                     lba,
@@ -3156,7 +3156,7 @@ impl BxHardDriveC {
                     );
                     self.ready_to_send_atapi(channel_num, pic, pci_ide);
                 } else {
-                    tracing::debug!("ATAPI: Event Status Notification — polled only supported");
+                    tracing::trace!("ATAPI: Event Status Notification — polled only supported");
                     self.atapi_cmd_error(
                         channel_num,
                         SenseKey::IllegalRequest,
@@ -3457,7 +3457,7 @@ impl BxHardDriveC {
         self.cmd_history.push((channel_num as u8, command, lba));
 
         if drive.device_type == DeviceType::None {
-            tracing::debug!("[ATA-DIAG] cmd {:#04x} to ch{} (empty) — dropped", command, channel_num);
+            tracing::trace!("[ATA-DIAG] cmd {:#04x} to ch{} (empty) — dropped", command, channel_num);
             return;
         }
 
@@ -3466,7 +3466,7 @@ impl BxHardDriveC {
         drive.controller.error = AtaError::empty();
         drive.controller.status.remove(AtaStatus::ERR);
 
-        tracing::debug!(
+        tracing::trace!(
             "ATA: Command {:#04x} drive={} scount={} sno={} cyl={} head={} lba_mode={}",
             command,
             ds,
@@ -3498,7 +3498,7 @@ impl BxHardDriveC {
                 drive.controller.buffer_size = SECTOR_SIZE;
                 drive.controller.buffer_index = 0;
 
-                tracing::debug!(
+                tracing::trace!(
                     "ATA: READ SECTORS lba={} num_sectors={}",
                     drive.get_lba(),
                     drive.controller.num_sectors
@@ -3539,7 +3539,7 @@ impl BxHardDriveC {
                     }
                     drive.controller.buffer_index = 0;
 
-                    tracing::debug!(
+                    tracing::trace!(
                         "ATA: READ MULTIPLE lba={} num_sectors={} batch={}",
                         drive.get_lba(),
                         drive.controller.num_sectors,
@@ -3565,7 +3565,7 @@ impl BxHardDriveC {
                 drive.controller.buffer_size = SECTOR_SIZE;
                 drive.controller.buffer_index = 0;
 
-                tracing::debug!(
+                tracing::trace!(
                     "ATA: WRITE SECTORS lba={} num_sectors={}",
                     drive.get_lba(),
                     drive.controller.num_sectors
@@ -3591,7 +3591,7 @@ impl BxHardDriveC {
                     }
                     drive.controller.buffer_index = 0;
 
-                    tracing::debug!(
+                    tracing::trace!(
                         "ATA: WRITE MULTIPLE lba={} num_sectors={} batch={}",
                         drive.get_lba(),
                         drive.controller.num_sectors,
@@ -3632,7 +3632,7 @@ impl BxHardDriveC {
                 let head_no = drive.controller.head_no;
                 let disk_spt = drive.geometry.sectors_per_track;
                 let disk_heads = drive.geometry.heads;
-                tracing::debug!("ATA: Initialize params sec={} head={}", spt, head_no);
+                tracing::trace!("ATA: Initialize params sec={} head={}", spt, head_no);
 
                 if spt != disk_spt {
                     tracing::error!(
@@ -3643,7 +3643,7 @@ impl BxHardDriveC {
                     return;
                 } else if head_no == 0 {
                     // Linux 2.6.x kernels use head_no=0 — log but don't abort (Bochs behavior)
-                    tracing::debug!("ATA: init drive params: max. logical head number 0");
+                    tracing::trace!("ATA: init drive params: max. logical head number 0");
                     drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC;
                     drive.controller.interrupt_pending = true;
                 } else if head_no != (disk_heads - 1) {
@@ -3668,7 +3668,7 @@ impl BxHardDriveC {
                     self.command_aborted(channel_num, command, pic, pci_ide);
                     return;
                 }
-                tracing::debug!("ATA: IDENTIFY command");
+                tracing::trace!("ATA: IDENTIFY command");
                 drive.fill_identify_buffer();
                 drive.controller.status.insert(AtaStatus::DRQ);
                 drive.controller.interrupt_pending = true;
@@ -3679,7 +3679,7 @@ impl BxHardDriveC {
                 match subcommand {
                     0x02 => {
                         // Enable write cache — no-op, just succeed
-                        tracing::debug!("ATA: SET FEATURES: enable write cache");
+                        tracing::trace!("ATA: SET FEATURES: enable write cache");
                     }
                     0x03 => {
                         // Set transfer mode (PIO/DMA) based on sector_count
@@ -3689,24 +3689,24 @@ impl BxHardDriveC {
                         match xfer_type {
                             0x00 | 0x01 => {
                                 // PIO default / PIO mode
-                                tracing::debug!("ATA: SET FEATURES: set transfer mode to PIO");
+                                tracing::trace!("ATA: SET FEATURES: set transfer mode to PIO");
                                 drive.controller.mdma_mode = 0x00;
                                 drive.controller.udma_mode = 0x00;
                             }
                             0x04 => {
                                 // MDMA mode
-                                tracing::debug!("ATA: SET FEATURES: set transfer mode to MDMA{} ch={}", xfer_mode, channel_num);
+                                tracing::trace!("ATA: SET FEATURES: set transfer mode to MDMA{} ch={}", xfer_mode, channel_num);
                                 drive.controller.mdma_mode = 1 << xfer_mode;
                                 drive.controller.udma_mode = 0x00;
                             }
                             0x08 => {
                                 // UDMA mode
-                                tracing::debug!("ATA: SET FEATURES: set transfer mode to UDMA{} ch={}", xfer_mode, channel_num);
+                                tracing::trace!("ATA: SET FEATURES: set transfer mode to UDMA{} ch={}", xfer_mode, channel_num);
                                 drive.controller.mdma_mode = 0x00;
                                 drive.controller.udma_mode = 1 << xfer_mode;
                             }
                             _ => {
-                                tracing::debug!(
+                                tracing::trace!(
                                     "ATA: SET FEATURES: unknown transfer mode type {:#04x}",
                                     xfer_type
                                 );
@@ -3720,15 +3720,15 @@ impl BxHardDriveC {
                     }
                     0x82 => {
                         // Disable write cache — no-op, just succeed
-                        tracing::debug!("ATA: SET FEATURES: disable write cache");
+                        tracing::trace!("ATA: SET FEATURES: disable write cache");
                     }
                     0xAA => {
                         // Enable read look-ahead — no-op
-                        tracing::debug!("ATA: SET FEATURES: enable read look-ahead");
+                        tracing::trace!("ATA: SET FEATURES: enable read look-ahead");
                     }
                     0x55 => {
                         // Disable read look-ahead — no-op
-                        tracing::debug!("ATA: SET FEATURES: disable read look-ahead");
+                        tracing::trace!("ATA: SET FEATURES: disable read look-ahead");
                     }
                     0xCC => {
                         // Enable reverting to power-on defaults — no-op
@@ -3737,7 +3737,7 @@ impl BxHardDriveC {
                         // Disable reverting to power-on defaults — no-op
                     }
                     _ => {
-                        tracing::debug!(
+                        tracing::trace!(
                             "ATA: SET FEATURES: unknown subcommand {:#04x}",
                             subcommand
                         );
@@ -3833,10 +3833,10 @@ impl BxHardDriveC {
                     let features = drive.controller.features;
                     drive.controller.packet_dma = (features & 1) != 0;
                     if drive.controller.packet_dma {
-                        tracing::debug!("ATAPI: PACKET cmd with DMA flag (features={:#04x})", features);
+                        tracing::trace!("ATAPI: PACKET cmd with DMA flag (features={:#04x})", features);
                     }
                     if (features & (1 << 1)) != 0 {
-                        tracing::debug!("ATA: PACKET-overlapped not supported");
+                        tracing::trace!("ATA: PACKET-overlapped not supported");
                         self.command_aborted(channel_num, ATA_CMD_PACKET, pic, pci_ide);
                         return;
                     }

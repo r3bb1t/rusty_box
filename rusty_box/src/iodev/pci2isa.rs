@@ -209,7 +209,7 @@ impl BxPiix3 {
                 if v != self.elcr1 {
                     self.elcr1 = v;
                     self.elcr1_changed = true;
-                    tracing::info!("ELCR1 = {:#04x}", self.elcr1);
+                    tracing::debug!("ELCR1 = {:#04x}", self.elcr1);
                 }
             }
             // ELCR2 — slave PIC edge/level (pci2isa.cc)
@@ -218,12 +218,12 @@ impl BxPiix3 {
                 if v != self.elcr2 {
                     self.elcr2 = v;
                     self.elcr2_changed = true;
-                    tracing::info!("ELCR2 = {:#04x}", self.elcr2);
+                    tracing::debug!("ELCR2 = {:#04x}", self.elcr2);
                 }
             }
             // CPU reset register (pci2isa.cc)
             0x0CF9 => {
-                tracing::info!("CPU reset register write: {:#04x}", value);
+                tracing::debug!("CPU reset register write: {:#04x}", value);
                 self.pci_reset = (value as u8) & 0x02;
                 if (value as u8) & 0x04 != 0 {
                     if self.pci_reset != 0 {
@@ -274,7 +274,7 @@ impl BxPiix3 {
                 // XBCS register (pci2isa.cc) — BIOS write enable
                 0x4E => {
                     if (value8 & 0x04) != (oldval & 0x04) {
-                        tracing::debug!("BIOS write support set to {}", (value8 & 0x04) != 0);
+                        tracing::trace!("BIOS write support set to {}", (value8 & 0x04) != 0);
                     }
                     self.pci_conf[addr] = value8;
                 }
@@ -283,14 +283,14 @@ impl BxPiix3 {
                     self.pci_conf[addr] = value8 & 0x01;
                     // bit 0: I/O APIC enable
                     // In Bochs, this calls DEV_ioapic_set_enabled()
-                    tracing::debug!("PIIX3: APIC enable = {}", value8 & 0x01);
+                    tracing::trace!("PIIX3: APIC enable = {}", value8 & 0x01);
                 }
                 // PIRQ routing registers (pci2isa.cc)
                 0x60..=0x63 => {
                     let v = value8 & 0x8F; // bits 4-6 reserved
                     if v != oldval {
                         self.pci_conf[addr] = v;
-                        tracing::info!(
+                        tracing::debug!(
                             "PCI IRQ routing: PIRQ{}# set to {:#04x}",
                             (b'A' + (addr as u8 - 0x60)) as char,
                             v
@@ -358,7 +358,7 @@ impl BxPiix3 {
                 self.irq_level[pirq as usize][irq as usize] |= 1 << device;
 
                 if !was_asserted {
-                    tracing::debug!(
+                    tracing::trace!(
                         "INT{} -> PIRQ{} -> IRQ {} = 1",
                         (line + 64) as char, // 'A', 'B', etc.
                         (pirq + 65) as char,
@@ -376,7 +376,7 @@ impl BxPiix3 {
                     || self.irq_level[3][irq as usize] != 0;
 
                 if !still_asserted {
-                    tracing::debug!(
+                    tracing::trace!(
                         "INT{} -> PIRQ{} -> IRQ {} = 0",
                         (line + 64) as char,
                         (pirq + 65) as char,

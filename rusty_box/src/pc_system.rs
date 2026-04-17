@@ -225,7 +225,7 @@ impl BxPcSystemC {
         // Convert IPS to millions for timing calculations
         self.m_ips = f64::from(ips) / 1_000_000.0;
 
-        tracing::debug!("PC system initialized with ips = {}", ips);
+        tracing::trace!("PC system initialized with ips = {}", ips);
     }
 
     // ========================================================================
@@ -357,12 +357,12 @@ impl BxPcSystemC {
             self.a20_mask = 0xFFFF_FFFF_FFEF_FFFFu64;
         }
 
-        tracing::debug!("A20: set() = {}", self.enable_a20);
+        tracing::trace!("A20: set() = {}", self.enable_a20);
 
         // If there has been a transition, TLB flush may be needed
         if old_enable_a20 != self.enable_a20 {
             // Note: TLB flush is handled by the caller (CPU)
-            tracing::debug!("A20 line changed, memory mapping affected");
+            tracing::trace!("A20 line changed, memory mapping affected");
         }
     }
 
@@ -451,7 +451,7 @@ impl BxPcSystemC {
     /// For hardware reset: enables A20, resets CPU and all devices
     /// For software reset: just resets CPU
     pub fn reset(&mut self, reset_type: ResetReason) -> crate::Result<()> {
-        tracing::info!("BxPcSystemC::reset({:?}) called", reset_type);
+        tracing::debug!("BxPcSystemC::reset({:?}) called", reset_type);
 
         // A20 line is ENABLED at hardware reset on 386+ CPUs
         // (Only 286 systems start with A20 disabled)
@@ -466,13 +466,13 @@ impl BxPcSystemC {
     /// Register state for save/restore functionality.
     /// Bochs uses parameter tree nodes. Our snapshot uses snapshot.rs instead.
     pub fn register_state(&self) {
-        tracing::debug!("PC system state registered");
+        tracing::trace!("PC system state registered");
     }
 
     /// Start all registered timers. No-op — matches Bochs pc_system.cc.
     /// Timer time_to_fire is set correctly during register_timer/activate_timer.
     pub fn start_timers(&mut self) {
-        tracing::debug!("start_timers: no-op (timers started during registration)");
+        tracing::trace!("start_timers: no-op (timers started during registration)");
     }
 
     // ========================================================================
@@ -542,7 +542,7 @@ impl BxPcSystemC {
                     self.num_timers = i + 1;
                 }
 
-                tracing::debug!("Registered timer {} with id '{}'", i, id);
+                tracing::trace!("Registered timer {} with id '{}'", i, id);
                 return Ok(i);
             }
         }

@@ -324,7 +324,7 @@ impl<'m> BxMemC<'m> {
     /// `dram`: true = DRAM (shadow RAM), false = ROM.
     pub fn set_memory_type(&mut self, area: usize, rw: usize, dram: bool) {
         if area < 13 && rw < 2 {
-            tracing::debug!(
+            tracing::trace!(
                 "set_memory_type: area={}, rw={}, dram={} (was {})",
                 area,
                 rw,
