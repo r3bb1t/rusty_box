@@ -455,7 +455,7 @@ fn run() -> Result<()> {
     let bios_boot = boot_mode != "direct";
 
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
+        .with_max_level(tracing::Level::INFO)
         .with_target(false)
         .init();
 
