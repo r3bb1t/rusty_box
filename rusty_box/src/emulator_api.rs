@@ -745,13 +745,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         read_cb: alloc::boxed::Box<dyn FnMut(u64, usize) -> u64 + Send>,
         write_cb: alloc::boxed::Box<dyn FnMut(u64, usize, u64) + Send>,
     ) {
-        self.mmio.map(addr, size, read_cb, write_cb);
+        self.cpu.mmio.map(addr, size, read_cb, write_cb);
     }
 
     /// Remove MMIO regions overlapping [addr, addr+size).
     #[cfg(feature = "alloc")]
     pub fn mmio_unmap(&mut self, addr: u64, size: u64) {
-        self.mmio.unmap(addr, size);
+        self.cpu.mmio.unmap(addr, size);
     }
 }
 
@@ -842,7 +842,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     #[cfg(feature = "instrumentation")]
     pub fn mem_protect(&mut self, addr: u64, size: usize, perms: crate::cpu::instrumentation::MemPerms) {
         let mem_len = self.memory.get_memory_len();
-        let pp = self.page_permissions.get_or_insert_with(|| {
+        let pp = self.cpu.page_permissions.get_or_insert_with(|| {
             crate::memory::permissions::PagePermissions::new(mem_len as u64)
         });
         pp.set(addr, size, perms);

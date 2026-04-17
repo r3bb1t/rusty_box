@@ -689,6 +689,12 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// With `T = ()` and no closures registered, this is 4 bytes (the bitmask).
     pub(crate) instrumentation: super::instrumentation::InstrumentationRegistry<T>,
 
+    #[cfg(feature = "instrumentation")]
+    pub(crate) page_permissions: Option<crate::memory::permissions::PagePermissions>,
+
+    #[cfg(feature = "alloc")]
+    pub(crate) mmio: crate::memory::mmio::MmioRegistry,
+
     pub(crate) dtlb: Tlb<BX_DTLB_SIZE>,
     pub(super) itlb: Tlb<BX_ITLB_SIZE>,
 

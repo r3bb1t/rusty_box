@@ -109,11 +109,6 @@ pub struct Emulator<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrum
     /// Exit addresses for emu_start.
     pub(crate) exit_set: crate::cpu::instrumentation::ExitSet,
     pub stop_flag: Arc<AtomicBool>,
-    /// Per-page memory permissions (lazy-initialized on first mem_protect call)
-    #[cfg(feature = "instrumentation")]
-    pub(crate) page_permissions: Option<crate::memory::permissions::PagePermissions>,
-    #[cfg(feature = "alloc")]
-    pub(crate) mmio: crate::memory::mmio::MmioRegistry,
 }
 
 impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
@@ -226,10 +221,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             bios_output_file: None,
             exit_set: crate::cpu::instrumentation::ExitSet::new(),
             stop_flag: Arc::new(AtomicBool::new(false)),
-            #[cfg(feature = "instrumentation")]
-            page_permissions: None,
-            #[cfg(feature = "alloc")]
-            mmio: crate::memory::mmio::MmioRegistry::new(),
         }))
     }
 

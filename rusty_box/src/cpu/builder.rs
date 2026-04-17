@@ -157,6 +157,12 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             guard_found: Default::default(),
 
             instrumentation: super::instrumentation::InstrumentationRegistry::with_tracer(tracer),
+
+            #[cfg(feature = "instrumentation")]
+            page_permissions: None,
+
+            #[cfg(feature = "alloc")]
+            mmio: crate::memory::mmio::MmioRegistry::new(),
             dtlb: Tlb::new(),
             itlb: Tlb::new(),
             pdptrcache: Default::default(),
