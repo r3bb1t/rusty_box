@@ -44,8 +44,16 @@ use crate::cpu::decoder::Instruction;
 /// The `Send` bound lets the trait object move between threads with the
 /// `Emulator`. The trait is never shared across threads simultaneously
 /// (the emulator is `!Sync` on purpose).
+///
+/// # Typed access
+///
+/// The `Any` supertrait lets [`Emulator`](crate::emulator::Emulator) hand
+/// you a `&mut YourTracer` after installation — see
+/// `Emulator::instrumentation_mut::<T>()`. Zero-cost: monomorphized to a
+/// single `TypeId` compare-and-branch, no `unsafe` for the caller, no
+/// `Arc<Mutex<...>>` to share state with the outer loop.
 #[allow(unused_variables)]
-pub trait Instrumentation: Send {
+pub trait Instrumentation: core::any::Any + Send {
     // ── Lifecycle ───────────────────────────────────────────────────────
 
     /// Called on CPU reset. BOCHS: `BX_INSTR_RESET(cpu_id, type)`.

@@ -45,6 +45,13 @@ pub enum InstrumentationError {
     InvalidHandle(u64),
 }
 
+/// Tracer slot: one installed `Box<dyn Instrumentation>` plus the handle
+/// we hand back to the caller for later removal.
+pub(crate) struct BochsEntry {
+    pub(crate) handle: HookHandle,
+    pub(crate) instr: Box<dyn Instrumentation>,
+}
+
 /// Registry holding the BOCHS trait object plus per-category closure vecs.
 ///
 /// Feature-gated: absent entirely when `instrumentation` is disabled.
@@ -53,8 +60,9 @@ pub struct InstrumentationRegistry {
     /// Callers check this before invoking `fire_*` to keep the hot path empty.
     pub active: HookMask,
 
-    /// BOCHS-style trait instrumentation, if installed.
-    pub(crate) bochs: Option<Box<dyn Instrumentation>>,
+    /// BOCHS-style trait instrumentation. Multiple tracers can be installed;
+    /// they fire in registration order at every callback.
+    pub(crate) bochs: Vec<BochsEntry>,
 
     pub(crate) code_hooks: Vec<CodeHook>,
     pub(crate) code_after_hooks: Vec<CodeHook>,
@@ -81,7 +89,7 @@ impl InstrumentationRegistry {
     pub const fn new() -> Self {
         Self {
             active: HookMask::empty(),
-            bochs: None,
+            bochs: Vec::new(),
             code_hooks: Vec::new(),
             code_after_hooks: Vec::new(),
             mem_hooks: Vec::new(),
@@ -103,7 +111,7 @@ impl InstrumentationRegistry {
     /// Recompute `active` from the current hook vecs + BOCHS trait presence.
     fn recompute_active(&mut self) {
         let mut m = HookMask::empty();
-        if self.bochs.is_some() {
+        if !self.bochs.is_empty() {
             m |= HookMask::BOCHS_TRAIT;
         }
         if !self.code_hooks.is_empty() || !self.code_after_hooks.is_empty() {
@@ -132,19 +140,41 @@ impl InstrumentationRegistry {
 
     // ─────────────────── BOCHS trait management ───────────────────
 
-    pub fn set_bochs(
-        &mut self,
-        instr: Box<dyn Instrumentation>,
-    ) -> Option<Box<dyn Instrumentation>> {
-        let prev = self.bochs.replace(instr);
-        self.recompute_active();
-        prev
+    /// Add a BOCHS-style trait tracer to the pipeline. Returns a handle
+    /// that can be used to remove it later. Multiple tracers stack and fire
+    /// in registration order at every callback.
+    pub fn add_bochs(&mut self, instr: Box<dyn Instrumentation>) -> HookHandle {
+        let handle = self.mint_handle();
+        self.bochs.push(BochsEntry { handle, instr });
+        self.active |= HookMask::BOCHS_TRAIT;
+        handle
     }
 
-    pub fn clear_bochs(&mut self) -> Option<Box<dyn Instrumentation>> {
-        let prev = self.bochs.take();
+    /// Remove a specific BOCHS trait tracer by handle. Returns the tracer
+    /// (so the caller can recover state) or `Err(InvalidHandle)` if it's
+    /// already gone.
+    pub fn remove_bochs(
+        &mut self,
+        handle: HookHandle,
+    ) -> Result<Box<dyn Instrumentation>, InstrumentationError> {
+        let pos = self
+            .bochs
+            .iter()
+            .position(|e| e.handle == handle)
+            .ok_or(InstrumentationError::InvalidHandle(handle.raw()))?;
+        let entry = self.bochs.swap_remove(pos);
         self.recompute_active();
-        prev
+        Ok(entry.instr)
+    }
+
+    /// Remove all installed BOCHS trait tracers.
+    pub fn clear_bochs(&mut self) -> Vec<Box<dyn Instrumentation>> {
+        let out = core::mem::take(&mut self.bochs)
+            .into_iter()
+            .map(|e| e.instr)
+            .collect();
+        self.recompute_active();
+        out
     }
 
     // ─────────────────── Hook registration ───────────────────

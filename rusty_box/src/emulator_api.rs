@@ -179,6 +179,52 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     ) -> Option<Box<dyn crate::cpu::Instrumentation>> {
         self.cpu.clear_instrumentation()
     }
+
+    /// Borrow the installed BOCHS trait instrumentation as a concrete type `T`.
+    /// Returns `None` if no tracer is installed or the installed tracer is
+    /// a different type.
+    ///
+    /// **Zero-cost**: monomorphizes to a single `TypeId` compare (constant-
+    /// folded at most call sites) + a pointer cast. No `Arc<Mutex<...>>`
+    /// needed to share state between the installed tracer and the outer
+    /// emulator loop.
+    pub fn instrumentation<T: crate::cpu::Instrumentation>(&self) -> Option<&T> {
+        let boxed = self.cpu.instrumentation.bochs.as_ref()?;
+        let any_ref: &dyn core::any::Any = &**boxed;
+        any_ref.downcast_ref::<T>()
+    }
+
+    /// Mutable twin of [`instrumentation`](Self::instrumentation).
+    pub fn instrumentation_mut<T: crate::cpu::Instrumentation>(&mut self) -> Option<&mut T> {
+        let boxed = self.cpu.instrumentation.bochs.as_mut()?;
+        let any_ref: &mut dyn core::any::Any = &mut **boxed;
+        any_ref.downcast_mut::<T>()
+    }
+
+    /// Remove the installed tracer and recover it as the concrete type `T`.
+    /// If no tracer is installed, or the installed tracer is a different
+    /// type, returns `None` and leaves any installed tracer untouched.
+    pub fn take_instrumentation<T: crate::cpu::Instrumentation>(
+        &mut self,
+    ) -> Option<Box<T>> {
+        // Peek the type without consuming, so a mismatched call does not
+        // destroy the caller's installed tracer.
+        {
+            let boxed = self.cpu.instrumentation.bochs.as_ref()?;
+            let any_ref: &dyn core::any::Any = &**boxed;
+            if !any_ref.is::<T>() {
+                return None;
+            }
+        }
+        let boxed = self.cpu.clear_instrumentation()?;
+        // SAFETY: We verified the concrete type matches T via TypeId above,
+        // and the Instrumentation slot is uniquely owned (no aliasing).
+        // The Box<dyn Instrumentation> and Box<T> share the same layout
+        // because T: Instrumentation and the wide-pointer vtable is
+        // discarded.
+        let raw = Box::into_raw(boxed) as *mut T;
+        Some(unsafe { Box::from_raw(raw) })
+    }
 }
 
 // ─────────────────────────── reg_read / reg_write ───────────────────────────

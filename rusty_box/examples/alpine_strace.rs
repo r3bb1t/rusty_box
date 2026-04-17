@@ -46,10 +46,8 @@ use std::time::Instant;
 
 mod syscalls;
 
-/// Shared strace state — atomics so it can live inside a closure that only
-/// captures by shared reference. We don't need locking because all hook
-/// firing is single-threaded (the closure runs on the CPU thread while the
-/// GUI thread only calls StopHandle).
+/// Read-only shared config. Passed to the tracer by `Arc` and accessed
+/// lock-free on the hot path; the only lock is stderr serialization.
 struct StraceCtx {
     enabled_from: u64,
     max_events: u64,
@@ -57,7 +55,7 @@ struct StraceCtx {
     log_irqs: bool,
     log_exc: bool,
     events: AtomicU64,
-    /// Last printed icount, for rate-limiting.
+    /// Last printed icount, for progress display.
     last_printed: AtomicU64,
     out: std::sync::Mutex<std::io::BufWriter<std::io::Stderr>>,
 }
@@ -74,7 +72,6 @@ impl StraceCtx {
             .unwrap_or(u64::MAX);
         let log_ports = std::env::var("STRACE_PORTS").ok().as_deref() == Some("1");
         let log_irqs = std::env::var("STRACE_IRQS").ok().as_deref() == Some("1");
-        // Exceptions on by default since they're low-volume and interesting.
         let log_exc = std::env::var("STRACE_EXCEPTIONS").ok().as_deref() != Some("0");
         Arc::new(Self {
             enabled_from,
@@ -93,7 +90,6 @@ impl StraceCtx {
         n < self.max_events
     }
 
-
     fn print(&self, line: &str) {
         use std::io::Write;
         if let Ok(mut w) = self.out.lock() {
@@ -103,29 +99,22 @@ impl StraceCtx {
     }
 }
 
-/// Tracer that lives inside the BOCHS [`Instrumentation`] trait object.
-/// We do the hook logic there because it needs access to register values
-/// via its own icount counter — Unicorn-style closures can't read CPU
-/// state mid-instruction (they get `(rip, &Instruction)` only).
-///
-/// For the full register set we install a lightweight shadow: this tracer
-/// listens to `before_execution` to capture RIP + Opcode. When it sees a
-/// syscall-family instruction, it requests a snapshot from the surrounding
-/// emulator on the next batch boundary. But since batches are 4096
-/// instructions and syscalls are relatively rare, we get the info live:
-/// the hook runs synchronously with CPU state intact.
-///
-/// So we stash register getters by address and formulate the strace line
-/// directly from the CPU snapshot.
-struct StraceTracer {
+/// BOCHS-style tracer. Plain fields, no interior mutability — the outer
+/// loop reaches in via the zero-cost
+/// [`Emulator::instrumentation_mut::<StraceTracer>()`] accessor to pull
+/// out pending syscalls between batches.
+pub struct StraceTracer {
     ctx: Arc<StraceCtx>,
     icount: u64,
-    /// Captured at each SYSCALL/SYSENTER/INT80 before the transition.
-    /// We need to read registers at the moment the syscall fires; the
-    /// `far_branch` hook sees post-transition state where RAX/RDI/... may
-    /// have been clobbered. Instead we cooperate with the emulator loop:
-    /// flag the next poll, and `drain_events` emits one strace line per flag.
-    pending_syscall_nr: Option<(u64, SyscallArgs, bool /*is_64*/)>,
+    /// Set by `interrupt`/`far_branch` when a syscall fires; drained by
+    /// `drain_syscalls` on the next batch boundary.
+    pending: Option<Pending>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Pending {
+    icount: u64,
+    is_64: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -141,7 +130,7 @@ struct SyscallArgs {
 
 impl StraceTracer {
     fn new(ctx: Arc<StraceCtx>) -> Self {
-        Self { ctx, icount: 0, pending_syscall_nr: None }
+        Self { ctx, icount: 0, pending: None }
     }
 
     fn should_log(&self) -> bool {
@@ -182,15 +171,10 @@ impl Instrumentation for StraceTracer {
     }
 
     fn interrupt(&mut self, vector: u8) {
-        // INT 0x80 is the 32-bit Linux syscall gate. We can only read
-        // register values from emulator (not here); the caller below
-        // arranges it via a memoized flag.
+        // INT 0x80 is the 32-bit Linux syscall gate. Register file is read
+        // in `drain_syscalls` on the next batch boundary.
         if vector == 0x80 && self.should_log() {
-            self.pending_syscall_nr = Some((
-                self.icount,
-                SyscallArgs { nr: 0, a0: 0, a1: 0, a2: 0, a3: 0, a4: 0, a5: 0 },
-                false,
-            ));
+            self.pending = Some(Pending { icount: self.icount, is_64: false });
         }
     }
 
@@ -207,11 +191,7 @@ impl Instrumentation for StraceTracer {
             && self.should_log()
         {
             let is_64 = matches!(what, BranchType::Syscall);
-            self.pending_syscall_nr = Some((
-                self.icount,
-                SyscallArgs { nr: 0, a0: 0, a1: 0, a2: 0, a3: 0, a4: 0, a5: 0 },
-                is_64,
-            ));
+            self.pending = Some(Pending { icount: self.icount, is_64 });
         }
     }
 
@@ -244,70 +224,56 @@ impl Instrumentation for StraceTracer {
     }
 }
 
-/// Call between batches: reads register state and emits any pending
-/// syscall line.
+/// Call between batches: pulls any pending syscall out of the tracer, reads
+/// register state, prints a strace-style line. No `unsafe`, no `Arc<Mutex>`:
+/// `Emulator::instrumentation_mut::<StraceTracer>()` is a typed accessor
+/// that monomorphizes to a single `TypeId` compare-and-branch.
 fn drain_syscalls(emu: &mut Emulator<Corei7SkylakeX>, ctx: &StraceCtx) {
     use rusty_box::cpu::X86Reg;
-    // Peek into the instrumentation registry to see if a syscall is pending.
-    // We installed a tracer, so we need to temporarily pop it, check, and
-    // reinstall. That's expensive — but syscalls are rare (<1% of batches).
-    let prev = emu.clear_instrumentation();
-    let pending = if let Some(mut boxed) = prev {
-        let mut tracer = unsafe {
-            // SAFETY: we only ever install StraceTracer via this file's path,
-            // so downcasting is valid.
-            let raw = Box::into_raw(boxed) as *mut StraceTracer;
-            Box::from_raw(raw)
-        };
-        let pending = tracer.pending_syscall_nr.take();
-        boxed = tracer;
-        emu.set_instrumentation(boxed);
-        pending
-    } else {
-        None
-    };
+    let pending = emu
+        .instrumentation_mut::<StraceTracer>()
+        .and_then(|t| t.pending.take());
+    let Some(Pending { icount, is_64 }) = pending else { return; };
 
-    if let Some((icount, _stale, is_64)) = pending {
-        // Read register file NOW — this is the first safe point after the
-        // syscall fired. For SYSCALL the kernel has already swapped GS,
-        // adjusted RIP and set up RCX/R11, but RAX/RDI/... still hold
-        // the caller's values in the first instruction of the handler.
-        let (nr, a0, a1, a2, a3, a4, a5) = if is_64 {
-            (
-                emu.reg_read(X86Reg::Rax).unwrap_or(0),
-                emu.reg_read(X86Reg::Rdi).unwrap_or(0),
-                emu.reg_read(X86Reg::Rsi).unwrap_or(0),
-                emu.reg_read(X86Reg::Rdx).unwrap_or(0),
-                emu.reg_read(X86Reg::R10).unwrap_or(0),
-                emu.reg_read(X86Reg::R8).unwrap_or(0),
-                emu.reg_read(X86Reg::R9).unwrap_or(0),
-            )
-        } else {
-            (
-                emu.reg_read(X86Reg::Eax).unwrap_or(0),
-                emu.reg_read(X86Reg::Ebx).unwrap_or(0),
-                emu.reg_read(X86Reg::Ecx).unwrap_or(0),
-                emu.reg_read(X86Reg::Edx).unwrap_or(0),
-                emu.reg_read(X86Reg::Esi).unwrap_or(0),
-                emu.reg_read(X86Reg::Edi).unwrap_or(0),
-                emu.reg_read(X86Reg::Ebp).unwrap_or(0),
-            )
-        };
-        let args = SyscallArgs { nr, a0, a1, a2, a3, a4, a5 };
-        let name = if is_64 {
-            syscalls::name_x86_64(nr as u32)
-        } else {
-            syscalls::name_x86_32(nr as u32)
-        };
-        let fmt = format_syscall(name, &args, is_64);
-        let line = format!(
-            "[{icount:>12}] {kind:5} {line}",
-            icount = icount,
-            kind = if is_64 { "SYS64" } else { "SYS32" },
-            line = fmt,
-        );
-        ctx.print(&line);
-    }
+    // Read the register file now — first safe point after the syscall
+    // fired. SYSCALL has swapped GS and loaded LSTAR into RIP, but the
+    // kernel handler hasn't run yet so RAX/RDI/... still hold user values.
+    let (nr, a0, a1, a2, a3, a4, a5) = if is_64 {
+        (
+            emu.reg_read(X86Reg::Rax).unwrap_or(0),
+            emu.reg_read(X86Reg::Rdi).unwrap_or(0),
+            emu.reg_read(X86Reg::Rsi).unwrap_or(0),
+            emu.reg_read(X86Reg::Rdx).unwrap_or(0),
+            emu.reg_read(X86Reg::R10).unwrap_or(0),
+            emu.reg_read(X86Reg::R8).unwrap_or(0),
+            emu.reg_read(X86Reg::R9).unwrap_or(0),
+        )
+    } else {
+        (
+            emu.reg_read(X86Reg::Eax).unwrap_or(0),
+            emu.reg_read(X86Reg::Ebx).unwrap_or(0),
+            emu.reg_read(X86Reg::Ecx).unwrap_or(0),
+            emu.reg_read(X86Reg::Edx).unwrap_or(0),
+            emu.reg_read(X86Reg::Esi).unwrap_or(0),
+            emu.reg_read(X86Reg::Edi).unwrap_or(0),
+            emu.reg_read(X86Reg::Ebp).unwrap_or(0),
+        )
+    };
+    let args = SyscallArgs { nr, a0, a1, a2, a3, a4, a5 };
+    let name = if is_64 {
+        syscalls::name_x86_64(nr as u32)
+    } else {
+        syscalls::name_x86_32(nr as u32)
+    };
+    let fmt = format_syscall(name, &args, is_64);
+    let line = format!(
+        "[{icount:>12}] {kind:5} {line}",
+        icount = icount,
+        kind = if is_64 { "SYS64" } else { "SYS32" },
+        line = fmt,
+    );
+    ctx.print(&line);
+    ctx.last_printed.store(icount, Ordering::Relaxed);
 }
 
 fn format_syscall(name: &str, a: &SyscallArgs, is_64: bool) -> String {
