@@ -37,7 +37,7 @@ fn qword_elements(vl: u8) -> usize {
     }
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // VPGATHERDD — Gather packed dwords using dword indices
     // EVEX.0F38.W0 90 /r (VSIB)

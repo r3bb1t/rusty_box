@@ -10,8 +10,8 @@ use crate::cpu::{BxCpuC, BxCpuIdTrait};
 /// Opcode: 0xA0
 /// Segment: DS (default) or override prefix
 /// Offset: 16-bit or 32-bit immediate offset (i.Id())
-pub fn MOV_ALOd<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn MOV_ALOd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = BxSegregs::from(instr.seg());
@@ -25,8 +25,8 @@ pub fn MOV_ALOd<I: BxCpuIdTrait>(
 /// Opcode: 0xA2
 /// Segment: DS (default) or override prefix
 /// Offset: 16-bit or 32-bit immediate offset (i.Id())
-pub fn MOV_OdAL<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn MOV_OdAL<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = BxSegregs::from(instr.seg());
@@ -38,8 +38,8 @@ pub fn MOV_OdAL<I: BxCpuIdTrait>(
 /// MOV_GbEbM: MOV r8, r/m8 - Load register from memory
 /// Opcode: 0x8A (memory form)
 /// Mirrors Bochs cpp/cpu/data_xfer8.cc MOV_GbEbM
-pub fn MOV_GbEbM<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn MOV_GbEbM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     // Resolve effective address (matching BX_CPU_RESOLVE_ADDR)
@@ -59,8 +59,8 @@ pub fn MOV_GbEbM<I: BxCpuIdTrait>(
 
 /// MOV_GbEbR: MOV r8, r8 - Register to register (opcode 0x8A, register form)
 /// Mirrors Bochs cpp/cpu/data_xfer8.cc MOV_GbEbR
-pub fn MOV_GbEbR<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn MOV_GbEbR<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op2 = cpu.read_8bit_regx(instr.src() as usize, instr.extend8bit_l());
@@ -71,8 +71,8 @@ pub fn MOV_GbEbR<I: BxCpuIdTrait>(
 /// MOV_EbGbM: MOV r/m8, r8 - Store register to memory
 /// Opcode: 0x88 (memory form)
 /// Mirrors Bochs cpp/cpu/data_xfer8.cc (MOV_EbGbM)
-pub fn MOV_EbGbM<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn MOV_EbGbM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     // Resolve effective address
@@ -96,8 +96,8 @@ pub fn MOV_EbGbM<I: BxCpuIdTrait>(
 /// Mirrors Bochs cpp/cpu/data_xfer8.cc MOV_EbGbR
 /// Note: decoder always stores reg->operands.dst(dst), rm->operands.src1(src).
 /// For opcode 0x88, reg=source and rm=destination, so we swap access.
-pub fn MOV_EbGbR<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn MOV_EbGbR<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let op2 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());

@@ -5,7 +5,7 @@ use super::{
 };
 use crate::config::BxPhyAddress;
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Check if the given address range overlaps with the monitored address range
     pub fn is_monitor(&self, begin_addr: BxPhyAddress, len: u32) -> bool {
         if !self.monitor.armed() {

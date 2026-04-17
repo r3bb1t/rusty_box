@@ -133,10 +133,10 @@ impl BxMemoryStubC {
         })
     }
 
-    pub(super) fn get_vector<'a, I: BxCpuIdTrait>(
+    pub(super) fn get_vector<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         &'a mut self,
         addr: BxPhyAddress,
-        _cpus: &[&BxCpuC<I>],
+        _cpus: &[&BxCpuC<'_, I, T>],
     ) -> Result<&'a mut [u8]> {
         // Memory is contiguous in actual_vector[vector_offset..].
         // Use the full physical address as the index into the flat memory view.
@@ -171,7 +171,7 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub fn allocate_block<I: BxCpuIdTrait>(&self, block: usize, cpus: &[&BxCpuC<I>]) -> Result<()> {
+    pub fn allocate_block<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(&self, block: usize, cpus: &[&BxCpuC<'_, I, T>]) -> Result<()> {
         #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
         {
             let max_blocks = self.allocated / self.block_size;
@@ -270,13 +270,13 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub fn dbg_fetch_mem<I: BxCpuIdTrait>(
+    pub fn dbg_fetch_mem<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         &mut self,
-        _cpu: BxCpuC<I>,
+        _cpu: BxCpuC<I, T>,
         addr: BxPhyAddress,
         mut len: u32,
         buf: &mut [u8],
-        cpus: &[&BxCpuC<I>],
+        cpus: &[&BxCpuC<I, T>],
         a20_mask: A20Mask,
     ) -> Result<bool> {
         let mut a20_addr: BxPhyAddress = addr & a20_mask;
@@ -357,9 +357,9 @@ impl BxMemoryStubC {
     /// The other assumption is that the calling code _only_ accesses memory
     /// directly within the page that encompasses the address requested.
     ///
-    fn get_host_mem_addr<'a, I: BxCpuIdTrait>(
+    fn get_host_mem_addr<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         &'a mut self,
-        cpus: &[&BxCpuC<I>],
+        cpus: &[&BxCpuC<I, T>],
         addr: BxPhyAddress,
         rw: u32,
         a20_mask: A20Mask,
@@ -389,9 +389,9 @@ impl BxMemoryStubC {
         }
     }
 
-    pub(crate) fn write_physical_page<I: BxCpuIdTrait>(
+    pub(crate) fn write_physical_page<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         &mut self,
-        cpus: &[&BxCpuC<I>],
+        cpus: &[&BxCpuC<I, T>],
         page_write_stamp_table: &mut BxPageWriteStampTable,
         addr: BxPhyAddress,
         mut len: usize,
@@ -483,9 +483,9 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub(crate) fn read_physical_page<I: BxCpuIdTrait>(
+    pub(crate) fn read_physical_page<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         &mut self,
-        cpus: &[&BxCpuC<I>],
+        cpus: &[&BxCpuC<I, T>],
         addr: BxPhyAddress,
         len: usize,
         data: &mut [u8],
@@ -576,8 +576,8 @@ impl BxMemoryStubC {
     }
 
     #[cfg(feature = "bx_support_monitor_mwait")]
-    pub(super) fn is_monitor<I: BxCpuIdTrait>(
-        cpus: &[&BxCpuC<I>],
+    pub(super) fn is_monitor<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpus: &[&BxCpuC<I, T>],
         begin_addr: BxPhyAddress,
         len: u32,
     ) -> bool {
@@ -585,8 +585,8 @@ impl BxMemoryStubC {
     }
 
     #[cfg(feature = "bx_support_monitor_mwait")]
-    fn check_monitor<I: BxCpuIdTrait>(
-        cpus: &mut [BxCpuC<I>],
+    fn check_monitor<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpus: &mut [BxCpuC<I, T>],
         begin_addr: BxPhyAddress,
         len: u32,
     ) -> Result<()> {

@@ -9,6 +9,7 @@ use bitflags::bitflags;
 
 // ─────────────────────────── Hook handle ───────────────────────────
 
+#[cfg(feature = "instrumentation")]
 /// Opaque identifier for a registered hook.
 ///
 /// Returned by `Emulator::hook_add_*` methods and consumed by
@@ -22,6 +23,7 @@ use bitflags::bitflags;
 #[must_use = "HookHandle must be stored to later remove the hook, or explicitly discarded with `let _ = ...`"]
 pub struct HookHandle(u64);
 
+#[cfg(feature = "instrumentation")]
 impl HookHandle {
     #[inline]
     pub(crate) const fn new(id: u64) -> Self {
@@ -44,7 +46,6 @@ bitflags! {
     /// case (no instrumentation → branch predictor handles it for free).
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct HookMask: u32 {
-        const BOCHS_TRAIT  = 1 << 0;
         const EXEC         = 1 << 1; // before_execution / after_execution / repeat_iteration / opcode
         const MEM          = 1 << 2; // lin_access / phy_access
         const BRANCH       = 1 << 3; // cnear/ucnear/far_branch
@@ -62,80 +63,75 @@ bitflags! {
 }
 
 impl HookMask {
-    /// Any hook category active (BOCHS trait or any closure)?
+    /// Any hook category active?
     #[inline]
     pub const fn has_any(self) -> bool {
         !self.is_empty()
     }
 
     #[inline]
-    pub const fn has_bochs(self) -> bool {
-        self.contains(Self::BOCHS_TRAIT)
-    }
-
-    #[inline]
     pub const fn has_exec(self) -> bool {
-        self.intersects(Self::EXEC.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::EXEC)
     }
 
     #[inline]
     pub const fn has_mem(self) -> bool {
-        self.intersects(Self::MEM.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::MEM)
     }
 
     #[inline]
     pub const fn has_branch(self) -> bool {
-        self.intersects(Self::BRANCH.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::BRANCH)
     }
 
     #[inline]
     pub const fn has_interrupt(self) -> bool {
-        self.intersects(Self::INTERRUPT.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::INTERRUPT)
     }
 
     #[inline]
     pub const fn has_hw_interrupt(self) -> bool {
-        self.intersects(Self::HW_INTERRUPT.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::HW_INTERRUPT)
     }
 
     #[inline]
     pub const fn has_exception(self) -> bool {
-        self.intersects(Self::EXCEPTION.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::EXCEPTION)
     }
 
     #[inline]
     pub const fn has_io(self) -> bool {
-        self.intersects(Self::IO.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::IO)
     }
 
     #[inline]
     pub const fn has_tlb(self) -> bool {
-        self.intersects(Self::TLB.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::TLB)
     }
 
     #[inline]
     pub const fn has_cache(self) -> bool {
-        self.intersects(Self::CACHE.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::CACHE)
     }
 
     #[inline]
     pub const fn has_hlt_mwait(self) -> bool {
-        self.intersects(Self::HLT_MWAIT.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::HLT_MWAIT)
     }
 
     #[inline]
     pub const fn has_cpuid_msr(self) -> bool {
-        self.intersects(Self::CPUID_MSR.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::CPUID_MSR)
     }
 
     #[inline]
     pub const fn has_vmexit(self) -> bool {
-        self.intersects(Self::VMEXIT.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::VMEXIT)
     }
 
     #[inline]
     pub const fn has_reset(self) -> bool {
-        self.intersects(Self::RESET.union(Self::BOCHS_TRAIT))
+        self.intersects(Self::RESET)
     }
 }
 
@@ -306,6 +302,7 @@ bitflags! {
 
 // ─────────────────────────── Hook event types ───────────────────────────
 
+#[cfg(feature = "instrumentation")]
 /// Memory hook category — selects which kind of accesses fire the hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemHookType {
@@ -319,6 +316,7 @@ pub enum MemHookType {
     All,
 }
 
+#[cfg(feature = "instrumentation")]
 impl MemHookType {
     #[inline]
     pub(crate) fn matches(self, rw: MemAccessRW) -> bool {
@@ -334,6 +332,7 @@ impl MemHookType {
     }
 }
 
+#[cfg(feature = "instrumentation")]
 /// I/O port hook category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IoHookType {
@@ -345,6 +344,7 @@ pub enum IoHookType {
     InOut,
 }
 
+#[cfg(feature = "instrumentation")]
 impl IoHookType {
     #[inline]
     pub(crate) fn matches(self, rw: MemAccessRW) -> bool {
@@ -493,34 +493,114 @@ pub struct CpuSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum X86Reg {
     // 64-bit GPRs
-    Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi,
-    R8, R9, R10, R11, R12, R13, R14, R15,
+    Rax,
+    Rcx,
+    Rdx,
+    Rbx,
+    Rsp,
+    Rbp,
+    Rsi,
+    Rdi,
+    R8,
+    R9,
+    R10,
+    R11,
+    R12,
+    R13,
+    R14,
+    R15,
     // 32-bit views (read zero-extended; write replaces low 32 bits and zero-extends per x86-64 rules)
-    Eax, Ecx, Edx, Ebx, Esp, Ebp, Esi, Edi,
-    R8d, R9d, R10d, R11d, R12d, R13d, R14d, R15d,
+    Eax,
+    Ecx,
+    Edx,
+    Ebx,
+    Esp,
+    Ebp,
+    Esi,
+    Edi,
+    R8d,
+    R9d,
+    R10d,
+    R11d,
+    R12d,
+    R13d,
+    R14d,
+    R15d,
     // 16-bit views (write replaces low 16 bits, upper bits preserved)
-    Ax, Cx, Dx, Bx, Sp, Bp, Si, Di,
-    R8w, R9w, R10w, R11w, R12w, R13w, R14w, R15w,
+    Ax,
+    Cx,
+    Dx,
+    Bx,
+    Sp,
+    Bp,
+    Si,
+    Di,
+    R8w,
+    R9w,
+    R10w,
+    R11w,
+    R12w,
+    R13w,
+    R14w,
+    R15w,
     // 8-bit low / high views
-    Al, Cl, Dl, Bl,
-    Ah, Ch, Dh, Bh,
-    Spl, Bpl, Sil, Dil,
-    R8b, R9b, R10b, R11b, R12b, R13b, R14b, R15b,
+    Al,
+    Cl,
+    Dl,
+    Bl,
+    Ah,
+    Ch,
+    Dh,
+    Bh,
+    Spl,
+    Bpl,
+    Sil,
+    Dil,
+    R8b,
+    R9b,
+    R10b,
+    R11b,
+    R12b,
+    R13b,
+    R14b,
+    R15b,
     // Instruction pointer & flags
-    Rip, Eip, Ip,
-    Rflags, Eflags, Flags,
+    Rip,
+    Eip,
+    Ip,
+    Rflags,
+    Eflags,
+    Flags,
     // Segment selectors
-    Cs, Ds, Es, Fs, Gs, Ss,
+    Cs,
+    Ds,
+    Es,
+    Fs,
+    Gs,
+    Ss,
     // Segment hidden bases (writable for setup convenience)
-    FsBase, GsBase,
+    FsBase,
+    GsBase,
     // Control registers
-    Cr0, Cr2, Cr3, Cr4, Cr8,
+    Cr0,
+    Cr2,
+    Cr3,
+    Cr4,
+    Cr8,
     // Debug registers
-    Dr0, Dr1, Dr2, Dr3, Dr6, Dr7,
+    Dr0,
+    Dr1,
+    Dr2,
+    Dr3,
+    Dr6,
+    Dr7,
     // Descriptor table registers (limit only — bases are 64-bit, exposed as `*Base`)
-    GdtrBase, GdtrLimit,
-    IdtrBase, IdtrLimit,
-    LdtrSelector, TrSelector,
+    GdtrBase,
+    GdtrLimit,
+    IdtrBase,
+    IdtrLimit,
+    LdtrSelector,
+    TrSelector,
     // Time-stamp counter (read-only via reg_read; reg_write returns Err for now)
     Tsc,
     // EFER MSR (alias for convenience — also accessible via msr_read/msr_write)

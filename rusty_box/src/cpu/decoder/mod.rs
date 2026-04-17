@@ -11,7 +11,7 @@ pub use rusty_box_decoder::features::X86Feature;
 // Keep the impl BxCpuC block in the main crate
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Validate CPU feature bitmask and configure decode tables.
     ///
     /// Bochs fetchdecode32.cc: loops all opcodes and disables those

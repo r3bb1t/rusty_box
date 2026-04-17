@@ -11,7 +11,7 @@ use super::{
     eflags::EFlags,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =====================================================================
     // Internal helpers
     // =====================================================================

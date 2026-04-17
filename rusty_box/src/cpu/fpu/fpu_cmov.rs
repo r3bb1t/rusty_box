@@ -6,7 +6,7 @@ use super::super::cpu::BxCpuC;
 use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::Instruction;
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// FCMOVB ST(0), ST(j) — Move if below (CF=1)
     pub fn fcmovb_st0_stj(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;

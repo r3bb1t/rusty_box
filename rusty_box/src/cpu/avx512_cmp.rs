@@ -48,7 +48,7 @@ fn vl_bytes(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, instr: &Instruction) -> u64 {
+fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, instr: &Instruction) -> u64 {
     let k = instr.opmask();
     if k == 0 {
         u64::MAX
@@ -60,13 +60,13 @@ fn read_opmask_for_write<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, instr: &Instructi
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, reg: u8) -> BxPackedZmmRegister {
+fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, reg: u8) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register, zeroing upper bits beyond VL (dword masking granularity)
-fn write_zmm_masked<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<'_, I>,
+fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -89,8 +89,8 @@ fn write_zmm_masked<I: BxCpuIdTrait>(
 }
 
 /// Write ZMM register for qword operations
-fn write_zmm_masked_q<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<'_, I>,
+fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -112,8 +112,8 @@ fn write_zmm_masked_q<I: BxCpuIdTrait>(
 }
 
 /// Read src2 dword elements from register or memory
-fn read_src2_dwords<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<'_, I>,
+fn read_src2_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
     nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -131,8 +131,8 @@ fn read_src2_dwords<I: BxCpuIdTrait>(
 }
 
 /// Read src2 qword elements from register or memory
-fn read_src2_qwords<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<'_, I>,
+fn read_src2_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
     nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -215,7 +215,7 @@ fn fp_compare_f64(a: f64, b: f64, imm: u8) -> bool {
     }
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // VCMPPS — Compare packed single-precision FP, producing opmask
     // EVEX.NDS.W0.0F C2 /r ib

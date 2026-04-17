@@ -301,3 +301,286 @@ pub fn name_x86_32(nr: u32) -> &'static str {
         _ => "unknown",
     }
 }
+
+
+use std::fmt;
+use std::net::{Ipv4Addr, Ipv6Addr};
+
+// ─────────────────────────── Address family ───────────────────────────
+
+/// Address family for socket syscalls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressFamily {
+    Unspec,
+    Unix,
+    Inet,
+    Inet6,
+    Netlink,
+    #[non_exhaustive]
+    Other(u64),
+}
+
+impl AddressFamily {
+    pub fn from_raw(v: u64) -> Self {
+        match v {
+            0 => Self::Unspec,
+            1 => Self::Unix,
+            2 => Self::Inet,
+            10 => Self::Inet6,
+            16 => Self::Netlink,
+            other => Self::Other(other),
+        }
+    }
+}
+
+impl fmt::Display for AddressFamily {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unspec => write!(f, "AF_UNSPEC"),
+            Self::Unix => write!(f, "AF_UNIX"),
+            Self::Inet => write!(f, "AF_INET"),
+            Self::Inet6 => write!(f, "AF_INET6"),
+            Self::Netlink => write!(f, "AF_NETLINK"),
+            Self::Other(v) => write!(f, "AF_UNKNOWN({v})"),
+        }
+    }
+}
+
+// ─────────────────────────── Socket type ───────────────────────────
+
+/// Socket type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SockType {
+    Stream,
+    Dgram,
+    Raw,
+    #[non_exhaustive]
+    Other(u64),
+}
+
+impl SockType {
+    pub fn from_raw(v: u64) -> Self {
+        match v {
+            1 => Self::Stream,
+            2 => Self::Dgram,
+            3 => Self::Raw,
+            other => Self::Other(other),
+        }
+    }
+}
+
+impl fmt::Display for SockType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stream => write!(f, "SOCK_STREAM"),
+            Self::Dgram => write!(f, "SOCK_DGRAM"),
+            Self::Raw => write!(f, "SOCK_RAW"),
+            Self::Other(v) => write!(f, "SOCK_UNKNOWN({v})"),
+        }
+    }
+}
+
+// ─────────────────────────── Decoded sockaddr ───────────────────────────
+
+/// Decoded sockaddr.
+#[derive(Debug, Clone)]
+pub enum SockAddr {
+    Inet { port: u16, addr: Ipv4Addr },
+    Inet6 { port: u16, addr: Ipv6Addr },
+    Unix { path: String },
+    Unknown { family: u16, data: Vec<u8> },
+}
+
+impl fmt::Display for SockAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inet { port, addr } => write!(f, "AF_INET {addr}:{port}"),
+            Self::Inet6 { port, addr } => write!(f, "AF_INET6 [{addr}]:{port}"),
+            Self::Unix { path } => write!(f, "AF_UNIX {path:?}"),
+            Self::Unknown { family, data } => {
+                write!(f, "AF_UNKNOWN({family}) [{} bytes]", data.len())
+            }
+        }
+    }
+}
+
+/// Decode a `sockaddr` from a raw byte slice.
+///
+/// The first two bytes are the address family (little-endian on x86).
+/// Returns `SockAddr::Unknown` for families we don't handle or if the
+/// buffer is too short.
+pub fn decode_sockaddr(data: &[u8]) -> SockAddr {
+    if data.len() < 2 {
+        return SockAddr::Unknown {
+            family: 0,
+            data: data.to_vec(),
+        };
+    }
+    let family = u16::from_le_bytes([data[0], data[1]]);
+    match family {
+        // AF_INET — sockaddr_in: family(2) + port(2, big-endian) + addr(4).
+        2 => {
+            if data.len() < 8 {
+                return SockAddr::Unknown {
+                    family,
+                    data: data.to_vec(),
+                };
+            }
+            let port = u16::from_be_bytes([data[2], data[3]]);
+            let addr = Ipv4Addr::new(data[4], data[5], data[6], data[7]);
+            SockAddr::Inet { port, addr }
+        }
+        // AF_INET6 — sockaddr_in6: family(2) + port(2, big-endian) + flowinfo(4) + addr(16).
+        10 => {
+            if data.len() < 24 {
+                return SockAddr::Unknown {
+                    family,
+                    data: data.to_vec(),
+                };
+            }
+            let port = u16::from_be_bytes([data[2], data[3]]);
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&data[8..24]);
+            let addr = Ipv6Addr::from(octets);
+            SockAddr::Inet6 { port, addr }
+        }
+        // AF_UNIX — sockaddr_un: family(2) + path (up to 108 bytes, NUL-terminated).
+        1 => {
+            let path_bytes = &data[2..];
+            let end = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
+            let path = String::from_utf8_lossy(&path_bytes[..end]).into_owned();
+            SockAddr::Unix { path }
+        }
+        _ => SockAddr::Unknown {
+            family,
+            data: data.to_vec(),
+        },
+    }
+}
+
+// ─────────────────────────── Linux syscall ADT ───────────────────────────
+
+/// A decoded Linux x86-64 syscall with typed arguments.
+#[derive(Debug, Clone)]
+pub enum LinuxSyscall {
+    Socket {
+        domain: AddressFamily,
+        sock_type: SockType,
+        protocol: i32,
+    },
+    Connect {
+        sockfd: i32,
+        addr: SockAddr,
+        addrlen: u32,
+    },
+    Dup2 {
+        oldfd: i32,
+        newfd: i32,
+    },
+    Execve {
+        filename: String,
+        argv: Vec<String>,
+        envp_addr: u64,
+    },
+    Read {
+        fd: i32,
+        buf: u64,
+        count: u64,
+    },
+    Write {
+        fd: i32,
+        buf: u64,
+        count: u64,
+    },
+    Open {
+        filename: String,
+        flags: i32,
+        mode: u32,
+    },
+    Close {
+        fd: i32,
+    },
+    Mmap {
+        addr: u64,
+        length: u64,
+        prot: i32,
+        flags: i32,
+        fd: i32,
+        offset: u64,
+    },
+    Mprotect {
+        addr: u64,
+        length: u64,
+        prot: i32,
+    },
+    Brk {
+        addr: u64,
+    },
+    Exit {
+        status: i32,
+    },
+    ExitGroup {
+        status: i32,
+    },
+    /// Fallback for unrecognized syscalls.
+    #[non_exhaustive]
+    Other {
+        nr: u64,
+        args: [u64; 6],
+    },
+}
+
+impl fmt::Display for LinuxSyscall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Socket {
+                domain,
+                sock_type,
+                protocol,
+            } => write!(f, "socket({domain}, {sock_type}, {protocol})"),
+            Self::Connect {
+                sockfd,
+                addr,
+                addrlen,
+            } => write!(f, "connect({sockfd}, {addr}, {addrlen})"),
+            Self::Dup2 { oldfd, newfd } => write!(f, "dup2({oldfd}, {newfd})"),
+            Self::Execve {
+                filename,
+                argv,
+                envp_addr,
+            } => write!(f, "execve({filename:?}, {argv:?}, {envp_addr:#x})"),
+            Self::Read { fd, buf, count } => write!(f, "read({fd}, {buf:#x}, {count})"),
+            Self::Write { fd, buf, count } => write!(f, "write({fd}, {buf:#x}, {count})"),
+            Self::Open {
+                filename,
+                flags,
+                mode,
+            } => write!(f, "open({filename:?}, {flags:#x}, {mode:#o})"),
+            Self::Close { fd } => write!(f, "close({fd})"),
+            Self::Mmap {
+                addr,
+                length,
+                prot,
+                flags,
+                fd,
+                offset,
+            } => write!(
+                f,
+                "mmap({addr:#x}, {length}, {prot:#x}, {flags:#x}, {fd}, {offset})",
+            ),
+            Self::Mprotect { addr, length, prot } => {
+                write!(f, "mprotect({addr:#x}, {length}, {prot:#x})")
+            }
+            Self::Brk { addr } => write!(f, "brk({addr:#x})"),
+            Self::Exit { status } => write!(f, "exit({status})"),
+            Self::ExitGroup { status } => write!(f, "exit_group({status})"),
+            Self::Other { nr, args } => {
+                write!(
+                    f,
+                    "syscall_{nr}({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x})",
+                    args[0], args[1], args[2], args[3], args[4], args[5],
+                )
+            }
+        }
+    }
+}

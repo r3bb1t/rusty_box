@@ -54,7 +54,7 @@ fn down_or_chop(cwd: u16) -> bool {
     (cwd & FPU_CW_RC & FPU_RC_DOWN) != 0
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// FLDL2T — Load log2(10)
     pub fn fldl2t(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;

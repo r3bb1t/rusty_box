@@ -46,7 +46,7 @@ pub enum ResetReason {
     Hardware = 11,
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     pub fn initialize(&mut self, config: BxParams) -> Result<()> {
         tracing::info!("Initialized cpu model {}", self.cpuid.get_name());
 
@@ -418,6 +418,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.nmi_unblocking_iret = false;
 
         self.handle_cpu_context_change();
+
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_any() {
+            let reset_type = match source {
+                ResetReason::Hardware => super::instrumentation::ResetType::Hardware,
+                ResetReason::Software => super::instrumentation::ResetType::Software,
+            };
+            self.instrumentation.fire_reset(reset_type);
+        }
 
     }
 

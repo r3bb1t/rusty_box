@@ -238,7 +238,7 @@ const EXCEPTIONS_INFO: [BxExceptionInfo; BX_CPU_HANDLED_EXCEPTIONS as _] = [
     },
 ];
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // vector:     0..255: vector in IDT
     // error_code: if exception generates and error, push this error code
     #[track_caller]

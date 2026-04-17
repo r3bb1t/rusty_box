@@ -4,7 +4,7 @@
 
 use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, eflags::EFlags};
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =========================================================================
     // 32-bit PUSH instructions
     // Based on Bochs stack32.cc

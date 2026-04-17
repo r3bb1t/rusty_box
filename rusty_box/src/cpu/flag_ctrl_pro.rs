@@ -8,7 +8,7 @@
 use super::eflags::EFlags;
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Check if interrupts are enabled (EFLAGS.IF = 1)
     #[inline]
     pub fn interrupts_enabled(&self) -> bool {

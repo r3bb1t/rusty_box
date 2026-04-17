@@ -8,7 +8,7 @@ use super::{
     eflags::EFlags,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Save CPU state to a byte vector.
     pub fn save_snapshot_state(&self) -> alloc::vec::Vec<u8> {
         let mut buf = alloc::vec::Vec::with_capacity(16384);

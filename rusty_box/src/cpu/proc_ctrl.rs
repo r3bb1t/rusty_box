@@ -4,7 +4,7 @@
 
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     pub(super) fn handle_cpu_context_change(&mut self) {
         self.tlb_flush();
 

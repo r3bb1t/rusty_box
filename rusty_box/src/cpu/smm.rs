@@ -125,7 +125,7 @@ pub(super) enum SMMRAM_Fields {
 
 use SMMRAM_Fields::*;
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     pub(super) fn init_smram() -> Result<[u32; SMRAM_FIELD_LAST as _]> {
         let mut smram_map = [0; SMRAM_FIELD_LAST as _];
         smram_map[SMRAM_FIELD_SMBASE_OFFSET as usize] = smram_translate(0x7f00);

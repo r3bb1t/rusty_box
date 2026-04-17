@@ -7,7 +7,7 @@ use crate::cpu::decoder::Instruction;
 use crate::cpu::eflags::EFlags;
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Set AF flag (bit 4)
     fn set_af(&mut self, val: bool) {
         if val {
@@ -30,8 +30,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 /// AAA: ASCII Adjust After Addition
 /// Opcode: 0x37
 /// Matches Bochs bcd.cc BX_CPU_C::AAA
-pub fn AAA<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn AAA<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     _instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let mut tmp_cf = false;
@@ -56,8 +56,8 @@ pub fn AAA<I: BxCpuIdTrait>(
 /// AAS: ASCII Adjust After Subtraction
 /// Opcode: 0x3F
 /// Matches Bochs bcd.cc BX_CPU_C::AAS
-pub fn AAS<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn AAS<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     _instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let mut tmp_cf = false;
@@ -82,8 +82,8 @@ pub fn AAS<I: BxCpuIdTrait>(
 /// AAM: ASCII Adjust AX After Multiply
 /// Opcode: 0xD4 imm8
 /// Matches Bochs bcd.cc BX_CPU_C::AAM
-pub fn AAM<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn AAM<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let imm8 = instr.ib();
@@ -103,8 +103,8 @@ pub fn AAM<I: BxCpuIdTrait>(
 /// AAD: ASCII Adjust AX Before Division
 /// Opcode: 0xD5 imm8
 /// Matches Bochs bcd.cc BX_CPU_C::AAD
-pub fn AAD<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn AAD<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let tmp = (cpu.ah() as u16)
@@ -120,8 +120,8 @@ pub fn AAD<I: BxCpuIdTrait>(
 /// DAA: Decimal Adjust AL after Addition
 /// Opcode: 0x27
 /// Matches Bochs bcd.cc BX_CPU_C::DAA
-pub fn DAA<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn DAA<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     _instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let tmp_al = cpu.al();
@@ -150,8 +150,8 @@ pub fn DAA<I: BxCpuIdTrait>(
 /// DAS: Decimal Adjust AL after Subtraction
 /// Opcode: 0x2F
 /// Matches Bochs bcd.cc BX_CPU_C::DAS
-pub fn DAS<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn DAS<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     _instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let tmp_al = cpu.al();

@@ -10,8 +10,8 @@ use crate::cpu::{BxCpuC, BxCpuIdTrait};
 /// Opcode: 0xA1 (16-bit operand size)
 /// Segment: DS (default) or override prefix
 /// Offset: 16-bit or 32-bit immediate offset (i.Id())
-pub fn MOV_AXOd<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn MOV_AXOd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = BxSegregs::from(instr.seg());
@@ -25,8 +25,8 @@ pub fn MOV_AXOd<I: BxCpuIdTrait>(
 /// Opcode: 0xA3 (16-bit operand size)
 /// Segment: DS (default) or override prefix
 /// Offset: 16-bit or 32-bit immediate offset (i.Id())
-pub fn MOV_OdAX<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<I>,
+pub fn MOV_OdAX<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = BxSegregs::from(instr.seg());

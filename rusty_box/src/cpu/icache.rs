@@ -102,7 +102,7 @@ struct BxPageWriteStampTableInternal {
     fine_granularity_mapping: [u32; 32768], // 128MB / 4KB = 32768 pages
 }
 
-fn handle_smc<I: BxCpuIdTrait>(cpus: &mut [BxCpuC<I>], p_addr: BxPhyAddress, mask: u32) {
+fn handle_smc<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpus: &mut [BxCpuC<I, T>], p_addr: BxPhyAddress, mask: u32) {
     // INC_SMC_STAT(smc);
     for cpu in cpus {
         cpu.i_cache.handle_smc(p_addr, mask);
@@ -610,7 +610,7 @@ fn is_trace_end_opcode(opcode: Opcode) -> bool {
     )
 }
 
-impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
+impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
     fn bx_end_trace(&mut self) {
         self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
     }
@@ -761,8 +761,25 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     let stop_trace_indication =
                         is_trace_end_opcode(self.i_cache.mpool[current_mpindex].get_ia_opcode());
 
-                    // TODO: Implement BX_INSTR_STORE_OPCODE_BYTES if needed (matching C++ line 175-177)
-                    // TODO: Implement BX_INSTR_OPCODE if needed (matching C++ line 178-179)
+                    // BX_INSTR_OPCODE (matching C++ icache.cc:178-179)
+                    #[cfg(feature = "instrumentation")]
+                    if self.instrumentation.active.has_exec() {
+                        let rip = self.prev_rip + (current_page_offset as u64 - (page_offset as u64));
+                        let bytes = &current_fetch_ptr[..i_len as usize];
+                        let size = if long64 {
+                            super::instrumentation::CodeSize::Bits64
+                        } else if is_32_bit_mode {
+                            super::instrumentation::CodeSize::Bits32
+                        } else {
+                            super::instrumentation::CodeSize::Bits16
+                        };
+                        self.instrumentation.fire_opcode(
+                            rip,
+                            &self.i_cache.mpool[current_mpindex],
+                            bytes,
+                            size,
+                        );
+                    }
 
                     // Update trace mask
                     // Clamp shift amounts to 31 to prevent overflow (u32 has 32 bits, so max shift is 31)
@@ -1088,8 +1105,20 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // (matching C++ line 306: RIP = BX_CPU_THIS_PTR prev_rip)
         self.set_rip(self.prev_rip);
 
-        // TODO: Implement BX_INSTR_STORE_OPCODE_BYTES if needed (matching C++ line 314-316)
-        // TODO: Implement BX_INSTR_OPCODE if needed (matching C++ line 318-319)
+        // BX_INSTR_OPCODE (matching C++ icache.cc:318-319)
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_exec() {
+            let rip = self.prev_rip;
+            let bytes = &fetch_buffer[..instr.ilen() as usize];
+            let size = if self.long64_mode() {
+                super::instrumentation::CodeSize::Bits64
+            } else if is_32_bit_mode {
+                super::instrumentation::CodeSize::Bits32
+            } else {
+                super::instrumentation::CodeSize::Bits16
+            };
+            self.instrumentation.fire_opcode(rip, &instr, bytes, size);
+        }
 
         Ok(instr)
     }

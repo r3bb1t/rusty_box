@@ -204,7 +204,7 @@ fn gf2p8mul(a: u8, b: u8) -> u8 {
 // Instruction handlers
 // ============================================================================
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// GF2P8AFFINEQB VdqWdqIb -- 66 0F 3A CE
     ///
     /// Galois Field Affine Transformation.

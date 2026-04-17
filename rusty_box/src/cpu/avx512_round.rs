@@ -34,7 +34,7 @@ fn qword_elements(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, instr: &Instruction) -> u64 {
+fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, instr: &Instruction) -> u64 {
     let k = instr.opmask();
     if k == 0 {
         u64::MAX
@@ -46,13 +46,13 @@ fn read_opmask_for_write<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, instr: &Instructi
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, reg: u8) -> BxPackedZmmRegister {
+fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, reg: u8) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register with dword-granularity masking, zeroing upper beyond VL
-fn write_zmm_masked<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<'_, I>,
+fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -74,8 +74,8 @@ fn write_zmm_masked<I: BxCpuIdTrait>(
 }
 
 /// Write ZMM register with qword-granularity masking, zeroing upper beyond VL
-fn write_zmm_masked_q<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<'_, I>,
+fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -270,7 +270,7 @@ fn scalef_f64(src1: f64, src2: f64) -> f64 {
 // Read helpers for memory operands
 // ============================================================================
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Read packed SP source: register or memory, dword-element granularity
     #[inline]
     fn read_src_ps(&mut self, instr: &Instruction, nelements: usize) -> super::Result<BxPackedZmmRegister> {

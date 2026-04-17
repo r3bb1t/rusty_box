@@ -359,7 +359,7 @@ pub(super) const MXCSR_FZ: u32 = Mxcsr::FZ.bits();
 // CPU helper methods for XMM register access
 // ============================================================================
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Clear a vector register (all 512 bits to zero)
     #[allow(non_snake_case)]
     pub(super) fn BX_CLEAR_AVX_REG(&mut self, index: usize) {

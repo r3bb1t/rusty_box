@@ -2488,7 +2488,6 @@ dependencies = [
  "crossterm",
  "eframe",
  "egui",
- "libc",
  "paste",
  "rusty_box_decoder",
  "spin",

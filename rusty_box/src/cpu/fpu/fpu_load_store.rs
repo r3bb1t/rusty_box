@@ -30,7 +30,7 @@ use super::super::softfloat3e::softfloat_types::floatx80;
 use super::super::softfloat3e::specialize::*;
 use super::ferr::i387cw_to_softfloat_status_word;
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // read_virtual_qword and write_virtual_qword are defined in access.rs
 
     // =========================================================================

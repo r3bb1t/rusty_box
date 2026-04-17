@@ -10,7 +10,7 @@
 
 use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::BxSegregs};
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =========================================================================
     // Helper functions for stack operations
     // Based on Bochs stack.h and stack.cc

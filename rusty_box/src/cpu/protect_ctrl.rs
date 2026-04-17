@@ -14,7 +14,7 @@ use super::{
     Result,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// LGDT - Load Global Descriptor Table Register
     /// Based on Bochs protect_ctrl.cc
     pub fn lgdt_ms(&mut self, instr: &Instruction) -> Result<()> {

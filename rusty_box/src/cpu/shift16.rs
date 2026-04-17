@@ -11,7 +11,7 @@ use super::{
     eflags::EFlags,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ---- 16-bit read/write helpers for shift instructions ----
     fn shift_read16(&mut self, instr: &Instruction) -> super::Result<(u16, Option<()>)> {
         if instr.mod_c0() {

@@ -5,7 +5,7 @@ use super::{
     eflags::EFlags,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Bit-mix hash of icount for pseudo-random values (splitmix64 variant).
     fn hw_rand64(&self) -> u64 {
         let mut x = self.icount.wrapping_mul(0x517cc1b727220a95);

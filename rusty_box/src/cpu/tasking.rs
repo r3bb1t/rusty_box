@@ -21,7 +21,7 @@ pub(super) const BX_TASK_FROM_CALL: u32 = 0x1;
 pub(super) const BX_TASK_FROM_INT: u32 = 0x2;
 pub(super) const BX_TASK_FROM_IRET: u32 = 0x3;
 
-impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cpu::BxCpuC<'_, I, T> {
     /// Perform task switch
     /// Based on BX_CPU_C::task_switch in tasking.cc
     #[allow(clippy::too_many_arguments)]

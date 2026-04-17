@@ -97,8 +97,8 @@ bitflags! {
 
 // TODO: remove self reference
 
-pub(crate) struct BxCpuId<'c, I: BxCpuIdTrait> {
-    cpu: &'c BxCpuC<'c, I>,
+pub(crate) struct BxCpuId<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> {
+    cpu: &'c BxCpuC<'c, I, T>,
     nprocessors: u32,
     ncores: u32,
     nthreads: u32,
@@ -106,8 +106,8 @@ pub(crate) struct BxCpuId<'c, I: BxCpuIdTrait> {
     ia_extensions_bitmask: [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE],
 }
 
-impl<'c, I: BxCpuIdTrait> BxCpuId<'c, I> {
-    pub fn new(cpu: &'c BxCpuC<I>, nprocessors: u32, ncores: u32, nthreads: u32) -> Self {
+impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuId<'c, I, T> {
+    pub fn new(cpu: &'c BxCpuC<'c, I, T>, nprocessors: u32, ncores: u32, nthreads: u32) -> Self {
         let ia_extensions_bitmask = [0; BX_ISA_EXTENSIONS_ARRAY_SIZE];
 
         Self {

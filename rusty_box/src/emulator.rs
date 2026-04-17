@@ -85,9 +85,9 @@ impl Default for EmulatorConfig {
 /// // Access components directly for cpu_loop:
 /// // emu.cpu.cpu_loop(&mut emu.memory, &[]);
 /// ```
-pub struct Emulator<'a, I: BxCpuIdTrait> {
+pub struct Emulator<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation = ()> {
     /// CPU instance
-    pub cpu: BxCpuC<'a, I>,
+    pub cpu: BxCpuC<'a, I, T>,
     /// Memory subsystem
     pub memory: BxMemC<'a>,
     /// Device controller (I/O port handlers)
@@ -109,7 +109,7 @@ pub struct Emulator<'a, I: BxCpuIdTrait> {
     pub stop_flag: Arc<AtomicBool>,
 }
 
-impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
+impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
     /// Extend the borrow of memory owned by this Emulator to match lifetime 'a.
     ///
     /// # Safety
@@ -174,37 +174,38 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         r
     }
 
-    /// Create a new emulator instance with the given configuration
-    ///
-    /// This creates all components but does not initialize them.
-    /// Call `initialize()` after creation to complete setup.
-    ///
-    /// Returns Box<Emulator> to avoid stack overflow (Emulator is ~1.4 MB).
-    /// This matches original Bochs behavior which uses `new BX_CPU_C(i)`.
-    pub fn new(config: EmulatorConfig) -> Result<Box<Self>> {
-        // Create PC system
-        let pc_system = BxPcSystemC::new();
+}
 
-        // Create memory (but don't initialize yet - that's done in initialize() to match original)
-        // In original Bochs, BX_MEM(0) is created first, then init_memory() is called in bx_init_hardware()
+impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
+    /// Create a new emulator with no instrumentation (`T = ()`).
+    ///
+    /// Returns `Box<Self>` because Emulator is ~1.4 MB.
+    pub fn new(config: EmulatorConfig) -> Result<Box<Self>> {
+        let cpu = BxCpuBuilder::<I>::new().build()?;
+        Self::new_inner(config, cpu)
+    }
+}
+
+impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+    /// Create a new emulator with a monomorphized tracer.
+    ///
+    /// The tracer type `T` is baked in at construction and cannot be changed.
+    /// All tracer dispatch is inlined — zero overhead.
+    pub fn new_with_instrumentation(config: EmulatorConfig, tracer: T) -> Result<Box<Self>> {
+        let cpu = BxCpuBuilder::<I>::new().build_with_tracer(tracer)?;
+        Self::new_inner(config, cpu)
+    }
+
+    fn new_inner(config: EmulatorConfig, cpu: BxCpuC<'static, I, T>) -> Result<Box<Self>> {
+        let pc_system = BxPcSystemC::new();
         let mem_stub = BxMemoryStubC::create_and_init(
             config.guest_memory_size,
             config.host_memory_size,
             config.memory_block_size,
         )?;
         let memory = BxMemC::new(mem_stub, config.pci_enabled);
-
-        // Create devices (I/O port handlers)
         let devices = BxDevicesC::new();
-
-        // Create device manager (actual hardware)
         let device_manager = DeviceManager::new();
-
-        // Create CPU
-        let builder: BxCpuBuilder<I> = BxCpuBuilder::new();
-        let cpu = builder.build()?;
-
-        // Box to allocate on heap (matches Bochs's `new BX_CPU_C(i)`)
         Ok(Box::new(Self {
             cpu,
             memory,
@@ -618,7 +619,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     }
 
     /// Get mutable reference to CPU for instrumentation setup.
-    pub fn cpu_mut(&mut self) -> &mut crate::cpu::cpu::BxCpuC<'a, I> {
+    pub fn cpu_mut(&mut self) -> &mut crate::cpu::cpu::BxCpuC<'a, I, T> {
         &mut self.cpu
     }
 
@@ -2613,7 +2614,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     }
 
     /// Attach a CD-ROM ISO from in-memory data (for no_std / WASM environments).
-    #[cfg(not(feature = "std"))]
     pub fn attach_cdrom_data(
         &mut self,
         channel: usize,
@@ -2629,7 +2629,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     ///
     /// Wraps `HardDrive::attach_disk_data()` which stores the disk image
     /// in a `Vec<u8>` instead of using file I/O.
-    #[cfg(not(feature = "std"))]
     pub fn attach_disk_data(
         &mut self,
         channel: usize,
@@ -2915,7 +2914,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     }
 }
 
-impl<I: BxCpuIdTrait> Emulator<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'_, I, T> {
     /// Dump comprehensive diagnostic state (for Alpine debugging).
     #[cfg(all(feature = "std", debug_assertions))]
     pub fn dump_alpine_diag(&mut self) {
@@ -3116,7 +3115,7 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
 
 // Ensure Emulator is Send (can be moved between threads)
 // Each instance is fully independent with no shared state
-unsafe impl<I: BxCpuIdTrait + Send> Send for Emulator<'_, I> {}
+unsafe impl<I: BxCpuIdTrait + Send, T: crate::cpu::instrumentation::Instrumentation + Send> Send for Emulator<'_, I, T> {}
 
 #[cfg(test)]
 mod tests {

@@ -257,17 +257,17 @@ impl BxMemoryStubC {
 }
 
 impl<'m> BxMemC<'m> {
-    pub(crate) fn get_vector<I: BxCpuIdTrait>(
+    pub(crate) fn get_vector<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         &mut self,
-        cpus: &[&BxCpuC<I>],
+        cpus: &[&BxCpuC<I, T>],
         addr: BxPhyAddress,
     ) -> Result<&mut [u8]> {
         self.inherited_memory_stub.get_vector(addr, cpus)
     }
 
     #[cfg(feature = "bx_support_monitor_mwait")]
-    pub(super) fn is_monitor<I: BxCpuIdTrait>(
-        cpus: &[&BxCpuC<I>],
+    pub(super) fn is_monitor<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpus: &[&BxCpuC<I, T>],
         begin_addr: BxPhyAddress,
         len: u32,
     ) -> bool {

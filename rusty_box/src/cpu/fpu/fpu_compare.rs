@@ -53,7 +53,7 @@ fn status_word_flags_fpu_compare(float_relation: i32) -> u16 {
 // Instruction handlers
 // ---------------------------------------------------------------------------
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =======================================================================
     // FCOM ST(i) / FCOMP ST(i)
     // =======================================================================

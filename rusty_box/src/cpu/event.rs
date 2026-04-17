@@ -1,6 +1,6 @@
 use super::{cpu::CpuActivityState, cpuid::BxCpuIdTrait, eflags::EFlags, BxCpuC};
 
-impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
+impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
     /// Handle async events - matches Bochs event.cc handleAsyncEvent()
     /// Returns true if should return from cpu_loop
     pub(super) fn handle_async_event(

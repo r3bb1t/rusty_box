@@ -1,18 +1,17 @@
-//! The `InstrumentationRegistry` — combines BOCHS-style trait instrumentation
+//! The `InstrumentationRegistry` — combines a monomorphized generic tracer
 //! with Unicorn-style closure hooks.
 //!
 //! Lives inside `BxCpuC` when the `instrumentation` feature is enabled. The
 //! CPU hot path fires events through this registry; registration is done
-//! via `Emulator::hook_add_*` / `Emulator::set_instrumentation`.
+//! via `Emulator::hook_add_*`.
 //!
 //! ## Hot path contract
 //!
 //! Every `fire_*` method:
 //! 1. Is `#[inline]` so that the bitmask short-circuit in `has_*()` can
 //!    be hoisted by LLVM and combined with the outer callsite guard.
-//! 2. Mutates at most `self.bochs` or one of the hook `Vec`s — never
-//!    both at once — so that callsites can keep the `&mut BxCpuC` borrow
-//!    that wraps the registry without re-entering any other CPU state.
+//! 2. Calls `self.tracer.method()` first (zero-cost when `T = ()`),
+//!    then walks the closure vec (when the `alloc` feature is enabled).
 //! 3. Does not allocate.
 //!
 //! The outer callsite pattern is:
@@ -23,162 +22,150 @@
 //! }
 //! ```
 
+#[cfg(feature = "instrumentation")]
 use alloc::{boxed::Box, vec::Vec};
 use core::ops::RangeBounds;
 
 use crate::cpu::decoder::Instruction;
 
 use super::bochs::Instrumentation;
+#[cfg(feature = "instrumentation")]
 use super::hooks::{
     AddrRange, BranchHook, CodeHook, ExceptionHook, HwIntrHook, IntrHook, IoHook, MemHook,
 };
 use super::types::{
-    BranchEvent, BranchType, CacheCntrl, CodeSize, HookHandle, HookMask, HwInterruptEvent,
-    IoHookEvent, IoHookType, MemAccessRW, MemHookEvent, MemHookType, MemType, MwaitFlags,
-    PrefetchHint, ResetType, TlbCntrl,
+    BranchType, CacheCntrl, CodeSize, HookMask, MemAccessRW, MemType, MwaitFlags, PrefetchHint,
+    ResetType, TlbCntrl,
 };
+#[cfg(feature = "instrumentation")]
+use super::types::{BranchEvent, HookHandle, HwInterruptEvent, IoHookEvent, IoHookType, MemHookEvent, MemHookType};
 
 /// Error returned by registry mutation methods.
+#[cfg(feature = "instrumentation")]
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum InstrumentationError {
     #[error("hook handle {0:#x} is invalid or already removed")]
     InvalidHandle(u64),
 }
 
-/// Tracer slot: one installed `Box<dyn Instrumentation>` plus the handle
-/// we hand back to the caller for later removal.
-pub(crate) struct BochsEntry {
-    pub(crate) handle: HookHandle,
-    pub(crate) instr: Box<dyn Instrumentation>,
-}
-
-/// Registry holding the BOCHS trait object plus per-category closure vecs.
+/// Registry holding the monomorphized tracer plus per-category closure vecs.
 ///
 /// Feature-gated: absent entirely when `instrumentation` is disabled.
-pub struct InstrumentationRegistry {
+pub struct InstrumentationRegistry<T: Instrumentation = ()> {
     /// Cheap bitmask querying whether any hook of a given category is registered.
     /// Callers check this before invoking `fire_*` to keep the hot path empty.
     pub active: HookMask,
 
-    /// BOCHS-style trait instrumentation. Multiple tracers can be installed;
-    /// they fire in registration order at every callback.
-    pub(crate) bochs: Vec<BochsEntry>,
+    /// Monomorphized tracer — zero-cost when `T = ()`.
+    pub(crate) tracer: T,
 
+    #[cfg(feature = "instrumentation")]
     pub(crate) code_hooks: Vec<CodeHook>,
+    #[cfg(feature = "instrumentation")]
     pub(crate) code_after_hooks: Vec<CodeHook>,
+    #[cfg(feature = "instrumentation")]
     pub(crate) mem_hooks: Vec<MemHook>,
+    #[cfg(feature = "instrumentation")]
     pub(crate) intr_hooks: Vec<IntrHook>,
+    #[cfg(feature = "instrumentation")]
     pub(crate) hw_intr_hooks: Vec<HwIntrHook>,
+    #[cfg(feature = "instrumentation")]
     pub(crate) exception_hooks: Vec<ExceptionHook>,
+    #[cfg(feature = "instrumentation")]
     pub(crate) io_hooks: Vec<IoHook>,
+    #[cfg(feature = "instrumentation")]
     pub(crate) branch_hooks: Vec<BranchHook>,
 
     /// Monotonic handle counter. Starts at 1; zero is reserved as "never
     /// returned" so future sentinel use is possible.
+    #[cfg(feature = "instrumentation")]
     next_handle: u64,
 }
 
-impl Default for InstrumentationRegistry {
+impl<T: Instrumentation + Default> Default for InstrumentationRegistry<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl InstrumentationRegistry {
-    /// Create an empty registry. Zero allocations until a hook is registered.
-    pub const fn new() -> Self {
-        Self {
+impl<T: Instrumentation> InstrumentationRegistry<T> {
+    /// Create a registry with the given tracer. Zero allocations until a hook
+    /// is registered.
+    pub fn with_tracer(tracer: T) -> Self {
+        let mut reg = Self {
             active: HookMask::empty(),
-            bochs: Vec::new(),
+            tracer,
+            #[cfg(feature = "instrumentation")]
             code_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
             code_after_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
             mem_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
             intr_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
             hw_intr_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
             exception_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
             io_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
             branch_hooks: Vec::new(),
+            #[cfg(feature = "instrumentation")]
             next_handle: 1,
-        }
+        };
+        reg.refresh_active();
+        reg
     }
 
+    /// Recompute `active` from the tracer's active hooks and closure vec
+    /// occupancy. Call after any mutation that changes what's installed.
+    pub fn refresh_active(&mut self) {
+        let mut m = self.tracer.active_hooks();
+
+        #[cfg(feature = "instrumentation")]
+        {
+            if !self.code_hooks.is_empty() || !self.code_after_hooks.is_empty() {
+                m |= HookMask::EXEC;
+            }
+            if !self.mem_hooks.is_empty() {
+                m |= HookMask::MEM;
+            }
+            if !self.branch_hooks.is_empty() {
+                m |= HookMask::BRANCH;
+            }
+            if !self.intr_hooks.is_empty() {
+                m |= HookMask::INTERRUPT;
+            }
+            if !self.hw_intr_hooks.is_empty() {
+                m |= HookMask::HW_INTERRUPT;
+            }
+            if !self.exception_hooks.is_empty() {
+                m |= HookMask::EXCEPTION;
+            }
+            if !self.io_hooks.is_empty() {
+                m |= HookMask::IO;
+            }
+        }
+
+        self.active = m;
+    }
+
+    /// Recompute `active` from the current hook vecs + tracer active hooks.
+    fn recompute_active(&mut self) {
+        self.refresh_active();
+    }
+
+    // ─────────────────── Hook registration (alloc only) ───────────────────
+
+    #[cfg(feature = "instrumentation")]
     fn mint_handle(&mut self) -> HookHandle {
         let id = self.next_handle;
         self.next_handle = self.next_handle.wrapping_add(1);
         HookHandle::new(id)
     }
 
-    /// Recompute `active` from the current hook vecs + BOCHS trait presence.
-    fn recompute_active(&mut self) {
-        let mut m = HookMask::empty();
-        if !self.bochs.is_empty() {
-            m |= HookMask::BOCHS_TRAIT;
-        }
-        if !self.code_hooks.is_empty() || !self.code_after_hooks.is_empty() {
-            m |= HookMask::EXEC;
-        }
-        if !self.mem_hooks.is_empty() {
-            m |= HookMask::MEM;
-        }
-        if !self.branch_hooks.is_empty() {
-            m |= HookMask::BRANCH;
-        }
-        if !self.intr_hooks.is_empty() {
-            m |= HookMask::INTERRUPT;
-        }
-        if !self.hw_intr_hooks.is_empty() {
-            m |= HookMask::HW_INTERRUPT;
-        }
-        if !self.exception_hooks.is_empty() {
-            m |= HookMask::EXCEPTION;
-        }
-        if !self.io_hooks.is_empty() {
-            m |= HookMask::IO;
-        }
-        self.active = m;
-    }
-
-    // ─────────────────── BOCHS trait management ───────────────────
-
-    /// Add a BOCHS-style trait tracer to the pipeline. Returns a handle
-    /// that can be used to remove it later. Multiple tracers stack and fire
-    /// in registration order at every callback.
-    pub fn add_bochs(&mut self, instr: Box<dyn Instrumentation>) -> HookHandle {
-        let handle = self.mint_handle();
-        self.bochs.push(BochsEntry { handle, instr });
-        self.active |= HookMask::BOCHS_TRAIT;
-        handle
-    }
-
-    /// Remove a specific BOCHS trait tracer by handle. Returns the tracer
-    /// (so the caller can recover state) or `Err(InvalidHandle)` if it's
-    /// already gone.
-    pub fn remove_bochs(
-        &mut self,
-        handle: HookHandle,
-    ) -> Result<Box<dyn Instrumentation>, InstrumentationError> {
-        let pos = self
-            .bochs
-            .iter()
-            .position(|e| e.handle == handle)
-            .ok_or(InstrumentationError::InvalidHandle(handle.raw()))?;
-        let entry = self.bochs.swap_remove(pos);
-        self.recompute_active();
-        Ok(entry.instr)
-    }
-
-    /// Remove all installed BOCHS trait tracers.
-    pub fn clear_bochs(&mut self) -> Vec<Box<dyn Instrumentation>> {
-        let out = core::mem::take(&mut self.bochs)
-            .into_iter()
-            .map(|e| e.instr)
-            .collect();
-        self.recompute_active();
-        out
-    }
-
-    // ─────────────────── Hook registration ───────────────────
-
+    #[cfg(feature = "instrumentation")]
     pub fn add_code<R: RangeBounds<u64>>(
         &mut self,
         range: R,
@@ -194,6 +181,7 @@ impl InstrumentationRegistry {
         handle
     }
 
+    #[cfg(feature = "instrumentation")]
     pub fn add_code_after<R: RangeBounds<u64>>(
         &mut self,
         range: R,
@@ -209,6 +197,7 @@ impl InstrumentationRegistry {
         handle
     }
 
+    #[cfg(feature = "instrumentation")]
     pub fn add_mem<R: RangeBounds<u64>>(
         &mut self,
         kind: MemHookType,
@@ -226,6 +215,7 @@ impl InstrumentationRegistry {
         handle
     }
 
+    #[cfg(feature = "instrumentation")]
     pub fn add_interrupt(&mut self, cb: Box<dyn FnMut(u8) + Send>) -> HookHandle {
         let handle = self.mint_handle();
         self.intr_hooks.push(IntrHook { handle, cb });
@@ -233,6 +223,7 @@ impl InstrumentationRegistry {
         handle
     }
 
+    #[cfg(feature = "instrumentation")]
     pub fn add_hw_interrupt(
         &mut self,
         cb: Box<dyn FnMut(&HwInterruptEvent) + Send>,
@@ -243,6 +234,7 @@ impl InstrumentationRegistry {
         handle
     }
 
+    #[cfg(feature = "instrumentation")]
     pub fn add_exception(&mut self, cb: Box<dyn FnMut(u8, u32) + Send>) -> HookHandle {
         let handle = self.mint_handle();
         self.exception_hooks.push(ExceptionHook { handle, cb });
@@ -250,6 +242,7 @@ impl InstrumentationRegistry {
         handle
     }
 
+    #[cfg(feature = "instrumentation")]
     pub fn add_io<R: RangeBounds<u16>>(
         &mut self,
         kind: IoHookType,
@@ -267,6 +260,7 @@ impl InstrumentationRegistry {
         handle
     }
 
+    #[cfg(feature = "instrumentation")]
     pub fn add_branch<R: RangeBounds<u64>>(
         &mut self,
         range: R,
@@ -284,6 +278,7 @@ impl InstrumentationRegistry {
 
     /// Remove any hook by handle. Searches every category; returns
     /// `Err(InvalidHandle)` if not found.
+    #[cfg(feature = "instrumentation")]
     pub fn remove(&mut self, handle: HookHandle) -> Result<(), InstrumentationError> {
         let target = handle;
         // Try every category; stop as soon as one hits.
@@ -313,24 +308,18 @@ impl InstrumentationRegistry {
     // bit is set. The outer guard in CPU code must check the mask first —
     // these methods assume at least one hook is interested.
     //
-    // We iterate the bochs trait first (single indirect call), then walk
-    // the closure vec. Removing a hook during dispatch would violate the
-    // borrow checker (it would need `&mut self` on the registry while we
-    // already hold a mutable borrow on one of its vecs) — users can't do
-    // that anyway because hook_del requires `&mut Emulator`.
+    // We call the tracer first (monomorphized, zero dispatch), then walk
+    // the closure vec (when `alloc` is enabled).
 
     #[inline]
     pub fn fire_reset(&mut self, reset_type: ResetType) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.reset(reset_type);
-        }
+        self.tracer.reset(reset_type);
     }
 
     #[inline]
     pub fn fire_before_execution(&mut self, rip: u64, instr: &Instruction) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.before_execution(rip, instr);
-        }
+        self.tracer.before_execution(rip, instr);
+        #[cfg(feature = "instrumentation")]
         for h in &mut self.code_hooks {
             if h.range.contains(rip) {
                 (h.cb)(rip, instr);
@@ -340,9 +329,8 @@ impl InstrumentationRegistry {
 
     #[inline]
     pub fn fire_after_execution(&mut self, rip: u64, instr: &Instruction) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.after_execution(rip, instr);
-        }
+        self.tracer.after_execution(rip, instr);
+        #[cfg(feature = "instrumentation")]
         for h in &mut self.code_after_hooks {
             if h.range.contains(rip) {
                 (h.cb)(rip, instr);
@@ -352,37 +340,28 @@ impl InstrumentationRegistry {
 
     #[inline]
     pub fn fire_repeat_iteration(&mut self, rip: u64, instr: &Instruction) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.repeat_iteration(rip, instr);
-        }
+        self.tracer.repeat_iteration(rip, instr);
     }
 
     #[inline]
     pub fn fire_opcode(&mut self, rip: u64, instr: &Instruction, bytes: &[u8], size: CodeSize) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.opcode(rip, instr, bytes, size);
-        }
+        self.tracer.opcode(rip, instr, bytes, size);
     }
 
     #[inline]
     pub fn fire_hlt(&mut self) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.hlt();
-        }
+        self.tracer.hlt();
     }
 
     #[inline]
     pub fn fire_mwait(&mut self, addr: u64, len: u32, flags: MwaitFlags) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.mwait(addr, len, flags);
-        }
+        self.tracer.mwait(addr, len, flags);
     }
 
     #[inline]
     pub fn fire_cnear_branch_taken(&mut self, branch_rip: u64, new_rip: u64) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.cnear_branch_taken(branch_rip, new_rip);
-        }
+        self.tracer.cnear_branch_taken(branch_rip, new_rip);
+        #[cfg(feature = "instrumentation")]
         if !self.branch_hooks.is_empty() {
             let ev = BranchEvent::CnearTaken {
                 src_rip: branch_rip,
@@ -398,9 +377,8 @@ impl InstrumentationRegistry {
 
     #[inline]
     pub fn fire_cnear_branch_not_taken(&mut self, branch_rip: u64, fallthrough_rip: u64) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.cnear_branch_not_taken(branch_rip);
-        }
+        self.tracer.cnear_branch_not_taken(branch_rip);
+        #[cfg(feature = "instrumentation")]
         if !self.branch_hooks.is_empty() {
             let ev = BranchEvent::CnearNotTaken {
                 src_rip: branch_rip,
@@ -416,9 +394,8 @@ impl InstrumentationRegistry {
 
     #[inline]
     pub fn fire_ucnear_branch(&mut self, what: BranchType, branch_rip: u64, new_rip: u64) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.ucnear_branch(what, branch_rip, new_rip);
-        }
+        self.tracer.ucnear_branch(what, branch_rip, new_rip);
+        #[cfg(feature = "instrumentation")]
         if !self.branch_hooks.is_empty() {
             let ev = BranchEvent::Ucnear {
                 kind: what,
@@ -442,9 +419,8 @@ impl InstrumentationRegistry {
         new_cs: u16,
         new_rip: u64,
     ) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.far_branch(what, prev_cs, prev_rip, new_cs, new_rip);
-        }
+        self.tracer.far_branch(what, prev_cs, prev_rip, new_cs, new_rip);
+        #[cfg(feature = "instrumentation")]
         if !self.branch_hooks.is_empty() {
             let ev = BranchEvent::Far {
                 kind: what,
@@ -463,9 +439,8 @@ impl InstrumentationRegistry {
 
     #[inline]
     pub fn fire_interrupt(&mut self, vector: u8) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.interrupt(vector);
-        }
+        self.tracer.interrupt(vector);
+        #[cfg(feature = "instrumentation")]
         for h in &mut self.intr_hooks {
             (h.cb)(vector);
         }
@@ -473,9 +448,8 @@ impl InstrumentationRegistry {
 
     #[inline]
     pub fn fire_exception(&mut self, vector: u8, error_code: u32) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.exception(vector, error_code);
-        }
+        self.tracer.exception(vector, error_code);
+        #[cfg(feature = "instrumentation")]
         for h in &mut self.exception_hooks {
             (h.cb)(vector, error_code);
         }
@@ -483,9 +457,8 @@ impl InstrumentationRegistry {
 
     #[inline]
     pub fn fire_hwinterrupt(&mut self, vector: u8, cs: u16, rip: u64) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.hwinterrupt(vector, cs, rip);
-        }
+        self.tracer.hwinterrupt(vector, cs, rip);
+        #[cfg(feature = "instrumentation")]
         if !self.hw_intr_hooks.is_empty() {
             let ev = HwInterruptEvent { vector, cs, rip };
             for h in &mut self.hw_intr_hooks {
@@ -503,9 +476,8 @@ impl InstrumentationRegistry {
         memtype: MemType,
         rw: MemAccessRW,
     ) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.lin_access(lin, phy, len, memtype, rw);
-        }
+        self.tracer.lin_access(lin, phy, len, memtype, rw);
+        #[cfg(feature = "instrumentation")]
         if !self.mem_hooks.is_empty() {
             let ev = MemHookEvent {
                 access: rw,
@@ -525,23 +497,18 @@ impl InstrumentationRegistry {
 
     #[inline]
     pub fn fire_phy_access(&mut self, phy: u64, len: usize, memtype: MemType, rw: MemAccessRW) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.phy_access(phy, len, memtype, rw);
-        }
+        self.tracer.phy_access(phy, len, memtype, rw);
     }
 
     #[inline]
     pub fn fire_inp(&mut self, port: u16, len: u8) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.inp(port, len);
-        }
+        self.tracer.inp(port, len);
     }
 
     #[inline]
     pub fn fire_inp2(&mut self, port: u16, len: u8, val: u32) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.inp2(port, len, val);
-        }
+        self.tracer.inp2(port, len, val);
+        #[cfg(feature = "instrumentation")]
         if !self.io_hooks.is_empty() {
             let ev = IoHookEvent {
                 port,
@@ -559,9 +526,8 @@ impl InstrumentationRegistry {
 
     #[inline]
     pub fn fire_outp(&mut self, port: u16, len: u8, val: u32) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.outp(port, len, val);
-        }
+        self.tracer.outp(port, len, val);
+        #[cfg(feature = "instrumentation")]
         if !self.io_hooks.is_empty() {
             let ev = IoHookEvent {
                 port,
@@ -579,50 +545,44 @@ impl InstrumentationRegistry {
 
     #[inline]
     pub fn fire_tlb_cntrl(&mut self, what: TlbCntrl) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.tlb_cntrl(what);
-        }
+        self.tracer.tlb_cntrl(what);
     }
 
     #[inline]
     pub fn fire_cache_cntrl(&mut self, what: CacheCntrl) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.cache_cntrl(what);
-        }
+        self.tracer.cache_cntrl(what);
     }
 
     #[inline]
     pub fn fire_clflush(&mut self, laddr: u64, paddr: u64) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.clflush(laddr, paddr);
-        }
+        self.tracer.clflush(laddr, paddr);
     }
 
     #[inline]
     pub fn fire_prefetch_hint(&mut self, what: PrefetchHint, seg: u8, offset: u64) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.prefetch_hint(what, seg, offset);
-        }
+        self.tracer.prefetch_hint(what, seg, offset);
     }
 
     #[inline]
     pub fn fire_cpuid(&mut self) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.cpuid();
-        }
+        self.tracer.cpuid();
     }
 
     #[inline]
     pub fn fire_wrmsr(&mut self, msr: u32, value: u64) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.wrmsr(msr, value);
-        }
+        self.tracer.wrmsr(msr, value);
     }
 
     #[inline]
     pub fn fire_vmexit(&mut self, reason: u32, qualification: u64) {
-        if let Some(b) = self.bochs.as_mut() {
-            b.vmexit(reason, qualification);
-        }
+        self.tracer.vmexit(reason, qualification);
+    }
+}
+
+impl<T: Instrumentation + Default> InstrumentationRegistry<T> {
+    /// Create an empty registry with a default tracer. Zero allocations until
+    /// a hook is registered.
+    pub fn new() -> Self {
+        Self::with_tracer(T::default())
     }
 }

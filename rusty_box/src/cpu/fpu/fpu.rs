@@ -9,7 +9,7 @@ use super::super::decoder::{BxSegregs, Instruction};
 use super::super::i387::*;
 use super::super::softfloat3e::softfloat_types::floatx80;
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// FNINIT — Initialize FPU state
     pub fn fninit(&mut self, _instr: &Instruction) -> super::super::Result<()> {
         self.the_i387.init();

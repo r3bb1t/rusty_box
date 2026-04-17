@@ -68,12 +68,12 @@ impl BxMemC<'_> {
 }
 
 impl<'c> BxMemC<'c> {
-    pub(crate) fn get_host_mem_addr<I: BxCpuIdTrait>(
+    pub(crate) fn get_host_mem_addr<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         &mut self,
-        // cpu_option: Option<&'c BxCpuC<I>>,
+        // cpu_option: Option<&'c BxCpuC<I, T>>,
         addr: BxPhyAddress,
         rw: MemoryAccessType,
-        cpus: &[&BxCpuC<I>],
+        cpus: &[&BxCpuC<I, T>],
     ) -> Result<Option<&mut [u8]>> {
         let a20_addr: BxPhyAddress = self.a20_addr(addr);
 
@@ -442,9 +442,9 @@ impl BxMemC<'_> {
 
     /// Write physical page with memory handler support
     /// Based on BX_MEM_C::writePhysicalPage in memory.cc
-    pub fn write_physical_page<I: BxCpuIdTrait>(
+    pub fn write_physical_page<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         &mut self,
-        cpus: &[&BxCpuC<I>],
+        cpus: &[&BxCpuC<I, T>],
         page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
         addr: BxPhyAddress,
         len: usize,
@@ -629,9 +629,9 @@ impl BxMemC<'_> {
 
     /// Read physical page with memory handler support
     /// Based on BX_MEM_C::readPhysicalPage in memory.cc
-    pub fn read_physical_page<I: BxCpuIdTrait>(
+    pub fn read_physical_page<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         &mut self,
-        cpus: &[&BxCpuC<I>],
+        cpus: &[&BxCpuC<I, T>],
         addr: BxPhyAddress,
         len: usize,
         data: &mut [u8],

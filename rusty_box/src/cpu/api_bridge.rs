@@ -13,7 +13,7 @@ use super::{BxCpuC, BxCpuIdTrait};
 use super::decoder::BxSegregs;
 use super::instrumentation::X86Reg;
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ── RFLAGS / EFLAGS ────────────────────────────────────────────────
 
     #[inline]
@@ -371,5 +371,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             _ => return Err(super::CpuError::UnimplementedInstruction),
         }
         Ok(())
+    }
+
+    /// Translate a linear (virtual) address to physical using current page tables.
+    /// Returns Err if the translation faults (page not present, protection violation).
+    pub(crate) fn translate_linear_for_api(&self, laddr: u64) -> super::Result<u64> {
+        self.translate_linear_system_read(laddr)
     }
 }

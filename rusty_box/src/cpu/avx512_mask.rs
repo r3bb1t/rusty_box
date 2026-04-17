@@ -16,13 +16,13 @@ use super::{
 
 /// Helper: read opmask register value (full 64-bit)
 #[inline]
-fn read_opmask<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, idx: u8) -> u64 {
+fn read_opmask<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, idx: u8) -> u64 {
     cpu.opmask_rrx(idx as usize)
 }
 
 /// Helper: write opmask register with width mask
 #[inline]
-fn write_opmask_masked<I: BxCpuIdTrait>(cpu: &mut BxCpuC<'_, I>, idx: u8, val: u64, mask: u64) {
+fn write_opmask_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<'_, I, T>, idx: u8, val: u64, mask: u64) {
     cpu.bx_write_opmask(idx as usize, val & mask);
 }
 
@@ -36,7 +36,7 @@ const MASK_Q: u64 = u64::MAX;
 // KMOV — Move opmask register
 // ========================================================================
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // --- KMOV register-to-register ---
 
     /// KMOVB KGb, KEb (VEX.L0.66.0F.W0 90 /r) — register form

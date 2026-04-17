@@ -59,13 +59,12 @@
 
 #![cfg(all(feature = "std", feature = "instrumentation"))]
 
-use std::sync::{Arc, Mutex};
-
 use rusty_box::{
     cpu::{
         core_i7_skylake::Corei7SkylakeX,
         decoder::{Instruction, Opcode},
-        BranchType, CpuSetupMode, Instrumentation, MemAccessRW, MemHookType, X86Reg,
+        BranchType, CpuSetupMode, HookMask, Instrumentation, MemAccessRW, MemHookType,
+        ResetReason, X86Reg,
     },
     emulator::{Emulator, EmulatorConfig},
 };
@@ -131,15 +130,17 @@ const STACK_TOP: u64 = 0x8000_0000;
 
 // ────────────────────────── Tracer ────────────────────────────────────────────────────────
 //
-// The tracer lives inside `Box<dyn Instrumentation>` on the emulator and is
-// read back via the zero-cost
-// [`Emulator::instrumentation_mut::<TraceInstr>()`] accessor. Plain fields,
-// no `Arc<Mutex<...>>`, no `unsafe` — the TypeId check in `instrumentation_mut`
-// is monomorphized to a single compare-and-branch per call.
+// The tracer is monomorphized into the emulator at construction via
+// `Emulator::<Corei7SkylakeX, TraceInstr>::new_with_instrumentation()`.
+// Accessed via `emu.instrumentation()` / `emu.instrumentation_mut()` —
+// plain field access, zero-cost, no `Arc<Mutex>`, no `unsafe`.
 
 pub struct TraceInstr {
     /// Per-instruction disassembly log toggle.
     log_instr: bool,
+    /// Memory-write tracing toggle (used during hook installation).
+    #[allow(dead_code)]
+    log_mem: bool,
     /// Count of syscalls intercepted.
     syscall_count: u32,
     /// Next fake file-descriptor handed back from `socket`/`accept`.
@@ -150,6 +151,10 @@ pub struct TraceInstr {
 }
 
 impl Instrumentation for TraceInstr {
+    fn active_hooks(&self) -> HookMask {
+        HookMask::EXEC | HookMask::BRANCH
+    }
+
     fn before_execution(&mut self, rip: u64, instr: &Instruction) {
         if self.log_instr {
             print_disasm(rip, instr);
@@ -176,7 +181,7 @@ fn print_disasm(rip: u64, instr: &Instruction) {
     // The Opcode debug form is enough for a shellcode trace — mnemonics
     // aren't formatted with operands, but combined with the instruction
     // length we can show hex bytes plus the decoded mnemonic.
-    eprintln!(
+    tracing::trace!(
         "0x{rip:08x}:  ilen={ilen}  {op:?}",
         rip = rip,
         ilen = instr.ilen(),
@@ -189,21 +194,26 @@ fn print_disasm(rip: u64, instr: &Instruction) {
 /// Pretty-print the syscall at the ABI point immediately after SYSCALL has
 /// transitioned (RIP now at LSTAR, RCX = return RIP, R11 = flags, but the
 /// kernel has not run yet — so RAX/RDI/... still hold user values).
-fn decode_syscall(emu: &Emulator<Corei7SkylakeX>, state: &mut TraceInstr) -> SyscallAction {
+///
+/// Reads registers and tracer state immutably. The caller is responsible for
+/// mutating tracer counters (`syscall_count`, `next_fake_fd`) after this returns.
+fn decode_syscall(emu: &Emulator<Corei7SkylakeX, TraceInstr>) -> SyscallAction {
     // Read x86-64 syscall ABI registers.
-    let nr = emu.reg_read(X86Reg::Rax).unwrap_or(0);
-    let a0 = emu.reg_read(X86Reg::Rdi).unwrap_or(0);
-    let a1 = emu.reg_read(X86Reg::Rsi).unwrap_or(0);
-    let a2 = emu.reg_read(X86Reg::Rdx).unwrap_or(0);
-    let a3 = emu.reg_read(X86Reg::R10).unwrap_or(0);
-    let _a4 = emu.reg_read(X86Reg::R8).unwrap_or(0);
-    let _a5 = emu.reg_read(X86Reg::R9).unwrap_or(0);
-    let rcx = emu.reg_read(X86Reg::Rcx).unwrap_or(0);
+    let nr = emu.reg_read(X86Reg::Rax);
+    let a0 = emu.reg_read(X86Reg::Rdi);
+    let a1 = emu.reg_read(X86Reg::Rsi);
+    let a2 = emu.reg_read(X86Reg::Rdx);
+    let a3 = emu.reg_read(X86Reg::R10);
+    let _a4 = emu.reg_read(X86Reg::R8);
+    let _a5 = emu.reg_read(X86Reg::R9);
+    let rcx = emu.reg_read(X86Reg::Rcx);
 
-    state.syscall_count += 1;
-    eprintln!("═══════════════════════════════════════════════════════════════════════");
-    eprintln!(
-        "SYSCALL  #{nr:<3} {name}",
+    let tracer = emu.instrumentation();
+    let count = tracer.syscall_count + 1;
+
+    tracing::info!("═══════════════════════════════════════════════════════════════════════");
+    tracing::info!(
+        "SYSCALL  #{nr:<3} {name}  (call #{count})",
         nr = nr,
         name = syscalls::name_x86_64(nr as u32)
     );
@@ -211,40 +221,38 @@ fn decode_syscall(emu: &Emulator<Corei7SkylakeX>, state: &mut TraceInstr) -> Sys
     let action = match nr {
         // socket(domain, type, protocol)
         41 => {
-            eprintln!("    domain   = {a0}  ({name})", name = af_name(a0));
-            eprintln!("    type     = {a1}  ({name})", name = sock_type_name(a1));
-            eprintln!("    protocol = {a2}");
-            let fd = state.next_fake_fd;
-            state.next_fake_fd += 1;
-            eprintln!(">> faking return value: sockfd = {fd} (intercepted)");
+            tracing::info!("    domain   = {a0}  ({name})", name = af_name(a0));
+            tracing::info!("    type     = {a1}  ({name})", name = sock_type_name(a1));
+            tracing::info!("    protocol = {a2}");
+            let fd = tracer.next_fake_fd;
+            tracing::info!(">> faking return value: sockfd = {fd} (intercepted)");
             SyscallAction::Return(fd)
         }
         // connect(sockfd, addr, addrlen)
         42 => {
-            eprintln!("    sockfd  = {a0}");
+            tracing::info!("    sockfd  = {a0}");
             let decoded = decode_sockaddr(emu, a1, a2 as usize);
-            eprintln!("    addr    = {a1:#018x} -> {decoded}");
-            eprintln!("    addrlen = {a2}");
-            eprintln!(">> faking return value: 0 (success)");
+            tracing::info!("    addr    = {a1:#018x} -> {decoded}");
+            tracing::info!("    addrlen = {a2}");
+            tracing::info!(">> faking return value: 0 (success)");
             SyscallAction::Return(0)
         }
         // dup2(oldfd, newfd)
         33 => {
-            eprintln!("    oldfd = {a0}");
-            eprintln!("    newfd = {a1}");
-            eprintln!(">> faking return value: {a1} (newfd)");
+            tracing::info!("    oldfd = {a0}");
+            tracing::info!("    newfd = {a1}");
+            tracing::info!(">> faking return value: {a1} (newfd)");
             SyscallAction::Return(a1)
         }
         // execve(filename, argv[], envp[])
         59 => {
             let path = read_c_string(emu, a0).unwrap_or_else(|| format!("<unreadable {a0:#x}>"));
-            eprintln!("    filename = {a0:#018x} -> {path:?}");
-            // argv is pointer-to-pointer array, null-terminated.
-            eprintln!(
+            tracing::info!("    filename = {a0:#018x} -> {path:?}");
+            tracing::info!(
                 "    argv     = {a1:#018x} -> {args:?}",
                 args = read_argv(emu, a1, 8).unwrap_or_default()
             );
-            eprintln!(
+            tracing::info!(
                 "    envp     = {a2:#018x}{env}",
                 env = if a2 == 0 {
                     String::new()
@@ -252,21 +260,21 @@ fn decode_syscall(emu: &Emulator<Corei7SkylakeX>, state: &mut TraceInstr) -> Sys
                     format!(" -> {envs:?}", envs = read_argv(emu, a2, 8).unwrap_or_default())
                 }
             );
-            eprintln!(">> execve would spawn the target here; stopping emulation");
+            tracing::info!(">> execve would spawn the target here; stopping emulation");
             SyscallAction::Stop
         }
         // read/write/close/... — general passthrough traces.
         _ => {
-            eprintln!("    rdi = {a0:#018x}");
-            eprintln!("    rsi = {a1:#018x}");
-            eprintln!("    rdx = {a2:#018x}");
-            eprintln!("    r10 = {a3:#018x}");
-            eprintln!("    (return rip = rcx = {rcx:#018x})");
-            eprintln!(">> faking return value: 0");
+            tracing::info!("    rdi = {a0:#018x}");
+            tracing::info!("    rsi = {a1:#018x}");
+            tracing::info!("    rdx = {a2:#018x}");
+            tracing::info!("    r10 = {a3:#018x}");
+            tracing::info!("    (return rip = rcx = {rcx:#018x})");
+            tracing::info!(">> faking return value: 0");
             SyscallAction::Return(0)
         }
     };
-    eprintln!("═══════════════════════════════════════════════════════════════════════");
+    tracing::info!("═══════════════════════════════════════════════════════════════════════");
     action
 }
 
@@ -280,15 +288,15 @@ enum SyscallAction {
 /// after SYSCALL (RCX holds the saved return address) and RAX to the
 /// spoofed return value. Clear any pending stop_flag so `emu_start` keeps
 /// going.
-fn apply_syscall_return(emu: &mut Emulator<Corei7SkylakeX>, retval: u64) {
-    let rcx = emu.reg_read(X86Reg::Rcx).unwrap_or(0);
-    emu.reg_write(X86Reg::Rip, rcx).ok();
-    emu.reg_write(X86Reg::Rax, retval).ok();
+fn apply_syscall_return(emu: &mut Emulator<Corei7SkylakeX, TraceInstr>, retval: u64) {
+    let rcx = emu.reg_read(X86Reg::Rcx);
+    emu.reg_write(X86Reg::Rip, rcx);
+    emu.reg_write(X86Reg::Rax, retval);
 }
 
 // ─────────────────────────── Sockaddr / string helpers ───────────────────────────
 
-fn decode_sockaddr(emu: &Emulator<Corei7SkylakeX>, addr: u64, len: usize) -> String {
+fn decode_sockaddr(emu: &Emulator<Corei7SkylakeX, TraceInstr>, addr: u64, len: usize) -> String {
     if len < 16 {
         return format!("(sockaddr too short, len={len})");
     }
@@ -341,7 +349,7 @@ fn sock_type_name(ty: u64) -> &'static str {
     }
 }
 
-fn read_c_string(emu: &Emulator<Corei7SkylakeX>, addr: u64) -> Option<String> {
+fn read_c_string(emu: &Emulator<Corei7SkylakeX, TraceInstr>, addr: u64) -> Option<String> {
     if addr == 0 {
         return None;
     }
@@ -356,7 +364,7 @@ fn read_c_string(emu: &Emulator<Corei7SkylakeX>, addr: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn read_argv(emu: &Emulator<Corei7SkylakeX>, addr: u64, max: usize) -> Option<Vec<String>> {
+fn read_argv(emu: &Emulator<Corei7SkylakeX, TraceInstr>, addr: u64, max: usize) -> Option<Vec<String>> {
     if addr == 0 {
         return None;
     }
@@ -397,15 +405,15 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(10_000);
 
-    eprintln!("───────────────────────────────────────────────────────────────────────");
-    eprintln!("Shellcode emulator — Linux x86-64 reverse-TCP payload");
-    eprintln!("  load addr    : {SHELLCODE_BASE:#018x}");
-    eprintln!("  size         : {} bytes", SHELLCODE.len());
-    eprintln!("  stack top    : {STACK_TOP:#018x}");
-    eprintln!("  max instr    : {max_instr}");
-    eprintln!("  log instr    : {log_instr}");
-    eprintln!("  log mem      : {log_mem}");
-    eprintln!("───────────────────────────────────────────────────────────────────────");
+    tracing::info!("───────────────────────────────────────────────────────────────────────");
+    tracing::info!("Shellcode emulator — Linux x86-64 reverse-TCP payload");
+    tracing::info!("  load addr    : {SHELLCODE_BASE:#018x}");
+    tracing::info!("  size         : {} bytes", SHELLCODE.len());
+    tracing::info!("  stack top    : {STACK_TOP:#018x}");
+    tracing::info!("  max instr    : {max_instr}");
+    tracing::info!("  log instr    : {log_instr}");
+    tracing::info!("  log mem      : {log_mem}");
+    tracing::info!("───────────────────────────────────────────────────────────────────────");
 
     // Build emulator: 128 MB guest RAM, long-mode identity-mapped.
     let config = EmulatorConfig {
@@ -415,42 +423,28 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         pci_enabled: false,
         ..EmulatorConfig::default()
     };
-    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(config, CpuSetupMode::FlatLong64)?;
-
-    // Load shellcode + zero the stack region so the first few pushes are
-    // readable by our sockaddr decoder.
-    emu.mem_write(SHELLCODE_BASE, SHELLCODE)?;
-    emu.mem_fill(STACK_TOP - 0x10_000, 0x10_000, 0)?;
-    emu.reg_write(X86Reg::Rsp, STACK_TOP - 0x100)?;
-
-    // ── Install hooks ──────────────────────────────────────────────────
-
-    let state = Arc::new(Mutex::new(TraceState {
+    let tracer = TraceInstr {
         log_instr,
         log_mem,
-        stop_requested: false,
         syscall_count: 0,
         next_fake_fd: 3,
-        pending_writes: Vec::new(),
-    }));
-
-    // Per-instruction disassembly + SYSCALL detection via BOCHS trait.
-    let tracer_state = Arc::clone(&state);
-    emu.set_instrumentation(Box::new(TraceInstr {
-        state: tracer_state,
         pending_syscall: None,
-    }));
+    };
+    let mut emu = Emulator::<Corei7SkylakeX, TraceInstr>::new_with_instrumentation(config, tracer)?;
+    // Replicate what new_with_mode does (which only works for T = ()).
+    let cfg = emu.config_ref().clone();
+    emu.memory.init_memory(cfg.guest_memory_size, cfg.host_memory_size, cfg.memory_block_size)?;
+    emu.memory.set_a20_mask(emu.pc_system.a20_mask());
+    emu.pc_system.initialize(cfg.ips);
+    emu.cpu.reset(ResetReason::Hardware);
+    emu.setup_cpu_mode(CpuSetupMode::FlatLong64)?;
 
     // Memory-write tracing (optional): show what the shellcode pushes to
     // the stack. Useful for seeing sockaddr/structs being built.
     if log_mem {
-        let mem_state = Arc::clone(&state);
         let _ = emu.hook_add_mem(MemHookType::Write, .., move |ev| {
-            let mut s = mem_state.lock().unwrap();
-            s.pending_writes
-                .push((ev.addr, ev.value.unwrap_or(0), ev.size));
             if ev.access == MemAccessRW::Write {
-                eprintln!(
+                tracing::debug!(
                     "  MEM WRITE {:#018x} size={} val={:?}",
                     ev.addr,
                     ev.size,
@@ -486,7 +480,7 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     loop {
         if remaining == 0 {
-            eprintln!("Instruction budget exhausted at {total_executed}");
+            tracing::warn!("Instruction budget exhausted at {total_executed}");
             break;
         }
         let budget = remaining.min(8_192);
@@ -499,7 +493,7 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Which instruction did we end up at? If the branch hook stopped
         // us, RIP is inside the syscall entry (LSTAR = 0 by default). If
         // the budget ran out, RIP is wherever the shellcode happened to be.
-        entry_rip = emu.reg_read(X86Reg::Rip)?;
+        entry_rip = emu.reg_read(X86Reg::Rip);
 
         // Detect "we just hit SYSCALL": before the syscall handler ran,
         // the CPU saved RIP+2 (length of the SYSCALL opcode bytes) into RCX.
@@ -507,20 +501,25 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // transition, so RCX holds the return address and RAX still holds
         // the caller-provided syscall number. That's exactly what we want.
         if matches!(reason, rusty_box::cpu::EmuStopReason::Stopped) {
-            let action = {
-                let mut s = state.lock().unwrap();
-                decode_syscall(&emu, &mut s)
-            };
+            // Read syscall nr before decode so we can update tracer state after.
+            let nr = emu.reg_read(X86Reg::Rax);
+            let action = decode_syscall(&emu);
+            // Mutate tracer state after decode (avoids borrow conflict).
+            {
+                let t = emu.instrumentation_mut();
+                t.syscall_count += 1;
+                if nr == 41 { t.next_fake_fd += 1; } // socket consumed an fd
+            }
             match action {
                 SyscallAction::Return(v) => {
                     apply_syscall_return(&mut emu, v);
-                    entry_rip = emu.reg_read(X86Reg::Rip)?;
+                    entry_rip = emu.reg_read(X86Reg::Rip);
                     total_executed += 1; // SYSCALL itself counted once
                     if remaining > 0 { remaining -= 1; }
                     continue;
                 }
                 SyscallAction::Stop => {
-                    eprintln!("Stopping emulation per syscall handler.");
+                    tracing::info!("Stopping emulation per syscall handler.");
                     break;
                 }
             }
@@ -533,34 +532,20 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // If RIP fell into unmapped space or the CPU triple-faulted,
         // break out cleanly.
         if emu.cpu.is_in_shutdown() {
-            eprintln!("CPU entered shutdown at {total_executed}");
+            tracing::error!("CPU entered shutdown at {total_executed}");
             break;
         }
     }
 
-    eprintln!("───────────────────────────────────────────────────────────────────────");
-    eprintln!(
+    tracing::info!("───────────────────────────────────────────────────────────────────────");
+    tracing::info!(
         "Summary: executed {total_executed} instructions, {calls} syscalls intercepted",
         total_executed = total_executed,
-        calls = state.lock().unwrap().syscall_count,
+        calls = emu.instrumentation().syscall_count,
     );
     Ok(())
 }
 
-/// Pop the `pending_syscall` flag from the installed tracer. We have to
-/// un/re-install the trait object to mutate it (BOCHS trait doesn't expose
-/// an introspection API).
-fn peek_pending_syscall(emu: &mut Emulator<Corei7SkylakeX>) -> Option<u64> {
-    let prev = emu.clear_instrumentation()?;
-    // SAFETY: we only ever install `TraceInstr` via the path above.
-    let mut tracer: Box<TraceInstr> = unsafe {
-        let raw = Box::into_raw(prev) as *mut TraceInstr;
-        Box::from_raw(raw)
-    };
-    let pending = tracer.pending_syscall.take();
-    emu.set_instrumentation(tracer);
-    pending
-}
 
 // Opcode import only pulled in to surface it to the reader of the top-of-
 // file docs — runtime uses `instr.get_ia_opcode()` directly through Debug.

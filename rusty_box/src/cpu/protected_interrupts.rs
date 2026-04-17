@@ -15,7 +15,7 @@ use super::{
     Result,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Handle interrupt in protected mode via IDT
     /// Based on BX_CPU_C::protected_mode_int in exception.cc
     pub(super) fn protected_mode_int(

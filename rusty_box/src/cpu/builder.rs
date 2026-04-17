@@ -23,7 +23,9 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
         Self { cpuid }
     }
 
-    pub fn build(self) -> Result<BxCpuC<'static, I>> {
+    pub fn build(self) -> Result<BxCpuC<'static, I, ()>> { self.build_with_tracer(()) }
+
+    pub fn build_with_tracer<T: super::instrumentation::Instrumentation>(self, tracer: T) -> Result<BxCpuC<'static, I, T>> {
         let cpuid = I::new();
         //let cpuid = cpuid_factory();
 
@@ -155,8 +157,7 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             #[cfg(feature = "bx_debugger")]
             guard_found: Default::default(),
 
-            #[cfg(feature = "instrumentation")]
-            instrumentation: super::instrumentation::InstrumentationRegistry::new(),
+            instrumentation: super::instrumentation::InstrumentationRegistry::with_tracer(tracer),
             dtlb: Tlb::new(),
             itlb: Tlb::new(),
             pdptrcache: Default::default(),

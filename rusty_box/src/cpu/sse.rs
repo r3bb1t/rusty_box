@@ -63,7 +63,7 @@ fn saturate_dword_s_to_word_s(val: i32) -> i16 {
     }
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // SSE helper: read op2 (register or memory)
     // ========================================================================

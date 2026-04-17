@@ -13,7 +13,7 @@ use super::{
     segment_ctrl_pro::parse_selector,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =========================================================================
     // Unified interrupt dispatch — matches Bochs interrupt() in exception.cc
     // =========================================================================

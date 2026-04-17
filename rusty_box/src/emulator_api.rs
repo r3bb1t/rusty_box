@@ -67,7 +67,7 @@ impl StopHandle {
 // feature-gated. When the feature is off, the methods simply do not exist.
 
 #[cfg(feature = "instrumentation")]
-impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
+impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
     /// Register a hook fired before each instruction whose RIP is in `range`.
     /// Callback receives `(rip, &Instruction)`.
     pub fn hook_add_code<R, F>(&mut self, range: R, cb: F) -> HookHandle
@@ -162,77 +162,29 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.cpu.instrumentation.remove(handle)
     }
 
-    /// Install a BOCHS-style trait instrumentation object. Returns any
-    /// previously-installed trait object. Closure hooks from `hook_add_*`
-    /// are unaffected — both APIs can be live simultaneously.
-    pub fn set_instrumentation(
-        &mut self,
-        instr: Box<dyn crate::cpu::Instrumentation>,
-    ) -> Option<Box<dyn crate::cpu::Instrumentation>> {
-        self.cpu.set_instrumentation(instr)
+    /// Direct typed reference to the installed tracer. Zero-cost field access.
+    pub fn instrumentation(&self) -> &T {
+        &self.cpu.instrumentation.tracer
     }
 
-    /// Remove any installed BOCHS-style trait instrumentation. Returns it
-    /// if present.
-    pub fn clear_instrumentation(
-        &mut self,
-    ) -> Option<Box<dyn crate::cpu::Instrumentation>> {
-        self.cpu.clear_instrumentation()
+    /// Mutable reference to the installed tracer. Zero-cost field access.
+    pub fn instrumentation_mut(&mut self) -> &mut T {
+        &mut self.cpu.instrumentation.tracer
     }
 
-    /// Borrow the installed BOCHS trait instrumentation as a concrete type `T`.
-    /// Returns `None` if no tracer is installed or the installed tracer is
-    /// a different type.
-    ///
-    /// **Zero-cost**: monomorphizes to a single `TypeId` compare (constant-
-    /// folded at most call sites) + a pointer cast. No `Arc<Mutex<...>>`
-    /// needed to share state between the installed tracer and the outer
-    /// emulator loop.
-    pub fn instrumentation<T: crate::cpu::Instrumentation>(&self) -> Option<&T> {
-        let boxed = self.cpu.instrumentation.bochs.as_ref()?;
-        let any_ref: &dyn core::any::Any = &**boxed;
-        any_ref.downcast_ref::<T>()
-    }
-
-    /// Mutable twin of [`instrumentation`](Self::instrumentation).
-    pub fn instrumentation_mut<T: crate::cpu::Instrumentation>(&mut self) -> Option<&mut T> {
-        let boxed = self.cpu.instrumentation.bochs.as_mut()?;
-        let any_ref: &mut dyn core::any::Any = &mut **boxed;
-        any_ref.downcast_mut::<T>()
-    }
-
-    /// Remove the installed tracer and recover it as the concrete type `T`.
-    /// If no tracer is installed, or the installed tracer is a different
-    /// type, returns `None` and leaves any installed tracer untouched.
-    pub fn take_instrumentation<T: crate::cpu::Instrumentation>(
-        &mut self,
-    ) -> Option<Box<T>> {
-        // Peek the type without consuming, so a mismatched call does not
-        // destroy the caller's installed tracer.
-        {
-            let boxed = self.cpu.instrumentation.bochs.as_ref()?;
-            let any_ref: &dyn core::any::Any = &**boxed;
-            if !any_ref.is::<T>() {
-                return None;
-            }
-        }
-        let boxed = self.cpu.clear_instrumentation()?;
-        // SAFETY: We verified the concrete type matches T via TypeId above,
-        // and the Instrumentation slot is uniquely owned (no aliasing).
-        // The Box<dyn Instrumentation> and Box<T> share the same layout
-        // because T: Instrumentation and the wide-pointer vtable is
-        // discarded.
-        let raw = Box::into_raw(boxed) as *mut T;
-        Some(unsafe { Box::from_raw(raw) })
+    /// Recompute the active hook mask from the tracer's `active_hooks()`.
+    /// Call this after mutating tracer state that changes which categories are active.
+    pub fn refresh_hook_mask(&mut self) {
+        self.cpu.instrumentation.refresh_active();
     }
 }
 
 // ─────────────────────────── reg_read / reg_write ───────────────────────────
 
-impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
+impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
     /// Read any register by enum tag. Narrower registers are zero-extended
     /// into the returned `u64`.
-    pub fn reg_read(&self, reg: X86Reg) -> Result<u64> {
+    pub fn reg_read(&self, reg: X86Reg) -> u64 {
         let cpu = &self.cpu;
         let v: u64 = match reg {
             X86Reg::Rax => cpu.rax(),
@@ -348,7 +300,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             X86Reg::Tsc => cpu.tsc_for_api(),
             X86Reg::Efer => cpu.efer_for_api(),
         };
-        Ok(v)
+        v
     }
 
     /// Write any register by enum tag. Width semantics:
@@ -360,7 +312,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// - Segment selectors: updated without descriptor-cache reload.
     ///   For correct protected-mode operation use
     ///   `setup_cpu_mode` instead.
-    pub fn reg_write(&mut self, reg: X86Reg, val: u64) -> Result<()> {
+    pub fn reg_write(&mut self, reg: X86Reg, val: u64) {
         let cpu = &mut self.cpu;
         match reg {
             X86Reg::Rax => cpu.set_rax(val),
@@ -487,7 +439,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             X86Reg::Tsc => cpu.set_tsc_for_api(val),
             X86Reg::Efer => cpu.set_efer_for_api(val),
         }
-        Ok(())
+
     }
 
     /// Read an MSR by index. Returns Err if the MSR is not modeled.
@@ -538,15 +490,50 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             icount: cpu.icount_for_api(),
         }
     }
+
+    /// Restore CPU state from a previously captured snapshot.
+    /// Writes all registers that `cpu_snapshot` captures.
+    /// Note: `icount` and `cpl` are not restored (icount is monotonic,
+    /// cpl is derived from segment descriptor state).
+    pub fn restore_cpu_snapshot(&mut self, snap: &CpuSnapshot) {
+        self.reg_write(X86Reg::Rax, snap.rax);
+        self.reg_write(X86Reg::Rbx, snap.rbx);
+        self.reg_write(X86Reg::Rcx, snap.rcx);
+        self.reg_write(X86Reg::Rdx, snap.rdx);
+        self.reg_write(X86Reg::Rsi, snap.rsi);
+        self.reg_write(X86Reg::Rdi, snap.rdi);
+        self.reg_write(X86Reg::Rbp, snap.rbp);
+        self.reg_write(X86Reg::Rsp, snap.rsp);
+        self.reg_write(X86Reg::R8, snap.r8);
+        self.reg_write(X86Reg::R9, snap.r9);
+        self.reg_write(X86Reg::R10, snap.r10);
+        self.reg_write(X86Reg::R11, snap.r11);
+        self.reg_write(X86Reg::R12, snap.r12);
+        self.reg_write(X86Reg::R13, snap.r13);
+        self.reg_write(X86Reg::R14, snap.r14);
+        self.reg_write(X86Reg::R15, snap.r15);
+        self.reg_write(X86Reg::Rip, snap.rip);
+        self.reg_write(X86Reg::Rflags, snap.eflags as u64);
+        self.reg_write(X86Reg::Cs, snap.cs as u64);
+        self.reg_write(X86Reg::Ss, snap.ss as u64);
+        self.reg_write(X86Reg::Ds, snap.ds as u64);
+        self.reg_write(X86Reg::Es, snap.es as u64);
+        self.reg_write(X86Reg::Fs, snap.fs as u64);
+        self.reg_write(X86Reg::Gs, snap.gs as u64);
+        self.reg_write(X86Reg::Cr0, snap.cr0);
+        self.reg_write(X86Reg::Cr2, snap.cr2);
+        self.reg_write(X86Reg::Cr3, snap.cr3);
+        self.reg_write(X86Reg::Cr4, snap.cr4);
+    }
 }
 
 // ─────────────────────────── mem_read / mem_write ───────────────────────────
 
-impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
+impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
     /// Read bytes from guest physical memory into the caller's buffer.
     /// Returns the number of bytes read (always `buf.len()` on success).
     /// Bypasses MMIO handlers — matches Unicorn `uc_mem_read` semantics.
-    pub fn mem_read(&self, addr: u64, buf: &mut [u8]) -> Result<usize> {
+    pub fn mem_read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
         let ram = self.memory.ram_slice();
         let start = addr as usize;
         let end = start
@@ -562,7 +549,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             }));
         }
         buf.copy_from_slice(&ram[start..end]);
-        Ok(buf.len())
+        Ok(())
     }
 
     /// Read `size` bytes into a freshly-allocated `Vec`.
@@ -664,11 +651,113 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     pub fn mem_write_u64_le(&mut self, addr: u64, val: u64) -> Result<()> {
         self.mem_write(addr, &val.to_le_bytes())
     }
+
+    // ── Virtual (linear) memory access ──────────────────────────────────
+
+    /// Translate a guest virtual address to guest physical address using
+    /// the current page tables (CR3). Returns Err on page fault.
+    pub fn virt_to_phys(&self, vaddr: u64) -> Result<u64> {
+        self.cpu.translate_linear_for_api(vaddr).map_err(Error::Cpu)
+    }
+
+    /// Read bytes from guest VIRTUAL memory. Translates through current
+    /// page tables, then reads from the resulting physical address.
+    /// Handles page-crossing reads by translating each page separately.
+    pub fn virt_read(&self, vaddr: u64, buf: &mut [u8]) -> Result<()> {
+        let mut offset = 0;
+        while offset < buf.len() {
+            let va = vaddr + offset as u64;
+            let page_offset = (va & 0xFFF) as usize;
+            let chunk = (0x1000 - page_offset).min(buf.len() - offset);
+            let pa = self.virt_to_phys(va)?;
+            self.mem_read(pa, &mut buf[offset..offset + chunk])?;
+            offset += chunk;
+        }
+        Ok(())
+    }
+
+    /// Write bytes to guest VIRTUAL memory. Translates through current
+    /// page tables, then writes to the resulting physical address.
+    /// Handles page-crossing writes by translating each page separately.
+    pub fn virt_write(&mut self, vaddr: u64, data: &[u8]) -> Result<()> {
+        let mut offset = 0;
+        while offset < data.len() {
+            let va = vaddr + offset as u64;
+            let page_offset = (va & 0xFFF) as usize;
+            let chunk = (0x1000 - page_offset).min(data.len() - offset);
+            let pa = self.virt_to_phys(va)?;
+            self.mem_write(pa, &data[offset..offset + chunk])?;
+            offset += chunk;
+        }
+        Ok(())
+    }
+
+    /// Read bytes from guest virtual memory into a Vec.
+    pub fn virt_read_vec(&self, vaddr: u64, size: usize) -> Result<Vec<u8>> {
+        let mut v = alloc::vec![0u8; size];
+        self.virt_read(vaddr, &mut v)?;
+        Ok(v)
+    }
+
+    pub fn virt_read_u8(&self, vaddr: u64) -> Result<u8> {
+        let mut b = [0u8; 1];
+        self.virt_read(vaddr, &mut b)?;
+        Ok(b[0])
+    }
+
+    pub fn virt_read_u16_le(&self, vaddr: u64) -> Result<u16> {
+        let mut b = [0u8; 2];
+        self.virt_read(vaddr, &mut b)?;
+        Ok(u16::from_le_bytes(b))
+    }
+
+    pub fn virt_read_u32_le(&self, vaddr: u64) -> Result<u32> {
+        let mut b = [0u8; 4];
+        self.virt_read(vaddr, &mut b)?;
+        Ok(u32::from_le_bytes(b))
+    }
+
+    pub fn virt_read_u64_le(&self, vaddr: u64) -> Result<u64> {
+        let mut b = [0u8; 8];
+        self.virt_read(vaddr, &mut b)?;
+        Ok(u64::from_le_bytes(b))
+    }
+
+    pub fn virt_write_u8(&mut self, vaddr: u64, val: u8) -> Result<()> {
+        self.virt_write(vaddr, &[val])
+    }
+
+    pub fn virt_write_u16_le(&mut self, vaddr: u64, val: u16) -> Result<()> {
+        self.virt_write(vaddr, &val.to_le_bytes())
+    }
+
+    pub fn virt_write_u32_le(&mut self, vaddr: u64, val: u32) -> Result<()> {
+        self.virt_write(vaddr, &val.to_le_bytes())
+    }
+
+    pub fn virt_write_u64_le(&mut self, vaddr: u64, val: u64) -> Result<()> {
+        self.virt_write(vaddr, &val.to_le_bytes())
+    }
+
+    /// Fill `size` bytes of guest virtual memory with `byte`.
+    /// Translates through current page tables, handles page crossings.
+    pub fn virt_fill(&mut self, vaddr: u64, size: usize, byte: u8) -> Result<()> {
+        let mut offset = 0;
+        while offset < size {
+            let va = vaddr + offset as u64;
+            let page_offset = (va & 0xFFF) as usize;
+            let chunk = (0x1000 - page_offset).min(size - offset);
+            let pa = self.virt_to_phys(va)?;
+            self.mem_fill(pa, chunk, byte)?;
+            offset += chunk;
+        }
+        Ok(())
+    }
 }
 
 // ─────────────────────────── emu_start / emu_stop ───────────────────────────
 
-impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
+impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
     /// Obtain a cross-thread [`StopHandle`] that breaks the `emu_start` loop
     /// at its next batch boundary.
     pub fn stop_handle(&self) -> StopHandle {
@@ -761,7 +850,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
 // ─────────────────────────── CpuSetupMode builders ───────────────────────────
 
-impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
+impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
     /// Create a new emulator with guest memory allocated but no BIOS loaded,
     /// pre-configured for the given CPU mode. See [`CpuSetupMode`].
     ///
@@ -784,6 +873,32 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         emu.setup_cpu_mode(mode)?;
         Ok(emu)
     }
+}
+
+impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+    /// Create a new emulator pre-configured for the given CPU mode with a
+    /// monomorphized tracer. Combines `new_with_instrumentation` + `setup_cpu_mode`.
+    pub fn new_with_mode_and_instrumentation(
+        config: EmulatorConfig,
+        mode: CpuSetupMode,
+        tracer: T,
+    ) -> Result<Box<Self>> {
+        let mut emu = Self::new_with_instrumentation(config, tracer)?;
+        let cfg = emu.config_ref().clone();
+        emu.memory.init_memory(
+            cfg.guest_memory_size,
+            cfg.host_memory_size,
+            cfg.memory_block_size,
+        )?;
+        emu.memory.set_a20_mask(emu.pc_system.a20_mask());
+        emu.pc_system.initialize(cfg.ips);
+        emu.cpu.reset(crate::cpu::ResetReason::Hardware);
+        emu.setup_cpu_mode(mode)?;
+        Ok(emu)
+    }
+}
+
+impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
 
     /// Reconfigure an existing emulator for the given CPU mode, skipping BIOS.
     /// Must be called after `initialize()` (or from `new_with_mode`).
@@ -948,20 +1063,20 @@ mod tests {
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
-                emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF_CAFE_BABE).unwrap();
+                emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF_CAFE_BABE);
                 assert_eq!(
-                    emu.reg_read(X86Reg::Rax).unwrap(),
+                    emu.reg_read(X86Reg::Rax),
                     0xDEAD_BEEF_CAFE_BABE
                 );
                 assert_eq!(
-                    emu.reg_read(X86Reg::Eax).unwrap(),
+                    emu.reg_read(X86Reg::Eax),
                     0xCAFE_BABE
                 );
-                assert_eq!(emu.reg_read(X86Reg::Ax).unwrap(), 0xBABE);
-                assert_eq!(emu.reg_read(X86Reg::Al).unwrap(), 0xBE);
-                assert_eq!(emu.reg_read(X86Reg::Ah).unwrap(), 0xBA);
-                emu.reg_write(X86Reg::Rip, 0x1234).unwrap();
-                assert_eq!(emu.reg_read(X86Reg::Rip).unwrap(), 0x1234);
+                assert_eq!(emu.reg_read(X86Reg::Ax), 0xBABE);
+                assert_eq!(emu.reg_read(X86Reg::Al), 0xBE);
+                assert_eq!(emu.reg_read(X86Reg::Ah), 0xBA);
+                emu.reg_write(X86Reg::Rip, 0x1234);
+                assert_eq!(emu.reg_read(X86Reg::Rip), 0x1234);
             })
             .unwrap()
             .join()
@@ -1038,11 +1153,11 @@ mod tests {
                 )
                 .unwrap();
                 // CR0.PE should be set
-                let cr0 = emu.reg_read(X86Reg::Cr0).unwrap();
+                let cr0 = emu.reg_read(X86Reg::Cr0);
                 assert!(cr0 & 0x1 != 0, "CR0.PE not set after FlatProtected32 setup: {:#x}", cr0);
                 // CS should be 0x08, DS 0x10
-                assert_eq!(emu.reg_read(X86Reg::Cs).unwrap(), 0x08);
-                assert_eq!(emu.reg_read(X86Reg::Ds).unwrap(), 0x10);
+                assert_eq!(emu.reg_read(X86Reg::Cs), 0x08);
+                assert_eq!(emu.reg_read(X86Reg::Ds), 0x10);
             })
             .unwrap()
             .join()
@@ -1061,12 +1176,12 @@ mod tests {
                     CpuSetupMode::FlatLong64,
                 )
                 .unwrap();
-                let cr0 = emu.reg_read(X86Reg::Cr0).unwrap();
+                let cr0 = emu.reg_read(X86Reg::Cr0);
                 assert!(cr0 & 0x1 != 0, "CR0.PE not set");
                 assert!(cr0 & 0x8000_0000 != 0, "CR0.PG not set: {:#x}", cr0);
-                let cr4 = emu.reg_read(X86Reg::Cr4).unwrap();
+                let cr4 = emu.reg_read(X86Reg::Cr4);
                 assert!(cr4 & (1 << 5) != 0, "CR4.PAE not set: {:#x}", cr4);
-                let efer = emu.reg_read(X86Reg::Efer).unwrap();
+                let efer = emu.reg_read(X86Reg::Efer);
                 assert!(efer & (1 << 8) != 0, "EFER.LME not set: {:#x}", efer);
                 assert!(efer & (1 << 10) != 0, "EFER.LMA not set: {:#x}", efer);
             })

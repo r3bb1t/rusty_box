@@ -4,10 +4,12 @@ pub use error::{CpuError, Result};
 pub mod instrumentation;
 pub use instrumentation::{
     BranchEvent, BranchType, CacheCntrl, CodeSize, CpuSetupMode, CpuSnapshot, EmuStopReason,
-    HookHandle, HookMask, HwInterruptEvent, Instrumentation, InstrumentationError,
-    InvEptType, InvPcidType, IoHookEvent, IoHookType, MemAccessRW, MemHookEvent, MemHookType,
+    HookMask, HwInterruptEvent, Instrumentation,
+    InvEptType, InvPcidType, IoHookEvent, MemAccessRW, MemHookEvent,
     MemType, MwaitFlags, PrefetchHint, ResetType, TlbCntrl, X86Reg,
 };
+#[cfg(feature = "instrumentation")]
+pub use instrumentation::{HookHandle, InstrumentationError, IoHookType, MemHookType};
 
 pub(crate) mod api_bridge;
 

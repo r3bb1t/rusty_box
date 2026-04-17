@@ -30,7 +30,7 @@ pub struct AMX {
     pub tilecfg: [TILECFG; 8],
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // VZEROUPPER / VZEROALL (VEX.0F 77)
     // ========================================================================

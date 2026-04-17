@@ -8,7 +8,7 @@ use super::{
     BxCpuC, BxCpuIdTrait,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // I/O Privilege Check — Bochs io.cc
     // ========================================================================

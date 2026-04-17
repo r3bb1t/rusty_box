@@ -8,6 +8,7 @@ pub type VmcsCache = BxVmcs;
 pub struct VmcsMapping {}
 
 // TODO: Implement this
+// TODO: Add fire_vmexit callsite when VMexit function is ported (C++ vmx.cc:2862)
 #[derive(Debug, Default)] // Fixme: derive default by hand maybe
 pub struct BxVmcs {
     pin_vmexec_ctrls: VmxPinBasedVmexecControls,

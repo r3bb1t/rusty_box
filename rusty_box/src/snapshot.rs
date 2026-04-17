@@ -49,7 +49,7 @@ const SEC_PCI: u32 = 31;
 const SEC_ACPI: u32 = 32;
 
 #[cfg(feature = "std")]
-impl<I: BxCpuIdTrait> Emulator<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'_, I, T> {
     /// Save a complete emulator snapshot to a writer.
     pub fn save_snapshot<W: Write>(&mut self, w: &mut W) -> std::io::Result<()> {
         w.write_all(SNAPSHOT_MAGIC)?;

@@ -13,7 +13,7 @@ use super::{
     Result,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     pub(super) fn execute_instruction(&mut self, instr: &Instruction) -> Result<()> {
         use crate::cpu::arith16;
         use crate::cpu::arith32;
@@ -2312,14 +2312,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Ldmxcsr => self.ldmxcsr(instr),
             Opcode::Stmxcsr => self.stmxcsr(instr),
 
-            // Prefetch hints and memory fences — NOPs in emulation
+            // Prefetch hints — NOPs in emulation, but fire instrumentation
             Opcode::PrefetchMb
             | Opcode::PrefetchwMb
             | Opcode::Prefetcht0Mb
             | Opcode::Prefetcht1Mb
             | Opcode::Prefetcht2Mb
-            | Opcode::PrefetchntaMb
-            | Opcode::Lfence
+            | Opcode::PrefetchntaMb => {
+                #[cfg(feature = "instrumentation")]
+                if self.instrumentation.active.has_cache() {
+                    use super::instrumentation::PrefetchHint;
+                    let hint = match instr.get_ia_opcode() {
+                        Opcode::PrefetchntaMb => PrefetchHint::Nta,
+                        Opcode::Prefetcht0Mb => PrefetchHint::T0,
+                        Opcode::Prefetcht1Mb => PrefetchHint::T1,
+                        Opcode::Prefetcht2Mb => PrefetchHint::T2,
+                        _ => PrefetchHint::Nta, // PrefetchMb, PrefetchwMb
+                    };
+                    let offset = self.resolve_addr(instr);
+                    self.instrumentation.fire_prefetch_hint(hint, instr.seg(), offset);
+                }
+                Ok(())
+            }
+            // Memory fences — NOPs in emulation
+            Opcode::Lfence
             | Opcode::Sfence
             | Opcode::Mfence => Ok(()),
 

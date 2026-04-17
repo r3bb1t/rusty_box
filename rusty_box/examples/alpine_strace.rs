@@ -40,72 +40,22 @@ use rusty_box::{
     gui::{NoGui, TermGui},
     Result,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Instant;
 
 mod syscalls;
 
-/// Read-only shared config. Passed to the tracer by `Arc` and accessed
-/// lock-free on the hot path; the only lock is stderr serialization.
-struct StraceCtx {
+/// BOCHS-style tracer. All config and state are plain fields — no Arc,
+/// no Mutex, no atomics. The outer loop accesses state via the zero-cost
+/// `emu.instrumentation()` / `emu.instrumentation_mut()` field accessors.
+pub struct StraceTracer {
     enabled_from: u64,
     max_events: u64,
     log_ports: bool,
     log_irqs: bool,
     log_exc: bool,
-    events: AtomicU64,
-    /// Last printed icount, for progress display.
-    last_printed: AtomicU64,
-    out: std::sync::Mutex<std::io::BufWriter<std::io::Stderr>>,
-}
-
-impl StraceCtx {
-    fn from_env() -> Arc<Self> {
-        let enabled_from = std::env::var("STRACE_FROM_ICOUNT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let max_events = std::env::var("STRACE_LIMIT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(u64::MAX);
-        let log_ports = std::env::var("STRACE_PORTS").ok().as_deref() == Some("1");
-        let log_irqs = std::env::var("STRACE_IRQS").ok().as_deref() == Some("1");
-        let log_exc = std::env::var("STRACE_EXCEPTIONS").ok().as_deref() != Some("0");
-        Arc::new(Self {
-            enabled_from,
-            max_events,
-            log_ports,
-            log_irqs,
-            log_exc,
-            events: AtomicU64::new(0),
-            last_printed: AtomicU64::new(0),
-            out: std::sync::Mutex::new(std::io::BufWriter::new(std::io::stderr())),
-        })
-    }
-
-    fn bump(&self) -> bool {
-        let n = self.events.fetch_add(1, Ordering::Relaxed);
-        n < self.max_events
-    }
-
-    fn print(&self, line: &str) {
-        use std::io::Write;
-        if let Ok(mut w) = self.out.lock() {
-            let _ = writeln!(w, "{line}");
-            let _ = w.flush();
-        }
-    }
-}
-
-/// BOCHS-style tracer. Plain fields, no interior mutability — the outer
-/// loop reaches in via the zero-cost
-/// [`Emulator::instrumentation_mut::<StraceTracer>()`] accessor to pull
-/// out pending syscalls between batches.
-pub struct StraceTracer {
-    ctx: Arc<StraceCtx>,
+    events: u64,
     icount: u64,
+    last_printed: u64,
     /// Set by `interrupt`/`far_branch` when a syscall fires; drained by
     /// `drain_syscalls` on the next batch boundary.
     pending: Option<Pending>,
@@ -129,12 +79,38 @@ struct SyscallArgs {
 }
 
 impl StraceTracer {
-    fn new(ctx: Arc<StraceCtx>) -> Self {
-        Self { ctx, icount: 0, pending: None }
+    fn from_env() -> Self {
+        let enabled_from = std::env::var("STRACE_FROM_ICOUNT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let max_events = std::env::var("STRACE_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(u64::MAX);
+        let log_ports = std::env::var("STRACE_PORTS").ok().as_deref() == Some("1");
+        let log_irqs = std::env::var("STRACE_IRQS").ok().as_deref() == Some("1");
+        let log_exc = std::env::var("STRACE_EXCEPTIONS").ok().as_deref() != Some("0");
+        Self {
+            enabled_from,
+            max_events,
+            log_ports,
+            log_irqs,
+            log_exc,
+            events: 0,
+            icount: 0,
+            last_printed: 0,
+            pending: None,
+        }
     }
 
-    fn should_log(&self) -> bool {
-        self.icount >= self.ctx.enabled_from && self.ctx.bump()
+    fn should_log(&mut self) -> bool {
+        if self.icount >= self.enabled_from && self.events < self.max_events {
+            self.events += 1;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -144,7 +120,7 @@ impl Instrumentation for StraceTracer {
     }
 
     fn hwinterrupt(&mut self, vector: u8, cs: u16, rip: u64) {
-        if self.ctx.log_irqs && self.should_log() {
+        if self.log_irqs && self.should_log() {
             let line = format!(
                 "[{icount:>12}] HWIRQ  vec={vec:#04x} {name:>15} cs={cs:#06x} rip={rip:#018x}",
                 icount = self.icount,
@@ -153,12 +129,12 @@ impl Instrumentation for StraceTracer {
                 cs = cs,
                 rip = rip,
             );
-            self.ctx.print(&line);
+            tracing::info!("{}", line);
         }
     }
 
     fn exception(&mut self, vector: u8, error_code: u32) {
-        if self.ctx.log_exc && self.should_log() {
+        if self.log_exc && self.should_log() {
             let line = format!(
                 "[{icount:>12}] EXC    vec={vec:#04x} {name:>6} err={err:#010x}",
                 icount = self.icount,
@@ -166,7 +142,7 @@ impl Instrumentation for StraceTracer {
                 name = exception_name(vector),
                 err = error_code,
             );
-            self.ctx.print(&line);
+            tracing::info!("{}", line);
         }
     }
 
@@ -196,7 +172,7 @@ impl Instrumentation for StraceTracer {
     }
 
     fn inp2(&mut self, port: u16, len: u8, val: u32) {
-        if self.ctx.log_ports && !is_noisy_port(port) && self.should_log() {
+        if self.log_ports && !is_noisy_port(port) && self.should_log() {
             let line = format!(
                 "[{icount:>12}] IN {len}  port={port:#06x} {name:>14} -> {val:#010x}",
                 icount = self.icount,
@@ -205,12 +181,12 @@ impl Instrumentation for StraceTracer {
                 name = port_name(port),
                 val = val,
             );
-            self.ctx.print(&line);
+            tracing::info!("{}", line);
         }
     }
 
     fn outp(&mut self, port: u16, len: u8, val: u32) {
-        if self.ctx.log_ports && !is_noisy_port(port) && self.should_log() {
+        if self.log_ports && !is_noisy_port(port) && self.should_log() {
             let line = format!(
                 "[{icount:>12}] OUT{len}  port={port:#06x} {name:>14} <- {val:#010x}",
                 icount = self.icount,
@@ -219,20 +195,16 @@ impl Instrumentation for StraceTracer {
                 name = port_name(port),
                 val = val,
             );
-            self.ctx.print(&line);
+            tracing::info!("{}", line);
         }
     }
 }
 
 /// Call between batches: pulls any pending syscall out of the tracer, reads
-/// register state, prints a strace-style line. No `unsafe`, no `Arc<Mutex>`:
-/// `Emulator::instrumentation_mut::<StraceTracer>()` is a typed accessor
-/// that monomorphizes to a single `TypeId` compare-and-branch.
-fn drain_syscalls(emu: &mut Emulator<Corei7SkylakeX>, ctx: &StraceCtx) {
+/// register state, logs a strace-style line. Zero-cost field access.
+fn drain_syscalls(emu: &mut Emulator<Corei7SkylakeX, StraceTracer>) {
     use rusty_box::cpu::X86Reg;
-    let pending = emu
-        .instrumentation_mut::<StraceTracer>()
-        .and_then(|t| t.pending.take());
+    let pending = emu.instrumentation_mut().pending.take();
     let Some(Pending { icount, is_64 }) = pending else { return; };
 
     // Read the register file now — first safe point after the syscall
@@ -240,23 +212,23 @@ fn drain_syscalls(emu: &mut Emulator<Corei7SkylakeX>, ctx: &StraceCtx) {
     // kernel handler hasn't run yet so RAX/RDI/... still hold user values.
     let (nr, a0, a1, a2, a3, a4, a5) = if is_64 {
         (
-            emu.reg_read(X86Reg::Rax).unwrap_or(0),
-            emu.reg_read(X86Reg::Rdi).unwrap_or(0),
-            emu.reg_read(X86Reg::Rsi).unwrap_or(0),
-            emu.reg_read(X86Reg::Rdx).unwrap_or(0),
-            emu.reg_read(X86Reg::R10).unwrap_or(0),
-            emu.reg_read(X86Reg::R8).unwrap_or(0),
-            emu.reg_read(X86Reg::R9).unwrap_or(0),
+            emu.reg_read(X86Reg::Rax),
+            emu.reg_read(X86Reg::Rdi),
+            emu.reg_read(X86Reg::Rsi),
+            emu.reg_read(X86Reg::Rdx),
+            emu.reg_read(X86Reg::R10),
+            emu.reg_read(X86Reg::R8),
+            emu.reg_read(X86Reg::R9),
         )
     } else {
         (
-            emu.reg_read(X86Reg::Eax).unwrap_or(0),
-            emu.reg_read(X86Reg::Ebx).unwrap_or(0),
-            emu.reg_read(X86Reg::Ecx).unwrap_or(0),
-            emu.reg_read(X86Reg::Edx).unwrap_or(0),
-            emu.reg_read(X86Reg::Esi).unwrap_or(0),
-            emu.reg_read(X86Reg::Edi).unwrap_or(0),
-            emu.reg_read(X86Reg::Ebp).unwrap_or(0),
+            emu.reg_read(X86Reg::Eax),
+            emu.reg_read(X86Reg::Ebx),
+            emu.reg_read(X86Reg::Ecx),
+            emu.reg_read(X86Reg::Edx),
+            emu.reg_read(X86Reg::Esi),
+            emu.reg_read(X86Reg::Edi),
+            emu.reg_read(X86Reg::Ebp),
         )
     };
     let args = SyscallArgs { nr, a0, a1, a2, a3, a4, a5 };
@@ -272,8 +244,8 @@ fn drain_syscalls(emu: &mut Emulator<Corei7SkylakeX>, ctx: &StraceCtx) {
         kind = if is_64 { "SYS64" } else { "SYS32" },
         line = fmt,
     );
-    ctx.print(&line);
-    ctx.last_printed.store(icount, Ordering::Relaxed);
+    tracing::info!("{}", line);
+    emu.instrumentation_mut().last_printed = icount;
 }
 
 fn format_syscall(name: &str, a: &SyscallArgs, is_64: bool) -> String {
@@ -503,15 +475,21 @@ fn run() -> Result<()> {
         .with_target(false)
         .init();
 
-    println!("Reading ISO: {iso_path}");
+    tracing::info!("Reading ISO: {iso_path}");
     let iso_data = std::fs::read(&iso_path).unwrap_or_else(|e| {
         eprintln!("Failed to read ISO '{iso_path}': {e}");
         eprintln!("Set ALPINE_ISO=/path/to/alpine-virt-*.iso");
         std::process::exit(1);
     });
-    println!("  ISO size: {} MB", iso_data.len() / 1024 / 1024);
+    tracing::info!("  ISO size: {} MB", iso_data.len() / 1024 / 1024);
 
     let ram_bytes = ram_mb * 1024 * 1024;
+    let tracer = StraceTracer::from_env();
+    tracing::info!(
+        "Strace config: from_icount={} max={} ports={} irqs={} exc={}",
+        tracer.enabled_from, tracer.max_events, tracer.log_ports, tracer.log_irqs, tracer.log_exc
+    );
+
     let config = EmulatorConfig {
         guest_memory_size: ram_bytes,
         host_memory_size: ram_bytes,
@@ -519,7 +497,7 @@ fn run() -> Result<()> {
         pci_enabled: true,
         ..EmulatorConfig::default()
     };
-    let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
+    let mut emu = Emulator::<Corei7SkylakeX, StraceTracer>::new_with_instrumentation(config, tracer)?;
     emu.init_memory_and_pc_system()?;
 
     if bios_boot {
@@ -545,7 +523,7 @@ fn run() -> Result<()> {
         ];
         if let Some(vga_data) = vga_candidates.iter().find_map(|p| std::fs::read(p).ok()) {
             emu.load_optional_rom(&vga_data, 0xC0000)?;
-            println!("  VGA BIOS loaded: {} bytes", vga_data.len());
+            tracing::info!("  VGA BIOS loaded: {} bytes", vga_data.len());
         }
         emu.init_cpu_and_devices()?;
         emu.configure_memory_in_cmos_from_config();
@@ -585,15 +563,7 @@ fn run() -> Result<()> {
         emu.start();
     }
 
-    // ═════════════════════════ Install strace hooks ═════════════════════════
-
-    let ctx = StraceCtx::from_env();
-    println!(
-        "Strace config: from_icount={} max={} ports={} irqs={} exc={}",
-        ctx.enabled_from, ctx.max_events, ctx.log_ports, ctx.log_irqs, ctx.log_exc
-    );
-
-    emu.set_instrumentation(Box::new(StraceTracer::new(ctx.clone())));
+    // Instrumentation already installed at construction time.
 
     // ═════════════════════════ Execute ═════════════════════════
     let start = Instant::now();
@@ -607,22 +577,22 @@ fn run() -> Result<()> {
         match emu.run_interactive(budget) {
             Ok(n) => executed += n,
             Err(e) => {
-                eprintln!("CPU error at {executed}: {e:?}");
+                tracing::error!("CPU error at {executed}: {e:?}");
                 break;
             }
         }
 
         // Drain any pending syscall entries captured by the tracer.
-        drain_syscalls(&mut emu, &ctx);
+        drain_syscalls(&mut emu);
 
         if emu.cpu.is_in_shutdown() {
-            println!("CPU shutdown at {executed}");
+            tracing::info!("CPU shutdown at {executed}");
             break;
         }
 
         // BIOS boot: press Enter at ISOLINUX around 18M instructions.
         if !enter_injected && executed >= 18_000_000 {
-            println!("[{}M] press Enter at ISOLINUX", executed / 1_000_000);
+            tracing::info!("[{}M] press Enter at ISOLINUX", executed / 1_000_000);
             emu.send_string("\n");
             enter_injected = true;
         }
@@ -639,13 +609,16 @@ fn run() -> Result<()> {
         }
 
         // Stop once we've logged enough events.
-        if ctx.events.load(Ordering::Relaxed) >= ctx.max_events {
-            println!(
-                "Strace limit ({}) reached at icount~={}; stopping",
-                ctx.max_events,
-                ctx.last_printed.load(Ordering::Relaxed)
-            );
-            break;
+        {
+            let t = emu.instrumentation();
+            if t.events >= t.max_events {
+                tracing::info!(
+                    "Strace limit ({}) reached at icount~={}; stopping",
+                    t.max_events,
+                    t.last_printed,
+                );
+                break;
+            }
         }
     }
 
@@ -658,11 +631,11 @@ fn run() -> Result<()> {
     }
 
     let elapsed = start.elapsed();
-    println!(
-        "\nRan {executed} instructions in {:.2}s ({:.1} MIPS); {} strace events logged",
+    tracing::info!(
+        "Ran {executed} instructions in {:.2}s ({:.1} MIPS); {} strace events logged",
         elapsed.as_secs_f64(),
         executed as f64 / elapsed.as_secs_f64() / 1_000_000.0,
-        ctx.events.load(Ordering::Relaxed).min(ctx.max_events),
+        emu.instrumentation().events.min(emu.instrumentation().max_events),
     );
     Ok(())
 }

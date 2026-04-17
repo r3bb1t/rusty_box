@@ -20,7 +20,7 @@ use super::{
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, instr: &Instruction) -> u64 {
+fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, instr: &Instruction) -> u64 {
     let k = instr.opmask();
     if k == 0 {
         u64::MAX
@@ -32,7 +32,7 @@ fn read_opmask_for_write<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, instr: &Instructi
 
 /// Read ZMM register as a ZMM-width value.
 #[inline]
-fn read_zmm<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, reg: u8) -> BxPackedZmmRegister {
+fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, reg: u8) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
@@ -41,8 +41,8 @@ fn read_zmm<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, reg: u8) -> BxPackedZmmRegiste
 /// Element [0] is the result, subject to opmask bit 0 merge/zero masking.
 /// Elements [1..3] come from src1. Elements [4..15] are zeroed (EVEX clears
 /// upper bits).
-fn write_scalar_ss<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<'_, I>,
+fn write_scalar_ss<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
     result_elem0: f32,
@@ -73,8 +73,8 @@ fn write_scalar_ss<I: BxCpuIdTrait>(
 ///
 /// Element [0] is the result, subject to opmask bit 0 merge/zero masking.
 /// Element [1] comes from src1. Elements [2..7] are zeroed.
-fn write_scalar_sd<I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<'_, I>,
+fn write_scalar_sd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
     result_elem0: f64,
@@ -99,7 +99,7 @@ fn write_scalar_sd<I: BxCpuIdTrait>(
     }
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // Helper: read scalar f32 source operand (register or memory)
     // ========================================================================

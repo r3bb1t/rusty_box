@@ -1,10 +1,21 @@
-//! BOCHS-style instrumentation trait (primary API).
+//! Monomorphized instrumentation trait (primary API).
 //!
 //! Full-fidelity port of the C++ BOCHS instrumentation callbacks
 //! (cpp_orig/bochs/instrument/stubs/instrument.h). All methods have
 //! default no-op implementations — override only the hooks you need.
 //!
-//! ## Design differences from BOCHS C++
+//! ## Design
+//!
+//! The trait is generic (`T: Instrumentation`) rather than object-safe
+//! (`Box<dyn Instrumentation>`). Composition is achieved through tuple
+//! types — `(A, B)` implements `Instrumentation` when both `A` and `B`
+//! do. No `Any` downcasting, no vtable dispatch on the hot path.
+//!
+//! `active_hooks()` returns a `HookMask` so the CPU hot path can skip
+//! categories with no active hooks (predicted-not-taken branch, zero
+//! cost when no instrumentation is attached).
+//!
+//! ## Callback design (same as BOCHS)
 //!
 //! **Category 1 — explicit parameters replacing globals.** BOCHS callbacks
 //! access `BX_CPU(cpu_id)->field` through globals. Rust has no globals,
@@ -31,29 +42,23 @@
 //! registers through globals).
 
 use super::types::{
-    BranchType, CacheCntrl, CodeSize, MemAccessRW, MemType, MwaitFlags,
+    BranchType, CacheCntrl, CodeSize, HookMask, MemAccessRW, MemType, MwaitFlags,
     PrefetchHint, ResetType, TlbCntrl,
 };
 use crate::cpu::decoder::Instruction;
 
-/// BOCHS-compatible instrumentation trait. Implement only the callbacks
-/// you need — everything defaults to a no-op.
+/// Instrumentation trait. Implement only the callbacks you need —
+/// everything defaults to a no-op.
 ///
-/// # Thread safety
-///
-/// The `Send` bound lets the trait object move between threads with the
-/// `Emulator`. The trait is never shared across threads simultaneously
-/// (the emulator is `!Sync` on purpose).
-///
-/// # Typed access
-///
-/// The `Any` supertrait lets [`Emulator`](crate::emulator::Emulator) hand
-/// you a `&mut YourTracer` after installation — see
-/// `Emulator::instrumentation_mut::<T>()`. Zero-cost: monomorphized to a
-/// single `TypeId` compare-and-branch, no `unsafe` for the caller, no
-/// `Arc<Mutex<...>>` to share state with the outer loop.
+/// `active_hooks()` declares which hook categories this implementation
+/// cares about, enabling the CPU to skip dispatch for inactive
+/// categories. The default returns `HookMask::all()` (conservative).
 #[allow(unused_variables)]
-pub trait Instrumentation: core::any::Any + Send {
+pub trait Instrumentation {
+    /// Declare which hook categories this implementation uses.
+    /// The CPU skips dispatch for categories not in the returned mask.
+    fn active_hooks(&self) -> HookMask { HookMask::all() }
+
     // ── Lifecycle ───────────────────────────────────────────────────────
 
     /// Called on CPU reset. BOCHS: `BX_INSTR_RESET(cpu_id, type)`.
@@ -173,3 +178,176 @@ pub trait Instrumentation: core::any::Any + Send {
     /// VMX exit event. BOCHS: `BX_INSTR_VMEXIT(cpu_id, reason, qualification)`.
     fn vmexit(&mut self, reason: u32, qualification: u64) {}
 }
+
+// ── Unit impl (no-op sentinel) ──────────────────────────────────────────
+
+impl Instrumentation for () {
+    fn active_hooks(&self) -> HookMask { HookMask::empty() }
+}
+
+// ── Tuple composition ───────────────────────────────────────────────────
+
+macro_rules! impl_instrumentation_tuple {
+    ($($T:ident),+) => {
+        #[allow(non_snake_case)]
+        impl<$($T: Instrumentation),+> Instrumentation for ($($T,)+) {
+            fn active_hooks(&self) -> HookMask {
+                let ($($T,)+) = self;
+                HookMask::empty() $(| $T.active_hooks())+
+            }
+
+            fn reset(&mut self, reset_type: ResetType) {
+                let ($($T,)+) = self;
+                $($T.reset(reset_type);)+
+            }
+
+            fn before_execution(&mut self, rip: u64, instr: &Instruction) {
+                let ($($T,)+) = self;
+                $($T.before_execution(rip, instr);)+
+            }
+
+            fn after_execution(&mut self, rip: u64, instr: &Instruction) {
+                let ($($T,)+) = self;
+                $($T.after_execution(rip, instr);)+
+            }
+
+            fn repeat_iteration(&mut self, rip: u64, instr: &Instruction) {
+                let ($($T,)+) = self;
+                $($T.repeat_iteration(rip, instr);)+
+            }
+
+            fn opcode(&mut self, rip: u64, instr: &Instruction, bytes: &[u8], size: CodeSize) {
+                let ($($T,)+) = self;
+                $($T.opcode(rip, instr, bytes, size);)+
+            }
+
+            fn hlt(&mut self) {
+                let ($($T,)+) = self;
+                $($T.hlt();)+
+            }
+
+            fn mwait(&mut self, addr: u64, len: u32, flags: MwaitFlags) {
+                let ($($T,)+) = self;
+                $($T.mwait(addr, len, flags);)+
+            }
+
+            fn cnear_branch_taken(&mut self, branch_rip: u64, new_rip: u64) {
+                let ($($T,)+) = self;
+                $($T.cnear_branch_taken(branch_rip, new_rip);)+
+            }
+
+            fn cnear_branch_not_taken(&mut self, branch_rip: u64) {
+                let ($($T,)+) = self;
+                $($T.cnear_branch_not_taken(branch_rip);)+
+            }
+
+            fn ucnear_branch(&mut self, what: BranchType, branch_rip: u64, new_rip: u64) {
+                let ($($T,)+) = self;
+                $($T.ucnear_branch(what, branch_rip, new_rip);)+
+            }
+
+            fn far_branch(
+                &mut self,
+                what: BranchType,
+                prev_cs: u16,
+                prev_rip: u64,
+                new_cs: u16,
+                new_rip: u64,
+            ) {
+                let ($($T,)+) = self;
+                $($T.far_branch(what, prev_cs, prev_rip, new_cs, new_rip);)+
+            }
+
+            fn interrupt(&mut self, vector: u8) {
+                let ($($T,)+) = self;
+                $($T.interrupt(vector);)+
+            }
+
+            fn exception(&mut self, vector: u8, error_code: u32) {
+                let ($($T,)+) = self;
+                $($T.exception(vector, error_code);)+
+            }
+
+            fn hwinterrupt(&mut self, vector: u8, cs: u16, rip: u64) {
+                let ($($T,)+) = self;
+                $($T.hwinterrupt(vector, cs, rip);)+
+            }
+
+            fn lin_access(
+                &mut self,
+                lin: u64,
+                phy: u64,
+                len: usize,
+                memtype: MemType,
+                rw: MemAccessRW,
+            ) {
+                let ($($T,)+) = self;
+                $($T.lin_access(lin, phy, len, memtype, rw);)+
+            }
+
+            fn phy_access(&mut self, phy: u64, len: usize, memtype: MemType, rw: MemAccessRW) {
+                let ($($T,)+) = self;
+                $($T.phy_access(phy, len, memtype, rw);)+
+            }
+
+            fn inp(&mut self, port: u16, len: u8) {
+                let ($($T,)+) = self;
+                $($T.inp(port, len);)+
+            }
+
+            fn inp2(&mut self, port: u16, len: u8, val: u32) {
+                let ($($T,)+) = self;
+                $($T.inp2(port, len, val);)+
+            }
+
+            fn outp(&mut self, port: u16, len: u8, val: u32) {
+                let ($($T,)+) = self;
+                $($T.outp(port, len, val);)+
+            }
+
+            fn tlb_cntrl(&mut self, what: TlbCntrl) {
+                let ($($T,)+) = self;
+                $($T.tlb_cntrl(what);)+
+            }
+
+            fn cache_cntrl(&mut self, what: CacheCntrl) {
+                let ($($T,)+) = self;
+                $($T.cache_cntrl(what);)+
+            }
+
+            fn clflush(&mut self, laddr: u64, paddr: u64) {
+                let ($($T,)+) = self;
+                $($T.clflush(laddr, paddr);)+
+            }
+
+            fn prefetch_hint(&mut self, what: PrefetchHint, seg: u8, offset: u64) {
+                let ($($T,)+) = self;
+                $($T.prefetch_hint(what, seg, offset);)+
+            }
+
+            fn cpuid(&mut self) {
+                let ($($T,)+) = self;
+                $($T.cpuid();)+
+            }
+
+            fn wrmsr(&mut self, msr: u32, value: u64) {
+                let ($($T,)+) = self;
+                $($T.wrmsr(msr, value);)+
+            }
+
+            fn vmexit(&mut self, reason: u32, qualification: u64) {
+                let ($($T,)+) = self;
+                $($T.vmexit(reason, qualification);)+
+            }
+        }
+    }
+}
+
+impl_instrumentation_tuple!(A);
+impl_instrumentation_tuple!(A, B);
+impl_instrumentation_tuple!(A, B, C);
+impl_instrumentation_tuple!(A, B, C, D);
+impl_instrumentation_tuple!(A, B, C, D, E);
+impl_instrumentation_tuple!(A, B, C, D, E, F);
+impl_instrumentation_tuple!(A, B, C, D, E, F, G);
+impl_instrumentation_tuple!(A, B, C, D, E, F, G, H);

@@ -10,7 +10,7 @@ use super::{
     decoder::{BxSegregs, Instruction},
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ---- 64-bit read/write helpers for shift instructions ----
     fn shift_read64(&mut self, instr: &Instruction) -> super::Result<(u64, Option<u64>)> {
         if instr.mod_c0() {

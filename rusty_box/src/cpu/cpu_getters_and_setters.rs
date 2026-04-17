@@ -10,7 +10,7 @@ use super::{
 };
 
 // according to RFC #344, we use "set_<name>" for setters
-impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
+impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
     // getters for 8 bit general registers
     #[inline]
     pub fn al(&self) -> u8 {

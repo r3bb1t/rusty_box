@@ -19,7 +19,7 @@ pub fn parse_selector(raw_selector: u16, selector: &mut BxSelector) {
     selector.rpl = raw_selector as u8 & 0x03;
 }
 
-impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
+impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cpu::BxCpuC<'_, I, T> {
     /// Fetch raw descriptor from GDT or LDT
     /// Based on BX_CPU_C::fetch_raw_descriptor in segment_ctrl_pro.cc
     pub(super) fn fetch_raw_descriptor(&mut self, selector: &BxSelector) -> Result<(u32, u32)> {

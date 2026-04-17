@@ -9,6 +9,7 @@ homepage.workspace = true
 description = "A Rust port of the Bochs x86 emulator — boots DLX and Alpine Linux"
 keywords = ["x86", "emulator", "bochs", "cpu", "virtualization"]
 categories = ["emulators", "simulation"]
+autoexamples = false
 
 [lib]
 name = "rusty_box"
@@ -17,7 +18,7 @@ path = "src/lib.rs"
 [features]
 default = ["bx_full", "std"]
 
-std = ["tracing/std", "tempfile", "libc", "crossterm"]
+std = ["tracing/std", "tempfile", "crossterm"]
 gui-egui = ["dep:egui", "dep:eframe"]
 
 bx_full = [
@@ -60,10 +61,24 @@ spin.workspace = true
 bitflags.workspace = true
 paste.workspace = true
 rusty_box_decoder = { path = "../rusty_box_decoder" }
-libc = { version = "0.2", optional = true }
 crossterm = { version = "0.29", optional = true }
 egui = { workspace = true, optional = true }
 eframe = { workspace = true, optional = true, features = ["default_fonts", "glow"] }
+
+[[example]]
+name = "alpine"
+path = "examples/alpine.rs"
+required-features = ["std"]
+
+[[example]]
+name = "dlxlinux"
+path = "examples/dlxlinux.rs"
+required-features = ["std"]
+
+[[example]]
+name = "alpine_direct"
+path = "examples/alpine_direct.rs"
+required-features = ["std"]
 
 [[example]]
 name = "dlxlinux_egui"

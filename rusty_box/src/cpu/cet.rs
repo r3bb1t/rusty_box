@@ -40,7 +40,7 @@ pub(super) fn is_invalid_cet_control(val: u64) -> bool {
     false
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =========================================================================
     // CET query helpers — Bochs cet.cc
     // =========================================================================

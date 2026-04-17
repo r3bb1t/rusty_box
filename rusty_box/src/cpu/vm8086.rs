@@ -16,7 +16,7 @@ use super::{
     eflags::EFlags,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Return from protected mode (CPL=0) to V8086 mode via IRET.
     ///
     /// Bochs: BX_CPU_C::stack_return_to_v86() in vm8086.cc

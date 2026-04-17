@@ -9,7 +9,7 @@ use super::{
     error::{CpuError, Result},
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =========================================================================
     // Helper functions for branching
     // =========================================================================

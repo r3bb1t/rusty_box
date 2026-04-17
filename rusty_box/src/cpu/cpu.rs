@@ -311,7 +311,7 @@ impl From<CpuActivityState> for u8 {
 
 #[allow(unused)]
 //#[derive(Debug)]
-pub struct BxCpuC<'c, I: BxCpuIdTrait> {
+pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentation = ()> {
     pub(super) bx_cpuid: u32,
 
     pub(super) cpuid: I,
@@ -686,11 +686,9 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) guard_found: BxGuardFound,
 
 
-    /// Instrumentation hooks: BOCHS-style trait object + Unicorn-style closures.
-    /// Install via `Emulator::set_instrumentation()` / `Emulator::hook_add_*`.
-    /// Feature-gated by `instrumentation`.
-    #[cfg(feature = "instrumentation")]
-    pub(crate) instrumentation: super::instrumentation::InstrumentationRegistry,
+    /// Instrumentation: monomorphized tracer + closure hooks.
+    /// With `T = ()` and no closures registered, this is 4 bytes (the bitmask).
+    pub(crate) instrumentation: super::instrumentation::InstrumentationRegistry<T>,
 
     pub(crate) dtlb: Tlb<BX_DTLB_SIZE>,
     pub(super) itlb: Tlb<BX_ITLB_SIZE>,
@@ -750,7 +748,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) boot_debug_flags: u8,
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
     /// Persistent sleep sentinel set by enter_sleep_state (HLT/MWAIT).
     /// Matches Bochs proc_ctrl.cc `async_event = 1` — survives the
@@ -805,7 +803,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 // Note: Memory access is done through mem_ptr/mem_len raw pointer
 // which is set during cpu_loop. See string.rs for mem_read_byte/mem_write_byte helpers.
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     pub fn is_canonical(&self, addr: BxAddress) -> bool {
         Self::is_canonical_to_width(addr, self.linaddr_width.into())
     }
@@ -971,7 +969,7 @@ pub struct BxRegsMsr {
     pub(crate) ia32_spec_ctrl: u32, // SCA
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /* CPL == 3 */
     #[inline]
     pub(super) fn user_pl(&self) -> bool {
@@ -1149,9 +1147,9 @@ pub(super) struct BxGuardFound {
 }
 
 /// Type alias for instruction handler function pointer
-type InstructionHandler<I> = fn(&mut BxCpuC<'_, I>, &Instruction) -> Result<()>;
+type InstructionHandler<I, T> = fn(&mut BxCpuC<'_, I, T>, &Instruction) -> Result<()>;
 
-impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
+impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
     /// Bochs `signal_event()`: set event bit and force async check.
     /// Called by PIC (via raw pointer) when master int_pin asserts.
     #[inline]
@@ -1213,24 +1211,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.io_bus = None;
     }
 
-    /// Install BOCHS-style trait instrumentation. Returns any previously-installed
-    /// trait object. Closure hooks registered via `hook_add_*` are unaffected.
-    #[cfg(feature = "instrumentation")]
-    pub fn set_instrumentation(
-        &mut self,
-        instr: alloc::boxed::Box<dyn super::Instrumentation>,
-    ) -> Option<alloc::boxed::Box<dyn super::Instrumentation>> {
-        self.instrumentation.set_bochs(instr)
-    }
-
-    /// Remove BOCHS-style trait instrumentation. Returns it if present.
-    /// Closure hooks registered via `hook_add_*` are unaffected.
-    #[cfg(feature = "instrumentation")]
-    pub fn clear_instrumentation(
-        &mut self,
-    ) -> Option<alloc::boxed::Box<dyn super::Instrumentation>> {
-        self.instrumentation.clear_bochs()
-    }
     // ── Instrumentation helpers (no-op when `instrumentation` feature disabled) ──
 
     /// Fire the `repeat_iteration` hook for string/IO REP instructions.
@@ -1429,12 +1409,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// lifetime, and the `*const BxCpuC` re-borrow is non-aliasing because
     /// nothing writes through it while `mem` is live.
     #[inline(always)]
-    pub(super) fn mem_bus_and_cpu(&self) -> Option<(&mut crate::memory::BxMemC<'c>, &BxCpuC<'c, I>)> {
+    pub(super) fn mem_bus_and_cpu(&self) -> Option<(&mut crate::memory::BxMemC<'c>, &BxCpuC<'c, I, T>)> {
         let mem_bus = self.mem_bus?;
         // SAFETY: mem_bus valid for duration of cpu_loop; single-threaded access
         let mem = unsafe { &mut *mem_bus.as_ptr() };
         // SAFETY: cpu_ptr derived from valid &mut self; no aliasing during this call
-        let cpu_ref: &BxCpuC<'c, I> = unsafe { &*(self as *const BxCpuC<'c, I>) };
+        let cpu_ref: &BxCpuC<'c, I, T> = unsafe { &*(self as *const BxCpuC<'c, I, T>) };
         Some((mem, cpu_ref))
     }
 
@@ -3021,7 +3001,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         &mut self,
         instr: &mut Instruction,
         fetch_mode_mask: super::opcodes_table::FetchModeMask,
-    ) -> Result<(bool, Option<InstructionHandler<I>>)> {
+    ) -> Result<(bool, Option<InstructionHandler<I, T>>)> {
         use super::opcodes_table::{get_opcode_entry, FetchModeMask, OpFlags};
         use crate::cpu::decoder::Opcode;
 
@@ -3038,7 +3018,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let is_reg_form = instr.mod_c0();
 
         // Handler assignment logic (matching original lines 2045-2061)
-        let mut selected_handler: Option<InstructionHandler<I>> = None;
+        let mut selected_handler: Option<InstructionHandler<I, T>> = None;
         let is_bx_error = false; // Track if BxError handler was assigned
 
         if let Some(entry) = &opcode_entry {

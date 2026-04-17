@@ -154,7 +154,7 @@ const PRIV_CHECK: [u8; 32] = [
     0, 0, 0, 0, 1, 0, 1, 1, // user access
 ];
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     #[cfg(feature = "bx_large_ram_file")]
     pub(crate) fn check_addr_in_tlb_buffers(&self, addr: usize, end: usize) -> bool {
         let addr_ptr = addr;
@@ -204,9 +204,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // We need to pass &[&BxCpuC] but we have &mut self
         // Create a temporary immutable reference - safe because we're only reading
         let mut data = [0u8; 4];
-        let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+        let cpu_ptr: *const BxCpuC<I, T> = self as *const BxCpuC<I, T>;
         // SAFETY: cpu_ptr derived from valid &self; single-threaded, no aliasing during reads
-        let as_cpu_ref = || -> &BxCpuC<I> { unsafe { &*cpu_ptr } };
+        let as_cpu_ref = || -> &BxCpuC<I, T> { unsafe { &*cpu_ptr } };
         let cpu_ref = as_cpu_ref();
         // read_physical_page returns crate::memory::Result which is Result<T, crate::error::Error>
         // We need to convert it to Result<T, CpuError>
@@ -233,9 +233,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut data = value.to_le_bytes();
         // We need to pass &[&BxCpuC] but we have &mut self
         // Create a temporary immutable reference - safe because write_physical_page doesn't mutate CPU
-        let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+        let cpu_ptr: *const BxCpuC<I, T> = self as *const BxCpuC<I, T>;
         // SAFETY: cpu_ptr derived from valid &self; single-threaded, no aliasing during reads
-        let as_cpu_ref = || -> &BxCpuC<I> { unsafe { &*cpu_ptr } };
+        let as_cpu_ref = || -> &BxCpuC<I, T> { unsafe { &*cpu_ptr } };
         let cpu_ref = as_cpu_ref();
         // write_physical_page returns crate::memory::Result which is Result<T, crate::error::Error>
         // We need to convert it to Result<T, CpuError>
@@ -422,7 +422,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Translate a linear address to a physical address
     /// Based on BX_CPU_C::translate_linear in paging.cc
     /// Returns Ok(paddr) on success, or Err with page fault info that caller should handle
@@ -495,7 +495,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// PAE paging translation (slow path, used by translate_linear for prefetch).
     /// Based on Bochs translate_linear_PAE in paging.cc.
     fn translate_linear_pae_slow(
@@ -508,9 +508,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ) -> Result<BxPhyAddress> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
-        let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+        let cpu_ptr: *const BxCpuC<I, T> = self as *const BxCpuC<I, T>;
         // SAFETY: cpu_ptr derived from valid &self; single-threaded, no aliasing during reads
-        let as_cpu_ref = || -> &BxCpuC<I> { unsafe { &*cpu_ptr } };
+        let as_cpu_ref = || -> &BxCpuC<I, T> { unsafe { &*cpu_ptr } };
 
         let mut reserved = PAGING_LEGACY_PAE_RESERVED_BITS;
         if !self.efer.nxe() {
@@ -720,9 +720,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ) -> Result<BxPhyAddress> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
-        let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+        let cpu_ptr: *const BxCpuC<I, T> = self as *const BxCpuC<I, T>;
         // SAFETY: cpu_ptr derived from valid &self; single-threaded, no aliasing during reads
-        let as_cpu_ref = || -> &BxCpuC<I> { unsafe { &*cpu_ptr } };
+        let as_cpu_ref = || -> &BxCpuC<I, T> { unsafe { &*cpu_ptr } };
 
         let mut reserved = PAGING_PAE_PHY_RESERVED_BITS;
         if !self.efer.nxe() {
@@ -881,7 +881,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Page table walk for system writes (CPL=0).
     /// Updates Accessed/Dirty bits on PDE/PTE as required by x86 paging.
     /// Used by system_write_byte/word/dword for TSS, descriptor table writes.
@@ -1908,7 +1908,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 }
 
-impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
+impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
     fn is_virtual_apic_page(&self, _p_addr: &BxPhyAddress) -> bool {
         // TODO: Implement virtual APIC page check
         false

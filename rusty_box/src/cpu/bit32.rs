@@ -7,7 +7,7 @@ use super::{
     eflags::EFlags,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =========================================================================
     // BSF / BSR — Bit Scan Forward / Reverse (0F BC / 0F BD)
     // =========================================================================

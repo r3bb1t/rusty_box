@@ -14,7 +14,7 @@ use super::{
     xmm::BxPackedXmmRegister,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // RCPPS — Reciprocal of Packed Single-Precision (approximate)
     // Bochs: RCPPS_VpsWps in sse_rcp.cc

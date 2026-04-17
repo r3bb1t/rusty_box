@@ -10,7 +10,7 @@ use super::{
     error::Result,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =========================================================================
     // 64-bit Multiplication and Division
     // =========================================================================

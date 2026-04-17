@@ -98,7 +98,7 @@ fn sse_compare_f64(op1: f64, op2: f64, predicate: u8) -> bool {
     }
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // SSE FP helpers: read source operand (register or memory)
     // ========================================================================

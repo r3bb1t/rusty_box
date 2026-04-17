@@ -321,7 +321,7 @@ fn xmm_pclmulqdq(a: u64, b: u64) -> BxPackedXmmRegister {
 // Instruction handlers
 // ============================================================================
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Read source XMM operand from register or memory.
     /// Matches Bochs LOAD_Wdq pattern: if mod==11b read register, else read 128-bit
     /// from memory via paging-aware access.

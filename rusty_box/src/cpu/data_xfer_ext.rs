@@ -14,7 +14,7 @@ use super::{
     error::Result,
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =========================================================================
     // LEA - Load Effective Address
     // =========================================================================

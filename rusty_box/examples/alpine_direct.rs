@@ -352,33 +352,24 @@ fn run_alpine() -> Result<()> {
     // =========================================================================
     #[cfg(feature = "instrumentation")]
     {
-        use rusty_box::cpu::{decoder::Instruction, Instrumentation};
-
-        /// Traces awk_split FS dispatch to find why field splitting fails.
-        /// Counts its own icount locally so callbacks receive only (rip, &Instruction).
-        struct AwkFieldSplitTracer {
-            icount: u64,
-            hits: u32,
-        }
-        impl Instrumentation for AwkFieldSplitTracer {
-            fn before_execution(&mut self, rip: u64, instr: &Instruction) {
-                self.icount += 1;
-                if self.icount < 3_000_000_000 || rip < 0x400000 { return; }
-                if self.hits >= 100 { return; }
-
-                let opcode = instr.get_ia_opcode() as u16;
-                // Match opcodes of interest (CmpEbIb=42, CmpAlib=70, TestAlib=38).
-                if (opcode == 42 || opcode == 70 || opcode == 38) && self.hits < 30 {
-                    eprintln!(
-                        "[INSTR] op={} RIP={:#x} ilen={} icount={}",
-                        opcode, rip, instr.ilen(), self.icount
-                    );
-                    self.hits += 1;
-                }
+        use std::cell::Cell;
+        let icount = Cell::new(0u64);
+        let hits = Cell::new(0u32);
+        let _ = emu.hook_add_code(.., move |rip, instr| {
+            let ic = icount.get() + 1;
+            icount.set(ic);
+            if ic < 3_000_000_000 || rip < 0x400000 { return; }
+            if hits.get() >= 100 { return; }
+            let opcode = instr.get_ia_opcode() as u16;
+            if (opcode == 42 || opcode == 70 || opcode == 38) && hits.get() < 30 {
+                tracing::info!(
+                    "[INSTR] op={} RIP={:#x} ilen={} icount={}",
+                    opcode, rip, instr.ilen(), ic
+                );
+                hits.set(hits.get() + 1);
             }
-        }
-        let _ = emu.cpu_mut().set_instrumentation(Box::new(AwkFieldSplitTracer { icount: 0, hits: 0 }));
-        println!("Instrumentation: AwkFieldSplitTracer installed");
+        });
+        tracing::info!("Instrumentation: AwkFieldSplitTracer installed (as closure hook)");
     }
 
     // Execution loop

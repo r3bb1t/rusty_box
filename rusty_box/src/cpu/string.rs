@@ -25,7 +25,7 @@ use crate::{
     cpu::{icache::BxPageWriteStampTable, rusty_box::MemoryAccessType},
 };
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =========================================================================
     // Helper: Get direction flag (DF)
     // =========================================================================

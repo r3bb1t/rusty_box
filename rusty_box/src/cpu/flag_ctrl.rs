@@ -5,7 +5,7 @@ use super::decoder::BxSegregs;
 use super::eflags::EFlags;
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     pub(super) fn clc(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         self.eflags.remove(EFlags::CF);
         Ok(())

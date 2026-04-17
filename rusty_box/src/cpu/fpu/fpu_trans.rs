@@ -41,7 +41,7 @@ const FLOATX80_ONE: floatx80 = floatx80 {
 // CPU methods: FPU transcendental instructions
 // ---------------------------------------------------------------------------
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ================================================================
     // FSCALE (D9 FD) -- ST(0) = ST(0) * 2^trunc(ST(1))
     // ================================================================

@@ -9,15 +9,9 @@
 //! The registry stores these in per-category `Vec`s. Dispatch walks the
 //! vec and fires every matching hook. The fast path (no hooks) is
 //! short-circuited by `HookMask` one level up.
-
-use alloc::boxed::Box;
-
-use crate::cpu::decoder::Instruction;
-
-use super::types::{
-    BranchEvent, HookHandle, HwInterruptEvent, IoHookEvent, IoHookType, MemHookEvent,
-    MemHookType,
-};
+//!
+//! All hook record structs require `alloc` (they store boxed closures).
+//! [`AddrRange`] is a pure value type and is always available.
 
 /// Closed range `[start, end]` in u64 address space.
 /// Stored in resolved form so the hot path does not re-evaluate
@@ -70,50 +64,66 @@ impl AddrRange<u16> {
 
 // ─────────────────────────── hook record structs ───────────────────────────
 
-/// Code hook: fires before or after each instruction whose RIP is in range.
-pub(crate) struct CodeHook {
-    pub(crate) handle: HookHandle,
-    pub(crate) range: AddrRange<u64>,
-    pub(crate) cb: Box<dyn FnMut(u64, &Instruction) + Send>,
+#[cfg(feature = "instrumentation")]
+mod alloc_hooks {
+    use alloc::boxed::Box;
+
+    use crate::cpu::decoder::Instruction;
+
+    use super::super::types::{
+        BranchEvent, HookHandle, HwInterruptEvent, IoHookEvent, IoHookType, MemHookEvent,
+        MemHookType,
+    };
+    use super::AddrRange;
+
+    /// Code hook: fires before or after each instruction whose RIP is in range.
+    pub(crate) struct CodeHook {
+        pub(crate) handle: HookHandle,
+        pub(crate) range: AddrRange<u64>,
+        pub(crate) cb: Box<dyn FnMut(u64, &Instruction) + Send>,
+    }
+
+    /// Memory access hook.
+    pub(crate) struct MemHook {
+        pub(crate) handle: HookHandle,
+        pub(crate) kind: MemHookType,
+        pub(crate) range: AddrRange<u64>,
+        pub(crate) cb: Box<dyn FnMut(&MemHookEvent) + Send>,
+    }
+
+    /// Software interrupt hook (INT n).
+    pub(crate) struct IntrHook {
+        pub(crate) handle: HookHandle,
+        pub(crate) cb: Box<dyn FnMut(u8) + Send>,
+    }
+
+    /// Hardware interrupt hook.
+    pub(crate) struct HwIntrHook {
+        pub(crate) handle: HookHandle,
+        pub(crate) cb: Box<dyn FnMut(&HwInterruptEvent) + Send>,
+    }
+
+    /// Exception hook.
+    pub(crate) struct ExceptionHook {
+        pub(crate) handle: HookHandle,
+        pub(crate) cb: Box<dyn FnMut(u8, u32) + Send>,
+    }
+
+    /// I/O port hook.
+    pub(crate) struct IoHook {
+        pub(crate) handle: HookHandle,
+        pub(crate) kind: IoHookType,
+        pub(crate) range: AddrRange<u16>,
+        pub(crate) cb: Box<dyn FnMut(&IoHookEvent) + Send>,
+    }
+
+    /// Branch hook.
+    pub(crate) struct BranchHook {
+        pub(crate) handle: HookHandle,
+        pub(crate) range: AddrRange<u64>,
+        pub(crate) cb: Box<dyn FnMut(&BranchEvent) + Send>,
+    }
 }
 
-/// Memory access hook.
-pub(crate) struct MemHook {
-    pub(crate) handle: HookHandle,
-    pub(crate) kind: MemHookType,
-    pub(crate) range: AddrRange<u64>,
-    pub(crate) cb: Box<dyn FnMut(&MemHookEvent) + Send>,
-}
-
-/// Software interrupt hook (INT n).
-pub(crate) struct IntrHook {
-    pub(crate) handle: HookHandle,
-    pub(crate) cb: Box<dyn FnMut(u8) + Send>,
-}
-
-/// Hardware interrupt hook.
-pub(crate) struct HwIntrHook {
-    pub(crate) handle: HookHandle,
-    pub(crate) cb: Box<dyn FnMut(&HwInterruptEvent) + Send>,
-}
-
-/// Exception hook.
-pub(crate) struct ExceptionHook {
-    pub(crate) handle: HookHandle,
-    pub(crate) cb: Box<dyn FnMut(u8, u32) + Send>,
-}
-
-/// I/O port hook.
-pub(crate) struct IoHook {
-    pub(crate) handle: HookHandle,
-    pub(crate) kind: IoHookType,
-    pub(crate) range: AddrRange<u16>,
-    pub(crate) cb: Box<dyn FnMut(&IoHookEvent) + Send>,
-}
-
-/// Branch hook.
-pub(crate) struct BranchHook {
-    pub(crate) handle: HookHandle,
-    pub(crate) range: AddrRange<u64>,
-    pub(crate) cb: Box<dyn FnMut(&BranchEvent) + Send>,
-}
+#[cfg(feature = "instrumentation")]
+pub(crate) use alloc_hooks::*;
