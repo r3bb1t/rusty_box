@@ -67,17 +67,6 @@ struct Pending {
     is_64: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SyscallArgs {
-    nr: u64,
-    a0: u64,
-    a1: u64,
-    a2: u64,
-    a3: u64,
-    a4: u64,
-    a5: u64,
-}
-
 impl StraceTracer {
     fn from_env() -> Self {
         let enabled_from = std::env::var("STRACE_FROM_ICOUNT")
@@ -201,7 +190,8 @@ impl Instrumentation for StraceTracer {
 }
 
 /// Call between batches: pulls any pending syscall out of the tracer, reads
-/// register state, logs a strace-style line. Zero-cost field access.
+/// register state, decodes into a typed `Syscall` enum, and logs a
+/// strace-style line.
 fn drain_syscalls(emu: &mut Emulator<Corei7SkylakeX, StraceTracer>) {
     use rusty_box::cpu::X86Reg;
     let pending = emu.instrumentation_mut().pending.take();
@@ -210,60 +200,54 @@ fn drain_syscalls(emu: &mut Emulator<Corei7SkylakeX, StraceTracer>) {
     // Read the register file now — first safe point after the syscall
     // fired. SYSCALL has swapped GS and loaded LSTAR into RIP, but the
     // kernel handler hasn't run yet so RAX/RDI/... still hold user values.
-    let (nr, a0, a1, a2, a3, a4, a5) = if is_64 {
-        (
-            emu.reg_read(X86Reg::Rax),
+    let args: [u64; 6] = if is_64 {
+        [
             emu.reg_read(X86Reg::Rdi),
             emu.reg_read(X86Reg::Rsi),
             emu.reg_read(X86Reg::Rdx),
             emu.reg_read(X86Reg::R10),
             emu.reg_read(X86Reg::R8),
             emu.reg_read(X86Reg::R9),
-        )
+        ]
     } else {
-        (
-            emu.reg_read(X86Reg::Eax),
+        [
             emu.reg_read(X86Reg::Ebx),
             emu.reg_read(X86Reg::Ecx),
             emu.reg_read(X86Reg::Edx),
             emu.reg_read(X86Reg::Esi),
             emu.reg_read(X86Reg::Edi),
             emu.reg_read(X86Reg::Ebp),
-        )
+        ]
     };
-    let args = SyscallArgs { nr, a0, a1, a2, a3, a4, a5 };
-    let name = if is_64 {
-        syscalls::name_x86_64(nr as u32)
+    let nr = if is_64 { emu.reg_read(X86Reg::Rax) } else { emu.reg_read(X86Reg::Eax) };
+
+    // Decode into typed enum. String args read from guest memory.
+    let mut read_str = |addr: u64| -> String {
+        if addr == 0 { return "NULL".into(); }
+        let mut buf = [0u8; 256];
+        match emu.mem_read(addr, &mut buf) {
+            Ok(()) => {
+                let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                String::from_utf8_lossy(&buf[..end]).into_owned()
+            }
+            Err(_) => format!("{addr:#x}"),
+        }
+    };
+
+    let decoded = if is_64 {
+        syscalls::Syscall::decode_x86_64(nr, args, &mut read_str)
     } else {
-        syscalls::name_x86_32(nr as u32)
+        // 32-bit: use name table fallback (decode_x86_32 not yet implemented)
+        let name = syscalls::name_x86_32(nr as u32);
+        syscalls::Syscall::Other { nr, name, args }
     };
-    let fmt = format_syscall(name, &args, is_64);
-    let line = format!(
-        "[{icount:>12}] {kind:5} {line}",
+
+    tracing::info!(
+        "[{icount:>12}] {kind:5} {decoded}",
         icount = icount,
         kind = if is_64 { "SYS64" } else { "SYS32" },
-        line = fmt,
     );
-    tracing::info!("{}", line);
     emu.instrumentation_mut().last_printed = icount;
-}
-
-fn format_syscall(name: &str, a: &SyscallArgs, is_64: bool) -> String {
-    // Show arg count heuristically — most syscalls use <= 3 args. Always
-    // show nr, and dump all six for the ones we know take them.
-    let width = if is_64 { 16 } else { 8 };
-    format!(
-        "{name:<20} nr={nr:>4}  ({a0:#0w$x}, {a1:#0w$x}, {a2:#0w$x}, {a3:#0w$x}, {a4:#0w$x}, {a5:#0w$x})",
-        name = name,
-        nr = a.nr,
-        a0 = a.a0,
-        a1 = a.a1,
-        a2 = a.a2,
-        a3 = a.a3,
-        a4 = a.a4,
-        a5 = a.a5,
-        w = width + 2,
-    )
 }
 
 // ─────────────────── Port, IRQ, Exception name tables ───────────────────
