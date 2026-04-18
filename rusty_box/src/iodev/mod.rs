@@ -34,6 +34,7 @@ pub mod pic;
 pub mod pit;
 pub mod serial;
 pub mod vga;
+pub mod geforce;
 
 // Re-export device types for convenience
 pub use acpi::BxAcpiCtrl;
@@ -50,6 +51,7 @@ pub use pic::BxPicC;
 pub use pit::BxPitC;
 pub use serial::BxSerialC;
 // BxVgaC is pub(crate) - not exported outside the crate
+pub use geforce::BxGeForceC;
 
 /// Number of I/O ports (0x0000 - 0xFFFF)
 pub const IO_PORTS: usize = 0x10000;
