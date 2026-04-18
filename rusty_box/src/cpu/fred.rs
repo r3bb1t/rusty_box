@@ -448,7 +448,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let raw_cs_selector = (temp_cs & 0xFFFF) as u16;
         let raw_ss_selector = (temp_ss & 0xFFFF) as u16;
 
-        let mut to_long_mode;
+        let to_long_mode;
         let flat;
 
         if ((temp_cs & 0x7FFF) == star_base + 16) && ((temp_ss & 0x7FFF) == star_base + 8) {

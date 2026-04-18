@@ -191,7 +191,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Read a qword from the shadow stack.
     /// Bochs access2.cc shadow_stack_read_qword()
-    pub(super) fn shadow_stack_read_qword(&mut self, offset: u64, cpl: u8) -> Result<u64> {
+    pub(super) fn shadow_stack_read_qword(&mut self, offset: u64, _cpl: u8) -> Result<u64> {
         // Shadow stack reads use the same linear access path as regular reads
         // but with shadow-stack privilege semantics. In our emulator, delegate
         // to the linear read path since TLB fast-path is not modelled.
