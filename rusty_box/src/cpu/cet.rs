@@ -218,30 +218,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        if !self.shadow_stack_enabled(0) {
-            return self.exception(super::cpu::Exception::Ud, 0);
-        }
+        todo!("SETSSBSY: requires CET shadow stack helpers (shadow_stack_atomic_set_busy)")
 
-        let cpl = self.cs_rpl();
-        if cpl > 0 {
-            return self.exception(super::cpu::Exception::Gp, 0);
-        }
-
-        let ssp_laddr = self.msr.ia32_pl_ssp[0];
-        if ssp_laddr & 0x7 != 0 {
-            return self.exception(super::cpu::Exception::Gp, 0);
-        }
-
-        if !self.shadow_stack_atomic_set_busy(ssp_laddr, cpl)? {
-            return self.exception(
-                super::cpu::Exception::Cp,
-                super::cpu::CpExceptionErrorCode::SETSSBSY as u32,
-            );
-        }
-
-        self.set_ssp(ssp_laddr);
-
-        Ok(())
     }
 
     /// CLRSSBSY handler.
@@ -256,29 +234,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        if !self.shadow_stack_enabled(0) {
-            return self.exception(super::cpu::Exception::Ud, 0);
-        }
+        todo!("CLRSSBSY: requires CET shadow stack helpers (shadow_stack_atomic_clear_busy, agen_read_aligned)")
 
-        let cpl = self.cs_rpl();
-        if cpl > 0 {
-            return self.exception(super::cpu::Exception::Gp, 0);
-        }
-
-        let eaddr = self.resolve_addr(instr);
-        let laddr = self.agen_read_aligned(instr.seg(), eaddr, 8)?;
-        if laddr & 0x7 != 0 {
-            return self.exception(super::cpu::Exception::Gp, 0);
-        }
-
-        let invalid_token = self.shadow_stack_atomic_clear_busy(laddr, cpl)?;
-        self.clear_eflags_oszapc();
-        if invalid_token {
-            self.assert_cf();
-        }
-        self.set_ssp(0);
-
-        Ok(())
     }
 
     // =========================================================================

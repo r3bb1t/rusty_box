@@ -1,5 +1,5 @@
 // Auto-generated from Bochs acpi-dsdt.dsl via iasl compiler.
-// DO NOT EDIT — regenerate from DSL source.
+// DO NOT EDIT - regenerate from DSL source.
 // Contains 3782 bytes (0xEC6) of pre-compiled DSDT AML.
 
 const DSDT_AML: &[u8] = &[

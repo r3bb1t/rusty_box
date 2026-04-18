@@ -2935,6 +2935,14 @@ pub enum TypedInstruction {
     TdpbusdTnnnTrmTreg { dst: u8, src1: u8, src2: u8 },
     TdpbuudTnnnTrmTreg { dst: u8, src1: u8, src2: u8 },
     Tdpfp16psTnnnTrmTreg { dst: u8, src1: u8, src2: u8 },
+    Tdpbf8psTnnnTrmTreg { dst: u8, src1: u8, src2: u8 },
+    Tdphf8psTnnnTrmTreg { dst: u8, src1: u8, src2: u8 },
+    Tdpbhf8psTnnnTrmTreg { dst: u8, src1: u8, src2: u8 },
+    Tdphbf8psTnnnTrmTreg { dst: u8, src1: u8, src2: u8 },
+    Erets,
+    Eretu,
+    LkgsEwR { src: GprIndex },
+    LkgsEwM { mem: MemoryOperand },
     TileloaddTnnnMdq { dst: u8, src: MemoryOperand },
     TileloaddrsTnnnMdq { dst: u8, src: MemoryOperand },
     Tileloaddrst1TnnnMdq { dst: u8, src: MemoryOperand },
@@ -11490,6 +11498,13 @@ impl Instruction {
             O::Gf2p8mulbVdqWdq => simd!(Gf2p8mulbVdqWdqR, Gf2p8mulbVdqWdqM, self),
             O::VphsubdqVdqWdq => simd!(VphsubdqVdqWdqR, VphsubdqVdqWdqM, self),
             O::KtestdKgdKed => T::KtestdKgdKed { dst: self.operands.dst, src: self.operands.src1 },
+            O::Tdpbf8psTnnnTrmTreg => T::Tdpbf8psTnnnTrmTreg { dst: self.operands.dst, src1: self.operands.src2, src2: self.operands.src1 },
+            O::Tdphf8psTnnnTrmTreg => T::Tdphf8psTnnnTrmTreg { dst: self.operands.dst, src1: self.operands.src2, src2: self.operands.src1 },
+            O::Tdpbhf8psTnnnTrmTreg => T::Tdpbhf8psTnnnTrmTreg { dst: self.operands.dst, src1: self.operands.src2, src2: self.operands.src1 },
+            O::Tdphbf8psTnnnTrmTreg => T::Tdphbf8psTnnnTrmTreg { dst: self.operands.dst, src1: self.operands.src2, src2: self.operands.src1 },
+            O::Erets => T::Erets,
+            O::Eretu => T::Eretu,
+            O::LkgsEw => if self.mod_c0() { T::LkgsEwR { src: self.src1_reg() } } else { T::LkgsEwM { mem: self.memory_operand() } },
         }
     }
 }

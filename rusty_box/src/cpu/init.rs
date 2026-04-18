@@ -251,7 +251,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.cr2 = 0;
         self.cr3 = 0;
 
-        self.cr4.set(0);
+        self.cr4.set_val(0);
 
         self.cr4_suppmask = self.get_cr4_allow_mask();
 

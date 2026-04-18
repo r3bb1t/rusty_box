@@ -1121,7 +1121,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.check_perm_read(laddr, paddr_hit, 1)?;
             let v = unsafe { *host_at_page_offset(host, laddr) };
             #[cfg(feature = "instrumentation")]
-        let _buf = [v]; self.on_lin_access(laddr, paddr_hit, &_buf, super::instrumentation::MemAccessRW::Read);
+            { let _buf = [v]; self.on_lin_access(laddr, paddr_hit, &_buf, super::instrumentation::MemAccessRW::Read); }
             return Ok(v);
         }
         let paddr = self.translate_data_read(laddr)?;
@@ -1133,7 +1133,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let v = self.mem_read_byte(paddr);
         #[cfg(feature = "instrumentation")]
-        let _buf = [v]; self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Read);
+            { let _buf = [v]; self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Read); }
         Ok(v)
     }
 
@@ -1153,7 +1153,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let v = read_unaligned_u16(ptr);
             #[cfg(feature = "instrumentation")]
-        let _buf = v.to_le_bytes(); self.on_lin_access(laddr, paddr_hit, &_buf, super::instrumentation::MemAccessRW::Read);
+            { let _buf = v.to_le_bytes(); self.on_lin_access(laddr, paddr_hit, &_buf, super::instrumentation::MemAccessRW::Read); }
             return Ok(v);
         }
         let page_offset = laddr & 0xFFF;
@@ -1167,7 +1167,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             let v = self.mem_read_word(paddr);
             #[cfg(feature = "instrumentation")]
-        let _buf = v.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Read);
+            { let _buf = v.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Read); }
             Ok(v)
         } else {
             let p0 = self.translate_data_read(laddr)?;
@@ -1194,7 +1194,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let v = read_unaligned_u32(ptr);
             #[cfg(feature = "instrumentation")]
-        let _buf = v.to_le_bytes(); self.on_lin_access(laddr, paddr_hit, &_buf, super::instrumentation::MemAccessRW::Read);
+            { let _buf = v.to_le_bytes(); self.on_lin_access(laddr, paddr_hit, &_buf, super::instrumentation::MemAccessRW::Read); }
             return Ok(v);
         }
         let page_offset = laddr & 0xFFF;
@@ -1208,7 +1208,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             let v = self.mem_read_dword(paddr);
             #[cfg(feature = "instrumentation")]
-        let _buf = v.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Read);
+            { let _buf = v.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Read); }
             Ok(v)
         } else {
             let mut buf = [0u8; 4];
@@ -1236,7 +1236,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let v = read_unaligned_u64(ptr);
             #[cfg(feature = "instrumentation")]
-        let _buf = v.to_le_bytes(); self.on_lin_access(laddr, paddr_hit, &_buf, super::instrumentation::MemAccessRW::Read);
+            { let _buf = v.to_le_bytes(); self.on_lin_access(laddr, paddr_hit, &_buf, super::instrumentation::MemAccessRW::Read); }
             return Ok(v);
         }
         let page_offset = laddr & 0xFFF;
@@ -1250,7 +1250,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             let v = self.mem_read_qword(paddr);
             #[cfg(feature = "instrumentation")]
-        let _buf = v.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Read);
+            { let _buf = v.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Read); }
             Ok(v)
         } else {
             let mut buf = [0u8; 8];
@@ -1276,7 +1276,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.i_cache.smc_write_check(paddr, 1);
             unsafe { *host_at_page_offset_mut(host, laddr) = val };
             #[cfg(feature = "instrumentation")]
-        let _buf = [val]; self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write);
+            { let _buf = [val]; self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write); }
             return Ok(());
         }
         let paddr = self.translate_data_write(laddr)?;
@@ -1289,7 +1289,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.i_cache.smc_write_check(paddr, 1);
         self.mem_write_byte(paddr, val);
         #[cfg(feature = "instrumentation")]
-        let _buf = [val]; self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write);
+        { let _buf = [val]; self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write); }
         Ok(())
     }
 
@@ -1309,7 +1309,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u16(ptr, val);
             #[cfg(feature = "instrumentation")]
-        let _buf = val.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write);
+            { let _buf = val.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write); }
             return Ok(());
         }
         let page_offset = laddr & 0xFFF;
@@ -1324,7 +1324,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.i_cache.smc_write_check(paddr, 2);
             self.mem_write_word(paddr, val);
             #[cfg(feature = "instrumentation")]
-        let _buf = val.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write);
+            { let _buf = val.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write); }
         } else {
             let bytes = val.to_le_bytes();
             let p0 = self.translate_data_write(laddr)?;
@@ -1359,7 +1359,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u32(ptr, val);
             #[cfg(feature = "instrumentation")]
-        let _buf = val.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write);
+            { let _buf = val.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write); }
             return Ok(());
         }
         let page_offset = laddr & 0xFFF;
@@ -1374,7 +1374,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.i_cache.smc_write_check(paddr, 4);
             self.mem_write_dword(paddr, val);
             #[cfg(feature = "instrumentation")]
-        let _buf = val.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write);
+            { let _buf = val.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write); }
         } else {
             let bytes = val.to_le_bytes();
             for i in 0..4u64 {
@@ -1404,7 +1404,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u64(ptr, val);
             #[cfg(feature = "instrumentation")]
-        let _buf = val.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write);
+            { let _buf = val.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write); }
             return Ok(());
         }
         let page_offset = laddr & 0xFFF;
@@ -1419,7 +1419,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.i_cache.smc_write_check(paddr, 8);
             self.mem_write_qword(paddr, val);
             #[cfg(feature = "instrumentation")]
-        let _buf = val.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write);
+            { let _buf = val.to_le_bytes(); self.on_lin_access(laddr, paddr, &_buf, super::instrumentation::MemAccessRW::Write); }
         } else {
             let bytes = val.to_le_bytes();
             for i in 0..8u64 {

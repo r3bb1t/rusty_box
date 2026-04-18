@@ -237,6 +237,8 @@ impl<'c> BxMemC<'c> {
             }
         }
 }
+    }
+
 
 impl BxMemC<'_> {
     /// Reset memory state for UEFI support.

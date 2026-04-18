@@ -1118,7 +1118,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Set up CS as a flat code segment with the given DPL and long-mode flag.
     /// Calls handle_cpu_mode_change(), update_fetch_mode_mask(), and
     /// handle_alignment_check() as the C++ implementation does.
-    fn setup_flat_cs(&mut self, dpl: u8, long_mode: bool) {
+    pub(super) fn setup_flat_cs(&mut self, dpl: u8, long_mode: bool) {
         use super::decoder::BxSegregs;
         use super::descriptor::{
             SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
@@ -1144,7 +1144,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Set up SS as a flat data segment with the given DPL.
-    fn setup_flat_ss(&mut self, dpl: u8) {
+    pub(super) fn setup_flat_ss(&mut self, dpl: u8) {
         use super::decoder::BxSegregs;
         use super::descriptor::{
             SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,

@@ -248,7 +248,7 @@ impl BxCr4 {
         self.bits()
     }
     #[inline]
-    pub(super) fn set(&mut self, val: u64) {
+    pub(super) fn set_val(&mut self, val: u64) {
         *self = Self::from_bits_retain(val);
     }
     #[inline]
@@ -257,7 +257,7 @@ impl BxCr4 {
     }
     #[inline]
     pub(super) fn set32(&mut self, val: u32) {
-        self.set(val as u64);
+        self.set_val(val as u64);
     }
 }
 
@@ -986,7 +986,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         let old_cr4 = self.cr4.get();
-        self.cr4.set(val_32);
+        self.cr4.set_val(val_32);
 
         // Bochs: TLB flush only if paging-related bits changed
         // BX_CR4_FLUSH_TLB_MASK = PSE|PAE|PGE|PCIDE|SMEP|SMAP

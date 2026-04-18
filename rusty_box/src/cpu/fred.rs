@@ -240,7 +240,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Update registers defining context
         self.set_rip(new_rip);
         self.eflags = EFlags::from_bits_retain(0x2); // Clear EFLAGS, bit 1 always set
-        self.clear_eflags_oszapc();
+        self.eflags.remove(EFlags::OSZAPC);
         self.set_rsp(new_rsp.wrapping_sub(64));
         self.set_csl(new_csl);
 
@@ -331,7 +331,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         let pending_db = (temp_ss >> 17) & 0x1 != 0;
-        if pending_db && self.get_tf() != 0 {
+        if pending_db && self.eflags.contains(EFlags::TF) {
             self.debug_trap |= Self::BX_DEBUG_SINGLE_STEP_BIT;
             self.async_event = 1;
         }
@@ -373,7 +373,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Skip error code
         self.set_rsp(self.rsp().wrapping_add(8));
 
-        let new_rip = self.pop_64()?;
+        let mut new_rip = self.pop_64()?;
         let temp_cs = self.pop_64()?;
         let new_rflags = self.pop_64()?;
         let mut new_rsp = self.pop_64()?;
@@ -421,7 +421,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             if cs_selector.rpl < cpl {
                 tracing::error!("ERETU: return selector RPL < CPL");
-                return self.exception(Exception::Gp, (raw_cs_selector & 0xFFFC) as u32);
+                return self.exception(Exception::Gp, (raw_cs_selector & 0xFFFC) as u16);
             }
 
             self.check_cs(&cs_descriptor, raw_cs_selector, 0, cs_selector.rpl)?;
@@ -454,8 +454,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // CET shadow stack checks (stubbed)
             // TODO: Full CET shadow stack integration for ERETU
 
+            let dpl = cs_descriptor.dpl;
             let mut cs_desc_mut = cs_descriptor;
-            self.load_cs(&mut cs_selector, &mut cs_desc_mut, cs_descriptor.dpl)?;
+            self.load_cs(&mut cs_selector, &mut cs_desc_mut, dpl)?;
 
             if (raw_ss_selector & 0xFFFC) != 0 {
                 self.load_ss(&mut ss_selector, &mut ss_descriptor, cs_selector.rpl)?;
@@ -478,7 +479,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             // Event-related state
             let pending_db = (temp_ss >> 17) & 0x1 != 0;
-            if pending_db && self.get_tf() != 0 {
+            if pending_db && self.eflags.contains(EFlags::TF) {
                 self.debug_trap |= Self::BX_DEBUG_SINGLE_STEP_BIT;
                 self.async_event = 1;
             }
@@ -523,7 +524,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Event-related state
         let pending_db = (temp_ss >> 17) & 0x1 != 0;
-        if pending_db && self.get_tf() != 0 {
+        if pending_db && self.eflags.contains(EFlags::TF) {
             self.debug_trap |= Self::BX_DEBUG_SINGLE_STEP_BIT;
             self.async_event = 1;
         }
