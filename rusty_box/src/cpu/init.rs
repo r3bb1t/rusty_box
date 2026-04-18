@@ -342,7 +342,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         self.ext = false;
-        self.last_exception_type = 0;
+        self.last_exception_type = -1; // BX_ET_NONE
 
         // invalidate the code prefetch queue
         self.eip_page_bias = 0;

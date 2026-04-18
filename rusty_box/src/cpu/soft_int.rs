@@ -27,6 +27,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn interrupt(
         &mut self,
         vector: u8,
+        event_type: super::exception::InterruptType,
         soft_int: bool,
         push_error: bool,
         error_code: u16,
@@ -79,7 +80,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Long mode: dispatch through 16-byte IDT entries
             // Protected mode (or V86 non-redirected): dispatch through 8-byte IDT entries
             let delivery_result = if self.long_mode() {
-                self.long_mode_int(vector, soft_int, push_error, error_code)
+                if self.cr4.fred() {
+                    self.fred_event_delivery(vector, event_type, error_code)
+                } else {
+                    self.long_mode_int(vector, soft_int, push_error, error_code)
+                }
             } else {
                 self.protected_mode_int(vector, soft_int, push_error, error_code)
             };
@@ -124,7 +129,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vector = instr.ib();
         tracing::trace!("INT {:#04x}", vector);
         // BX_SOFTWARE_INTERRUPT → soft_int=true, no error code
-        self.interrupt(vector, true, false, 0)
+        self.interrupt(vector, super::exception::InterruptType::SoftwareInterrupt, true, false, 0)
     }
 
     /// INT3 - Breakpoint interrupt (vector 3)
@@ -132,7 +137,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn int3(&mut self, _instr: &Instruction) -> super::Result<()> {
         tracing::trace!("INT3 (breakpoint)");
         // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code
-        self.interrupt(3, true, false, 0)
+        self.interrupt(3, super::exception::InterruptType::SoftwareException, true, false, 0)
     }
 
     /// INTO - Interrupt on overflow (vector 4, only if OF=1)
@@ -141,7 +146,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.get_of() {
             tracing::trace!("INTO: overflow detected, calling INT 4");
             // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code
-            return self.interrupt(4, true, false, 0);
+            return self.interrupt(4, super::exception::InterruptType::SoftwareException, true, false, 0);
         }
         Ok(())
     }
@@ -159,7 +164,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // BX_PRIVILEGED_SOFTWARE_INTERRUPT → soft_int=false (privileged bypass DPL check)
         // Bochs sets EXT=1 before calling interrupt() for INT1
         self.ext = true;
-        self.interrupt(1, false, false, 0)
+        self.interrupt(1, super::exception::InterruptType::PrivilegedSoftwareInterrupt, false, false, 0)
     }
 
     // =========================================================================

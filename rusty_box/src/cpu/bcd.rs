@@ -18,7 +18,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Set CF flag (bit 0)
-    fn set_cf(&mut self, val: bool) {
+    pub(super) fn set_cf(&mut self, val: bool) {
         if val {
             self.eflags.insert(EFlags::CF);
         } else {

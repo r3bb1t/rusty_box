@@ -521,7 +521,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     pub(super) cpu_state_use_ok: u32, // format of BX_FETCH_MODE_*
 
     // Bochs uses jmp_buf for exception longjmp; we use CpuLoopRestart instead
-    pub(super) last_exception_type: u32,
+    pub(super) last_exception_type: i32,
 
     pub(super) cpuloop_stack_anchor: Option<&'c [u8]>,
 
@@ -1620,7 +1620,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // - BadVector → exception() recovery
         // - mode dispatch (real vs protected)
         // soft_int=false, no error code for external IRQs
-        let result = self.interrupt(vector, false, false, 0);
+        let result = self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, false, 0);
 
         // Commit prev_rip after successful delivery (Bochs event.cc)
         if result.is_ok() {

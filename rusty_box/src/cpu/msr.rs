@@ -40,6 +40,20 @@ pub const BX_MSR_PMC7: u32 = 0x0C8;
 pub const BX_MSR_PERFEVTSEL0: u32 = 0x186;
 pub const BX_MSR_PERFEVTSEL7: u32 = 0x18D;
 
+/// IA32_FRED_RSP0..RSP3 (FRED Return Stack Pointers)
+pub const BX_MSR_IA32_FRED_RSP0: u32 = 0x1CC;
+pub const BX_MSR_IA32_FRED_RSP3: u32 = 0x1CF;
+
+/// IA32_FRED_STKLVLS (FRED Stack Levels)
+pub const BX_MSR_IA32_FRED_STKLVLS: u32 = 0x1D0;
+
+/// IA32_FRED_SSP1..SSP3 (FRED Shadow Stack Pointers)
+pub const BX_MSR_IA32_FRED_SSP1: u32 = 0x1D1;
+pub const BX_MSR_IA32_FRED_SSP3: u32 = 0x1D3;
+
+/// IA32_FRED_CONFIG
+pub const BX_MSR_IA32_FRED_CONFIG: u32 = 0x1D4;
+
 /// SYSENTER_CS
 pub const BX_MSR_SYSENTER_CS: u32 = 0x174;
 

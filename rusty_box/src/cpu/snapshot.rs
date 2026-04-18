@@ -255,7 +255,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.in_smm = d[off] != 0; off += 1;
         self.ext = d[off] != 0; off += 1;
         self.nmi_unblocking_iret = d[off] != 0; off += 1;
-        self.last_exception_type = u32_at(d, &mut off);
+        self.last_exception_type = i32_at(d, &mut off);
         self.smbase = u32_at(d, &mut off);
         self.alignment_check_mask = u32_at(d, &mut off);
         self.a20_mask = u64_at(d, &mut off);
@@ -334,6 +334,12 @@ fn u16_at(d: &[u8], off: &mut usize) -> u16 {
 
 fn u32_at(d: &[u8], off: &mut usize) -> u32 {
     let v = u32::from_le_bytes(d[*off..*off + 4].try_into().unwrap_or_else(|_| unreachable!("slice is exactly 4 bytes")));
+    *off += 4;
+    v
+}
+
+fn i32_at(d: &[u8], off: &mut usize) -> i32 {
+    let v = i32::from_le_bytes(d[*off..*off + 4].try_into().unwrap_or_else(|_| unreachable!("slice is exactly 4 bytes")));
     *off += 4;
     v
 }

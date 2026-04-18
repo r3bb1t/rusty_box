@@ -30,6 +30,9 @@ enum ExceptionType {
     DoubleFault = 10,
 }
 
+/// Sentinel value for "no pending exception" (Bochs BX_ET_NONE = -1).
+const BX_ET_NONE: i32 = -1;
+
 // Match Bochs `is_exception_OK[3][3]` (cpu/exception.cc..855).
 // Indexes are {Benign, Contributory, PageFault}.
 const IS_EXCEPTION_OK: [[bool; 3]; 3] = [
@@ -304,7 +307,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Mirror Bochs cpu/exception.cc..1052.
         let info = &EXCEPTIONS_INFO[vector as usize];
-        let exception_type = info.exception_type as u32;
+        let exception_type = info.exception_type as i32;
         let exception_class = info.exception_class;
 
         if matches!(exception_class, ExceptionClass::Fault) {
@@ -322,7 +325,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
 
             // Triple fault: 3rd exception with no resolution after #DF.
-            if self.last_exception_type == ExceptionType::DoubleFault as u32 {
+            if self.last_exception_type == ExceptionType::DoubleFault as i32 {
                 let rip = self.rip();
                 let cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
                 tracing::error!("TRIPLE FAULT at RIP={:#x} CS={:#x} vector={:?} error_code={:#x} icount={} CR0={:#x} CR3={:#x} CR2={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
@@ -349,7 +352,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.ext = true;
 
         // If we've already had 1st exception, see if 2nd causes a Double Fault.
-        if exception_type != ExceptionType::DoubleFault as u32 {
+        if self.last_exception_type != BX_ET_NONE && exception_type != ExceptionType::DoubleFault as i32 {
             let last = self.last_exception_type as usize;
             let newt = exception_type as usize;
             if last < 3 && newt < 3 && !IS_EXCEPTION_OK[last][newt] {
@@ -368,6 +371,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return self.exception(Exception::Df, 0);
             }
         }
+
+        // FRED: record exception event info before delivery
+        self.set_fred_event_info_and_data(
+            vector as u8,
+            InterruptType::HardwareException,
+            self.last_exception_type != BX_ET_NONE,
+            0,
+        );
 
         self.last_exception_type = exception_type;
 
@@ -418,7 +429,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // another exception (like IDT entry invalid → #GP). Handle it like Bochs does:
             // call exception() recursively so double-fault detection runs normally.
             let delivery_result = if self.long_mode() {
-                self.long_mode_int(vector_u8, false, push_error, error_code)
+                if self.cr4.fred() {
+                    self.fred_event_delivery(vector_u8, InterruptType::HardwareException, error_code)
+                } else {
+                    self.long_mode_int(vector_u8, false, push_error, error_code)
+                }
             } else {
                 self.protected_mode_int(vector_u8, false, push_error, error_code)
             };
@@ -454,7 +469,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.ext = false;
 
         // error resolved
-        self.last_exception_type = 0;
+        self.last_exception_type = BX_ET_NONE;
+
+        // FRED: clear event info after exception resolved
+        self.fred_event_info = 0;
+        self.fred_event_data = 0;
 
         // Bochs longjmps back to the main decode loop after delivering the exception.
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;

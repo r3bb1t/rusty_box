@@ -99,7 +99,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.mask_event(Self::BX_EVENT_NMI); // Block further NMIs until IRET
             self.activity_state = CpuActivityState::Active;
             self.ext = true;
-            let result = self.interrupt(2, false, false, 0); // NMI vector = 2
+            let result = self.interrupt(2, super::exception::InterruptType::Nmi, false, false, 0); // NMI vector = 2
             self.ext = false;
             match result {
                 Ok(()) => {
@@ -133,7 +133,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     }
                     self.activity_state = CpuActivityState::Active;
                     self.ext = true;
-                    let result = self.interrupt(vector, false, false, 0);
+                    let result = self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, false, 0);
                     self.ext = false;
                     delivered = true;
                     match result {
@@ -167,7 +167,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     // Mark as external interrupt (EXT=1)
                     self.ext = true;
                     // Deliver interrupt (matches Bochs interrupt() call in event.cc)
-                    let result = self.interrupt(vector, false, false, 0);
+                    let result = self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, false, 0);
                     self.ext = false;
                     match result {
                         Ok(()) => {

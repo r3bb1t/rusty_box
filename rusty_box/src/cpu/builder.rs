@@ -115,7 +115,7 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             ignore_bad_msrs: true, // Bochs default: silently ignore unknown MSRs
             a20_mask: 0xFFFF_FFFF_FFFF_FFFF,
             cpu_state_use_ok: Default::default(),
-            last_exception_type: Default::default(),
+            last_exception_type: -1, // BX_ET_NONE
             cpuloop_stack_anchor: Default::default(),
             perf_icache_miss: 0,
             perf_prefetch: 0,

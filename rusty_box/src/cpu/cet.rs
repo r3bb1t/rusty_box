@@ -8,6 +8,7 @@
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 use super::decoder::BxSegregs;
+use super::eflags::EFlags;
 use super::Result;
 
 // CET control MSR bit constants — matches Bochs cet.cc
@@ -21,8 +22,26 @@ pub(super) const CET_SUPPRESS_DIS: u64 = 1 << 5;
 pub(super) const CET_SUPPRESS_INDIRECT_BRANCH_TRACKING: u64 = 1 << 10;
 pub(super) const CET_WAIT_FOR_ENBRANCH: u64 = 1 << 11;
 
+// #CP exception error codes — matches Bochs cpu.h BxCPException enum
+pub(super) const BX_CP_NEAR_RET: u16 = 1;
+pub(super) const BX_CP_FAR_RET_IRET: u16 = 2;
+pub(super) const BX_CP_ENDBRANCH: u16 = 3;
+pub(super) const BX_CP_RSTORSSP: u16 = 4;
+pub(super) const BX_CP_SETSSBSY: u16 = 5;
+
 /// Reserved bits mask for CET control validation — bits 6-9
 const CET_RESERVED_BITS: u64 = 0x3c0;
+
+/// Canonicalize a 64-bit address (sign-extend bit 47).
+/// Bochs cpu.h CanonicalizeAddress()
+#[inline]
+pub(super) fn canonicalize_address(addr: u64) -> u64 {
+    if addr & 0x0000_8000_0000_0000 != 0 {
+        addr | 0xFFFF_0000_0000_0000
+    } else {
+        addr & 0x0000_FFFF_FFFF_FFFF
+    }
+}
 
 /// Check if a CET control value has invalid bit combinations.
 /// Matches Bochs cet.cc is_invalid_cet_control()
@@ -167,6 +186,118 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // =========================================================================
+    // Shadow stack memory operations — Bochs access2.cc
+    // =========================================================================
+
+    /// Read a qword from the shadow stack.
+    /// Bochs access2.cc shadow_stack_read_qword()
+    pub(super) fn shadow_stack_read_qword(&mut self, offset: u64, cpl: u8) -> Result<u64> {
+        // Shadow stack reads use the same linear access path as regular reads
+        // but with shadow-stack privilege semantics. In our emulator, delegate
+        // to the linear read path since TLB fast-path is not modelled.
+        self.read_linear_qword(BxSegregs::Ss, offset)
+    }
+
+    /// Write a dword to the shadow stack.
+    /// Bochs access2.cc shadow_stack_write_dword()
+    pub(super) fn shadow_stack_write_dword(&mut self, offset: u64, _cpl: u8, data: u32) -> Result<()> {
+        self.write_linear_dword(BxSegregs::Ss, offset, data)
+    }
+
+    /// Write a qword to the shadow stack.
+    /// Bochs access2.cc shadow_stack_write_qword()
+    pub(super) fn shadow_stack_write_qword(&mut self, offset: u64, _cpl: u8, data: u64) -> Result<()> {
+        self.write_linear_qword(BxSegregs::Ss, offset, data)
+    }
+
+    /// Pop a qword from the shadow stack: read SSP, then SSP += 8.
+    /// Bochs stack.h shadow_stack_pop_64()
+    pub(super) fn shadow_stack_pop_64(&mut self) -> Result<u64> {
+        let ssp = self.ssp();
+        let cpl = self.cs_rpl();
+        let val = self.shadow_stack_read_qword(ssp, cpl)?;
+        self.set_ssp(ssp + 8);
+        Ok(val)
+    }
+
+    /// Atomic compare-exchange on shadow stack (locked RMW).
+    /// Bochs access2.cc shadow_stack_lock_cmpxchg8b()
+    /// Returns true if the exchange succeeded.
+    fn shadow_stack_lock_cmpxchg8b(
+        &mut self,
+        offset: u64,
+        cpl: u8,
+        data: u64,
+        expected: u64,
+    ) -> Result<bool> {
+        let val = self.shadow_stack_read_qword(offset, cpl)?;
+        if val == expected {
+            self.shadow_stack_write_qword(offset, cpl, data)?;
+            Ok(true)
+        } else {
+            self.shadow_stack_write_qword(offset, cpl, val)?;
+            Ok(false)
+        }
+    }
+
+    /// Atomically set the busy bit on a shadow stack token.
+    /// Bochs access2.cc shadow_stack_atomic_set_busy()
+    /// Returns true on success.
+    pub(super) fn shadow_stack_atomic_set_busy(&mut self, offset: u64, cpl: u8) -> Result<bool> {
+        let expected = if self.long64_mode() { offset } else { offset & 0xFFFF_FFFF };
+        self.shadow_stack_lock_cmpxchg8b(offset, cpl, offset | 0x1, expected)
+    }
+
+    /// Atomically clear the busy bit on a shadow stack token.
+    /// Returns the raw cmpxchg result: true if the exchange matched.
+    /// Bochs: shadow_stack_atomic_clear_busy (access2.cc)
+    pub(super) fn shadow_stack_atomic_clear_busy(&mut self, offset: u64, cpl: u8) -> Result<bool> {
+        self.shadow_stack_lock_cmpxchg8b(offset, cpl, offset, offset | 0x1)
+    }
+
+    /// Restore shadow stack state from a FRED/IRET shadow stack frame.
+    /// Bochs ret_far.cc shadow_stack_restore(raw_cs_selector, return_lip)
+    ///
+    /// Pops three qwords (prevSSP, shadowLIP, shadowCS), validates them,
+    /// and returns prevSSP.
+    pub(super) fn shadow_stack_restore_lip(&mut self, raw_cs_selector: u16, return_lip: u64) -> Result<u64> {
+        let ssp = self.ssp();
+        if ssp & 0x7 != 0 {
+            tracing::error!("shadow_stack_restore: SSP must be 8-byte aligned");
+            self.exception(super::cpu::Exception::Cp, BX_CP_FAR_RET_IRET)?;
+            unreachable!();
+        }
+
+        let prev_ssp = self.shadow_stack_pop_64()?;
+        let shadow_lip = self.shadow_stack_pop_64()?;
+        let shadow_cs = self.shadow_stack_pop_64()?;
+
+        if raw_cs_selector as u64 != shadow_cs {
+            tracing::error!("shadow_stack_restore: CS mismatch");
+            self.exception(super::cpu::Exception::Cp, BX_CP_FAR_RET_IRET)?;
+            unreachable!();
+        }
+        if return_lip != shadow_lip {
+            tracing::error!("shadow_stack_restore: LIP mismatch");
+            self.exception(super::cpu::Exception::Cp, BX_CP_FAR_RET_IRET)?;
+            unreachable!();
+        }
+        if prev_ssp & 0x3 != 0 {
+            tracing::error!("shadow_stack_restore: prevSSP must be 4-byte aligned");
+            self.exception(super::cpu::Exception::Cp, BX_CP_FAR_RET_IRET)?;
+            unreachable!();
+        }
+        if !self.long64_mode() && (prev_ssp >> 32) != 0 {
+            tracing::error!("shadow_stack_restore: prevSSP must be 32-bit in 32-bit mode");
+            self.exception(super::cpu::Exception::Gp, 0)?;
+            unreachable!();
+        }
+
+        Ok(prev_ssp)
+    }
+
+
+    // =========================================================================
     // ENDBR32 / ENDBR64 instruction handlers — Bochs cet.cc
     // =========================================================================
 
@@ -218,8 +349,30 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        todo!("SETSSBSY: requires CET shadow stack helpers (shadow_stack_atomic_set_busy)")
+        if !self.shadow_stack_enabled(0) {
+            tracing::error!("SETSSBSY: shadow stack not enabled");
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
 
+        let cpl = self.cs_rpl();
+        if cpl > 0 {
+            tracing::error!("SETSSBSY: CPL != 0");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let ssp_laddr = self.msr.ia32_pl_ssp[0];
+        if ssp_laddr & 0x7 != 0 {
+            tracing::error!("SETSSBSY: SSP_LA not aligned to 8 bytes boundary");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        if !self.shadow_stack_atomic_set_busy(ssp_laddr, cpl)? {
+            tracing::error!("SETSSBSY: failed to set SSP busy bit");
+            return self.exception(super::cpu::Exception::Cp, BX_CP_SETSSBSY);
+        }
+
+        self.set_ssp(ssp_laddr);
+        Ok(())
     }
 
     /// CLRSSBSY handler.
@@ -234,8 +387,37 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        todo!("CLRSSBSY: requires CET shadow stack helpers (shadow_stack_atomic_clear_busy, agen_read_aligned)")
+        if !self.shadow_stack_enabled(0) {
+            tracing::error!("CLRSSBSY: shadow stack not enabled");
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
 
+        let cpl = self.cs_rpl();
+        if cpl > 0 {
+            tracing::error!("CLRSSBSY: CPL != 0");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = if self.long64_mode() {
+            self.get_laddr64(seg as usize, eaddr)
+        } else {
+            self.agen_read32(seg, eaddr as u32, 8)? as u64
+        };
+        if laddr & 0x7 != 0 {
+            tracing::error!("CLRSSBSY: SSP_LA not aligned to 8 bytes boundary");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let invalid_token = self.shadow_stack_atomic_clear_busy(laddr, cpl)?;
+        self.eflags.remove(EFlags::OSZAPC);
+        if invalid_token {
+            self.set_cf(true);
+        }
+        self.set_ssp(0);
+
+        Ok(())
     }
 
     // =========================================================================

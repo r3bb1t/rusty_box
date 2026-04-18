@@ -1540,13 +1540,25 @@ impl BxVgaC {
             line_offset = (TEXT_COLS * BYTES_PER_CHAR) as u16;
         }
 
-        let line_compare = 0; // TODO: Calculate from CRTC registers if needed
+        let line_compare = {
+            let lc_low = self.crtc_regs[CRTC_LINE_COMPARE] as u16;
+            let lc_bit8 = if self.crtc_regs[CRTC_OVERFLOW] & 0x10 != 0 { 0x100u16 } else { 0 };
+            let lc_bit9 = if self.crtc_regs[CRTC_MAX_SCAN_LINE] & 0x40 != 0 { 0x200u16 } else { 0 };
+            lc_low | lc_bit8 | lc_bit9
+        };
         let h_panning = self.attr_regs[ATTR_REG_HORIZ_PIXEL_PAN] & ATTR_HPANNING_MASK;
         let v_panning = self.crtc_regs[CRTC_PRESET_ROW_SCAN] & CRTC_PRESET_ROW_MASK;
         let line_graphics = (self.attr_regs[ATTR_REG_MODE_CONTROL] & ATTR_MODE_LINE_GRAPHICS) != 0;
         let split_hpanning =
             (self.attr_regs[ATTR_REG_MODE_CONTROL] & ATTR_MODE_SPLIT_HPANNING) != 0;
-        let blink_flags = 0u8; // TODO: Calculate from attribute controller
+        let blink_flags = {
+            let mut flags = 0u8;
+            // Bit 3 of attr mode control register = blink/intensity select
+            if self.attr_regs[ATTR_REG_MODE_CONTROL] & 0x08 != 0 {
+                flags |= 1; // BX_TEXT_BLINK_MODE
+            }
+            flags
+        };
 
         // Build palette (matching vgacore.cc)
         let mut actl_palette = [0u8; 16];
@@ -2119,8 +2131,9 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
 //   0x400-0x4FF: VBE EDID data (currently unimplemented)
 //   0x500-0x515: Bochs VBE extension registers (PCI_VGA_BOCHS_OFFSET)
 //
-// TODO: Register BAR2 in PCI init once PCI BAR infrastructure is available:
-//   init_bar_mem(2, PCI_VGA_MMIO_SIZE, vbe_mmio_read, vbe_mmio_write)
+// BAR2 is registered via I/O port dispatch, not PCI BAR init.
+// PCI BAR infrastructure is not implemented; MMIO access is handled
+// through the vbe_mmio_read / vbe_mmio_write methods directly.
 
 impl BxVgaC {
     /// MMIO read handler for BAR2.
@@ -2249,10 +2262,10 @@ impl BxVgaC {
     /// Handle a VBE data-port write (port 0x01CF or MMIO-dispatched).
     ///
     /// Matches the Bochs `vbe_write` / `vbe_write_handler` logic.
-    /// TODO: Full implementation — currently a stub that stores basic register values.
     fn vbe_write(&mut self, value: u32, _io_len: u8) {
         let index = self.vbe.curindex;
         let value16 = value as u16;
+        let mut needs_update = false;
 
         match index {
             VBE_DISPI_INDEX_ID => {
@@ -2262,32 +2275,194 @@ impl BxVgaC {
                 }
             }
             VBE_DISPI_INDEX_XRES => {
-                self.vbe.xres = value16;
+                if self.vbe.enabled == 0 {
+                    if value16 <= self.vbe.max_xres {
+                        self.vbe.xres = value16;
+                    }
+                }
             }
             VBE_DISPI_INDEX_YRES => {
-                self.vbe.yres = value16;
+                if self.vbe.enabled == 0 {
+                    if value16 <= self.vbe.max_yres {
+                        self.vbe.yres = value16;
+                    }
+                }
             }
             VBE_DISPI_INDEX_BPP => {
-                self.vbe.bpp = value16;
-            }
-            VBE_DISPI_INDEX_ENABLE => {
-                self.vbe.get_capabilities = (value16 & VBE_DISPI_GETCAPS) != 0;
-                self.vbe.dac_8bit = (value16 & VBE_DISPI_8BIT_DAC) != 0;
-                self.vbe.enabled = value16 & VBE_DISPI_ENABLED;
-                // TODO: handle mode-set logic (clear mem, recalculate virtual dimensions,
-                // update line offset, visible_screen_size, bpp_multiplier, etc.)
+                if self.vbe.enabled == 0 {
+                    let bpp = if value16 == 0 { VBE_DISPI_BPP_8 } else { value16 };
+                    if bpp == VBE_DISPI_BPP_4 || bpp == VBE_DISPI_BPP_8
+                        || bpp == VBE_DISPI_BPP_15 || bpp == VBE_DISPI_BPP_16
+                        || bpp == VBE_DISPI_BPP_24 || bpp == VBE_DISPI_BPP_32
+                    {
+                        self.vbe.bpp = bpp;
+                    }
+                }
             }
             VBE_DISPI_INDEX_BANK => {
-                self.vbe.bank[0] = value16;
+                let num_banks = {
+                    let mut nb = (self.vbe_memsize >> 10) / self.vbe.bank_granularity_kb as u32;
+                    if self.vbe.bpp == VBE_DISPI_BPP_4 {
+                        nb >>= 2;
+                    }
+                    nb as u16
+                };
+                let rw_mode = if (value16 & VBE_DISPI_BANK_RW) != 0 {
+                    value16 & VBE_DISPI_BANK_RW
+                } else {
+                    VBE_DISPI_BANK_RW // compatibility mode
+                };
+                let bank_val = value16 & 0x1ff;
+                if bank_val < num_banks {
+                    if (rw_mode & VBE_DISPI_BANK_WR) != 0 {
+                        self.vbe.bank[0] = bank_val;
+                    }
+                    if (rw_mode & VBE_DISPI_BANK_RD) != 0 {
+                        self.vbe.bank[1] = bank_val;
+                    }
+                }
+            }
+            VBE_DISPI_INDEX_ENABLE => {
+                if (value16 & VBE_DISPI_ENABLED) != 0 && self.vbe.enabled == 0 {
+                    // Enabling VBE mode
+                    self.vbe.virtual_yres = self.vbe.yres;
+                    self.vbe.virtual_xres = self.vbe.xres;
+
+                    self.vbe.offset_x = 0;
+                    self.vbe.offset_y = 0;
+                    self.vbe.virtual_start = 0;
+
+                    match self.vbe.bpp {
+                        VBE_DISPI_BPP_4 => {
+                            self.vbe.bpp_multiplier = 1;
+                            self.vbe.line_offset = self.vbe.virtual_xres >> 3;
+                        }
+                        VBE_DISPI_BPP_8 => {
+                            self.vbe.bpp_multiplier = 1;
+                            self.vbe.line_offset = self.vbe.virtual_xres;
+                        }
+                        VBE_DISPI_BPP_15 => {
+                            self.vbe.bpp_multiplier = 2;
+                            self.vbe.line_offset = self.vbe.virtual_xres * 2;
+                        }
+                        VBE_DISPI_BPP_16 => {
+                            self.vbe.bpp_multiplier = 2;
+                            self.vbe.line_offset = self.vbe.virtual_xres * 2;
+                        }
+                        VBE_DISPI_BPP_24 => {
+                            self.vbe.bpp_multiplier = 3;
+                            self.vbe.line_offset = self.vbe.virtual_xres * 3;
+                        }
+                        VBE_DISPI_BPP_32 => {
+                            self.vbe.bpp_multiplier = 4;
+                            self.vbe.line_offset = self.vbe.virtual_xres << 2;
+                        }
+                        _ => {}
+                    }
+                    self.vbe.visible_screen_size =
+                        self.vbe.line_offset as u32 * self.vbe.yres as u32;
+
+                    if (value16 & VBE_DISPI_NOCLEARMEM) == 0 {
+                        self.vga_memory.fill(0);
+                    }
+
+                    if self.vbe.bpp != VBE_DISPI_BPP_4 {
+                        self.last_bpp = self.vbe.bpp as u32;
+                        self.last_fh = 0;
+                    }
+                } else if (value16 & VBE_DISPI_ENABLED) == 0 && self.vbe.enabled != 0 {
+                    // Disabling VBE mode — return to legacy VGA
+                    self.text_buffer_update = true;
+                }
+
+                self.vbe.enabled = value16 & VBE_DISPI_ENABLED;
+                self.vbe.get_capabilities = (value16 & VBE_DISPI_GETCAPS) != 0;
+
+                // Handle bank granularity change
+                let new_bank_gran: u16 = if (value16 & VBE_DISPI_BANK_GRANULARITY_32K) != 0 {
+                    32
+                } else {
+                    64
+                };
+                if new_bank_gran != self.vbe.bank_granularity_kb {
+                    self.vbe.bank_granularity_kb = new_bank_gran;
+                    self.vbe.bank[0] = 0;
+                    self.vbe.bank[1] = 0;
+                }
+
+                // Handle 8-bit DAC mode change
+                let new_dac_8bit = (value16 & VBE_DISPI_8BIT_DAC) != 0;
+                if new_dac_8bit != self.vbe.dac_8bit {
+                    if new_dac_8bit {
+                        for i in 0..256 {
+                            self.pel_data[i][0] <<= 2;
+                            self.pel_data[i][1] <<= 2;
+                            self.pel_data[i][2] <<= 2;
+                        }
+                    } else {
+                        for i in 0..256 {
+                            self.pel_data[i][0] >>= 2;
+                            self.pel_data[i][1] >>= 2;
+                            self.pel_data[i][2] >>= 2;
+                        }
+                    }
+                    self.vbe.dac_8bit = new_dac_8bit;
+                    needs_update = true;
+                }
             }
             VBE_DISPI_INDEX_X_OFFSET => {
                 self.vbe.offset_x = value16;
+                self.vbe.virtual_start =
+                    self.vbe.offset_y as u32 * self.vbe.line_offset as u32;
+                if self.vbe.bpp != VBE_DISPI_BPP_4 {
+                    self.vbe.virtual_start +=
+                        self.vbe.offset_x as u32 * self.vbe.bpp_multiplier as u32;
+                } else {
+                    self.vbe.virtual_start += (self.vbe.offset_x as u32) >> 3;
+                }
+                needs_update = true;
             }
             VBE_DISPI_INDEX_Y_OFFSET => {
                 self.vbe.offset_y = value16;
+                self.vbe.virtual_start =
+                    self.vbe.offset_y as u32 * self.vbe.line_offset as u32;
+                if self.vbe.bpp != VBE_DISPI_BPP_4 {
+                    self.vbe.virtual_start +=
+                        self.vbe.offset_x as u32 * self.vbe.bpp_multiplier as u32;
+                } else {
+                    self.vbe.virtual_start += (self.vbe.offset_x as u32) >> 3;
+                }
+                needs_update = true;
             }
             VBE_DISPI_INDEX_VIRT_WIDTH => {
-                self.vbe.virtual_xres = value16;
+                let new_width = value16;
+                let new_height = if self.vbe.bpp != VBE_DISPI_BPP_4 {
+                    (self.vbe_memsize / self.vbe.bpp_multiplier as u32) / new_width as u32
+                } else {
+                    (self.vbe_memsize << 1) / new_width as u32
+                };
+                let (final_width, final_height) = if new_height as u16 >= self.vbe.yres {
+                    (new_width, new_height as u16)
+                } else {
+                    // Cannot fit: recalculate width for yres
+                    let h = self.vbe.yres;
+                    let w = if self.vbe.bpp != VBE_DISPI_BPP_4 {
+                        (self.vbe_memsize / self.vbe.bpp_multiplier as u32) / h as u32
+                    } else {
+                        (self.vbe_memsize << 1) / h as u32
+                    };
+                    (w as u16, h)
+                };
+                self.vbe.virtual_xres = final_width;
+                self.vbe.virtual_yres = final_height;
+                if self.vbe.bpp != VBE_DISPI_BPP_4 {
+                    self.vbe.line_offset =
+                        self.vbe.virtual_xres * self.vbe.bpp_multiplier as u16;
+                } else {
+                    self.vbe.line_offset = self.vbe.virtual_xres >> 3;
+                }
+                self.vbe.visible_screen_size =
+                    self.vbe.line_offset as u32 * self.vbe.yres as u32;
             }
             VBE_DISPI_INDEX_VIRT_HEIGHT => {
                 // Read-only in Bochs; ignore writes
@@ -2298,6 +2473,10 @@ impl BxVgaC {
             _ => {
                 tracing::error!("VBE write: unknown index 0x{:x}, value 0x{:x}", index, value16);
             }
+        }
+
+        if needs_update {
+            self.vga_mem_updated = 1;
         }
     }
 }

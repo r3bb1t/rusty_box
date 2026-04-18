@@ -73,7 +73,7 @@ pub(super) enum SMMRAM_Fields {
     SMRAM_FIELD_CR0,
     SMRAM_FIELD_CR3_HI32, // zero when physical address size 32-bit
     SMRAM_FIELD_CR3,
-    SMRAM_FIELD_CR4_HI32, // always zero
+    SMRAM_FIELD_CR4_HI32,
     SMRAM_FIELD_CR4,
     SMRAM_FIELD_EFER_HI32, // always zero
     SMRAM_FIELD_EFER,
@@ -305,7 +305,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.cr0.set32(new_cr0);
 
         // CR4 = 0
-        self.cr4.set32(0);
+        self.cr4.set_val(0);
 
         // EFER = 0 (clear LME etc.)
         self.efer.set32(0);
@@ -401,6 +401,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // CR0, CR3, CR4, EFER
         smram_set!(SMRAM_FIELD_CR0, self.cr0.get32());
         smram_set!(SMRAM_FIELD_CR3, self.cr3 as u32);
+        smram_set!(SMRAM_FIELD_CR4_HI32, (self.cr4.get() >> 32) as u32);
         smram_set!(SMRAM_FIELD_CR4, self.cr4.get32());
         smram_set!(SMRAM_FIELD_EFER, self.efer.get32());
 
@@ -528,12 +529,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Restore CR0, CR4, EFER, CR3
         let saved_cr0 = smram_get!(SMRAM_FIELD_CR0);
+        let saved_cr4_hi = smram_get!(SMRAM_FIELD_CR4_HI32);
         let saved_cr4 = smram_get!(SMRAM_FIELD_CR4);
         let saved_efer = smram_get!(SMRAM_FIELD_EFER);
         let saved_cr3 = smram_get!(SMRAM_FIELD_CR3);
 
         self.cr0.set32(saved_cr0);
-        self.cr4.set32(saved_cr4);
+        self.cr4.set_val(((saved_cr4_hi as u64) << 32) | saved_cr4 as u64);
         self.efer.set32(saved_efer);
         self.cr3 = saved_cr3 as u64;
 

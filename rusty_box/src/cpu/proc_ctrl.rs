@@ -622,6 +622,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_TSC_AUX => self.msr.tsc_aux as u64,
             // VMX capability MSRs (Bochs msr.cc)
             // Return Bochs-compatible default values so kernel VMX probing doesn't #GP
+            // FRED MSRs
+            BX_MSR_IA32_FRED_RSP0..=BX_MSR_IA32_FRED_RSP3 => {
+                let idx = (msr - BX_MSR_IA32_FRED_RSP0) as usize;
+                self.msr.ia32_fred_rsp[idx]
+            }
+            BX_MSR_IA32_FRED_STKLVLS => self.msr.ia32_fred_stack_levels,
+            BX_MSR_IA32_FRED_SSP1..=BX_MSR_IA32_FRED_SSP3 => {
+                let idx = 1 + (msr - BX_MSR_IA32_FRED_SSP1) as usize;
+                self.msr.ia32_fred_ssp[idx]
+            }
+            BX_MSR_IA32_FRED_CONFIG => self.msr.ia32_fred_cfg,
             0x480 => {
                 // IA32_VMX_BASIC: VMCS revision=1, VMCS size=4096, memory type=WB(6)
                 // Bits 48=1 (true controls supported), bit 55=1 (INS/OUTS exit info)
@@ -791,6 +802,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.msr.kernelgsbase = val;
             }
             BX_MSR_TSC_AUX => self.msr.tsc_aux = val as u32,
+            // FRED MSRs
+            BX_MSR_IA32_FRED_RSP0..=BX_MSR_IA32_FRED_RSP3 => {
+                let idx = (msr - BX_MSR_IA32_FRED_RSP0) as usize;
+                self.msr.ia32_fred_rsp[idx] = val;
+            }
+            BX_MSR_IA32_FRED_STKLVLS => self.msr.ia32_fred_stack_levels = val,
+            BX_MSR_IA32_FRED_SSP1..=BX_MSR_IA32_FRED_SSP3 => {
+                let idx = 1 + (msr - BX_MSR_IA32_FRED_SSP1) as usize;
+                self.msr.ia32_fred_ssp[idx] = val;
+            }
+            BX_MSR_IA32_FRED_CONFIG => self.msr.ia32_fred_cfg = val,
             _ => {
                 // Bochs: unknown MSRs raise #GP(0)
                 if !self.ignore_bad_msrs {
@@ -1170,7 +1192,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs: proc_ctrl.cc
     // ========================================================================
 
-    pub(super) fn sysenter(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
+    pub(super) fn sysenter(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
 
         if self.real_mode() {
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -1178,12 +1200,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // FRED event delivery for SYSENTER
         if self.cr4.fred() {
-            // TODO: FRED functions don't exist yet
-            // self.set_fred_event_info_and_data(BX_EVENT_SYSENTER, BX_EVENT_OTHER, false, instr.ilen());
-            // self.fred_event_delivery(BX_EVENT_SYSENTER, BX_EVENT_OTHER, 0);
-            // self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-            // return Ok(());
-            todo!("FRED event delivery for SYSENTER");
+            self.set_fred_event_info_and_data(
+                2, // BX_EVENT_SYSENTER
+                super::exception::InterruptType::EventOther,
+                false,
+                instr.ilen() as u16,
+            );
+            self.fred_event_delivery(
+                2, // BX_EVENT_SYSENTER
+                super::exception::InterruptType::EventOther,
+                0,
+            )?;
+            self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+            return Ok(());
         }
         if (self.msr.sysenter_cs_msr & 0xFFFC) == 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -1449,7 +1478,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs: proc_ctrl.cc
     // ========================================================================
 
-    pub(super) fn syscall(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
+    pub(super) fn syscall(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::eflags::EFlags;
 
         if !self.efer.sce() {
@@ -1492,12 +1521,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // FRED event delivery for SYSCALL
         if self.cr4.fred() {
-            // TODO: FRED functions don't exist yet
-            // self.set_fred_event_info_and_data(BX_EVENT_SYSCALL, BX_EVENT_OTHER, false, instr.ilen());
-            // self.fred_event_delivery(BX_EVENT_SYSENTER, BX_EVENT_OTHER, 0);
-            // self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-            // return Ok(());
-            todo!("FRED event delivery for SYSCALL");
+            self.set_fred_event_info_and_data(
+                1, // BX_EVENT_SYSCALL
+                super::exception::InterruptType::EventOther,
+                false,
+                instr.ilen() as u16,
+            );
+            self.fred_event_delivery(
+                2, // BX_EVENT_SYSENTER (matches Bochs C++ behavior)
+                super::exception::InterruptType::EventOther,
+                0,
+            )?;
+            self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+            return Ok(());
         }
 
 

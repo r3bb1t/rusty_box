@@ -209,8 +209,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let old_eflags = self.eflags.bits();
 
-        // CET shadow stack handling (stubbed — shadow_stack_write_qword not yet implemented)
-        // TODO: Full CET shadow stack integration for FRED
+        // CET shadow stack: compute old/new SSP before frame push
+        let old_ssp = self.ssp();
+        let mut new_ssp: u64 = 0;
+        if self.shadow_stack_enabled(0) {
+            if cpl == 3 || new_csl > old_csl {
+                // FRED transitions use IA32_PL0_SSP MSR as IA32_FRED_SSP0
+                if new_csl == 0 {
+                    new_ssp = self.msr.ia32_pl_ssp[0];
+                } else {
+                    new_ssp = self.msr.ia32_fred_ssp[new_csl as usize];
+                }
+                if new_ssp & 0x4 != 0 {
+                    tracing::error!("FRED Event Delivery: Shadow Stack not 8-byte aligned");
+                    return self.exception(Exception::Gp, 0);
+                }
+            } else {
+                new_ssp = self.ssp().wrapping_sub(self.msr.ia32_fred_cfg & 0x8);
+            }
+        }
 
         // ESTABLISH NEW CONTEXT — save state on new regular stack (supervisor privilege)
         self.write_new_stack_qword_64(new_rsp.wrapping_sub(8), 0, 0)?; // first 8 bytes are zeros
@@ -221,6 +238,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.write_new_stack_qword_64(new_rsp.wrapping_sub(48), 0, old_cs)?;
         self.write_new_stack_qword_64(new_rsp.wrapping_sub(56), 0, old_rip)?;
         self.write_new_stack_qword_64(new_rsp.wrapping_sub(64), 0, error_code as u64)?;
+
+        // CET: write shadow stack frame after regular stack frame
+        if self.shadow_stack_enabled(0) {
+            if cpl == 0 {
+                // Store 4 bytes of zeros to new_SSP-4
+                self.shadow_stack_write_dword(new_ssp.wrapping_sub(4), 0, 0)?;
+                new_ssp &= !0x7;
+                self.shadow_stack_write_qword(new_ssp.wrapping_sub(8), 0, old_cs)?;
+                self.shadow_stack_write_qword(new_ssp.wrapping_sub(16), 0, old_rip)?;
+                self.shadow_stack_write_qword(new_ssp.wrapping_sub(24), 0, old_ssp)?;
+                new_ssp = new_ssp.wrapping_sub(24);
+            }
+            self.set_ssp(new_ssp);
+        }
 
         // Update segment registers if event occurred in ring 3
         if cpl == 3 {
@@ -244,8 +275,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_rsp(new_rsp.wrapping_sub(64));
         self.set_csl(new_csl);
 
-        // CET: save ring-3 SSP and reset endbranch tracker (stubbed)
+        // CET: save ring-3 SSP, reset endbranch tracker
         if self.cr4.cet() {
+            if self.shadow_stack_enabled(3) && cpl == 3 {
+                self.msr.ia32_pl_ssp[3] = super::cet::canonicalize_address(self.msr.ia32_pl_ssp[3]);
+            }
+
             self.reset_endbranch_tracker(0, false);
         }
 
@@ -313,8 +348,28 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let new_csl = ((temp_cs >> 16) & 0x3) as u32;
         let new_csl = new_csl.min(self.csl());
 
-        // CET shadow stack restore (stubbed)
-        // TODO: Full CET shadow stack integration for ERETS
+        // CET shadow stack restore
+        if self.shadow_stack_enabled(0) {
+            // In FRED, shadow_stack_restore uses temp_cs as CS and new_rip as LIP
+            let new_ssp = self.shadow_stack_restore_lip(temp_cs as u16, new_rip)?;
+            if !self.is_canonical(new_ssp) {
+                tracing::error!("ERETS: new SSP not canonical");
+                return self.exception(Exception::Gp, 0);
+            }
+            if new_csl < self.csl() && self.msr.ia32_fred_ssp[self.csl() as usize] != self.ssp() {
+                tracing::error!("ERETS changing stack level: SSP mismatch");
+                return self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET);
+            }
+            self.set_ssp(new_ssp);
+        }
+
+        // CET: IBT restore from saved tracking state in old_CS[18]
+        if self.endbranch_enabled_and_not_suppressed(0) {
+            let ibt_restore = (temp_cs >> 18) & 0x1 != 0;
+            if ibt_restore {
+                self.track_indirect(0);
+            }
+        }
 
         // RSP_COMMIT
         self.speculative_rsp = false;
@@ -451,8 +506,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 }
             }
 
-            // CET shadow stack checks (stubbed)
-            // TODO: Full CET shadow stack integration for ERETU
+            // CET shadow stack checks for ERETU
+            if self.shadow_stack_enabled(3) {
+                if !to_long_mode && (self.msr.ia32_pl_ssp[3] >> 32) != 0 {
+                    tracing::error!("ERETU: attempt to return to compatibility mode while MSR_IA32_PL3_SSP[63:32] != 0");
+                    return self.exception(Exception::Gp, 0);
+                }
+                self.set_ssp(self.msr.ia32_pl_ssp[3]);
+            }
+            if self.shadow_stack_enabled(0) && self.msr.ia32_pl_ssp[0] != self.ssp() {
+                tracing::error!("ERETU: supervisor shadow stack SSP mismatch");
+                return self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET);
+            }
 
             let dpl = cs_descriptor.dpl;
             let mut cs_desc_mut = cs_descriptor;
@@ -507,8 +572,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.setup_flat_ss(3);
         }
 
-        // CET shadow stack (stubbed)
-        // TODO: Full CET shadow stack integration for ERETU flat path
+        // CET shadow stack checks for ERETU (flat path)
+        if self.shadow_stack_enabled(3) {
+            if !to_long_mode && (self.msr.ia32_pl_ssp[3] >> 32) != 0 {
+                tracing::error!("ERETU: attempt to return to compatibility mode while MSR_IA32_PL3_SSP[63:32] != 0");
+                return self.exception(Exception::Gp, 0);
+            }
+            self.set_ssp(self.msr.ia32_pl_ssp[3]);
+        }
+        if self.shadow_stack_enabled(0) && self.msr.ia32_pl_ssp[0] != self.ssp() {
+            tracing::error!("ERETU: supervisor shadow stack SSP mismatch");
+            return self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET);
+        }
 
         // RSP_COMMIT
         self.speculative_rsp = false;
