@@ -8,7 +8,7 @@ use crate::{
     config::BxPhyAddress,
     cpu::{rusty_box::MemoryAccessType, BxCpuC, BxCpuIdTrait},
     memory::{
-        memory_rusty_box::{bios_map_last128k, bx_is_pci_hole_addr, bx_translate_gpa_to_linear, MemoryAreaT, BIOSROMSZ, BIOS_MASK, EXROM_MASK},
+        memory_rusty_box::{bios_map_last128k, MemoryAreaT, BIOSROMSZ, BIOS_MASK, EXROM_MASK},
         BxMemC, BxMemoryStubC,
     },
 };
@@ -77,9 +77,6 @@ impl<'c> BxMemC<'c> {
     ) -> Result<Option<&mut [u8]>> {
         let a20_addr: BxPhyAddress = self.a20_addr(addr);
 
-        // Translate guest physical address to linear memory offset (handles PCI hole)
-        let linear_addr: BxPhyAddress = bx_translate_gpa_to_linear(a20_addr);
-
         // Match Bochs: 0xE0000-0xFFFFF is ALWAYS BIOS ROM, plus addresses >= bios_rom_addr
         // This is critical for rombios32 which is linked to run at 0xE0000!
         // From cpp_orig/bochs/memory/misc_mem.cc and memory-bochs.h
@@ -99,11 +96,10 @@ impl<'c> BxMemC<'c> {
             // reading from SMRAM memory space
             if (0x000a0000..0x000c0000).contains(&a20_addr) && (self.smram_available)
                 && (self.smram_enable || cpu.smm_mode()) {
-                    return Ok(Some(self.get_vector(cpus, linear_addr)?));
+                    return Ok(Some(self.get_vector(cpus, a20_addr)?));
                 }
         }
 
-        // MWAIT monitors physical pages - must use a20_addr, not post-PCI-hole linear_addr
         if write && Self::is_monitor(cpus, a20_addr & !(0xfff as BxPhyAddress), 0xfff) {
             // Vetoed! Write monitored page !
             return Ok(None);
@@ -127,14 +123,6 @@ impl<'c> BxMemC<'c> {
             }
         }
 
-        // Never allow direct access in the PCI/MMIO hole, except for the BIOS/UEFI
-        // ROM window which is backed by BX_MEM_THIS rom[]. Without this exception,
-        // instruction fetch from the reset vector at 0xFFFFFFF0 will panic when a
-        // >3GB RAM PCI hole is enabled.
-        if bx_is_pci_hole_addr(a20_addr) && !is_bios {
-            return Ok(None);
-        }
-
         if !write {
             if (0x000a0000..0x000c0000).contains(&a20_addr) {
                 // VGA memory area - vetoed (no handler registered)
@@ -152,7 +140,7 @@ impl<'c> BxMemC<'c> {
                 }
                 if self.memory_type[area][0] {
                     // Read from ShadowRAM (PAM enabled DRAM reads)
-                    Ok(Some(self.get_vector(cpus, linear_addr)?))
+                    Ok(Some(self.get_vector(cpus, a20_addr)?))
                 } else {
                     // Read from ROM
                     let rom_offset = if (a20_addr & 0xfffe0000) == 0x000e0000 {
@@ -165,11 +153,10 @@ impl<'c> BxMemC<'c> {
                     };
                     Ok(Some(&mut self.inherited_memory_stub.rom()[rom_offset..]))
                 }
-            // Use translated linear address for bounds check
-            } else if (linear_addr < self.inherited_memory_stub.len.try_into()?) && !is_bios {
+            } else if (a20_addr < self.inherited_memory_stub.len.try_into()?) && !is_bios {
                 // Regular RAM or non-PCI ROM
                 if !(0x000c0000..0x00100000).contains(&a20_addr) {
-                    Ok(Some(self.get_vector(cpus, linear_addr)?))
+                    Ok(Some(self.get_vector(cpus, a20_addr)?))
                 }
                 // must be in C0000 - FFFFF range (non-PCI path)
                 // Bochs: misc_mem.cc
@@ -186,8 +173,8 @@ impl<'c> BxMemC<'c> {
                             .try_into()?..],
                     ))
                 }
-            } else if a20_addr > 0xffffffffu64 {
-                // Address above 4GB that doesn't map to RAM - use bogus memory
+            } else if true && a20_addr > 0xffffffffu64 {
+                // Error, requested addr is out of bounds.
                 Ok(Some(
                     &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff).try_into()?..],
                 ))
@@ -214,8 +201,7 @@ impl<'c> BxMemC<'c> {
                 // and must go through the CPU's mem_write_dword → lapic.write() intercept.
                 return Ok(None);
             }
-            // Use translated linear address for bounds check
-            if (linear_addr >= self.inherited_memory_stub.len.try_into()?) || is_bios {
+            if (a20_addr >= self.inherited_memory_stub.len.try_into()?) || is_bios {
                 // Error, requested addr is out of bounds or writing to BIOS ROM
                 // From cpp_orig/bochs/memory/misc_mem.cc
                 Ok(None)
@@ -230,44 +216,16 @@ impl<'c> BxMemC<'c> {
                 Ok(None)
             } else {
                 if !(0x000c0000..0x00100000).contains(&a20_addr) {
-                    Ok(Some(self.get_vector(cpus, linear_addr)?))
+                    Ok(Some(self.get_vector(cpus, a20_addr)?))
                 } else {
                     Ok(None) // Vetoed!  ROMs
                 }
             }
         }
-}
     }
-
+}
 
 impl BxMemC<'_> {
-    /// Reset memory state for UEFI support.
-    /// UEFI firmware (OVMF) modifies ROM during execution, so we need to reload it on reset.
-    pub fn reset(&mut self) {
-        // Reset flash state to initial values (same as init_memory)
-        self.bios_write_enabled = false;
-        self.flash_status = 0x80; // WSM ready
-        self.flash_wsm_state = FLASH_READ_ARRAY;
-        self.flash_modified = false;
-
-        // Clear ROM presence tracking (so load_ROM doesn't panic on address conflicts)
-        for i in 0..65 {
-            self.rom_present[i] = false;
-        }
-
-        // Clear ROM area
-        use crate::memory::memory_rusty_box::{BIOSROMSZ, EXROMSIZE};
-        let rom = self.inherited_memory_stub.rom();
-        let clear_len = (BIOSROMSZ + EXROMSIZE).min(rom.len());
-        rom[..clear_len].fill(0xff);
-
-        // Note: In the C++ implementation, reset() also reloads system BIOS, VGABIOS, and
-        // optional ROMs from disk using SIM->get_param_string(). The Rust codebase loads
-        // ROMs via load_ROM(&[u8], ...) from caller-provided data, so ROM reload must be
-        // performed by the caller after calling reset().
-        tracing::debug!("memory reset: flash state cleared, ROM area zeroed");
-    }
-
     pub fn load_ROM(
         &mut self,
         rom_data: &[u8],
@@ -458,50 +416,24 @@ impl BxMemC<'_> {
             return Err(MemoryError::RomTooLarge(0).into());
         }
 
-        let mut gpa = self.a20_addr(ram_address);
-        let mut remaining = size;
-        let mut src_offset = 0;
+        // RAM images are loaded directly into memory at the specified address
+        // We need to write to the memory vector using get_vector
+        let a20_addr = self.a20_addr(ram_address);
 
-        while remaining > 0 {
-            let a20_addr = self.a20_addr(gpa);
+        // For simplicity, we'll write directly to the memory stub
+        // In the original Bochs, it calls get_vector() which returns a pointer to memory
+        // We need to access the memory vector and write at the offset
+        let mem_stub = &mut self.inherited_memory_stub;
+        let vector = mem_stub.vector();
 
-            if bx_is_pci_hole_addr(a20_addr) {
-                return Err(MemoryError::Internal("RAM: image target address is in PCI hole").into());
-            }
-
-            let linear_addr = bx_translate_gpa_to_linear(a20_addr);
-            let mem_len: u64 = self.inherited_memory_stub.len.try_into()?;
-            if linear_addr >= mem_len {
-                return Err(MemoryError::Internal("RAM: image target address is beyond RAM").into());
-            }
-
-            // Chunk: don't cross page boundary, don't exceed remaining RAM
-            let remains_in_page = 0x1000u64 - (a20_addr & 0xfff);
-            let remains_in_ram = mem_len - linear_addr;
-            let mut chunk = remaining as u64;
-            if chunk > remains_in_page { chunk = remains_in_page; }
-            if chunk > remains_in_ram { chunk = remains_in_ram; }
-            let chunk = chunk as usize;
-
-            if chunk == 0 {
-                return Err(MemoryError::Internal("RAM: no writable RAM left while loading image").into());
-            }
-
-            let linear_usize = linear_addr as usize;
-            let mem_stub = &mut self.inherited_memory_stub;
-            let vector = mem_stub.vector();
-            if linear_usize + chunk > vector.len() {
-                return Err(MemoryError::RomTooLarge(vector.len()).into());
-            }
-            vector[linear_usize..linear_usize + chunk]
-                .copy_from_slice(&ram_data[src_offset..src_offset + chunk]);
-
-            remaining -= chunk;
-            src_offset += chunk;
-            gpa = self.a20_addr(gpa + chunk as u64);
+        let offset = a20_addr as usize;
+        if offset + size > vector.len() {
+            return Err(MemoryError::RomTooLarge(vector.len()).into());
         }
 
-        tracing::debug!("ram at {:#x}/{} (RAM image)", ram_address, size);
+        vector[offset..offset + size].copy_from_slice(ram_data);
+
+        tracing::debug!("ram at {:#05x}/{} ({})", ram_address, size, "RAM image");
 
         Ok(())
     }
@@ -590,12 +522,7 @@ impl BxMemC<'_> {
         // (where is_bios=true) must enter this block to reach the PCI shadow RAM
         // write path. High BIOS addresses (>= bios_rom_addr like 0xFFFF0000) are
         // above RAM len so the `a20_addr < len` check naturally excludes them.
-        if (bx_translate_gpa_to_linear(a20_addr) < self.inherited_memory_stub.len.try_into()?) && !is_bios {
-            // Check if address is in PCI hole — do not access RAM backing store!
-            if bx_is_pci_hole_addr(a20_addr) {
-                return Ok(());
-            }
-
+        if a20_addr < self.inherited_memory_stub.len.try_into()? {
             // All of data is within limits of physical memory
             if !(0x000a0000..0x00100000).contains(&a20_addr) {
                 // Log writes to very low RAM (first 4KB) - these might be IVT/BDA initialization
@@ -773,13 +700,7 @@ impl BxMemC<'_> {
         // mem_read:
         // Note: Bochs does NOT check is_bios here — addresses in E0000-FFFFF
         // must enter this block to reach the PCI shadow RAM read path.
-        if bx_translate_gpa_to_linear(a20_addr) < self.inherited_memory_stub.len.try_into()? && !is_bios {
-            // Check if address is in PCI hole — do not access RAM backing store!
-            if bx_is_pci_hole_addr(a20_addr) {
-                data[..len].fill(0xff);
-                return Ok(());
-            }
-
+        if a20_addr < self.inherited_memory_stub.len.try_into()? {
             // All of data is within limits of physical memory
             if !(0x000a0000..0x00100000).contains(&a20_addr) {
                 // Regular RAM - delegate to stub

@@ -266,13 +266,8 @@ impl BxMemoryStubC {
         let mut buf_offset = 0;
 
         while len > 0 {
-            // Keep translated address in sync as we increment a20addr.
-            let linear_addr = bx_translate_gpa_to_linear(a20_addr);
-            if bx_is_pci_hole_addr(a20_addr) {
-                buf[buf_offset] = 0xff;
-                ret = false; // MMIO hole without handler
-            } else if linear_addr < self.len.try_into()? {
-                buf[buf_offset] = *self.get_vector(linear_addr, cpus)?
+            if a20_addr < self.len.try_into()? {
+                buf[buf_offset] = *self.get_vector(a20_addr, cpus)?
                     .first()
                     .ok_or(MemoryError::Internal("get_vector returned empty slice"))?;
             } else {
@@ -282,6 +277,7 @@ impl BxMemoryStubC {
             len -= 1;
 
             buf_offset += 1;
+            // TODO: I'm not sure about 1
             a20_addr += 1;
         }
 
@@ -297,16 +293,8 @@ impl BxMemoryStubC {
             if i >= buf.len() {
                 break;
             }
-            let a20_addr = addr + i as u64;
-            // Keep translated address in sync as we increment a20addr.
-            let linear_addr = bx_translate_gpa_to_linear(a20_addr);
-            if bx_is_pci_hole_addr(a20_addr) {
-                return false; // MMIO hole without handler
-            }
-            if linear_addr >= self.len as u64 {
-                return false; // out of bounds
-            }
-            let idx = vo + linear_addr as usize;
+            let phys = addr as usize + i;
+            let idx = vo + phys;
             if idx < self.actual_vector.len() {
                 self.actual_vector[idx] = buf[i];
             }
@@ -359,33 +347,26 @@ impl BxMemoryStubC {
         a20_mask: A20Mask,
     ) -> Result<Option<&'a mut [u8]>> {
         let a20_addr = addr & a20_mask;
-        let linear_addr = bx_translate_gpa_to_linear(a20_addr);
 
         let write = rw & 1 != 0;
 
-        // MWAIT monitors physical pages - must use a20_addr, not post-PCI-hole linear_addr
         if write && Self::is_monitor(cpus, a20_addr & !0xfff, 0xfff) {
+            // TODO: Consider actually returning error
+
             // Vetoed! Write monitored page!
             return Ok(None);
         }
 
-        // Never allow direct access in the PCI/MMIO hole
-        if bx_is_pci_hole_addr(a20_addr) {
-            return Ok(None);
-        }
-
         if !write {
-            // Use translated linear address for bounds check
-            if linear_addr < self.len.try_into()? {
-                Ok(Some(self.get_vector(linear_addr, cpus)?))
+            if addr < self.len.try_into()? {
+                Ok(Some(self.get_vector(addr, cpus)?))
             } else {
                 Ok(Some(&mut self.bogus()[a20_addr as usize & 0xfff..]))
             }
-        // Use translated linear address for bounds check
-        } else if linear_addr >= self.len.try_into()? {
+        } else if a20_addr >= self.len.try_into()? {
             Ok(None)
         } else {
-            Ok(Some(self.get_vector(linear_addr, cpus)?))
+            Ok(Some(self.get_vector(addr, cpus)?))
         }
     }
 
@@ -407,12 +388,11 @@ impl BxMemoryStubC {
 
         Self::is_monitor(cpus, a20_addr, len.try_into()?);
 
-        // Use translated linear address for bounds check
+        if bx_is_pci_hole_addr(a20_addr) {
+            // PCI MMIO hole — writes are silently dropped
+            return Ok(());
+        }
         if bx_translate_gpa_to_linear(a20_addr) < self.len.try_into()? {
-            // Check if address is in PCI hole — do not access RAM backing store!
-            if bx_is_pci_hole_addr(a20_addr) {
-                return Ok(());
-            }
             // all of data is within limits of physical memory
             if len == 8 {
                 page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
@@ -502,14 +482,12 @@ impl BxMemoryStubC {
             return Err(MemoryError::ReadPhysicalPage { addr, len }.into());
         }
 
-        // Use translated linear address for bounds check
+        if bx_is_pci_hole_addr(a20_addr) {
+            // PCI MMIO hole — reads return 0xFF
+            data[..len].fill(0xff);
+            return Ok(());
+        }
         if bx_translate_gpa_to_linear(a20_addr) < self.len.try_into()? {
-            // Check if address is in PCI hole — do not access RAM backing store!
-            if bx_is_pci_hole_addr(a20_addr) {
-                data[..len].fill(0xff);
-                return Ok(());
-            }
-
             // all of data is within limits of physical memory
             if len == 8 {
                 let val = read_host_qword_to_little_endian(self.get_vector(a20_addr, cpus)?);
