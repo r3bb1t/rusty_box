@@ -456,16 +456,4 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         //      - If time in PAUSE loop > pause_loop_exiting_window: VMexit
         Ok(())
     }
-
-    /// SVM PAUSE intercept handler.
-    /// Bochs svm.cc SvmInterceptPAUSE()
-    /// Checks SVM_INTERCEPT0_PAUSE and pause filter counter.
-    fn svm_intercept_pause(&mut self) -> Result<()> {
-        // TODO: Implement full SvmInterceptPAUSE when SVM exit machinery is ported.
-        // Bochs checks:
-        //   1. SVM_INTERCEPT(SVM_INTERCEPT0_PAUSE) first
-        //   2. If pause_filter extension: decrement pause_filter_count, return if >0
-        //   3. Otherwise: Svm_Vmexit(SVM_VMEXIT_PAUSE)
-        Ok(())
-    }
 }

@@ -858,6 +858,7 @@ where
 // Option slot, running the hook, then putting it back. `None` is visible
 // only during the hook call — user code can't observe it.
 
+#[cfg(feature = "instrumentation")]
 use crate::cpu::instrumentation::{HookCtx, InstrAction};
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -865,6 +866,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `sysenter()` BEFORE the architectural CS/RIP transition. The hook
     /// returns an `InstrAction` which the caller inspects to decide whether
     /// to execute the transition, skip it, stop the loop, or both.
+    #[cfg(feature = "instrumentation")]
     pub(crate) fn fire_pre_syscall(&mut self) -> InstrAction {
         let Some(mut tracer) = self.instrumentation.tracer.take() else {
             return InstrAction::Continue;

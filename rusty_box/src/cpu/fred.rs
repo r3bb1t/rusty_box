@@ -460,8 +460,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             to_long_mode = false;
             flat = true;
         } else {
-            flat = false;
-
             // Load CS descriptor from GDT/LDT
             let mut cs_selector = super::descriptor::BxSelector::default();
             parse_selector(raw_cs_selector, &mut cs_selector);

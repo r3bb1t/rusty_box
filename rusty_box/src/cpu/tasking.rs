@@ -46,6 +46,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
         self.debug_trap &= !Self::BX_DEBUG_SINGLE_STEP_BIT;
         self.inhibit_mask = 0;
 
+        // SVM task switch intercept — if the guest has the intercept enabled,
+        // this triggers a VMEXIT before the switch proceeds.
+        self.svm_intercept_task_switch(
+            tss_selector.value,
+            source,
+            push_error,
+            error_code,
+        )?;
+
         // STEP 2: The processor performs limit-checking on the target TSS
         // Gather info about new TSS (matches lines 158-164)
         let new_tss_max = if tss_descriptor.r#type <= 3 {

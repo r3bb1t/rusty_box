@@ -579,6 +579,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         let msr = self.ecx();
+        // SVM MSR intercept
+        if self.in_svm_guest {
+            self.svm_intercept_msr(0, msr)?; // 0 = read
+        }
         let val: u64 = match msr {
             BX_MSR_TSC => self.get_tsc(self.system_ticks()),
             BX_MSR_APICBASE => self.msr.apicbase,
@@ -655,6 +659,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             0x48F => 0x0000_FFFF_0000_0011u64, // IA32_VMX_TRUE_ENTRY_CTLS
             0x490 => 0x0000_0000_0000_0000u64, // IA32_VMX_VMFUNC
             0x491 => 0x0000_0000_0000_0000u64, // IA32_VMX_PROCBASED_CTLS3
+            // SVM MSRs
+            super::svm::BX_SVM_VM_CR_MSR => self.msr.svm_vm_cr as u64,
+            super::svm::BX_SVM_IGNNE_MSR => 0, // IGNNE not supported
+            super::svm::BX_SVM_SMM_CTL_MSR => 0, // SMM_CTL not supported
+            super::svm::BX_SVM_VM_HSAVE_PA_MSR => self.msr.svm_hsave_pa,
             _ => {
                 // Bochs: unknown MSRs raise #GP(0)
                 if !self.ignore_bad_msrs {
@@ -692,6 +701,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cpuid_msr() {
             self.instrumentation.fire_wrmsr(msr, val);
+        }
+
+        // SVM MSR intercept
+        if self.in_svm_guest {
+            self.svm_intercept_msr(1, msr)?; // 1 = write
         }
 
         match msr {
@@ -813,6 +827,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.msr.ia32_fred_ssp[idx] = val;
             }
             BX_MSR_IA32_FRED_CONFIG => self.msr.ia32_fred_cfg = val,
+            // SVM MSRs
+            super::svm::BX_SVM_VM_CR_MSR => {
+                self.svm_update_vm_cr_msr(val)?;
+            }
+            super::svm::BX_SVM_IGNNE_MSR => { /* IGNNE: ignore write */ }
+            super::svm::BX_SVM_SMM_CTL_MSR => { /* SMM_CTL: ignore write */ }
+            super::svm::BX_SVM_VM_HSAVE_PA_MSR => {
+                self.msr.svm_hsave_pa = val;
+            }
             _ => {
                 // Bochs: unknown MSRs raise #GP(0)
                 if !self.ignore_bad_msrs {

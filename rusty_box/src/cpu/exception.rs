@@ -391,9 +391,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // VMexit_Event(BX_HARDWARE_EXCEPTION, vector, error_code, push_error);
         // #endif
 
-        // #if BX_SUPPORT_SVM
-        // SvmInterceptException(BX_HARDWARE_EXCEPTION, vector, error_code, push_error);
-        // #endif
+        // SVM exception intercept
+        if self.in_svm_guest {
+            self.svm_intercept_exception(
+                vector as u8,
+                error_code,
+                push_error,
+                0, // qualification
+            )?;
+        }
 
         // Call interrupt handler based on CPU mode
         let vector_u8 = vector as u8;

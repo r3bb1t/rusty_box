@@ -3562,6 +3562,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::KshiftrdKgdKedIb => self.kshiftrd_kgd_ked_ib_r(instr),
             Opcode::KshiftrqKgqKeqIb => self.kshiftrq_kgq_keq_ib_r(instr),
 
+            // SVM instructions
+            Opcode::Vmrun => self.svm_vmrun(instr),
+            Opcode::Vmmcall => self.svm_vmmcall(instr),
+            Opcode::Vmload => self.svm_vmload(instr),
+            Opcode::Vmsave => self.svm_vmsave(instr),
+            Opcode::Skinit => self.svm_skinit(instr),
+            Opcode::Clgi => self.svm_clgi(instr),
+            Opcode::Stgi => self.svm_stgi(instr),
+            Opcode::Invlpga => self.svm_invlpga(instr),
+
             // UD0/UD1/UD2 — intentional #UD exceptions (Linux uses UD2 for BUG()/WARN())
             Opcode::Ud0 | Opcode::Ud1 | Opcode::Ud2 => {
                 self.exception(super::cpu::Exception::Ud, 0)?;
