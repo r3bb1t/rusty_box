@@ -2730,7 +2730,7 @@ pub(super) const BxOpcodeTable0FC7: [u64; 17] = [
     ),
     form_opcode(
         ATTR_IS64 | ATTR_MODC0 | ATTR_NNN6 | ATTR_SSE_PREFIX_F3,
-        Opcode::SenduipiGq,
+        Opcode::SenduipiEq,
     ),
     form_opcode(ATTR_NNN7 | ATTR_MODC0 | ATTR_SSE_PREFIX_F3, Opcode::RdpidEd),
     form_opcode_lockable(ATTR_OS16_32 | ATTR_NNN1 | ATTR_MOD_MEM, Opcode::Cmpxchg8b),

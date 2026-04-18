@@ -11,6 +11,9 @@ use crate::cpu::{cpuid::BxCpuIdTrait, BxCpuC};
 /// IA32_TIME_STAMP_COUNTER (TSC)
 pub const BX_MSR_TSC: u32 = 0x010;
 
+/// IA32_PLATFORM_ID
+pub const BX_MSR_PLATFORM_ID: u32 = 0x017;
+
 /// IA32_APICBASE
 pub const BX_MSR_APICBASE: u32 = 0x01B;
 
@@ -19,6 +22,12 @@ pub const BX_MSR_TSC_ADJUST: u32 = 0x03B;
 
 /// IA32_BIOS_SIGN_ID (microcode revision)
 pub const BX_MSR_BIOS_SIGN_ID: u32 = 0x08B;
+
+/// IA32_APERF (Actual Performance Frequency Clock Count)
+pub const BX_MSR_IA32_APERF: u32 = 0x0E7;
+
+/// IA32_MPERF (Maximum Performance Frequency Clock Count)
+pub const BX_MSR_IA32_MPERF: u32 = 0x0E8;
 
 /// MTRR Capability register
 pub const BX_MSR_MTRRCAP: u32 = 0x0FE;

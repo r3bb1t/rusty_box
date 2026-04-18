@@ -165,6 +165,9 @@ pub struct BxAcpiCtrl {
     pub(crate) pm_ports_registered: bool,
     /// Whether SM I/O ports are registered (tracks sm_base changes)
     pub(crate) sm_ports_registered: bool,
+
+    /// When true, seed QEMU-like PM base defaults for UEFI firmware (OVMF).
+    pub uefi_enabled: bool,
 }
 
 impl Default for BxAcpiCtrl {
@@ -192,6 +195,7 @@ impl BxAcpiCtrl {
             irq9_level: false,
             pm_ports_registered: false,
             sm_ports_registered: false,
+            uefi_enabled: false,
         };
         ctrl.init_pci_conf();
         ctrl
@@ -225,10 +229,30 @@ impl BxAcpiCtrl {
         self.pci_conf[0x3C] = 0x00; // IRQ
 
         // PM base 0x40-0x43 (acpi.cc)
-        self.pci_conf[0x40] = 0x01;
-        self.pci_conf[0x41] = 0x00;
-        self.pci_conf[0x42] = 0x00;
-        self.pci_conf[0x43] = 0x00;
+        // When running with UEFI firmware (OVMF), seed QEMU-like defaults so the
+        // ACPI PM timer is available very early.
+        if !self.uefi_enabled {
+            // Upstream-compatible reset behavior.
+            self.pci_conf[0x40] = 0x01;
+            self.pci_conf[0x41] = 0x00;
+            self.pci_conf[0x42] = 0x00;
+            self.pci_conf[0x43] = 0x00;
+        } else {
+            let pmbar = u32::from_le_bytes([
+                self.pci_conf[0x40], self.pci_conf[0x41],
+                self.pci_conf[0x42], self.pci_conf[0x43],
+            ]);
+            if (pmbar & 0xFFC0) == 0 {
+                // Default to 0xB000 (I/O BAR => bit0 set).
+                self.pci_conf[0x40] = 0x01;
+                self.pci_conf[0x41] = 0xB0;
+                self.pci_conf[0x42] = 0x00;
+                self.pci_conf[0x43] = 0x00;
+            } else {
+                // Preserve base, keep read-only bit semantics on the low byte.
+                self.pci_conf[0x40] = (self.pci_conf[0x40] & 0xC0) | 0x01;
+            }
+        }
 
         // Clear DEVACTB (acpi.cc)
         self.pci_conf[0x58] = 0x00;
@@ -242,10 +266,28 @@ impl BxAcpiCtrl {
         self.pci_conf[0x67] = 0x98;
 
         // SM base 0x90-0x93 (acpi.cc)
-        self.pci_conf[0x90] = 0x01;
-        self.pci_conf[0x91] = 0x00;
-        self.pci_conf[0x92] = 0x00;
-        self.pci_conf[0x93] = 0x00;
+        if !self.uefi_enabled {
+            // Upstream-compatible reset behavior.
+            self.pci_conf[0x90] = 0x01;
+            self.pci_conf[0x91] = 0x00;
+            self.pci_conf[0x92] = 0x00;
+            self.pci_conf[0x93] = 0x00;
+        } else {
+            let smbar = u32::from_le_bytes([
+                self.pci_conf[0x90], self.pci_conf[0x91],
+                self.pci_conf[0x92], self.pci_conf[0x93],
+            ]);
+            if (smbar & 0xFFF0) == 0 {
+                // Default to 0xB100 (I/O BAR => bit0 set).
+                self.pci_conf[0x90] = 0x01;
+                self.pci_conf[0x91] = 0xB1;
+                self.pci_conf[0x92] = 0x00;
+                self.pci_conf[0x93] = 0x00;
+            } else {
+                // Preserve base, keep read-only bit semantics on the low byte.
+                self.pci_conf[0x90] = (self.pci_conf[0x90] & 0xF0) | 0x01;
+            }
+        }
 
         // Clear PM state (acpi.cc)
         self.pmsts = 0;
@@ -258,6 +300,22 @@ impl BxAcpiCtrl {
         self.smbus = SmBusState::default();
 
         self.irq9_level = false;
+
+        // Map PM/SM I/O windows when the BAR is configured (e.g. UEFI defaults).
+        let pmbar = u32::from_le_bytes([
+            self.pci_conf[0x40], self.pci_conf[0x41],
+            self.pci_conf[0x42], self.pci_conf[0x43],
+        ]);
+        if (pmbar & 0xFFC0) != 0 {
+            self.pm_base = pmbar & 0xFFC0;
+        }
+        let smbar = u32::from_le_bytes([
+            self.pci_conf[0x90], self.pci_conf[0x91],
+            self.pci_conf[0x92], self.pci_conf[0x93],
+        ]);
+        if (smbar & 0xFFF0) != 0 {
+            self.sm_base = smbar & 0xFFF0;
+        }
     }
 
     /// Advance the internal time counter by the given microseconds.

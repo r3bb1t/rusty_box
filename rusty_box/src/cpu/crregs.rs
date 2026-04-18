@@ -97,7 +97,7 @@ impl BxCr0 {
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub struct BxCr4: u32 {
+    pub struct BxCr4: u64 {
         const VME = 1 << 0;
         const PVI = 1 << 1;
         const TSD = 1 << 2;
@@ -125,6 +125,7 @@ bitflags::bitflags! {
         const UINTR = 1 << 25;
         const LASS = 1 << 27;
         const LAM_SUPERVISOR = 1 << 28;
+        const FRED = 1u64 << 32;
     }
 }
 
@@ -237,14 +238,26 @@ impl BxCr4 {
     pub fn lam_supervisor(self) -> bool {
         self.contains(Self::LAM_SUPERVISOR)
     }
+    #[inline]
+    pub fn fred(self) -> bool {
+        self.contains(Self::FRED)
+    }
 
     #[inline]
-    pub(super) fn get32(self) -> u32 {
+    pub(super) fn get(self) -> u64 {
         self.bits()
     }
     #[inline]
-    pub(super) fn set32(&mut self, val: u32) {
+    pub(super) fn set(&mut self, val: u64) {
         *self = Self::from_bits_retain(val);
+    }
+    #[inline]
+    pub(super) fn get32(self) -> u32 {
+        self.bits() as u32
+    }
+    #[inline]
+    pub(super) fn set32(&mut self, val: u32) {
+        self.set(val as u64);
     }
 }
 
@@ -938,7 +951,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.invalidate_prefetch_q();
 
         let src = instr.src1() as usize;
-        let val_32 = self.get_gpr32(src);
+        let val_32 = self.get_gpr32(src) as u64;
 
         // Bochs check_CR4(): reject unsupported bits using cr4_suppmask
         // computed at reset from CPUID features (matches crregs.cc)
@@ -972,8 +985,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        let old_cr4 = self.cr4.get32();
-        self.cr4.set32(val_32);
+        let old_cr4 = self.cr4.get();
+        self.cr4.set(val_32);
 
         // Bochs: TLB flush only if paging-related bits changed
         // BX_CR4_FLUSH_TLB_MASK = PSE|PAE|PGE|PCIDE|SMEP|SMAP
@@ -996,7 +1009,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
             self.instrumentation.fire_tlb_cntrl(
-                super::instrumentation::TlbCntrl::MovCr4 { new_value: val_32 as u64 },
+                super::instrumentation::TlbCntrl::MovCr4 { new_value: val_32 },
             );
         }
 
@@ -1143,10 +1156,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Compute CR4 supported bits mask from CPUID features.
     /// Matches Bochs crregs.cc get_cr4_allow_mask()
-    pub(super) fn get_cr4_allow_mask(&self) -> u32 {
+    pub(super) fn get_cr4_allow_mask(&self) -> u64 {
         use super::decoder::features::X86Feature;
 
-        let mut allow = 0u32;
+        let mut allow = 0u64;
 
         // VME → CR4.VME + CR4.PVI
         if self.bx_cpuid_support_isa_extension(X86Feature::IsaVme) {
@@ -1235,6 +1248,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // LASS → CR4.LASS
         if self.bx_cpuid_support_isa_extension(X86Feature::IsaLass) {
             allow |= BxCr4::LASS.bits();
+        }
+        // FRED → CR4.FRED
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaFred) {
+            allow |= BxCr4::FRED.bits();
         }
 
         allow
@@ -1348,7 +1365,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn mov_rq_cr4(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
-        let val = self.cr4.get32() as u64;
+        let val = self.cr4.get();
         self.set_gpr64(instr.src() as usize, val);
         Ok(())
     }

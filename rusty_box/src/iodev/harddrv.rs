@@ -1376,6 +1376,12 @@ impl BxHardDriveC {
                 drive.controller.head_no = 0;
                 drive.controller.sector_count = 1;
                 drive.controller.sector_no = 1;
+                // Reset HOB registers (Bochs harddrv.cc)
+                drive.controller.hob.feature = 0;
+                drive.controller.hob.nsector = 0;
+                drive.controller.hob.sector = 0;
+                drive.controller.hob.lcyl = 0;
+                drive.controller.hob.hcyl = 0;
                 // HD → cylinder_no=0, CDROM → 0xEB14 (ATAPI signature), absent → 0xFFFF
                 match drive.device_type {
                     DeviceType::Disk => drive.controller.cylinder_no = 0,
@@ -3249,6 +3255,19 @@ impl BxHardDriveC {
                         for i in 20..24 { drive.controller.buffer[i] = 0; }
                         self.ready_to_send_atapi(channel_num, pic, pci_ide);
                     }
+                    0x0e => {
+                        // CD-ROM audio control page (Bochs harddrv.cc)
+                        self.init_send_atapi_command(channel_num, atapi_command, 16, mode_alloc_length, false);
+                        let drive = self.channels[channel_num].selected_drive_mut();
+                        drive.controller.buffer[0] = 0;
+                        drive.controller.buffer[1] = 14;
+                        drive.controller.buffer[2] = (1 << 2) | (0 << 1);
+                        for i in 3..8 { drive.controller.buffer[i] = 0; } // reserved
+                        drive.controller.buffer[8] = 3;    // connect channels 0 and 1
+                        drive.controller.buffer[9] = 0xFF; // volume
+                        for i in 10..16 { drive.controller.buffer[i] = 0; } // ports muted
+                        self.ready_to_send_atapi(channel_num, pic, pci_ide);
+                    }
                     _ => {
                         self.atapi_cmd_error(channel_num, SenseKey::IllegalRequest, Asc::InvFieldInCmdPacket);
                         self.raise_interrupt(channel_num, pic, pci_ide);
@@ -3321,6 +3340,19 @@ impl BxHardDriveC {
                         for i in 24..28 {
                             drive.controller.buffer[i] = 0;
                         }
+                        self.ready_to_send_atapi(channel_num, pic, pci_ide);
+                    }
+                    0x0e => {
+                        // CD-ROM audio control page (Bochs harddrv.cc)
+                        self.init_send_atapi_command(channel_num, atapi_command, 16, mode_alloc_length, false);
+                        let drive = self.channels[channel_num].selected_drive_mut();
+                        drive.controller.buffer[0] = 0;
+                        drive.controller.buffer[1] = 14;
+                        drive.controller.buffer[2] = (1 << 2) | (0 << 1);
+                        for i in 3..8 { drive.controller.buffer[i] = 0; } // reserved
+                        drive.controller.buffer[8] = 3;    // connect channels 0 and 1
+                        drive.controller.buffer[9] = 0xFF; // volume
+                        for i in 10..16 { drive.controller.buffer[i] = 0; } // ports muted
                         self.ready_to_send_atapi(channel_num, pic, pci_ide);
                     }
                     _ => {

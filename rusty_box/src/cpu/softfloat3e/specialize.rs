@@ -176,6 +176,41 @@ pub fn softfloat_propagate_nan_extf80(
     }
 }
 
+/// Propagate NaN for f16
+pub fn softfloat_propagate_nan_f16(
+    a: float16,
+    b: float16,
+    status: &mut SoftFloatStatus,
+) -> float16 {
+    let a_is_snan = f16_is_signaling_nan(a);
+    let b_is_snan = f16_is_signaling_nan(b);
+
+    // Quieten SNaN
+    let a_q = a | 0x0200;
+    let b_q = b | 0x0200;
+
+    if a_is_snan | b_is_snan {
+        softfloat_raiseFlags(status, FLAG_INVALID);
+    }
+
+    if a_is_snan {
+        if b_is_snan {
+            return if a_q < b_q { b_q } else { a_q };
+        }
+        return if f16_is_nan(b) { b_q } else { a_q };
+    }
+    if f16_is_nan(a) {
+        if b_is_snan {
+            return a_q;
+        }
+        if f16_is_nan(b) {
+            return if a_q < b_q { b_q } else { a_q };
+        }
+        return a_q;
+    }
+    b_q
+}
+
 /// Propagate NaN for f32
 pub fn softfloat_propagate_nan_f32(
     a: float32,

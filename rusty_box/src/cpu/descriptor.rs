@@ -468,7 +468,7 @@ pub(crate) struct BxSegmentReg {
     pub(crate) cache: BxDescriptor, // Idk if really option
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct BxGlobalSegmentReg {
     /// base address: 24bits=286,32bits=386,64bits=x86-64
     pub(super) base: BxAddress,

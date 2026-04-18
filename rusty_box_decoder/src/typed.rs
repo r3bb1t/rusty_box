@@ -2078,8 +2078,8 @@ pub enum TypedInstruction {
     Testui,
     /// UIRET — return from user interrupt handler
     Uiret,
-    /// SENDUIPI r64 — send user IPI
-    SenduipiGqR { dst: GprIndex },
+    /// SENDUIPI r/m64 — send user IPI
+    SenduipiEqR { dst: GprIndex },
 
     // =====================================================================
     // Extension — MONITOR/MWAIT extensions
@@ -8886,7 +8886,7 @@ impl Instruction {
             O::Stui => T::Stui,
             O::Testui => T::Testui,
             O::Uiret => T::Uiret,
-            O::SenduipiGq => T::SenduipiGqR { dst: self.dst_reg() },
+            O::SenduipiEq => T::SenduipiEqR { dst: self.dst_reg() },
 
             // =================================================================
             // Extension — MONITOR/MWAIT extensions

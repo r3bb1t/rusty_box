@@ -582,6 +582,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let val: u64 = match msr {
             BX_MSR_TSC => self.get_tsc(self.system_ticks()),
             BX_MSR_APICBASE => self.msr.apicbase,
+            BX_MSR_PLATFORM_ID => 0, // read-only, returns 0
+            BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => self.get_tsc(self.system_ticks()), // stub: return TSC
             BX_MSR_BIOS_SIGN_ID => 0x02000065, // Skylake-X microcode revision
             BX_MSR_MTRRCAP => BX_MSR_MTRRCAP_DEFAULT,
             BX_MSR_PMC0..=BX_MSR_PMC7 => 0, // Performance counters — return 0
@@ -684,6 +686,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         match msr {
             BX_MSR_TSC => self.set_tsc(val, self.system_ticks()),
             BX_MSR_APICBASE => self.msr.apicbase = val as _,
+            BX_MSR_PLATFORM_ID => {
+                tracing::trace!("WRMSR: PLATFORM_ID is read-only");
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            BX_MSR_IA32_APERF => { /* ignore write */ }
+            BX_MSR_IA32_MPERF => { /* ignore write */ }
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr = val as u32,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr = val,
             BX_MSR_SYSENTER_EIP => self.msr.sysenter_eip_msr = val,
@@ -1101,18 +1109,81 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // ========================================================================
-    // SYSENTER — Fast System Call Entry (opcode 0F 34)
-    // Bochs: proc_ctrl.cc
+    // setup_flat_cs / setup_flat_ss — Helper functions for flat segment setup
+    // Used by SYSENTER/SYSEXIT/SYSCALL/SYSRET to avoid duplicated ~15-line
+    // segment-cache initialization blocks.
+    // Bochs: segment_ctrl_pro.cc setup_flat_CS / setup_flat_SS
     // ========================================================================
 
-    pub(super) fn sysenter(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
+    /// Set up CS as a flat code segment with the given DPL and long-mode flag.
+    /// Calls handle_cpu_mode_change(), update_fetch_mode_mask(), and
+    /// handle_alignment_check() as the C++ implementation does.
+    fn setup_flat_cs(&mut self, dpl: u8, long_mode: bool) {
         use super::decoder::BxSegregs;
         use super::descriptor::{
             SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
         };
 
+        let cs_idx = BxSegregs::Cs as usize;
+        self.sregs[cs_idx].cache.valid =
+            SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+        self.sregs[cs_idx].cache.p = true;
+        self.sregs[cs_idx].cache.dpl = dpl;
+        self.sregs[cs_idx].cache.segment = true;
+        self.sregs[cs_idx].cache.r#type = 0xb; // CODE_EXEC_READ_ACCESSED
+        self.sregs[cs_idx].cache.u.set_segment_base(0);
+        self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+        self.sregs[cs_idx].cache.u.set_segment_g(true);
+        self.sregs[cs_idx].cache.u.set_segment_avl(false);
+        self.sregs[cs_idx].cache.u.set_segment_d_b(!long_mode);
+        self.sregs[cs_idx].cache.u.set_segment_l(long_mode);
+
+        self.handle_cpu_mode_change();
+        self.update_fetch_mode_mask();
+        self.handle_alignment_check();
+    }
+
+    /// Set up SS as a flat data segment with the given DPL.
+    fn setup_flat_ss(&mut self, dpl: u8) {
+        use super::decoder::BxSegregs;
+        use super::descriptor::{
+            SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
+        };
+
+        let ss_idx = BxSegregs::Ss as usize;
+        self.sregs[ss_idx].cache.valid =
+            SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+        self.sregs[ss_idx].cache.p = true;
+        self.sregs[ss_idx].cache.dpl = dpl;
+        self.sregs[ss_idx].cache.segment = true;
+        self.sregs[ss_idx].cache.r#type = 0x3; // DATA_READ_WRITE_ACCESSED
+        self.sregs[ss_idx].cache.u.set_segment_base(0);
+        self.sregs[ss_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+        self.sregs[ss_idx].cache.u.set_segment_g(true);
+        self.sregs[ss_idx].cache.u.set_segment_d_b(true);
+        self.sregs[ss_idx].cache.u.set_segment_avl(false);
+        self.sregs[ss_idx].cache.u.set_segment_l(false);
+    }
+
+    // ========================================================================
+    // SYSENTER — Fast System Call Entry (opcode 0F 34)
+    // Bochs: proc_ctrl.cc
+    // ========================================================================
+
+    pub(super) fn sysenter(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
+
         if self.real_mode() {
             return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // FRED event delivery for SYSENTER
+        if self.cr4.fred() {
+            // TODO: FRED functions don't exist yet
+            // self.set_fred_event_info_and_data(BX_EVENT_SYSENTER, BX_EVENT_OTHER, false, instr.ilen());
+            // self.fred_event_delivery(BX_EVENT_SYSENTER, BX_EVENT_OTHER, 0);
+            // self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+            // return Ok(());
+            todo!("FRED event delivery for SYSENTER");
         }
         if (self.msr.sysenter_cs_msr & 0xFFFC) == 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -1136,48 +1207,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Load CS: flat code segment, DPL=0 (Bochs proc_ctrl.cc)
-        let cs_idx = BxSegregs::Cs as usize;
         super::segment_ctrl_pro::parse_selector(
             (self.msr.sysenter_cs_msr & 0xFFFC) as u16,
-            &mut self.sregs[cs_idx].selector,
+            &mut self.sregs[super::decoder::BxSegregs::Cs as usize].selector,
         );
-        let seg_valid =
-            SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
-        self.sregs[cs_idx].cache.valid = seg_valid;
-        self.sregs[cs_idx].cache.p = true;
-        self.sregs[cs_idx].cache.dpl = 0;
-        self.sregs[cs_idx].cache.segment = true;
-        self.sregs[cs_idx].cache.r#type = 0xb; // CODE_EXEC_READ_ACCESSED
-        self.sregs[cs_idx].cache.u.set_segment_base(0);
-        self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
-        self.sregs[cs_idx].cache.u.set_segment_g(true);
-        self.sregs[cs_idx].cache.u.set_segment_avl(false);
-        self.sregs[cs_idx].cache.u.set_segment_d_b(!self.long_mode());
-        self.sregs[cs_idx].cache.u.set_segment_l(self.long_mode());
-
-        self.handle_cpu_mode_change();
-        self.alignment_check_mask = 0;
-        // Bochs proc_ctrl.cc — updateFetchModeMask() after CS reload
-        self.update_fetch_mode_mask();
+        self.setup_flat_cs(0, self.long_mode());
 
         // Load SS: flat data segment, DPL=0 (Bochs proc_ctrl.cc)
-        let ss_idx = BxSegregs::Ss as usize;
         super::segment_ctrl_pro::parse_selector(
             ((self.msr.sysenter_cs_msr + 8) & 0xFFFC) as u16,
-            &mut self.sregs[ss_idx].selector,
+            &mut self.sregs[super::decoder::BxSegregs::Ss as usize].selector,
         );
-        self.sregs[ss_idx].cache.valid = seg_valid;
-        self.sregs[ss_idx].cache.p = true;
-        self.sregs[ss_idx].cache.dpl = 0;
-        self.sregs[ss_idx].cache.segment = true;
-        self.sregs[ss_idx].cache.r#type = 0x3; // DATA_READ_WRITE_ACCESSED
-        self.sregs[ss_idx].cache.u.set_segment_base(0);
-        self.sregs[ss_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
-        self.sregs[ss_idx].cache.u.set_segment_g(true);
-        self.sregs[ss_idx].cache.u.set_segment_d_b(true);
-        self.sregs[ss_idx].cache.u.set_segment_avl(false);
-        self.sregs[ss_idx].cache.u.set_segment_l(false);
-
+        self.setup_flat_ss(0);
         // Load RSP/RIP from MSRs (Bochs proc_ctrl.cc)
         if self.long_mode() {
             self.set_rsp(self.msr.sysenter_esp_msr);
@@ -1202,12 +1243,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     pub(super) fn sysexit(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        use super::decoder::BxSegregs;
-        use super::descriptor::{
-            SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
-        };
 
-        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if self.cr4.fred() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
         if self.real_mode() || cpl != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -1218,10 +1259,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.invalidate_prefetch_q();
         self.monitor.reset_umonitor();
 
-        let seg_valid =
-            SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
-        let cs_idx = BxSegregs::Cs as usize;
-        let ss_idx = BxSegregs::Ss as usize;
 
         // 64-bit SYSEXIT (Bochs proc_ctrl.cc)
         if instr.os64_l() != 0 {
@@ -1235,19 +1272,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // CS = (sysenter_cs_msr + 32) | 3, 64-bit code DPL=3
             super::segment_ctrl_pro::parse_selector(
                 (((self.msr.sysenter_cs_msr + 32) & 0xFFFC) | 3) as u16,
-                &mut self.sregs[cs_idx].selector,
+                &mut self.sregs[super::decoder::BxSegregs::Cs as usize].selector,
             );
-            self.sregs[cs_idx].cache.valid = seg_valid;
-            self.sregs[cs_idx].cache.p = true;
-            self.sregs[cs_idx].cache.dpl = 3;
-            self.sregs[cs_idx].cache.segment = true;
-            self.sregs[cs_idx].cache.r#type = 0xb;
-                self.sregs[cs_idx].cache.u.set_segment_base(0);
-                self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
-                self.sregs[cs_idx].cache.u.set_segment_g(true);
-                self.sregs[cs_idx].cache.u.set_segment_avl(false);
-                self.sregs[cs_idx].cache.u.set_segment_d_b(false);
-                self.sregs[cs_idx].cache.u.set_segment_l(true); // 64-bit
+            self.setup_flat_cs(3, true);
 
             self.set_rsp(self.rcx());
             self.set_rip(self.rdx());
@@ -1255,46 +1282,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // 32-bit SYSEXIT: CS = (sysenter_cs_msr + 16) | 3 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 (((self.msr.sysenter_cs_msr + 16) & 0xFFFC) | 3) as u16,
-                &mut self.sregs[cs_idx].selector,
+                &mut self.sregs[super::decoder::BxSegregs::Cs as usize].selector,
             );
-            self.sregs[cs_idx].cache.valid = seg_valid;
-            self.sregs[cs_idx].cache.p = true;
-            self.sregs[cs_idx].cache.dpl = 3;
-            self.sregs[cs_idx].cache.segment = true;
-            self.sregs[cs_idx].cache.r#type = 0xb;
-                self.sregs[cs_idx].cache.u.set_segment_base(0);
-                self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
-                self.sregs[cs_idx].cache.u.set_segment_g(true);
-                self.sregs[cs_idx].cache.u.set_segment_avl(false);
-                self.sregs[cs_idx].cache.u.set_segment_d_b(true);
-                self.sregs[cs_idx].cache.u.set_segment_l(false);
+            self.setup_flat_cs(3, false);
 
             self.set_esp(self.ecx());
             self.set_eip(self.edx());
         }
 
-        self.handle_cpu_mode_change();
-        self.handle_alignment_check();
-        // Bochs proc_ctrl.cc — updateFetchModeMask() after CS reload
-        self.update_fetch_mode_mask();
-
         // SS = (sysenter_cs_msr + (os64 ? 40 : 24)) | 3 (Bochs proc_ctrl.cc)
         let ss_offset: u32 = if instr.os64_l() != 0 { 40 } else { 24 };
         super::segment_ctrl_pro::parse_selector(
             (((self.msr.sysenter_cs_msr + ss_offset) & 0xFFFC) | 3) as u16,
-            &mut self.sregs[ss_idx].selector,
+            &mut self.sregs[super::decoder::BxSegregs::Ss as usize].selector,
         );
-        self.sregs[ss_idx].cache.valid = seg_valid;
-        self.sregs[ss_idx].cache.p = true;
-        self.sregs[ss_idx].cache.dpl = 3;
-        self.sregs[ss_idx].cache.segment = true;
-        self.sregs[ss_idx].cache.r#type = 0x3;
-        self.sregs[ss_idx].cache.u.set_segment_base(0);
-        self.sregs[ss_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
-        self.sregs[ss_idx].cache.u.set_segment_g(true);
-        self.sregs[ss_idx].cache.u.set_segment_d_b(true);
-        self.sregs[ss_idx].cache.u.set_segment_avl(false);
-        self.sregs[ss_idx].cache.u.set_segment_l(false);
+        self.setup_flat_ss(3);
 
         // Bochs: BX_INSTR_FAR_BRANCH(BX_CPU_ID, BX_INSTR_IS_SYSEXIT, ...)
         let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
@@ -1448,10 +1450,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     pub(super) fn syscall(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
-        use super::decoder::BxSegregs;
-        use super::descriptor::{
-            SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
-        };
         use super::eflags::EFlags;
 
         if !self.efer.sce() {
@@ -1492,10 +1490,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         self.invalidate_prefetch_q();
 
-        let seg_valid =
-            SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
-        let cs_idx = BxSegregs::Cs as usize;
-        let ss_idx = BxSegregs::Ss as usize;
+        // FRED event delivery for SYSCALL
+        if self.cr4.fred() {
+            // TODO: FRED functions don't exist yet
+            // self.set_fred_event_info_and_data(BX_EVENT_SYSCALL, BX_EVENT_OTHER, false, instr.ilen());
+            // self.fred_event_delivery(BX_EVENT_SYSENTER, BX_EVENT_OTHER, 0);
+            // self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+            // return Ok(());
+            todo!("FRED event delivery for SYSCALL");
+        }
+
 
         if self.long_mode() {
             // Long mode SYSCALL (Bochs proc_ctrl.cc)
@@ -1513,41 +1517,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // CS: flat 64-bit code, DPL=0 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 ((self.msr.star >> 32) & 0xFFFC) as u16,
-                &mut self.sregs[cs_idx].selector,
+                &mut self.sregs[super::decoder::BxSegregs::Cs as usize].selector,
             );
-            self.sregs[cs_idx].cache.valid = seg_valid;
-            self.sregs[cs_idx].cache.p = true;
-            self.sregs[cs_idx].cache.dpl = 0;
-            self.sregs[cs_idx].cache.segment = true;
-            self.sregs[cs_idx].cache.r#type = 0xb;
-            self.sregs[cs_idx].cache.u.set_segment_base(0);
-            self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
-            self.sregs[cs_idx].cache.u.set_segment_g(true);
-            self.sregs[cs_idx].cache.u.set_segment_d_b(false);
-            self.sregs[cs_idx].cache.u.set_segment_l(true); // 64-bit code
-            self.sregs[cs_idx].cache.u.set_segment_avl(false);
-
-            self.handle_cpu_mode_change();
-            self.alignment_check_mask = 0;
-            // Bochs proc_ctrl.cc — updateFetchModeMask() after CS reload
-            self.update_fetch_mode_mask();
+            self.setup_flat_cs(0, true);
 
             // SS: flat data, DPL=0 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 (((self.msr.star >> 32) + 8) & 0xFFFC) as u16,
-                &mut self.sregs[ss_idx].selector,
+                &mut self.sregs[super::decoder::BxSegregs::Ss as usize].selector,
             );
-            self.sregs[ss_idx].cache.valid = seg_valid;
-            self.sregs[ss_idx].cache.p = true;
-            self.sregs[ss_idx].cache.dpl = 0;
-            self.sregs[ss_idx].cache.segment = true;
-            self.sregs[ss_idx].cache.r#type = 0x3;
-            self.sregs[ss_idx].cache.u.set_segment_base(0);
-            self.sregs[ss_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
-            self.sregs[ss_idx].cache.u.set_segment_g(true);
-            self.sregs[ss_idx].cache.u.set_segment_d_b(true);
-            self.sregs[ss_idx].cache.u.set_segment_l(false);
-            self.sregs[ss_idx].cache.u.set_segment_avl(false);
+            self.setup_flat_ss(0);
 
             // Mask RFLAGS with FMASK, clear RF (Bochs proc_ctrl.cc)
             let new_flags = saved_rflags & !self.msr.fmask & !EFlags::RF.bits();
@@ -1562,41 +1541,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // CS: flat 32-bit code, DPL=0 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 ((self.msr.star >> 32) & 0xFFFC) as u16,
-                &mut self.sregs[cs_idx].selector,
+                &mut self.sregs[super::decoder::BxSegregs::Cs as usize].selector,
             );
-            self.sregs[cs_idx].cache.valid = seg_valid;
-            self.sregs[cs_idx].cache.p = true;
-            self.sregs[cs_idx].cache.dpl = 0;
-            self.sregs[cs_idx].cache.segment = true;
-            self.sregs[cs_idx].cache.r#type = 0xb;
-            self.sregs[cs_idx].cache.u.set_segment_base(0);
-            self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
-            self.sregs[cs_idx].cache.u.set_segment_g(true);
-            self.sregs[cs_idx].cache.u.set_segment_d_b(true);
-            self.sregs[cs_idx].cache.u.set_segment_l(false);
-            self.sregs[cs_idx].cache.u.set_segment_avl(false);
-
-            self.handle_cpu_mode_change();
-            self.alignment_check_mask = 0;
-            // Bochs proc_ctrl.cc — updateFetchModeMask() after CS reload
-            self.update_fetch_mode_mask();
+            self.setup_flat_cs(0, false);
 
             // SS: flat data, DPL=0 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 (((self.msr.star >> 32) + 8) & 0xFFFC) as u16,
-                &mut self.sregs[ss_idx].selector,
+                &mut self.sregs[super::decoder::BxSegregs::Ss as usize].selector,
             );
-            self.sregs[ss_idx].cache.valid = seg_valid;
-            self.sregs[ss_idx].cache.p = true;
-            self.sregs[ss_idx].cache.dpl = 0;
-            self.sregs[ss_idx].cache.segment = true;
-            self.sregs[ss_idx].cache.r#type = 0x3;
-            self.sregs[ss_idx].cache.u.set_segment_base(0);
-            self.sregs[ss_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
-            self.sregs[ss_idx].cache.u.set_segment_g(true);
-            self.sregs[ss_idx].cache.u.set_segment_d_b(true);
-            self.sregs[ss_idx].cache.u.set_segment_l(false);
-            self.sregs[ss_idx].cache.u.set_segment_avl(false);
+            self.setup_flat_ss(0);
 
             self.clear_vm();
             self.clear_if();
@@ -1619,19 +1573,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     pub(super) fn sysret(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        use super::decoder::BxSegregs;
-        use super::descriptor::{
-            SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
-        };
         use super::eflags::EFlags;
 
         // Track SYSRET for diagnostics
         #[cfg(debug_assertions)] { self.diag_sysret_count += 1; }
 
+        if self.cr4.fred() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
         if !self.efer.sce() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
-        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
         if !self.protected_mode() || cpl != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -1639,10 +1593,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.invalidate_prefetch_q();
         self.monitor.reset_umonitor();
 
-        let seg_valid =
-            SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
-        let cs_idx = BxSegregs::Cs as usize;
-        let ss_idx = BxSegregs::Ss as usize;
 
         // Bochs proc_ctrl.cc — temp_RIP stores the return address;
         // RIP is set AFTER all mode changes (line 1348).
@@ -1659,19 +1609,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 // CS = ((star >> 48) + 16) | 3, 64-bit code DPL=3
                 super::segment_ctrl_pro::parse_selector(
                     ((((self.msr.star >> 48) + 16) & 0xFFFC) | 3) as u16,
-                    &mut self.sregs[cs_idx].selector,
+                    &mut self.sregs[super::decoder::BxSegregs::Cs as usize].selector,
                 );
-                self.sregs[cs_idx].cache.valid = seg_valid;
-                self.sregs[cs_idx].cache.p = true;
-                self.sregs[cs_idx].cache.dpl = 3;
-                self.sregs[cs_idx].cache.segment = true;
-                self.sregs[cs_idx].cache.r#type = 0xb;
-                    self.sregs[cs_idx].cache.u.set_segment_base(0);
-                    self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
-                    self.sregs[cs_idx].cache.u.set_segment_g(true);
-                    self.sregs[cs_idx].cache.u.set_segment_d_b(false);
-                    self.sregs[cs_idx].cache.u.set_segment_l(true); // 64-bit
-                    self.sregs[cs_idx].cache.u.set_segment_avl(false);
+                self.setup_flat_cs(3, true);
 
                 // Bochs proc_ctrl.cc — save RCX for later RIP assignment
                 temp_rip = self.rcx();
@@ -1679,39 +1619,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 // Return to 32-bit compat mode (Bochs proc_ctrl.cc)
                 super::segment_ctrl_pro::parse_selector(
                     (((self.msr.star >> 48) & 0xFFFC) | 3) as u16,
-                    &mut self.sregs[cs_idx].selector,
+                    &mut self.sregs[super::decoder::BxSegregs::Cs as usize].selector,
                 );
-                self.sregs[cs_idx].cache.valid = seg_valid;
-                self.sregs[cs_idx].cache.p = true;
-                self.sregs[cs_idx].cache.dpl = 3;
-                self.sregs[cs_idx].cache.segment = true;
-                self.sregs[cs_idx].cache.r#type = 0xb;
-                    self.sregs[cs_idx].cache.u.set_segment_base(0);
-                    self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
-                    self.sregs[cs_idx].cache.u.set_segment_g(true);
-                    self.sregs[cs_idx].cache.u.set_segment_d_b(true);
-                    self.sregs[cs_idx].cache.u.set_segment_l(false);
-                    self.sregs[cs_idx].cache.u.set_segment_avl(false);
+                self.setup_flat_cs(3, false);
 
                 // Bochs proc_ctrl.cc — save ECX for later RIP assignment
                 temp_rip = self.ecx() as u64;
             }
 
-            // Bochs proc_ctrl.cc — handleCpuModeChange (mode change from CS.L)
-            self.handle_cpu_mode_change();
-            // Bochs proc_ctrl.cc — handleAlignmentCheck (CPL change)
-            self.handle_alignment_check();
-
-            // SS: (star >> 48) + 8) | 3 (Bochs proc_ctrl.cc)
+            // SS: (star >> 48) + 8) | 3 — base, limit, attributes unchanged (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 ((((self.msr.star >> 48) + 8) & 0xFFFC) | 3) as u16,
-                &mut self.sregs[ss_idx].selector,
+                &mut self.sregs[super::decoder::BxSegregs::Ss as usize].selector,
             );
-            self.sregs[ss_idx].cache.valid = seg_valid;
-            self.sregs[ss_idx].cache.p = true;
-            self.sregs[ss_idx].cache.dpl = 3;
-            self.sregs[ss_idx].cache.segment = true;
-            self.sregs[ss_idx].cache.r#type = 0x3;
+            {
+                use super::descriptor::{
+                    SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G,
+                    SEG_VALID_CACHE,
+                };
+                let ss_idx = super::decoder::BxSegregs::Ss as usize;
+                self.sregs[ss_idx].cache.valid =
+                    SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+                self.sregs[ss_idx].cache.p = true;
+                self.sregs[ss_idx].cache.dpl = 3;
+                self.sregs[ss_idx].cache.segment = true;
+                self.sregs[ss_idx].cache.r#type = 0x3;
+            }
 
             // Bochs proc_ctrl.cc — restore RFLAGS from R11
             self.write_eflags(self.r11() as u32, EFlags::VALID_MASK.bits());
@@ -1719,36 +1652,28 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Legacy/compat mode SYSRET (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 (((self.msr.star >> 48) & 0xFFFC) | 3) as u16,
-                &mut self.sregs[cs_idx].selector,
+                &mut self.sregs[super::decoder::BxSegregs::Cs as usize].selector,
             );
-            self.sregs[cs_idx].cache.valid = seg_valid;
-            self.sregs[cs_idx].cache.p = true;
-            self.sregs[cs_idx].cache.dpl = 3;
-            self.sregs[cs_idx].cache.segment = true;
-            self.sregs[cs_idx].cache.r#type = 0xb;
-            self.sregs[cs_idx].cache.u.set_segment_base(0);
-            self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
-            self.sregs[cs_idx].cache.u.set_segment_g(true);
-            self.sregs[cs_idx].cache.u.set_segment_d_b(true);
-            self.sregs[cs_idx].cache.u.set_segment_l(false);
-            self.sregs[cs_idx].cache.u.set_segment_avl(false);
+            self.setup_flat_cs(3, false);
 
-            // Bochs proc_ctrl.cc — updateFetchModeMask after CS reload
-            // (NOT handleCpuModeChange — that's only called at line 1346 outside)
-            self.update_fetch_mode_mask();
-            // Bochs proc_ctrl.cc — handleAlignmentCheck (CPL change)
-            self.handle_alignment_check();
-
-            // SS: (star >> 48) + 8) | 3 (Bochs proc_ctrl.cc)
+            // SS: (star >> 48) + 8) | 3 — base, limit, attributes unchanged (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 ((((self.msr.star >> 48) + 8) & 0xFFFC) | 3) as u16,
-                &mut self.sregs[ss_idx].selector,
+                &mut self.sregs[super::decoder::BxSegregs::Ss as usize].selector,
             );
-            self.sregs[ss_idx].cache.valid = seg_valid;
-            self.sregs[ss_idx].cache.p = true;
-            self.sregs[ss_idx].cache.dpl = 3;
-            self.sregs[ss_idx].cache.segment = true;
-            self.sregs[ss_idx].cache.r#type = 0x3;
+            {
+                use super::descriptor::{
+                    SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G,
+                    SEG_VALID_CACHE,
+                };
+                let ss_idx = super::decoder::BxSegregs::Ss as usize;
+                self.sregs[ss_idx].cache.valid =
+                    SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+                self.sregs[ss_idx].cache.p = true;
+                self.sregs[ss_idx].cache.dpl = 3;
+                self.sregs[ss_idx].cache.segment = true;
+                self.sregs[ss_idx].cache.r#type = 0x3;
+            }
 
             // Bochs proc_ctrl.cc — assert_IF()
             self.eflags.insert(super::eflags::EFlags::IF_);
@@ -1756,9 +1681,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Bochs proc_ctrl.cc — temp_RIP = ECX
             temp_rip = self.ecx() as u64;
         }
-
-        // Bochs proc_ctrl.cc — handleCpuModeChange (final, outside if/else)
-        self.handle_cpu_mode_change();
 
         // Bochs proc_ctrl.cc — RIP = temp_RIP (set AFTER all mode changes)
         self.set_rip(temp_rip);
@@ -1865,6 +1787,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.xcr0.set32(eax);
         self.handle_avx_mode_change();
+        self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
         tracing::trace!("XSETBV: XCR0={:#010x}", eax);
 
         Ok(())
@@ -1923,8 +1846,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Save MXCSR if SSE or YMM requested (Bochs xsave.cc)
         if (requested & 0x6) != 0 {
-            self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
-            self.v_write_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
+            self.xsave_mxcsr_state(seg, eaddr)?;
         }
 
         // Save SSE state if requested (bit 1)
@@ -2012,6 +1934,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         Ok(())
+    }
+
+    /// Save MXCSR and MXCSR_MASK to XSAVE area at eaddr+24 and eaddr+28
+    /// Bochs xsave.cc: xsave_mxcsr_state
+    fn xsave_mxcsr_state(&mut self, seg: super::decoder::BxSegregs, eaddr: u64) -> super::Result<()> {
+        self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
+        self.v_write_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
+        Ok(())
+    }
+
+    /// Restore MXCSR from XSAVE area at eaddr+24, validating against mxcsr_mask
+    /// Bochs xsave.cc: xrstor_mxcsr_state
+    fn xrstor_mxcsr_state(&mut self, seg: super::decoder::BxSegregs, eaddr: u64) -> super::Result<()> {
+        let new_mxcsr = self.v_read_dword(seg, eaddr.wrapping_add(24))?;
+        if (new_mxcsr & !self.mxcsr_mask) != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        self.mxcsr.mxcsr = new_mxcsr;
+        Ok(())
+    }
+
+    /// Reset MXCSR to initial value
+    /// Bochs xsave.cc: xrstor_init_mxcsr_state
+    fn xrstor_init_mxcsr_state(&mut self) {
+        use super::xmm::MXCSR_RESET;
+        self.mxcsr.mxcsr = MXCSR_RESET;
     }
 
     /// Save SSE state to XSAVE area (at given offset, up to 256 bytes: XMM0-XMM15)
@@ -2589,8 +2537,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // MXCSR: always written when SSE or YMM requested (Bochs xsave.cc)
         // NOT gated on xinuse — matches standard XSAVE behavior
         if (requested & 0x6) != 0 {
-            self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
-            self.v_write_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
+            self.xsave_mxcsr_state(seg, eaddr)?;
         }
 
         // SSE (bit 1)
@@ -2676,14 +2623,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.xsave_x87_state(seg, eaddr, instr.os64_l() != 0)?;
         }
 
-        // MXCSR if SSE or YMM in xstate_bv
-        if (xstate_bv & 0x6) != 0 {
-            self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
-            self.v_write_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
-        }
-
-        // SSE (bit 1) at standard offset 160
-        if (requested & 2) != 0 && (xinuse & 2) != 0 {
+        // For XSAVEC/XSAVES, MXCSR is part of SSE state — saved together with SSE
+        // Bochs xsave.cc: xsave_mxcsr_state called when SSE is in xstate_bv
+        if (xstate_bv & 2) != 0 {
+            self.xsave_mxcsr_state(seg, eaddr)?;
             self.xsave_sse_state(seg, eaddr.wrapping_add(160))?;
         }
 
@@ -2820,32 +2763,26 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // --- MXCSR ---
-        if compaction {
-            // Compacted: load MXCSR only if SSE is requested AND in restore_mask
-            if (requested & 2) != 0 && (restore_mask & 2) != 0 {
-                let new_mxcsr = self.v_read_dword(seg, eaddr.wrapping_add(24))?;
-                if (new_mxcsr & !self.mxcsr_mask) != 0 {
-                    return self.exception(super::cpu::Exception::Gp, 0);
-                }
-                self.mxcsr.mxcsr = new_mxcsr;
-            }
-        } else {
-            // Standard: load MXCSR when SSE or YMM is requested
-            if (requested & 0x6) != 0 {
-                let new_mxcsr = self.v_read_dword(seg, eaddr.wrapping_add(24))?;
-                if (new_mxcsr & !self.mxcsr_mask) != 0 {
-                    return self.exception(super::cpu::Exception::Gp, 0);
-                }
-                self.mxcsr.mxcsr = new_mxcsr;
-            }
+        // Legacy (non-compacted, non-XRSTORS): load MXCSR when SSE or YMM is in RFBM,
+        // regardless of xstate_bv. For compaction/XRSTORS, MXCSR is part of SSE state.
+        if (requested & 0x6) != 0 && !compaction && !is_xrstors {
+            self.xrstor_mxcsr_state(seg, eaddr)?;
         }
 
         // --- SSE (bit 1) at standard offset 160 ---
         if (requested & 2) != 0 {
             if (restore_mask & 2) != 0 {
                 self.xrstor_sse_state(seg, eaddr.wrapping_add(160))?;
+                // For compacted/XRSTORS, MXCSR is part of SSE state
+                if compaction || is_xrstors {
+                    self.xrstor_mxcsr_state(seg, eaddr)?;
+                }
             } else {
                 self.xrstor_init_sse_state();
+                // For compacted/XRSTORS, init MXCSR with SSE
+                if compaction || is_xrstors {
+                    self.xrstor_init_mxcsr_state();
+                }
             }
         }
 
@@ -2861,11 +2798,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     } else {
                         self.xrstor_init_extended_component(feature);
                     }
-
-                    // Offset advances inside the requested block (Bochs xsave.cc)
-                    if (format & mask) != 0 {
-                        offset += Self::xsave_component_len(feature);
-                    }
+                }
+                // Offset advances for ALL components in format (xcomp_bv),
+                // regardless of whether they are in requested
+                if (format & mask) != 0 {
+                    offset += Self::xsave_component_len(feature);
                 }
             }
         } else {

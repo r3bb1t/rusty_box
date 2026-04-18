@@ -1696,7 +1696,7 @@ back_to_enum! {
         Stui,
         Testui,
         Uiret,
-        SenduipiGq,
+        SenduipiEq,
 
         RdpidEd,
 
@@ -2665,6 +2665,10 @@ back_to_enum! {
         Tcmmrlfp16psTnnnTrmTreg,
         Tcmmimfp16psTnnnTrmTreg,
         Tmmultf32psTnnnTrmTreg,
+        Tdpbf8psTnnnTrmTreg,
+        Tdphf8psTnnnTrmTreg,
+        Tdpbhf8psTnnnTrmTreg,
+        Tdphbf8psTnnnTrmTreg,
 
         KaddwKgwKhwKew,
         KaddqKgqKhqKeq,
@@ -2754,6 +2758,11 @@ back_to_enum! {
         MovrsGwEw,
         MovrsGdEd,
         MovrsGqEq,
+
+        // FRED
+        Erets,
+        Eretu,
+        LkgsEw,
 
         // EVEX
         EvexVaddpsVpsHpsWps,

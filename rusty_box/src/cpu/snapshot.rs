@@ -161,8 +161,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.cr0 = BxCr0::from_bits_retain(u32_at(d, &mut off));
         self.cr2 = u64_at(d, &mut off);
         self.cr3 = u64_at(d, &mut off);
-        self.cr4 = BxCr4::from_bits_retain(u32_at(d, &mut off));
-        self.cr4_suppmask = u32_at(d, &mut off);
+        self.cr4 = BxCr4::from_bits_retain(u64_at(d, &mut off));
+        self.cr4_suppmask = u64_at(d, &mut off);
         self.efer = BxEfer::from_bits_retain(u32_at(d, &mut off));
         self.efer_suppmask = u32_at(d, &mut off);
         for i in 0..5 {

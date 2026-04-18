@@ -33,6 +33,8 @@ bitflags! {
         const RESERVED     = 0x08;
         /// Instruction fetch (bit 4, NX violation)
         const CODE_ACCESS  = 0x10;
+        /// Protection key violation (bit 5)
+        const PKEY         = 0x20;
     }
 }
 
@@ -832,6 +834,45 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             (entry[leaf].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
         let is_write = matches!(rw, MemoryAccessType::Write);
         let is_execute = matches!(rw, MemoryAccessType::Execute);
+
+        // Protection keys check (Bochs handle_pkeys)
+        // Note: pkeys only apply to data accesses, not execute
+        if !is_execute {
+            let user_page = (combined_access & CombinedAccess::USER.bits()) != 0;
+            if self.cr4.pke() && user_page {
+                let pkey = ((entry[leaf].bits() >> 59) & 0xf) as u32;
+                // accessDisable
+                if self.pkru & (1 << (pkey * 2)) != 0 {
+                    return Err(super::CpuError::Memory(
+                        crate::memory::MemoryError::PageProtectionViolation,
+                    ));
+                }
+                // writeDisable
+                if self.pkru & (1 << (pkey * 2 + 1)) != 0 {
+                    if is_write && (user || self.cr0.wp()) {
+                        return Err(super::CpuError::Memory(
+                            crate::memory::MemoryError::PageProtectionViolation,
+                        ));
+                    }
+                }
+            } else if self.cr4.pks() && !user_page {
+                let pkey = ((entry[leaf].bits() >> 59) & 0xf) as u32;
+                // accessDisable
+                if self.pkrs & (1 << (pkey * 2)) != 0 {
+                    return Err(super::CpuError::Memory(
+                        crate::memory::MemoryError::PageProtectionViolation,
+                    ));
+                }
+                // writeDisable
+                if self.pkrs & (1 << (pkey * 2 + 1)) != 0 {
+                    if is_write && self.cr0.wp() {
+                        return Err(super::CpuError::Memory(
+                            crate::memory::MemoryError::PageProtectionViolation,
+                        ));
+                    }
+                }
+            }
+        }
         let priv_index = ((self.cr0.wp() as u32) << 4)
             | ((user as u32) << 3)
             | combined_access
@@ -1385,7 +1426,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // ---- DTLB miss — full page table walk ----
         self.perf_tlb_miss += 1;
-        let (paddr, combined_access, lpf_mask) = self.page_walk_for_dtlb(laddr, user, is_write)?;
+        let (paddr, combined_access, lpf_mask, pkey) = self.page_walk_for_dtlb(laddr, user, is_write)?;
         let paddr = self.apply_a20(paddr);
         let is_large_page = lpf_mask > 0xFFF;
 
@@ -1447,6 +1488,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             tlb_entry.access_bits = access_bits;
             tlb_entry.lpf_mask = lpf_mask;
             tlb_entry.host_page_addr = host_page_addr;
+            tlb_entry.pkey = pkey;
         }
 
         if is_large_page {
@@ -1571,15 +1613,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         user: bool,
         is_write: bool,
-    ) -> Result<(u64, u32, u32)> {
+    ) -> Result<(u64, u32, u32, u32)> {
         self.perf_page_walk += 1;
         if self.long_mode() {
             return self.page_walk_for_dtlb_long_mode(laddr, user, is_write);
         }
-        if self.cr4.pae() {
-            return self.page_walk_for_dtlb_pae(laddr, user, is_write);
-        }
-        self.page_walk_for_dtlb_legacy(laddr, user, is_write)
+        // Legacy and PAE modes don't support protection keys — pkey=0
+        let (paddr, combined_access, lpf_mask) = if self.cr4.pae() {
+            self.page_walk_for_dtlb_pae(laddr, user, is_write)?
+        } else {
+            self.page_walk_for_dtlb_legacy(laddr, user, is_write)?
+        };
+        Ok((paddr, combined_access, lpf_mask, 0))
     }
 
     /// Legacy 32-bit paging page walk for DTLB (2-level, 32-bit entries).
@@ -1827,6 +1872,76 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok((paddr, combined_access, 0xFFF)) // 4KB lpf_mask
     }
 
+    /// Handle protection keys (PKRU/PKS) for a page table leaf entry.
+    /// Based on Bochs handle_pkeys in paging.cc.
+    /// Returns the 4-bit protection key from the leaf entry.
+    /// Raises a page fault if the access violates protection key restrictions.
+    fn handle_pkeys(
+        &mut self,
+        laddr: u64,
+        leaf_entry: u64,
+        user: bool,
+        user_page: bool,
+        is_write: bool,
+    ) -> Result<u32> {
+
+        if self.cr4.pke() && user_page {
+            let pkey = ((leaf_entry >> 59) & 0xf) as u32;
+
+            // check of accessDisable bit set
+            if self.pkru & (1 << (pkey * 2)) != 0 {
+                tracing::error!("protection key access not allowed PKRU={:#x} pkey={}", self.pkru, pkey);
+                self.page_fault(
+                    PageFaultError::PROTECTION.bits() | PageFaultError::PKEY.bits(),
+                    laddr, user, is_write,
+                )?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
+
+            // check of writeDisable bit set
+            if self.pkru & (1 << (pkey * 2 + 1)) != 0 {
+                if is_write && (user || self.cr0.wp()) {
+                    tracing::error!("protection key write not allowed PKRU={:#x} pkey={}", self.pkru, pkey);
+                    self.page_fault(
+                        PageFaultError::PROTECTION.bits() | PageFaultError::PKEY.bits(),
+                        laddr, user, is_write,
+                    )?;
+                    return Err(super::CpuError::CpuLoopRestart);
+                }
+            }
+
+            return Ok(pkey);
+        } else if self.cr4.pks() && !user_page {
+            let pkey = ((leaf_entry >> 59) & 0xf) as u32;
+
+            // check of accessDisable bit set
+            if self.pkrs & (1 << (pkey * 2)) != 0 {
+                tracing::error!("protection key access not allowed PKRS={:#x} pkey={}", self.pkrs, pkey);
+                self.page_fault(
+                    PageFaultError::PROTECTION.bits() | PageFaultError::PKEY.bits(),
+                    laddr, user, is_write,
+                )?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
+
+            // check of writeDisable bit set
+            if self.pkrs & (1 << (pkey * 2 + 1)) != 0 {
+                if is_write && self.cr0.wp() {
+                    tracing::error!("protection key write not allowed PKRS={:#x} pkey={}", self.pkrs, pkey);
+                    self.page_fault(
+                        PageFaultError::PROTECTION.bits() | PageFaultError::PKEY.bits(),
+                        laddr, user, is_write,
+                    )?;
+                    return Err(super::CpuError::CpuLoopRestart);
+                }
+            }
+
+            return Ok(pkey);
+        }
+
+        Ok(0)
+    }
+
     /// Long mode paging page walk for DTLB (4-level: PML4 -> PDPTE -> PDE -> PTE, 64-bit entries).
     /// Based on Bochs translate_linear_long_mode in paging.cc.
     fn page_walk_for_dtlb_long_mode(
@@ -1834,7 +1949,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         user: bool,
         is_write: bool,
-    ) -> Result<(u64, u32, u32)> {
+    ) -> Result<(u64, u32, u32, u32)> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
 
@@ -1922,6 +2037,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         combined_access &=
             (entry[leaf].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
 
+        // Protection keys check (Bochs handle_pkeys)
+        let user_page = (combined_access & CombinedAccess::USER.bits()) != 0;
+        let pkey = self.handle_pkeys(laddr, entry[leaf].bits(), user, user_page, is_write)?;
+
         let priv_index = ((self.cr0.wp() as u32) << 4)
             | ((user as u32) << 3)
             | combined_access
@@ -1956,7 +2075,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         let paddr = ppf | (laddr & lpf_mask as u64);
-        Ok((paddr, combined_access, lpf_mask))
+        Ok((paddr, combined_access, lpf_mask, pkey))
     }
 }
 

@@ -19,9 +19,11 @@
 use alloc::{collections::VecDeque, string::String, vec::Vec};
 
 pub mod acpi;
+pub mod acpi_tables;
 pub mod cmos;
 pub mod devices;
 pub mod dma;
+pub mod fw_cfg;
 pub mod harddrv;
 pub mod ioapic;
 pub mod keyboard;
@@ -36,6 +38,7 @@ pub mod vga;
 // Re-export device types for convenience
 pub use acpi::BxAcpiCtrl;
 pub use cmos::BxCmosC;
+pub use fw_cfg::BxFwCfg;
 pub use dma::BxDmaC;
 pub use harddrv::BxHardDriveC;
 pub use ioapic::BxIoApic;
@@ -84,6 +87,8 @@ pub enum DeviceId {
     Acpi,
     /// I/O APIC (MMIO-only, no port I/O)
     Ioapic,
+    /// QEMU fw_cfg Firmware Configuration Device
+    FwCfg,
 }
 
 /// I/O handler registration entry for a single port.
@@ -519,6 +524,7 @@ impl BxDevicesC {
             DeviceId::Pci => dm.pci_read(port, io_len),
             DeviceId::Acpi => dm.acpi_read(port, io_len),
             DeviceId::PciIde => dm.pci_ide_read(port, io_len),
+            DeviceId::FwCfg => dm.fw_cfg.read_port_mut(port, io_len),
             DeviceId::Ioapic => 0xFF, // IOAPIC uses MMIO, not port I/O
             DeviceId::None => 0xFFFF_FFFF,
         }
@@ -546,6 +552,7 @@ impl BxDevicesC {
             DeviceId::Pci => dm.pci_write(port, value, io_len),
             DeviceId::Acpi => dm.acpi_write(port, value, io_len),
             DeviceId::PciIde => dm.pci_ide_write(port, value, io_len),
+            DeviceId::FwCfg => dm.fw_cfg_write(port, value, io_len),
             DeviceId::Ioapic | DeviceId::None => {},
         }
     }

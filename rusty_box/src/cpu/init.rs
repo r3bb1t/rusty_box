@@ -251,7 +251,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.cr2 = 0;
         self.cr3 = 0;
 
-        self.cr4.set32(0);
+        self.cr4.set(0);
 
         self.cr4_suppmask = self.get_cr4_allow_mask();
 
@@ -407,6 +407,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.svm_gif = true;
 
         self.in_event = false;
+        self.fred_event_info = 0;
+        self.fred_event_data = 0;
 
         self.nmi_unblocking_iret = false;
 
@@ -489,6 +491,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
             );
         }
+    }
+
+    /// Enable VMX in IA32_FEATURE_CONTROL MSR for external firmware.
+    ///
+    /// Sets the lock bit (bit 0) and VMX-outside-SMX enable bit (bit 2).
+    /// The Bochs BIOS does this itself; UEFI firmware (OVMF) relies on the
+    /// emulator to pre-configure it via the fw_cfg path.
+    pub fn allow_vmx_for_firmware(&mut self) {
+        if !self.bx_cpuid_support_isa_extension(X86Feature::IsaVmx) {
+            return;
+        }
+        // Lock bit (0) | VMX outside SMX enable (2)
+        const BX_IA32_FEATURE_CONTROL_BITS: u32 = 0x5;
+        self.msr.ia32_feature_ctrl |= BX_IA32_FEATURE_CONTROL_BITS;
     }
 
     /// Configure CPU for direct Linux kernel boot (bypassing BIOS).

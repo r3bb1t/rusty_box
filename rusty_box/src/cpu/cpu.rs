@@ -397,7 +397,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     pub(crate) cr3: BxAddress,
 
     pub(super) cr4: BxCr4,
-    pub(super) cr4_suppmask: u32,
+    pub(super) cr4_suppmask: u64,
 
     pub(super) linaddr_width: u8,
 
@@ -489,6 +489,11 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     pub(super) vmcb: Option<VmcbCache>,
 
     pub(super) in_event: bool,
+
+    /// FRED event info word (vector, type, nested, ilen)
+    pub(super) fred_event_info: u32,
+    /// FRED event data (e.g., CR2 for #PF, DR6 bits for #DB)
+    pub(super) fred_event_data: u64,
 
     pub(super) nmi_unblocking_iret: bool,
 
@@ -968,6 +973,12 @@ pub struct BxRegsMsr {
     pub(crate) ia32_cet_control: [u64; 2], // indexed by CPL==3
     pub(crate) ia32_pl_ssp: [u64; 4],
     pub(crate) ia32_interrupt_ssp_table: u64,
+
+    // FRED MSRs
+    pub(crate) ia32_fred_rsp: [u64; 4],          // RSP0-RSP3
+    pub(crate) ia32_fred_ssp: [u64; 4],          // SSP0-SSP3 (CET)
+    pub(crate) ia32_fred_stack_levels: u64,
+    pub(crate) ia32_fred_cfg: u64,
 
     pub(crate) ia32_umwait_ctrl: u32,
     pub(crate) ia32_spec_ctrl: u32, // SCA

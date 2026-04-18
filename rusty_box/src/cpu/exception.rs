@@ -15,6 +15,8 @@ pub(super) enum InterruptType {
     ExternalInterrupt = 3,
     Nmi = 4,
     HardwareException = 5,
+    /// SYSCALL, SYSENTER with FRED, injected MTF
+    EventOther = 7,
 }
 
 /* Exception types.  These are used as indexes into the 'is_exception_OK'

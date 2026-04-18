@@ -177,6 +177,17 @@ pub fn floatx80_abs(a: floatx80) -> floatx80 {
     }
 }
 
+// f16 helpers
+#[inline]
+pub fn f16_is_nan(a: u16) -> bool {
+    ((!a & 0x7C00) == 0) && ((a & 0x03FF) != 0)
+}
+
+#[inline]
+pub fn f16_is_signaling_nan(a: u16) -> bool {
+    ((a & 0x7E00) == 0x7C00) && ((a & 0x01FF) != 0)
+}
+
 // f32 helpers
 #[inline]
 pub fn f32_sign(a: u32) -> bool {

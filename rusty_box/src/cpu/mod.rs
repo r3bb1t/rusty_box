@@ -133,6 +133,8 @@ pub(super) mod flag_ctrl;
 #[cfg(feature = "alloc")]
 pub(super) mod flag_ctrl_pro;
 #[cfg(feature = "alloc")]
+pub(super) mod fred;
+#[cfg(feature = "alloc")]
 pub(super) mod fpu;
 #[cfg(feature = "alloc")]
 pub(super) mod gf2;

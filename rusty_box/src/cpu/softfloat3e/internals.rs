@@ -11,6 +11,28 @@ use super::specialize::*;
 // Field extraction macros (from internals.h)
 // ============================================================
 
+// --- float16 ---
+#[inline]
+pub fn sign_f16(a: u16) -> bool {
+    (a >> 15) != 0
+}
+#[inline]
+pub fn exp_f16(a: u16) -> i16 {
+    ((a >> 10) & 0x1F) as i16
+}
+#[inline]
+pub fn frac_f16(a: u16) -> u16 {
+    a & 0x03FF
+}
+#[inline]
+pub fn pack_to_f16(sign: bool, exp: i16, sig: u16) -> u16 {
+    ((sign as u16) << 15).wrapping_add((exp as u16) << 10).wrapping_add(sig)
+}
+#[inline]
+pub fn is_nan_f16(a: u16) -> bool {
+    ((!a & 0x7C00) == 0) && ((a & 0x03FF) != 0)
+}
+
 // --- float32 ---
 #[inline]
 pub fn sign_f32(a: u32) -> bool {
@@ -73,6 +95,11 @@ pub fn pack_to_extf80_sign_exp(sign: bool, exp: u16) -> u16 {
 // Normalization of subnormal significands
 // ============================================================
 
+pub struct ExpSig16 {
+    pub(crate) exp: i16,
+    pub(crate) sig: u16,
+}
+
 pub struct ExpSig32 {
     pub(crate) exp: i16,
     pub(crate) sig: u32,
@@ -84,6 +111,14 @@ pub struct ExpSig64 {
 pub struct ExpSig64_32 {
     pub(crate) exp: i32,
     pub(crate) sig: u64,
+}
+
+pub fn norm_subnormal_f16_sig(sig: u16) -> ExpSig16 {
+    let shift = count_leading_zeros16(sig) as i16 - 5;
+    ExpSig16 {
+        exp: 1 - shift,
+        sig: sig << shift,
+    }
 }
 
 pub fn norm_subnormal_f32_sig(sig: u32) -> ExpSig32 {
@@ -108,6 +143,64 @@ pub fn norm_subnormal_extf80_sig(sig: u64) -> ExpSig64_32 {
         exp: -shift,
         sig: sig << shift,
     }
+}
+
+// ============================================================
+// Round-and-pack to float16
+// ============================================================
+
+pub fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatStatus) -> float16 {
+    let rounding_mode = softfloat_getRoundingMode(status);
+    let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
+    let mut round_increment: u16 = 0x8;
+    if !round_near_even && rounding_mode != ROUND_NEAR_MAXMAG {
+        round_increment = if rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX }) {
+            0xF
+        } else {
+            0
+        };
+    }
+    let round_bits = sig & 0xF;
+    let mut exp = exp;
+    let mut sig = sig;
+
+    if 0x1D <= (exp as u16) {
+        if exp < 0 {
+            let is_tiny = (exp < -1) || ((sig as u32).wrapping_add(round_increment as u32) < 0x8000);
+            sig = shift_right_jam32(sig as u32, (-(exp as i32)) as u16) as u16;
+            exp = 0;
+            let round_bits = sig & 0xF;
+            if is_tiny {
+                if !softfloat_isMaskedException(status, FLAG_UNDERFLOW) || round_bits != 0 {
+                    softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                }
+                if softfloat_flushUnderflowToZero(status) {
+                    softfloat_raiseFlags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
+                    return pack_to_f16(sign, 0, 0);
+                }
+            }
+        } else if (0x1D < exp) || (0x8000 <= (sig as u32).wrapping_add(round_increment as u32)) {
+            softfloat_raiseFlags(status, FLAG_OVERFLOW);
+            if round_bits != 0 || softfloat_isMaskedException(status, FLAG_OVERFLOW) {
+                softfloat_raiseFlags(status, FLAG_INEXACT);
+                if round_increment != 0 {
+                    softfloat_setRoundingUp(status);
+                }
+            }
+            return pack_to_f16(sign, 0x1F, 0).wrapping_sub(if round_increment == 0 { 1 } else { 0 });
+        }
+    }
+    let sig_ref = sig;
+    sig = (sig.wrapping_add(round_increment)) >> 4;
+    sig &= !((!((round_bits ^ 8) != 0) as u16) & (round_near_even as u16));
+    if sig == 0 { exp = 0; }
+    if round_bits != 0 {
+        softfloat_raiseFlags(status, FLAG_INEXACT);
+        if (sig << 4) > sig_ref {
+            softfloat_setRoundingUp(status);
+        }
+    }
+    pack_to_f16(sign, exp, sig)
 }
 
 // ============================================================

@@ -203,6 +203,85 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // =========================================================================
+    // SETSSBSY / CLRSSBSY instruction handlers — Bochs cet.cc
+    // =========================================================================
+
+    /// SETSSBSY handler.
+    /// Sets the shadow stack busy flag and loads SSP from IA32_PL0_SSP.
+    /// Bochs cet.cc SETSSBSY()
+    pub(super) fn setssbsy(
+        &mut self,
+        _instr: &crate::cpu::decoder::Instruction,
+    ) -> Result<()> {
+        // FRED check: SETSSBSY is not supported when FRED is enabled in CR4.
+        if self.cr4.fred() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        if !self.shadow_stack_enabled(0) {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        let cpl = self.cs_rpl();
+        if cpl > 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let ssp_laddr = self.msr.ia32_pl_ssp[0];
+        if ssp_laddr & 0x7 != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        if !self.shadow_stack_atomic_set_busy(ssp_laddr, cpl)? {
+            return self.exception(
+                super::cpu::Exception::Cp,
+                super::cpu::CpExceptionErrorCode::SETSSBSY as u32,
+            );
+        }
+
+        self.set_ssp(ssp_laddr);
+
+        Ok(())
+    }
+
+    /// CLRSSBSY handler.
+    /// Clears the shadow stack busy flag at the address given by the memory operand.
+    /// Bochs cet.cc CLRSSBSY()
+    pub(super) fn clrssbsy(
+        &mut self,
+        instr: &crate::cpu::decoder::Instruction,
+    ) -> Result<()> {
+        // FRED check: CLRSSBSY is not supported when FRED is enabled in CR4.
+        if self.cr4.fred() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        if !self.shadow_stack_enabled(0) {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        let cpl = self.cs_rpl();
+        if cpl > 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let eaddr = self.resolve_addr(instr);
+        let laddr = self.agen_read_aligned(instr.seg(), eaddr, 8)?;
+        if laddr & 0x7 != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let invalid_token = self.shadow_stack_atomic_clear_busy(laddr, cpl)?;
+        self.clear_eflags_oszapc();
+        if invalid_token {
+            self.assert_cf();
+        }
+        self.set_ssp(0);
+
+        Ok(())
+    }
+
+    // =========================================================================
     // PAUSE instruction handler — Bochs proc_ctrl.cc
     // =========================================================================
 

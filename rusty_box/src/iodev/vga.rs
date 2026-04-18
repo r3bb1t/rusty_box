@@ -89,6 +89,54 @@ const VGA_DAC_STATE: u16 = 0x3C7;
 const VGA_PEL_ADDR_WRITE: u16 = 0x3C8;
 const VGA_PEL_DATA: u16 = 0x3C9;
 
+// ---- VBE (Bochs VGA Extension) I/O ports and constants ----
+const VBE_DISPI_IOPORT_INDEX: u16 = 0x01CE;
+const VBE_DISPI_IOPORT_DATA: u16 = 0x01CF;
+
+const VBE_DISPI_INDEX_ID: u16 = 0x0;
+const VBE_DISPI_INDEX_XRES: u16 = 0x1;
+const VBE_DISPI_INDEX_YRES: u16 = 0x2;
+const VBE_DISPI_INDEX_BPP: u16 = 0x3;
+const VBE_DISPI_INDEX_ENABLE: u16 = 0x4;
+const VBE_DISPI_INDEX_BANK: u16 = 0x5;
+const VBE_DISPI_INDEX_VIRT_WIDTH: u16 = 0x6;
+const VBE_DISPI_INDEX_VIRT_HEIGHT: u16 = 0x7;
+const VBE_DISPI_INDEX_X_OFFSET: u16 = 0x8;
+const VBE_DISPI_INDEX_Y_OFFSET: u16 = 0x9;
+const VBE_DISPI_INDEX_VIDEO_MEMORY_64K: u16 = 0xA;
+const VBE_DISPI_INDEX_DDC: u16 = 0xB;
+
+const VBE_DISPI_ID0: u16 = 0xB0C0;
+const VBE_DISPI_ID5: u16 = 0xB0C5;
+
+const VBE_DISPI_DISABLED: u16 = 0x00;
+const VBE_DISPI_ENABLED: u16 = 0x01;
+const VBE_DISPI_GETCAPS: u16 = 0x02;
+const VBE_DISPI_8BIT_DAC: u16 = 0x20;
+const VBE_DISPI_LFB_ENABLED: u16 = 0x40;
+const VBE_DISPI_NOCLEARMEM: u16 = 0x80;
+
+const VBE_DISPI_BPP_4: u16 = 0x04;
+const VBE_DISPI_BPP_8: u16 = 0x08;
+const VBE_DISPI_BPP_15: u16 = 0x0F;
+const VBE_DISPI_BPP_16: u16 = 0x10;
+const VBE_DISPI_BPP_24: u16 = 0x18;
+const VBE_DISPI_BPP_32: u16 = 0x20;
+
+const VBE_DISPI_BANK_GRANULARITY_32K: u16 = 0x10;
+const VBE_DISPI_BANK_WR: u16 = 0x4000;
+const VBE_DISPI_BANK_RD: u16 = 0x8000;
+const VBE_DISPI_BANK_RW: u16 = 0xC000;
+
+const VBE_DISPI_LFB_PHYSICAL_ADDRESS: u32 = 0xE000_0000;
+
+/// QEMU-compatible MMIO BAR2 size (4KB)
+const PCI_VGA_MMIO_SIZE: u32 = 0x1000;
+/// Offset within BAR2 MMIO for Bochs VBE extension registers
+const PCI_VGA_BOCHS_OFFSET: u32 = 0x500;
+/// Size of the Bochs VBE extension register region within BAR2
+const PCI_VGA_BOCHS_SIZE: u32 = 0x16;
+
 // ---- CRTC register indices ----
 const CRTC_HORIZ_TOTAL: usize = 0x00;
 const CRTC_HORIZ_DISPLAY_END: usize = 0x01;
@@ -280,6 +328,88 @@ pub(crate) struct VgaUpdateResult {
     pub(crate) fwidth: u32,
 }
 
+/// VBE (Bochs VGA Extension) state, matching Bochs `bx_vga_c::vbe`.
+#[derive(Debug, Clone)]
+struct VbeState {
+    /// Current DISPI ID (VBE_DISPI_ID0..ID5)
+    cur_dispi: u16,
+    /// LFB base address
+    base_address: u32,
+    /// Horizontal resolution
+    xres: u16,
+    /// Vertical resolution
+    yres: u16,
+    /// Bits per pixel
+    bpp: u16,
+    /// Maximum horizontal resolution (capability)
+    max_xres: u16,
+    /// Maximum vertical resolution (capability)
+    max_yres: u16,
+    /// Maximum bits per pixel (capability)
+    max_bpp: u16,
+    /// Bank registers [write, read]
+    bank: [u16; 2],
+    /// Bank granularity in KB
+    bank_granularity_kb: u16,
+    /// VBE enabled flag
+    enabled: u16,
+    /// Current VBE index register
+    curindex: u16,
+    /// Visible screen size in bytes
+    visible_screen_size: u32,
+    /// Virtual screen X offset in pixels
+    offset_x: u16,
+    /// Virtual screen Y offset in pixels
+    offset_y: u16,
+    /// Virtual horizontal resolution
+    virtual_xres: u16,
+    /// Virtual vertical resolution
+    virtual_yres: u16,
+    /// Virtual screen start offset (for bpp>8)
+    virtual_start: u32,
+    /// BPP multiplier
+    bpp_multiplier: u8,
+    /// Line offset in bytes
+    line_offset: u16,
+    /// Get-capabilities mode active
+    get_capabilities: bool,
+    /// 8-bit DAC mode
+    dac_8bit: bool,
+    /// DDC enabled
+    ddc_enabled: bool,
+}
+
+impl Default for VbeState {
+    fn default() -> Self {
+        Self {
+            cur_dispi: VBE_DISPI_ID0,
+            base_address: VBE_DISPI_LFB_PHYSICAL_ADDRESS,
+            xres: 640,
+            yres: 480,
+            bpp: 8,
+            max_xres: 1600,
+            max_yres: 1200,
+            max_bpp: 32,
+            bank: [0; 2],
+            bank_granularity_kb: 64,
+            enabled: 0,
+            curindex: 0,
+            visible_screen_size: 0,
+            offset_x: 0,
+            offset_y: 0,
+            virtual_xres: 640,
+            virtual_yres: 480,
+            virtual_start: 0,
+            bpp_multiplier: 1,
+            line_offset: 640,
+            get_capabilities: false,
+            dac_8bit: false,
+            ddc_enabled: false,
+        }
+    }
+}
+
+
 /// VGA controller state
 #[derive(Debug)]
 pub(crate) struct BxVgaC {
@@ -437,6 +567,15 @@ pub(crate) struct BxVgaC {
     /// Bochs: s.attribute_ctrl.video_enabled
     video_enabled: bool,
 
+
+    // =====================================================================
+    // VBE (Bochs VGA Extension) state
+    // =====================================================================
+    /// VBE extension state (DISPI registers, resolution, banking, etc.)
+    vbe: VbeState,
+    /// Total VBE memory size in bytes (configurable, default 4MB)
+    vbe_memsize: u32,
+
     // =====================================================================
     // Dimension tracking (matching Bochs vgacore.cc s.last_xres etc.)
     // Used to detect when dimension_update needs to be called on the GUI.
@@ -527,6 +666,10 @@ impl BxVgaC {
             ips: 15_000_000, // Default 15 MIPS
 
             video_enabled: false, // PAS bit, set by 0x3C0 address writes
+
+            // VBE state (defaults via VbeState::default())
+            vbe: VbeState::default(),
+            vbe_memsize: 4 << 20, // 4MB default
 
             last_xres: 0,
             last_yres: 0,
@@ -1962,6 +2105,198 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+
+// =============================================================================
+// VBE MMIO handlers for BAR2 (QEMU-compatible, used by OVMF QemuVideoDxe)
+// =============================================================================
+// BAR2 MMIO layout:
+//   0x000-0x3FF: VBE index registers (EDID/DDC, currently unimplemented)
+//   0x400-0x4FF: VBE EDID data (currently unimplemented)
+//   0x500-0x515: Bochs VBE extension registers (PCI_VGA_BOCHS_OFFSET)
+//
+// TODO: Register BAR2 in PCI init once PCI BAR infrastructure is available:
+//   init_bar_mem(2, PCI_VGA_MMIO_SIZE, vbe_mmio_read, vbe_mmio_write)
+
+impl BxVgaC {
+    /// MMIO read handler for BAR2.
+    ///
+    /// Translates MMIO offset reads into VBE register reads.
+    /// Matches Bochs `bx_vga_c::vbe_mmio_read_handler`.
+    pub(crate) fn vbe_mmio_read(&mut self, addr: BxPhyAddress, len: u32, data: &mut [u8]) -> bool {
+        let offset = (addr & 0xFFF) as u32;
+        let mut value: u32 = 0xFFFF_FFFF;
+
+        if offset >= PCI_VGA_BOCHS_OFFSET
+            && offset < PCI_VGA_BOCHS_OFFSET + PCI_VGA_BOCHS_SIZE
+        {
+            let reg_offset = offset - PCI_VGA_BOCHS_OFFSET;
+            let index = (reg_offset >> 1) as u16;
+            self.vbe.curindex = index;
+
+            value = match index {
+                VBE_DISPI_INDEX_ID => self.vbe.cur_dispi as u32,
+                VBE_DISPI_INDEX_XRES => {
+                    if self.vbe.get_capabilities {
+                        self.vbe.max_xres as u32
+                    } else {
+                        self.vbe.xres as u32
+                    }
+                }
+                VBE_DISPI_INDEX_YRES => {
+                    if self.vbe.get_capabilities {
+                        self.vbe.max_yres as u32
+                    } else {
+                        self.vbe.yres as u32
+                    }
+                }
+                VBE_DISPI_INDEX_BPP => {
+                    if self.vbe.get_capabilities {
+                        self.vbe.max_bpp as u32
+                    } else {
+                        self.vbe.bpp as u32
+                    }
+                }
+                VBE_DISPI_INDEX_ENABLE => {
+                    let mut v = self.vbe.enabled as u32;
+                    if self.vbe.get_capabilities {
+                        v |= VBE_DISPI_GETCAPS as u32;
+                    }
+                    if self.vbe.dac_8bit {
+                        v |= VBE_DISPI_8BIT_DAC as u32;
+                    }
+                    v
+                }
+                VBE_DISPI_INDEX_BANK => self.vbe.bank[0] as u32,
+                VBE_DISPI_INDEX_X_OFFSET => self.vbe.offset_x as u32,
+                VBE_DISPI_INDEX_Y_OFFSET => self.vbe.offset_y as u32,
+                VBE_DISPI_INDEX_VIRT_WIDTH => self.vbe.virtual_xres as u32,
+                VBE_DISPI_INDEX_VIRT_HEIGHT => self.vbe.virtual_yres as u32,
+                VBE_DISPI_INDEX_VIDEO_MEMORY_64K => (self.vbe_memsize >> 16) as u32,
+                _ => {
+                    tracing::error!("VBE MMIO read: unknown index 0x{:x}", index);
+                    0
+                }
+            };
+        }
+
+        match len {
+            1 => {
+                if let Some(d) = data.first_mut() {
+                    *d = value as u8;
+                }
+            }
+            2 => {
+                let bytes = (value as u16).to_le_bytes();
+                data[..2].copy_from_slice(&bytes);
+            }
+            4 => {
+                let bytes = value.to_le_bytes();
+                data[..4].copy_from_slice(&bytes);
+            }
+            _ => {
+                tracing::error!("vbe_mmio_read: unsupported len={}", len);
+            }
+        }
+
+        true
+    }
+
+    /// MMIO write handler for BAR2.
+    ///
+    /// Translates MMIO offset writes into VBE register writes.
+    /// Matches Bochs `bx_vga_c::vbe_mmio_write_handler`.
+    pub(crate) fn vbe_mmio_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) -> bool {
+        let offset = (addr & 0xFFF) as u32;
+
+        let value: u32 = match len {
+            1 => data.first().copied().unwrap_or(0) as u32,
+            2 => {
+                let mut buf = [0u8; 2];
+                buf[..data.len().min(2)].copy_from_slice(&data[..data.len().min(2)]);
+                u16::from_le_bytes(buf) as u32
+            }
+            4 => {
+                let mut buf = [0u8; 4];
+                buf[..data.len().min(4)].copy_from_slice(&data[..data.len().min(4)]);
+                u32::from_le_bytes(buf)
+            }
+            _ => {
+                tracing::error!("vbe_mmio_write: unsupported len={}", len);
+                return true;
+            }
+        };
+
+        if offset >= PCI_VGA_BOCHS_OFFSET
+            && offset < PCI_VGA_BOCHS_OFFSET + PCI_VGA_BOCHS_SIZE
+        {
+            let reg_offset = offset - PCI_VGA_BOCHS_OFFSET;
+            let index = (reg_offset >> 1) as u16;
+            self.vbe.curindex = index;
+            // Delegate to the VBE data-port write path.
+            // The I/O-len is 2 for word access, 1 for byte access.
+            let io_len = if len == 1 { 1u8 } else { 2u8 };
+            self.vbe_write(value, io_len);
+        }
+
+        true
+    }
+
+    /// Handle a VBE data-port write (port 0x01CF or MMIO-dispatched).
+    ///
+    /// Matches the Bochs `vbe_write` / `vbe_write_handler` logic.
+    /// TODO: Full implementation — currently a stub that stores basic register values.
+    fn vbe_write(&mut self, value: u32, _io_len: u8) {
+        let index = self.vbe.curindex;
+        let value16 = value as u16;
+
+        match index {
+            VBE_DISPI_INDEX_ID => {
+                // Accept any known DISPI ID
+                if value16 >= VBE_DISPI_ID0 && value16 <= VBE_DISPI_ID5 {
+                    self.vbe.cur_dispi = value16;
+                }
+            }
+            VBE_DISPI_INDEX_XRES => {
+                self.vbe.xres = value16;
+            }
+            VBE_DISPI_INDEX_YRES => {
+                self.vbe.yres = value16;
+            }
+            VBE_DISPI_INDEX_BPP => {
+                self.vbe.bpp = value16;
+            }
+            VBE_DISPI_INDEX_ENABLE => {
+                self.vbe.get_capabilities = (value16 & VBE_DISPI_GETCAPS) != 0;
+                self.vbe.dac_8bit = (value16 & VBE_DISPI_8BIT_DAC) != 0;
+                self.vbe.enabled = value16 & VBE_DISPI_ENABLED;
+                // TODO: handle mode-set logic (clear mem, recalculate virtual dimensions,
+                // update line offset, visible_screen_size, bpp_multiplier, etc.)
+            }
+            VBE_DISPI_INDEX_BANK => {
+                self.vbe.bank[0] = value16;
+            }
+            VBE_DISPI_INDEX_X_OFFSET => {
+                self.vbe.offset_x = value16;
+            }
+            VBE_DISPI_INDEX_Y_OFFSET => {
+                self.vbe.offset_y = value16;
+            }
+            VBE_DISPI_INDEX_VIRT_WIDTH => {
+                self.vbe.virtual_xres = value16;
+            }
+            VBE_DISPI_INDEX_VIRT_HEIGHT => {
+                // Read-only in Bochs; ignore writes
+            }
+            VBE_DISPI_INDEX_DDC => {
+                self.vbe.ddc_enabled = (value16 & 1) != 0;
+            }
+            _ => {
+                tracing::error!("VBE write: unknown index 0x{:x}, value 0x{:x}", index, value16);
             }
         }
     }

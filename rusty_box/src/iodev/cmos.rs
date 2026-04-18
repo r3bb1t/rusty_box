@@ -755,6 +755,7 @@ impl BxCmosC {
     /// - 0x15-0x16: Base memory (640 KB)
     /// - 0x17-0x18, 0x30-0x31: Extended memory 1MB-65MB (KB, capped at 0xFC00)
     /// - 0x34-0x35: Extended memory above 16MB (64KB blocks, capped at 0xBF00)
+    /// - 0x5b-0x5d: Memory above 4GB in 64KB units (QEMU-compatible extension)
     pub fn set_memory_size_from_bytes(&mut self, total_bytes: u64) {
         const BASE_MEMORY_IN_K: u16 = 640;
 
@@ -784,6 +785,19 @@ impl BxCmosC {
         };
         self.ram[0x34] = (extended_memory_in_64k & 0xFF) as u8;
         self.ram[0x35] = ((extended_memory_in_64k >> 8) & 0xFF) as u8;
+
+        // Memory above 4GB via QEMU-compatible CMOS extension (registers 0x5b-0x5d).
+        // For configurations with a 3GB-4GB PCI MMIO hole, RAM above 3GB is remapped
+        // above 4GB, so the threshold is 3GB (0xC000_0000), not 4GB.
+        let memory_above_4gb = if total_bytes > 0xC000_0000 {
+            total_bytes - 0xC000_0000
+        } else {
+            0
+        };
+        let memory_above_4gb_in_64k = memory_above_4gb >> 16;
+        self.ram[0x5b] = (memory_above_4gb_in_64k & 0xFF) as u8;
+        self.ram[0x5c] = ((memory_above_4gb_in_64k >> 8) & 0xFF) as u8;
+        self.ram[0x5d] = ((memory_above_4gb_in_64k >> 16) & 0xFF) as u8;
 
         self.update_checksum();
     }

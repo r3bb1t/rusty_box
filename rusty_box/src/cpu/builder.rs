@@ -101,6 +101,8 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             vmcb_memtype: Default::default(),
             vmcb: Default::default(),
             in_event: Default::default(),
+            fred_event_info: Default::default(),
+            fred_event_data: Default::default(),
             nmi_unblocking_iret: Default::default(),
             ext: Default::default(),
             activity_state: Default::default(),

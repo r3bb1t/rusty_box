@@ -11,6 +11,31 @@ pub(super) fn bios_map_last128k(addr: usize) -> usize {
     ((addr) | 0xfff00000) & BIOS_MASK
 }
 
+// PCI hole: when RAM > 3GB, the 3GB-4GB range is reserved for PCI MMIO.
+// Physical RAM that would occupy that range is remapped above 4GB.
+pub(super) const BX_PCI_HOLE_START: u64 = 0xC000_0000; // 3GB
+pub(super) const BX_PCI_HOLE_END: u64 = 0x1_0000_0000; // 4GB
+pub(super) const BX_PCI_HOLE_SIZE: u64 = 0x4000_0000; // 1GB
+
+/// Returns true if the guest physical address falls in the PCI MMIO hole (3GB-4GB).
+#[inline]
+pub(super) fn bx_is_pci_hole_addr(gpa: u64) -> bool {
+    gpa >= BX_PCI_HOLE_START && gpa < BX_PCI_HOLE_END
+}
+
+/// Translate a guest physical address to a linear memory offset.
+/// Addresses >= 4GB are shifted down by the PCI hole size (1GB),
+/// because physical RAM that would have been at 3GB-4GB is remapped above 4GB.
+/// Addresses below 4GB are unchanged.
+#[inline]
+pub(super) fn bx_translate_gpa_to_linear(gpa: u64) -> u64 {
+    if gpa >= BX_PCI_HOLE_END {
+        gpa - BX_PCI_HOLE_SIZE
+    } else {
+        gpa
+    }
+}
+
 pub(super) enum MemoryAreaT {
     C0000 = 0,
     C4000,

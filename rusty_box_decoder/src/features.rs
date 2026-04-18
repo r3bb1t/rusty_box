@@ -197,6 +197,8 @@ pub enum X86Feature {
     IsaAmxFp16,
     /// AMX-TF32 Instructions
     IsaAmxTf32,
+    /// AMX-FP8 Instructions
+    IsaAmxFp8,
     /// AMX-COMPLEX Instructions
     IsaAmxComplex,
     /// AMX-MOVRS Instructions
@@ -271,4 +273,6 @@ pub enum X86Feature {
     IsaRaoInt,
     /// MOVRS instructions support
     IsaMovrs,
+    /// FRED (Flexible Return and Event Delivery) support
+    IsaFred,
 }

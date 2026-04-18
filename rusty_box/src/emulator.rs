@@ -152,12 +152,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         io_ptr.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm_ptr);
         let mem_static = self.mem_nonnull_static();
         io_ptr.as_ptr().as_mut().unwrap_unchecked().set_mem_ptr(mem_static);
+        (*dm_ptr.as_ptr()).mem_ptr = Some(mem_static);
         let pic_ref: *mut _ = &mut self.device_manager.pic;
         let dma_ref: *mut _ = &mut self.device_manager.dma;
         let r = self.cpu
             .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr, ps_ptr, Some(&mut *pic_ref), Some(&mut *dma_ref));
         self.devices.clear_device_manager();
         self.devices.clear_mem_ptr();
+        self.device_manager.mem_ptr = None;
         r
     }
 
@@ -302,6 +304,11 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
             self.device_manager.pci_bridge.init_dram(ramsize_mb);
             tracing::trace!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
+        }
+        // Initialize fw_cfg device (QEMU-compatible firmware configuration)
+        {
+            let ram_size = self.config.guest_memory_size as u64;
+            self.device_manager.fw_cfg.init(ram_size, 1); // single CPU
         }
         tracing::trace!("Devices initialized");
 
@@ -477,6 +484,11 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
             self.device_manager.pci_bridge.init_dram(ramsize_mb);
             tracing::trace!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
+        }
+        // Initialize fw_cfg device (QEMU-compatible firmware configuration)
+        {
+            let ram_size = self.config.guest_memory_size as u64;
+            self.device_manager.fw_cfg.init(ram_size, 1);
         }
         tracing::debug!("Device initialization complete");
 

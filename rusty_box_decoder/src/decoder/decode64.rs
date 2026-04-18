@@ -279,10 +279,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         pos += 1;
 
         // Valid VEX maps: 1 (0F), 2 (0F38), 3 (0F3A)
-        // Bochs fetchdecode64.cc: maps 0, 4, 5, 6 are invalid.
-        // Map 7 exists in Bochs but has its OWN 256-entry table section
-        // (indices 768-1023 in BxOpcodeTableVEX). We don't have those
-        // entries, so accepting map 7 would decode wrong instructions.
+        // Upstream Bochs also supports map 5 (AMX-FP8) and map 7, but we
+        // don't have those VEX opcode table entries yet.
         match vex_opc_map {
             1 => {
                 b1 = 0x100 | opcode_byte;
@@ -535,6 +533,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         if mod_field == 3 || force_modc0 {
             // Register mode (or forced register for MOV CR/DR)
             metainfo1_bits |= MetaInfoFlags::ModC0.bits();
+            // EVEX.X extends rm to 5 bits for vector register encoding (mod==3 only)
+            if is_evex && (rex_prefix & 0x02) != 0 {
+                rm |= 16;
+            }
         } else {
             // Memory mode
             let use_sib = (rm & 0x7) == 4;
@@ -765,6 +767,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         instr.set_opmask(evex_aaa);
         instr.set_evex_b(evex_b_flag);
         instr.set_zero_masking(evex_z);
+        // EVEX.b in register form implies 512-bit vector length
+        if evex_b_flag != 0 && (metainfo1_bits & MetaInfoFlags::ModC0.bits()) != 0 {
+            instr.set_vl(2); // VL512
+        }
     }
 
     // === Phase 3.5: Read 3DNow! suffix byte (comes after ModRM/displacement) ===

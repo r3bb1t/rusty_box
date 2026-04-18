@@ -20,6 +20,7 @@ use super::acpi::BxAcpiCtrl;
 use super::cmos::{BxCmosC, CMOS_ADDR, CMOS_DATA};
 use super::dma::BxDmaC;
 use super::harddrv::BxHardDriveC;
+use super::fw_cfg::BxFwCfg;
 use super::ioapic::BxIoApic;
 use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT, SYSTEM_CONTROL_B};
 use super::pci::BxPciBridge;
@@ -84,6 +85,9 @@ pub struct DeviceManager {
     /// 16550 UART Serial Port Controller (COM1-COM4)
     /// Bochs: `bx_serial_c *pluginSerial` (iodev/iodev.h)
     pub(crate) serial: BxSerialC,
+    /// QEMU fw_cfg Firmware Configuration Device
+    /// Bochs: `bx_fw_cfg_c *theFwCfgDevice` (iodev/fw_cfg.h)
+    pub(crate) fw_cfg: BxFwCfg,
     /// PCI configuration address register (shadow copy for handler dispatch)
     /// Bochs: bx_devices_c::pci_conf_addr (devices.cc)
     pub(crate) pci_conf_addr: u32,
@@ -109,6 +113,8 @@ pub struct DeviceManager {
     pub diag_total_usec: u64,
     /// Diagnostic: iac vector histogram [0..256]
     pub diag_vector_hist: [u32; 256],
+    /// Pointer to BxMemC for fw_cfg DMA. Set temporarily during CPU execution.
+    pub(crate) mem_ptr: Option<core::ptr::NonNull<BxMemC<'static>>>,
     /// System Control Port (Port 92h) — A20 gate and fast reset
     pub(crate) port92: SystemControlPort,
 }
@@ -136,6 +142,7 @@ impl DeviceManager {
             pci2isa: BxPiix3::new(),
             pci_ide: BxPciIde::new(),
             serial: BxSerialC::new(1), // COM1 only
+            fw_cfg: BxFwCfg::new(),
             pci_conf_addr: 0,
             pci_ide_bar4_needs_reregister: false,
             acpi_pm_needs_reregister: false,
@@ -148,6 +155,7 @@ impl DeviceManager {
             diag_tick_count: 0,
             diag_total_usec: 0,
             diag_vector_hist: [0; 256],
+            mem_ptr: None,
             port92: SystemControlPort::new(),
         }
     }
@@ -201,6 +209,7 @@ impl DeviceManager {
         self.register_serial_handlers(io);
         self.register_acpi_handlers(io);
         self.register_pci_handlers(io);
+        self.register_fw_cfg_handlers(io);
         // Register BM-DMA ports if BAR4 is pre-configured (for direct boot without BIOS)
         if self.pci_ide.bmdma_base > 0 {
             self.register_pci_ide_bmdma_ports(io);
@@ -224,6 +233,7 @@ impl DeviceManager {
         self.serial.reset();
         self.ioapic.reset();
         self.acpi.reset();
+        self.fw_cfg.reset();
         {
             self.pci_bridge.reset();
             self.pci2isa.reset();
@@ -289,8 +299,11 @@ impl DeviceManager {
 
     /// Register Keyboard I/O handlers
     fn register_keyboard_handlers(&mut self, io: &mut BxDevicesC) {
-        io.register_io_handler(DeviceId::Keyboard, KBD_DATA_PORT, "Keyboard Data", 0x1);
-        io.register_io_handler(DeviceId::Keyboard, KBD_STATUS_PORT, "Keyboard Status/Command", 0x1);
+        // Issue #610 — Darwin boot fix: allow 1/2/4-byte reads (width 7), write stays 1-byte
+        io.register_io_read_handler(DeviceId::Keyboard, KBD_DATA_PORT, "Keyboard Data", 0x7);
+        io.register_io_write_handler(DeviceId::Keyboard, KBD_DATA_PORT, "Keyboard Data", 0x1);
+        io.register_io_read_handler(DeviceId::Keyboard, KBD_STATUS_PORT, "Keyboard Status/Command", 0x7);
+        io.register_io_write_handler(DeviceId::Keyboard, KBD_STATUS_PORT, "Keyboard Status/Command", 0x1);
         io.register_io_handler(DeviceId::Keyboard, SYSTEM_CONTROL_B, "System Control B", 0x1);
     }
 
@@ -381,6 +394,21 @@ impl DeviceManager {
             super::pci2isa::ELCR2_PORT,
         ] {
             io.register_io_handler(DeviceId::Pci, port, "PIIX3", 0x1);
+        }
+    }
+
+    /// Register fw_cfg I/O handlers.
+    /// Ports: 0x510 (selector), 0x511 (data), 0x514-0x51B (DMA).
+    fn register_fw_cfg_handlers(&mut self, io: &mut BxDevicesC) {
+        // Selector port: 1-byte read, 2-byte write
+        io.register_io_read_handler(DeviceId::FwCfg, 0x510, "fw_cfg selector", 0x1);
+        io.register_io_write_handler(DeviceId::FwCfg, 0x510, "fw_cfg selector", 0x3);
+        // Data port: 1-byte read and write
+        io.register_io_read_handler(DeviceId::FwCfg, 0x511, "fw_cfg data", 0x1);
+        io.register_io_write_handler(DeviceId::FwCfg, 0x511, "fw_cfg data", 0x3);
+        // DMA ports: 0x514-0x51B, 1/2/4-byte read and write
+        for port in 0x514..=0x51B_u16 {
+            io.register_io_handler(DeviceId::FwCfg, port, "fw_cfg dma", 0x7);
         }
     }
 
@@ -777,6 +805,12 @@ impl DeviceManager {
     /// PCI IDE I/O write dispatch (BM-DMA ports)
     pub(crate) fn pci_ide_write(&mut self, address: u16, value: u32, io_len: u8) {
         self.pci_ide.bmdma_write(address, value, io_len);
+    }
+
+    /// fw_cfg I/O write dispatch — passes memory ref for DMA.
+    pub(crate) fn fw_cfg_write(&mut self, address: u16, value: u32, io_len: u8) {
+        let mem = self.mem_ptr.map(|mut p| unsafe { p.as_mut() });
+        self.fw_cfg.write_port(address, value, io_len, mem);
     }
 }
 
