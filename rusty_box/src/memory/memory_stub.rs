@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#[cfg(feature = "alloc")]
 use alloc::{vec, vec::Vec};
 use byteorder::{ByteOrder, LittleEndian};
 #[cfg(feature = "std")]
@@ -7,7 +8,7 @@ use tempfile::tempfile;
 use super::{Block, BxMemoryStubC, MemoryError, Result};
 use crate::cpu::cpuid::BxCpuIdTrait;
 
-use crate::config::BxPhyAddress;
+use crate::config::{BxPhyAddress, MAX_MEM_BLOCKS};
 use crate::config::BxPhyAddress as A20Mask;
 use crate::cpu::cpu::BxCpuC;
 use crate::cpu::icache::BxPageWriteStampTable;
@@ -31,21 +32,21 @@ fn is_power_of_2(x: usize) -> bool {
 const BX_MEM_VECTOR_ALIGN: usize = 4096;
 
 impl BxMemoryStubC {
+    #[cfg(feature = "alloc")]
     pub fn alloc_vector_aligned(bytes: usize, alignment: usize) -> (Vec<u8>, usize) {
-        // Validate alignment
-
-        // Calculate the mask and actual vector size
         let test_mask: usize = alignment - 1;
         let actual_vector_size = bytes + test_mask;
-
-        // Create and zero-initialize the vector efficiently
-        // Using vec![0; size] is much faster than pushing bytes one at a time
-        let actual_vector = vec![0; actual_vector_size];
-
-        // Calculate the pointer and offset using unsafe block
+        // Use alloc_zeroed with page alignment to avoid UEFI pool allocator
+        // limitations on large contiguous allocations.
+        let layout = alloc::alloc::Layout::from_size_align(actual_vector_size, alignment)
+            .expect("invalid layout for memory vector");
+        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        let actual_vector = unsafe { Vec::from_raw_parts(ptr, actual_vector_size, actual_vector_size) };
         let actual_vector_ptr = actual_vector.as_ptr() as usize;
         let masked: usize = ((actual_vector_ptr + test_mask) & !test_mask) - actual_vector_ptr;
-
         (actual_vector, masked)
     }
 
@@ -53,9 +54,9 @@ impl BxMemoryStubC {
         self.len
     }
 
-    pub fn create_and_init(guest: usize, host: usize, block_size: usize) -> Result<Self> {
-        // accept only memory size which is multiply of 1M
-        const ONE_MEGABYTE: usize = 1 << 20; // 1 MB in bytes
+    #[cfg(feature = "alloc")]
+    pub fn create_and_init(guest: usize, host: usize, block_size: usize) -> Result<alloc::boxed::Box<Self>> {
+        const ONE_MEGABYTE: usize = 1 << 20;
 
         if !host.is_multiple_of(ONE_MEGABYTE) || !guest.is_multiple_of(ONE_MEGABYTE) {
             return Err(MemoryError::MemorySizeIsNotAMultiplyOf1Megabyte.into());
@@ -71,7 +72,6 @@ impl BxMemoryStubC {
             "allocated memory at {:p}. after alignment, vector={:p}, block_size = {}k",
             actual_vector.as_ptr(),
             actual_vector[vector_offset..].as_ptr(),
-            //vector.as_ptr(),
             block_size / 1024
         );
 
@@ -81,54 +81,91 @@ impl BxMemoryStubC {
         let bogus_offset = host + BIOSROMSZ + EXROMSIZE;
 
         // Initialize ROM and bogus memory with 0xFF (matching C++ memset)
-        // Matching C++ line 124: memset(BX_MEM_THIS rom, 0xff, BIOSROMSZ + EXROMSIZE + 4096);
         let rom_start = vector_offset + rom_offset;
         let rom_end = rom_start + BIOSROMSZ + EXROMSIZE + 4096;
         if rom_end <= actual_vector.len() {
             actual_vector[rom_start..rom_end].fill(0xFF);
         }
 
-        // block must be large enough to fit num_blocks in 32-bit
         assert!((len / block_size) <= 0xffffffff);
 
         let num_blocks = len / block_size;
-        tracing::debug!("{:.2}MB", len as f64 / (1024.0 * 1024.0));
+        assert!(num_blocks <= MAX_MEM_BLOCKS, "num_blocks {} exceeds MAX_MEM_BLOCKS", num_blocks);
+        tracing::debug!("{}MB", len / (1024 * 1024));
         tracing::debug!("mem block size = {:8X}, blocks={}", block_size, num_blocks);
 
-        let mut blocks = Vec::with_capacity(num_blocks);
-        let used_blocks = if false {
-            // Map each block to the corresponding location in actual_vector
-            for idx in 0..num_blocks {
-                blocks.push(Block::Block {
-                    offset: idx * block_size,
-                });
+        // Allocate BxMemoryStubC on the heap to avoid stack overflow.
+        // blocks_offsets is 262KB — too large for UEFI's 128KB stack.
+        let layout = alloc::alloc::Layout::new::<Self>();
+        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut Self;
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+
+        let actual_vector_ptr = actual_vector.as_mut_ptr();
+        let actual_vector_len = actual_vector.len();
+        core::mem::forget(actual_vector);
+
+        unsafe {
+            core::ptr::addr_of_mut!((*ptr).actual_vector).write(actual_vector_ptr);
+            core::ptr::addr_of_mut!((*ptr).actual_vector_len).write(actual_vector_len);
+            core::ptr::addr_of_mut!((*ptr).len).write(len);
+            core::ptr::addr_of_mut!((*ptr).allocated).write(allocated);
+            core::ptr::addr_of_mut!((*ptr).block_size).write(block_size);
+            core::ptr::addr_of_mut!((*ptr).num_blocks).write(num_blocks);
+            core::ptr::addr_of_mut!((*ptr).vector_offset).write(vector_offset);
+            core::ptr::addr_of_mut!((*ptr).rom_offset).write(rom_offset);
+            core::ptr::addr_of_mut!((*ptr).bogus_offset).write(bogus_offset);
+            // Initialize blocks to SwappedOut in-place on heap
+            let blocks = &mut *(*ptr).blocks_offsets.get();
+            for b in blocks.iter_mut().take(num_blocks) {
+                *b = Block::SwappedOut;
             }
-            num_blocks
-        } else {
-            for _ in 0..num_blocks {
-                blocks.push(Block::SwappedOut);
+            #[cfg(feature = "std")]
+            {
+                let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
+                core::ptr::addr_of_mut!((*ptr).overflow_file).write(UnsafeCell::new(overflow_file));
             }
-            0
-        };
+            Ok(alloc::boxed::Box::from_raw(ptr))
+        }
+    }
+
+    /// Create a memory stub from an externally-provided buffer (no-alloc path).
+    ///
+    /// # Safety
+    /// `ptr` must point to a valid, exclusively-owned buffer of at least `len` bytes
+    /// that remains valid for the lifetime of this struct.
+    pub unsafe fn create_from_raw(
+        ptr: *mut u8,
+        len: usize,
+        guest: usize,
+        host: usize,
+        block_size: usize,
+    ) -> Result<Self> {
+        let vector_offset = 0; // caller is responsible for alignment
+        let rom_offset = host;
+        let bogus_offset = host + BIOSROMSZ + EXROMSIZE;
+        let num_blocks = guest / block_size;
+        assert!(num_blocks <= MAX_MEM_BLOCKS, "num_blocks {} exceeds MAX_MEM_BLOCKS", num_blocks);
 
         #[cfg(feature = "std")]
         let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
         Ok(Self {
-            actual_vector,
-            len,
-            allocated,
+            actual_vector: ptr,
+            actual_vector_len: len,
+            len: guest,
+            allocated: host,
             block_size,
-            blocks_offsets: UnsafeCell::new(blocks),
+            blocks_offsets: UnsafeCell::new([Block::SwappedOut; MAX_MEM_BLOCKS]),
+            num_blocks,
             vector_offset,
             rom_offset,
             bogus_offset,
-
-            used_blocks: Cell::new(used_blocks),
+            used_blocks: Cell::new(0),
             apic_scratch: [0u8; 4096],
             next_swapout_idx: Cell::new(0),
             #[cfg(feature = "std")]
             overflow_file: UnsafeCell::new(overflow_file),
-            //swapped_out,
         })
     }
 
@@ -147,13 +184,16 @@ impl BxMemoryStubC {
         // written to the wrong address, and any data above 128KB to be misplaced.
         let addr_usize = addr as usize;
         let vo = self.vector_offset;
+        let bo = self.bogus_offset;
+        let ptr = self.actual_vector;
+        let len = self.actual_vector_len;
         let start = vo + addr_usize;
-        if start < self.actual_vector.len() {
-            Ok(&mut self.actual_vector[start..])
+        // SAFETY: actual_vector is valid for actual_vector_len bytes (invariant of the struct)
+        let av = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
+        if start < av.len() {
+            Ok(&mut av[start..])
         } else {
-            // Out of bounds — return bogus memory scratch area
-            let bo = self.bogus_offset;
-            Ok(&mut self.actual_vector[bo..])
+            Ok(&mut av[bo..])
         }
     }
 
@@ -289,14 +329,15 @@ impl BxMemoryStubC {
     #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
     pub fn dbg_set_mem(&mut self, addr: BxPhyAddress, len: u32, buf: &[u8]) -> bool {
         let vo = self.vector_offset;
+        let av = self.actual_vector_mut();
         for i in 0..len as usize {
             if i >= buf.len() {
                 break;
             }
             let phys = addr as usize + i;
             let idx = vo + phys;
-            if idx < self.actual_vector.len() {
-                self.actual_vector[idx] = buf[i];
+            if idx < av.len() {
+                av[idx] = buf[i];
             }
         }
         true
@@ -306,12 +347,13 @@ impl BxMemoryStubC {
     #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
     pub fn dbg_crc32(&self, addr1: BxPhyAddress, addr2: BxPhyAddress, crc: &mut u32) -> bool {
         let vo = self.vector_offset;
+        let av = self.actual_vector_slice();
         let mut c = 0xFFFF_FFFFu32;
         let mut addr = addr1;
         while addr <= addr2 {
             let idx = vo + addr as usize;
-            let byte = if idx < self.actual_vector.len() {
-                self.actual_vector[idx]
+            let byte = if idx < av.len() {
+                av[idx]
             } else {
                 0xFF
             };

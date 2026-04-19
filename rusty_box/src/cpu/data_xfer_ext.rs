@@ -4,7 +4,6 @@
 //!
 //! Implements LEA, XCHG, MOV segment, LES, LDS, CBW, CWD, CWDE, CDQ
 
-use alloc::string::ToString;
 
 use super::{
     cpu::BxCpuC,
@@ -190,7 +189,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if dst_seg == BxSegregs::Cs as usize {
             tracing::warn!("MOV to CS not allowed");
             return Err(super::error::CpuError::UnimplementedOpcode {
-                opcode: "MOV CS, reg (use far jump/call instead)".to_string(),
+                opcode: "MOV CS, reg (use far jump/call instead)",
             });
         }
 

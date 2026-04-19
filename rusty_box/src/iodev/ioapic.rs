@@ -979,6 +979,7 @@ impl BxIoApic {
 // Debug dump
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "alloc")]
 impl BxIoApic {
     /// Generate a diagnostic dump of all redirection table entries.
     ///

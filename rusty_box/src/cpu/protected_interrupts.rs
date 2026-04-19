@@ -3,7 +3,6 @@
 //!
 //! Based on Bochs cpu/exception.cc protected_mode_int
 
-use alloc::vec::Vec;
 
 use super::{
     cpu::{BxCpuC, Exception},
@@ -366,15 +365,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 // SAFETY: segment cache populated during segment load; union read matches descriptor type
                 let base = cs_descriptor.u.segment_base();
                 let linear = base + gate_dest_offset as u64;
-                let bytes: Vec<u8> = (0..48u64)
-                    .map(|i| {
-                        if let Ok(pa) = self.translate_linear_system_read(linear + i) {
-                            self.mem_read_byte(pa)
-                        } else {
-                            0xFF
-                        }
-                    })
-                    .collect();
+                let mut bytes = [0xFFu8; 48];
+                for i in 0..48u64 {
+                    if let Ok(pa) = self.translate_linear_system_read(linear + i) {
+                        bytes[i as usize] = self.mem_read_byte(pa);
+                    }
+                }
                 tracing::trace!("PM_INT: loading CS sel={:#06x} base={:#010x} limit={:#010x} d_b={} -> EIP={:#010x} (linear={:#010x})",
                     new_cs_selector.value, base,
                     cs_descriptor.u.segment_limit_scaled(),

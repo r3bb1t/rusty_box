@@ -11,8 +11,8 @@
 //! - Standard devices (HardDrive, Floppy, VGA) are configurable
 //! - Each device registers its own I/O port handlers
 
-use alloc::format;
-use alloc::string::String;
+#[cfg(feature = "alloc")] use alloc::format;
+#[cfg(feature = "alloc")] use alloc::string::String;
 
 use crate::{cpu::ResetReason, memory::BxMemC, pc_system::BxPcSystemC, Result};
 
@@ -98,7 +98,7 @@ pub struct DeviceManager {
     /// Deferred: ACPI SMBus base changed, needs port re-registration
     pub(crate) acpi_sm_needs_reregister: bool,
     /// Deferred: PAM registers changed, needs memory type update
-    pub(crate) pam_needs_update: bool,
+    pub pam_needs_update: bool,
     /// Diagnostic: PIT fire count (check_irq0 returned true)
     pub diag_pit_fires: u64,
     /// Diagnostic: raise_irq(0) latched (irq_in was 0)
@@ -629,6 +629,7 @@ impl DeviceManager {
         (0, 0)
     }
 
+    #[cfg(feature = "alloc")]
     /// Get PIC diagnostic string
     pub fn pic_diag(&self) -> String {
         format!(
@@ -664,11 +665,13 @@ impl DeviceManager {
         )
     }
 
+    #[cfg(feature = "alloc")]
     /// Get ATA controller diagnostic string
     pub fn ata_diag(&self) -> String {
         self.harddrv.diag_string()
     }
 
+    #[cfg(feature = "alloc")]
     /// Get full interrupt chain diagnostic summary (for end-of-run reporting)
     pub fn interrupt_chain_diag(&self) -> String {
         let c0 = &self.pit.counters[0];

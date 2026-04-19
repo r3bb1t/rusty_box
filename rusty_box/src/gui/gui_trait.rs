@@ -15,28 +15,14 @@ pub enum DisplayMode {
     Sim,
 }
 
-/// VGA text mode information
-#[derive(Debug, Clone)]
-pub struct VgaTextModeInfo {
-    pub(crate) start_address: u16,
-    pub(crate) cs_start: u8,
-    pub(crate) cs_end: u8,
-    pub(crate) line_offset: u16,
-    pub(crate) line_compare: u16,
-    pub(crate) h_panning: u8,
-    pub(crate) v_panning: u8,
-    pub(crate) line_graphics: bool,
-    pub(crate) split_hpanning: bool,
-    pub(crate) blink_flags: u8,
-    pub(crate) actl_palette: [u8; 16],
-}
+pub use crate::iodev::vga::VgaTextModeInfo;
 
 /// GUI trait - all GUI implementations must provide these methods
 ///
 /// Based on bx_gui_c class from cpp_orig/bochs/gui/gui.h
 pub trait BxGui: Send + Sync {
     /// Initialize the GUI with specific parameters
-    fn specific_init(&mut self, argc: i32, argv: &[String], header_bar_y: u32);
+    fn specific_init(&mut self, argc: i32, argv: &[&str], header_bar_y: u32);
 
     /// Update text mode display
     fn text_update(

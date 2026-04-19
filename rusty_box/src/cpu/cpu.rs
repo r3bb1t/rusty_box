@@ -1,7 +1,6 @@
 #![allow(non_snake_case, unused_variables, unused_assignments, dead_code)]
 #![allow(unused_unsafe)]
 
-use alloc::vec;
 use core::{marker::PhantomData, ptr::NonNull};
 
 use crate::{
@@ -502,7 +501,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// 0 if current CS:EIP caused exception */
     pub(super) ext: bool,
 
-    pub(crate) activity_state: CpuActivityState,
+    pub activity_state: CpuActivityState,
 
     pub(crate) pending_event: u32,
     pub(crate) event_mask: u32,
@@ -698,7 +697,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     #[cfg(feature = "instrumentation")]
     pub(crate) page_permissions: Option<crate::memory::permissions::PagePermissions>,
 
-    #[cfg(feature = "alloc")]
     pub(crate) mmio: crate::memory::mmio::MmioRegistry,
 
     pub(crate) dtlb: Tlb<BX_DTLB_SIZE>,
@@ -1412,14 +1410,31 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
     }
 
+    /// Initialize a BxCpuC on a pre-allocated, zeroed buffer.
+    ///
+    /// # Safety
+    /// `ptr` must point to a zeroed buffer of at least `size_of::<BxCpuC<I, T>>()`
+    /// bytes, properly aligned, exclusively owned, and valid for `'static`.
+    pub unsafe fn init_on_ptr(ptr: *mut Self) where T: Default {
+        core::ptr::addr_of_mut!((*ptr).cpuid).write(I::new());
+        core::ptr::addr_of_mut!((*ptr).ignore_bad_msrs).write(true);
+        core::ptr::addr_of_mut!((*ptr).a20_mask).write(0xFFFF_FFFF_FFFF_FFFF);
+        core::ptr::addr_of_mut!((*ptr).last_exception_type).write(-1);
+        core::ptr::addr_of_mut!((*ptr).instrumentation).write(
+            super::instrumentation::InstrumentationRegistry::with_tracer(T::default()),
+        );
+        core::ptr::addr_of_mut!((*ptr).dtlb).write(super::tlb::Tlb::new());
+        core::ptr::addr_of_mut!((*ptr).itlb).write(super::tlb::Tlb::new());
+    }
+
 
     #[inline]
-    pub(crate) fn set_pc_system_ptr(&mut self, ps: NonNull<crate::pc_system::BxPcSystemC>) {
+    pub fn set_pc_system_ptr(&mut self, ps: NonNull<crate::pc_system::BxPcSystemC>) {
         self.pc_system_ptr = Some(ps);
     }
 
     #[inline]
-    pub(crate) fn clear_pc_system(&mut self) {
+    pub fn clear_pc_system(&mut self) {
         self.pc_system_ptr = None;
     }
 
@@ -1430,6 +1445,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     pub(super) fn io_bus_mut(&mut self) -> Option<&mut crate::iodev::BxDevicesC> {
         self.io_bus.map(|mut p| unsafe { p.as_mut() })
     }
+
 
     #[inline(always)]
     pub(super) fn pc_system_mut(&mut self) -> Option<&mut crate::pc_system::BxPcSystemC> {
@@ -1491,6 +1507,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
     }
 
+
+
     /// Check HRQ (DMA Hold Request) state from pc_system.
     /// Matches Bochs `BX_HRQ` macro (pc_system.h) which reads
     /// `bx_pc_system.HRQ`. Returns false if pc_system is not wired.
@@ -1532,12 +1550,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     }
 
     #[inline]
-    pub(crate) fn set_mem_bus_ptr(&mut self, mem: NonNull<crate::memory::BxMemC<'c>>) {
+    pub fn set_mem_bus_ptr(&mut self, mem: NonNull<crate::memory::BxMemC<'c>>) {
         self.mem_bus = Some(mem);
     }
 
     #[inline]
-    pub(crate) fn clear_mem_bus(&mut self) {
+    pub fn clear_mem_bus(&mut self) {
         self.mem_bus = None;
     }
 
@@ -1662,8 +1680,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         max_instructions: u64,
         io: NonNull<crate::iodev::BxDevicesC>,
         pc_system: NonNull<crate::pc_system::BxPcSystemC>,
-        pic: Option<&mut crate::iodev::pic::BxPicC>,
-        dma: Option<&mut crate::iodev::dma::BxDmaC>,
+        pic: Option<&mut crate::pic::BxPicC>,
+        dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
         self.set_io_bus_ptr(io);
         self.set_pc_system_ptr(pc_system);
@@ -1707,7 +1725,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         Ok(())
     }
 
-    /// Execute CPU loop with a maximum instruction count
+    /// Execute CPU loop with a maximum instruction count.
     ///
     /// Returns Ok(instructions_executed) when limit is reached or async event occurs.
     pub fn cpu_loop_n(
@@ -1715,8 +1733,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
         max_instructions: u64,
-        mut pic: Option<&mut crate::iodev::pic::BxPicC>,
-        mut dma: Option<&mut crate::iodev::dma::BxDmaC>,
+        mut pic: Option<&mut crate::pic::BxPicC>,
+        mut dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
         // Wire the memory system pointer for the duration of this execution call.
         // This enables Bochs-style "host-pointer-or-fallback" access in mem_read/mem_write.
@@ -2045,21 +2063,25 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 let cs_base = self.sregs[BxSegregs::Cs as usize].cache.u.segment_base();
                 let laddr = cs_base + rip;
                 let cs_value = self.cs_selector_value();
-                let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
+                let instr_bytes: [u8; 16] = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
                     let page_base = cs_base + self.eip_page_bias;
                     let offset = (rip.wrapping_sub(page_base)) as usize;
                     let ilen = instr.ilen() as usize;
                     if offset < fetch_ptr.len() && offset + ilen <= fetch_ptr.len() {
-                        fetch_ptr[offset..offset + ilen].to_vec()
+                        let mut buf = [0u8; 16];
+                        let copy_len = ilen.min(16);
+                        buf[..copy_len].copy_from_slice(&fetch_ptr[offset..offset + copy_len]);
+                        buf
                     } else {
-                        vec![]
+                        [0u8; 16]
                     }
                 } else {
-                    vec![]
+                    [0u8; 16]
                 };
+                let ilen = instr.ilen() as usize;
                 tracing::error!(
                     "UNIMPLEMENTED OPCODE: {} at RIP={:#x} CS:IP={:#x}:{:#x} laddr={:#x} bytes={:02x?}",
-                    opcode, rip, cs_value, rip, laddr, instr_bytes
+                    opcode, rip, cs_value, rip, laddr, &instr_bytes[..ilen.min(16)]
                 );
             }
             _ => {

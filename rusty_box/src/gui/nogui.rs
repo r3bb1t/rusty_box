@@ -27,7 +27,7 @@ impl Default for NoGui {
 }
 
 impl BxGui for NoGui {
-    fn specific_init(&mut self, _argc: i32, _argv: &[String], _header_bar_y: u32) {
+    fn specific_init(&mut self, _argc: i32, _argv: &[&str], _header_bar_y: u32) {
         tracing::debug!("NoGUI: Initialized (no visual output)");
     }
 

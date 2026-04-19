@@ -55,3 +55,8 @@ rusty_box_web/dist/
 
 # Temp files
 /tmpclaude-*
+rusty_box_uefi.iso
+rusty_box_uefi.img
+rusty_box_uefi_disk/
+efi_test/
+examples/rusty_box_uefi/alpine.iso

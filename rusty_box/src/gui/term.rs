@@ -64,7 +64,7 @@ impl Default for TermGui {
 }
 
 impl BxGui for TermGui {
-    fn specific_init(&mut self, _argc: i32, _argv: &[String], _header_bar_y: u32) {
+    fn specific_init(&mut self, _argc: i32, _argv: &[&str], _header_bar_y: u32) {
         tracing::debug!("TermGUI: Initialized (terminal text mode)");
         print!("\x1b[2J\x1b[H");
         self.setup_raw_mode();

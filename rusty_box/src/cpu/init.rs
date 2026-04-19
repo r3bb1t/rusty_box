@@ -1,6 +1,5 @@
 #![allow(non_snake_case, dead_code)]
 
-use alloc::vec::Vec;
 use tracing::info;
 
 use super::Result;
@@ -39,22 +38,13 @@ pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
     Corei7SkylakeX {}
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
-pub enum ResetReason {
-    Software = 10,
-    Hardware = 11,
-}
+// ResetReason is defined in cpu/mod.rs (always available without alloc)
+use super::ResetReason;
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     pub fn initialize(&mut self, config: BxParams) -> Result<()> {
         tracing::debug!("Initialized cpu model {}", self.cpuid.get_name());
 
-        let _cpuid_features: Vec<X86Feature> = config
-            .cpu_include_features
-            .iter()
-            .cloned()
-            .filter(|feature| config.cpu_exclude_features.contains(feature))
-            .collect();
 
         // Populate ISA extensions bitmask from CPUID model — matches Bochs init.cc
         self.ia_extensions_bitmask = self.cpuid.get_isa_extensions_bitmask();
@@ -66,6 +56,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Note: sanity_checks() is called separately after initialize() to match original Bochs
         // Original order: initialize() -> sanity_checks() -> register_state()
 
+        #[cfg(feature = "alloc")]
         self.init_fetch_decode_tables()?;
 
         self.xsave_xrestor_init();

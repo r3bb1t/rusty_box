@@ -8,9 +8,6 @@
 //!
 //! Reference: `cpp_orig/bochs_new/iodev/fw_cfg.cc` (700 lines)
 
-use alloc::vec;
-use alloc::vec::Vec;
-
 use crate::memory::BxMemC;
 
 // ─── I/O Ports ──────────────────────────────────────────────────────────
@@ -66,11 +63,17 @@ const E820_RAM: u32 = 1;
 
 // ─── Entry Mask / Limits ────────────────────────────────────────────────
 
-const FW_CFG_MAX_ENTRY: usize = 0x4000;
 /// Mask to strip control bits from a key to get the entry index.
 const FW_CFG_ENTRY_MASK: u16 = !(FW_CFG_WRITE_CHANNEL | FW_CFG_ARCH_LOCAL);
 
 const FW_CFG_INVALID: u16 = 0xFFFF;
+
+// ─── Sparse Storage Constants ───────────────────────────────────────────
+
+/// Maximum entries that can be stored.
+const FW_CFG_MAX_ENTRIES: usize = 64;
+/// Maximum total data bytes across all entries.
+const FW_CFG_DATA_POOL_SIZE: usize = 32768;
 
 // ─── FW_CFG_ID bits ─────────────────────────────────────────────────────
 
@@ -134,15 +137,37 @@ struct FwCfgFiles {
     f: [FwCfgFile; FW_CFG_FILE_SLOTS],
 }
 
+// ─── Sparse Slot ──────────────────────────────────────────────────────
+
+/// A single entry in the sparse slot table, mapping a selector key to a
+/// region in the shared data pool.
+#[derive(Clone, Copy)]
+struct FwCfgSlot {
+    /// Selector key (with FW_CFG_ENTRY_MASK already applied for base keys,
+    /// or the raw key for arch-local keys).
+    key: u16,
+    /// Byte offset into `data_pool` where this entry's data begins.
+    offset: u16,
+    /// Length of entry data in `data_pool`.
+    len: u16,
+}
+
 // ─── BxFwCfg ────────────────────────────────────────────────────────────
 
 /// QEMU-compatible firmware configuration device.
 ///
-/// Entries are indexed by selector key (masked to strip control bits).
-/// Files are appended to a serialized directory blob exposed at `FW_CFG_FILE_DIR`.
+/// Uses sparse flat storage: a small slot table maps selector keys to regions
+/// in a fixed-size data pool. Linear scan over ≤64 slots replaces the old
+/// 16384-element Vec.
 pub struct BxFwCfg {
-    /// Per-key entry data. Index = key & (MAX_ENTRY - 1). `None` = not populated.
-    entries: Vec<Option<Vec<u8>>>,
+    /// Sparse slot table — only populated entries are meaningful (indices < slot_count).
+    slots: [FwCfgSlot; FW_CFG_MAX_ENTRIES],
+    /// Number of populated slots.
+    slot_count: u16,
+    /// Shared backing store for all entry data.
+    data_pool: [u8; FW_CFG_DATA_POOL_SIZE],
+    /// Next free byte in `data_pool`.
+    data_used: usize,
     /// Currently selected entry key.
     cur_entry: u16,
     /// Byte offset within the currently selected entry.
@@ -150,16 +175,18 @@ pub struct BxFwCfg {
     /// DMA descriptor address (accumulated across port writes).
     dma_addr: u64,
     /// Serialized file directory (written into entries[FW_CFG_FILE_DIR]).
-    file_dir: Vec<u8>,
+    file_dir: [u8; 4096],
+    /// Valid length of `file_dir`.
+    file_dir_len: usize,
     /// Number of files added.
     file_count: u16,
 }
 
 impl core::fmt::Debug for BxFwCfg {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let populated = self.entries.iter().filter(|e| e.is_some()).count();
         f.debug_struct("BxFwCfg")
-            .field("entries_populated", &populated)
+            .field("slot_count", &self.slot_count)
+            .field("data_used", &self.data_used)
             .field("cur_entry", &self.cur_entry)
             .field("cur_offset", &self.cur_offset)
             .field("dma_addr", &self.dma_addr)
@@ -171,14 +198,16 @@ impl core::fmt::Debug for BxFwCfg {
 impl BxFwCfg {
     /// Create a new fw_cfg device with empty state.
     pub fn new() -> Self {
-        let mut entries = Vec::with_capacity(FW_CFG_MAX_ENTRY);
-        entries.resize_with(FW_CFG_MAX_ENTRY, || None);
         Self {
-            entries,
+            slots: [FwCfgSlot { key: 0, offset: 0, len: 0 }; FW_CFG_MAX_ENTRIES],
+            slot_count: 0,
+            data_pool: [0u8; FW_CFG_DATA_POOL_SIZE],
+            data_used: 0,
             cur_entry: FW_CFG_INVALID,
             cur_offset: 0,
             dma_addr: 0,
-            file_dir: Vec::new(),
+            file_dir: [0u8; 4096],
+            file_dir_len: 0,
             file_count: 0,
         }
     }
@@ -190,35 +219,35 @@ impl BxFwCfg {
     /// via [`add_acpi_tables`].
     pub fn init(&mut self, ram_size: u64, num_cpus: u32) {
         // Signature: "QEMU"
-        self.add_bytes(FW_CFG_SIGNATURE, b"QEMU".to_vec());
+        self.add_bytes(FW_CFG_SIGNATURE, b"QEMU");
 
         // ID with DMA support
-        self.add_bytes(FW_CFG_ID, (FW_CFG_VERSION | FW_CFG_VERSION_DMA).to_le_bytes().to_vec());
+        self.add_bytes(FW_CFG_ID, &(FW_CFG_VERSION | FW_CFG_VERSION_DMA).to_le_bytes());
 
         // RAM size (little-endian 8 bytes)
-        self.add_bytes(FW_CFG_RAM_SIZE, ram_size.to_le_bytes().to_vec());
+        self.add_bytes(FW_CFG_RAM_SIZE, &ram_size.to_le_bytes());
 
         // CPU count
-        self.add_bytes(FW_CFG_NB_CPUS, (num_cpus as u16).to_le_bytes().to_vec());
-        self.add_bytes(FW_CFG_MAX_CPUS, (num_cpus as u16).to_le_bytes().to_vec());
+        self.add_bytes(FW_CFG_NB_CPUS, &(num_cpus as u16).to_le_bytes());
+        self.add_bytes(FW_CFG_MAX_CPUS, &(num_cpus as u16).to_le_bytes());
 
         // x86-specific: IRQ0 connected to IOAPIC pin 2
-        self.add_bytes(FW_CFG_IRQ0_OVERRIDE, 1u32.to_le_bytes().to_vec());
+        self.add_bytes(FW_CFG_IRQ0_OVERRIDE, &1u32.to_le_bytes());
 
         // NOGRAPHIC: 0 = graphics enabled
-        self.add_bytes(FW_CFG_NOGRAPHIC, 0u16.to_le_bytes().to_vec());
+        self.add_bytes(FW_CFG_NOGRAPHIC, &0u16.to_le_bytes());
 
         // BOOT_MENU: 0 = disabled
-        self.add_bytes(FW_CFG_BOOT_MENU, 0u16.to_le_bytes().to_vec());
+        self.add_bytes(FW_CFG_BOOT_MENU, &0u16.to_le_bytes());
 
         // MACHINE_ID: 0 = PC
-        self.add_bytes(FW_CFG_MACHINE_ID, 0u32.to_le_bytes().to_vec());
+        self.add_bytes(FW_CFG_MACHINE_ID, &0u32.to_le_bytes());
 
         // BOOT_DEVICE: 0 = default
-        self.add_bytes(FW_CFG_BOOT_DEVICE, 0u16.to_le_bytes().to_vec());
+        self.add_bytes(FW_CFG_BOOT_DEVICE, &0u16.to_le_bytes());
 
         // NUMA: empty
-        self.add_bytes(FW_CFG_NUMA, 0u64.to_le_bytes().to_vec());
+        self.add_bytes(FW_CFG_NUMA, &0u64.to_le_bytes());
 
         // Linux kernel boot entries — zeroed (OVMF probes these)
         for key in [
@@ -227,7 +256,7 @@ impl BxFwCfg {
             FW_CFG_CMDLINE_ADDR, FW_CFG_CMDLINE_SIZE,
             FW_CFG_SETUP_ADDR, FW_CFG_SETUP_SIZE,
         ] {
-            self.add_bytes(key, 0u32.to_le_bytes().to_vec());
+            self.add_bytes(key, &0u32.to_le_bytes());
         }
 
         // Initialize file directory
@@ -247,6 +276,29 @@ impl BxFwCfg {
         self.cur_entry = FW_CFG_INVALID;
         self.cur_offset = 0;
         self.dma_addr = 0;
+    }
+
+    // ─── Slot Lookup ────────────────────────────────────────────────────
+
+    /// Find the slot index for a given raw key, or None.
+    fn find_slot(&self, key: u16) -> Option<usize> {
+        let count = self.slot_count as usize;
+        for i in 0..count {
+            if self.slots[i].key == key {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Get entry data for a given raw key.
+    fn get_entry_data(&self, key: u16) -> Option<&[u8]> {
+        self.find_slot(key).map(|i| {
+            let slot = &self.slots[i];
+            let start = slot.offset as usize;
+            let end = start + slot.len as usize;
+            &self.data_pool[start..end]
+        })
     }
 
     // ─── I/O Port Handlers ──────────────────────────────────────────────
@@ -287,7 +339,7 @@ impl BxFwCfg {
                     return 0;
                 }
                 let key = self.cur_entry & FW_CFG_ENTRY_MASK;
-                if let Some(Some(data)) = self.entries.get(key as usize) {
+                if let Some(data) = self.get_entry_data(key) {
                     if (self.cur_offset as usize) < data.len() {
                         let val = data[self.cur_offset as usize] as u32;
                         self.cur_offset += 1;
@@ -411,49 +463,45 @@ impl BxFwCfg {
 
         // READ: copy entry data to guest memory in page-aligned chunks
         if control & FW_CFG_DMA_CTL_READ != 0 {
-            let key = (self.cur_entry & FW_CFG_ENTRY_MASK) as usize;
+            let key = self.cur_entry & FW_CFG_ENTRY_MASK;
 
-            let success = if key < FW_CFG_MAX_ENTRY {
-                if let Some(Some(data)) = self.entries.get(key) {
-                    let mut to_read = length;
-                    if self.cur_offset as usize + to_read as usize > data.len() {
-                        to_read = data.len().saturating_sub(self.cur_offset as usize) as u32;
-                    }
-
-                    // Page-chunked write to guest memory
-                    let mut written = 0u32;
-                    let src = &data[self.cur_offset as usize..];
-                    let mut dst_addr = address as usize;
-
-                    while written < to_read {
-                        let page_offset = dst_addr & 0xFFF;
-                        let to_page_end = 0x1000 - page_offset;
-                        let chunk = core::cmp::min(to_read - written, to_page_end as u32) as usize;
-
-                        if dst_addr + chunk > ram_len {
-                            tracing::error!("fw_cfg DMA READ: dest {:#x} out of range", dst_addr);
-                            break;
-                        }
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                src[written as usize..].as_ptr(),
-                                ram_ptr.add(dst_addr),
-                                chunk,
-                            );
-                        }
-                        written += chunk as u32;
-                        dst_addr += chunk;
-                    }
-
-                    self.cur_offset += to_read;
-                    tracing::debug!(
-                        "fw_cfg DMA: read {} bytes from entry {:#06x} to {:#x}",
-                        to_read, key, address
-                    );
-                    true
-                } else {
-                    false
+            let success = if let Some(data) = self.get_entry_data(key) {
+                let mut to_read = length;
+                if self.cur_offset as usize + to_read as usize > data.len() {
+                    to_read = data.len().saturating_sub(self.cur_offset as usize) as u32;
                 }
+
+                // Page-chunked write to guest memory
+                let mut written = 0u32;
+                let src = &data[self.cur_offset as usize..];
+                let mut dst_addr = address as usize;
+
+                while written < to_read {
+                    let page_offset = dst_addr & 0xFFF;
+                    let to_page_end = 0x1000 - page_offset;
+                    let chunk = core::cmp::min(to_read - written, to_page_end as u32) as usize;
+
+                    if dst_addr + chunk > ram_len {
+                        tracing::error!("fw_cfg DMA READ: dest {:#x} out of range", dst_addr);
+                        break;
+                    }
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src[written as usize..].as_ptr(),
+                            ram_ptr.add(dst_addr),
+                            chunk,
+                        );
+                    }
+                    written += chunk as u32;
+                    dst_addr += chunk;
+                }
+
+                self.cur_offset += to_read;
+                tracing::debug!(
+                    "fw_cfg DMA: read {} bytes from entry {:#06x} to {:#x}",
+                    to_read, key, address
+                );
+                true
             } else {
                 false
             };
@@ -487,21 +535,50 @@ impl BxFwCfg {
     // ─── Entry Management ───────────────────────────────────────────────
 
     /// Store raw bytes for a given key. Overwrites any existing entry.
-    pub fn add_bytes(&mut self, key: u16, data: Vec<u8>) {
-        let index = (key & (FW_CFG_MAX_ENTRY as u16 - 1)) as usize;
-        if index >= FW_CFG_MAX_ENTRY {
-            tracing::error!("fw_cfg: key {:#06x} (index {:#06x}) out of range", key, index);
+    ///
+    /// If the key already exists, the old data space in the pool is abandoned
+    /// (wasted) and new data is appended. The 32KB pool is generous enough for
+    /// the ~15-20 entries used during boot.
+    pub fn add_bytes(&mut self, key: u16, data: &[u8]) {
+        // Check pool capacity
+        if self.data_used + data.len() > FW_CFG_DATA_POOL_SIZE {
+            tracing::error!(
+                "fw_cfg: data pool full (used={}, need={}), cannot add key {:#06x}",
+                self.data_used, data.len(), key
+            );
             return;
         }
-        tracing::debug!("fw_cfg: added entry {:#06x} (index {:#06x}), len={}", key, index, data.len());
-        self.entries[index] = Some(data);
+
+        let offset = self.data_used as u16;
+        let len = data.len() as u16;
+
+        // Copy data into pool
+        self.data_pool[self.data_used..self.data_used + data.len()].copy_from_slice(data);
+        self.data_used += data.len();
+
+        // Update existing slot or allocate a new one
+        if let Some(i) = self.find_slot(key) {
+            // Overwrite: old pool space is wasted, point to new data
+            self.slots[i].offset = offset;
+            self.slots[i].len = len;
+        } else {
+            if (self.slot_count as usize) >= FW_CFG_MAX_ENTRIES {
+                tracing::error!("fw_cfg: slot table full, cannot add key {:#06x}", key);
+                return;
+            }
+            let i = self.slot_count as usize;
+            self.slots[i] = FwCfgSlot { key, offset, len };
+            self.slot_count += 1;
+        }
+
+        tracing::debug!("fw_cfg: added entry {:#06x}, len={}", key, data.len());
     }
 
     /// Add a named file to the file directory.
     ///
     /// Files are assigned sequential keys starting at `FW_CFG_FILE_FIRST`.
     /// Directory entry fields (size, select) are stored big-endian.
-    pub fn add_file(&mut self, name: &str, data: Vec<u8>) {
+    pub fn add_file(&mut self, name: &str, data: &[u8]) {
         if self.file_count as usize >= FW_CFG_FILE_SLOTS {
             tracing::error!("fw_cfg: file directory full, cannot add '{}'", name);
             return;
@@ -514,7 +591,6 @@ impl BxFwCfg {
         // Build 64-byte file entry (big-endian size + select, zero-padded name)
         let entry_offset = 4 + (self.file_count as usize) * 64; // skip count field
         if entry_offset + 64 > self.file_dir.len() {
-            // Should not happen if init_file_dir was called
             tracing::error!("fw_cfg: file_dir too small");
             return;
         }
@@ -536,8 +612,12 @@ impl BxFwCfg {
         self.file_dir[0..4].copy_from_slice(&(self.file_count as u32).to_be_bytes());
 
         // Re-register the file directory in entries so reads see updated data
-        let dir_copy = self.file_dir.clone();
-        self.add_bytes(FW_CFG_FILE_DIR, dir_copy);
+        let dir_len = self.file_dir_len;
+        // Safety: we need to borrow file_dir immutably while calling add_bytes.
+        // Copy the relevant slice to avoid aliasing issues.
+        let mut dir_copy = [0u8; 4096];
+        dir_copy[..dir_len].copy_from_slice(&self.file_dir[..dir_len]);
+        self.add_bytes(FW_CFG_FILE_DIR, &dir_copy[..dir_len]);
 
         tracing::info!(
             "fw_cfg: added file '{}' at index {:#06x} ({} bytes)",
@@ -547,7 +627,7 @@ impl BxFwCfg {
 
     /// Add ACPI tables, RSDP, and loader as fw_cfg files.
     /// Called externally after ACPI table generation.
-    pub fn add_acpi_tables(&mut self, tables: Vec<u8>, rsdp: Vec<u8>, loader: Vec<u8>) {
+    pub fn add_acpi_tables(&mut self, tables: &[u8], rsdp: &[u8], loader: &[u8]) {
         self.add_file("etc/acpi/tables", tables);
         self.add_file("etc/acpi/rsdp", rsdp);
         self.add_file("etc/table-loader", loader);
@@ -559,11 +639,12 @@ impl BxFwCfg {
     /// Initialize the file directory buffer (count + FILE_SLOTS * 64 bytes).
     fn init_file_dir(&mut self) {
         let dir_size = 4 + FW_CFG_FILE_SLOTS * 64;
-        self.file_dir = vec![0u8; dir_size];
+        self.file_dir = [0u8; 4096];
+        self.file_dir_len = dir_size;
         self.file_count = 0;
-        // Register empty directory
-        let dir_copy = self.file_dir.clone();
-        self.add_bytes(FW_CFG_FILE_DIR, dir_copy);
+        // Register empty directory — file_dir is all zeros, safe to copy out
+        let empty = [0u8; 4096];
+        self.add_bytes(FW_CFG_FILE_DIR, &empty[..dir_size]);
     }
 
     /// Generate the E820 memory map and add it as file "etc/e820".
@@ -581,26 +662,30 @@ impl BxFwCfg {
             (ram_size, 0u64)
         };
 
-        let mut entries: Vec<E820Entry> = Vec::with_capacity(2);
+        let mut entries = [E820Entry { address: 0, length: 0, entry_type: 0 }; 2];
+        let mut count = 0usize;
 
         // Entry 0: below 4GB RAM
-        entries.push(E820Entry {
+        entries[0] = E820Entry {
             address: 0,
             length: below_4g,
             entry_type: E820_RAM,
-        });
+        };
+        count += 1;
 
         // Entry 1: above 4GB RAM (only if present)
         if above_4g > 0 {
-            entries.push(E820Entry {
+            entries[1] = E820Entry {
                 address: 0x1_0000_0000,
                 length: above_4g,
                 entry_type: E820_RAM,
-            });
+            };
+            count += 1;
         }
 
-        tracing::info!("fw_cfg: generated {} e820 entries:", entries.len());
-        for (i, e) in entries.iter().enumerate() {
+        tracing::info!("fw_cfg: generated {} e820 entries:", count);
+        for i in 0..count {
+            let e = &entries[i];
             tracing::info!(
                 "  Entry {}: addr={:#x} len={:#x} type={}",
                 i,
@@ -612,8 +697,8 @@ impl BxFwCfg {
 
         // Serialize to raw bytes
         let entry_size = core::mem::size_of::<E820Entry>();
-        let total_size = entries.len() * entry_size;
-        let mut data = vec![0u8; total_size];
+        let total_size = count * entry_size;
+        let mut data = [0u8; 2 * core::mem::size_of::<E820Entry>()];
         unsafe {
             core::ptr::copy_nonoverlapping(
                 entries.as_ptr() as *const u8,
@@ -622,7 +707,7 @@ impl BxFwCfg {
             );
         }
 
-        self.add_file("etc/e820", data);
+        self.add_file("etc/e820", &data[..total_size]);
     }
 
     /// Generate HPET configuration and add it as FW_CFG_HPET key.
@@ -646,7 +731,7 @@ impl BxFwCfg {
 
         // Serialize: count byte + 1 entry
         let hpet_size = core::mem::size_of::<u8>() + core::mem::size_of::<HpetFwEntry>();
-        let mut data = vec![0u8; hpet_size];
+        let mut data = [0u8; core::mem::size_of::<u8>() + core::mem::size_of::<HpetFwEntry>()];
         unsafe {
             core::ptr::copy_nonoverlapping(
                 &cfg as *const HpetFwConfig as *const u8,
@@ -655,7 +740,7 @@ impl BxFwCfg {
             );
         }
 
-        self.add_bytes(FW_CFG_HPET, data);
+        self.add_bytes(FW_CFG_HPET, &data[..hpet_size]);
         tracing::info!("fw_cfg: added HPET configuration");
     }
 }

@@ -41,7 +41,7 @@ mod bridge_impl {
     }
 
     impl BxGui for BridgeGui {
-        fn specific_init(&mut self, _argc: i32, _argv: &[String], _header_bar_y: u32) {
+        fn specific_init(&mut self, _argc: i32, _argv: &[&str], _header_bar_y: u32) {
             tracing::debug!("BridgeGui: Initialized");
         }
 

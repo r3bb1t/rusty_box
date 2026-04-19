@@ -36,8 +36,9 @@ use super::hooks::{
     InvalidInsnHook, IoHook, MemHook, MemUnmappedHook,
 };
 use super::types::{
-    BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, IoHookEvent, LinAccess, MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess,
-    PrefetchEvent, ResetType, TlbCntrl,
+    BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, IoHookEvent,
+    LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemUnmapped,
+    MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType, TlbCntrl,
 };
 #[cfg(feature = "instrumentation")]
 use super::types::{HookHandle, IoHookType, MemHookType};

@@ -1,6 +1,5 @@
 use thiserror::Error;
 
-use alloc::string::String;
 
 use crate::{config::BxPhyAddress, cpu::cpu::Exception};
 
@@ -43,7 +42,7 @@ pub enum CpuError {
     UnimplementedInstruction,
 
     #[error("Unimplemented opcode: {opcode}")]
-    UnimplementedOpcode { opcode: String },
+    UnimplementedOpcode { opcode: &'static str },
 
     /// Bochs-style control flow: exceptions/interrupt delivery longjmp back to the
     /// main decode loop. We model that by unwinding the current instruction/trace

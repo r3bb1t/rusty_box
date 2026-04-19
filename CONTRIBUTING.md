@@ -9,8 +9,14 @@ cargo build --release --all-features
 # Run tests
 cargo test
 
-# no_std build (core library only)
-cargo check -p rusty_box --no-default-features --features bx_full
+# no_std + no_alloc build (core library only, no heap)
+cargo check -p rusty_box --no-default-features
+
+# no_std + alloc (adds Emulator wrapper, iodev)
+cargo check -p rusty_box --no-default-features --features alloc
+
+# UEFI target
+cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi
 
 # Fuzz the decoder
 cd rusty_box_decoder && cargo +nightly fuzz run fuzz_target_1
@@ -23,6 +29,7 @@ The emulator is organized as a Cargo workspace with three crates:
 - **rusty_box** — main emulator library (CPU, memory, I/O devices)
 - **rusty_box_decoder** — standalone x86 instruction decoder
 - **rusty_box_web** — WASM web frontend (in `examples/rusty_box_web/`)
+- **rusty_box_uefi** -- UEFI bootable emulator (in `examples/rusty_box_uefi/`)
 
 ### Code Organization
 
@@ -41,7 +48,7 @@ CPU instructions are organized by category, mirroring the Bochs `cpu/` directory
 
 1. **Match Bochs exactly** — all logic must correspond to the Bochs C++ source. The original source is in `cpp_orig/bochs/` for reference. Structural deviations are bugs.
 2. **No global state** — the emulator is fully instance-based. No static mutables.
-3. **no_std first** — the core library must compile without std. File I/O and terminal UI are behind the `std` feature flag.
+3. **no_std + no_alloc first** -- core emulation compiles without std or alloc. Heap-dependent features (iodev, Emulator, GUI) are behind `alloc`/`std` feature flags.
 
 ## Testing Requirements
 

@@ -23,6 +23,8 @@ cargo test                                    # Run tests
 cargo run --release --example dlxlinux --features std            # DLX headless
 cargo run --release --example rusty_box_egui --features "std,gui-egui"  # GUI
 cd examples/rusty_box_web && trunk serve      # WASM dev server
+cargo check --no-default-features -p rusty_box  # no_std + no_alloc build
+cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi  # UEFI app
 ```
 
 ## Architecture
@@ -41,14 +43,15 @@ Emulator<'a, I: BxCpuIdTrait>
 
 - **No global state** — each `Emulator<I>` is fully self-contained
 - **Bochs parity** — all logic must match Bochs C++ source exactly; deviations are bugs
-- **no_std compatible** — core library works without std; `std` feature enables file I/O and terminal GUI
+- **no_std compatible** — core emulation (CPU, memory, decoder, params, pc_system) compiles without alloc. Only iodev, emulator, gui, snapshot require alloc/std.
 
 ## Workspace Structure
 
-- **rusty_box/** — Main emulator library
-- **rusty_box_decoder/** — Separate crate for x86 instruction decoding
-- **examples/rusty_box_web/** — WASM web frontend
-- **cpp_orig/bochs/** — Original C++ Bochs source for reference
+- **rusty_box/** -- Main emulator library
+- **rusty_box_decoder/** -- Separate crate for x86 instruction decoding
+- **examples/rusty_box_web/** -- WASM web frontend
+- **examples/rusty_box_uefi/** -- UEFI bootable emulator application
+- **cpp_orig/bochs/** -- Original C++ Bochs source for reference
 
 ## Key Files for Common Tasks
 
@@ -61,6 +64,10 @@ Emulator<'a, I: BxCpuIdTrait>
 
 ## Feature Flags
 
-- `std` — Standard library support (terminal, file I/O)
-- `gui-egui` — Graphical UI using egui
-- `bx_full` — Enables all emulation features (default)
+- `std` -- Standard library support (terminal, file I/O, tempfile). Implies `alloc`.
+- `alloc` -- Heap allocation. Required for Emulator wrapper, iodev, GUI.
+- `gui-egui` -- Graphical UI using egui
+- `instrumentation` -- Closure-based CPU hooks. Implies `alloc`.
+- `bx_debugger` -- Built-in debugger
+- `bx_gdb_stub` -- GDB remote stub
+- `profiling` -- Profiling support. Implies `std`.

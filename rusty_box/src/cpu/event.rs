@@ -5,8 +5,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Returns true if should return from cpu_loop
     pub(super) fn handle_async_event(
         &mut self,
-        pic: Option<&mut crate::iodev::pic::BxPicC>,
-        mut dma: Option<&mut crate::iodev::dma::BxDmaC>,
+        pic: Option<&mut crate::pic::BxPicC>,
+        mut dma: Option<&mut crate::dma::BxDmaC>,
     ) -> bool {
         // Check if CPU is in non-active state (HLT, MWAIT, etc.)
         // Matches Bochs event.cc
@@ -224,7 +224,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Handle wait for event - matches Bochs event.cc:handleWaitForEvent()
     /// Called when CPU is halted (HLT) or waiting (MWAIT)
     /// Returns true if should return from cpu_loop
-    fn handle_wait_for_event(&mut self, dma: Option<&mut crate::iodev::dma::BxDmaC>) -> bool {
+    fn handle_wait_for_event(&mut self, dma: Option<&mut crate::dma::BxDmaC>) -> bool {
         // For WAIT_FOR_SIPI, just return (matches Bochs event.cc)
         if matches!(self.activity_state, CpuActivityState::WaitForSipi) {
             tracing::trace!("CPU in WAIT_FOR_SIPI state, returning from cpu_loop");

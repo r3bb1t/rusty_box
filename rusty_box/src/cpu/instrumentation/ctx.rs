@@ -71,6 +71,7 @@ impl<'a> HookCtx<'a> {
     /// Read a NUL-terminated string from guest user-space memory, starting at
     /// `vaddr`, translating via `cr3`. Up to `max_len` bytes. Returns empty
     /// string on translation failure (strace convention).
+    #[cfg(feature = "alloc")]
     pub fn read_cstr_user(&self, vaddr: u64, cr3: u64, max_len: usize) -> alloc::string::String {
         use alloc::string::String;
         if vaddr == 0 || max_len == 0 { return String::new(); }

@@ -1216,6 +1216,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Returns the number of bytes actually read. If the port doesn't support
     /// bulk reads (or no IO bus is wired), returns 0.
     fn bulk_port_in(&mut self, port: u16, buf: &mut [u8]) -> usize {
+        #[cfg(feature = "alloc")]
         if let Some(io) = self.io_bus_mut() {
             return io.inp_bulk(port, buf);
         }
@@ -1235,18 +1236,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         let icount = self.icount;
+        #[cfg(feature = "alloc")]
         let value = if let Some(io) = self.io_bus_mut() {
             let v = io.inp(port, len, icount);
             self.sync_pic_flags();
             v
         } else {
-            // Fallback (no bus wired)
             match len {
                 1 => 0xFF,
                 2 => 0xFFFF,
                 4 => 0xFFFFFFFF,
                 _ => 0xFF,
             }
+        };
+        #[cfg(not(feature = "alloc"))]
+        let value = match len {
+            1 => 0xFF,
+            2 => 0xFFFF,
+            4 => 0xFFFFFFFF,
+            _ => 0xFF,
         };
 
         // BOCHS BX_INSTR_INP2(addr, len, val) — fires after the read with the value.
@@ -1287,6 +1295,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.rip()
             );
         }
+        #[cfg(feature = "alloc")]
         if let Some(io) = self.io_bus_mut() {
             io.outp(port, value, len);
             self.sync_pic_flags();

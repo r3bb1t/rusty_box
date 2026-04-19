@@ -23,249 +23,68 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
         Self { cpuid }
     }
 
-    pub fn build(self) -> Result<BxCpuC<'static, I, ()>> { self.build_with_tracer(()) }
+    #[cfg(feature = "alloc")]
+    pub fn build(self) -> Result<alloc::boxed::Box<BxCpuC<'static, I, ()>>> { self.build_with_tracer(()) }
 
-    pub fn build_with_tracer<T: super::instrumentation::Instrumentation>(self, tracer: T) -> Result<BxCpuC<'static, I, T>> {
+    #[cfg(feature = "alloc")]
+    pub fn build_with_tracer<T: super::instrumentation::Instrumentation>(self, tracer: T) -> Result<alloc::boxed::Box<BxCpuC<'static, I, T>>> {
         let cpuid = I::new();
-        //let cpuid = cpuid_factory();
 
-        let mut raw_cpu = BxCpuC {
-            bx_cpuid: Default::default(),
-            cpuid,
-            ia_extensions_bitmask: Default::default(),
-            vmx_extensions_bitmask: Default::default(),
-            svm_extensions_bitmask: Default::default(),
-            gen_reg: Default::default(),
-            eflags: Default::default(),
-            oszapc: Default::default(),
-            prev_rip: Default::default(),
-            prev_rsp: Default::default(),
-            prev_ssp: Default::default(),
-            speculative_rsp: Default::default(),
-            icount: Default::default(),
-            icount_last_sync: Default::default(),
-            inhibit_mask: Default::default(),
-            inhibit_icount: Default::default(),
-            sregs: Default::default(),
-            gdtr: Default::default(),
-            idtr: Default::default(),
-            ldtr: Default::default(),
-            tr: Default::default(),
-            dr: Default::default(),
-            dr6: Default::default(),
-            dr7: Default::default(),
-            debug_trap: Default::default(),
-            cr0: Default::default(),
-            cr2: Default::default(),
-            cr3: Default::default(),
-            cr4: Default::default(),
-            cr4_suppmask: Default::default(),
-            linaddr_width: Default::default(),
-            efer: Default::default(),
-            efer_suppmask: Default::default(),
-            tsc_adjust: Default::default(),
-            tsc_offset: Default::default(),
-            xcr0: Default::default(),
-            xcr0_suppmask: Default::default(),
-            ia32_xss_suppmask: Default::default(),
-            pkru: Default::default(),
-            pkrs: Default::default(),
-            rd_pkey: Default::default(),
-            wr_pkey: Default::default(),
-            uintr: Default::default(),
-            the_i387: Default::default(),
-            vmm: Default::default(),
-            mxcsr: Default::default(),
-            mxcsr_mask: Default::default(),
-            opmask: Default::default(),
-            monitor: Default::default(),
-            lapic: Default::default(),
-            smbase: Default::default(),
-            msr: Default::default(),
-            msrs: [Default::default(); BX_MSR_MAX_INDEX],
-            amx: Default::default(),
-            in_vmx: Default::default(),
-            in_vmx_guest: Default::default(),
-            in_smm_vmx: Default::default(),
-            in_smm_vmx_guest: Default::default(),
-            vmcsptr: Default::default(),
-            vmcs_memtype: Default::default(),
-            vmxonptr: Default::default(),
-            vmcs: Default::default(),
-            vmx_cap: Default::default(),
-            vmcs_map: Default::default(),
-            in_svm_guest: Default::default(),
-            svm_gif: Default::default(),
-            vmcbptr: Default::default(),
-            vmcbhostptr: Default::default(),
-            vmcb_memtype: Default::default(),
-            vmcb: Default::default(),
-            in_event: Default::default(),
-            fred_event_info: Default::default(),
-            fred_event_data: Default::default(),
-            nmi_unblocking_iret: Default::default(),
-            ext: Default::default(),
-            activity_state: Default::default(),
-            pending_event: Default::default(),
-            event_mask: Default::default(),
-            async_event: Default::default(),
-            in_smm: Default::default(),
-            cpu_mode: Default::default(),
-            user_pl: Default::default(),
-            ignore_bad_msrs: true, // Bochs default: silently ignore unknown MSRs
-            a20_mask: 0xFFFF_FFFF_FFFF_FFFF,
-            cpu_state_use_ok: Default::default(),
-            last_exception_type: -1, // BX_ET_NONE
-            cpuloop_stack_anchor: Default::default(),
-            perf_icache_miss: 0,
-            perf_prefetch: 0,
-            perf_tlb_hit: 0,
-            perf_tlb_miss: 0,
-            perf_page_walk: 0,
-            perf_instructions: 0,
-            eip_page_bias: Default::default(),
-            eip_page_window_size: Default::default(),
-            eip_fetch_ptr: Default::default(),
-            p_addr_fetch_page: Default::default(),
-            esp_page_bias: Default::default(),
-            esp_page_window_size: Default::default(),
-            esp_host_ptr: Default::default(),
-            p_addr_stack_page: Default::default(),
-            espPageMemtype: Default::default(),
-            esp_page_fine_granularity_mapping: Default::default(),
-            alignment_check_mask: Default::default(),
-            stats: Default::default(),
-            #[cfg(feature = "bx_debugger")]
-            watchpoint: Default::default(),
-            #[cfg(feature = "bx_debugger")]
-            break_point: Default::default(),
-            #[cfg(feature = "bx_debugger")]
-            magic_break: Default::default(),
-            #[cfg(feature = "bx_debugger")]
-            stop_reason: Default::default(),
-            #[cfg(feature = "bx_debugger")]
-            trace: Default::default(),
-            #[cfg(feature = "bx_debugger")]
-            trace_reg: Default::default(),
-            #[cfg(feature = "bx_debugger")]
-            trace_mem: Default::default(),
-            #[cfg(feature = "bx_debugger")]
-            mode_break: Default::default(),
-            #[cfg(feature = "bx_debugger")]
-            vmexit_break: Default::default(),
-            #[cfg(feature = "bx_debugger")]
-            show_flag: Default::default(),
-            #[cfg(feature = "bx_debugger")]
-            guard_found: Default::default(),
+        // BxCpuC is ~50MB (BxICache alone is ~19MB of fixed arrays).
+        // Cannot construct on the stack. Allocate zeroed heap memory and
+        // initialize field-by-field via raw pointer.
+        let layout = alloc::alloc::Layout::new::<BxCpuC<'static, I, T>>();
+        tracing::info!("CPU alloc: {} bytes (align={})", layout.size(), layout.align());
+        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut BxCpuC<'static, I, T>;
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        tracing::info!("CPU alloc OK at {:p}", ptr);
 
-            instrumentation: super::instrumentation::InstrumentationRegistry::with_tracer(tracer),
+        unsafe {
+            Self::init_cpu_fields(ptr, cpuid, tracer);
+            let mut boxed = alloc::boxed::Box::from_raw(ptr);
+            let config = Default::default();
+            boxed.initialize(config)?;
+            Ok(boxed)
+        }
+    }
 
-            #[cfg(feature = "instrumentation")]
-            page_permissions: None,
+    /// Initialize a BxCpuC at a caller-provided, zeroed memory location.
+    ///
+    /// # Safety
+    /// - `ptr` must point to a valid, zeroed, properly aligned allocation of
+    ///   `size_of::<BxCpuC<I, T>>()` bytes.
+    /// - The allocation must outlive the returned reference.
+    pub unsafe fn init_cpu_at<'a, T: super::instrumentation::Instrumentation>(
+        ptr: *mut BxCpuC<'a, I, T>,
+        tracer: T,
+    ) -> Result<&'a mut BxCpuC<'a, I, T>> {
+        let cpuid = I::new();
+        Self::init_cpu_fields(ptr, cpuid, tracer);
+        let cpu = &mut *ptr;
+        cpu.initialize(Default::default())?;
+        Ok(cpu)
+    }
 
-            #[cfg(feature = "alloc")]
-            mmio: crate::memory::mmio::MmioRegistry::new(),
-            dtlb: Tlb::new(),
-            itlb: Tlb::new(),
-            pdptrcache: Default::default(),
-            i_cache: Default::default(),
-            fetch_mode_mask: Default::default(),
-            address_xlation: Default::default(),
-            smram_map: [0; SMMRAM_Fields::SMRAM_FIELD_LAST as _],
-            phantom: Default::default(),
-            mem_ptr: None,
-            mem_len: 0,
-            mem_host_base: core::ptr::null_mut(),
-            mem_host_len: 0,
-            mem_bus: None,
-            io_bus: None,
-            pc_system_ptr: None,
-            boot_debug_flags: 0,
-            #[cfg(debug_assertions)]
-            diag_hae_intr_delivered: 0,
-            #[cfg(debug_assertions)]
-            diag_hae_intr_if_blocked: 0,
-            #[cfg(debug_assertions)]
-            diag_hae_intr_no_pic: 0,
-            #[cfg(debug_assertions)]
-            diag_hae_intr_pic_empty: 0,
-            #[cfg(debug_assertions)]
-            diag_exception_counts: [0; 32],
-            #[cfg(debug_assertions)]
-            diag_ia_error_count: 0,
-            #[cfg(debug_assertions)]
-            diag_ia_error_last_rip: 0,
-            #[cfg(debug_assertions)]
-            diag_iac_vectors: [0; 256],
-            #[cfg(debug_assertions)]
-            diag_inject_ext_intr_count: 0,
-            #[cfg(debug_assertions)]
-            diag_inject_ext_intr_vectors: [0; 256],
-            #[cfg(debug_assertions)]
-            diag_soft_int_vectors: [0; 256],
-            #[cfg(debug_assertions)]
-            diag_soft_int_vectors_late: [0; 256],
-            #[cfg(debug_assertions)]
-            diag_syscall_ring: [(0, 0, 0); 32],
-            #[cfg(debug_assertions)]
-            diag_syscall_ring_idx: 0,
-            #[cfg(debug_assertions)]
-            diag_syscall_count: 0,
-            #[cfg(debug_assertions)]
-            diag_sysret_count: 0,
-            #[cfg(debug_assertions)]
-            diag_awk_trace_active: false,
-            #[cfg(debug_assertions)]
-            diag_addr_hits: [(0, 0); 8],
-            #[cfg(debug_assertions)]
-            diag_int10h_ah_hist: [0; 256],
-            #[cfg(debug_assertions)]
-            diag_int10h_tty_chars: [0; 128],
-            #[cfg(debug_assertions)]
-            diag_int10h_tty_count: 0,
-            #[cfg(debug_assertions)]
-            diag_int10h_first_icount: 0,
-            #[cfg(debug_assertions)]
-            diag_int10h_last_icount: 0,
-            #[cfg(debug_assertions)]
-            diag_int10h_tty_first_icount: 0,
-            #[cfg(debug_assertions)]
-            diag_int10h_tty_last_icount: 0,
-            #[cfg(debug_assertions)]
-            diag_first_pm_hlt_captured: false,
-            #[cfg(debug_assertions)]
-            diag_first_pm_hlt_icount: 0,
-            #[cfg(debug_assertions)]
-            diag_first_pm_hlt_regs: [0; 8],
-            #[cfg(debug_assertions)]
-            diag_first_pm_hlt_cs: 0,
-            #[cfg(debug_assertions)]
-            diag_first_pm_hlt_ss: 0,
-            #[cfg(debug_assertions)]
-            diag_first_pm_hlt_eflags: 0,
-            #[cfg(debug_assertions)]
-            diag_first_pm_hlt_rip: 0,
-            #[cfg(debug_assertions)]
-            diag_first_pm_hlt_stack: [0; 16],
-            #[cfg(debug_assertions)]
-            diag_rip_ring: [0; 8192],
-            #[cfg(debug_assertions)]
-            diag_opcode_ring: [0; 256],
-            #[cfg(debug_assertions)]
-            diag_rip_ring_idx: 0,
-            #[cfg(debug_assertions)]
-            diag_current_opcode: 0,
-            #[cfg(debug_assertions)]
-            diag_gpr64_corrupt_count: 0,
-            #[cfg(debug_assertions)]
-            diag_pm_to_rm_count: 0,
-            #[cfg(debug_assertions)]
-            diag_rm_to_pm_count: 0,
-        };
-
-        let config = Default::default();
-        raw_cpu.initialize(config)?;
-
-        Ok(raw_cpu)
+    /// Write essential fields into a zeroed BxCpuC allocation.
+    ///
+    /// # Safety
+    /// `ptr` must be valid, zeroed, aligned for BxCpuC.
+    unsafe fn init_cpu_fields<T: super::instrumentation::Instrumentation>(
+        ptr: *mut BxCpuC<'_, I, T>,
+        cpuid: I,
+        tracer: T,
+    ) {
+        core::ptr::addr_of_mut!((*ptr).cpuid).write(cpuid);
+        core::ptr::addr_of_mut!((*ptr).ignore_bad_msrs).write(true);
+        core::ptr::addr_of_mut!((*ptr).a20_mask).write(0xFFFF_FFFF_FFFF_FFFF);
+        core::ptr::addr_of_mut!((*ptr).last_exception_type).write(-1);
+        core::ptr::addr_of_mut!((*ptr).instrumentation).write(
+            super::instrumentation::InstrumentationRegistry::with_tracer(tracer),
+        );
+        core::ptr::addr_of_mut!((*ptr).mmio).write(crate::memory::mmio::MmioRegistry::new());
+        (*ptr).dtlb.flush();
+        (*ptr).itlb.flush();
     }
 }

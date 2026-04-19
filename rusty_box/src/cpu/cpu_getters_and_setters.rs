@@ -288,7 +288,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     }
 
     /// Get CPU diagnostic string (IF, activity, inhibit)
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "alloc"))]
     pub fn cpu_diag_string(&self) -> alloc::string::String {
         alloc::format!(
             "IF={} activity={:?} inhibit={} async_event={:#x}",
@@ -299,7 +299,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         )
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(all(not(debug_assertions), feature = "alloc"))]
     pub fn cpu_diag_string(&self) -> alloc::string::String {
         alloc::string::String::new()
     }

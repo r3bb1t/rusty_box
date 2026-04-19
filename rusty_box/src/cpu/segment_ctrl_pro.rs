@@ -1,4 +1,3 @@
-use alloc::format;
 
 use super::{
     cpu::Exception,
@@ -983,7 +982,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             } else {
                 tracing::error!("load_seg_reg(): invalid segment register {:?}", seg);
                 return Err(super::error::CpuError::UnimplementedOpcode {
-                    opcode: format!("load_seg_reg for segment {:?}", seg),
+                    opcode: "load_seg_reg: unimplemented segment",
                 });
             }
         }

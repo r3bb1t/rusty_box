@@ -10,6 +10,7 @@ A Rust port of the [Bochs](https://bochs.sourceforge.io/) x86 emulator — a com
 - AVX-512 Foundation (320 handlers), AVX2, SSE4.2, AES-NI, SHA, BMI1/BMI2
 - Bus Master DMA, ATAPI CD-ROM, PCI IDE
 - Runs in the browser via WASM (egui frontend)
+- Compiles and runs without `alloc` (no_std + no heap) for embedded/UEFI targets
 
 ## Quick Start
 
@@ -31,6 +32,12 @@ cargo test
 
 # WASM build
 cd examples/rusty_box_web && trunk serve
+
+# UEFI bootable image (emulator-in-emulator)
+rustup target add x86_64-unknown-uefi
+cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi
+python examples/rusty_box_uefi/make_iso.py --alpine-iso alpine.iso
+# Run: qemu-system-x86_64 -bios OVMF.fd -cdrom rusty_box_uefi.iso
 ```
 
 ## Getting Alpine Linux ISO
@@ -55,11 +62,24 @@ Emulator<'a, I: BxCpuIdTrait>
 +-- GUI               Display (NoGui, TermGui, or EguiGui)
 ```
 
+## Feature Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `std` | yes | Standard library (terminal GUI, file I/O, tempfile). Implies `alloc`. |
+| `alloc` | no | Heap allocation (Box, Vec). Required for `Emulator` wrapper and `iodev`. |
+| `gui-egui` | no | Graphical UI using egui/eframe. |
+| `instrumentation` | no | Closure-based CPU hooks (syscall tracing, memory watchpoints). Implies `alloc`. |
+| `bx_debugger` | no | Built-in debugger support. |
+| `bx_gdb_stub` | no | GDB remote debugging stub. |
+
+Minimal no-alloc build: `cargo check --no-default-features -p rusty_box`
+
 ### Key Design Principles
 
 - **No global state** — each `Emulator<I>` is fully self-contained; multiple instances can run concurrently
 - **Bochs parity** — all logic matches the Bochs C++ source; deviations are bugs
-- **no_std compatible** — core library works without std; `std` feature enables file I/O and terminal GUI
+- **no_std + no_alloc core** -- core emulation (CPU, memory, decoder) compiles without alloc; std/alloc features add convenience (Box, file I/O, terminal GUI)
 - **Type-safe CPU models** — `BxCpuIdTrait` makes CPU model a compile-time type parameter
 
 ## Project Structure
@@ -73,6 +93,7 @@ rusty_box/
 |   +-- examples/           # Desktop examples (DLX, Alpine, egui GUI)
 +-- rusty_box_decoder/      # x86 instruction decoder (separate crate)
 +-- examples/rusty_box_web/ # WASM web frontend
++-- examples/rusty_box_uefi/  # UEFI bootable emulator (ISO image)
 ```
 
 ## Web Demo

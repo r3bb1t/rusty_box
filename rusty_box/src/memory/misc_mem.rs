@@ -2,10 +2,11 @@
 
 #![allow(non_snake_case)]
 
-use alloc::{boxed::Box, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 
 use crate::{
-    config::BxPhyAddress,
+    config::{BxPhyAddress, MAX_HANDLER_OVERFLOW},
     cpu::{rusty_box::MemoryAccessType, BxCpuC, BxCpuIdTrait},
     memory::{
         memory_rusty_box::{bios_map_last128k, MemoryAreaT, BIOSROMSZ, BIOS_MASK, EXROM_MASK},
@@ -28,12 +29,16 @@ const BX_PHY_ADDRESS_WIDTH: u64 = 40;
 const BX_MEM_HANDLERS: usize = ((1u64 << BX_PHY_ADDRESS_WIDTH) >> 20) as usize;
 
 impl BxMemC<'_> {
-    pub fn new(mem_stub: BxMemoryStubC, pci_enabled: bool) -> Self {
-        let mut memory_handlers = Vec::with_capacity(BX_MEM_HANDLERS);
-        for _ in 0..BX_MEM_HANDLERS {
-            memory_handlers.push(None);
-        }
+    #[cfg(feature = "alloc")]
+    pub fn new(mem_stub: alloc::boxed::Box<BxMemoryStubC>, pci_enabled: bool) -> Self {
+        Self::new_inner(*mem_stub, pci_enabled)
+    }
 
+    pub fn new_from_stub(mem_stub: BxMemoryStubC, pci_enabled: bool) -> Self {
+        Self::new_inner(mem_stub, pci_enabled)
+    }
+
+    fn new_inner(mem_stub: BxMemoryStubC, pci_enabled: bool) -> Self {
         let memory_type: [[bool; 2]; 13] = [[false, false]; 13];
 
         Self {
@@ -41,7 +46,16 @@ impl BxMemC<'_> {
             smram_available: false,
             smram_enable: false,
             smram_restricted: false,
-            memory_handlers,
+            #[cfg(feature = "alloc")]
+            memory_handlers: {
+                let mut v = Vec::with_capacity(BX_MEM_HANDLERS);
+                v.resize_with(BX_MEM_HANDLERS, || None);
+                v
+            },
+            #[cfg(not(feature = "alloc"))]
+            memory_handlers: [const { None }; 4096],
+            handler_overflow: [const { None }; MAX_HANDLER_OVERFLOW],
+            handler_overflow_count: 0,
 
             pci_enabled,
             // Bochs defaults bios_write_enabled to false (misc_mem.cc), then the
@@ -58,7 +72,7 @@ impl BxMemC<'_> {
             rom_present: [false; 65],
             memory_type,
 
-            bios_rom_access: 0, // idk tbh
+            bios_rom_access: 0,
 
             // A20 starts DISABLED at boot (synced from PC system during init)
             a20_mask: 0xFFFF_FFFF_FFEF_FFFFu64,
@@ -118,7 +132,7 @@ impl<'c> BxMemC<'c> {
                         // The actual read/write goes through read/writePhysicalPage.
                         return Ok(None);
                     }
-                    current_handler = handler.next.as_ref().map(|b| b.as_ref());
+                    current_handler = handler.next.and_then(|idx| self.handler_overflow[idx as usize].as_ref());
                 }
             }
         }
@@ -499,6 +513,7 @@ impl BxMemC<'_> {
 
                 while let Some(handler) = current_handler {
                     if handler.begin <= a20_addr && handler.end >= a20_addr {
+                        #[cfg(feature = "alloc")]
                         let handled = if let Some(vga) = handler.device_id.vga_mut() {
                             vga.mem_write(a20_addr, len as u32, &data[..len])
                         } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
@@ -506,11 +521,13 @@ impl BxMemC<'_> {
                         } else {
                             unreachable!("unknown MMIO handler device")
                         };
+                        #[cfg(not(feature = "alloc"))]
+                        let handled = unreachable!("MMIO handlers require alloc");
                         if handled {
                             return Ok(());
                         }
                     }
-                    current_handler = handler.next.as_ref().map(|b| b.as_ref());
+                    current_handler = handler.next.and_then(|idx| self.handler_overflow[idx as usize].as_ref());
                 }
             }
         }
@@ -671,6 +688,7 @@ impl BxMemC<'_> {
 
                 while let Some(handler) = current_handler {
                     if handler.begin <= a20_addr && handler.end >= a20_addr {
+                        #[cfg(feature = "alloc")]
                         let handled = if let Some(vga) = handler.device_id.vga_mut() {
                             vga.mem_read(a20_addr, len as u32, data)
                         } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
@@ -678,6 +696,8 @@ impl BxMemC<'_> {
                         } else {
                             unreachable!("unknown MMIO handler device")
                         };
+                        #[cfg(not(feature = "alloc"))]
+                        let handled = unreachable!("MMIO handlers require alloc");
                         if handled {
                             if self.pci_enabled && ((a20_addr & 0xfffc0000) == 0x000c0000) {
                                 let area = ((a20_addr >> 14) & 0x0f) as usize;
@@ -692,7 +712,7 @@ impl BxMemC<'_> {
                             }
                         }
                     }
-                    current_handler = handler.next.as_ref().map(|b| b.as_ref());
+                    current_handler = handler.next.and_then(|idx| self.handler_overflow[idx as usize].as_ref());
                 }
             }
         }
@@ -829,8 +849,9 @@ impl BxMemC<'_> {
         let start_page = (begin_addr >> 20) as usize;
         let end_page = (end_addr >> 20) as usize;
 
-        // Ensure handlers vector is large enough
+        // Ensure handlers array/vec is large enough
         let required_len = end_page + 1;
+        #[cfg(feature = "alloc")]
         if required_len > self.memory_handlers.len() {
             let current_len = self.memory_handlers.len();
             self.memory_handlers.reserve(required_len - current_len);
@@ -838,6 +859,13 @@ impl BxMemC<'_> {
                 self.memory_handlers.push(None);
             }
         }
+        #[cfg(not(feature = "alloc"))]
+        assert!(
+            required_len <= self.memory_handlers.len(),
+            "memory handler page index {} exceeds no-alloc limit {}",
+            required_len,
+            self.memory_handlers.len()
+        );
 
         for page_idx in start_page..=end_page {
             // Calculate bitmap for 64KB sub-ranges within this page
@@ -863,8 +891,22 @@ impl BxMemC<'_> {
                 bitmap |= existing.bitmap;
             }
 
+            // If this page already has a handler, move it to overflow pool
+            let next_idx = if let Some(existing) = self.memory_handlers[page_idx].take() {
+                assert!(
+                    (self.handler_overflow_count) < MAX_HANDLER_OVERFLOW,
+                    "handler overflow pool exhausted"
+                );
+                let idx = self.handler_overflow_count;
+                self.handler_overflow[idx] = Some(existing);
+                self.handler_overflow_count += 1;
+                Some(idx as u16)
+            } else {
+                None
+            };
+
             let handler = super::MemoryHandlerStruct {
-                next: self.memory_handlers[page_idx].take().map(Box::new),
+                next: next_idx,
                 begin: begin_addr,
                 end: end_addr,
                 bitmap,

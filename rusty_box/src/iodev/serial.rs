@@ -10,7 +10,7 @@
 //!   COM3: 0x3E8-0x3EF, IRQ 4
 //!   COM4: 0x2E8-0x2EF, IRQ 3
 
-use alloc::collections::VecDeque;
+use crate::ring_buffer::RingBuffer;
 
 
 /// UART crystal oscillator frequency (Hz) — Bochs BX_PC_CLOCK_XTL
@@ -164,8 +164,8 @@ struct SerialPort {
     base: u16,
 
     // FIFOs
-    rx_fifo: VecDeque<u8>,
-    tx_fifo: VecDeque<u8>,
+    rx_fifo: RingBuffer<u8, 16>,
+    tx_fifo: RingBuffer<u8, 16>,
 
     // Registers
     rxbuffer: u8,
@@ -206,7 +206,7 @@ struct SerialPort {
     fifo_timeout_ticks: u32,
 
     // TX output buffer — bytes written by guest, drained by host
-    tx_output: VecDeque<u8>,
+    tx_output: RingBuffer<u8, 4096>,
 }
 
 impl SerialPort {
@@ -225,8 +225,8 @@ impl SerialPort {
             irq: COM_IRQS[port_index],
             base: COM_BASES[port_index],
 
-            rx_fifo: VecDeque::with_capacity(FIFO_SIZE),
-            tx_fifo: VecDeque::with_capacity(FIFO_SIZE),
+            rx_fifo: RingBuffer::new(),
+            tx_fifo: RingBuffer::new(),
 
             rxbuffer: 0,
             thrbuffer: 0,
@@ -255,7 +255,7 @@ impl SerialPort {
 
             fifo_timeout_ticks: 0,
 
-            tx_output: VecDeque::with_capacity(256),
+            tx_output: RingBuffer::new(),
         };
         // Simulate connected device
         s.modem_status.cts = true;
@@ -377,7 +377,7 @@ impl BxSerialC {
     /// Drain transmitted bytes from a port (for host-side consumption)
     #[allow(dead_code)]
     pub fn drain_tx_output(&mut self, port_index: usize) -> impl Iterator<Item = u8> + '_ {
-        self.ports[port_index].tx_output.drain(..)
+        self.ports[port_index].tx_output.drain()
     }
 
     pub fn tx_output_len(&self, port_index: usize) -> usize {
@@ -1189,7 +1189,13 @@ mod tests {
         serial.write(0x03F8, b'i' as u32, 1);
 
         // Check TX output buffer
-        let output: alloc::vec::Vec<u8> = serial.drain_tx_output(0).collect();
+        let mut output = [0u8; 2];
+        let mut i = 0;
+        for b in serial.drain_tx_output(0) {
+            output[i] = b;
+            i += 1;
+        }
+        assert_eq!(i, 2);
         assert_eq!(&output, b"Hi");
     }
 

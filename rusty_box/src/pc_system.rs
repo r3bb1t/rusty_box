@@ -135,8 +135,8 @@ pub struct BxPcSystemC {
     pub(crate) a20_mask: BxPhyAddress,
     /// Whether A20 line is enabled
     pub(crate) enable_a20: bool,
-    /// Instructions per second (in millions)
-    m_ips: f64,
+    /// Instructions per second (raw count, e.g. 300_000_000)
+    ips: u64,
     /// Hardware Request (DMA)
     hrq: bool,
     /// HRQ pending flag — set by set_hrq(true), checked by emulator loop.
@@ -185,7 +185,7 @@ impl BxPcSystemC {
             // This causes addresses like 0xFFFFFFF0 to wrap to 0x000FFFF0
             a20_mask: 0xFFFF_FFFF_FFEF_FFFFu64,
             enable_a20: false,
-            m_ips: 1.0,
+            ips: 1_000_000,
             hrq: false,
             hrq_pending: false,
             async_event_pending: false,
@@ -223,7 +223,7 @@ impl BxPcSystemC {
         self.kill_bochs_request = false;
 
         // Convert IPS to millions for timing calculations
-        self.m_ips = f64::from(ips) / 1_000_000.0;
+        self.ips = ips as u64;
 
         tracing::trace!("PC system initialized with ips = {}", ips);
     }
@@ -400,13 +400,13 @@ impl BxPcSystemC {
     /// Convert ticks to microseconds using IPS setting.
     /// Matches Bochs pc_system.cc.
     pub fn time_usec(&self) -> u64 {
-        ((self.time_ticks() as f64) / self.m_ips) as u64
+        self.time_ticks() * 1_000_000 / self.ips
     }
 
     /// Convert ticks to nanoseconds using IPS setting.
     /// Matches Bochs pc_system.cc.
     pub fn time_nsec(&self) -> u64 {
-        ((self.time_ticks() as f64) / self.m_ips * 1000.0) as u64
+        self.time_ticks() * 1_000_000_000 / self.ips
     }
 
     // ========================================================================
@@ -450,7 +450,7 @@ impl BxPcSystemC {
     ///
     /// For hardware reset: enables A20, resets CPU and all devices
     /// For software reset: just resets CPU
-    pub fn reset(&mut self, reset_type: ResetReason) -> crate::Result<()> {
+    pub fn reset(&mut self, reset_type: ResetReason) {
         tracing::debug!("BxPcSystemC::reset({:?}) called", reset_type);
 
         // A20 line is ENABLED at hardware reset on 386+ CPUs
@@ -459,8 +459,6 @@ impl BxPcSystemC {
 
         // Clear DMA pending flag
         self.hrq_pending = false;
-
-        Ok(())
     }
 
     /// Register state for save/restore functionality.
@@ -563,7 +561,7 @@ impl BxPcSystemC {
         id: &str,
     ) -> Result<usize, PcSystemError> {
         // Convert useconds to number of ticks (Bochs pc_system.cc)
-        let ticks = (f64::from(useconds) * self.m_ips) as u64;
+        let ticks = useconds as u64 * self.ips / 1_000_000;
         self.register_timer(owner, ticks, continuous, active, id)
     }
 
@@ -610,7 +608,7 @@ impl BxPcSystemC {
             self.timers[timer_index].period
         } else {
             // Convert useconds to ticks (Bochs pc_system.cc)
-            let t = (f64::from(useconds) * self.m_ips) as u64;
+            let t = useconds as u64 * self.ips / 1_000_000;
             t.max(MIN_ALLOWABLE_TIMER_PERIOD)
         };
         self.activate_timer(timer_index, ticks, continuous)
@@ -631,7 +629,7 @@ impl BxPcSystemC {
             self.timers[timer_index].period
         } else {
             // Convert nseconds to ticks (Bochs pc_system.cc)
-            let t = ((nseconds as f64) * self.m_ips / 1000.0) as u64;
+            let t = nseconds * self.ips / 1_000_000_000;
             t.max(MIN_ALLOWABLE_TIMER_PERIOD)
         };
         self.activate_timer(timer_index, ticks, continuous)
@@ -775,9 +773,9 @@ impl BxPcSystemC {
     /// ISA bus runs at ~8 MHz. Each ISA cycle consumes CPU ticks
     /// proportional to IPS. Bochs: `tickn((Bit32u)(m_ips * 2.0))`
     pub fn isa_bus_delay(&mut self) {
-        let m_ips = self.m_ips;
-        if m_ips > 4.0 {
-            let ticks = (m_ips * 2.0) as u32;
+        let ips = self.ips;
+        if ips > 4_000_000 {
+            let ticks = (ips * 2 / 1_000_000) as u32;
             self.tickn(ticks);
         }
     }
@@ -872,7 +870,7 @@ mod tests {
     #[test]
     fn test_timer_usec_conversion() {
         let mut pc = BxPcSystemC::new();
-        pc.initialize(15_000_000); // 15 MIPS → m_ips = 15.0
+        pc.initialize(15_000_000); // 15 MIPS → ips = 15_000_000
 
         // 1000 usec at 15 MIPS = 15000 ticks
         let idx = pc
@@ -915,7 +913,7 @@ mod tests {
     #[test]
     fn test_time_usec_nsec() {
         let mut pc = BxPcSystemC::new();
-        pc.initialize(10_000_000); // 10 MIPS → m_ips = 10.0
+        pc.initialize(10_000_000); // 10 MIPS → ips = 10_000_000
 
         pc.tickn(10_000_000); // 10M ticks = 1 second at 10 MIPS
         assert_eq!(pc.time_usec(), 1_000_000); // 1 second in microseconds

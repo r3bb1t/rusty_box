@@ -16,13 +16,15 @@
 //! - **Keyboard (8042)**: PS/2 keyboard and mouse controller
 //! - **HardDrive (ATA/IDE)**: Hard disk controller
 
-use alloc::{collections::VecDeque, string::String, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
+use crate::ring_buffer::RingBuffer;
 
 pub mod acpi;
-pub mod acpi_tables;
+#[cfg(feature = "alloc")] pub mod acpi_tables;
 pub mod cmos;
 pub mod devices;
-pub mod dma;
+pub use crate::dma;
 pub mod fw_cfg;
 pub mod harddrv;
 pub mod ioapic;
@@ -30,11 +32,11 @@ pub mod keyboard;
 pub mod pci;
 pub mod pci2isa;
 pub mod pci_ide;
-pub mod pic;
+pub use crate::pic;
 pub mod pit;
 pub mod serial;
 pub mod vga;
-pub mod geforce;
+#[cfg(feature = "alloc")] pub mod geforce;
 
 // Re-export device types for convenience
 pub use acpi::BxAcpiCtrl;
@@ -51,7 +53,7 @@ pub use pic::BxPicC;
 pub use pit::BxPitC;
 pub use serial::BxSerialC;
 // BxVgaC is pub(crate) - not exported outside the crate
-pub use geforce::BxGeForceC;
+#[cfg(feature = "alloc")] pub use geforce::BxGeForceC;
 
 /// Number of I/O ports (0x0000 - 0xFFFF)
 pub const IO_PORTS: usize = 0x10000;
@@ -96,12 +98,12 @@ pub enum DeviceId {
 /// I/O handler registration entry for a single port.
 ///
 /// Each port maps to a `DeviceId` for safe dispatch through `DeviceManager`.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct IoHandlerEntry {
     /// Which device owns this port
     pub(crate) device_id: DeviceId,
     /// Handler name for debugging
-    pub(crate) name: String,
+    pub(crate) name: &'static str,
     /// I/O length mask (bit 0 = 1 byte, bit 1 = 2 bytes, bit 2 = 4 bytes)
     pub(crate) mask: u8,
 }
@@ -110,7 +112,7 @@ impl Default for IoHandlerEntry {
     fn default() -> Self {
         Self {
             device_id: DeviceId::None,
-            name: String::new(),
+            name: "",
             mask: 0x7, // All lengths supported by default
         }
     }
@@ -122,9 +124,9 @@ impl Default for IoHandlerEntry {
 /// independent emulator instances to run concurrently.
 pub struct BxDevicesC {
     /// Read handlers indexed by port number
-    read_handlers: Vec<IoHandlerEntry>,
+    read_handlers: [IoHandlerEntry; IO_PORTS],
     /// Write handlers indexed by port number
-    write_handlers: Vec<IoHandlerEntry>,
+    write_handlers: [IoHandlerEntry; IO_PORTS],
     /// PCI enabled flag
     pci_enabled: bool,
     /// PCI configuration address register (port 0xCF8)
@@ -140,12 +142,12 @@ pub struct BxDevicesC {
     ///
     /// We funnel these into a single byte stream buffer. Host code (examples/GUI)
     /// can drain and print it.
-    port_e9_output: VecDeque<u8>,
+    port_e9_output: RingBuffer<u8, 65536>,
 
     /// Bochs BIOS POST codes (port 0x80, sometimes 0x84).
     ///
     /// These are not ASCII; they are diagnostic progress codes used by many BIOSes.
-    port80_output: VecDeque<u8>,
+    port80_output: RingBuffer<u8, 4096>,
 
     /// Last I/O read port and value (for stuck-loop diagnostics)
     pub(crate) last_io_read_port: u16,
@@ -178,21 +180,16 @@ impl BxDevicesC {
     /// Create a new device controller instance
     pub fn new() -> Self {
         // Create handler arrays with default entries
-        let mut read_handlers = Vec::with_capacity(IO_PORTS);
-        let mut write_handlers = Vec::with_capacity(IO_PORTS);
-
-        for _ in 0..IO_PORTS {
-            read_handlers.push(IoHandlerEntry::default());
-            write_handlers.push(IoHandlerEntry::default());
-        }
+        let read_handlers = [IoHandlerEntry::default(); IO_PORTS];
+        let write_handlers = [IoHandlerEntry::default(); IO_PORTS];
 
         Self {
             read_handlers,
             write_handlers,
             pci_enabled: false,
             pci_conf_addr: 0,
-            port_e9_output: VecDeque::new(),
-            port80_output: VecDeque::new(),
+            port_e9_output: RingBuffer::new(),
+            port80_output: RingBuffer::new(),
             last_io_read_port: 0,
             last_io_read_value: 0,
             diag_io_reads: 0,
@@ -209,12 +206,12 @@ impl BxDevicesC {
         &mut self,
         device_id: DeviceId,
         port: u16,
-        name: &str,
+        name: &'static str,
         mask: u8,
     ) {
         let entry = &mut self.read_handlers[port as usize];
         entry.device_id = device_id;
-        entry.name = String::from(name);
+        entry.name = name;
         entry.mask = mask;
         tracing::trace!(
             "Registered I/O read handler for port {:#06x}: {}",
@@ -228,12 +225,12 @@ impl BxDevicesC {
         &mut self,
         device_id: DeviceId,
         port: u16,
-        name: &str,
+        name: &'static str,
         mask: u8,
     ) {
         let entry = &mut self.write_handlers[port as usize];
         entry.device_id = device_id;
-        entry.name = String::from(name);
+        entry.name = name;
         entry.mask = mask;
         tracing::trace!(
             "Registered I/O write handler for port {:#06x}: {}",
@@ -247,7 +244,7 @@ impl BxDevicesC {
         &mut self,
         device_id: DeviceId,
         port: u16,
-        name: &str,
+        name: &'static str,
         mask: u8,
     ) {
         self.register_io_read_handler(device_id, port, name, mask);
@@ -397,10 +394,6 @@ impl BxDevicesC {
         // Bochs-style BIOS POST code port (0x80). Some BIOSes also use 0x84.
         if io_len == 1 && matches!(address, 0x0080 | 0x0084) {
             tracing::trace!("BIOS POST code port {:#06x}: {:#04x}", address, value as u8);
-            const PORT80_CAPACITY: usize = 4096;
-            if self.port80_output.len() >= PORT80_CAPACITY {
-                self.port80_output.pop_front();
-            }
             self.port80_output.push_back(value as u8);
             return;
         }
@@ -416,10 +409,6 @@ impl BxDevicesC {
                 address,
                 value as u8 as char
             );
-            const PORT_E9_CAPACITY: usize = 65536;
-            if self.port_e9_output.len() >= PORT_E9_CAPACITY {
-                self.port_e9_output.pop_front();
-            }
             self.port_e9_output.push_back(value as u8);
         }
 
@@ -438,13 +427,25 @@ impl BxDevicesC {
     /// Drain and return bytes written to port 0xE9.
     ///
     /// This is alloc-only; callers can print/interpret the bytes however they want.
+    #[cfg(feature = "alloc")]
     pub fn take_port_e9_output(&mut self) -> Vec<u8> {
-        self.port_e9_output.drain(..).collect()
+        self.port_e9_output.drain().collect()
     }
 
     /// Drain and return BIOS POST codes written to port 0x80/0x84.
+    #[cfg(feature = "alloc")]
     pub fn take_port80_output(&mut self) -> Vec<u8> {
-        self.port80_output.drain(..).collect()
+        self.port80_output.drain().collect()
+    }
+
+    /// Drain port 0xE9 output as an iterator (no-alloc).
+    pub fn drain_port_e9_output(&mut self) -> impl Iterator<Item = u8> + '_ {
+        self.port_e9_output.drain()
+    }
+
+    /// Drain BIOS POST codes (port 0x80/0x84) as an iterator (no-alloc).
+    pub fn drain_port80_output(&mut self) -> impl Iterator<Item = u8> + '_ {
+        self.port80_output.drain()
     }
 
     /// Set device_manager pointer for enum-based I/O dispatch.
@@ -565,9 +566,29 @@ impl BxDevicesC {
 mod tests {
     use super::*;
 
+    /// BxDevicesC is ~1.5MB due to [IoHandlerEntry; 65536] x2.
+    /// Allocate on heap to avoid test stack overflow.
+    fn boxed_devices() -> alloc::boxed::Box<BxDevicesC> {
+        // Use alloc_zeroed + field writes to avoid stack intermediary.
+        let layout = alloc::alloc::Layout::new::<BxDevicesC>();
+        unsafe {
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut BxDevicesC;
+            assert!(!ptr.is_null());
+            // IoHandlerEntry is all-zero-valid: device_id=None(0), name="" is ptr+len
+            // but &'static str zero bits aren't valid. Write defaults properly:
+            for i in 0..IO_PORTS {
+                core::ptr::addr_of_mut!((*ptr).read_handlers[i]).write(IoHandlerEntry::default());
+                core::ptr::addr_of_mut!((*ptr).write_handlers[i]).write(IoHandlerEntry::default());
+            }
+            core::ptr::addr_of_mut!((*ptr).port_e9_output).write(RingBuffer::new());
+            core::ptr::addr_of_mut!((*ptr).port80_output).write(RingBuffer::new());
+            alloc::boxed::Box::from_raw(ptr)
+        }
+    }
+
     #[test]
     fn test_default_handlers() {
-        let mut devices = BxDevicesC::new();
+        let mut devices = boxed_devices();
 
         // Reading unhandled port should return 0xFF/0xFFFF/0xFFFFFFFF
         assert_eq!(devices.inp(0x1234, 1, 0), 0xFF);
@@ -577,8 +598,8 @@ mod tests {
 
     #[test]
     fn test_multiple_instances() {
-        let mut dev1 = BxDevicesC::new();
-        let mut dev2 = BxDevicesC::new();
+        let mut dev1 = boxed_devices();
+        let mut dev2 = boxed_devices();
 
         // Register handler only on dev1
         dev1.register_io_read_handler(DeviceId::Pic, 0x100, "test", 0x1);

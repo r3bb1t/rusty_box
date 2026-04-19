@@ -14,7 +14,7 @@
 //! - **ADD_POINTER**: Patch offset fields to become physical addresses
 //! - **ADD_CHECKSUM**: Recompute checksums after pointer patching
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 // ─── QEMU Loader Constants ──────────────────────────────────────────
 

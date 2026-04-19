@@ -22,13 +22,28 @@
 //! Read mode 0: return plane selected by read_map_select (GFX reg 4)
 //! Read mode 1: color compare (returns match bitmap)
 
-#[cfg(not(feature = "std"))]
-use alloc::vec;
-use alloc::{string::String, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::{string::String, vec, vec::Vec};
 
 use crate::{config::BxPhyAddress, memory::BxMemC, Result};
 
 use super::BxDevicesC;
+
+/// VGA text mode information
+#[derive(Debug, Clone)]
+pub struct VgaTextModeInfo {
+    pub(crate) start_address: u16,
+    pub(crate) cs_start: u8,
+    pub(crate) cs_end: u8,
+    pub(crate) line_offset: u16,
+    pub(crate) line_compare: u16,
+    pub(crate) h_panning: u8,
+    pub(crate) v_panning: u8,
+    pub(crate) line_graphics: bool,
+    pub(crate) split_hpanning: bool,
+    pub(crate) blink_flags: u8,
+    pub(crate) actl_palette: [u8; 16],
+}
 
 /// VGA text mode memory base address
 const VGA_TEXT_MEM_BASE: BxPhyAddress = 0xB8000;
@@ -309,13 +324,13 @@ pub(crate) struct VgaUpdateResult {
     /// Whether an update is needed
     pub(crate) needs_update: bool,
     /// Text buffer (new state)
-    pub(crate) text_buffer: Vec<u8>,
+    pub(crate) text_buffer: [u8; VGA_TEXT_MEM_SIZE],
     /// Text snapshot (old state) for comparison
-    pub(crate) text_snapshot: Vec<u8>,
+    pub(crate) text_snapshot: [u8; VGA_TEXT_MEM_SIZE],
     /// Cursor address in text buffer
     pub(crate) cursor_address: u16,
     /// Text mode info
-    pub(crate) tm_info: crate::gui::VgaTextModeInfo,
+    pub(crate) tm_info: VgaTextModeInfo,
     /// Whether dimension_update should be called on the GUI
     pub(crate) dimension_changed: bool,
     /// Pixel width (for dimension_update)
@@ -440,17 +455,17 @@ pub(crate) struct BxVgaC {
     /// Bochs does *not* keep separate B0000 vs B8000 buffers; instead, the Graphics
     /// Controller `memory_mapping` selects which address range maps to the same memory.
     /// See `cpp_orig/bochs/iodev/display/vgacore.cc` `mem_read`/`mem_write` mapping switch.
-    text_memory: Vec<u8>,
+    text_memory: [u8; VGA_TEXT_MEM_SIZE],
     /// Current cursor position (row, col)
     cursor_pos: (usize, usize),
     /// Flag indicating text memory has changed (dirty)
     text_dirty: bool,
     /// Text buffer for GUI updates (new state)
     /// This is extracted from text_memory when update() is called
-    text_buffer: Vec<u8>,
+    text_buffer: [u8; VGA_TEXT_MEM_SIZE],
     /// Text snapshot for comparison (old state)
     /// Used to detect what changed between updates
-    text_snapshot: Vec<u8>,
+    text_snapshot: [u8; VGA_TEXT_MEM_SIZE],
     /// Flag indicating VGA memory has been updated (matching vgacore.cc vga_mem_updated)
     vga_mem_updated: u8,
     /// Flag indicating text buffer needs to be updated from VGA memory
@@ -531,7 +546,7 @@ pub(crate) struct BxVgaC {
     // =====================================================================
     /// VGA planar memory (256KB). Layout: memory[offset * 4 + plane]
     /// Matches Bochs `s.memory` with `s.memsize = 0x40000`.
-    vga_memory: Vec<u8>,
+    vga_memory: [u8; VGA_MEM_SIZE],
 
     /// Graphics controller latch register (one byte per plane).
     /// Loaded on every VGA memory read. Used by write modes 0-3.
@@ -611,12 +626,12 @@ impl BxVgaC {
             // horiz_sync_pol=1, vert_sync_pol=1, clock_select=0, select_high_bank=0
             // = 0b11000011 = 0xC3
             misc_output: 0xC3,
-            text_memory: vec![0; VGA_TEXT_MEM_SIZE],
+            text_memory: [0u8; VGA_TEXT_MEM_SIZE],
             cursor_pos: (0, 0),
             text_dirty: false,
             // Bochs keeps text buffers sized for the whole aperture (0x8000 for mapping 2/3).
-            text_buffer: vec![0; VGA_TEXT_MEM_SIZE],
-            text_snapshot: vec![0; VGA_TEXT_MEM_SIZE],
+            text_buffer: [0u8; VGA_TEXT_MEM_SIZE],
+            text_snapshot: [0u8; VGA_TEXT_MEM_SIZE],
             vga_mem_updated: 0,
             text_buffer_update: true, // Initial update needed
 
@@ -650,7 +665,7 @@ impl BxVgaC {
             seq_odd_even_dis: false,
 
             // VGA planar memory and latch
-            vga_memory: vec![0; VGA_MEM_SIZE],
+            vga_memory: [0u8; VGA_MEM_SIZE],
             latch: [0u8; 4],
 
             // Retrace timing defaults (matching Bochs vgacore.cc)
@@ -707,6 +722,7 @@ impl BxVgaC {
         vga
     }
 
+    #[cfg(feature = "alloc")]
     /// Summary of VGA memory write activity (for headless debugging).
     pub(crate) fn probe_summary(&self) -> String {
         use core::fmt::Write;
@@ -1343,6 +1359,7 @@ impl BxVgaC {
         }
     }
 
+    #[cfg(feature = "alloc")]
     /// Read from text mode memory
     pub(crate) fn read_memory(&self, addr: BxPhyAddress, len: usize) -> Vec<u8> {
         // Debug helper: expose the backing text memory (no window gating).
@@ -1368,6 +1385,7 @@ impl BxVgaC {
         }
     }
 
+    #[cfg(feature = "alloc")]
     /// Get text mode screen contents as a string
     pub(crate) fn get_text_screen(&self) -> String {
         let mut result = String::new();
@@ -1403,6 +1421,7 @@ impl BxVgaC {
         result
     }
 
+    #[cfg(feature = "alloc")]
     /// Scan all 32KB of VGA text memory and return summary: CRTC start address,
     /// graphics mode flag, and any non-space printable chars found anywhere.
     pub(crate) fn scan_all_text_memory(&self) -> String {
@@ -1438,6 +1457,7 @@ impl BxVgaC {
         s
     }
 
+    #[cfg(feature = "alloc")]
     /// Return all rows from VGA text memory as a Vec of Strings (for diagnostics).
     /// Scans the entire 32KB text_memory buffer row by row (80-col rows).
     pub(crate) fn get_all_text_rows(&self) -> alloc::vec::Vec<alloc::string::String> {
@@ -1615,7 +1635,7 @@ impl BxVgaC {
         }
 
         // Create text mode info
-        let tm_info = crate::gui::VgaTextModeInfo {
+        let tm_info = VgaTextModeInfo {
             start_address,
             cs_start,
             cs_end,

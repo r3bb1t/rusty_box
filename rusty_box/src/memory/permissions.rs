@@ -4,7 +4,7 @@
 //! when the `instrumentation` feature is enabled. Zero overhead when
 //! disabled — the bitmap doesn't exist.
 
-use alloc::vec::Vec;
+use crate::config::MAX_PERM_PAGES;
 use crate::cpu::instrumentation::MemPerms;
 
 const PAGE_SIZE: u64 = 4096;
@@ -13,7 +13,7 @@ const PAGE_SIZE: u64 = 4096;
 /// (matching `MemPerms` layout). Default: all pages have ALL permissions.
 pub struct PagePermissions {
     /// 1 byte per page: bits 0=R, 1=W, 2=X (matches MemPerms layout)
-    bitmap: Vec<u8>,
+    bitmap: [u8; MAX_PERM_PAGES],
     /// Number of pages tracked
     page_count: usize,
 }
@@ -23,8 +23,17 @@ impl PagePermissions {
     /// All pages default to ALL permissions.
     pub fn new(size: u64) -> Self {
         let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
+        assert!(
+            page_count <= MAX_PERM_PAGES,
+            "page_count {} exceeds MAX_PERM_PAGES {}",
+            page_count,
+            MAX_PERM_PAGES
+        );
+        let mut bitmap = [0u8; MAX_PERM_PAGES];
+        let bits = MemPerms::ALL.bits();
+        bitmap[..page_count].fill(bits);
         Self {
-            bitmap: alloc::vec![MemPerms::ALL.bits(); page_count],
+            bitmap,
             page_count,
         }
     }

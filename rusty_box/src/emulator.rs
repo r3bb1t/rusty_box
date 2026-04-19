@@ -7,9 +7,10 @@
 //! Each `Emulator` instance is fully independent with no global state,
 //! allowing hundreds of emulator instances to run concurrently on different threads.
 
+#[cfg(feature = "alloc")]
+use crate::gui::BxGui;
 use crate::{
-    cpu::{builder::BxCpuBuilder, BxCpuC, BxCpuIdTrait, ResetReason},
-    gui::BxGui,
+    cpu::{BxCpuC, BxCpuIdTrait, ResetReason},
     iodev::{
         devices::{DeviceManager, SystemControlPort},
         BxDevicesC,
@@ -20,10 +21,9 @@ use crate::{
     Result,
 };
 
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::AtomicBool;
-#[cfg(feature = "std")]
-use core::sync::atomic::Ordering;
+#[cfg(feature = "alloc")]
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Emulator configuration
 #[derive(Debug, Clone)]
@@ -86,8 +86,12 @@ impl Default for EmulatorConfig {
 /// // emu.cpu.cpu_loop(&mut emu.memory, &[]);
 /// ```
 pub struct Emulator<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation = ()> {
-    /// CPU instance
-    pub cpu: BxCpuC<'a, I, T>,
+    /// CPU instance (boxed because BxICache contains ~19MB fixed arrays)
+    #[cfg(feature = "alloc")]
+    pub cpu: alloc::boxed::Box<BxCpuC<'a, I, T>>,
+    /// CPU instance (reference for no-alloc environments)
+    #[cfg(not(feature = "alloc"))]
+    pub cpu: &'a mut BxCpuC<'a, I, T>,
     /// Memory subsystem
     pub memory: BxMemC<'a>,
     /// Device controller (I/O port handlers)
@@ -101,14 +105,18 @@ pub struct Emulator<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrum
     /// Whether the emulator has been initialized
     initialized: bool,
     /// GUI instance (optional, can be None for headless operation)
+    #[cfg(feature = "alloc")]
     gui: Option<Box<dyn BxGui>>,
     /// BIOS output file for port 0x402/0x403/0xE9 messages (std feature only)
     #[cfg(feature = "std")]
     bios_output_file: Option<std::fs::File>,
-    /// Shared stop flag: when set to true by the GUI thread, run_interactive exits the loop
     /// Exit addresses for emu_start.
     pub(crate) exit_set: crate::cpu::instrumentation::ExitSet,
+    /// Shared stop flag: when set to true by the GUI thread, run_interactive exits the loop
+    #[cfg(feature = "alloc")]
     pub stop_flag: Arc<AtomicBool>,
+    #[cfg(not(feature = "alloc"))]
+    pub stop_flag: AtomicBool,
 }
 
 impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
@@ -144,7 +152,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// # Safety
     /// Same invariants as `borrow_memory_for_cpu`: caller must hold `&mut self`
     /// and no other code path may access memory/devices during the batch.
-    unsafe fn run_cpu_batch(&mut self, batch_size: u64) -> crate::cpu::Result<u64> {
+    pub unsafe fn run_cpu_batch(&mut self, batch_size: u64) -> crate::cpu::Result<u64> {
         let mem_extended = self.borrow_memory_for_cpu();
         let io_ptr = core::ptr::NonNull::from(&mut self.devices);
         let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
@@ -163,6 +171,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         r
     }
 
+
     /// Inject an external interrupt with temporary memory bus wiring.
     ///
     /// Wires the memory bus so the interrupt path can read IVT/IDT and push
@@ -180,27 +189,29 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
 }
 
+#[cfg(feature = "alloc")]
 impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
     /// Create a new emulator with no instrumentation (`T = ()`).
     ///
     /// Returns `Box<Self>` because Emulator is ~1.4 MB.
     pub fn new(config: EmulatorConfig) -> Result<Box<Self>> {
-        let cpu = BxCpuBuilder::<I>::new().build()?;
+        let cpu = crate::cpu::builder::BxCpuBuilder::<I>::new().build()?;
         Self::new_inner(config, cpu)
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
     /// Create a new emulator with a monomorphized tracer.
     ///
     /// The tracer type `T` is baked in at construction and cannot be changed.
     /// All tracer dispatch is inlined — zero overhead.
     pub fn new_with_instrumentation(config: EmulatorConfig, tracer: T) -> Result<Box<Self>> {
-        let cpu = BxCpuBuilder::<I>::new().build_with_tracer(tracer)?;
+        let cpu = crate::cpu::builder::BxCpuBuilder::<I>::new().build_with_tracer(tracer)?;
         Self::new_inner(config, cpu)
     }
 
-    fn new_inner(config: EmulatorConfig, cpu: BxCpuC<'static, I, T>) -> Result<Box<Self>> {
+    fn new_inner(config: EmulatorConfig, cpu: alloc::boxed::Box<BxCpuC<'static, I, T>>) -> Result<Box<Self>> {
         let pc_system = BxPcSystemC::new();
         let mem_stub = BxMemoryStubC::create_and_init(
             config.guest_memory_size,
@@ -210,20 +221,59 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         let memory = BxMemC::new(mem_stub, config.pci_enabled);
         let devices = BxDevicesC::new();
         let device_manager = DeviceManager::new();
-        Ok(Box::new(Self {
-            cpu,
-            memory,
-            devices,
-            device_manager,
-            pc_system,
-            config,
-            initialized: false,
-            gui: None,
-            #[cfg(feature = "std")]
-            bios_output_file: None,
-            exit_set: crate::cpu::instrumentation::ExitSet::new(),
-            stop_flag: Arc::new(AtomicBool::new(false)),
-        }))
+
+        // Emulator contains large fixed arrays. Allocate zeroed on heap
+        // then write fields to avoid stack overflow on UEFI (128KB stack).
+        let layout = alloc::alloc::Layout::new::<Self>();
+        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut Self;
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        unsafe {
+            core::ptr::addr_of_mut!((*ptr).cpu).write(cpu);
+            core::ptr::addr_of_mut!((*ptr).memory).write(memory);
+            core::ptr::addr_of_mut!((*ptr).devices).write(devices);
+            core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
+            core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
+            core::ptr::addr_of_mut!((*ptr).config).write(config);
+            core::ptr::addr_of_mut!((*ptr).exit_set).write(crate::cpu::instrumentation::ExitSet::new());
+            core::ptr::addr_of_mut!((*ptr).stop_flag).write(Arc::new(AtomicBool::new(false)));
+            Ok(alloc::boxed::Box::from_raw(ptr))
+        }
+    }
+}
+
+impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+    #[cfg(not(feature = "alloc"))]
+    /// Initialize an Emulator at a caller-provided memory location.
+    ///
+    /// In no-alloc environments the caller is responsible for allocating and
+    /// initializing the `BxMemoryStubC` (e.g. from a firmware-provided buffer).
+    ///
+    /// # Safety
+    /// - `ptr` must point to a valid, zeroed, properly aligned allocation of `size_of::<Self>()` bytes
+    /// - `cpu` must point to a valid, initialized BxCpuC
+    /// - `mem_stub` must be a fully initialized memory stub
+    /// - All allocations must outlive the returned reference
+    pub unsafe fn init_at(
+        ptr: *mut Self,
+        cpu: &'a mut BxCpuC<'a, I, T>,
+        mem_stub: BxMemoryStubC,
+        config: EmulatorConfig,
+    ) -> Result<&'a mut Self> {
+        let memory = BxMemC::new_from_stub(mem_stub, config.pci_enabled);
+        let devices = BxDevicesC::new();
+        let device_manager = DeviceManager::new();
+        let pc_system = BxPcSystemC::new();
+        core::ptr::addr_of_mut!((*ptr).cpu).write(cpu);
+        core::ptr::addr_of_mut!((*ptr).memory).write(memory);
+        core::ptr::addr_of_mut!((*ptr).devices).write(devices);
+        core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
+        core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
+        core::ptr::addr_of_mut!((*ptr).config).write(config);
+        core::ptr::addr_of_mut!((*ptr).exit_set).write(crate::cpu::instrumentation::ExitSet::new());
+        core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
+        Ok(&mut *ptr)
     }
 
     /// Initialize the emulator
@@ -249,6 +299,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// **IMPORTANT**: For correct BIOS initialization sequence matching original Bochs,
     /// use `init_memory()` + `load_bios()` + `init_cpu_and_devices()` instead of this method.
     /// See main.cc for the correct sequence.
+    #[cfg(feature = "alloc")]
     pub fn initialize(&mut self) -> Result<()> {
         if self.initialized {
             tracing::trace!("Emulator already initialized");
@@ -418,6 +469,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     ///
     /// After this, call `load_bios()` and `load_optional_rom()`, then `init_cpu_and_devices()`.
     /// This matches the original Bochs sequence: Memory init → Load BIOS → CPU init → Device init.
+    #[cfg(feature = "alloc")]
     pub fn init_memory_and_pc_system(&mut self) -> Result<()> {
         if self.initialized {
             tracing::trace!("Emulator already initialized");
@@ -443,6 +495,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         tracing::trace!("Memory initialized and A20 mask synced");
 
         Ok(())
+    }
+
+    /// Initialize PC system timers and sync A20 mask.
+    /// Use this instead of `init_memory_and_pc_system` when memory was
+    /// initialized externally (e.g. via `init_at`).
+    pub fn init_pc_system(&mut self) {
+        self.pc_system.initialize(self.config.ips);
+        self.memory.set_a20_mask(self.pc_system.a20_mask());
     }
 
     /// Initialize CPU and devices (Step 6-11 of initialization)
@@ -585,6 +645,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         Ok(())
     }
 
+    #[cfg(feature = "alloc")]
     /// Set the GUI instance
     ///
     /// Based on load_and_init_display_lib() in main.cc
@@ -593,12 +654,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         tracing::debug!("GUI set");
     }
 
+    #[cfg(feature = "alloc")]
     /// Initialize the GUI
     ///
     /// Based on bx_init_hardware() GUI initialization in main.cc
     /// This calls specific_init() to set up the GUI, but signal handlers are
     /// initialized separately via init_gui_signal_handlers() after reset.
-    pub fn init_gui(&mut self, argc: i32, argv: &[String]) -> Result<()> {
+    pub fn init_gui(&mut self, argc: i32, argv: &[&str]) -> Result<()> {
         if let Some(ref mut gui) = self.gui {
             gui.specific_init(argc, argv, 32); // BX_HEADER_BAR_Y = 32
             gui.update_drive_status_buttons();
@@ -613,17 +675,20 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         Ok(())
     }
 
+    #[cfg(feature = "alloc")]
     /// Connect keyboard callback from GUI to keyboard device
     /// (No-op now - we use queue-based approach instead)
     fn connect_keyboard_callback(&mut self) {
         // Keyboard input is now handled via get_pending_scancodes() in the event loop
     }
 
+    #[cfg(feature = "alloc")]
     /// Get mutable reference to GUI (if set)
     pub fn gui_mut(&mut self) -> Option<&mut (dyn BxGui + 'static)> {
         self.gui.as_deref_mut()
     }
 
+    #[cfg(feature = "alloc")]
     /// Get reference to GUI (if set)
     pub fn gui(&self) -> Option<&(dyn BxGui + 'static)> {
         self.gui.as_deref()
@@ -631,9 +696,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     /// Get mutable reference to CPU for instrumentation setup.
     pub fn cpu_mut(&mut self) -> &mut crate::cpu::cpu::BxCpuC<'a, I, T> {
-        &mut self.cpu
+        &mut *self.cpu
     }
 
+    #[cfg(feature = "alloc")]
     /// Update GUI with VGA text mode changes
     ///
     /// Call this periodically to refresh the display (matching vgacore.cc)
@@ -742,7 +808,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         tracing::debug!("Emulator reset ({:?})", reset_type);
 
         // Reset PC system (enables A20)
-        self.pc_system.reset(reset_type)?;
+        self.pc_system.reset(reset_type);
 
         // Sync A20 mask to memory
         self.memory.set_a20_mask(self.pc_system.a20_mask());
@@ -784,6 +850,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         Ok(())
     }
 
+    #[cfg(feature = "alloc")]
     /// Initialize GUI signal handlers
     ///
     /// This should be called after reset() and before start_timers() to match
@@ -842,6 +909,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         self.cpu.rip()
     }
 
+    #[cfg(feature = "alloc")]
     /// Return the current VGA text-mode screen as a string.
     ///
     /// This is useful for headless debugging (no terminal repaint).
@@ -849,10 +917,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         self.device_manager.vga.get_text_screen()
     }
 
+    #[cfg(feature = "alloc")]
     pub fn vga_probe_dump(&self) -> String {
         self.device_manager.vga.probe_summary()
     }
 
+    #[cfg(feature = "alloc")]
     /// Scan all VGA text memory for any non-space printable characters.
     /// Useful when the screen has been cleared and we need to find if a new
     /// prompt was written somewhere in text_memory that the CRTC start address
@@ -861,11 +931,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         self.device_manager.vga.scan_all_text_memory()
     }
 
+    #[cfg(feature = "alloc")]
     /// Return all rows from VGA text memory (for full-dump diagnostics).
     pub fn vga_all_text_rows(&self) -> alloc::vec::Vec<alloc::string::String> {
         self.device_manager.vga.get_all_text_rows()
     }
 
+    #[cfg(feature = "alloc")]
     /// Peek at raw RAM at a physical address range (for diagnostics).
     /// Returns up to `len` bytes from the physical RAM array.
     pub fn peek_ram_at(&self, addr: usize, len: usize) -> alloc::vec::Vec<u8> {
@@ -922,6 +994,35 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Read Port 92h value
     pub fn read_port_92h(&self) -> u8 {
         self.device_manager.port92.read()
+    }
+
+    /// Check for pending reset requests (keyboard 0xFE, port 92h, PCI CF9).
+    /// If a reset is pending, clears the request flags and performs a hardware reset.
+    /// Returns true if a reset was performed.
+    pub fn check_and_handle_resets(&mut self) -> Result<bool> {
+        let pci_reset = self.device_manager.pci2isa.reset_request.take();
+        if self.device_manager.port92.reset_request
+            || self.device_manager.keyboard.reset_requested
+            || pci_reset.is_some()
+        {
+            self.device_manager.port92.reset_request = false;
+            self.device_manager.keyboard.reset_requested = false;
+            self.reset(ResetReason::Hardware)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Sync A20 state if port 92h changed. Returns true if A20 was updated.
+    pub fn sync_port92_a20(&mut self, last_value: &mut u8) -> bool {
+        if self.device_manager.port92.value != *last_value {
+            *last_value = self.device_manager.port92.value;
+            self.sync_a20_state();
+            true
+        } else {
+            false
+        }
     }
 
     /// Set BIOS output file for port 0x402/0x403/0xE9 messages (requires std feature)
@@ -1015,7 +1116,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     ///
     /// `countdown_event` records fired timer owners instead of calling fn ptrs.
     /// This method drains them and performs the device-specific action.
-    fn dispatch_timer_fires(&mut self) {
+    pub fn dispatch_timer_fires(&mut self) {
         let (owners, count) = self.pc_system.take_fired_timers();
         for &owner in &owners[..count] {
             match owner {
@@ -1041,7 +1142,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// signal the CPU. This method reads those flags, applies the
     /// corresponding bits to `cpu.pending_event` / `cpu.async_event`,
     /// and clears the flags.
-    fn sync_event_flags(&mut self) {
+    pub fn sync_event_flags(&mut self) {
         // PIC: BX_RAISE_INTR
         if self.device_manager.pic.irq_pending {
             self.cpu.pending_event |= BxCpuC::<I>::BX_EVENT_PENDING_INTR;
@@ -1140,6 +1241,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             .set_boot_sequence(first, second, third);
     }
 
+    #[cfg(feature = "alloc")]
     /// Set up direct Linux kernel boot, bypassing BIOS entirely.
     ///
     /// Loads a bzImage kernel and optional initramfs into memory, sets up
@@ -1188,8 +1290,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         let boot_version = u16::from_le_bytes([bzimage[0x206], bzimage[0x207]]);
         if boot_version < 0x0204 {
             return Err(crate::Error::Cpu(crate::cpu::CpuError::UnimplementedOpcode {
-                opcode: alloc::format!("Boot protocol {}.{} too old (need >= 2.04)",
-                    boot_version >> 8, boot_version & 0xFF),
+                opcode: "boot protocol too old (need >= 2.04)",
             }));
         }
 
@@ -1561,6 +1662,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         Ok(())
     }
 
+    #[cfg(feature = "alloc")]
     /// Run emulator interactively with GUI event handling
     ///
     /// This method integrates CPU execution with GUI event processing:
@@ -1570,7 +1672,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// - Executes CPU instructions in batches
     ///
     /// Returns the number of instructions executed, or an error.
-    #[cfg(feature = "std")]
     pub fn run_interactive(&mut self, max_instructions: u64) -> Result<u64>
     where
         'a: 'static, // Required for borrow_memory_for_cpu safety
@@ -1600,18 +1701,27 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         self.update_gui(); // Force initial update
 
         let mut instructions_executed = 0u64;
+        #[cfg(feature = "std")]
         let mut slowdown_start = std::time::Instant::now();
+        #[cfg(feature = "std")]
         let mut slowdown_ticks_base = self.pc_system.time_ticks();
+        #[cfg(feature = "std")]
         let mut last_gui_update = std::time::Instant::now();
+        #[cfg(feature = "std")]
         let mut last_ips_update = std::time::Instant::now();
+        #[cfg(feature = "std")]
         let mut last_ips_instructions = self.cpu.icount; // Bochs-compatible: track icount for IPS
         // MIPS terminal log: separate tracker fired every 5M instructions.
         // At 20 MIPS (active) fires every 250ms; at 40K IPS (idle) fires every ~125s.
         // This prevents flooding the terminal with "0.04 MIPS" lines during HLT idle.
+        #[cfg(feature = "std")]
         let mut last_mips_log_update = std::time::Instant::now();
+        #[cfg(feature = "std")]
         let mut last_mips_log_instructions = 0u64;
         // Bochs VGA timer fires every ~40ms (25 fps). Use same interval for display parity.
+        #[cfg(feature = "std")]
         const GUI_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40);
+        #[cfg(feature = "std")]
         const IPS_SHOW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
         const MIPS_LOG_INTERVAL: u64 = 50_000_000;
         let mut last_port92_value: u8 = self.device_manager.port92.value;
@@ -1661,7 +1771,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                 self.device_manager.process_pci_deferred(&mut self.devices, &mut self.memory);
             }
 
-            let should_update_gui = match result {
+            let _should_update_gui = match result {
                 Ok(executed) => {
                     instructions_executed += executed;
 
@@ -1755,10 +1865,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                         }
                         self.device_manager.port92.reset_request = false;
                         self.device_manager.keyboard.reset_requested = false;
-                        if let Err(e) = self.reset(ResetReason::Hardware) {
-                            tracing::error!("Reset failed: {}", e);
-                            break;
-                        }
+                        self.reset(ResetReason::Hardware)?;
                         last_port92_value = self.device_manager.port92.value;
                         continue;
                     }
@@ -1851,22 +1958,26 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
                     // Drain Bochs-style port 0xE9 output (if any) and print it.
                     // This is useful for very early debug output before VGA is initialized.
-                    let e9 = self.devices.take_port_e9_output();
-                    if !e9.is_empty() {
-                        use std::io::Write;
-                        // Write to BIOS output file if configured, otherwise to stdout
-                        #[cfg(feature = "std")]
-                        if let Some(ref mut bios_file) = self.bios_output_file {
-                            bios_file.write_all(&e9).ok();
-                            bios_file.flush().ok();
-                        } else {
-                            let mut out = std::io::stdout();
-                            out.write_all(&e9).ok();
-                            out.flush().ok();
+                    #[cfg(feature = "std")]
+                    {
+                        let e9 = self.devices.take_port_e9_output();
+                        if !e9.is_empty() {
+                            use std::io::Write;
+                            // Write to BIOS output file if configured, otherwise to stdout
+                            if let Some(ref mut bios_file) = self.bios_output_file {
+                                bios_file.write_all(&e9).ok();
+                                bios_file.flush().ok();
+                            } else {
+                                let mut out = std::io::stdout();
+                                out.write_all(&e9).ok();
+                                out.flush().ok();
+                            }
                         }
-
-                        // In no-std builds, port 0xE9 output is silently dropped
-                        // (no stdout available)
+                    }
+                    #[cfg(not(feature = "std"))]
+                    {
+                        // Drain E9 output to prevent buffer growth (output discarded)
+                        let _ = self.devices.take_port_e9_output();
                     }
 
                     // Advance virtual time (Bochs-like ticking).
@@ -2261,17 +2372,21 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                     // Progress logging removed per user request
 
                     // 4. Check if GUI should be updated
-                    // Update when text is dirty, or periodically to catch any missed updates
-                    let text_dirty = self.device_manager.vga.is_text_dirty();
-                    let time_since_update = last_gui_update.elapsed();
-                    // Update if text changed OR periodically (like Bochs timer-based updates)
-                    let should_update = text_dirty || time_since_update >= GUI_UPDATE_INTERVAL;
-
-                    // Update timestamp if we're going to update
-                    if should_update {
-                        last_gui_update = std::time::Instant::now();
-                    }
-
+                    #[cfg(feature = "std")]
+                    let should_update = {
+                        // Update when text is dirty, or periodically to catch any missed updates
+                        let text_dirty = self.device_manager.vga.is_text_dirty();
+                        let time_since_update = last_gui_update.elapsed();
+                        // Update if text changed OR periodically (like Bochs timer-based updates)
+                        let should_update = text_dirty || time_since_update >= GUI_UPDATE_INTERVAL;
+                        // Update timestamp if we're going to update
+                        if should_update {
+                            last_gui_update = std::time::Instant::now();
+                        }
+                        should_update
+                    };
+                    #[cfg(not(feature = "std"))]
+                    let should_update = false;
                     should_update
                 }
                 Err(e) => {
@@ -2300,55 +2415,62 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                 }
             }
 
-            // Update GUI after CPU execution (outside the match to avoid borrow conflicts)
-            // Update more frequently if text is dirty OR periodically (like Bochs timer)
-            if should_update_gui {
+            // Update GUI after CPU execution
+            #[cfg(feature = "std")]
+            if _should_update_gui {
                 self.update_gui();
             }
 
-            // Update IPS: show_ips() every 1 real second (keeps egui status bar responsive).
-            // Uses icount delta (Bochs-compatible: counts REP iterations as separate ticks).
-            // Bochs main.cc — ips_count = bx_pc_system.time_ticks() delta
-            let ips_elapsed = last_ips_update.elapsed();
-            if ips_elapsed >= IPS_SHOW_INTERVAL {
-                let current_icount = self.cpu.icount;
-                let delta_ticks = current_icount - last_ips_instructions;
-                let mips = (delta_ticks as f64 / ips_elapsed.as_secs_f64()) / 1_000_000.0;
-                let ips = (mips * 1_000_000.0) as u32;
-                last_ips_instructions = current_icount;
-                last_ips_update = std::time::Instant::now();
-                if let Some(ref mut gui) = self.gui {
-                    gui.show_ips(ips);
+            #[cfg(feature = "std")]
+            {
+                // Update IPS: show_ips() every 1 real second (keeps egui status bar responsive).
+                // Uses icount delta (Bochs-compatible: counts REP iterations as separate ticks).
+                // Bochs main.cc — ips_count = bx_pc_system.time_ticks() delta
+                let ips_elapsed = last_ips_update.elapsed();
+                if ips_elapsed >= IPS_SHOW_INTERVAL {
+                    let current_icount = self.cpu.icount;
+                    let delta_ticks = current_icount - last_ips_instructions;
+                    let mips = (delta_ticks as f64 / ips_elapsed.as_secs_f64()) / 1_000_000.0;
+                    let ips = (mips * 1_000_000.0) as u32;
+                    last_ips_instructions = current_icount;
+                    last_ips_update = std::time::Instant::now();
+                    if let Some(ref mut gui) = self.gui {
+                        gui.show_ips(ips);
+                    }
                 }
             }
-            // Print MIPS terminal line every 50M instructions (~5s at 9 MIPS).
-            if instructions_executed / MIPS_LOG_INTERVAL
-                > last_mips_log_instructions / MIPS_LOG_INTERVAL
+            #[cfg(feature = "std")]
             {
-                let log_elapsed = last_mips_log_update.elapsed();
-                let log_delta = instructions_executed - last_mips_log_instructions;
-                let mips = if log_elapsed.as_secs_f64() > 0.001 {
-                    (log_delta as f64 / log_elapsed.as_secs_f64()) / 1_000_000.0
-                } else {
-                    0.0
-                };
-                last_mips_log_instructions = instructions_executed;
-                last_mips_log_update = std::time::Instant::now();
-                tracing::debug!(
-                    target: "mips",
-                    "[{:>6}M instr] {:>6.2} MIPS  RIP={:#010x}  CS={:#06x}  mode={}",
-                    instructions_executed / 1_000_000,
-                    mips,
-                    self.cpu.rip(),
-                    self.cpu.get_cs_selector(),
-                    self.get_cpu_mode_str(),
-                );
+                // Print MIPS terminal line every 50M instructions (~5s at 9 MIPS).
+                if instructions_executed / MIPS_LOG_INTERVAL
+                    > last_mips_log_instructions / MIPS_LOG_INTERVAL
+                {
+                    let log_elapsed = last_mips_log_update.elapsed();
+                    let log_delta = instructions_executed - last_mips_log_instructions;
+                    let mips = if log_elapsed.as_secs_f64() > 0.001 {
+                        (log_delta as f64 / log_elapsed.as_secs_f64()) / 1_000_000.0
+                    } else {
+                        0.0
+                    };
+                    last_mips_log_instructions = instructions_executed;
+                    last_mips_log_update = std::time::Instant::now();
+                    tracing::debug!(
+                        target: "mips",
+                        "[{:>6}M instr] {:>6.2} MIPS  RIP={:#010x}  CS={:#06x}  mode={}",
+                        instructions_executed / 1_000_000,
+                        mips,
+                        self.cpu.rip(),
+                        self.cpu.get_cs_selector(),
+                        self.get_cpu_mode_str(),
+                    );
+                }
             }
 
             // 5. sync=slowdown: interval-based throttle matching Bochs slowdown.cc.
             // Compares emulated vs wall-clock time over a sliding 1-second window.
             // Resets the window periodically to prevent unbounded deficit accumulation
             // (which would cause massive sleeps when transitioning from active to idle).
+            #[cfg(feature = "std")]
             if self.config.sync_slowdown && self.config.ips > 0 {
                 let wall_elapsed = slowdown_start.elapsed().as_micros() as u64;
                 // Reset window every 1 second to prevent deficit accumulation
@@ -2395,6 +2517,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         Ok(instructions_executed)
     }
 
+    #[cfg(feature = "alloc")]
     /// Execute a batch of instructions cooperatively (no blocking loop).
     ///
     /// Designed for single-threaded environments like WASM where the caller
@@ -2595,8 +2718,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         Ok((total_executed, shutdown))
     }
 
-    #[cfg(not(feature = "std"))]
-    /// Attach a CD-ROM ISO from in-memory data (for no_std / WASM environments).
+    #[cfg(feature = "alloc")]
+    /// Attach a CD-ROM ISO from in-memory data (for UEFI, WASM, or any environment).
     pub fn attach_cdrom_data(
         &mut self,
         channel: usize,
@@ -2608,8 +2731,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             .attach_cdrom_data(channel, drive, data);
     }
 
-    #[cfg(not(feature = "std"))]
-    /// Attach a hard disk from in-memory data (for no_std / WASM environments).
+    #[cfg(feature = "alloc")]
+    /// Attach a hard disk from in-memory data (for UEFI, WASM, or any environment).
     ///
     /// Wraps `HardDrive::attach_disk_data()` which stores the disk image
     /// in a `Vec<u8>` instead of using file I/O.
@@ -2627,6 +2750,34 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             .attach_disk_data(channel, drive, data, cylinders, heads, spt);
     }
 
+    /// Attach a CD-ROM ISO from a static byte slice (no-alloc).
+    pub fn attach_cdrom_data_ref(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        data: &'static [u8],
+    ) {
+        self.device_manager
+            .harddrv
+            .attach_cdrom_data_ref(channel, drive, data);
+    }
+
+    /// Attach a hard disk from a static byte slice (no-alloc).
+    pub fn attach_disk_data_ref(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        data: &'static [u8],
+        cylinders: u16,
+        heads: u8,
+        spt: u8,
+    ) {
+        self.device_manager
+            .harddrv
+            .attach_disk_data_ref(channel, drive, data, cylinders, heads, spt);
+    }
+
+    #[cfg(feature = "alloc")]
     /// Render VGA text output into a `SharedDisplay` framebuffer.
     ///
     /// This is the single-threaded equivalent of `update_gui()` — instead of
@@ -2709,6 +2860,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         self.device_manager.keyboard.send_scancode(scancode);
     }
 
+    #[cfg(feature = "alloc")]
     /// Send a string as PS/2 Set 2 scancodes (make + break for each character).
     ///
     /// Useful for headless testing — inject "root\n" to type at a login prompt.
@@ -2734,6 +2886,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         self.device_manager.vga.init_text_mode3();
     }
 
+    #[cfg(feature = "alloc")]
     /// Get VGA memory handler probe summary for diagnostics.
     pub fn vga_probe_summary(&self) -> alloc::string::String {
         self.device_manager.vga.probe_summary()
@@ -2766,6 +2919,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         (0, 0)
     }
 
+    #[cfg(feature = "alloc")]
     /// Get ATA channel 1 (CD-ROM) controller state + interrupt routing diagnostics.
     pub fn ata_ch1_diag(&self) -> String {
         let ch1 = &self.device_manager.harddrv.channels[1];
@@ -2803,7 +2957,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 
     /// Read a few bytes from the BIOS ROM array at the given ROM offset.
-    pub fn peek_rom(&self, offset: usize, len: usize) -> alloc::vec::Vec<u8> {
+    pub fn peek_rom(&self, offset: usize, len: usize) -> &[u8] {
         self.memory.peek_rom(offset, len)
     }
 
@@ -2974,7 +3128,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
         // ATA channel diagnostics
         tracing::trace!("--- ATA Diag ---");
         tracing::trace!("  cmd_history (last 10):");
-        let hist = &self.device_manager.harddrv.cmd_history;
+        let hist: Vec<(u8, u8, u32)> = self.device_manager.harddrv.cmd_history.iter().collect();
         let start = if hist.len() > 10 { hist.len() - 10 } else { 0 };
         for (ch, cmd, lba) in &hist[start..] {
             tracing::trace!("    ch={} cmd={:#04x} lba={}", ch, cmd, lba);
@@ -3101,15 +3255,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
 // Each instance is fully independent with no shared state
 unsafe impl<I: BxCpuIdTrait + Send, T: crate::cpu::instrumentation::Instrumentation + Send> Send for Emulator<'_, I, T> {}
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use crate::cpu::core_i7_skylake::Corei7SkylakeX;
 
     #[test]
     fn test_emulator_creation() {
+        // BxICache contains ~19MB fixed arrays; debug-mode struct literal needs large stack
         std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(256 * 1024 * 1024)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let emu = Emulator::<Corei7SkylakeX>::new(config);
@@ -3123,7 +3278,7 @@ mod tests {
     #[test]
     fn test_emulator_initialization() {
         std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(256 * 1024 * 1024)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -3141,7 +3296,7 @@ mod tests {
     #[test]
     fn test_multiple_instances_independent() {
         std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(256 * 1024 * 1024)
             .spawn(|| {
                 let config = EmulatorConfig::default();
 

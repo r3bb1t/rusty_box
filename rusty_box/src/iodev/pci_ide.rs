@@ -11,8 +11,6 @@
 //! - Physical Region Descriptor (PRD) table processing
 //! - Timer-driven DMA transfers (Bochs pci_ide.cc)
 
-use alloc::vec;
-use alloc::vec::Vec;
 
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
@@ -26,7 +24,6 @@ const BMDMA_BUFFER_SIZE: usize = 0x20000;
 
 /// BM-DMA channel state.
 /// Bochs: pci_ide.h
-#[derive(Debug)]
 pub struct BmDmaChannel {
     /// Start/Stop Bus Master (bit 0 of command register)
     pub cmd_ssbm: bool,
@@ -39,7 +36,7 @@ pub struct BmDmaChannel {
     /// Current PRD being processed
     pub prd_current: u32,
     /// DMA data buffer (128 KB)
-    pub buffer: Vec<u8>,
+    pub buffer: [u8; BMDMA_BUFFER_SIZE],
     /// Buffer write pointer offset
     pub buffer_top: usize,
     /// Buffer read pointer offset
@@ -50,6 +47,23 @@ pub struct BmDmaChannel {
     pub timer_index: Option<usize>,
 }
 
+impl core::fmt::Debug for BmDmaChannel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BmDmaChannel")
+            .field("cmd_ssbm", &self.cmd_ssbm)
+            .field("cmd_rwcon", &self.cmd_rwcon)
+            .field("status", &self.status)
+            .field("dtpr", &self.dtpr)
+            .field("prd_current", &self.prd_current)
+            .field("buffer", &format_args!("[u8; {}]", self.buffer.len()))
+            .field("buffer_top", &self.buffer_top)
+            .field("buffer_idx", &self.buffer_idx)
+            .field("data_ready", &self.data_ready)
+            .field("timer_index", &self.timer_index)
+            .finish()
+    }
+}
+
 impl BmDmaChannel {
     fn new() -> Self {
         Self {
@@ -58,7 +72,7 @@ impl BmDmaChannel {
             status: 0,
             dtpr: 0,
             prd_current: 0,
-            buffer: vec![0u8; BMDMA_BUFFER_SIZE],
+            buffer: [0u8; BMDMA_BUFFER_SIZE],
             buffer_top: 0,
             buffer_idx: 0,
             data_ready: false,

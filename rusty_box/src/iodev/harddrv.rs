@@ -90,11 +90,12 @@
 //!   (sector count, sector number, cylinder low/high) update HOB (High Order Byte)
 //!   registers on BOTH drives on the channel, supporting LBA48 addressing.
 
+#[cfg(feature = "alloc")]
 use alloc::format;
+#[cfg(feature = "alloc")]
 use alloc::string::String;
-use alloc::vec;
+use crate::ring_buffer::RingBuffer;
 use bitflags::bitflags;
-use alloc::vec::Vec;
 
 #[cfg(feature = "std")]
 use std::fs::File;
@@ -262,7 +263,6 @@ impl DriveGeometry {
 ///   For READ/WRITE MULTIPLE, equals `min(multiple_sectors, num_sectors) * sect_size`.
 /// - `buffer_index`: Current byte offset into the buffer. When it reaches
 ///   `buffer_size`, the next sector batch is loaded or the transfer completes.
-#[derive(Debug)]
 pub struct AtaController {
     /// Status register (port+7 read).
     pub(crate) status: AtaStatus,
@@ -305,7 +305,7 @@ pub struct AtaController {
     pub(crate) multiple_sectors: u8,
     /// Internal data buffer for sector transfers. Sized to hold up to 256 sectors
     /// (128KB) for maximum READ/WRITE MULTIPLE transfers.
-    pub(crate) buffer: Vec<u8>,
+    pub(crate) buffer: [u8; SECTOR_SIZE * 256],
     /// Current byte offset into the buffer. Incremented by each Data register
     /// read or write. When it reaches `buffer_size`, the next batch is processed.
     pub(crate) buffer_index: usize,
@@ -348,6 +348,37 @@ pub struct AtaController {
     /// Set by SET FEATURES (0xEF) sub-command 0x03 transfer mode type 0x08.
     pub(crate) udma_mode: u8,
 }
+impl core::fmt::Debug for AtaController {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AtaController")
+            .field("status", &self.status)
+            .field("error", &self.error)
+            .field("features", &self.features)
+            .field("sector_count", &self.sector_count)
+            .field("sector_no", &self.sector_no)
+            .field("cylinder_no", &self.cylinder_no)
+            .field("head_no", &self.head_no)
+            .field("lba_mode", &self.lba_mode)
+            .field("control", &self.control)
+            .field("interrupt_pending", &self.interrupt_pending)
+            .field("current_command", &self.current_command)
+            .field("multiple_sectors", &self.multiple_sectors)
+            .field("buffer", &format_args!("[u8; {}]", self.buffer.len()))
+            .field("buffer_index", &self.buffer_index)
+            .field("drq_index", &self.drq_index)
+            .field("buffer_size", &self.buffer_size)
+            .field("num_sectors", &self.num_sectors)
+            .field("lba48", &self.lba48)
+            .field("reset_in_progress", &self.reset_in_progress)
+            .field("index_pulse_count", &self.index_pulse_count)
+            .field("hob", &self.hob)
+            .field("packet_dma", &self.packet_dma)
+            .field("mdma_mode", &self.mdma_mode)
+            .field("udma_mode", &self.udma_mode)
+            .finish()
+    }
+}
+
 
 /// High Order Byte (HOB) registers for LBA48 addressing.
 /// Each field stores the previous value of the corresponding task file register.
@@ -431,7 +462,7 @@ impl Default for AtaController {
             interrupt_pending: false,
             current_command: 0,
             multiple_sectors: 0,
-            buffer: vec![0; SECTOR_SIZE * 256],
+            buffer: [0u8; SECTOR_SIZE * 256],
             buffer_index: 0,
             drq_index: 0,
             buffer_size: 0,
@@ -454,22 +485,31 @@ pub struct AtaDrive {
     pub(crate) device_type: DeviceType,
     /// Drive geometry
     pub(crate) geometry: DriveGeometry,
-    /// Model name
-    pub(crate) model: String,
-    /// Serial number
-    pub(crate) serial: String,
-    /// Firmware revision
-    pub(crate) firmware: String,
+    /// Model name (max 40 bytes, ATA IDENTIFY words 27-46)
+    pub(crate) model: [u8; 40],
+    /// Length of valid bytes in model
+    pub(crate) model_len: u8,
+    /// Serial number (max 20 bytes, ATA IDENTIFY words 10-19)
+    pub(crate) serial: [u8; 20],
+    /// Length of valid bytes in serial
+    pub(crate) serial_len: u8,
+    /// Firmware revision (max 8 bytes, ATA IDENTIFY words 23-26)
+    pub(crate) firmware: [u8; 8],
+    /// Length of valid bytes in firmware
+    pub(crate) firmware_len: u8,
     /// Controller state
     pub(crate) controller: AtaController,
-    /// Image file path
+    /// Image file path (only available with std feature)
+    #[cfg(feature = "std")]
     pub(crate) image_path: Option<String>,
     /// Image file (only available with std feature)
     #[cfg(feature = "std")]
     image_file: Option<File>,
-    /// Raw disk data (used when std is not available)
-    #[cfg(not(feature = "std"))]
+    /// Raw disk/CD-ROM data for in-memory I/O (alloc path).
+    #[cfg(feature = "alloc")]
     disk_data: Option<Vec<u8>>,
+    /// Raw disk/CD-ROM data for read-only in-memory I/O (no-alloc path).
+    disk_data_ref: Option<&'static [u8]>,
     /// ATAPI sense info
     pub(crate) sense: SenseInfo,
     /// ATAPI command tracking
@@ -497,15 +537,20 @@ impl AtaDrive {
         Self {
             device_type: DeviceType::None,
             geometry: DriveGeometry::from_chs(0, 0, 0),
-            model: String::new(),
-            serial: String::new(),
-            firmware: String::new(),
+            model: [0; 40],
+            model_len: 0,
+            serial: [0; 20],
+            serial_len: 0,
+            firmware: [0; 8],
+            firmware_len: 0,
             controller: AtaController::default(),
+            #[cfg(feature = "std")]
             image_path: None,
             #[cfg(feature = "std")]
             image_file: None,
-            #[cfg(not(feature = "std"))]
+            #[cfg(feature = "alloc")]
             disk_data: None,
+            disk_data_ref: None,
             sense: SenseInfo::default(),
             atapi: AtapiState::default(),
             cdrom: CdromState::default(),
@@ -520,18 +565,23 @@ impl AtaDrive {
 
     /// Create a hard disk drive
     pub fn create_disk(geometry: DriveGeometry) -> Self {
-        Self {
+        let mut drive = Self {
             device_type: DeviceType::Disk,
             geometry,
-            model: String::from("RUSTY_BOX HARDDISK"),
-            serial: String::from("RB000001"),
-            firmware: String::from("1.0"),
+            model: [0; 40],
+            model_len: 0,
+            serial: [0; 20],
+            serial_len: 0,
+            firmware: [0; 8],
+            firmware_len: 0,
             controller: AtaController::default(),
+            #[cfg(feature = "std")]
             image_path: None,
             #[cfg(feature = "std")]
             image_file: None,
-            #[cfg(not(feature = "std"))]
+            #[cfg(feature = "alloc")]
             disk_data: None,
+            disk_data_ref: None,
             sense: SenseInfo::default(),
             atapi: AtapiState::default(),
             cdrom: CdromState::default(),
@@ -541,23 +591,32 @@ impl AtaDrive {
             device_num: 0,
             #[cfg(feature = "std")]
             cdrom_file: None,
-        }
+        };
+        drive.set_model(b"RUSTY_BOX HARDDISK");
+        drive.set_serial(b"RB000001");
+        drive.set_firmware(b"1.0");
+        drive
     }
 
     /// Create a CD-ROM drive
     pub fn create_cdrom() -> Self {
-        Self {
+        let mut drive = Self {
             device_type: DeviceType::Cdrom,
             geometry: DriveGeometry::from_chs(0, 0, 0),
-            model: String::from("RUSTY_BOX CD-ROM"),
-            serial: String::from("RBCD0001"),
-            firmware: String::from("1.0"),
+            model: [0; 40],
+            model_len: 0,
+            serial: [0; 20],
+            serial_len: 0,
+            firmware: [0; 8],
+            firmware_len: 0,
             controller: AtaController::default(),
+            #[cfg(feature = "std")]
             image_path: None,
             #[cfg(feature = "std")]
             image_file: None,
-            #[cfg(not(feature = "std"))]
+            #[cfg(feature = "alloc")]
             disk_data: None,
+            disk_data_ref: None,
             sense: SenseInfo::default(),
             atapi: AtapiState::default(),
             cdrom: CdromState::default(),
@@ -567,7 +626,59 @@ impl AtaDrive {
             device_num: 0,
             #[cfg(feature = "std")]
             cdrom_file: None,
+        };
+        drive.set_model(b"RUSTY_BOX CD-ROM");
+        drive.set_serial(b"RBCD0001");
+        drive.set_firmware(b"1.0");
+        drive
+    }
+
+    /// Set model name from bytes (truncated to 40 bytes).
+    pub fn set_model(&mut self, s: &[u8]) {
+        let len = s.len().min(40);
+        self.model[..len].copy_from_slice(&s[..len]);
+        self.model_len = len as u8;
+    }
+
+    /// Set serial number from bytes (truncated to 20 bytes).
+    pub fn set_serial(&mut self, s: &[u8]) {
+        let len = s.len().min(20);
+        self.serial[..len].copy_from_slice(&s[..len]);
+        self.serial_len = len as u8;
+    }
+
+    /// Set firmware revision from bytes (truncated to 8 bytes).
+    pub fn set_firmware(&mut self, s: &[u8]) {
+        let len = s.len().min(8);
+        self.firmware[..len].copy_from_slice(&s[..len]);
+        self.firmware_len = len as u8;
+    }
+
+    /// Get model name as a str slice.
+    pub fn model_str(&self) -> &str {
+        core::str::from_utf8(&self.model[..self.model_len as usize]).unwrap_or("")
+    }
+
+    /// Get serial number as a str slice.
+    pub fn serial_str(&self) -> &str {
+        core::str::from_utf8(&self.serial[..self.serial_len as usize]).unwrap_or("")
+    }
+
+    /// Get firmware revision as a str slice.
+    pub fn firmware_str(&self) -> &str {
+        core::str::from_utf8(&self.firmware[..self.firmware_len as usize]).unwrap_or("")
+    }
+
+    /// Get a read-only slice of the disk data, checking both ref and alloc paths.
+    fn disk_slice(&self) -> Option<&[u8]> {
+        if let Some(data) = self.disk_data_ref {
+            return Some(data);
         }
+        #[cfg(feature = "alloc")]
+        if let Some(ref data) = self.disk_data {
+            return Some(data.as_slice());
+        }
+        None
     }
 
     /// Attach a CD-ROM ISO image (requires std feature)
@@ -615,8 +726,8 @@ impl AtaDrive {
         Ok(())
     }
 
-    /// Attach disk data directly (for no_std environments)
-    #[cfg(not(feature = "std"))]
+    /// Attach disk data directly (alloc path).
+    #[cfg(feature = "alloc")]
     pub fn attach_data(&mut self, data: Vec<u8>) {
         self.geometry.total_sectors = (data.len() / SECTOR_SIZE) as u32;
         tracing::debug!(
@@ -627,8 +738,19 @@ impl AtaDrive {
         self.disk_data = Some(data);
     }
 
-    /// Attach CD-ROM ISO data directly (for no_std / WASM environments)
-    #[cfg(not(feature = "std"))]
+    /// Attach disk data as a static ref (no-alloc path).
+    pub fn attach_data_ref(&mut self, data: &'static [u8]) {
+        self.geometry.total_sectors = (data.len() / SECTOR_SIZE) as u32;
+        tracing::debug!(
+            "ATA: Attached disk data ref ({} sectors, {} KB)",
+            self.geometry.total_sectors,
+            data.len() / 1024
+        );
+        self.disk_data_ref = Some(data);
+    }
+
+    /// Attach CD-ROM ISO data directly (alloc path).
+    #[cfg(feature = "alloc")]
     pub fn attach_cdrom_data(&mut self, data: Vec<u8>) {
         let size = data.len() as u64;
         let max_lba = (size / CDROM_SECTOR_SIZE as u64) as u32;
@@ -644,82 +766,91 @@ impl AtaDrive {
         self.disk_data = Some(data);
     }
 
-    /// Read a single CD-ROM block (2048 bytes) at the given LBA
-    #[cfg(feature = "std")]
+    /// Attach CD-ROM ISO data as a static ref (no-alloc path).
+    pub fn attach_cdrom_data_ref(&mut self, data: &'static [u8]) {
+        let size = data.len() as u64;
+        let max_lba = (size / CDROM_SECTOR_SIZE as u64) as u32;
+        tracing::debug!(
+            "ATAPI: Attached CD-ROM data ref ({} sectors, {} MB)",
+            max_lba,
+            size / (1024 * 1024)
+        );
+        self.cdrom.ready = true;
+        self.cdrom.max_lba = max_lba.saturating_sub(1);
+        self.cdrom.curr_lba = 0;
+        self.status_changed = 1;
+        self.disk_data_ref = Some(data);
+    }
+
+    /// Read a single CD-ROM block (2048 bytes) at the given LBA.
+    /// Prefers in-memory data if available, falls back to file I/O.
     fn read_cdrom_block(&mut self, lba: u32, buf: &mut [u8]) -> bool {
-        let offset = lba as u64 * CDROM_SECTOR_SIZE as u64;
-        let file = match self.cdrom_file.as_mut() {
-            Some(f) => f,
-            None => return false,
-        };
-        if file.seek(SeekFrom::Start(offset)).is_err() {
-            return false;
+        // In-memory path (UEFI, WASM, or attach_cdrom_data)
+        if let Some(data) = self.disk_slice() {
+            let offset = lba as usize * CDROM_SECTOR_SIZE;
+            let end = offset + CDROM_SECTOR_SIZE;
+            if end > data.len() {
+                return false;
+            }
+            buf[..CDROM_SECTOR_SIZE].copy_from_slice(&data[offset..end]);
+            return true;
         }
-        if file
-            .read_exact(&mut buf[..CDROM_SECTOR_SIZE])
-            .is_err()
+        // File I/O path
+        #[cfg(feature = "std")]
         {
-            return false;
+            let offset = lba as u64 * CDROM_SECTOR_SIZE as u64;
+            let file = match self.cdrom_file.as_mut() {
+                Some(f) => f,
+                None => return false,
+            };
+            if file.seek(SeekFrom::Start(offset)).is_err() {
+                return false;
+            }
+            if file.read_exact(&mut buf[..CDROM_SECTOR_SIZE]).is_err() {
+                return false;
+            }
+            return true;
         }
-        true
+        #[cfg(not(feature = "std"))]
+        false
     }
 
-    /// Read a single CD-ROM block from in-memory data (no_std)
-    #[cfg(not(feature = "std"))]
-    fn read_cdrom_block(&mut self, lba: u32, buf: &mut [u8]) -> bool {
-        let data = match self.disk_data.as_ref() {
-            Some(d) => d,
-            None => return false,
-        };
-        let offset = lba as usize * CDROM_SECTOR_SIZE;
-        let end = offset + CDROM_SECTOR_SIZE;
-        if end > data.len() {
-            return false;
-        }
-        buf[..CDROM_SECTOR_SIZE].copy_from_slice(&data[offset..end]);
-        true
-    }
-
-    /// Read multiple consecutive CD-ROM blocks in one file I/O call.
+    /// Read multiple consecutive CD-ROM blocks.
     /// Returns the number of blocks successfully read.
-    #[cfg(feature = "std")]
+    /// Prefers in-memory data if available, falls back to file I/O.
     fn read_cdrom_blocks(&mut self, start_lba: u32, count: usize, buf: &mut [u8]) -> usize {
-        let offset = start_lba as u64 * CDROM_SECTOR_SIZE as u64;
-        let file = match self.cdrom_file.as_mut() {
-            Some(f) => f,
-            None => return 0,
-        };
-        if file.seek(SeekFrom::Start(offset)).is_err() {
-            return 0;
-        }
         let total_bytes = count * CDROM_SECTOR_SIZE;
         if buf.len() < total_bytes {
             return 0;
         }
-        match file.read_exact(&mut buf[..total_bytes]) {
-            Ok(()) => count,
-            Err(_) => 0,
+        // In-memory path
+        if let Some(data) = self.disk_slice() {
+            let offset = start_lba as usize * CDROM_SECTOR_SIZE;
+            let end = offset + total_bytes;
+            if end > data.len() {
+                return 0;
+            }
+            buf[..total_bytes].copy_from_slice(&data[offset..end]);
+            return count;
         }
-    }
-
-    /// Read multiple consecutive CD-ROM blocks from in-memory data (no_std)
-    #[cfg(not(feature = "std"))]
-    fn read_cdrom_blocks(&mut self, start_lba: u32, count: usize, buf: &mut [u8]) -> usize {
-        let data = match self.disk_data.as_ref() {
-            Some(d) => d,
-            None => return 0,
-        };
-        let offset = start_lba as usize * CDROM_SECTOR_SIZE;
-        let total_bytes = count * CDROM_SECTOR_SIZE;
-        if buf.len() < total_bytes {
-            return 0;
+        // File I/O path
+        #[cfg(feature = "std")]
+        {
+            let offset = start_lba as u64 * CDROM_SECTOR_SIZE as u64;
+            let file = match self.cdrom_file.as_mut() {
+                Some(f) => f,
+                None => return 0,
+            };
+            if file.seek(SeekFrom::Start(offset)).is_err() {
+                return 0;
+            }
+            match file.read_exact(&mut buf[..total_bytes]) {
+                Ok(()) => return count,
+                Err(_) => return 0,
+            }
         }
-        let end = offset + total_bytes;
-        if end > data.len() {
-            return 0;
-        }
-        buf[..total_bytes].copy_from_slice(&data[offset..end]);
-        count
+        #[cfg(not(feature = "std"))]
+        0
     }
 
     /// Fill the IDENTIFY PACKET DEVICE response (Bochs identify_ATAPI_drive, harddrv.cc)
@@ -880,152 +1011,189 @@ impl AtaDrive {
     ///
     /// Matches Bochs `ide_read_sector()` (harddrv.cc).
     ///
-    /// For each sector in the batch (`buffer_size / SECTOR_SIZE`):
-    /// 1. Calculates the LBA from the current task file registers (CHS or LBA mode)
-    /// 2. Seeks to the byte offset in the disk image file
-    /// 3. Reads 512 bytes into the corresponding buffer slice
-    /// 4. Calls `increment_address()` to advance registers and decrement `num_sectors`
-    ///
-    /// Returns `false` on disk I/O error (seek or read failure), which causes
-    /// the caller to abort the command.
-    #[cfg(feature = "std")]
+    /// Prefers in-memory data if available, falls back to file I/O.
     fn ide_read_sector(&mut self) -> bool {
         let sector_count = self.controller.buffer_size / SECTOR_SIZE;
         let mut buf_offset = 0;
 
-        for _ in 0..sector_count {
-            let lba = self.get_lba();
-            let offset = lba as u64 * SECTOR_SIZE as u64;
+        // In-memory path — try disk_data_ref first (no borrow conflict since it's &'static).
+        if self.disk_data_ref.is_some() {
+            let data = self.disk_data_ref.unwrap();
+            for _ in 0..sector_count {
+                let lba = self.get_lba();
+                let disk_offset = lba as usize * SECTOR_SIZE;
 
-            let file = match self.image_file.as_mut() {
-                Some(f) => f,
-                None => return false,
-            };
+                if disk_offset + SECTOR_SIZE > data.len() {
+                    return false;
+                }
 
-            if file.seek(SeekFrom::Start(offset)).is_err() {
-                tracing::error!("ATA: ide_read_sector: seek failed at LBA {}", lba);
-                return false;
+                self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE]
+                    .copy_from_slice(&data[disk_offset..disk_offset + SECTOR_SIZE]);
+
+                tracing::trace!("ATA: read LBA {}", lba);
+                self.increment_address();
+                buf_offset += SECTOR_SIZE;
             }
 
-            if file
-                .read_exact(&mut self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE])
-                .is_err()
-            {
-                tracing::error!("ATA: ide_read_sector: read failed at LBA {}", lba);
-                return false;
-            }
-
-            tracing::trace!("ATA: read LBA {}", lba);
-
-            self.increment_address();
-            buf_offset += SECTOR_SIZE;
+            tracing::trace!(
+                "ATA: ide_read_sector: read {} sector(s), num_sectors remaining={}",
+                sector_count,
+                self.controller.num_sectors
+            );
+            return true;
         }
 
-        tracing::trace!(
-            "ATA: ide_read_sector: read {} sector(s), num_sectors remaining={}",
-            sector_count,
-            self.controller.num_sectors
-        );
-        true
-    }
+        // Alloc in-memory path — Vec<u8>
+        #[cfg(feature = "alloc")]
+        if self.disk_data.is_some() {
+            for _ in 0..sector_count {
+                let lba = self.get_lba();
+                let disk_offset = lba as usize * SECTOR_SIZE;
+                let data = self.disk_data.as_ref().unwrap();
 
-    /// Read buffer_size/512 sectors into controller buffer (no_std version).
-    #[cfg(not(feature = "std"))]
-    fn ide_read_sector(&mut self) -> bool {
-        let sector_count = self.controller.buffer_size / SECTOR_SIZE;
-        let mut buf_offset = 0;
+                if disk_offset + SECTOR_SIZE > data.len() {
+                    return false;
+                }
 
-        for _ in 0..sector_count {
-            let lba = self.get_lba();
-            let disk_offset = lba as usize * SECTOR_SIZE;
+                self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE]
+                    .copy_from_slice(&data[disk_offset..disk_offset + SECTOR_SIZE]);
 
-            let data = match self.disk_data.as_ref() {
-                Some(d) => d,
-                None => return false,
-            };
-
-            if disk_offset + SECTOR_SIZE > data.len() {
-                return false;
+                tracing::trace!("ATA: read LBA {}", lba);
+                self.increment_address();
+                buf_offset += SECTOR_SIZE;
             }
 
-            self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE]
-                .copy_from_slice(&data[disk_offset..disk_offset + SECTOR_SIZE]);
-
-            self.increment_address();
-            buf_offset += SECTOR_SIZE;
+            tracing::trace!(
+                "ATA: ide_read_sector: read {} sector(s), num_sectors remaining={}",
+                sector_count,
+                self.controller.num_sectors
+            );
+            return true;
         }
 
-        true
+        // File I/O path
+        #[cfg(feature = "std")]
+        {
+            for _ in 0..sector_count {
+                let lba = self.get_lba();
+                let offset = lba as u64 * SECTOR_SIZE as u64;
+
+                let file = match self.image_file.as_mut() {
+                    Some(f) => f,
+                    None => return false,
+                };
+
+                if file.seek(SeekFrom::Start(offset)).is_err() {
+                    tracing::error!("ATA: ide_read_sector: seek failed at LBA {}", lba);
+                    return false;
+                }
+
+                if file
+                    .read_exact(&mut self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE])
+                    .is_err()
+                {
+                    tracing::error!("ATA: ide_read_sector: read failed at LBA {}", lba);
+                    return false;
+                }
+
+                tracing::trace!("ATA: read LBA {}", lba);
+
+                self.increment_address();
+                buf_offset += SECTOR_SIZE;
+            }
+
+            tracing::trace!(
+                "ATA: ide_read_sector: read {} sector(s), num_sectors remaining={}",
+                sector_count,
+                self.controller.num_sectors
+            );
+            return true;
+        }
+
+        #[cfg(not(feature = "std"))]
+        false
     }
+
 
     /// Write buffer_size/512 sectors from controller buffer to disk at current register position.
     /// Matches Bochs ide_write_sector() (harddrv.cc).
-    #[cfg(feature = "std")]
+    ///
+    /// Prefers in-memory data if available, falls back to file I/O.
     fn ide_write_sector(&mut self) -> bool {
         let sector_count = self.controller.buffer_size / SECTOR_SIZE;
         let mut buf_offset = 0;
 
-        for _ in 0..sector_count {
-            let lba = self.get_lba();
-            let offset = lba as u64 * SECTOR_SIZE as u64;
+        // In-memory alloc path — mutable Vec<u8>
+        #[cfg(feature = "alloc")]
+        if self.disk_data.is_some() {
+            for _ in 0..sector_count {
+                let lba = self.get_lba();
+                let disk_offset = lba as usize * SECTOR_SIZE;
+                let data = self.disk_data.as_mut().unwrap();
 
-            let file = match self.image_file.as_mut() {
-                Some(f) => f,
-                None => return false,
-            };
+                if disk_offset + SECTOR_SIZE > data.len() {
+                    return false;
+                }
 
-            if file.seek(SeekFrom::Start(offset)).is_err() {
-                tracing::error!("ATA: ide_write_sector: seek failed at LBA {}", lba);
-                return false;
+                data[disk_offset..disk_offset + SECTOR_SIZE]
+                    .copy_from_slice(&self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE]);
+
+                self.increment_address();
+                buf_offset += SECTOR_SIZE;
             }
 
-            if file
-                .write_all(&self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE])
-                .is_err()
-            {
-                tracing::error!("ATA: ide_write_sector: write failed at LBA {}", lba);
-                return false;
+            return true;
+        }
+
+        // Read-only ref path — silently succeed without persisting
+        if self.disk_data_ref.is_some() {
+            for _ in 0..sector_count {
+                self.increment_address();
+                buf_offset += SECTOR_SIZE;
+            }
+            return true;
+        }
+
+        // File I/O path
+        #[cfg(feature = "std")]
+        {
+            for _ in 0..sector_count {
+                let lba = self.get_lba();
+                let offset = lba as u64 * SECTOR_SIZE as u64;
+
+                let file = match self.image_file.as_mut() {
+                    Some(f) => f,
+                    None => return false,
+                };
+
+                if file.seek(SeekFrom::Start(offset)).is_err() {
+                    tracing::error!("ATA: ide_write_sector: seek failed at LBA {}", lba);
+                    return false;
+                }
+
+                if file
+                    .write_all(&self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE])
+                    .is_err()
+                {
+                    tracing::error!("ATA: ide_write_sector: write failed at LBA {}", lba);
+                    return false;
+                }
+
+                self.increment_address();
+                buf_offset += SECTOR_SIZE;
             }
 
-            self.increment_address();
-            buf_offset += SECTOR_SIZE;
+            if let Some(f) = self.image_file.as_mut() {
+                f.flush().ok();
+            }
+
+            return true;
         }
 
-        if let Some(f) = self.image_file.as_mut() {
-            f.flush().ok();
-        }
-
-        true
+        #[cfg(not(feature = "std"))]
+        false
     }
 
-    /// Write buffer_size/512 sectors from controller buffer to disk (no_std version).
-    #[cfg(not(feature = "std"))]
-    fn ide_write_sector(&mut self) -> bool {
-        let sector_count = self.controller.buffer_size / SECTOR_SIZE;
-        let mut buf_offset = 0;
-
-        for _ in 0..sector_count {
-            let lba = self.get_lba();
-            let disk_offset = lba as usize * SECTOR_SIZE;
-
-            let data = match self.disk_data.as_mut() {
-                Some(d) => d,
-                None => return false,
-            };
-
-            if disk_offset + SECTOR_SIZE > data.len() {
-                return false;
-            }
-
-            data[disk_offset..disk_offset + SECTOR_SIZE]
-                .copy_from_slice(&self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE]);
-
-            self.increment_address();
-            buf_offset += SECTOR_SIZE;
-        }
-
-        true
-    }
 
     /// Fill identify buffer
     fn fill_identify_buffer(&mut self) {
@@ -1059,7 +1227,7 @@ impl AtaDrive {
         buf[13] = 0;
 
         // Words 10-19: Serial number (20 ASCII chars)
-        let serial_bytes = self.serial.as_bytes();
+        let serial_bytes = &self.serial[..self.serial_len as usize];
         for i in 0..10 {
             let idx = 20 + i * 2;
             if i * 2 < serial_bytes.len() {
@@ -1087,7 +1255,7 @@ impl AtaDrive {
         buf[45] = 0;
 
         // Words 23-26: Firmware revision (8 ASCII chars)
-        let fw_bytes = self.firmware.as_bytes();
+        let fw_bytes = &self.firmware[..self.firmware_len as usize];
         for i in 0..4 {
             let idx = 46 + i * 2;
             if i * 2 < fw_bytes.len() {
@@ -1103,7 +1271,7 @@ impl AtaDrive {
         }
 
         // Words 27-46: Model number (40 ASCII chars)
-        let model_bytes = self.model.as_bytes();
+        let model_bytes = &self.model[..self.model_len as usize];
         for i in 0..20 {
             let idx = 54 + i * 2;
             if i * 2 < model_bytes.len() {
@@ -1338,8 +1506,8 @@ pub struct BxHardDriveC {
     /// When set, the emulator's tick loop calls ready_to_send_atapi().
     /// Matches Bochs start_seek() + seek_timer_handler() flow.
     pub(crate) seek_complete_pending: [bool; 2],
-    /// Command history ring buffer (last 32 commands) for diagnostics
-    pub(crate) cmd_history: Vec<(u8, u8, u32)>,
+    /// Command history ring buffer (last 256 commands) for diagnostics
+    pub(crate) cmd_history: RingBuffer<(u8, u8, u32), 256>,
 }
 
 impl Default for BxHardDriveC {
@@ -1356,7 +1524,7 @@ impl BxHardDriveC {
                 AtaChannel::new(0x1F0, 0x3F0, 14), // Primary
                 AtaChannel::new(0x170, 0x370, 15), // Secondary
             ],
-            cmd_history: Vec::new(),
+            cmd_history: RingBuffer::new(),
             seek_complete_pending: [false; 2],
         }
     }
@@ -1410,8 +1578,8 @@ impl BxHardDriveC {
         Ok(())
     }
 
-    /// Attach disk data to a drive (for no_std environments)
-    #[cfg(not(feature = "std"))]
+    /// Attach disk data to a drive (alloc path).
+    #[cfg(feature = "alloc")]
     pub fn attach_disk_data(
         &mut self,
         channel: usize,
@@ -1424,6 +1592,21 @@ impl BxHardDriveC {
         let geometry = DriveGeometry::from_chs(cylinders, heads, spt);
         self.channels[channel].drives[drive] = AtaDrive::create_disk(geometry);
         self.channels[channel].drives[drive].attach_data(data);
+    }
+
+    /// Attach disk data to a drive (no-alloc ref path).
+    pub fn attach_disk_data_ref(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        data: &'static [u8],
+        cylinders: u16,
+        heads: u8,
+        spt: u8,
+    ) {
+        let geometry = DriveGeometry::from_chs(cylinders, heads, spt);
+        self.channels[channel].drives[drive] = AtaDrive::create_disk(geometry);
+        self.channels[channel].drives[drive].attach_data_ref(data);
     }
 
     /// Attach a CD-ROM ISO image to a drive (requires std feature)
@@ -1448,8 +1631,8 @@ impl BxHardDriveC {
         Ok(())
     }
 
-    /// Attach CD-ROM ISO data to a drive (for no_std / WASM environments)
-    #[cfg(not(feature = "std"))]
+    /// Attach CD-ROM ISO data to a drive (alloc path).
+    #[cfg(feature = "alloc")]
     pub fn attach_cdrom_data(
         &mut self,
         channel: usize,
@@ -1459,6 +1642,25 @@ impl BxHardDriveC {
         self.channels[channel].drives[drive] = AtaDrive::create_cdrom();
         self.channels[channel].drives[drive].device_num = drive as u8;
         self.channels[channel].drives[drive].attach_cdrom_data(data);
+        // Set ATAPI signature so kernel detects device type correctly
+        let d = &mut self.channels[channel].drives[drive];
+        d.controller.head_no = 0;
+        d.controller.sector_count = 1;
+        d.controller.sector_no = 1;
+        d.controller.cylinder_no = 0xEB14; // ATAPI signature
+        d.controller.status = AtaStatus::DRDY | AtaStatus::DSC;
+    }
+
+    /// Attach CD-ROM ISO data to a drive (no-alloc ref path).
+    pub fn attach_cdrom_data_ref(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        data: &'static [u8],
+    ) {
+        self.channels[channel].drives[drive] = AtaDrive::create_cdrom();
+        self.channels[channel].drives[drive].device_num = drive as u8;
+        self.channels[channel].drives[drive].attach_cdrom_data_ref(data);
         // Set ATAPI signature so kernel detects device type correctly
         let d = &mut self.channels[channel].drives[drive];
         d.controller.head_no = 0;
@@ -3480,13 +3682,9 @@ impl BxHardDriveC {
         let ds = channel.drive_select;
         let drive = channel.selected_drive_mut();
 
-        // Record command in history (circular buffer — keep last 256 commands so
-        // BIOS-phase entries don't crowd out kernel-phase ATA activity).
+        // Record command in history (ring buffer auto-drops oldest when full).
         let lba = drive.get_lba();
-        if self.cmd_history.len() >= 256 {
-            self.cmd_history.remove(0);
-        }
-        self.cmd_history.push((channel_num as u8, command, lba));
+        self.cmd_history.push_back((channel_num as u8, command, lba));
 
         if drive.device_type == DeviceType::None {
             tracing::trace!("[ATA-DIAG] cmd {:#04x} to ch{} (empty) — dropped", command, channel_num);
@@ -3906,6 +4104,7 @@ impl BxHardDriveC {
         }
     }
 
+    #[cfg(feature = "alloc")]
     /// Get diagnostic string for the ATA controller state
     pub fn diag_string(&self) -> String {
         let mut s = String::new();
@@ -3929,7 +4128,7 @@ impl BxHardDriveC {
             self.get_irq_level(0), self.get_irq_level(1),
         ));
         s.push_str(&format!("  cmd_history ({} cmds):", self.cmd_history.len()));
-        for (i, &(ch, cmd, lba)) in self.cmd_history.iter().enumerate() {
+        for (i, (ch, cmd, lba)) in self.cmd_history.iter().enumerate() {
             if i % 8 == 0 {
                 s.push('\n');
                 s.push_str("    ");
@@ -3966,7 +4165,16 @@ mod tests {
 
     #[test]
     fn test_controller_creation() {
-        let hd = BxHardDriveC::new();
+        // BxHardDriveC has 4 x 131KB buffers — too large for test stack.
+        let layout = alloc::alloc::Layout::new::<BxHardDriveC>();
+        let hd = unsafe {
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut BxHardDriveC;
+            assert!(!ptr.is_null());
+            // Write channel addresses (everything else is zeroed/default).
+            core::ptr::addr_of_mut!((*ptr).channels[0]).write(AtaChannel::new(0x1F0, 0x3F0, 14));
+            core::ptr::addr_of_mut!((*ptr).channels[1]).write(AtaChannel::new(0x170, 0x370, 15));
+            alloc::boxed::Box::from_raw(ptr)
+        };
         assert_eq!(hd.channels[0].ioaddr1, 0x1F0);
         assert_eq!(hd.channels[1].ioaddr1, 0x170);
     }

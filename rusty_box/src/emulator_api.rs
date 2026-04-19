@@ -6,8 +6,8 @@
 //! `emulator.rs` readable. Everything here operates purely on the public
 //! `&mut Emulator` surface.
 
-use alloc::{boxed::Box, vec::Vec};
-use alloc::sync::Arc;
+#[cfg(feature = "alloc")]
+use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "instrumentation")]
@@ -36,9 +36,11 @@ use crate::{Error, Result};
 ///
 /// Backed by `Arc<AtomicBool>` with `Ordering::Relaxed` — single mov on x86
 /// with no fence. See the plan's "Atomic Performance Analysis" section.
+#[cfg(feature = "alloc")]
 #[derive(Clone)]
 pub struct StopHandle(pub(crate) Arc<AtomicBool>);
 
+#[cfg(feature = "alloc")]
 impl StopHandle {
     /// Signal the Emulator to stop at the next batch boundary. Non-blocking.
     #[inline]
@@ -66,7 +68,7 @@ impl StopHandle {
 // populate the [`InstrumentationRegistry`] on the CPU, which is itself
 // feature-gated. When the feature is off, the methods simply do not exist.
 
-#[cfg(feature = "instrumentation")]
+#[cfg(all(feature = "instrumentation", feature = "alloc"))]
 impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
     /// Register a hook fired before each instruction whose RIP is in `range`.
     /// Callback receives `(rip, &Instruction)`.
@@ -477,6 +479,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 
     /// Read `size` bytes into a freshly-allocated `Vec`.
+    #[cfg(feature = "alloc")]
     pub fn mem_read_vec(&self, addr: u64, size: usize) -> Result<Vec<u8>> {
         let mut v = alloc::vec![0u8; size];
         self.mem_read(addr, &mut v)?;
@@ -646,6 +649,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 
     /// Read bytes from guest virtual memory into a Vec.
+    #[cfg(feature = "alloc")]
     pub fn virt_read_vec(&self, vaddr: u64, size: usize) -> Result<Vec<u8>> {
         let mut v = alloc::vec![0u8; size];
         self.virt_read(vaddr, &mut v)?;
@@ -713,6 +717,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
     /// Obtain a cross-thread [`StopHandle`] that breaks the `emu_start` loop
     /// at its next batch boundary.
+    #[cfg(feature = "alloc")]
     pub fn stop_handle(&self) -> StopHandle {
         StopHandle(self.stop_flag.clone())
     }
@@ -732,6 +737,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// - `emu_stop`/`StopHandle::stop` was called
     /// - CPU enters HLT/MWAIT with no pending interrupts
     /// - CPU triple-faults into shutdown
+    #[cfg(feature = "alloc")]
     pub fn emu_start(
         &mut self,
         begin: u64,
@@ -797,6 +803,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 
     /// Execute exactly one instruction from the current RIP.
+    #[cfg(feature = "alloc")]
     pub fn step_one(&mut self) -> Result<()>
     where
         'a: 'static,
@@ -810,6 +817,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
 // ─────────────────────────── CpuSetupMode builders ───────────────────────────
 
+#[cfg(feature = "alloc")]
 impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
     /// Create a new emulator with guest memory allocated but no BIOS loaded,
     /// pre-configured for the given CPU mode. See [`CpuSetupMode`].
@@ -835,6 +843,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
     /// Create a new emulator pre-configured for the given CPU mode with a
     /// monomorphized tracer. Combines `new_with_instrumentation` + `setup_cpu_mode`.

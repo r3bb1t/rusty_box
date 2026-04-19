@@ -4,9 +4,7 @@ mod error;
 pub(crate) mod memory_rusty_box;
 pub mod memory_stub;
 pub mod misc_mem;
-#[cfg(feature = "alloc")]
 pub mod permissions;
-#[cfg(feature = "alloc")]
 pub mod mmio;
 
 //#[cfg(test)]
@@ -14,10 +12,11 @@ pub mod mmio;
 
 pub use super::error::Result;
 use crate::{
-    config::BxPhyAddress,
+    config::{BxPhyAddress, MAX_HANDLER_OVERFLOW, MAX_MEM_BLOCKS},
     cpu::{BxCpuC, BxCpuIdTrait},
 };
-use alloc::{boxed::Box, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 pub use error::*;
 
 use core::cell::{Cell, UnsafeCell};
@@ -25,7 +24,7 @@ use core::cell::{Cell, UnsafeCell};
 #[cfg(feature = "std")]
 use std::fs::File;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Block {
     Block { offset: usize },
     SwappedOut,
@@ -39,11 +38,13 @@ pub struct BxMemoryStubC {
     allocated: usize,
     /// individual block size, must be power of 2
     block_size: usize,
-    actual_vector: Vec<u8>,
+    actual_vector: *mut u8,
+    actual_vector_len: usize,
     /// aligned correctly
     vector_offset: usize,
     /// None if swapped out
-    blocks_offsets: UnsafeCell<Vec<Block>>,
+    blocks_offsets: UnsafeCell<[Block; MAX_MEM_BLOCKS]>,
+    num_blocks: usize,
     /// 512k BIOS rom space + 128k expansion rom space
     rom_offset: usize,
     /// 4k for unexisting memory
@@ -61,6 +62,10 @@ pub struct BxMemoryStubC {
     //swapped_out: *const u8,
 }
 
+// SAFETY: The raw pointer `actual_vector` is owned exclusively by this struct
+// (allocated once, never aliased). UnsafeCell fields are only accessed single-threaded.
+unsafe impl Send for BxMemoryStubC {}
+
 type Unsigned = u32;
 
 /// Identifies which device owns a memory-mapped I/O handler.
@@ -72,6 +77,7 @@ type Unsigned = u32;
 pub(crate) enum MemoryDeviceId {
     Vga(*mut crate::iodev::vga::BxVgaC),
     IoApic(*mut crate::iodev::ioapic::BxIoApic),
+    None,
 }
 
 impl core::fmt::Debug for MemoryDeviceId {
@@ -79,6 +85,7 @@ impl core::fmt::Debug for MemoryDeviceId {
         match self {
             Self::Vga(p) => write!(f, "Vga({:p})", p),
             Self::IoApic(p) => write!(f, "IoApic({:p})", p),
+            Self::None => write!(f, "None"),
         }
     }
 }
@@ -113,7 +120,7 @@ impl MemoryDeviceId {
 
 #[derive(Debug)]
 pub(super) struct MemoryHandlerStruct {
-    next: Option<Box<MemoryHandlerStruct>>,
+    next: Option<u16>,
     pub(super) begin: BxPhyAddress,
     pub(super) end: BxPhyAddress,
     bitmap: u16,
@@ -128,7 +135,12 @@ static BIOS_ROM_1MEG: u8 = 0x04;
 
 #[derive(Debug)]
 pub struct BxMemC<'a> {
+    #[cfg(feature = "alloc")]
     memory_handlers: Vec<Option<MemoryHandlerStruct>>,
+    #[cfg(not(feature = "alloc"))]
+    memory_handlers: [Option<MemoryHandlerStruct>; 4096],
+    handler_overflow: [Option<MemoryHandlerStruct>; MAX_HANDLER_OVERFLOW],
+    handler_overflow_count: usize,
     pci_enabled: bool,
     bios_write_enabled: bool,
 
@@ -172,7 +184,7 @@ impl BxMemC<'_> {
     pub fn peek_ram(&self, addr: usize, len: usize) -> &[u8] {
         let stub = &self.inherited_memory_stub;
         let real_addr = stub.vector_offset + addr;
-        let ram = &stub.actual_vector;
+        let ram = stub.actual_vector_slice();
         if real_addr < ram.len() {
             let end = (real_addr + len).min(ram.len());
             &ram[real_addr..end]
@@ -203,31 +215,39 @@ impl BxMemC<'_> {
 
 // implement getters and setters for memory stub
 impl BxMemoryStubC {
-    #[allow(clippy::mut_from_ref)]
+    /// Reconstruct the full backing buffer as a shared slice.
+    pub(crate) fn actual_vector_slice(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.actual_vector, self.actual_vector_len) }
+    }
+
+    /// Reconstruct the full backing buffer as a mutable slice.
+    pub(crate) fn actual_vector_mut(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.actual_vector, self.actual_vector_len) }
+    }
+
     pub fn actual_vector(&mut self) -> &mut [u8] {
-        //unsafe { &mut (*self.actual_vector.get()) }
-        //unsafe { &mut (*self.actual_vector.get()) }
-        &mut self.actual_vector
+        self.actual_vector_mut()
     }
 
     #[allow(clippy::mut_from_ref)]
-    fn blocks_offsets(&self) -> &mut Vec<Block> {
-        unsafe { &mut (*self.blocks_offsets.get()) }
+    fn blocks_offsets(&self) -> &mut [Block] {
+        let arr = unsafe { &mut (*self.blocks_offsets.get()) };
+        &mut arr[..self.num_blocks]
     }
 
     pub fn vector(&mut self) -> &mut [u8] {
-        //&mut self.actual_vector()[self.vector_offset..]
-        &mut self.actual_vector[self.vector_offset..]
+        let vo = self.vector_offset;
+        &mut self.actual_vector_mut()[vo..]
     }
 
     pub fn rom(&mut self) -> &mut [u8] {
-        //&mut (self.actual_vector()[self.rom_offset..])
-        &mut self.actual_vector[self.rom_offset..]
+        let ro = self.rom_offset;
+        &mut self.actual_vector_mut()[ro..]
     }
 
     pub fn bogus(&mut self) -> &mut [u8] {
-        //&mut (self.actual_vector()[self.bogus_offset..])
-        &mut self.actual_vector[self.bogus_offset..]
+        let bo = self.bogus_offset;
+        &mut self.actual_vector_mut()[bo..]
     }
 
     pub fn apic_scratch(&mut self) -> &mut [u8] {
@@ -240,11 +260,9 @@ impl BxMemoryStubC {
     pub fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
         if let Some(Block::Block { offset }) = self.blocks_offsets().get(index) {
             let start = self.vector_offset + *offset;
-            let _end = start + self.block_size;
             // SAFETY: We're accessing within bounds of actual_vector via interior mutability pattern
-            let vec_ptr = self.actual_vector.as_ptr() as *mut u8;
             let slice =
-                unsafe { core::slice::from_raw_parts_mut(vec_ptr.add(start), self.block_size) };
+                unsafe { core::slice::from_raw_parts_mut(self.actual_vector.add(start), self.block_size) };
             Some(slice)
         } else {
             None
@@ -282,14 +300,15 @@ impl<'m> BxMemC<'m> {
     /// Direct read access to physical RAM for debug inspection (with vector_offset applied)
     pub(crate) fn ram_slice(&self) -> &[u8] {
         let stub = &self.inherited_memory_stub;
-        &stub.actual_vector[stub.vector_offset..]
+        let v = stub.actual_vector_slice();
+        &v[stub.vector_offset..]
     }
 
     /// Get raw pointer to memory for direct CPU access
     /// SAFETY: Caller must ensure the pointer is only used while memory is valid
     pub fn get_raw_memory_ptr(&mut self) -> (*mut u8, usize) {
-        let ptr = self.inherited_memory_stub.actual_vector.as_mut_ptr();
-        let len = self.inherited_memory_stub.actual_vector.len();
+        let ptr = self.inherited_memory_stub.actual_vector;
+        let len = self.inherited_memory_stub.actual_vector_len;
         (ptr, len)
     }
 
@@ -301,12 +320,7 @@ impl<'m> BxMemC<'m> {
     /// SAFETY: Caller must ensure the pointer is only used while memory is valid.
     pub fn get_ram_base_ptr(&mut self) -> (*mut u8, usize) {
         let vo = self.inherited_memory_stub.vector_offset;
-        let ptr = unsafe {
-            self.inherited_memory_stub
-                .actual_vector
-                .as_mut_ptr()
-                .add(vo)
-        };
+        let ptr = unsafe { self.inherited_memory_stub.actual_vector.add(vo) };
         let len = self.inherited_memory_stub.len; // guest RAM size
         (ptr, len)
     }
@@ -336,18 +350,20 @@ impl<'m> BxMemC<'m> {
     }
 
     /// Read bytes from the ROM array at the given offset (for diagnostics).
-    pub fn peek_rom(&self, offset: usize, len: usize) -> Vec<u8> {
+    pub fn peek_rom(&self, offset: usize, len: usize) -> &[u8] {
         let stub = &self.inherited_memory_stub;
         let rom_start = stub.rom_offset;
-        let rom = &stub.actual_vector[rom_start..];
+        let v = stub.actual_vector_slice();
+        let rom = &v[rom_start..];
         let end = (offset + len).min(rom.len());
         if offset < rom.len() {
-            rom[offset..end].to_vec()
+            &rom[offset..end]
         } else {
-            Vec::new()
+            &[]
         }
     }
 }
+#[cfg(feature = "alloc")]
 impl<'m> BxMemC<'m> {
     pub fn init_memory(
         &mut self,
@@ -356,7 +372,7 @@ impl<'m> BxMemC<'m> {
         block_size: usize,
     ) -> Result<()> {
         let mem_stub = BxMemoryStubC::create_and_init(guest_size, host_size, block_size)?;
-        self.inherited_memory_stub = mem_stub;
+        self.inherited_memory_stub = *mem_stub;
         self.rom_present = [false; 65];
         self.bios_rom_addr = 0xffff0000;
         self.memory_type = [[false, false]; 13];

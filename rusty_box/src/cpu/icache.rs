@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-use alloc::{vec, vec::Vec};
 
 use crate::{
     config::BxPhyAddress,
@@ -155,9 +154,8 @@ const PHY_MEM_PAGES: usize = 1024 * 1024;
 
 pub struct BxICache {
     pub(crate) entry: [BxICacheEntry; BX_ICACHE_ENTRIES],
-    /// Vec to avoid stack overflow - this is ~15 MB!
-    /// Using Vec instead of array moves allocation to heap
-    pub(crate) mpool: Vec<Instruction>,
+    /// Large array (~15 MB) — struct should be heap-allocated (e.g. via Box).
+    pub(crate) mpool: [Instruction; BX_ICACHE_MEM_POOL],
     pub(crate) mpindex: usize,
     next_page_split_index: usize,
     page_split_index: [PageSplitEntry; BX_ICACHE_ENTRIES],
@@ -172,7 +170,7 @@ pub struct BxICache {
     /// `handle_smc_scan()` is called to invalidate affected icache entries.
     /// This avoids the previous bug where `invalidate_page()` only checked one
     /// hash index and missed entries at other offsets within the page.
-    page_write_stamps: Vec<u32>,
+    page_write_stamps: [u32; PHY_MEM_PAGES],
 }
 
 #[derive(Clone, Debug)]
@@ -214,14 +212,11 @@ impl BxICache {
                 mpool_start_idx: 0,
                 first_bytes: [0; 8],
             }),
-            // Allocate on heap to avoid 15 MB stack allocation
-            // vec![val; size] is efficient and heap-allocated
-            mpool: vec![Instruction::default(); BX_ICACHE_MEM_POOL],
+            mpool: core::array::from_fn(|_| Instruction::default()),
             mpindex: 0,
             next_page_split_index: 0,
             page_split_index: core::array::from_fn(|_| PageSplitEntry::default()),
-            // 4MB heap allocation for 1M pages covering full 4GB physical address space
-            page_write_stamps: vec![0u32; PHY_MEM_PAGES],
+            page_write_stamps: [0u32; PHY_MEM_PAGES],
         }
     }
 

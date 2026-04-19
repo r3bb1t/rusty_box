@@ -1086,7 +1086,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    #[cfg(feature = "alloc")]
     #[inline]
     fn mmio_read(&mut self, paddr: u64, size: usize) -> Option<u64> {
         if self.mmio.is_empty() { return None; }
@@ -1096,7 +1095,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         None
     }
 
-    #[cfg(feature = "alloc")]
     #[inline]
     fn mmio_write(&mut self, paddr: u64, size: usize, val: u64) -> bool {
         if self.mmio.is_empty() { return false; }
@@ -1127,7 +1125,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let paddr = self.translate_data_read(laddr)?;
         #[cfg(feature = "instrumentation")]
         self.check_perm_read(laddr, paddr, 1)?;
-        #[cfg(feature = "alloc")]
         if let Some(val) = self.mmio_read(paddr, 1) {
             return Ok(val as u8);
         }
@@ -1161,7 +1158,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let paddr = self.translate_data_read(laddr)?;
             #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr, 2)?;
-            #[cfg(feature = "alloc")]
             if let Some(val) = self.mmio_read(paddr, 2) {
                 return Ok(val as u16);
             }
@@ -1202,7 +1198,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let paddr = self.translate_data_read(laddr)?;
             #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr, 4)?;
-            #[cfg(feature = "alloc")]
             if let Some(val) = self.mmio_read(paddr, 4) {
                 return Ok(val as u32);
             }
@@ -1244,7 +1239,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let paddr = self.translate_data_read(laddr)?;
             #[cfg(feature = "instrumentation")]
             self.check_perm_read(laddr, paddr, 8)?;
-            #[cfg(feature = "alloc")]
             if let Some(val) = self.mmio_read(paddr, 8) {
                 return Ok(val);
             }
@@ -1282,7 +1276,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let paddr = self.translate_data_write(laddr)?;
         #[cfg(feature = "instrumentation")]
         self.check_perm_write(laddr, paddr, 1)?;
-        #[cfg(feature = "alloc")]
         if self.mmio_write(paddr, 1, val as u64) {
             return Ok(());
         }
@@ -1317,7 +1310,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let paddr = self.translate_data_write(laddr)?;
             #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 2)?;
-            #[cfg(feature = "alloc")]
             if self.mmio_write(paddr, 2, val as u64) {
                 return Ok(());
             }
@@ -1367,7 +1359,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let paddr = self.translate_data_write(laddr)?;
             #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 4)?;
-            #[cfg(feature = "alloc")]
             if self.mmio_write(paddr, 4, val as u64) {
                 return Ok(());
             }
@@ -1412,7 +1403,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let paddr = self.translate_data_write(laddr)?;
             #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 8)?;
-            #[cfg(feature = "alloc")]
             if self.mmio_write(paddr, 8, val) {
                 return Ok(());
             }

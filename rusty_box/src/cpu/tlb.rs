@@ -1,6 +1,5 @@
 #![allow(private_interfaces, unused_assignments, dead_code)]
 
-use alloc::vec::Vec;
 
 use crate::config::{BxAddress, BxPhyAddress, BxPtrEquiv};
 
@@ -98,11 +97,7 @@ impl<const SIZE: usize> Tlb<SIZE> {
         // Initialize each entry via its `Default` or `new()` constructor:
         let entries: [TLBEntry; SIZE] = {
             // Trick: build from an array of `TLBEntry::new()`
-            let mut tmp: Vec<TLBEntry> = Vec::with_capacity(SIZE);
-            for _ in 0..SIZE {
-                tmp.push(TLBEntry::new());
-            }
-            tmp.try_into().unwrap_or_else(|_| unreachable!("Vec length equals SIZE by construction"))
+            core::array::from_fn(|_| TLBEntry::new())
         };
 
         // If we had a split_large field, initialize it here:

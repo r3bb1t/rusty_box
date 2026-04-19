@@ -3585,7 +3585,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 }
                 tracing::error!("Unimplemented opcode: {:?} at RIP={:#x}", instr.get_ia_opcode(), self.prev_rip);
                 Err(crate::cpu::CpuError::UnimplementedOpcode {
-                    opcode: alloc::format!("{:?}", instr.get_ia_opcode()),
+                    opcode: "unimplemented opcode",
                 })
             }
         }

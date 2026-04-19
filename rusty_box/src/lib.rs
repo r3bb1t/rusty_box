@@ -3,40 +3,34 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-// Always available: CPU instrumentation types and trait (no alloc needed)
+// Always available: core emulation modules (no alloc needed)
 pub mod cpu;
-
-// Everything below requires heap allocation
-#[cfg(feature = "alloc")]
-pub mod error;
-#[cfg(feature = "alloc")]
-pub use error::{Error, Result};
-
-#[cfg(feature = "alloc")]
-mod config;
-#[cfg(feature = "alloc")]
+pub mod config;
 mod crc;
-#[cfg(feature = "alloc")]
+pub mod error;
+pub use error::{Error, Result};
+pub mod memory;
+mod misc;
+pub mod params;
+pub mod pc_system;
+pub mod boot;
+pub mod pic;
+pub mod dma;
+pub mod ring_buffer;
+
+// Emulator modules — core types always available,
+// alloc-dependent methods gated internally per-method.
 pub mod emulator;
-#[cfg(feature = "alloc")]
 pub mod emulator_api;
 #[cfg(feature = "alloc")]
 pub use emulator_api::StopHandle;
 #[cfg(feature = "alloc")]
 pub mod gui;
-#[cfg(feature = "alloc")]
 pub mod iodev;
-#[cfg(feature = "alloc")]
-pub mod memory;
-#[cfg(feature = "alloc")]
-mod misc;
-#[cfg(feature = "alloc")]
-pub mod params;
-#[cfg(feature = "alloc")]
-pub mod pc_system;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "std")]
 pub mod snapshot;
 
-// Re-export commonly used types (alloc-gated since Emulator needs alloc)
+// Re-export commonly used types
+pub use emulator::EmulatorConfig;
 #[cfg(feature = "alloc")]
-pub use emulator::{Emulator, EmulatorConfig};
+pub use emulator::Emulator;
