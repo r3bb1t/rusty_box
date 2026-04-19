@@ -2536,7 +2536,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "rusty_box"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "bitflags 2.11.0",
  "byteorder",
@@ -2564,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_box_uefi"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "log",
  "rusty_box",

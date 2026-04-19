@@ -1,16 +1,15 @@
 [package]
 name = "rusty_box_uefi"
-version = "0.0.2"
-edition = "2021"
-license = "LGPL-2.1-or-later"
-authors = ["Aslan Gurtsiev"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
 description = "Rusty Box x86 emulator — UEFI bootable application (emulator-in-emulator)"
 
 [dependencies]
 rusty_box = { path = "../../rusty_box", default-features = false }
 uefi = { version = "0.33", features = ["logger"] }
 log = "0.4"
-
 
 [features]
 verbose = []
