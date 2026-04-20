@@ -6,7 +6,7 @@
 //! tables, etc.) through a selector/data port pair at 0x510-0x511 and a DMA
 //! interface at 0x514-0x51B.
 //!
-//! Reference: `cpp_orig/bochs_new/iodev/fw_cfg.cc` (700 lines)
+//! Reference: `cpp_orig/bochs/iodev/fw_cfg.cc` (700 lines)
 
 use crate::memory::BxMemC;
 

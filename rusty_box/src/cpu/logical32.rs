@@ -31,6 +31,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if sf {
             self.eflags.insert(EFlags::SF);
         }
+        self.oszapc.set_oszapc_logic_32(result);
     }
 
     /// Update flags for 32-bit subtraction
@@ -62,6 +63,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if of {
             self.eflags.insert(EFlags::OF);
         }
+        self.oszapc.set_oszapc_sub_32(op1, op2, result);
     }
 
     // =========================================================================

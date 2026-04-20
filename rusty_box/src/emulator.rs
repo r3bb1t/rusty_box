@@ -22,8 +22,10 @@ use crate::{
 };
 
 #[cfg(feature = "alloc")]
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use core::sync::atomic::AtomicBool;
+#[cfg(feature = "alloc")]
+use core::sync::atomic::Ordering;
 
 /// Emulator configuration
 #[derive(Debug, Clone)]
@@ -177,9 +179,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Wires the memory bus so the interrupt path can read IVT/IDT and push
     /// stack frames, then clears it after injection.
     ///
+    /// Used by `run_interactive` / `step_batch` for manual interrupt delivery
+    /// between CPU batches. Also available for no-alloc callers doing their
+    /// own batch loops (e.g. UEFI example).
+    ///
     /// # Safety
     /// Same invariants as `borrow_memory_for_cpu`.
-    unsafe fn inject_interrupt(&mut self, vector: u8) -> crate::cpu::Result<()> {
+    pub unsafe fn inject_interrupt(&mut self, vector: u8) -> crate::cpu::Result<()> {
         let mem_extended = self.borrow_memory_for_cpu();
         self.cpu.set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
         let r = self.cpu.inject_external_interrupt(vector);
@@ -1723,6 +1729,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         const GUI_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40);
         #[cfg(feature = "std")]
         const IPS_SHOW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        #[cfg(feature = "std")]
         const MIPS_LOG_INTERVAL: u64 = 50_000_000;
         let mut last_port92_value: u8 = self.device_manager.port92.value;
 

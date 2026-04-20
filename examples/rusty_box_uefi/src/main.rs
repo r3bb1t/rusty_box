@@ -247,6 +247,16 @@ fn run() -> Status {
         let dev_usec = (n * 1_000_000 / 300_000_000u64).max(1);
         emu.tick_devices(dev_usec);
 
+        // Sync PIC/LAPIC interrupt flags to CPU async_event
+        emu.sync_event_flags();
+
+        // Deliver PIC interrupt between batches if pending.
+        // Inhibition window (MOV SS/STI) expired during the batch.
+        if emu.device_manager.has_interrupt() && emu.cpu.interrupts_enabled() {
+            let vec = emu.iac();
+            unsafe { let _ = emu.inject_interrupt(vec); }
+        }
+
         // Port 92h A20 sync
         emu.sync_port92_a20(&mut last_port92);
 

@@ -7,8 +7,10 @@
 //! `&mut Emulator` surface.
 
 #[cfg(feature = "alloc")]
-use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::sync::atomic::Ordering;
+#[cfg(feature = "alloc")]
+use core::sync::atomic::AtomicBool;
 
 #[cfg(feature = "instrumentation")]
 use core::ops::RangeBounds;
@@ -20,9 +22,15 @@ use crate::cpu::instrumentation::{
     BranchEvent, HookHandle, HwInterruptEvent, InstrumentationError, IoHookEvent, IoHookType,
     MemHookEvent, MemHookType,
 };
-use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, EmuStopReason, X86Reg};
-use crate::cpu::{BxCpuIdTrait, ResetReason};
-use crate::emulator::{Emulator, EmulatorConfig};
+use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, X86Reg};
+#[cfg(feature = "alloc")]
+use crate::cpu::instrumentation::EmuStopReason;
+use crate::cpu::BxCpuIdTrait;
+#[cfg(feature = "alloc")]
+use crate::cpu::ResetReason;
+use crate::emulator::Emulator;
+#[cfg(feature = "alloc")]
+use crate::emulator::EmulatorConfig;
 use crate::{Error, Result};
 
 

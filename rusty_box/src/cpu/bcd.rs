@@ -4,28 +4,7 @@
 // Mirrors Bochs cpp/cpu/bcd.cc
 
 use crate::cpu::decoder::Instruction;
-use crate::cpu::eflags::EFlags;
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
-
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
-    /// Set AF flag (bit 4)
-    fn set_af(&mut self, val: bool) {
-        if val {
-            self.eflags.insert(EFlags::AF);
-        } else {
-            self.eflags.remove(EFlags::AF);
-        }
-    }
-
-    /// Set CF flag (bit 0)
-    pub(super) fn set_cf(&mut self, val: bool) {
-        if val {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
-    }
-}
 
 /// AAA: ASCII Adjust After Addition
 /// Opcode: 0x37

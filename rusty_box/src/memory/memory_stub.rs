@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 #[cfg(feature = "alloc")]
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use byteorder::{ByteOrder, LittleEndian};
 #[cfg(feature = "std")]
 use tempfile::tempfile;
@@ -211,6 +211,10 @@ impl BxMemoryStubC {
     }
 
     pub fn allocate_block<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(&self, block: usize, cpus: &[&BxCpuC<'_, I, T>]) -> Result<()> {
+        // Without std, block swapping to overflow file is unavailable.
+        // The params are used in the std path below.
+        #[cfg(not(feature = "std"))]
+        let _ = (block, &cpus);
         #[cfg(feature = "std")]
         {
             let max_blocks = self.allocated / self.block_size;

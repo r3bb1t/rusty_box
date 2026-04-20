@@ -513,17 +513,12 @@ impl BxMemC<'_> {
 
                 while let Some(handler) = current_handler {
                     if handler.begin <= a20_addr && handler.end >= a20_addr {
-                        #[cfg(feature = "alloc")]
-                        let handled = if let Some(vga) = handler.device_id.vga_mut() {
-                            vga.mem_write(a20_addr, len as u32, &data[..len])
+                        // Bochs: memory_handler->write_handler(a20addr, 1, buf, param)
+                        if let Some(vga) = handler.device_id.vga_mut() {
+                            vga.mem_write(a20_addr, len as u32, &data[..len]);
+                            return Ok(());
                         } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
-                            ioapic.mem_write(a20_addr, len as u32, &data[..len])
-                        } else {
-                            unreachable!("unknown MMIO handler device")
-                        };
-                        #[cfg(not(feature = "alloc"))]
-                        let handled = unreachable!("MMIO handlers require alloc");
-                        if handled {
+                            ioapic.mem_write(a20_addr, len as u32, &data[..len]);
                             return Ok(());
                         }
                     }
@@ -688,28 +683,13 @@ impl BxMemC<'_> {
 
                 while let Some(handler) = current_handler {
                     if handler.begin <= a20_addr && handler.end >= a20_addr {
-                        #[cfg(feature = "alloc")]
-                        let handled = if let Some(vga) = handler.device_id.vga_mut() {
-                            vga.mem_read(a20_addr, len as u32, data)
+                        // Bochs: memory_handler->read_handler(a20addr, 1, buf, param)
+                        if let Some(vga) = handler.device_id.vga_mut() {
+                            vga.mem_read(a20_addr, len as u32, data);
+                            return Ok(());
                         } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
-                            ioapic.mem_read(a20_addr, len as u32, data)
-                        } else {
-                            unreachable!("unknown MMIO handler device")
-                        };
-                        #[cfg(not(feature = "alloc"))]
-                        let handled = unreachable!("MMIO handlers require alloc");
-                        if handled {
-                            if self.pci_enabled && ((a20_addr & 0xfffc0000) == 0x000c0000) {
-                                let area = ((a20_addr >> 14) & 0x0f) as usize;
-                                let area = area.min(MemoryAreaT::F0000 as usize);
-                                if !self.memory_type[area][0] {
-                                    // Read from ROM, not shadow RAM - continue to ROM read below
-                                } else {
-                                    return Ok(()); // Handler processed the read from shadow RAM
-                                }
-                            } else {
-                                return Ok(()); // Handler processed the read
-                            }
+                            ioapic.mem_read(a20_addr, len as u32, data);
+                            return Ok(());
                         }
                     }
                     current_handler = handler.next.and_then(|idx| self.handler_overflow[idx as usize].as_ref());

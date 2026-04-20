@@ -2295,6 +2295,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if of {
             self.eflags.insert(EFlags::OF);
         }
+        self.oszapc.set_oszapc_add_32(op1, op2, res);
     }
 
     pub(super) fn update_flags_sub32(&mut self, op1: u32, op2: u32, res: u32) {
@@ -2330,6 +2331,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if of {
             self.eflags.insert(EFlags::OF);
         }
+        self.oszapc.set_oszapc_sub_32(op1, op2, res);
     }
 
     // execute_instruction() is in dispatcher.rs
@@ -2367,6 +2369,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if of {
             self.eflags.insert(EFlags::OF);
         }
+        self.oszapc.set_oszapc_add_8(op1, op2, result);
     }
 
     pub(super) fn update_flags_add16(&mut self, op1: u16, op2: u16, result: u16) {
@@ -2400,6 +2403,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if of {
             self.eflags.insert(EFlags::OF);
         }
+        self.oszapc.set_oszapc_add_16(op1, op2, result);
     }
 
     pub(super) fn update_flags_sub8(&mut self, op1: u8, op2: u8, result: u8) {
@@ -2433,6 +2437,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if of {
             self.eflags.insert(EFlags::OF);
         }
+        self.oszapc.set_oszapc_sub_8(op1, op2, result);
     }
 
     pub(super) fn update_flags_sub16(&mut self, op1: u16, op2: u16, result: u16) {
@@ -2466,6 +2471,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if of {
             self.eflags.insert(EFlags::OF);
         }
+        self.oszapc.set_oszapc_sub_16(op1, op2, result);
     }
 
     pub(super) fn update_flags_logic8(&mut self, result: u8) {
@@ -2474,6 +2480,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         self.eflags.set(EFlags::SF, (result & 0x80) != 0);
         self.eflags.set(EFlags::ZF, result == 0);
         self.eflags.set(EFlags::PF, result.count_ones().is_multiple_of(2));
+        self.oszapc.set_oszapc_logic_8(result);
     }
 
     pub(super) fn update_flags_logic16(&mut self, result: u16) {
@@ -2482,6 +2489,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         self.eflags.set(EFlags::ZF, result == 0);
         self.eflags
             .set(EFlags::PF, ((result & 0xFF) as u8).count_ones().is_multiple_of(2));
+        self.oszapc.set_oszapc_logic_16(result);
     }
 
     /// Get segment base address safely
@@ -2517,6 +2525,98 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Set PF (parity flag), based on low 8 bits
         let low_byte = (result & 0xFF) as u8;
         self.eflags.set(EFlags::PF, low_byte.count_ones().is_multiple_of(2));
+        self.oszapc.set_oszapc_logic_32(result);
+    }
+
+    // ── Bochs lazy-flag bridge (cpu.h, lazy_flags.h) ────────────────
+    // These methods are the interface for lazy flag evaluation.
+    // Wire individual call sites to these as you migrate from eflags.
+    // See docs/future-plans/lazy-flags-read-side.md for the plan.
+
+    /// Read a single arithmetic flag from the lazy `oszapc` store.
+    #[inline] pub(super) fn getb_cf(&self) -> u32 { self.oszapc.getb_cf() }
+    #[inline] pub(super) fn getb_pf(&self) -> u32 { self.oszapc.getb_pf() }
+    #[inline] pub(super) fn getb_af(&self) -> u32 { self.oszapc.getb_af() }
+    #[inline] pub(super) fn getb_zf(&self) -> u32 { self.oszapc.getb_zf() }
+    #[inline] pub(super) fn getb_sf(&self) -> u32 { self.oszapc.getb_sf() }
+    #[inline] pub(super) fn getb_of(&self) -> u32 { self.oszapc.getb_of() }
+
+    /// Write a single arithmetic flag into the lazy `oszapc` store.
+    #[inline] pub(super) fn set_cf(&mut self, val: bool) { self.oszapc.set_cf(val) }
+    #[inline] pub(super) fn set_pf(&mut self, val: bool) { self.oszapc.set_pf(val) }
+    #[inline] pub(super) fn set_af(&mut self, val: bool) { self.oszapc.set_af(val) }
+    #[inline] pub(super) fn set_zf(&mut self, val: bool) { self.oszapc.set_zf(val) }
+    #[inline] pub(super) fn set_sf(&mut self, val: bool) { self.oszapc.set_sf(val) }
+    #[inline] pub(super) fn set_of(&mut self, val: bool) { self.oszapc.set_of(val) }
+
+    /// Materialize all six arithmetic flags from `oszapc` into `eflags`.
+    /// Bochs `force_flags()`. Call before any code that reads the full
+    /// `eflags` register (PUSHF, LAHF, interrupt delivery, etc.).
+    #[allow(dead_code)]
+    pub(super) fn force_flags(&mut self) {
+        let new = self.oszapc.getb_cf()
+            | (self.oszapc.getb_pf() << 2)
+            | (self.oszapc.getb_af() << 4)
+            | (self.oszapc.getb_zf() << 6)
+            | (self.oszapc.getb_sf() << 7)
+            | (self.oszapc.getb_of() << 11);
+        let mask = EFlags::OSZAPC.bits();
+        self.eflags = EFlags::from_bits_retain(
+            (self.eflags.bits() & !mask) | (new & mask)
+        );
+    }
+
+    /// Materialize lazy flags then return the full `eflags` value.
+    /// Bochs `read_eflags()`.
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn read_eflags(&mut self) -> u32 {
+        self.force_flags();
+        self.eflags.bits()
+    }
+
+    /// Compute the full eflags value without mutating state.
+    /// Use when only `&self` is available (snapshot, API reads).
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn eflags_materialized(&self) -> u32 {
+        let new = self.oszapc.getb_cf()
+            | (self.oszapc.getb_pf() << 2)
+            | (self.oszapc.getb_af() << 4)
+            | (self.oszapc.getb_zf() << 6)
+            | (self.oszapc.getb_sf() << 7)
+            | (self.oszapc.getb_of() << 11);
+        let mask = EFlags::OSZAPC.bits();
+        (self.eflags.bits() & !mask) | (new & mask)
+    }
+
+    /// Sync raw `eflags` arithmetic bits into `oszapc`.
+    /// Bochs `setEFlagsOSZAPC()`. Call after any code that writes
+    /// raw arithmetic bits into `eflags` (POPF, SAHF, IRET, etc.).
+    #[allow(dead_code)]
+    pub(super) fn set_eflags_oszapc(&mut self, flags32: u32) {
+        self.oszapc.set_of((flags32 >> 11) & 1 != 0);
+        self.oszapc.set_sf((flags32 >> 7) & 1 != 0);
+        self.oszapc.set_zf((flags32 >> 6) & 1 != 0);
+        self.oszapc.set_af((flags32 >> 4) & 1 != 0);
+        self.oszapc.set_pf((flags32 >> 2) & 1 != 0);
+        self.oszapc.set_cf(flags32 & 1 != 0);
+    }
+
+    /// Debug helper: assert oszapc matches eager eflags.
+    /// Call after any flag-setting operation during development.
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(super) fn assert_oszapc_matches_eflags(&self, ctx: &str) {
+        let ef = self.eflags.bits();
+        let ecf = ef & 1; let epf = (ef >> 2) & 1; let eaf = (ef >> 4) & 1;
+        let ezf = (ef >> 6) & 1; let esf = (ef >> 7) & 1; let eof = (ef >> 11) & 1;
+        let ocf = self.oszapc.getb_cf(); let opf = self.oszapc.getb_pf();
+        let oaf = self.oszapc.getb_af(); let ozf = self.oszapc.getb_zf();
+        let osf = self.oszapc.getb_sf(); let oof = self.oszapc.getb_of();
+        assert!(ecf == ocf && epf == opf && eaf == oaf && ezf == ozf && esf == osf && eof == oof,
+            "{ctx}: eflags CF={ecf} PF={epf} AF={eaf} ZF={ezf} SF={esf} OF={eof} \
+             vs oszapc CF={ocf} PF={opf} AF={oaf} ZF={ozf} SF={osf} OF={oof}");
     }
 
     fn before_execution(&mut self, _cpu_id: u32) {

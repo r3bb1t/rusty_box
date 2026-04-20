@@ -1215,10 +1215,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bulk-read from an I/O port into `buf`.
     /// Returns the number of bytes actually read. If the port doesn't support
     /// bulk reads (or no IO bus is wired), returns 0.
-    fn bulk_port_in(&mut self, port: u16, buf: &mut [u8]) -> usize {
+    fn bulk_port_in(&mut self, _port: u16, _buf: &mut [u8]) -> usize {
         #[cfg(feature = "alloc")]
         if let Some(io) = self.io_bus_mut() {
-            return io.inp_bulk(port, buf);
+            return io.inp_bulk(_port, _buf);
         }
         0
     }
@@ -1229,12 +1229,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Otherwise it falls back to conservative defaults (useful for unit tests
     /// that don't wire devices and never execute real firmware).
     fn port_in(&mut self, port: u16, len: u8) -> u32 {
+        let _ = &port; // used by alloc/instrumentation paths
         // BOCHS BX_INSTR_INP(addr, len) — fires before the port read.
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_io() {
             self.instrumentation.fire_inp(port, len);
         }
 
+        #[cfg(feature = "alloc")]
         let icount = self.icount;
         #[cfg(feature = "alloc")]
         let value = if let Some(io) = self.io_bus_mut() {

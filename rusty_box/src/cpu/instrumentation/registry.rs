@@ -37,11 +37,11 @@ use super::hooks::{
 };
 use super::types::{
     BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, IoHookEvent,
-    LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemUnmapped,
+    LinAccess, MemPermViolation, MemUnmapped,
     MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType, TlbCntrl,
 };
 #[cfg(feature = "instrumentation")]
-use super::types::{HookHandle, IoHookType, MemHookType};
+use super::types::{HookHandle, IoHookType, MemAccessRW, MemHookEvent, MemHookType};
 
 /// Error returned by registry mutation methods.
 #[cfg(feature = "instrumentation")]

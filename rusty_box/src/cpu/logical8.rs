@@ -35,6 +35,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.eflags.insert(EFlags::SF);
         }
         // OF=0, CF=0 are already cleared
+        self.oszapc.set_oszapc_logic_8(result);
     }
 
     /// Update flags for 8-bit subtraction (CMP, SUB)
@@ -66,6 +67,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if of {
             self.eflags.insert(EFlags::OF);
         }
+        self.oszapc.set_oszapc_sub_8(op1, op2, result);
     }
 
     // =========================================================================

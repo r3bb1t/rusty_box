@@ -4,7 +4,7 @@
 //! Based on bx_gui_c class from gui/gui.h
 //! This trait defines the interface that all GUI implementations must provide.
 
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 
 /// Display mode for the GUI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

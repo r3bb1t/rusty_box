@@ -38,6 +38,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if sf {
             self.eflags.insert(EFlags::SF);
         }
+        self.oszapc.set_oszapc_logic_64(result);
     }
 
     // =========================================================================

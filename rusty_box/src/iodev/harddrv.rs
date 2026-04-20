@@ -94,6 +94,8 @@
 use alloc::format;
 #[cfg(feature = "alloc")]
 use alloc::string::String;
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 use crate::ring_buffer::RingBuffer;
 use bitflags::bitflags;
 
@@ -1121,6 +1123,7 @@ impl AtaDrive {
     /// Prefers in-memory data if available, falls back to file I/O.
     fn ide_write_sector(&mut self) -> bool {
         let sector_count = self.controller.buffer_size / SECTOR_SIZE;
+        #[cfg(any(feature = "alloc", feature = "std"))]
         let mut buf_offset = 0;
 
         // In-memory alloc path — mutable Vec<u8>
@@ -1149,7 +1152,6 @@ impl AtaDrive {
         if self.disk_data_ref.is_some() {
             for _ in 0..sector_count {
                 self.increment_address();
-                buf_offset += SECTOR_SIZE;
             }
             return true;
         }

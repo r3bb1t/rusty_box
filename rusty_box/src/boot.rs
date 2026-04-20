@@ -6,7 +6,6 @@
 //!
 //! This is the no-alloc equivalent of `Emulator::setup_direct_linux_boot`.
 
-use crate::config::BxPhyAddress;
 use crate::cpu::{cpu::BxCpuC, cpuid::BxCpuIdTrait, instrumentation::Instrumentation};
 use crate::memory::BxMemC;
 
