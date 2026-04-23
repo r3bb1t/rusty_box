@@ -207,7 +207,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             (old_rsp.wrapping_sub(self.msr.ia32_fred_cfg & 0x1C0)) & !0x3F
         };
 
-        let old_eflags = self.eflags.bits();
+        let old_eflags = self.read_eflags();
 
         // CET shadow stack: compute old/new SSP before frame push
         let old_ssp = self.ssp();
@@ -270,8 +270,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Update registers defining context
         self.set_rip(new_rip);
-        self.eflags = EFlags::from_bits_retain(0x2); // Clear EFLAGS, bit 1 always set
-        self.eflags.remove(EFlags::OSZAPC);
+        // New context clears EFLAGS (bit 1 = reserved-1), including OSZAPC in the lazy store.
+        self.eflags = EFlags::from_bits_retain(0x2);
+        self.set_eflags_oszapc(0x2);
         self.set_rsp(new_rsp.wrapping_sub(64));
         self.set_csl(new_csl);
 

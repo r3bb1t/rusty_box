@@ -11,7 +11,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
 };
 
 /// Helper: read opmask register value (full 64-bit)
@@ -425,9 +424,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let result = s1 | s2;
         let zf = result == 0;
         let cf = result == MASK_B;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        // Bochs KORTEST/KTEST: clears OSZAPC, then sets ZF and CF from the mask result.
+        self.set_of(false); self.set_sf(false); self.set_af(false); self.set_pf(false);
+        self.set_zf(zf);
+        self.set_cf(cf);
         Ok(())
     }
     /// KORTESTW KGw, KEw
@@ -437,9 +437,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let result = s1 | s2;
         let zf = result == 0;
         let cf = result == MASK_W;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        // Bochs KORTEST/KTEST: clears OSZAPC, then sets ZF and CF from the mask result.
+        self.set_of(false); self.set_sf(false); self.set_af(false); self.set_pf(false);
+        self.set_zf(zf);
+        self.set_cf(cf);
         Ok(())
     }
     /// KORTESTD KGd, KEd
@@ -449,9 +450,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let result = s1 | s2;
         let zf = result == 0;
         let cf = result == MASK_D;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        // Bochs KORTEST/KTEST: clears OSZAPC, then sets ZF and CF from the mask result.
+        self.set_of(false); self.set_sf(false); self.set_af(false); self.set_pf(false);
+        self.set_zf(zf);
+        self.set_cf(cf);
         Ok(())
     }
     /// KORTESTQ KGq, KEq
@@ -461,9 +463,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let result = s1 | s2;
         let zf = result == 0;
         let cf = result == MASK_Q;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        // Bochs KORTEST/KTEST: clears OSZAPC, then sets ZF and CF from the mask result.
+        self.set_of(false); self.set_sf(false); self.set_af(false); self.set_pf(false);
+        self.set_zf(zf);
+        self.set_cf(cf);
         Ok(())
     }
 
@@ -477,9 +480,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let s2 = read_opmask(self, instr.src()) & MASK_B;
         let zf = (s1 & s2) == 0;
         let cf = ((!s1) & s2 & MASK_B) == 0;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        // Bochs KORTEST/KTEST: clears OSZAPC, then sets ZF and CF from the mask result.
+        self.set_of(false); self.set_sf(false); self.set_af(false); self.set_pf(false);
+        self.set_zf(zf);
+        self.set_cf(cf);
         Ok(())
     }
     /// KTESTW KGw, KEw
@@ -488,9 +492,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let s2 = read_opmask(self, instr.src()) & MASK_W;
         let zf = (s1 & s2) == 0;
         let cf = ((!s1) & s2 & MASK_W) == 0;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        // Bochs KORTEST/KTEST: clears OSZAPC, then sets ZF and CF from the mask result.
+        self.set_of(false); self.set_sf(false); self.set_af(false); self.set_pf(false);
+        self.set_zf(zf);
+        self.set_cf(cf);
         Ok(())
     }
     /// KTESTD KGd, KEd
@@ -499,9 +504,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let s2 = read_opmask(self, instr.src()) & MASK_D;
         let zf = (s1 & s2) == 0;
         let cf = ((!s1) & s2 & MASK_D) == 0;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        // Bochs KORTEST/KTEST: clears OSZAPC, then sets ZF and CF from the mask result.
+        self.set_of(false); self.set_sf(false); self.set_af(false); self.set_pf(false);
+        self.set_zf(zf);
+        self.set_cf(cf);
         Ok(())
     }
     /// KTESTQ KGq, KEq
@@ -510,9 +516,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let s2 = read_opmask(self, instr.src());
         let zf = (s1 & s2) == 0;
         let cf = ((!s1) & s2) == 0;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        // Bochs KORTEST/KTEST: clears OSZAPC, then sets ZF and CF from the mask result.
+        self.set_of(false); self.set_sf(false); self.set_af(false); self.set_pf(false);
+        self.set_zf(zf);
+        self.set_cf(cf);
         Ok(())
     }
 

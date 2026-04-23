@@ -6,7 +6,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -14,121 +13,26 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Flag update helpers
     // =========================================================================
 
-    /// Update flags for 16-bit logical operations
+    /// Update flags for 16-bit logical operations.
     pub fn set_flags_oszapc_logic_16(&mut self, result: u16) {
-        let sf = (result & 0x8000) != 0;
-        let zf = result == 0;
-        let pf = (result as u8).count_ones().is_multiple_of(2);
-
-        self.eflags.remove(EFlags::LOGIC_MASK);
-
-        if pf {
-            self.eflags.insert(EFlags::PF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
         self.oszapc.set_oszapc_logic_16(result);
     }
 
-    /// Update flags for 16-bit subtraction
+    /// Update flags for 16-bit subtraction.
     pub fn set_flags_oszapc_sub_16(&mut self, op1: u16, op2: u16, result: u16) {
-        let cf = op1 < op2;
-        let zf = result == 0;
-        let sf = (result & 0x8000) != 0;
-        let of = ((op1 ^ op2) & (op1 ^ result) & 0x8000) != 0;
-        let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
-        let pf = (result as u8).count_ones().is_multiple_of(2);
-
-        self.eflags.remove(EFlags::OSZAPC);
-
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        }
-        if pf {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
         self.oszapc.set_oszapc_sub_16(op1, op2, result);
     }
 
-    /// Update flags for INC (preserves CF)
+    /// Update flags for INC (preserves CF) — Bochs SET_FLAGS_OSZAP_INC_16.
     pub fn set_flags_oszap_inc_16(&mut self, result: u16, op1: u16) {
-        let zf = result == 0;
-        let sf = (result & 0x8000) != 0;
-        let of = result == 0x8000; // Only overflow when 0x7FFF -> 0x8000
-        let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-        let pf = (result as u8).count_ones().is_multiple_of(2);
-
-        // CF is not affected by INC
-        const OSZAP: EFlags = EFlags::PF
-            .union(EFlags::AF)
-            .union(EFlags::ZF)
-            .union(EFlags::SF)
-            .union(EFlags::OF);
-        self.eflags.remove(OSZAP);
-
-        if pf {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
+        // Bochs uses SET_FLAGS_OSZAP_16(op1, 1, result) for INC.
+        self.oszapc.set_oszap_add_16(op1, 1, result);
     }
 
-    /// Update flags for DEC (preserves CF)
+    /// Update flags for DEC (preserves CF) — Bochs SET_FLAGS_OSZAP_DEC_16.
     pub fn set_flags_oszap_dec_16(&mut self, result: u16, op1: u16) {
-        let zf = result == 0;
-        let sf = (result & 0x8000) != 0;
-        let of = result == 0x7FFF && op1 == 0x8000;
-        let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-        let pf = (result as u8).count_ones().is_multiple_of(2);
-
-        const OSZAP: EFlags = EFlags::PF
-            .union(EFlags::AF)
-            .union(EFlags::ZF)
-            .union(EFlags::SF)
-            .union(EFlags::OF);
-        self.eflags.remove(OSZAP);
-
-        if pf {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
+        // Bochs uses SET_FLAGS_OSZAP_16(op1, 1, result) for DEC.
+        self.oszapc.set_oszap_sub_16(op1, 1, result);
     }
 
     // =========================================================================
@@ -710,7 +614,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
         let bit = (instr.ib() & 0x0F) as u16;
         let cf = (op1 >> bit) & 1;
-        self.eflags.set(EFlags::CF, cf != 0);
+        self.set_cf(cf != 0);
         Ok(())
     }
 
@@ -721,14 +625,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let dst = instr.dst() as usize;
             let op1 = self.get_gpr16(dst);
             let cf = (op1 >> bit) & 1;
-            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_cf(cf != 0);
             self.set_gpr16(dst, op1 | (1 << bit));
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             let op1 = self.v_read_rmw_word(seg, eaddr)?;
             let cf = (op1 >> bit) & 1;
-            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_cf(cf != 0);
             self.write_rmw_linear_word(op1 | (1 << bit));
         }
         Ok(())
@@ -741,14 +645,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let dst = instr.dst() as usize;
             let op1 = self.get_gpr16(dst);
             let cf = (op1 >> bit) & 1;
-            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_cf(cf != 0);
             self.set_gpr16(dst, op1 & !(1 << bit));
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             let op1 = self.v_read_rmw_word(seg, eaddr)?;
             let cf = (op1 >> bit) & 1;
-            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_cf(cf != 0);
             self.write_rmw_linear_word(op1 & !(1 << bit));
         }
         Ok(())
@@ -761,14 +665,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let dst = instr.dst() as usize;
             let op1 = self.get_gpr16(dst);
             let cf = (op1 >> bit) & 1;
-            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_cf(cf != 0);
             self.set_gpr16(dst, op1 ^ (1 << bit));
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             let op1 = self.v_read_rmw_word(seg, eaddr)?;
             let cf = (op1 >> bit) & 1;
-            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_cf(cf != 0);
             self.write_rmw_linear_word(op1 ^ (1 << bit));
         }
         Ok(())
@@ -790,7 +694,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
         let bit = op2 & 0x0F;
         let cf = (op1 >> bit) & 1;
-        self.eflags.set(EFlags::CF, cf != 0);
+        self.set_cf(cf != 0);
         Ok(())
     }
 
@@ -802,7 +706,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let dst = instr.dst() as usize;
             let op1 = self.get_gpr16(dst);
             let cf = (op1 >> bit) & 1;
-            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_cf(cf != 0);
             self.set_gpr16(dst, op1 | (1 << bit));
         } else {
             let eaddr = self.resolve_addr(instr);
@@ -811,7 +715,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let seg = BxSegregs::from(instr.seg());
             let op1 = self.v_read_rmw_word(seg, addr)?;
             let cf = (op1 >> bit) & 1;
-            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_cf(cf != 0);
             self.write_rmw_linear_word(op1 | (1 << bit));
         }
         Ok(())
@@ -825,7 +729,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let dst = instr.dst() as usize;
             let op1 = self.get_gpr16(dst);
             let cf = (op1 >> bit) & 1;
-            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_cf(cf != 0);
             self.set_gpr16(dst, op1 & !(1 << bit));
         } else {
             let eaddr = self.resolve_addr(instr);
@@ -834,7 +738,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let seg = BxSegregs::from(instr.seg());
             let op1 = self.v_read_rmw_word(seg, addr)?;
             let cf = (op1 >> bit) & 1;
-            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_cf(cf != 0);
             self.write_rmw_linear_word(op1 & !(1 << bit));
         }
         Ok(())
@@ -848,7 +752,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let dst = instr.dst() as usize;
             let op1 = self.get_gpr16(dst);
             let cf = (op1 >> bit) & 1;
-            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_cf(cf != 0);
             self.set_gpr16(dst, op1 ^ (1 << bit));
         } else {
             let eaddr = self.resolve_addr(instr);
@@ -857,7 +761,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let seg = BxSegregs::from(instr.seg());
             let op1 = self.v_read_rmw_word(seg, addr)?;
             let cf = (op1 >> bit) & 1;
-            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_cf(cf != 0);
             self.write_rmw_linear_word(op1 ^ (1 << bit));
         }
         Ok(())

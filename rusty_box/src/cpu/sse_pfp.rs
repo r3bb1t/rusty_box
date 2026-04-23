@@ -54,7 +54,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
     xmm::BxPackedXmmRegister,
 };
 
@@ -151,20 +150,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Clears OF, SF, AF. Sets ZF, PF, CF based on result.
     #[inline]
     fn sse_set_eflags_compare(&mut self, unordered: bool, less: bool, equal: bool) {
-        // Clear OF, SF, AF first
-        self.eflags.remove(EFlags::OF | EFlags::SF | EFlags::AF);
-        // Clear ZF, PF, CF — then set as needed
-        self.eflags.remove(EFlags::ZF | EFlags::PF | EFlags::CF);
+        // Bochs COMISS/UCOMISS: reset OF/SF/AF and write ZF/PF/CF per compare.
+        self.set_of(false); self.set_sf(false); self.set_af(false);
+        self.set_zf(false); self.set_pf(false); self.set_cf(false);
 
         if unordered {
             // NaN: ZF=1, PF=1, CF=1
-            self.eflags.insert(EFlags::ZF | EFlags::PF | EFlags::CF);
+            self.set_zf(true); self.set_pf(true); self.set_cf(true);
         } else if less {
             // op1 < op2: CF=1
-            self.eflags.insert(EFlags::CF);
+            self.set_cf(true);
         } else if equal {
             // op1 == op2: ZF=1
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         }
         // op1 > op2: all clear (done above)
     }

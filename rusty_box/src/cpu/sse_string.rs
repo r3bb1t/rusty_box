@@ -12,7 +12,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::Instruction,
-    eflags::EFlags,
     xmm::BxPackedXmmRegister,
 };
 
@@ -440,19 +439,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Set flags: CF, ZF, SF, OF; clear AF, PF
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::ZF | EFlags::AF | EFlags::PF | EFlags::CF);
+        self.set_of(false); self.set_sf(false); self.set_zf(false);
+                self.set_af(false); self.set_pf(false); self.set_cf(false);
         if result2 != 0 {
-            self.eflags.insert(EFlags::CF);
+            self.set_cf(true);
         }
         if len1 < num_elements {
-            self.eflags.insert(EFlags::SF);
+            self.set_sf(true);
         }
         if len2 < num_elements {
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         }
         if result2 & 0x1 != 0 {
-            self.eflags.insert(EFlags::OF);
+            self.set_of(true);
         }
 
         // Store result to XMM0
@@ -526,19 +525,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_rcx(index as u64);
 
         // Set flags: CF, ZF, SF, OF; clear AF, PF
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::ZF | EFlags::AF | EFlags::PF | EFlags::CF);
+        self.set_of(false); self.set_sf(false); self.set_zf(false);
+                self.set_af(false); self.set_pf(false); self.set_cf(false);
         if result2 != 0 {
-            self.eflags.insert(EFlags::CF);
+            self.set_cf(true);
         }
         if len1 < num_elements {
-            self.eflags.insert(EFlags::SF);
+            self.set_sf(true);
         }
         if len2 < num_elements {
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         }
         if result2 & 0x1 != 0 {
-            self.eflags.insert(EFlags::OF);
+            self.set_of(true);
         }
 
         Ok(())
@@ -588,19 +587,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Set flags: CF, ZF, SF, OF; clear AF, PF
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::ZF | EFlags::AF | EFlags::PF | EFlags::CF);
+        self.set_of(false); self.set_sf(false); self.set_zf(false);
+                self.set_af(false); self.set_pf(false); self.set_cf(false);
         if result2 != 0 {
-            self.eflags.insert(EFlags::CF);
+            self.set_cf(true);
         }
         if len1 < num_elements {
-            self.eflags.insert(EFlags::SF);
+            self.set_sf(true);
         }
         if len2 < num_elements {
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         }
         if result2 & 0x1 != 0 {
-            self.eflags.insert(EFlags::OF);
+            self.set_of(true);
         }
 
         // Store result to XMM0
@@ -663,19 +662,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_rcx(index as u64);
 
         // Set flags: CF, ZF, SF, OF; clear AF, PF
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::ZF | EFlags::AF | EFlags::PF | EFlags::CF);
+        self.set_of(false); self.set_sf(false); self.set_zf(false);
+                self.set_af(false); self.set_pf(false); self.set_cf(false);
         if result2 != 0 {
-            self.eflags.insert(EFlags::CF);
+            self.set_cf(true);
         }
         if len1 < num_elements {
-            self.eflags.insert(EFlags::SF);
+            self.set_sf(true);
         }
         if len2 < num_elements {
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         }
         if result2 & 0x1 != 0 {
-            self.eflags.insert(EFlags::OF);
+            self.set_of(true);
         }
 
         Ok(())

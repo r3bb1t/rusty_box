@@ -7,17 +7,17 @@ use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     pub(super) fn clc(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
-        self.eflags.remove(EFlags::CF);
+        self.set_cf(false);
         Ok(())
     }
 
     pub(super) fn stc(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
-        self.eflags.insert(EFlags::CF);
+        self.set_cf(true);
         Ok(())
     }
 
     pub(super) fn cmc(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
-        self.eflags.toggle(EFlags::CF);
+        self.set_cf(self.getb_cf() == 0);
         Ok(())
     }
 
@@ -120,7 +120,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// SALC - Set AL from Carry (undocumented, opcode 0xD6)
     /// Based on Bochs flag_ctrl.cc
     pub(super) fn salc(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
-        if self.eflags.contains(EFlags::CF) {
+        if self.getb_cf() != 0 {
             self.set_al(0xFF);
         } else {
             self.set_al(0x00);

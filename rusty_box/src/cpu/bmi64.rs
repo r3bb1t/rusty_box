@@ -8,7 +8,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -19,14 +18,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Clear OF, SF, ZF, AF, CF; set SF if sign bit set, set ZF if zero.
     /// Leaves PF unchanged (matching Bochs SET_FLAGS_OSZAxC_LOGIC_64).
     fn set_flags_oszaxc_logic_64(&mut self, result: u64) {
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::ZF | EFlags::AF | EFlags::CF);
-        if result == 0 {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if (result & 0x8000_0000_0000_0000) != 0 {
-            self.eflags.insert(EFlags::SF);
-        }
+        self.set_of(false);
+        self.set_sf((result & 0x8000_0000_0000_0000) != 0);
+        self.set_zf(result == 0);
+        self.set_af(false);
+        self.set_cf(false);
     }
 
     /// Read 64-bit r/m operand: register if mod=11, memory read otherwise.
@@ -66,9 +62,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let tmp_cf = op1 != 0;
         let result = (op1.wrapping_neg()) & op1;
         self.set_flags_oszaxc_logic_64(result);
-        if tmp_cf {
-            self.eflags.insert(EFlags::CF);
-        }
+        self.set_cf(tmp_cf);
         // Group VEX: result goes to vvv (src2), not rm (dst)
         self.set_gpr64(instr.src2() as usize, result);
         Ok(())
@@ -81,9 +75,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let tmp_cf = op1 == 0;
         let result = op1.wrapping_sub(1) ^ op1;
         self.set_flags_oszaxc_logic_64(result);
-        if tmp_cf {
-            self.eflags.insert(EFlags::CF);
-        }
+        self.set_cf(tmp_cf);
         self.set_gpr64(instr.src2() as usize, result);
         Ok(())
     }
@@ -95,9 +87,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let tmp_cf = op1 == 0;
         let result = op1.wrapping_sub(1) & op1;
         self.set_flags_oszaxc_logic_64(result);
-        if tmp_cf {
-            self.eflags.insert(EFlags::CF);
-        }
+        self.set_cf(tmp_cf);
         self.set_gpr64(instr.src2() as usize, result);
         Ok(())
     }
@@ -195,9 +185,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
 
         self.set_flags_oszaxc_logic_64(op1);
-        if tmp_cf {
-            self.eflags.insert(EFlags::CF);
-        }
+        self.set_cf(tmp_cf);
         self.set_gpr64(instr.dst() as usize, op1);
         Ok(())
     }
@@ -259,7 +247,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn adcx_gq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = self.get_gpr64(instr.dst() as usize);
         let op2 = self.read_eq64(instr, instr.src())?;
-        let cf_in = if self.eflags.contains(EFlags::CF) {
+        let cf_in = if self.getb_cf() != 0 {
             1u64
         } else {
             0u64
@@ -268,11 +256,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_gpr64(instr.dst() as usize, sum);
 
         let carry_out = (op1 & op2) | ((op1 | op2) & !sum);
-        if (carry_out >> 63) & 1 != 0 {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
+        self.set_cf(((carry_out >> 63) & 1) != 0);
         Ok(())
     }
 
@@ -281,7 +265,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn adox_gq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = self.get_gpr64(instr.dst() as usize);
         let op2 = self.read_eq64(instr, instr.src())?;
-        let of_in = if self.eflags.contains(EFlags::OF) {
+        let of_in = if self.getb_of() != 0 {
             1u64
         } else {
             0u64
@@ -290,11 +274,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_gpr64(instr.dst() as usize, sum);
 
         let carry_out = (op1 & op2) | ((op1 | op2) & !sum);
-        if (carry_out >> 63) & 1 != 0 {
-            self.eflags.insert(EFlags::OF);
-        } else {
-            self.eflags.remove(EFlags::OF);
-        }
+        self.set_of(((carry_out >> 63) & 1) != 0);
         Ok(())
     }
 }

@@ -4,7 +4,6 @@
 // Mirrors Bochs cpp/cpu/arith8.cc
 
 use crate::cpu::decoder::{BxSegregs, Instruction};
-use crate::cpu::eflags::EFlags;
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 // Helper methods are defined in logical8.rs and data_xfer_ext.rs
@@ -211,25 +210,7 @@ pub fn AND_EbGbM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
     let result = op1 & op2;
 
     cpu.write_rmw_linear_byte(result);
-    // Update flags for logical operation (AND)
-    let sf = (result & 0x80) != 0;
-    let zf = result == 0;
-    let pf = result.count_ones().is_multiple_of(2);
-    const MASK: EFlags = EFlags::CF
-        .union(EFlags::PF)
-        .union(EFlags::ZF)
-        .union(EFlags::SF)
-        .union(EFlags::OF);
-    cpu.eflags.remove(MASK);
-    if pf {
-        cpu.eflags.insert(EFlags::PF);
-    }
-    if zf {
-        cpu.eflags.insert(EFlags::ZF);
-    }
-    if sf {
-        cpu.eflags.insert(EFlags::SF);
-    }
+    cpu.set_flags_oszapc_logic_8(result);
 
     Ok(())
 }
@@ -246,25 +227,7 @@ pub fn AND_GbEbR<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
     let result = op1 & op2;
 
     cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), result);
-    // Update flags for logical operation (AND)
-    let sf = (result & 0x80) != 0;
-    let zf = result == 0;
-    let pf = result.count_ones().is_multiple_of(2);
-    const MASK: EFlags = EFlags::CF
-        .union(EFlags::PF)
-        .union(EFlags::ZF)
-        .union(EFlags::SF)
-        .union(EFlags::OF);
-    cpu.eflags.remove(MASK);
-    if pf {
-        cpu.eflags.insert(EFlags::PF);
-    }
-    if zf {
-        cpu.eflags.insert(EFlags::ZF);
-    }
-    if sf {
-        cpu.eflags.insert(EFlags::SF);
-    }
+    cpu.set_flags_oszapc_logic_8(result);
 
     Ok(())
 }
@@ -283,25 +246,7 @@ pub fn AND_EbGb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
         let result = op1 & op2;
 
         cpu.write_8bit_regx(instr.src1() as usize, instr.extend8bit_l(), result); // write to rm
-                                                                                  // Update flags for logical operation (AND)
-        let sf = (result & 0x80) != 0;
-        let zf = result == 0;
-        let pf = result.count_ones().is_multiple_of(2);
-        const MASK: EFlags = EFlags::CF
-            .union(EFlags::PF)
-            .union(EFlags::ZF)
-            .union(EFlags::SF)
-            .union(EFlags::OF);
-        cpu.eflags.remove(MASK);
-        if pf {
-            cpu.eflags.insert(EFlags::PF);
-        }
-        if zf {
-            cpu.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            cpu.eflags.insert(EFlags::SF);
-        }
+        cpu.set_flags_oszapc_logic_8(result);
 
         Ok(())
     } else {
@@ -713,37 +658,8 @@ pub fn INC_Eb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
     let op1 = cpu.read_8bit_regx(dst, instr.extend8bit_l());
     let result = op1.wrapping_add(1);
     cpu.write_8bit_regx(dst, instr.extend8bit_l(), result);
-
-    // INC affects OF, SF, ZF, AF, PF but NOT CF
-    let zf = result == 0;
-    let sf = (result & 0x80) != 0;
-    let of = result == 0x80; // Overflow if we wrapped from 0x7F to 0x80
-    let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-    let pf = result.count_ones().is_multiple_of(2);
-
-    // Update all flags except CF (bit 0)
-    const MASK: EFlags = EFlags::PF
-        .union(EFlags::AF)
-        .union(EFlags::ZF)
-        .union(EFlags::SF)
-        .union(EFlags::OF);
-    cpu.eflags.remove(MASK);
-    if pf {
-        cpu.eflags.insert(EFlags::PF);
-    }
-    if af {
-        cpu.eflags.insert(EFlags::AF);
-    }
-    if zf {
-        cpu.eflags.insert(EFlags::ZF);
-    }
-    if sf {
-        cpu.eflags.insert(EFlags::SF);
-    }
-    if of {
-        cpu.eflags.insert(EFlags::OF);
-    }
-
+    // Bochs SET_FLAGS_OSZAP_ADD_8(op1, 1, result) — INC preserves CF.
+    cpu.oszapc.set_oszap_add_8(op1, 1, result);
     Ok(())
 }
 
@@ -759,36 +675,8 @@ pub fn DEC_Eb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
     let op1 = cpu.read_8bit_regx(dst, instr.extend8bit_l());
     let result = op1.wrapping_sub(1);
     cpu.write_8bit_regx(dst, instr.extend8bit_l(), result);
-
-    // DEC affects OF, SF, ZF, AF, PF but NOT CF
-    let zf = result == 0;
-    let sf = (result & 0x80) != 0;
-    let of = result == 0x7F; // Overflow if we wrapped from 0x80 to 0x7F
-    let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-    let pf = result.count_ones().is_multiple_of(2);
-
-    const MASK: EFlags = EFlags::PF
-        .union(EFlags::AF)
-        .union(EFlags::ZF)
-        .union(EFlags::SF)
-        .union(EFlags::OF);
-    cpu.eflags.remove(MASK);
-    if pf {
-        cpu.eflags.insert(EFlags::PF);
-    }
-    if af {
-        cpu.eflags.insert(EFlags::AF);
-    }
-    if zf {
-        cpu.eflags.insert(EFlags::ZF);
-    }
-    if sf {
-        cpu.eflags.insert(EFlags::SF);
-    }
-    if of {
-        cpu.eflags.insert(EFlags::OF);
-    }
-
+    // Bochs SET_FLAGS_OSZAP_SUB_8(op1, 1, result) — DEC preserves CF.
+    cpu.oszapc.set_oszap_sub_8(op1, 1, result);
     Ok(())
 }
 
@@ -802,35 +690,7 @@ pub fn INC_EbM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let result = op1.wrapping_add(1);
     cpu.write_rmw_linear_byte(result);
-
-    let zf = result == 0;
-    let sf = (result & 0x80) != 0;
-    let of = result == 0x80;
-    let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-    let pf = result.count_ones() % 2 == 0;
-
-    const MASK: EFlags = EFlags::PF
-        .union(EFlags::AF)
-        .union(EFlags::ZF)
-        .union(EFlags::SF)
-        .union(EFlags::OF);
-    cpu.eflags.remove(MASK);
-    if pf {
-        cpu.eflags.insert(EFlags::PF);
-    }
-    if af {
-        cpu.eflags.insert(EFlags::AF);
-    }
-    if zf {
-        cpu.eflags.insert(EFlags::ZF);
-    }
-    if sf {
-        cpu.eflags.insert(EFlags::SF);
-    }
-    if of {
-        cpu.eflags.insert(EFlags::OF);
-    }
-
+    cpu.oszapc.set_oszap_add_8(op1, 1, result);
     Ok(())
 }
 
@@ -844,35 +704,7 @@ pub fn DEC_EbM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let result = op1.wrapping_sub(1);
     cpu.write_rmw_linear_byte(result);
-
-    let zf = result == 0;
-    let sf = (result & 0x80) != 0;
-    let of = result == 0x7F;
-    let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-    let pf = result.count_ones() % 2 == 0;
-
-    const MASK: EFlags = EFlags::PF
-        .union(EFlags::AF)
-        .union(EFlags::ZF)
-        .union(EFlags::SF)
-        .union(EFlags::OF);
-    cpu.eflags.remove(MASK);
-    if pf {
-        cpu.eflags.insert(EFlags::PF);
-    }
-    if af {
-        cpu.eflags.insert(EFlags::AF);
-    }
-    if zf {
-        cpu.eflags.insert(EFlags::ZF);
-    }
-    if sf {
-        cpu.eflags.insert(EFlags::SF);
-    }
-    if of {
-        cpu.eflags.insert(EFlags::OF);
-    }
-
+    cpu.oszapc.set_oszap_sub_8(op1, 1, result);
     Ok(())
 }
 

@@ -19,7 +19,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // EFLAGS + instruction state
-        buf.extend_from_slice(&self.eflags.bits().to_le_bytes());
+        buf.extend_from_slice(&self.eflags_materialized().to_le_bytes());
         buf.extend_from_slice(&self.icount.to_le_bytes());
         buf.extend_from_slice(&self.prev_rip.to_le_bytes());
         buf.extend_from_slice(&self.prev_rsp.to_le_bytes());

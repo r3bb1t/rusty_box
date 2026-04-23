@@ -11,7 +11,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -20,24 +19,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
 
     /// Update flags for 64-bit logical operations (AND, OR, XOR, TEST).
-    /// Clears OF and CF, sets SF/ZF/PF from result, AF is undefined (cleared).
-    /// Matches Bochs SET_FLAGS_OSZAPC_LOGIC_64 macro.
+    /// Bochs SET_FLAGS_OSZAPC_LOGIC_64 — clears OF/CF/AF, sets SF/ZF/PF from result.
     pub(super) fn set_flags_oszapc_logic_64(&mut self, result: u64) {
-        let sf = (result & 0x8000_0000_0000_0000) != 0;
-        let zf = result == 0;
-        let pf = (result as u8).count_ones().is_multiple_of(2);
-
-        self.eflags.remove(EFlags::LOGIC_MASK);
-
-        if pf {
-            self.eflags.insert(EFlags::PF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
         self.oszapc.set_oszapc_logic_64(result);
     }
 

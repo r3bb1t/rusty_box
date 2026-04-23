@@ -4,7 +4,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -23,11 +22,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.v_read_dword(seg, eaddr)?
         };
         if op2 == 0 {
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         } else {
             let idx = op2.trailing_zeros();
             self.set_flags_oszapc_logic_32(idx);
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             self.set_gpr32(instr.dst() as usize, idx);
         }
         Ok(())
@@ -44,11 +43,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.v_read_dword(seg, eaddr)?
         };
         if op2 == 0 {
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         } else {
             let idx = 31 - op2.leading_zeros();
             self.set_flags_oszapc_logic_32(idx);
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             self.set_gpr32(instr.dst() as usize, idx);
         }
         Ok(())
@@ -72,13 +71,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_gpr32(instr.dst() as usize, result);
 
         // POPCNT clears OF, SF, AF, CF, PF; sets ZF if result is 0
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::CF | EFlags::PF);
-        if result == 0 {
-            self.eflags.insert(EFlags::ZF);
-        } else {
-            self.eflags.remove(EFlags::ZF);
-        }
+        self.set_of(false);
+        self.set_sf(false);
+        self.set_af(false);
+        self.set_cf(false);
+        self.set_pf(false);
+        self.set_zf(result == 0);
         Ok(())
     }
 
@@ -97,13 +95,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let current = self.get_gpr32(dst);
         self.set_gpr32(dst, (current & 0xFFFF0000) | result as u32);
 
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::CF | EFlags::PF);
-        if result == 0 {
-            self.eflags.insert(EFlags::ZF);
-        } else {
-            self.eflags.remove(EFlags::ZF);
-        }
+        self.set_of(false);
+        self.set_sf(false);
+        self.set_af(false);
+        self.set_cf(false);
+        self.set_pf(false);
+        self.set_zf(result == 0);
         Ok(())
     }
 
@@ -124,18 +121,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_gpr32(instr.dst() as usize, result);
 
         // CF = (op2 == 0), ZF = (result == 0 i.e. op2 has bit 31 set)
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
-        if op2 == 0 {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
-        if result == 0 {
-            self.eflags.insert(EFlags::ZF);
-        } else {
-            self.eflags.remove(EFlags::ZF);
-        }
+        self.set_of(false);
+        self.set_sf(false);
+        self.set_af(false);
+        self.set_pf(false);
+        self.set_cf(op2 == 0);
+        self.set_zf(result == 0);
         Ok(())
     }
 
@@ -153,18 +144,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let current = self.get_gpr32(dst);
         self.set_gpr32(dst, (current & 0xFFFF0000) | result as u32);
 
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
-        if op2 == 0 {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
-        if result == 0 {
-            self.eflags.insert(EFlags::ZF);
-        } else {
-            self.eflags.remove(EFlags::ZF);
-        }
+        self.set_of(false);
+        self.set_sf(false);
+        self.set_af(false);
+        self.set_pf(false);
+        self.set_cf(op2 == 0);
+        self.set_zf(result == 0);
         Ok(())
     }
 
@@ -184,18 +169,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let result = op2.trailing_zeros();
         self.set_gpr32(instr.dst() as usize, result);
 
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
-        if op2 == 0 {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
-        if result == 0 {
-            self.eflags.insert(EFlags::ZF);
-        } else {
-            self.eflags.remove(EFlags::ZF);
-        }
+        self.set_of(false);
+        self.set_sf(false);
+        self.set_af(false);
+        self.set_pf(false);
+        self.set_cf(op2 == 0);
+        self.set_zf(result == 0);
         Ok(())
     }
 
@@ -213,18 +192,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let current = self.get_gpr32(dst);
         self.set_gpr32(dst, (current & 0xFFFF0000) | result as u32);
 
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
-        if op2 == 0 {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
-        if result == 0 {
-            self.eflags.insert(EFlags::ZF);
-        } else {
-            self.eflags.remove(EFlags::ZF);
-        }
+        self.set_of(false);
+        self.set_sf(false);
+        self.set_af(false);
+        self.set_pf(false);
+        self.set_cf(op2 == 0);
+        self.set_zf(result == 0);
         Ok(())
     }
 

@@ -2,7 +2,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::Instruction,
-    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -18,10 +17,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Clear OSZAPC then set CF=1 (hardware always ready).
     #[inline]
     fn clear_flags_set_cf(&mut self) {
-        self.eflags.remove(
-            EFlags::OF | EFlags::SF | EFlags::ZF | EFlags::AF | EFlags::PF | EFlags::CF,
-        );
-        self.eflags.insert(EFlags::CF);
+        self.set_of(false); self.set_sf(false); self.set_zf(false);
+        self.set_af(false); self.set_pf(false); self.set_cf(false);
+        self.set_cf(true);
     }
 
     // ── RDRAND ──────────────────────────────────────────────────────

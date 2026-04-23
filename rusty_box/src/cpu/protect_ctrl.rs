@@ -10,7 +10,6 @@ use super::{
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     descriptor::SegTypeBits,
-    eflags::EFlags,
     Result,
 };
 
@@ -263,9 +262,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 let eaddr = self.resolve_addr(instr);
                 self.v_write_word(seg, eaddr, new_op1)?;
             }
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         } else {
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
         }
         Ok(())
     }
@@ -325,7 +324,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Null selector → clear ZF
         if (raw_selector & 0xfffc) == 0 {
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             return Ok(());
         }
 
@@ -336,7 +335,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Some(v) => v,
             None => {
                 tracing::trace!("LAR: failed to fetch descriptor");
-                self.eflags.remove(EFlags::ZF);
+                self.set_zf(false);
                 return Ok(());
             }
         };
@@ -344,14 +343,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let descriptor = match self.parse_descriptor(dword1, dword2) {
             Ok(d) => d,
             Err(_) => {
-                self.eflags.remove(EFlags::ZF);
+                self.set_zf(false);
                 return Ok(());
             }
         };
 
         if descriptor.valid == 0 {
             tracing::trace!("LAR: descriptor not valid");
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             return Ok(());
         }
 
@@ -364,7 +363,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let is_conforming = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CONFORMING);
             if !(is_code && is_conforming)
                 && (descriptor.dpl < cpl || descriptor.dpl < selector.rpl) {
-                    self.eflags.remove(EFlags::ZF);
+                    self.set_zf(false);
                     return Ok(());
                 }
         } else {
@@ -380,18 +379,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 }
                 _ => {
                     tracing::trace!("LAR: not accepted descriptor type {}", descriptor.r#type);
-                    self.eflags.remove(EFlags::ZF);
+                    self.set_zf(false);
                     return Ok(());
                 }
             }
             if descriptor.dpl < cpl || descriptor.dpl < selector.rpl {
-                self.eflags.remove(EFlags::ZF);
+                self.set_zf(false);
                 return Ok(());
             }
         }
 
         // All checks passed — set ZF and write access rights to dst
-        self.eflags.insert(EFlags::ZF);
+        self.set_zf(true);
         if instr.os32_l() != 0 {
             // 32-bit: masked by 00FFFF00 (Bochs protect_ctrl.cc)
             self.set_gpr32(instr.dst() as usize, dword2 & 0x00ffff00);
@@ -419,7 +418,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Null selector → clear ZF
         if (raw_selector & 0xfffc) == 0 {
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             return Ok(());
         }
 
@@ -430,7 +429,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Some(v) => v,
             None => {
                 tracing::trace!("LSL: failed to fetch descriptor");
-                self.eflags.remove(EFlags::ZF);
+                self.set_zf(false);
                 return Ok(());
             }
         };
@@ -447,7 +446,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 0x1 | 0x3 | 0x2 | 0x9 | 0xB => {
                     // Privilege check
                     if descriptor_dpl < cpl || descriptor_dpl < selector.rpl {
-                        self.eflags.remove(EFlags::ZF);
+                        self.set_zf(false);
                         return Ok(());
                     }
                     // Compute byte-granular limit
@@ -460,7 +459,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 }
                 _ => {
                     // Remaining types not accepted for LSL
-                    self.eflags.remove(EFlags::ZF);
+                    self.set_zf(false);
                     return Ok(());
                 }
             }
@@ -476,13 +475,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // (dword2 & 0x00000c00) == 0x00000c00 means conforming code (bits 10+11 both set)
             if (dword2 & 0x00000c00) != 0x00000c00
                 && (descriptor_dpl < cpl || descriptor_dpl < selector.rpl) {
-                    self.eflags.remove(EFlags::ZF);
+                    self.set_zf(false);
                     return Ok(());
                 }
         }
 
         // All checks passed
-        self.eflags.insert(EFlags::ZF);
+        self.set_zf(true);
         if instr.os32_l() != 0 {
             self.set_gpr32(instr.dst() as usize, limit32);
         } else {
@@ -510,7 +509,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Null selector → clear ZF
         if (raw_selector & 0xfffc) == 0 {
             tracing::trace!("VERR: null selector");
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             return Ok(());
         }
 
@@ -521,7 +520,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Some(v) => v,
             None => {
                 tracing::trace!("VERR: not within descriptor table");
-                self.eflags.remove(EFlags::ZF);
+                self.set_zf(false);
                 return Ok(());
             }
         };
@@ -529,7 +528,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let descriptor = match self.parse_descriptor(dword1, dword2) {
             Ok(d) => d,
             Err(_) => {
-                self.eflags.remove(EFlags::ZF);
+                self.set_zf(false);
                 return Ok(());
             }
         };
@@ -537,13 +536,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // System segment → inaccessible
         if !descriptor.segment {
             tracing::trace!("VERR: system descriptor");
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             return Ok(());
         }
 
         if descriptor.valid == 0 {
             tracing::trace!("VERR: valid bit cleared");
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             return Ok(());
         }
 
@@ -556,28 +555,28 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let is_readable = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::READABLE);
             if is_conforming && is_readable {
                 tracing::trace!("VERR: conforming readable code, OK");
-                self.eflags.insert(EFlags::ZF);
+                self.set_zf(true);
                 return Ok(());
             }
             if !is_readable {
                 tracing::trace!("VERR: code not readable");
-                self.eflags.remove(EFlags::ZF);
+                self.set_zf(false);
                 return Ok(());
             }
             // Readable non-conforming code segment
             if descriptor.dpl < cpl || descriptor.dpl < selector.rpl {
                 tracing::trace!("VERR: non-conforming code not within priv level");
-                self.eflags.remove(EFlags::ZF);
+                self.set_zf(false);
             } else {
-                self.eflags.insert(EFlags::ZF);
+                self.set_zf(true);
             }
         } else {
             // Data segment
             if descriptor.dpl < cpl || descriptor.dpl < selector.rpl {
                 tracing::trace!("VERR: data seg not within priv level");
-                self.eflags.remove(EFlags::ZF);
+                self.set_zf(false);
             } else {
-                self.eflags.insert(EFlags::ZF);
+                self.set_zf(true);
             }
         }
         Ok(())
@@ -602,7 +601,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Null selector → clear ZF
         if (raw_selector & 0xfffc) == 0 {
             tracing::trace!("VERW: null selector");
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             return Ok(());
         }
 
@@ -613,7 +612,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Some(v) => v,
             None => {
                 tracing::trace!("VERW: not within descriptor table");
-                self.eflags.remove(EFlags::ZF);
+                self.set_zf(false);
                 return Ok(());
             }
         };
@@ -621,7 +620,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let descriptor = match self.parse_descriptor(dword1, dword2) {
             Ok(d) => d,
             Err(_) => {
-                self.eflags.remove(EFlags::ZF);
+                self.set_zf(false);
                 return Ok(());
             }
         };
@@ -630,13 +629,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let is_code = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CODE);
         if !descriptor.segment || is_code {
             tracing::trace!("VERW: system seg or code");
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             return Ok(());
         }
 
         if descriptor.valid == 0 {
             tracing::trace!("VERW: valid bit cleared");
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             return Ok(());
         }
 
@@ -646,13 +645,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if is_writable {
             if descriptor.dpl < cpl || descriptor.dpl < selector.rpl {
                 tracing::trace!("VERW: writable data seg not within priv level");
-                self.eflags.remove(EFlags::ZF);
+                self.set_zf(false);
             } else {
-                self.eflags.insert(EFlags::ZF);
+                self.set_zf(true);
             }
         } else {
             tracing::trace!("VERW: data seg not writable");
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
         }
         Ok(())
     }

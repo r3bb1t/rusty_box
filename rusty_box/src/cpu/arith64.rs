@@ -16,7 +16,6 @@
 
 use super::{BxCpuC, BxCpuIdTrait};
 use crate::cpu::decoder::{BxSegregs, Instruction};
-use crate::cpu::eflags::EFlags;
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =========================================================================
@@ -29,134 +28,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// SET_FLAGS_OSZAPC_ADD_64: update all six arithmetic flags after a 64-bit add.
     pub(super) fn update_flags_add64(&mut self, op1: u64, op2: u64, res: u64) {
-        // ADD_COUT_VEC: carry-out at each bit position
-        let cout_vec = (op1 & op2) | ((op1 | op2) & !res);
-        let cf = (cout_vec >> 63) & 1 != 0;
-        let zf = res == 0;
-        let sf = (res & 0x8000_0000_0000_0000) != 0;
-        // GET_ADD_OVERFLOW: overflow when both operands have the same sign but the
-        // result has a different sign.
-        let of = ((op1 ^ res) & (op2 ^ res) & 0x8000_0000_0000_0000) != 0;
-        let af = (cout_vec >> 3) & 1 != 0;
-        let parity = (res as u8).count_ones().is_multiple_of(2);
-
-        self.eflags.remove(EFlags::OSZAPC);
-
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        }
-        if parity {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
+        self.oszapc.set_oszapc_add_64(op1, op2, res);
     }
 
     /// SET_FLAGS_OSZAPC_SUB_64: update all six arithmetic flags after a 64-bit sub.
     pub(super) fn update_flags_sub64(&mut self, op1: u64, op2: u64, res: u64) {
-        // SUB_COUT_VEC: borrow at each bit position
-        let cout_vec = (!op1 & op2) | ((!op1 ^ op2) & res);
-        let cf = (cout_vec >> 63) & 1 != 0;
-        let zf = res == 0;
-        let sf = (res & 0x8000_0000_0000_0000) != 0;
-        // GET_SUB_OVERFLOW: overflow when operands have different signs and the
-        // result sign differs from op1.
-        let of = ((op1 ^ op2) & (op1 ^ res) & 0x8000_0000_0000_0000) != 0;
-        let af = (cout_vec >> 3) & 1 != 0;
-        let parity = (res as u8).count_ones().is_multiple_of(2);
-
-        self.eflags.remove(EFlags::OSZAPC);
-
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        }
-        if parity {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
+        self.oszapc.set_oszapc_sub_64(op1, op2, res);
     }
 
     /// SET_FLAGS_OSZAP_ADD_64: update OSZAP flags only (no CF) after a 64-bit add.
     /// Used by INC which must preserve CF.
     fn update_flags_oszap_add64(&mut self, op1: u64, op2: u64, res: u64) {
-        let cout_vec = (op1 & op2) | ((op1 | op2) & !res);
-        let zf = res == 0;
-        let sf = (res & 0x8000_0000_0000_0000) != 0;
-        let of = ((op1 ^ res) & (op2 ^ res) & 0x8000_0000_0000_0000) != 0;
-        let af = (cout_vec >> 3) & 1 != 0;
-        let parity = (res as u8).count_ones().is_multiple_of(2);
-
-        // Clear OSZAP but preserve CF
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::ZF | EFlags::AF | EFlags::PF);
-
-        if parity {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
+        self.oszapc.set_oszap_add_64(op1, op2, res);
     }
 
     /// SET_FLAGS_OSZAP_SUB_64: update OSZAP flags only (no CF) after a 64-bit sub.
     /// Used by DEC which must preserve CF.
     fn update_flags_oszap_sub64(&mut self, op1: u64, op2: u64, res: u64) {
-        let cout_vec = (!op1 & op2) | ((!op1 ^ op2) & res);
-        let zf = res == 0;
-        let sf = (res & 0x8000_0000_0000_0000) != 0;
-        let of = ((op1 ^ op2) & (op1 ^ res) & 0x8000_0000_0000_0000) != 0;
-        let af = (cout_vec >> 3) & 1 != 0;
-        let parity = (res as u8).count_ones().is_multiple_of(2);
-
-        // Clear OSZAP but preserve CF
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::ZF | EFlags::AF | EFlags::PF);
-
-        if parity {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
+        self.oszapc.set_oszap_sub_64(op1, op2, res);
     }
 
     // =========================================================================
@@ -702,12 +591,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let rcx = self.get_gpr64(1);
             self.mem_write_qword(paddr, rbx);
             self.mem_write_qword(paddr + 8, rcx);
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         } else {
             // write back original (Bochs: write_RMW_linear_dqword(hi, lo))
             self.mem_write_qword(paddr, op1_lo);
             self.mem_write_qword(paddr + 8, op1_hi);
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             // RAX <- op1_lo, RDX <- op1_hi
             self.set_gpr64(0, op1_lo);
             self.set_gpr64(2, op1_hi);

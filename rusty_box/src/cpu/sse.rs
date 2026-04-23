@@ -19,7 +19,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
     xmm::BxPackedXmmRegister,
 };
 
@@ -1682,19 +1681,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.sse_read_op2_xmm(instr)?;
 
         // Clear OF, SF, AF, ZF, PF, CF
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::ZF | EFlags::PF | EFlags::CF);
+        self.set_of(false); self.set_sf(false); self.set_af(false);
+        self.set_zf(false); self.set_pf(false); self.set_cf(false);
 
             if (op2.xmm64u(0) & op1.xmm64u(0)) == 0
                 && (op2.xmm64u(1) & op1.xmm64u(1)) == 0
             {
-                self.eflags.insert(EFlags::ZF);
+                self.set_zf(true);
             }
 
             if (op2.xmm64u(0) & !op1.xmm64u(0)) == 0
                 && (op2.xmm64u(1) & !op1.xmm64u(1)) == 0
             {
-                self.eflags.insert(EFlags::CF);
+                self.set_cf(true);
             }
         Ok(())
     }

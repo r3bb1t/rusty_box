@@ -181,6 +181,22 @@ impl BxLazyflagsEntry {
         self.set_oszap(16, add_cout_vec(op1 as u64, op2 as u64, sum as u64), sum as u64);
     }
     #[inline]
+    pub(super) fn set_oszap_add_8(&mut self, op1: u8, op2: u8, sum: u8) {
+        self.set_oszap(8, add_cout_vec(op1 as u64, op2 as u64, sum as u64), sum as u64);
+    }
+    #[inline]
+    pub(super) fn set_oszap_sub_8(&mut self, op1: u8, op2: u8, diff: u8) {
+        self.set_oszap(8, sub_cout_vec(op1 as u64, op2 as u64, diff as u64), diff as u64);
+    }
+    #[inline]
+    pub(super) fn set_oszap_add_32(&mut self, op1: u32, op2: u32, sum: u32) {
+        self.set_oszap(32, add_cout_vec(op1 as u64, op2 as u64, sum as u64), sum as u64);
+    }
+    #[inline]
+    pub(super) fn set_oszap_sub_32(&mut self, op1: u32, op2: u32, diff: u32) {
+        self.set_oszap(32, sub_cout_vec(op1 as u64, op2 as u64, diff as u64), diff as u64);
+    }
+    #[inline]
     pub(super) fn set_oszap_sub_16(&mut self, op1: u16, op2: u16, diff: u16) {
         self.set_oszap(16, sub_cout_vec(op1 as u64, op2 as u64, diff as u64), diff as u64);
     }

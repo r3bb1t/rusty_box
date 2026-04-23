@@ -30,6 +30,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let old = self.eflags;
         self.eflags = EFlags::from_bits_retain(new_eflags);
+        // Sync OSZAPC bits of the new value into lazy store.
+        self.set_eflags_oszapc(new_eflags);
         let new_flags = self.eflags;
 
         // RF set => invalidate prefetch queue

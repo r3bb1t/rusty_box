@@ -23,7 +23,6 @@ use super::super::softfloat3e::specialize::*;
 
 use super::super::cpu::Exception;
 use super::super::softfloat3e::softfloat_types::floatx80;
-use crate::cpu::eflags::EFlags;
 
 // ---------------------------------------------------------------------------
 // Free function: convert i387 control word → SoftFloat status
@@ -313,17 +312,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// ```
     pub fn write_eflags_fpu_compare(&mut self, float_relation: i32) {
         // Bochs clearEFlagsOSZAPC(): clear OF, SF, ZF, AF, PF, CF
-        self.eflags
-            .remove(EFlags::CF | EFlags::PF | EFlags::AF | EFlags::ZF | EFlags::SF | EFlags::OF);
+        self.set_cf(false); self.set_pf(false); self.set_af(false);
+        self.set_zf(false); self.set_sf(false); self.set_of(false);
 
         match float_relation {
             RELATION_LESS => {
                 // ST(0) < src: CF=1, PF=0, ZF=0
-                self.eflags.insert(EFlags::CF);
+                self.set_cf(true);
             }
             RELATION_EQUAL => {
                 // ST(0) == src: CF=0, PF=0, ZF=1
-                self.eflags.insert(EFlags::ZF);
+                self.set_zf(true);
             }
             RELATION_GREATER => {
                 // ST(0) > src: CF=0, PF=0, ZF=0
@@ -331,7 +330,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             _ => {
                 // Unordered (NaN): CF=1, PF=1, ZF=1
-                self.eflags.insert(EFlags::CF | EFlags::PF | EFlags::ZF);
+                self.set_cf(true); self.set_pf(true); self.set_zf(true);
             }
         }
     }

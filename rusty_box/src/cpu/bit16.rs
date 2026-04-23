@@ -4,7 +4,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -23,11 +22,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.v_read_word(seg, eaddr)? as u32
         };
         if op2 == 0 {
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         } else {
             let idx = op2.trailing_zeros();
             self.set_flags_oszapc_logic_16(idx as u16);
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             self.set_gpr16(instr.dst() as usize, idx as u16);
         }
         Ok(())
@@ -46,11 +45,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.v_read_word(seg, eaddr)? as u32
         };
         if op2 == 0 {
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         } else {
             let idx = 31 - op2.leading_zeros();
             self.set_flags_oszapc_logic_16(idx as u16);
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             self.set_gpr16(instr.dst() as usize, idx as u16);
         }
         Ok(())
