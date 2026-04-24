@@ -206,6 +206,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// PUSHF - Push flags (16-bit)
     /// Based on Bochs flag_ctrl.cc PUSHF_Fw
     pub fn pushf_fw(&mut self, _instr: &Instruction) -> super::Result<()> {
+        // Bochs svm.cc SVM_INTERCEPT0_PUSHF.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_PUSHF)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Pushf as i32, 0, 0);
+        }
         let mut flags = (self.read_eflags() & 0xFFFF) as u16;
 
         if self.v8086_mode()
@@ -232,6 +238,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Based on Bochs flag_ctrl.cc POPF_Fw
     pub fn popf_fw(&mut self, _instr: &Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
+
+        // Bochs svm.cc SVM_INTERCEPT0_POPF.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_POPF)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Popf as i32, 0, 0);
+        }
 
         // Base changeMask: OSZAPC + TF + DF + NT
         let mut change_mask: u32 =

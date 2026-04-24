@@ -126,6 +126,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// INT imm8 - Software interrupt with immediate vector
     /// Based on Bochs INT_Ib in soft_int.cc
     pub fn int_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        // Bochs svm.cc SVM_INTERCEPT0_SOFTINT — EXITINFO1 carries the vector.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_SOFTINT)
+        {
+            let vec = instr.ib() as u64;
+            return self.svm_vmexit(
+                super::svm::SvmVmexit::SoftwareInterrupt as i32,
+                vec,
+                0,
+            );
+        }
         let vector = instr.ib();
         tracing::trace!("INT {:#04x}", vector);
         // BX_SOFTWARE_INTERRUPT → soft_int=true, no error code
@@ -259,8 +270,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
 
     /// IRET - Return from interrupt (16-bit operand size)
-    /// Based on Bochs ctrl_xfer16.cc IRET16 (lines 520-590)
+    /// Based on Bochs ctrl_xfer16.cc IRET16
     pub fn iret16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        // Bochs svm.cc SVM_INTERCEPT0_IRET.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IRET)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Iret as i32, 0, 0);
+        }
         // Invalidate prefetch queue at entry (Bochs ctrl_xfer16.cc)
         self.invalidate_prefetch_q();
 
@@ -335,8 +352,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// IRET - Return from interrupt (32-bit operand size)
-    /// Based on Bochs ctrl_xfer32.cc IRET32 (lines 540-612)
+    /// Based on Bochs ctrl_xfer32.cc IRET32
     pub fn iret32(&mut self, _instr: &Instruction) -> super::Result<()> {
+        // Bochs svm.cc SVM_INTERCEPT0_IRET.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IRET)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Iret as i32, 0, 0);
+        }
         // Invalidate prefetch queue at entry (Bochs ctrl_xfer32.cc)
         self.invalidate_prefetch_q();
 
@@ -929,6 +952,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             tracing::trace!("HLT: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
+        // Bochs svm.cc SVM_INTERCEPT0_HLT.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_HLT)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Hlt as i32, 0, 0);
+        }
 
         // Check if interrupts are disabled (IF=0) - matches Bochs proc_ctrl.cc
         if !self.eflags.contains(EFlags::IF_) {
@@ -1033,6 +1062,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cpuid_msr() {
             self.instrumentation.fire_cpuid();
+        }
+
+        // Bochs svm.cc SVM_INTERCEPT0_CPUID — delivered before reading any
+        // registers so the guest sees the original RAX/RCX on re-entry.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_CPUID)
+        {
+            let _ = self.svm_vmexit(super::svm::SvmVmexit::Cpuid as i32, 0, 0);
+            return;
         }
 
         let function = self.eax();

@@ -126,6 +126,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// PUSHFQ - Push flags (64-bit)
     pub fn pushf_fq(&mut self, _instr: &Instruction) -> super::Result<()> {
+        // Bochs svm.cc SVM_INTERCEPT0_PUSHF.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_PUSHF)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Pushf as i32, 0, 0);
+        }
         // VM & RF flags cleared in image stored on the stack
         let flags = (self.read_eflags() & 0x00FCFFFF) as u64;
         self.push_64(flags)?;
@@ -133,8 +139,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// POPFQ - Pop flags (64-bit)
-    /// Based on Bochs flag_ctrl.cc POPF_Fq (lines 357-385)
+    /// Based on Bochs flag_ctrl.cc POPF_Fq
     pub fn popf_fq(&mut self, _instr: &Instruction) -> super::Result<()> {
+        // Bochs svm.cc SVM_INTERCEPT0_POPF.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_POPF)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Popf as i32, 0, 0);
+        }
         // Base changeMask: OSZAPC + TF + DF + NT + RF + AC + ID
         let mut change_mask = EFlags::OSZAPC
             .union(EFlags::TF)

@@ -1,3 +1,8 @@
+// Many SvmVmexit variants and SVM_INTERCEPT* bits are declared up-front for
+// Bochs parity but are consumed incrementally as intercept call-sites land
+// (Sessions 2+). Permit unused items until the full wire-up is complete.
+#![allow(dead_code)]
+
 use crate::config::BxPhyAddress;
 
 use super::crregs::{BxCr0, BxCr4, BxEfer};
@@ -9,15 +14,69 @@ use super::i387::BxPackedRegister;
 //  SVM intercept codes
 // =====================
 
+/// Mirrors Bochs svm.h enum `SVM_intercept_codes`. Discriminants are the raw
+/// VMCB exit codes the host reads after a VMEXIT.
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum SvmVmexit {
+    // CR reads (0x0-0x8).
+    Cr0Read = 0x00,
+    Cr2Read = 0x02,
+    Cr3Read = 0x03,
+    Cr4Read = 0x04,
+    Cr8Read = 0x08,
+    // CR writes (0x10-0x18).
+    Cr0Write = 0x10,
+    Cr2Write = 0x12,
+    Cr3Write = 0x13,
+    Cr4Write = 0x14,
+    Cr8Write = 0x18,
+    // DR reads (0x20) / writes (0x30) — Bochs uses DR0 as the base; exit code
+    // carries the specific DR index in bits [0:3].
+    Dr0Read = 0x20,
+    Dr0Write = 0x30,
+    // Exception intercept (0x40 + vector). PF_EXCEPTION = 0x4E in Bochs.
     Exception = 0x40,
+    PfException = 0x4E,
+    // External events (0x60-0x65).
+    Intr = 0x60,
+    Nmi = 0x61,
+    Smi = 0x62,
+    Init = 0x63,
+    Vintr = 0x64,
+    Cr0SelWrite = 0x65,
+    // Descriptor-table reads/writes (0x66-0x6d).
+    IdtrRead = 0x66,
+    GdtrRead = 0x67,
+    LdtrRead = 0x68,
+    TrRead = 0x69,
+    IdtrWrite = 0x6a,
+    GdtrWrite = 0x6b,
+    LdtrWrite = 0x6c,
+    TrWrite = 0x6d,
+    // Counters / flags (0x6e-0x71).
+    Rdtsc = 0x6e,
+    Rdpmc = 0x6f,
+    Pushf = 0x70,
+    Popf = 0x71,
+    // System events (0x72-0x79).
+    Cpuid = 0x72,
+    Rsm = 0x73,
+    Iret = 0x74,
+    SoftwareInterrupt = 0x75,
+    Invd = 0x76,
     Pause = 0x77,
+    Hlt = 0x78,
+    Invlpg = 0x79,
+    // Privileged / IO (0x7a-0x7f).
     Invlpga = 0x7a,
+    Io = 0x7b,
     Msr = 0x7c,
     TaskSwitch = 0x7d,
+    FerrFreeze = 0x7e,
+    Shutdown = 0x7f,
+    // SVM-specific instructions (0x80-0x88).
     Vmrun = 0x80,
     Vmmcall = 0x81,
     Vmload = 0x82,
@@ -25,6 +84,33 @@ pub enum SvmVmexit {
     Stgi = 0x84,
     Clgi = 0x85,
     Skinit = 0x86,
+    Rdtscp = 0x87,
+    Icebp = 0x88,
+    // Advanced (0x89-0x8e).
+    Wbinvd = 0x89,
+    Monitor = 0x8a,
+    Mwait = 0x8b,
+    MwaitConditional = 0x8c,
+    Xsetbv = 0x8d,
+    Rdpru = 0x8e,
+    // Write-trap variants (0x8f-0x94).
+    EferWriteTrap = 0x8f,
+    Cr0WriteTrap = 0x90,
+    Cr3WriteTrap = 0x93,
+    Cr4WriteTrap = 0x94,
+    // Post-SVM extensions (0xa0-0xa6).
+    Invlpgb = 0xa0,
+    InvlpgbIllegal = 0xa1,
+    Invpcid = 0xa2,
+    Mcommit = 0xa3,
+    Tlbsync = 0xa4,
+    Buslock = 0xa5,
+    IdleHlt = 0xa6,
+    // Nested paging / AVIC / SEV-GHCB (0x400-0x403).
+    Npf = 0x400,
+    AvicIncompleteIpi = 0x401,
+    AvicNoaccel = 0x402,
+    Vmgexit = 0x403,
 }
 
 pub const SVM_VMEXIT_INVALID: i32 = -1;
@@ -130,13 +216,42 @@ pub const SVM_GUEST_PAT: u32 = 0x668;
 // vector2[31:00]: intercept exception vectors 0-31
 // vector3[31:00]:
 
+// intercept_vector[0] — bits 0..31 (Bochs svm.h SVM_INTERCEPT0_*).
 #[allow(non_camel_case_types)]
+pub const SVM_INTERCEPT0_INTR: u32 = 0;
+pub const SVM_INTERCEPT0_NMI: u32 = 1;
+pub const SVM_INTERCEPT0_SMI: u32 = 2;
+pub const SVM_INTERCEPT0_INIT: u32 = 3;
+pub const SVM_INTERCEPT0_VINTR: u32 = 4;
+pub const SVM_INTERCEPT0_CR0_WRITE_NO_TS_MP: u32 = 5;
+pub const SVM_INTERCEPT0_IDTR_READ: u32 = 6;
+pub const SVM_INTERCEPT0_GDTR_READ: u32 = 7;
+pub const SVM_INTERCEPT0_LDTR_READ: u32 = 8;
+pub const SVM_INTERCEPT0_TR_READ: u32 = 9;
+pub const SVM_INTERCEPT0_IDTR_WRITE: u32 = 10;
+pub const SVM_INTERCEPT0_GDTR_WRITE: u32 = 11;
+pub const SVM_INTERCEPT0_LDTR_WRITE: u32 = 12;
+pub const SVM_INTERCEPT0_TR_WRITE: u32 = 13;
+pub const SVM_INTERCEPT0_RDTSC: u32 = 14;
+pub const SVM_INTERCEPT0_RDPMC: u32 = 15;
+pub const SVM_INTERCEPT0_PUSHF: u32 = 16;
+pub const SVM_INTERCEPT0_POPF: u32 = 17;
+pub const SVM_INTERCEPT0_CPUID: u32 = 18;
+pub const SVM_INTERCEPT0_RSM: u32 = 19;
+pub const SVM_INTERCEPT0_IRET: u32 = 20;
+pub const SVM_INTERCEPT0_SOFTINT: u32 = 21;
+pub const SVM_INTERCEPT0_INVD: u32 = 22;
+pub const SVM_INTERCEPT0_PAUSE: u32 = 23;
+pub const SVM_INTERCEPT0_HLT: u32 = 24;
+pub const SVM_INTERCEPT0_INVLPG: u32 = 25;
 pub const SVM_INTERCEPT0_INVLPGA: u32 = 26;
+pub const SVM_INTERCEPT0_IO: u32 = 27;
 pub const SVM_INTERCEPT0_MSR: u32 = 28;
 pub const SVM_INTERCEPT0_TASK_SWITCH: u32 = 29;
+pub const SVM_INTERCEPT0_FERR_FREEZE: u32 = 30;
+pub const SVM_INTERCEPT0_SHUTDOWN: u32 = 31;
 
-// vector4[16:00]:
-// vector4[31:16]: Intercept writes of CR0-CR15 (trap)
+// intercept_vector[1] — bits 32..63 (Bochs svm.h SVM_INTERCEPT1_*).
 pub const SVM_INTERCEPT1_VMRUN: u32 = 32;
 pub const SVM_INTERCEPT1_VMMCALL: u32 = 33;
 pub const SVM_INTERCEPT1_VMLOAD: u32 = 34;
@@ -144,6 +259,25 @@ pub const SVM_INTERCEPT1_VMSAVE: u32 = 35;
 pub const SVM_INTERCEPT1_STGI: u32 = 36;
 pub const SVM_INTERCEPT1_CLGI: u32 = 37;
 pub const SVM_INTERCEPT1_SKINIT: u32 = 38;
+pub const SVM_INTERCEPT1_RDTSCP: u32 = 39;
+pub const SVM_INTERCEPT1_ICEBP: u32 = 40;
+pub const SVM_INTERCEPT1_WBINVD: u32 = 41;
+pub const SVM_INTERCEPT1_MONITOR: u32 = 42;
+pub const SVM_INTERCEPT1_MWAIT: u32 = 43;
+pub const SVM_INTERCEPT1_MWAIT_ARMED: u32 = 44;
+pub const SVM_INTERCEPT1_XSETBV: u32 = 45;
+pub const SVM_INTERCEPT1_RDPRU: u32 = 46;
+pub const SVM_INTERCEPT1_EFER_WRITE_TRAP: u32 = 47;
+pub const SVM_INTERCEPT1_CR0_WRITE_TRAP: u32 = 48;
+
+// intercept_vector[2] — bits 64..95 (Bochs svm.h SVM_INTERCEPT2_*).
+pub const SVM_INTERCEPT2_INVLPGB: u32 = 64;
+pub const SVM_INTERCEPT2_INVLPGB_ILLEGAL: u32 = 65;
+pub const SVM_INTERCEPT2_INVPCID: u32 = 66;
+pub const SVM_INTERCEPT2_MCOMMIT: u32 = 67;
+pub const SVM_INTERCEPT2_TLBSYNC: u32 = 68;
+pub const SVM_INTERCEPT2_BUSLOCK: u32 = 69;
+pub const SVM_INTERCEPT2_IDLE_HLT: u32 = 70;
 
 // ========================
 //  SVM data structures
@@ -1019,8 +1153,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =====================================================================
 
     /// Check if an SVM intercept bit is set in the current VMCB controls.
+    /// `pub(super)` so dispatch sites (proc_ctrl, io, ctrl_xfer, flag_ctrl,
+    /// soft_int, crregs, dreg, tasking) can gate their handlers on SVM guest
+    /// intercepts — the Bochs svm.h SVM_INTERCEPT(...) macro wraps those
+    /// sites identically.
     #[inline]
-    fn svm_intercept_check(&self, intercept_bitnum: u32) -> bool {
+    pub(super) fn svm_intercept_check(&self, intercept_bitnum: u32) -> bool {
         match &self.vmcb {
             Some(vmcb) => svm_intercept(&vmcb.ctrls, intercept_bitnum),
             None => false,
@@ -1126,6 +1264,52 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.svm_vmexit(SvmVmexit::Msr as i32, op as u64, 0)?;
         }
         Ok(())
+    }
+
+    /// SVM I/O intercept — Bochs svm.cc SvmInterceptIO. Checks the IOPM
+    /// bitmap for `port..port+len` and triggers a VMEXIT_IO if any bit is set.
+    /// `direction_in` = true for IN*, false for OUT*. String/REP handling is
+    /// left out of this first cut (see svm.cc for the exact qualification
+    /// bits); the VMEXIT_IO qualification encodes port+len+direction+asize,
+    /// which is enough for non-string I/O.
+    pub(super) fn svm_intercept_io(
+        &mut self,
+        port: u16,
+        len: u32,
+        direction_in: bool,
+    ) -> super::Result<()> {
+        if !self.in_svm_guest {
+            return Ok(());
+        }
+        if !self.svm_intercept_check(SVM_INTERCEPT0_IO) {
+            return Ok(());
+        }
+        // Read two IOPM bitmap bytes to cover cross-bit accesses (Bochs uses
+        // single physical reads since read_physical_byte can't cross 4K).
+        let iopm_base = self.vmcb.as_ref().map_or(0, |v| v.ctrls.iopm_base);
+        let bit_addr = iopm_base + (port as u64 / 8);
+        let b0 = self.read_physical_byte_for_svm(bit_addr);
+        let b1 = self.read_physical_byte_for_svm(bit_addr + 1);
+        let combined = ((b1 as u16) << 8) | (b0 as u16);
+        let mask = ((1u32 << len) - 1) << (port & 7);
+        if (combined as u32 & mask) == 0 {
+            return Ok(());
+        }
+        // Qualification (EXITINFO1) layout mirrors Bochs svm.cc — port in bits
+        // 16-31, length flag bits 4-6, asize flag bits 1-3, direction bit 0.
+        let mut qualification: u64 = (port as u64) << 16;
+        if direction_in {
+            qualification |= 1; // SVM_VMEXIT_IO_PORTIN
+        }
+        match len {
+            1 => qualification |= 1 << 4, // SVM_VMEXIT_IO_INSTR_LEN8
+            2 => qualification |= 1 << 5, // SVM_VMEXIT_IO_INSTR_LEN16
+            4 => qualification |= 1 << 6, // SVM_VMEXIT_IO_INSTR_LEN32
+            _ => {}
+        }
+        // EXITINFO2 is the next-instruction RIP. Bochs passes RIP as-is.
+        let rip = self.rip();
+        self.svm_vmexit(SvmVmexit::Io as i32, qualification, rip)
     }
 
     /// SVM task switch intercept handler.

@@ -141,4 +141,5 @@ pub(super) mod xmm;
 pub use cpu::BxCpuC;
 pub use cpuid::BxCpuIdTrait;
 
+pub use cpudb::amd::amd_ryzen::AmdRyzen;
 pub use cpudb::intel::*;

@@ -15,7 +15,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Check I/O port permission based on IOPL and TSS I/O permission bitmap.
     /// Returns true if access is allowed, false if #GP(0) should be raised.
-    /// Based on Bochs io.cc allow_io() lines 866-929.
+    /// Based on Bochs io.cc allow_io().
     fn allow_io(&mut self, port: u16, len: u32) -> super::Result<bool> {
         // If not in protected mode, or CPL <= IOPL and not V8086, allow
         if !self.cr0.pe() {
@@ -67,6 +67,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs io.cc
     pub fn in_al_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
+        self.svm_intercept_io(port, 1, true)?;
         if !self.allow_io(port, 1)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -79,6 +80,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs io.cc
     pub fn in_ax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
+        self.svm_intercept_io(port, 2, true)?;
         if !self.allow_io(port, 2)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -91,6 +93,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs io.cc — writes RAX (zero-extends to 64-bit)
     pub fn in_eax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
+        self.svm_intercept_io(port, 4, true)?;
         if !self.allow_io(port, 4)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -103,6 +106,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs io.cc
     pub fn out_ib_al(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
+        self.svm_intercept_io(port, 1, false)?;
         if !self.allow_io(port, 1)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -115,6 +119,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs io.cc
     pub fn out_ib_ax(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
+        self.svm_intercept_io(port, 2, false)?;
         if !self.allow_io(port, 2)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -127,6 +132,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs io.cc
     pub fn out_ib_eax(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
+        self.svm_intercept_io(port, 4, false)?;
         if !self.allow_io(port, 4)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -139,6 +145,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs io.cc
     pub fn in_al_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        self.svm_intercept_io(port, 1, true)?;
         if !self.allow_io(port, 1)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -151,6 +158,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs io.cc
     pub fn in_ax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        self.svm_intercept_io(port, 2, true)?;
         if !self.allow_io(port, 2)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -163,6 +171,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs io.cc — writes RAX (zero-extends to 64-bit)
     pub fn in_eax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        self.svm_intercept_io(port, 4, true)?;
         if !self.allow_io(port, 4)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -175,6 +184,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs io.cc
     pub fn out_dx_al(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        self.svm_intercept_io(port, 1, false)?;
         if !self.allow_io(port, 1)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -187,6 +197,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs io.cc
     pub fn out_dx_ax(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        self.svm_intercept_io(port, 2, false)?;
         if !self.allow_io(port, 2)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -199,6 +210,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs io.cc
     pub fn out_dx_eax(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        self.svm_intercept_io(port, 4, false)?;
         if !self.allow_io(port, 4)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }

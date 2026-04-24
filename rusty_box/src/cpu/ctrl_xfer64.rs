@@ -349,7 +349,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Interrupt return (64-bit)
     /// Matching C++ ctrl_xfer64.cc IRET64
     pub fn iret64(&mut self, instr: &Instruction) -> Result<()> {
-        // Invalidate prefetch queue (matching C++ line 458)
+        // Bochs svm.cc SVM_INTERCEPT0_IRET.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IRET)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Iret as i32, 0, 0);
+        }
+        // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 

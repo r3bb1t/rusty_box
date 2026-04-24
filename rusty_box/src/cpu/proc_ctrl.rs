@@ -211,6 +211,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             tracing::trace!("WBINVD: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
+        // Bochs svm.cc SVM_INTERCEPT1_WBINVD.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT1_WBINVD)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Wbinvd as i32, 0, 0);
+        }
         // BOCHS BX_INSTR_CACHE_CNTRL(cpu_id, BX_INSTR_WBINVD)
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cache() {
@@ -231,6 +237,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if cpl != 0 {
             tracing::trace!("INVD: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        // Bochs svm.cc SVM_INTERCEPT0_INVD.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_INVD)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Invd as i32, 0, 0);
         }
         // BOCHS BX_INSTR_CACHE_CNTRL(cpu_id, BX_INSTR_INVD)
         #[cfg(feature = "instrumentation")]
@@ -255,6 +267,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
+        // Bochs svm.cc SVM_INTERCEPT0_INVLPG — VMEXIT carries the linear
+        // address in EXITINFO1 (computed here before we actually flush).
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_INVLPG)
+        {
+            let laddr_for_exit: u64 = if self.long64_mode() {
+                self.get_laddr64(seg as usize, eaddr)
+            } else {
+                self.get_laddr32(seg as usize, eaddr as u32) as u64
+            };
+            return self.svm_vmexit(
+                super::svm::SvmVmexit::Invlpg as i32,
+                laddr_for_exit,
+                0,
+            );
+        }
         let laddr: u64 = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
@@ -312,6 +340,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if cpl != 0 {
             tracing::trace!("MONITOR: CPL={} != 0, #UD", cpl);
             return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        // Bochs svm.cc SVM_INTERCEPT1_MONITOR.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT1_MONITOR)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Monitor as i32, 0, 0);
         }
 
         // Bochs mwait.cc: RCX must be 0 (no optional extensions supported)
@@ -385,6 +419,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub(super) fn mwait(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         tracing::trace!("MWAIT: ECX={:#x}", self.ecx());
+        // Bochs svm.cc SVM_INTERCEPT1_MWAIT (or MWAIT_ARMED when monitor is
+        // already armed). Both degrade to a single MWAIT vmexit in Bochs.
+        if self.in_svm_guest {
+            if self.monitor.armed()
+                && self.svm_intercept_check(super::svm::SVM_INTERCEPT1_MWAIT_ARMED)
+            {
+                return self.svm_vmexit(
+                    super::svm::SvmVmexit::MwaitConditional as i32,
+                    0,
+                    0,
+                );
+            }
+            if self.svm_intercept_check(super::svm::SVM_INTERCEPT1_MWAIT) {
+                return self.svm_vmexit(super::svm::SvmVmexit::Mwait as i32, 0, 0);
+            }
+        }
 
         // Bochs mwait.cc: MWAIT requires CPL==0 (CPL always 0 in real mode)
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
@@ -711,6 +761,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
         }
+        // Bochs svm.cc — RDTSCP triggers either RDTSCP or RDTSC intercept.
+        if self.in_svm_guest {
+            if self.svm_intercept_check(super::svm::SVM_INTERCEPT1_RDTSCP) {
+                return self.svm_vmexit(super::svm::SvmVmexit::Rdtscp as i32, 0, 0);
+            }
+            if self.svm_intercept_check(super::svm::SVM_INTERCEPT0_RDTSC) {
+                return self.svm_vmexit(super::svm::SvmVmexit::Rdtsc as i32, 0, 0);
+            }
+        }
 
         let ticks = self.get_tsc(self.system_ticks());
         self.set_rax(ticks & 0xFFFF_FFFF  );
@@ -736,6 +795,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 tracing::trace!("RDTSC: CR4.TSD=1 and CPL={}, #GP(0)", cpl);
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
+        }
+        // Bochs svm.cc SVM_INTERCEPT0_RDTSC.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_RDTSC)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Rdtsc as i32, 0, 0);
         }
 
         // Use system_ticks (pc_system.time_ticks) as time source.
@@ -2089,6 +2154,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
+        // Bochs svm.cc SVM_INTERCEPT1_XSETBV.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT1_XSETBV)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Xsetbv as i32, 0, 0);
+        }
+
         let ecx = self.ecx();
         if ecx != 0 {
             tracing::trace!("XSETBV: invalid XCR{}, #GP(0)", ecx);
@@ -2426,6 +2498,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
         if cpl != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        // Bochs svm.cc SVM_INTERCEPT2_INVPCID.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT2_INVPCID)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Invpcid as i32, 0, 0);
         }
 
         // Read type from register operand (Bochs: i->dst())

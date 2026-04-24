@@ -219,6 +219,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             tracing::trace!("PUSHFD: #GP(0) in v8086 mode");
             self.exception(super::cpu::Exception::Gp, 0)?;
         }
+        // Bochs svm.cc SVM_INTERCEPT0_PUSHF.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_PUSHF)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Pushf as i32, 0, 0);
+        }
 
         // VM & RF flags cleared in image stored on the stack
         let flags = self.read_eflags() & 0x00FCFFFF;
@@ -230,6 +236,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Based on Bochs flag_ctrl.cc POPF_Fd
     pub fn popf_fd(&mut self, _instr: &Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
+
+        // Bochs svm.cc SVM_INTERCEPT0_POPF.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_POPF)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Popf as i32, 0, 0);
+        }
 
         // Base changeMask: OSZAPC + TF + DF + NT + RF + ID + AC
         let mut change_mask: u32 = EFlags::OSZAPC.bits()

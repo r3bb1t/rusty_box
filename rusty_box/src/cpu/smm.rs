@@ -242,6 +242,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             tracing::trace!("RSM: not in SMM mode, #UD");
             return self.exception(super::cpu::Exception::Ud, 0);
         }
+        // Bochs svm.cc SVM_INTERCEPT0_RSM.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_RSM)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Rsm as i32, 0, 0);
+        }
 
         tracing::trace!("RSM: resuming from SMM (smbase={:#010x})", self.smbase);
 
