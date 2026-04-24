@@ -105,6 +105,26 @@ pub const BX_MSR_IA32_PL3_SSP: u32 = 0x6A7;
 pub const BX_MSR_IA32_INTERRUPT_SSP_TABLE_ADDR: u32 = 0x6A8;
 
 // =========================================================================
+// User Interrupts (UINTR) MSRs — Bochs msr.h
+// =========================================================================
+
+/// IA32_UINTR_RR — user-level interrupt request register.
+pub const BX_MSR_IA32_UINTR_RR: u32 = 0x985;
+/// IA32_UINTR_HANDLER — user-level interrupt handler address (canonical).
+pub const BX_MSR_IA32_UINTR_HANDLER: u32 = 0x986;
+/// IA32_UINTR_STACKADJUST — user-level stack adjustment.
+pub const BX_MSR_IA32_UINTR_STACKADJUST: u32 = 0x987;
+/// IA32_UINTR_MISC — low 32 = UITT_SIZE, high 32 = UINV (notification vector).
+pub const BX_MSR_IA32_UINTR_MISC: u32 = 0x988;
+/// IA32_UINTR_PD — user-level posted-interrupt descriptor address.
+pub const BX_MSR_IA32_UINTR_PD: u32 = 0x989;
+/// IA32_UINTR_TT — user-level interrupt target table address.
+pub const BX_MSR_IA32_UINTR_TT: u32 = 0x98A;
+
+/// IA32_PKRS — Supervisor Protection Key Rights (PKS). Bochs msr.h.
+pub const BX_MSR_IA32_PKRS: u32 = 0x6E1;
+
+// =========================================================================
 // Long-mode MSRs (AMD64/Intel EM64T) — Bochs msr.h
 // =========================================================================
 

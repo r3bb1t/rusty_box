@@ -900,6 +900,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.tlb_flush();
         }
 
+        // Bochs crregs.cc: WP change flips the pkey disable-to-SYS-write
+        // mapping inside set_PKeys. Recompute when WP bit differs.
+        if (old_cr0 & BxCr0::WP.bits()) != (val_32 & BxCr0::WP.bits()) {
+            self.set_pkeys(self.pkru, self.pkrs);
+        }
+
         // Bochs crregs.cc
         self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
 
@@ -1039,6 +1045,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.handle_fpu_mmx_mode_change();
         self.handle_sse_mode_change();
         self.handle_avx_mode_change();
+
+        // Bochs crregs.cc: PKE or PKS flip changes the pkey allow-mask layout.
+        let pke_pks_mask = BxCr4::PKE.bits() | BxCr4::PKS.bits();
+        if (old_cr4 ^ val_32) & pke_pks_mask != 0 {
+            self.set_pkeys(self.pkru, self.pkrs);
+        }
 
         // BOCHS BX_INSTR_TLB_CNTRL with MovCr4 kind
         #[cfg(feature = "instrumentation")]

@@ -787,6 +787,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.msr.ia32_pl_ssp[(msr - BX_MSR_IA32_PL0_SSP) as usize]
             }
             BX_MSR_IA32_INTERRUPT_SSP_TABLE_ADDR => self.msr.ia32_interrupt_ssp_table,
+            // Bochs msr.cc UINTR reads.
+            BX_MSR_IA32_UINTR_RR => self.uintr.uirr,
+            BX_MSR_IA32_UINTR_HANDLER => self.uintr.ui_handler,
+            BX_MSR_IA32_UINTR_STACKADJUST => self.uintr.stack_adjust,
+            BX_MSR_IA32_UINTR_MISC => {
+                ((self.uintr.uinv as u64) << 32) | (self.uintr.uitt_size as u64)
+            }
+            BX_MSR_IA32_UINTR_PD => self.uintr.upid_addr,
+            BX_MSR_IA32_UINTR_TT => self.uintr.uitt_addr,
+            // Bochs msr.cc — PKS read.
+            BX_MSR_IA32_PKRS => self.pkrs as u64,
             BX_MSR_BIOS_SIGN_ID => 0x02000065, // Skylake-X microcode revision
             BX_MSR_MTRRCAP => BX_MSR_MTRRCAP_DEFAULT,
             BX_MSR_PMC0..=BX_MSR_PMC7 => 0, // Performance counters — return 0
@@ -946,6 +957,46 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.msr.ia32_interrupt_ssp_table = val;
+            }
+            // Bochs msr.cc UINTR writes — each field has its own validation.
+            BX_MSR_IA32_UINTR_RR => {
+                self.uintr.uirr = val;
+                self.uintr_uirr_update();
+            }
+            BX_MSR_IA32_UINTR_HANDLER => {
+                if !self.is_canonical(val) {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.uintr.ui_handler = val;
+            }
+            BX_MSR_IA32_UINTR_STACKADJUST => {
+                if !self.is_canonical(val) {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.uintr.stack_adjust = val;
+            }
+            BX_MSR_IA32_UINTR_MISC => {
+                if val & 0xffffff0000000000u64 != 0 {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.uintr.uitt_size = val as u32;
+                self.uintr.uinv = (val >> 32) as u32;
+            }
+            BX_MSR_IA32_UINTR_PD => {
+                if !self.is_canonical(val) || (val & 0x3F) != 0 {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.uintr.upid_addr = val;
+            }
+            BX_MSR_IA32_UINTR_TT => {
+                if !self.is_canonical(val) || (val & 0x0E) != 0 {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.uintr.uitt_addr = val;
+            }
+            // Bochs msr.cc PKS write — val stored, then set_PKeys recomputes allow masks.
+            BX_MSR_IA32_PKRS => {
+                self.set_pkeys(self.pkru, val as u32);
             }
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr = val as u32,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr = val,
@@ -2616,6 +2667,68 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
+    /// Recompute rd_pkey/wr_pkey allow-masks from current PKRU/PKRS/CR4/CR0.
+    /// Bochs proc_ctrl.cc set_PKeys. Call this anywhere Bochs invokes set_PKeys:
+    /// after PKRU/PKRS WRMSR, after CR0.WP flip, after CR4.PKE/PKS flip, at CPU
+    /// reset, and on VMX/SVM host-load paths.
+    pub(super) fn set_pkeys(&mut self, pkru_val: u32, pkrs_val: u32) {
+        self.pkru = pkru_val;
+        self.pkrs = pkrs_val;
+
+        use super::paging::TlbAccess;
+        const ALL_RW: TlbAccess = TlbAccess::SYS_READ_OK
+            .union(TlbAccess::USER_READ_OK)
+            .union(TlbAccess::SYS_WRITE_OK)
+            .union(TlbAccess::USER_WRITE_OK);
+        const USER_RW: TlbAccess =
+            TlbAccess::USER_READ_OK.union(TlbAccess::USER_WRITE_OK);
+        const SYS_RW: TlbAccess =
+            TlbAccess::SYS_READ_OK.union(TlbAccess::SYS_WRITE_OK);
+
+        for i in 0..16 {
+            let mut rd_allow = ALL_RW;
+            let mut wr_allow = ALL_RW;
+
+            if self.long_mode() {
+                if self.cr4.pke() {
+                    // PKRU.accessDisable → strip user read/write.
+                    if pkru_val & (1 << (i * 2)) != 0 {
+                        rd_allow.remove(USER_RW);
+                        wr_allow.remove(USER_RW);
+                    }
+                    // PKRU.writeDisable → strip user write; also sys write when CR0.WP.
+                    if pkru_val & (1 << (i * 2 + 1)) != 0 {
+                        wr_allow.remove(TlbAccess::USER_WRITE_OK);
+                        if self.cr0.wp() {
+                            wr_allow.remove(TlbAccess::SYS_WRITE_OK);
+                        }
+                    }
+                }
+                if self.cr4.pks() {
+                    if pkrs_val & (1 << (i * 2)) != 0 {
+                        rd_allow.remove(SYS_RW);
+                        wr_allow.remove(SYS_RW);
+                    }
+                    if pkrs_val & (1 << (i * 2 + 1)) != 0 && self.cr0.wp() {
+                        wr_allow.remove(TlbAccess::SYS_WRITE_OK);
+                    }
+                }
+            }
+
+            // Bochs proc_ctrl.cc BX_SUPPORT_CET branch — for every regular
+            // access bit that's set, also set the corresponding SS bit. The
+            // SS flags live 4 positions above their regular counterparts in
+            // TlbAccess, so a bitflag-friendly shift-merge works.
+            let rd_ss = TlbAccess::from_bits_retain(rd_allow.bits() << 4);
+            let wr_ss = TlbAccess::from_bits_retain(wr_allow.bits() << 4);
+            rd_allow.insert(rd_ss);
+            wr_allow.insert(wr_ss);
+
+            self.rd_pkey[i] = rd_allow.bits();
+            self.wr_pkey[i] = wr_allow.bits();
+        }
+    }
+
     /// PKRU state — Bochs xsave.cc xsave_pkru_state. Single qword: low 32
     /// bits hold the PKRU register; upper 32 are reserved.
     fn xsave_pkru_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
@@ -2625,15 +2738,141 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// PKRU restore — Bochs xsave.cc xrstor_pkru_state. Bochs reads into TMP32
     /// and defers the set_PKeys side-effect to the end of XRSTOR; we have no
-    /// equivalent staging register, so write directly.
+    /// equivalent staging register, so apply via set_pkeys immediately.
     fn xrstor_pkru_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
         let val = self.v_read_qword(seg, base)?;
-        self.pkru = val as u32;
+        self.set_pkeys(val as u32, self.pkrs);
         Ok(())
     }
 
     fn xrstor_init_pkru_state(&mut self) {
-        self.pkru = 0;
+        self.set_pkeys(0, self.pkrs);
+    }
+
+    // =========================================================================
+    // AMX XSAVE state — Bochs xsave.cc xsave_tilecfg_state / xsave_tiledata_state
+    //
+    // XTILECFG (XCR0 bit 17, 64 bytes): palette_id/start_row/tilecfg[0..7].
+    // XTILEDATA (XCR0 bit 18, 8192 bytes): 8 tiles × 16 rows × 64 bytes.
+    //
+    // Unlike SSE/YMM/CET these state blocks live behind `self.amx: Option<Box<AMX>>`,
+    // populated only when the CPU model advertises AMX. When AMX is absent the
+    // handlers behave as Bochs' clear-on-absent path (write zeros / no-op restore).
+    // =========================================================================
+
+    fn xsave_xtilecfg_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        let mut buf = [0u8; 64];
+        if let Some(amx) = self.amx.as_ref() {
+            if amx.tiles_configured() {
+                buf[0] = amx.palette_id as u8;
+                buf[1] = amx.start_row as u8;
+                for n in 0..super::avx::BX_TILE_REGISTERS {
+                    // rows at bytes 16-31 (u16 LE), bytes_per_row at bytes 48-55 (u8).
+                    let row_off = 16 + n * 2;
+                    buf[row_off..row_off + 2]
+                        .copy_from_slice(&(amx.tilecfg[n].rows as u16).to_le_bytes());
+                    buf[48 + n] = amx.tilecfg[n].bytes_per_row as u8;
+                }
+            }
+        }
+        for (i, chunk) in buf.chunks_exact(8).enumerate() {
+            let val = u64::from_le_bytes(chunk.try_into().unwrap());
+            self.v_write_qword(seg, base.wrapping_add((i * 8) as u64), val)?;
+        }
+        Ok(())
+    }
+
+    fn xrstor_xtilecfg_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        let mut buf = [0u8; 64];
+        for i in 0..8u64 {
+            let val = self.v_read_qword(seg, base.wrapping_add(i * 8))?;
+            buf[i as usize * 8..i as usize * 8 + 8].copy_from_slice(&val.to_le_bytes());
+        }
+        // Bochs xsave.cc xrstor_tilecfg_state: if configure_tiles() rejects the
+        // buffer (reserved bits set / palette out of range / oversize rows),
+        // clear the AMX state entirely. We perform the same validation inline.
+        let palette_id = buf[0] as u32;
+        let start_row = buf[1] as u32;
+        // Reserved bytes 2..16 must be zero (Bochs configure_tiles).
+        let valid = buf[2..16].iter().all(|&b| b == 0)
+            && buf[56..64].iter().all(|&b| b == 0)
+            && palette_id <= 1;
+        if let Some(amx) = self.amx.as_mut() {
+            if !valid {
+                amx.clear();
+                return Ok(());
+            }
+            amx.palette_id = palette_id;
+            amx.start_row = start_row;
+            for n in 0..super::avx::BX_TILE_REGISTERS {
+                let row_off = 16 + n * 2;
+                amx.tilecfg[n].rows =
+                    u16::from_le_bytes([buf[row_off], buf[row_off + 1]]) as u32;
+                amx.tilecfg[n].bytes_per_row = buf[48 + n] as u32;
+            }
+        }
+        Ok(())
+    }
+
+    fn xrstor_init_xtilecfg_state(&mut self) {
+        if let Some(amx) = self.amx.as_mut() {
+            amx.clear();
+        }
+    }
+
+    fn xsave_xtiledata_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        // Snapshot the 8×16×64 = 8192 byte tile buffer up front so the
+        // &mut self write loop doesn't alias the AMX struct.
+        let tile_bytes: Option<[[u8; 1024]; 8]> = self.amx.as_ref().map(|amx| amx.tile);
+        let Some(tiles) = tile_bytes else { return Ok(()); };
+        for (tile_idx, tile) in tiles.iter().enumerate() {
+            for (row_idx, row) in tile.chunks_exact(super::avx::BX_TILE_ROW_BYTES).enumerate() {
+                let off = base.wrapping_add(
+                    ((tile_idx * super::avx::BX_TILE_MAX_ROWS + row_idx)
+                        * super::avx::BX_TILE_ROW_BYTES) as u64,
+                );
+                // 64-byte row → 8 qwords.
+                for (q, chunk) in row.chunks_exact(8).enumerate() {
+                    let val = u64::from_le_bytes(chunk.try_into().unwrap());
+                    self.v_write_qword(seg, off.wrapping_add((q * 8) as u64), val)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn xrstor_xtiledata_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        // Preload all rows without holding an &mut on amx.
+        let mut fresh_tiles: [[u8; 1024]; 8] = [[0u8; 1024]; 8];
+        for tile_idx in 0..super::avx::BX_TILE_REGISTERS {
+            for row_idx in 0..super::avx::BX_TILE_MAX_ROWS {
+                let off = base.wrapping_add(
+                    ((tile_idx * super::avx::BX_TILE_MAX_ROWS + row_idx)
+                        * super::avx::BX_TILE_ROW_BYTES) as u64,
+                );
+                for q in 0..8u64 {
+                    let val = self.v_read_qword(seg, off.wrapping_add(q * 8))?;
+                    let start = row_idx * super::avx::BX_TILE_ROW_BYTES + (q as usize) * 8;
+                    fresh_tiles[tile_idx][start..start + 8].copy_from_slice(&val.to_le_bytes());
+                }
+            }
+        }
+        if let Some(amx) = self.amx.as_mut() {
+            amx.tile = fresh_tiles;
+            // Bochs xrstor_tiledata_state marks every tile as used after restore.
+            for tile_idx in 0..super::avx::BX_TILE_REGISTERS {
+                amx.set_tile_used(tile_idx);
+            }
+        }
+        Ok(())
+    }
+
+    fn xrstor_init_xtiledata_state(&mut self) {
+        if let Some(amx) = self.amx.as_mut() {
+            for tile_idx in 0..super::avx::BX_TILE_REGISTERS {
+                amx.clear_tile_used(tile_idx);
+            }
+        }
     }
 
     /// CET U state — Bochs xsave.cc xsave_cet_u_state.
@@ -2712,6 +2951,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Some(Xcr0Component::Pkru) => self.xsave_pkru_state(seg, base),
             Some(Xcr0Component::CetU) => self.xsave_cet_u_state(seg, base),
             Some(Xcr0Component::CetS) => self.xsave_cet_s_state(seg, base),
+            Some(Xcr0Component::Uintr) => self.xsave_uintr_state(seg, base),
+            Some(Xcr0Component::Xtilecfg) => self.xsave_xtilecfg_state(seg, base),
+            Some(Xcr0Component::Xtiledata) => self.xsave_xtiledata_state(seg, base),
             _ => Ok(()),
         }
     }
@@ -2727,6 +2969,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Some(Xcr0Component::Pkru) => self.xrstor_pkru_state(seg, base),
             Some(Xcr0Component::CetU) => self.xrstor_cet_u_state(seg, base),
             Some(Xcr0Component::CetS) => self.xrstor_cet_s_state(seg, base),
+            Some(Xcr0Component::Uintr) => self.xrstor_uintr_state(seg, base),
+            Some(Xcr0Component::Xtilecfg) => self.xrstor_xtilecfg_state(seg, base),
+            Some(Xcr0Component::Xtiledata) => self.xrstor_xtiledata_state(seg, base),
             _ => Ok(()),
         }
     }
@@ -2742,6 +2987,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Some(Xcr0Component::Pkru) => self.xrstor_init_pkru_state(),
             Some(Xcr0Component::CetU) => self.xrstor_init_cet_u_state(),
             Some(Xcr0Component::CetS) => self.xrstor_init_cet_s_state(),
+            Some(Xcr0Component::Uintr) => self.xrstor_init_uintr_state(),
+            Some(Xcr0Component::Xtilecfg) => self.xrstor_init_xtilecfg_state(),
+            Some(Xcr0Component::Xtiledata) => self.xrstor_init_xtiledata_state(),
             _ => {}
         }
     }
@@ -2760,6 +3008,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Some(Xcr0Component::Pkru) => 8,
             Some(Xcr0Component::CetU) => 16,
             Some(Xcr0Component::CetS) => 24,
+            Some(Xcr0Component::Uintr) => 48,
+            Some(Xcr0Component::Xtilecfg) => 64,
+            Some(Xcr0Component::Xtiledata) => (super::avx::BX_TILE_REGISTERS
+                * super::avx::BX_TILE_MAX_ROWS
+                * super::avx::BX_TILE_ROW_BYTES) as u64,
+            // Bochs crregs.h XSAVE_APX_STATE_LEN: reserves 128 bytes at the
+            // APX offset even though no CPU yet registers a save/restore
+            // handler for APX. The dispatch fall-through `Ok(())` mirrors
+            // the NULL xsave_restore[APX] entry in Bochs.
+            Some(Xcr0Component::Apx) => 128,
             _ => 0,
         }
     }
@@ -2876,6 +3134,50 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                         xinuse |= 1 << 7;
                         break;
                     }
+                }
+            }
+        }
+
+        // PKRU (bit 9) — Bochs xsave.cc xsave_pkru_state_xinuse.
+        if (rfbm & (1 << 9)) != 0 && self.pkru != 0 {
+            xinuse |= 1 << 9;
+        }
+
+        // CET_U (bit 11) — Bochs xsave.cc xsave_cet_u_state_xinuse.
+        if (rfbm & (1 << 11)) != 0
+            && (self.msr.ia32_cet_control[1] != 0 || self.msr.ia32_pl_ssp[3] != 0)
+        {
+            xinuse |= 1 << 11;
+        }
+
+        // CET_S (bit 12) — Bochs xsave.cc xsave_cet_s_state_xinuse.
+        if (rfbm & (1 << 12)) != 0
+            && (self.msr.ia32_pl_ssp[0] != 0
+                || self.msr.ia32_pl_ssp[1] != 0
+                || self.msr.ia32_pl_ssp[2] != 0)
+        {
+            xinuse |= 1 << 12;
+        }
+
+        // UINTR (bit 14) — Bochs xsave.cc xsave_uintr_state_xinuse.
+        if (rfbm & (1 << 14)) != 0 && self.xsave_uintr_state_xinuse() {
+            xinuse |= 1 << 14;
+        }
+
+        // XTILECFG (bit 17) — Bochs xsave.cc xsave_tilecfg_state_xinuse.
+        if (rfbm & (1 << 17)) != 0 {
+            if let Some(amx) = self.amx.as_ref() {
+                if amx.tiles_configured() {
+                    xinuse |= 1 << 17;
+                }
+            }
+        }
+
+        // XTILEDATA (bit 18) — Bochs xsave.cc xsave_tiledata_state_xinuse.
+        if (rfbm & (1 << 18)) != 0 {
+            if let Some(amx) = self.amx.as_ref() {
+                if amx.tile_use_tracker != 0 {
+                    xinuse |= 1 << 18;
                 }
             }
         }
@@ -3024,10 +3326,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.xsave_sse_state(seg, eaddr.wrapping_add(160))?;
         }
 
-        // Extended features in compacted format starting at offset 576
-        // Bochs xsave.cc — offset advances for every requested feature
+        // Extended features in compacted format starting at offset 576.
+        // Bochs xsave.cc — offset advances for every requested feature, covering
+        // every XCR0 component we support (through UINTR = bit 14). Components
+        // our dispatch doesn't recognise contribute zero length and are skipped.
         let mut offset: u64 = 576; // XSAVE_YMM_STATE_OFFSET
-        for feature in 2..=7u32 {
+        for feature in 2..=19u32 {
             let mask = 1u64 << feature;
             if (requested & mask) != 0 {
                 if (xinuse & mask) != 0 {
@@ -3182,9 +3486,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // --- Extended features (YMM and beyond) ---
         if compaction {
-            // Compacted format: offset starts at 576, advances per component in xcomp_bv
+            // Compacted format: offset starts at 576, advances per component in xcomp_bv.
+            // Loop covers every component we may support (up to APX = bit 19).
             let mut offset: u64 = 576;
-            for feature in 2..=7u32 {
+            for feature in 2..=19u32 {
                 let mask = 1u64 << feature;
                 if (requested & mask) != 0 {
                     if (restore_mask & mask) != 0 {
@@ -3200,8 +3505,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 }
             }
         } else {
-            // Standard format: each feature at its fixed offset
-            for feature in 2..=7u32 {
+            // Standard format: each feature at its fixed offset (bits 0-9).
+            for feature in 2..=9u32 {
                 let mask = 1u64 << feature;
                 if (requested & mask) != 0 {
                     if (xstate_bv & mask) != 0 {

@@ -14,20 +14,71 @@ use super::{
     xmm::{BxPackedXmmRegister, BxPackedYmmRegister},
 };
 
-// AMX stub types (moved from old avx/amx.rs)
+// AMX architectural state — Bochs avx/amx.h BxPackedAmxRegister + amx.cc.
+//
+// 8 tiles × 16 rows × 64 bytes = 8192 bytes of tile storage (BX_TILE_REGISTERS
+// × BX_TILE_MAX_ROWS × 64). Tile config: palette_id, start_row, plus per-tile
+// rows/bytes-per-row. `tile_use_tracker` is an 8-bit bitmap of tiles whose row
+// data is nonzero — used by xsave_tiledata_state_xinuse.
+pub const BX_TILE_REGISTERS: usize = 8;
+pub const BX_TILE_MAX_ROWS: usize = 16;
+pub const BX_TILE_ROW_BYTES: usize = 64;
+
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct TILECFG {
     pub rows: u32,
     pub bytes_per_row: u32,
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AMX {
     pub palette_id: u32,
     pub start_row: u32,
-    pub tilecfg: [TILECFG; 8],
+    pub tilecfg: [TILECFG; BX_TILE_REGISTERS],
+    /// [tile][row] flat byte buffer sized for BX_TILE_MAX_ROWS × BX_TILE_ROW_BYTES.
+    pub tile: [[u8; BX_TILE_MAX_ROWS * BX_TILE_ROW_BYTES]; BX_TILE_REGISTERS],
+    /// Bitmap: bit i set iff tile `i` has non-initial content — Bochs amx.h
+    /// tile_use_tracker (drives xsave_tiledata_state_xinuse).
+    pub tile_use_tracker: u8,
+}
+
+impl Default for AMX {
+    fn default() -> Self {
+        Self {
+            palette_id: 0,
+            start_row: 0,
+            tilecfg: [TILECFG::default(); BX_TILE_REGISTERS],
+            tile: [[0u8; BX_TILE_MAX_ROWS * BX_TILE_ROW_BYTES]; BX_TILE_REGISTERS],
+            tile_use_tracker: 0,
+        }
+    }
+}
+
+impl AMX {
+    /// Bochs amx.h tiles_configured: palette_id != 0 indicates config was applied.
+    #[inline]
+    pub fn tiles_configured(&self) -> bool {
+        self.palette_id != 0
+    }
+
+    /// Bochs amx.h clear — reset the entire AMX state block.
+    pub fn clear(&mut self) {
+        *self = AMX::default();
+    }
+
+    #[inline]
+    pub fn set_tile_used(&mut self, idx: usize) {
+        self.tile_use_tracker |= 1 << idx;
+    }
+
+    #[inline]
+    pub fn clear_tile_used(&mut self, idx: usize) {
+        self.tile_use_tracker &= !(1 << idx);
+        // Also zero the tile storage so xinuse reports consistently.
+        self.tile[idx] = [0u8; BX_TILE_MAX_ROWS * BX_TILE_ROW_BYTES];
+    }
 }
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {

@@ -63,7 +63,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         {
             self.amx = if self.bx_cpuid_support_isa_extension(X86Feature::IsaAmx) {
-                Some(AMX::default())
+                Some(alloc::boxed::Box::new(AMX::default()))
             } else {
                 None
             };
@@ -270,6 +270,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.msr.ia32_pl_ssp = [0; 4];
 
         self.msr.ia32_spec_ctrl = 0;
+
+        // Bochs init.cc — set_PKeys(0, 0) at reset to rebuild the per-pkey allow
+        // masks from the zeroed PKRU/PKRS and current CR0.WP / CR4.PKE+PKS.
+        self.set_pkeys(0, 0);
 
         /* initialise MSR registers to defaults */
         self.msr.apicbase = BX_LAPIC_BASE_ADDR;

@@ -461,7 +461,9 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
 
     pub(super) msrs: [MSR; BX_MSR_MAX_INDEX],
 
-    pub(super) amx: Option<AMX>,
+    // Box-allocated because AMX carries 8 KiB of tile-data buffers — too big
+    // to inline into every CpuC when most CPUs (e.g. Skylake-X) never need it.
+    pub(super) amx: Option<alloc::boxed::Box<AMX>>,
 
     pub(super) in_vmx: bool,
     pub(super) in_vmx_guest: bool,
@@ -790,6 +792,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     #[allow(dead_code)]
     pub(super) const BX_EVENT_INIT: u32 = 1 << 7;
 
+    /// Event bit: user-level interrupt pending (UINTR).
+    /// Bochs cpu.h BX_EVENT_PENDING_UINTR.
+    pub(super) const BX_EVENT_PENDING_UINTR: u32 = 1 << 8;
+
     /// Returns a mutable raw pointer to the Local APIC for cross-module wiring.
     /// Used by emulator.rs to wire I/O APIC → LAPIC interrupt delivery.
     pub(crate) fn lapic_ptr_mut(&mut self) -> *mut crate::cpu::apic::BxLocalApic {
@@ -1111,20 +1117,20 @@ impl MonitorAddr {
 
 #[derive(Debug, Default)]
 pub(super) struct Uintr {
-    ui_handler: BxAddress,
-    stack_adjust: u64,
+    pub(super) ui_handler: BxAddress,
+    pub(super) stack_adjust: u64,
     /// user interrupt notification vector, actually 8 bit
-    uinv: u32,
+    pub(super) uinv: u32,
     /// user interrupt target table size
-    uitt_size: u32,
+    pub(super) uitt_size: u32,
     /// user interrupt target table address
-    uitt_addr: BxAddress,
+    pub(super) uitt_addr: BxAddress,
     /// user posted-interrupt descriptor address
-    upid_addr: BxAddress,
+    pub(super) upid_addr: BxAddress,
     /// user-interrupt request register
-    uirr: u64,
+    pub(super) uirr: u64,
     /// if UIF=0 user interrupt cannot be delivered
-    uif: bool,
+    pub(super) uif: bool,
 }
 
 impl Uintr {

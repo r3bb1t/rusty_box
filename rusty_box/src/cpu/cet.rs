@@ -233,37 +233,87 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(val)
     }
 
-    /// Atomic compare-exchange on shadow stack (locked RMW).
-    /// Bochs access2.cc shadow_stack_lock_cmpxchg8b()
-    /// Returns true if the exchange succeeded.
+    /// True atomic compare-exchange on a shadow-stack token.
+    ///
+    /// Bochs access2.cc shadow_stack_lock_cmpxchg8b does a sequenced read +
+    /// conditional write with a "should be atomic RMW" comment — fine under
+    /// Bochs' single-threaded-per-CPU model, but not SMP-safe. Per the
+    /// CLAUDE.md thread-safety rule we upgrade to a real lock-free CMPXCHG on
+    /// the host memory location.
+    ///
+    /// Returns Ok(true) when the exchange observed `expected` and installed
+    /// `new_val`; Ok(false) when `expected` did not match.
     fn shadow_stack_lock_cmpxchg8b(
         &mut self,
         offset: u64,
-        cpl: u8,
-        data: u64,
+        _cpl: u8,
+        new_val: u64,
         expected: u64,
     ) -> Result<bool> {
-        let val = self.shadow_stack_read_qword(offset, cpl)?;
-        if val == expected {
-            self.shadow_stack_write_qword(offset, cpl, data)?;
-            Ok(true)
+        use core::sync::atomic::{AtomicU64, Ordering};
+
+        // Walk the SS-aware page tables. This raises #PF on non-SS pages /
+        // U-S mismatch / missing pages — matching Bochs access_write_linear.
+        let paddr = self.translate_shadow_stack_write(offset)?;
+
+        // Prefer the TLB-cached host pointer that translate_shadow_stack_write
+        // has just populated; fall back to mem_read/mem_write for MMIO-backed
+        // SS pages (architecturally unusual but defensible).
+        let lpf = offset & super::tlb::LPF_MASK;
+        let host_ptr: Option<*mut u64> = {
+            let tlb = self.dtlb.get_entry_of(offset, 7);
+            if tlb.lpf == lpf && tlb.host_page_addr != 0 {
+                let byte_ptr = super::access::host_at_page_offset_mut(
+                    tlb.host_page_addr as *mut u8,
+                    offset,
+                );
+                // SSP is architecturally 8-byte aligned on every caller; the
+                // raw byte pointer thus aligns for u64/AtomicU64.
+                debug_assert_eq!(offset & 0x7, 0, "SS cmpxchg offset must be 8-byte aligned");
+                Some(byte_ptr as *mut u64)
+            } else {
+                None
+            }
+        };
+
+        if let Some(ptr) = host_ptr {
+            // SAFETY: `ptr` was derived from a TLB entry that translate_*
+            // validated as a present, writeable, 8-byte-aligned host-backed
+            // shadow-stack page. The memory it points at is shared guest
+            // RAM — accesses from device threads / other vCPUs must use
+            // atomic operations, and that's exactly what `AtomicU64` does
+            // at the same address. Lifetime of the underlying page is tied
+            // to the emulator's memory backing, which outlives the CPU loop.
+            let atomic = unsafe { &*(ptr as *const AtomicU64) };
+            let ok = atomic
+                .compare_exchange(expected, new_val, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+            self.i_cache.smc_write_check(paddr, 8);
+            Ok(ok)
         } else {
-            self.shadow_stack_write_qword(offset, cpl, val)?;
-            Ok(false)
+            // MMIO-backed SS page (not a real architectural case). Fall back to
+            // the Bochs sequenced RMW — no better option for non-RAM targets.
+            let val = self.mem_read_qword(paddr);
+            if val == expected {
+                self.mem_write_qword(paddr, new_val);
+                Ok(true)
+            } else {
+                self.mem_write_qword(paddr, val);
+                Ok(false)
+            }
         }
     }
 
     /// Atomically set the busy bit on a shadow stack token.
-    /// Bochs access2.cc shadow_stack_atomic_set_busy()
-    /// Returns true on success.
+    /// Bochs access2.cc shadow_stack_atomic_set_busy.
     pub(super) fn shadow_stack_atomic_set_busy(&mut self, offset: u64, cpl: u8) -> Result<bool> {
         let expected = if self.long64_mode() { offset } else { offset & 0xFFFF_FFFF };
         self.shadow_stack_lock_cmpxchg8b(offset, cpl, offset | 0x1, expected)
     }
 
     /// Atomically clear the busy bit on a shadow stack token.
-    /// Returns the raw cmpxchg result: true if the exchange matched.
-    /// Bochs: shadow_stack_atomic_clear_busy (access2.cc)
+    /// Bochs access2.cc shadow_stack_atomic_clear_busy — returns true if the
+    /// compare matched (busy bit was set as expected).
     pub(super) fn shadow_stack_atomic_clear_busy(&mut self, offset: u64, cpl: u8) -> Result<bool> {
         self.shadow_stack_lock_cmpxchg8b(offset, cpl, offset, offset | 0x1)
     }

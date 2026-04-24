@@ -1432,7 +1432,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let user = (curr_pl == 3) as u32;
         let lpf = laddr & super::tlb::LPF_MASK;
         let tlb = self.dtlb.get_entry_of(laddr, 3);
-        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user) && tlb.host_page_addr != 0 {
+        let pkey_mask = self.rd_pkey[tlb.pkey as usize];
+        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page_addr != 0 {
             let host = tlb.host_page_addr as *const u8;
             let ptr = host_at_page_offset(host, laddr);
             // SAFETY: TLB-validated host pointer; unaligned read OK.
@@ -1453,7 +1454,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let user = (curr_pl == 3) as u32;
         let lpf = laddr & super::tlb::LPF_MASK;
         let tlb = self.dtlb.get_entry_of(laddr, 7);
-        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user) && tlb.host_page_addr != 0 {
+        let pkey_mask = self.rd_pkey[tlb.pkey as usize];
+        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page_addr != 0 {
             let host = tlb.host_page_addr as *const u8;
             let ptr = host_at_page_offset(host, laddr);
             return Ok(read_unaligned_u64(ptr));
@@ -1473,7 +1475,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let user = (curr_pl == 3) as u32;
         let lpf = laddr & super::tlb::LPF_MASK;
         let tlb = self.dtlb.get_entry_of(laddr, 3);
-        if tlb.lpf == lpf && tlb.is_shadow_stack_write_ok(user) && tlb.host_page_addr != 0 {
+        let pkey_mask = self.wr_pkey[tlb.pkey as usize];
+        if tlb.lpf == lpf && tlb.is_shadow_stack_write_ok(user, pkey_mask) && tlb.host_page_addr != 0 {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
             self.i_cache.smc_write_check(paddr, 4);
@@ -1499,7 +1502,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let user = (curr_pl == 3) as u32;
         let lpf = laddr & super::tlb::LPF_MASK;
         let tlb = self.dtlb.get_entry_of(laddr, 7);
-        if tlb.lpf == lpf && tlb.is_shadow_stack_write_ok(user) && tlb.host_page_addr != 0 {
+        let pkey_mask = self.wr_pkey[tlb.pkey as usize];
+        if tlb.lpf == lpf && tlb.is_shadow_stack_write_ok(user, pkey_mask) && tlb.host_page_addr != 0 {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
             self.i_cache.smc_write_check(paddr, 8);
