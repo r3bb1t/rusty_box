@@ -856,7 +856,7 @@ pub fn CMPXCHG8B<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
         cpu.address_xlation = xlat_saved;
         cpu.write_rmw_linear_dword(src_64 as u32);
         cpu.v_write_dword(seg, eaddr.wrapping_add(4), (src_64 >> 32) as u32)?;
-        cpu.eflags.insert(crate::cpu::eflags::EFlags::ZF);
+        cpu.oszapc.set_zf(true);
     } else {
         // EDX:EAX <- dest
         // Write back original value (Bochs: write_RMW_linear_qword(op1_64))
@@ -864,7 +864,7 @@ pub fn CMPXCHG8B<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
         cpu.write_rmw_linear_dword(lo);
         cpu.set_rax(lo as u64);
         cpu.set_rdx(hi as u64);
-        cpu.eflags.remove(crate::cpu::eflags::EFlags::ZF);
+        cpu.oszapc.set_zf(false);
     }
     Ok(())
 }
