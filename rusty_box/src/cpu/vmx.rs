@@ -24,6 +24,16 @@ pub const BX_IA32_FEATURE_CONTROL_BITS: u32 =
 /// Bochs uses 1 — kernels treat any value the host returns as authoritative.
 pub const BX_VMCS_REVISION_ID: u32 = 1;
 
+/// Fixed offset within the 4 KiB VMCS region where we store the launch-state
+/// flag. Bochs picks an implementation-specific offset via its `vmcs_map`;
+/// since our table is not ported yet, pin launch-state to bytes 4..8 (right
+/// after the revision ID dword at offset 0). This is invisible to guests —
+/// they only touch this byte via VMCLEAR / VMLAUNCH / VMRESUME semantics.
+pub const VMCS_LAUNCH_STATE_OFFSET: u64 = 4;
+
+pub const VMCS_STATE_CLEAR: u32 = 0;
+pub const VMCS_STATE_LAUNCHED: u32 = 1;
+
 /// VMX-instruction error codes written into the VMCS 32-bit
 /// VMCS_32BIT_INSTRUCTION_ERROR field by `VMfail`.
 /// Mirrors Bochs vmx.h `enum VMX_error_code`.
@@ -103,9 +113,11 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.oszapc.set_oszapc_logic_32(1);
         if self.vmcsptr != super::vmcs::BX_INVALID_VMCSPTR {
             self.oszapc.set_zf(true);
-            // TODO Session 4: VMwrite32(VMCS_32BIT_INSTRUCTION_ERROR, error as u32)
-            // — requires VMCS field write path which ships with VMREAD/VMWRITE.
-            let _ = error;
+            // Bochs: VMwrite32(VMCS_32BIT_INSTRUCTION_ERROR, error).
+            // 0x4400 is the architecturally-assigned encoding.
+            if let Some(off) = Self::vmcs_field_offset(0x4400) {
+                self.mem_write_dword(self.vmcsptr + off, error as u32);
+            }
         } else {
             self.oszapc.set_cf(true);
         }
@@ -220,6 +232,266 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.monitor.reset_monitor();
         self.vmsucceed();
         Ok(())
+    }
+
+    // =========================================================================
+    // VMCLEAR — initialise a VMCS in memory, mark launch-state clear.
+    // Bochs vmx.cc BX_CPU_C::VMCLEAR.
+    // =========================================================================
+
+    pub(super) fn vmclear(&mut self, instr: &Instruction) -> Result<()> {
+        if !self.in_vmx || !self.protected_mode() || self.long_compat_mode() {
+            return self.exception(Exception::Ud, 0);
+        }
+        if self.in_vmx_guest {
+            // VMEXIT path lands in Session 5 — for now surface as #GP so guest
+            // VMCLEAR doesn't silently succeed.
+            return self.exception(Exception::Gp, 0);
+        }
+        if self.cs_rpl() != 0 {
+            return self.exception(Exception::Gp, 0);
+        }
+
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
+        let paddr = if self.long64_mode() {
+            self.read_virtual_qword_64(seg, eaddr)?
+        } else {
+            self.read_virtual_qword(seg, eaddr as u32)?
+        };
+
+        const BX_PHY_ADDRESS_WIDTH: u32 = 40;
+        if paddr == 0
+            || (paddr & 0xFFF) != 0
+            || (paddr >> BX_PHY_ADDRESS_WIDTH) != 0
+        {
+            self.vmfail(VmxErr::VmclearWithInvalidAddr);
+            return Ok(());
+        }
+
+        if paddr == self.vmxonptr {
+            self.vmfail(VmxErr::VmclearWithVmxonVmcsPtr);
+            return Ok(());
+        }
+
+        // Clear the VMCS launch-state flag in guest-physical memory.
+        self.mem_write_dword(paddr + VMCS_LAUNCH_STATE_OFFSET, VMCS_STATE_CLEAR);
+
+        // If we were using this VMCS as the current one, drop it.
+        if paddr == self.vmcsptr {
+            self.vmcsptr = super::vmcs::BX_INVALID_VMCSPTR;
+        }
+
+        self.vmsucceed();
+        Ok(())
+    }
+
+    // =========================================================================
+    // VMPTRLD — load VMCS pointer from memory operand.
+    // Bochs vmx.cc BX_CPU_C::VMPTRLD.
+    // =========================================================================
+
+    pub(super) fn vmptrld(&mut self, instr: &Instruction) -> Result<()> {
+        if !self.in_vmx || !self.protected_mode() || self.long_compat_mode() {
+            return self.exception(Exception::Ud, 0);
+        }
+        if self.in_vmx_guest {
+            return self.exception(Exception::Gp, 0);
+        }
+        if self.cs_rpl() != 0 {
+            return self.exception(Exception::Gp, 0);
+        }
+
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
+        let paddr = if self.long64_mode() {
+            self.read_virtual_qword_64(seg, eaddr)?
+        } else {
+            self.read_virtual_qword(seg, eaddr as u32)?
+        };
+
+        const BX_PHY_ADDRESS_WIDTH: u32 = 40;
+        if paddr == 0
+            || (paddr & 0xFFF) != 0
+            || (paddr >> BX_PHY_ADDRESS_WIDTH) != 0
+        {
+            self.vmfail(VmxErr::VmptrldInvalidPhysicalAddress);
+            return Ok(());
+        }
+
+        if paddr == self.vmxonptr {
+            self.vmfail(VmxErr::VmptrldWithVmxonPtr);
+            return Ok(());
+        }
+
+        let revision = self.vmx_read_revision_id(paddr);
+        if revision != BX_VMCS_REVISION_ID {
+            tracing::trace!(
+                "VMPTRLD: revision mismatch at {:#x}: {:#x} vs {:#x}",
+                paddr, revision, BX_VMCS_REVISION_ID
+            );
+            self.vmfail(VmxErr::VmptrldIncorrectVmcsRevisionId);
+            return Ok(());
+        }
+
+        self.vmcsptr = paddr;
+        self.vmsucceed();
+        Ok(())
+    }
+
+    // =========================================================================
+    // VMPTRST — store current VMCS pointer to memory operand.
+    // Bochs vmx.cc BX_CPU_C::VMPTRST.
+    // =========================================================================
+
+    pub(super) fn vmptrst(&mut self, instr: &Instruction) -> Result<()> {
+        if !self.in_vmx || !self.protected_mode() || self.long_compat_mode() {
+            return self.exception(Exception::Ud, 0);
+        }
+        if self.in_vmx_guest {
+            return self.exception(Exception::Gp, 0);
+        }
+        if self.cs_rpl() != 0 {
+            return self.exception(Exception::Gp, 0);
+        }
+
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
+        let val = self.vmcsptr;
+        if self.long64_mode() {
+            self.write_virtual_qword_64(seg, eaddr, val)?;
+        } else {
+            self.write_virtual_qword(seg, eaddr as u32, val)?;
+        }
+        self.vmsucceed();
+        Ok(())
+    }
+
+    // =========================================================================
+    // VMREAD / VMWRITE — minimal VMCS field access.
+    //
+    // Bochs' vmx_map drives a per-field byte offset into the 4 KiB VMCS
+    // region. That table isn't ported yet; for now we support the two
+    // architecturally required fields Session 3's VMfail writes touch:
+    // VMCS_LAUNCH_STATE (our stash at offset 4) and
+    // VMCS_32BIT_INSTRUCTION_ERROR (encoding 0x4400, stashed at offset 8).
+    // Any other encoding fails with VMXERR_UNSUPPORTED_VMCS_COMPONENT_ACCESS
+    // so guests see a well-defined error instead of silent corruption.
+    // =========================================================================
+
+    /// Return the byte offset inside the VMCS where a given encoding lives.
+    /// `None` means the encoding is not yet supported.
+    fn vmcs_field_offset(encoding: u32) -> Option<u64> {
+        match encoding {
+            0x4400 => Some(8), // VMCS_32BIT_INSTRUCTION_ERROR
+            _ => None,
+        }
+    }
+
+    pub(super) fn vmread_impl(&mut self, encoding: u32) -> Result<u64> {
+        if !self.in_vmx || !self.protected_mode() || self.long_compat_mode() {
+            self.exception(Exception::Ud, 0)?;
+            unreachable!();
+        }
+        if self.in_vmx_guest {
+            self.exception(Exception::Gp, 0)?;
+            unreachable!();
+        }
+        if self.cs_rpl() != 0 {
+            self.exception(Exception::Gp, 0)?;
+            unreachable!();
+        }
+        if self.vmcsptr == super::vmcs::BX_INVALID_VMCSPTR {
+            self.vmfail_invalid();
+            return Ok(0);
+        }
+
+        if let Some(off) = Self::vmcs_field_offset(encoding) {
+            let v = self.mem_read_dword(self.vmcsptr + off);
+            self.vmsucceed();
+            Ok(v as u64)
+        } else {
+            self.vmfail(VmxErr::UnsupportedVmcsComponentAccess);
+            Ok(0)
+        }
+    }
+
+    pub(super) fn vmwrite_impl(&mut self, encoding: u32, value: u64) -> Result<()> {
+        if !self.in_vmx || !self.protected_mode() || self.long_compat_mode() {
+            return self.exception(Exception::Ud, 0);
+        }
+        if self.in_vmx_guest {
+            return self.exception(Exception::Gp, 0);
+        }
+        if self.cs_rpl() != 0 {
+            return self.exception(Exception::Gp, 0);
+        }
+        if self.vmcsptr == super::vmcs::BX_INVALID_VMCSPTR {
+            self.vmfail_invalid();
+            return Ok(());
+        }
+
+        if let Some(off) = Self::vmcs_field_offset(encoding) {
+            self.mem_write_dword(self.vmcsptr + off, value as u32);
+            self.vmsucceed();
+            Ok(())
+        } else {
+            self.vmfail(VmxErr::UnsupportedVmcsComponentAccess);
+            Ok(())
+        }
+    }
+
+    // Top-level VMREAD handlers (32-bit and 64-bit operand size).
+    // Bochs vmx.cc BX_CPU_C::VMREAD_EdGd / VMREAD_EqGq.
+
+    pub(super) fn vmread_ed_gd(&mut self, instr: &Instruction) -> Result<()> {
+        let enc = self.get_gpr32(instr.src() as usize);
+        let val = self.vmread_impl(enc)?;
+        if instr.mod_c0() {
+            self.set_gpr32(instr.dst() as usize, val as u32);
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.write_virtual_dword(seg, eaddr as u32, val as u32)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn vmread_eq_gq(&mut self, instr: &Instruction) -> Result<()> {
+        let enc = self.get_gpr64(instr.src() as usize) as u32;
+        let val = self.vmread_impl(enc)?;
+        if instr.mod_c0() {
+            self.set_gpr64(instr.dst() as usize, val);
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.write_virtual_qword_64(seg, eaddr, val)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn vmwrite_gd_ed(&mut self, instr: &Instruction) -> Result<()> {
+        let enc = self.get_gpr32(instr.dst() as usize);
+        let src = if instr.mod_c0() {
+            self.get_gpr32(instr.src() as usize) as u64
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.read_virtual_dword(seg, eaddr as u32)? as u64
+        };
+        self.vmwrite_impl(enc, src)
+    }
+
+    pub(super) fn vmwrite_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let enc = self.get_gpr64(instr.dst() as usize) as u32;
+        let src = if instr.mod_c0() {
+            self.get_gpr64(instr.src() as usize)
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.read_virtual_qword_64(seg, eaddr)?
+        };
+        self.vmwrite_impl(enc, src)
     }
 
     // =========================================================================

@@ -1426,16 +1426,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::Wbinvd => self.wbinvd(instr),
             Opcode::Invd => self.invd(instr),
             // VMX stubs — #GP(0) in VMX root, #UD outside VMX
-            // VMX operation-mode entry/exit — wired in Session 3. The remaining
-            // VMX opcodes (VMLAUNCH/VMRESUME/VMCLEAR/VMPTRLD/VMREAD/VMWRITE)
-            // still fall through to #UD pending Session 4 VMCS work.
+            // VMX — operation mode, VMCS pointer management, and minimal
+            // VMREAD/VMWRITE. VMLAUNCH/VMRESUME still #UD pending Session 5.
             Opcode::VmxonMq => self.vmxon(instr),
             Opcode::Vmxoff => self.vmxoff(instr),
-            Opcode::Vmlaunch | Opcode::Vmresume
-            | Opcode::VmclearMq | Opcode::VmptrldMq
-            | Opcode::VmreadEdGd | Opcode::VmwriteGdEd
-            | Opcode::VmreadEqGq | Opcode::VmwriteGqEq => {
-                // Session 4 scope — raise #UD for now.
+            Opcode::VmclearMq => self.vmclear(instr),
+            Opcode::VmptrldMq => self.vmptrld(instr),
+            Opcode::VmreadEdGd => self.vmread_ed_gd(instr),
+            Opcode::VmreadEqGq => self.vmread_eq_gq(instr),
+            Opcode::VmwriteGdEd => self.vmwrite_gd_ed(instr),
+            Opcode::VmwriteGqEq => self.vmwrite_gq_eq(instr),
+            Opcode::VmptrstMq => self.vmptrst(instr),
+            Opcode::Vmlaunch | Opcode::Vmresume => {
+                // Session 5 scope — raise #UD until VM-entry lands.
                 self.exception(super::cpu::Exception::Ud, 0)
             }
             Opcode::Invlpg => self.invlpg(instr),
