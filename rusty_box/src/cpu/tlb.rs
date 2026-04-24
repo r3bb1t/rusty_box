@@ -82,6 +82,21 @@ impl TLBEntry {
             self.memtype
         }
     }
+
+    /// CET: page can be read as shadow stack from the given privilege level.
+    /// Bochs tlb.h isShadowStackReadOK macro.
+    /// `user` must be 0 (supervisor) or 1 (user) — used as a shift amount.
+    #[inline]
+    pub(crate) fn is_shadow_stack_read_ok(&self, user: u32) -> bool {
+        self.access_bits & (0x10u32 << user) != 0
+    }
+
+    /// CET: page can be written as shadow stack from the given privilege level.
+    /// Bochs tlb.h isShadowStackWriteOK macro.
+    #[inline]
+    pub(crate) fn is_shadow_stack_write_ok(&self, user: u32) -> bool {
+        self.access_bits & (0x40u32 << user) != 0
+    }
 }
 
 // Our TLB struct, generic over the number of entries:

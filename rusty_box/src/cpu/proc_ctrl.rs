@@ -446,7 +446,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     // =========================================================================
     // UMONITOR — User-mode Monitor setup (WAITPKG, opcode F3 0F AE /6)
-    // Bochs: mwait.cc:244-284 BX_CPU_C::UMONITOR_Eq
+    // Bochs: mwait.cc BX_CPU_C::UMONITOR_Eq
     // =========================================================================
 
     pub(super) fn umonitor(
@@ -461,14 +461,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        // Bochs mwait.cc:248-255: VMX intercept. If guest without UMWAIT_TPAUSE_VMEXIT
+        // Bochs mwait.cc: VMX intercept. If guest without UMWAIT_TPAUSE_VMEXIT
         // control bit → #UD. (Intercept plumbing ships in Session 6; #UD-only for now.)
         if self.in_vmx_guest {
             tracing::trace!("UMONITOR: VMX guest without UMWAIT_TPAUSE_VMEXIT control, #UD");
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        // Bochs mwait.cc:257-261: bx_address eaddr = BX_READ_*_REG(i->dst()) & i->asize_mask();
+        // Bochs mwait.cc: bx_address eaddr = BX_READ_*_REG(i->dst()) & i->asize_mask();
         const ASIZE_MASK: [u64; 4] = [
             0xFFFF,
             0xFFFF_FFFF,
@@ -484,7 +484,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
         let eaddr = raw & ASIZE_MASK[asize];
 
-        // Bochs mwait.cc:263-264: UMONITOR performs the same segmentation and
+        // Bochs mwait.cc: UMONITOR performs the same segmentation and
         // paging checks as a 1-byte read (tickle_read_virtual).
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let laddr: u64 = if self.long64_mode() {
@@ -494,7 +494,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
         let paddr = self.translate_data_read(laddr)?;
 
-        // Bochs mwait.cc:267-272: skip arm for non-WB memory types.
+        // Bochs mwait.cc: skip arm for non-WB memory types.
         // We don't track MTRR memory types per-page, so always arm. Warn only on
         // MMIO-like addresses (no host mapping) to match MONITOR's behavior.
         if self.get_host_write_ptr(laddr).is_none() {
@@ -504,7 +504,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             );
         }
 
-        // Bochs mwait.cc:276-278: bx_pc_system.invlpg(paddr); monitor.arm(paddr, UMONITOR).
+        // Bochs mwait.cc: bx_pc_system.invlpg(paddr); monitor.arm(paddr, UMONITOR).
         self.monitor
             .arm(paddr, super::cpu::BX_MONITOR_ARMED_BY_UMONITOR);
         tracing::trace!(
@@ -517,7 +517,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
     // UMWAIT — User-mode Monitor Wait (WAITPKG, opcode F2 0F AE /6)
     // TPAUSE — Timed PAUSE (WAITPKG, opcode 66 0F AE /6)
-    // Bochs: mwait.cc:286-377 BX_CPU_C::UMWAIT_Ed / TPAUSE_Ed (shared handler)
+    // Bochs: mwait.cc BX_CPU_C::UMWAIT_Ed / TPAUSE_Ed (shared handler)
     // =========================================================================
 
     pub(super) fn umwait(
@@ -546,13 +546,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        // Bochs mwait.cc:291-298: VMX intercept check (UMWAIT_TPAUSE_VMEXIT).
+        // Bochs mwait.cc: VMX intercept check (UMWAIT_TPAUSE_VMEXIT).
         // Full intercept plumbing ships in Session 6.
         if self.in_vmx_guest {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        // Bochs mwait.cc:300-303: CR4.TSD && CPL != 0 → #GP(0).
+        // Bochs mwait.cc: CR4.TSD && CPL != 0 → #GP(0).
         if self.cr4.tsd() {
             let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
                 .selector
@@ -562,17 +562,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
-        // Bochs mwait.cc:311-315: req_sleep_state = BX_READ_32BIT_REG(i->dst());
+        // Bochs mwait.cc: req_sleep_state = BX_READ_32BIT_REG(i->dst());
         // if (req_sleep_state & ~0x1) → #GP(0).
         let req_sleep_state = self.get_gpr32(instr.dst() as usize);
         if req_sleep_state & !0x1 != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        // Bochs mwait.cc:317: clearEFlagsOSZAPC().
+        // Bochs mwait.cc: clearEFlagsOSZAPC().
         self.oszapc.set_oszapc_logic_32(1);
 
-        // Bochs mwait.cc:319-328: UMWAIT returns early if monitor is not armed
+        // Bochs mwait.cc: UMWAIT returns early if monitor is not armed
         // by UMONITOR; TPAUSE unconditionally clears any armed-by-UMONITOR state.
         if !is_tpause {
             if !self.monitor.armed_by_umonitor() {
@@ -583,7 +583,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.monitor.reset_umonitor();
         }
 
-        // Bochs mwait.cc:330-377: Full deadline-based sleep requires the LAPIC
+        // Bochs mwait.cc: Full deadline-based sleep requires the LAPIC
         // MWAITX timer (set_mwaitx_timer). That infrastructure isn't wired yet,
         // so follow Bochs' mwait_is_nop=true early-return path — treats the
         // instruction as a PAUSE-equivalent. The monitor state above has already
@@ -654,7 +654,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     // =========================================================================
     // CLZERO — Zero Cache Line (AMD, opcode F3 0F 01 FC)
-    // Bochs: proc_ctrl.cc:321-334 BX_CPU_C::CLZERO
+    // Bochs: proc_ctrl.cc BX_CPU_C::CLZERO
     // =========================================================================
 
     pub(super) fn clzero(
@@ -670,7 +670,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        // Bochs proc_ctrl.cc:321-334. Bochs line 324:
+        // Bochs proc_ctrl.cc. Bochs line 324:
         //   bx_address eaddr = RAX & ~BX_CONST64(CACHE_LINE_SIZE-1) & i->asize_mask();
         const CACHE_LINE_SIZE: u64 = 64;
         const ASIZE_MASK: [u64; 4] = [
@@ -776,8 +776,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_APICBASE => self.msr.apicbase,
             BX_MSR_PLATFORM_ID => 0, // read-only, returns 0
             BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => self.get_tsc(self.system_ticks()), // stub: return TSC
-            // Bochs msr.cc:354-356 — WAITPKG umwait max-delay control.
+            // Bochs msr.cc — WAITPKG umwait max-delay control.
             BX_MSR_IA32_UMWAIT_CONTROL => self.msr.ia32_umwait_ctrl as u64,
+            // Bochs msr.cc — CET control + shadow-stack pointers.
+            // ia32_cet_control[] is indexed `index == BX_MSR_IA32_U_CET` so
+            // U_CET → [1] (user), S_CET → [0] (supervisor).
+            BX_MSR_IA32_U_CET => self.msr.ia32_cet_control[1],
+            BX_MSR_IA32_S_CET => self.msr.ia32_cet_control[0],
+            BX_MSR_IA32_PL0_SSP..=BX_MSR_IA32_PL3_SSP => {
+                self.msr.ia32_pl_ssp[(msr - BX_MSR_IA32_PL0_SSP) as usize]
+            }
+            BX_MSR_IA32_INTERRUPT_SSP_TABLE_ADDR => self.msr.ia32_interrupt_ssp_table,
             BX_MSR_BIOS_SIGN_ID => 0x02000065, // Skylake-X microcode revision
             BX_MSR_MTRRCAP => BX_MSR_MTRRCAP_DEFAULT,
             BX_MSR_PMC0..=BX_MSR_PMC7 => 0, // Performance counters — return 0
@@ -907,8 +916,37 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             BX_MSR_IA32_APERF => { /* ignore write */ }
             BX_MSR_IA32_MPERF => { /* ignore write */ }
-            // Bochs msr.cc:1019-1021 — stores low 32 bits of value.
+            // Bochs msr.cc — stores low 32 bits of value.
             BX_MSR_IA32_UMWAIT_CONTROL => self.msr.ia32_umwait_ctrl = val as u32,
+            // Bochs msr.cc — CET writes validate canonical address +
+            // CET-control bit-pattern, then store. Returns false (#GP) on bad value.
+            BX_MSR_IA32_U_CET | BX_MSR_IA32_S_CET => {
+                if !self.is_canonical(val)
+                    || super::cet::is_invalid_cet_control(val)
+                {
+                    tracing::trace!(
+                        "WRMSR: bad CET control value {:#x} for MSR {:#x}",
+                        val, msr
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.ia32_cet_control[usize::from(msr == BX_MSR_IA32_U_CET)] = val;
+            }
+            BX_MSR_IA32_PL0_SSP..=BX_MSR_IA32_PL3_SSP => {
+                if !self.is_canonical(val) {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                if val & 0x03 != 0 {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.ia32_pl_ssp[(msr - BX_MSR_IA32_PL0_SSP) as usize] = val;
+            }
+            BX_MSR_IA32_INTERRUPT_SSP_TABLE_ADDR => {
+                if !self.is_canonical(val) {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.ia32_interrupt_ssp_table = val;
+            }
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr = val as u32,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr = val,
             BX_MSR_SYSENTER_EIP => self.msr.sysenter_eip_msr = val,
@@ -1435,7 +1473,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.invalidate_prefetch_q();
 
-        // Bochs proc_ctrl.cc:890-892 — clear VM, IF, RF
+        // Bochs proc_ctrl.cc — clear VM, IF, RF
         self.clear_vm();
         self.clear_if();
         self.clear_rf();
@@ -1803,7 +1841,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             );
             self.setup_flat_ss(0);
 
-            // Bochs proc_ctrl.cc:1096-1098 — SYSCALL legacy mode: clear VM, IF, RF
+            // Bochs proc_ctrl.cc — SYSCALL legacy mode: clear VM, IF, RF
             self.clear_vm();
             self.clear_if();
             self.clear_rf();
@@ -2111,8 +2149,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
-        // Save extended features at standard (fixed) offsets
-        for feature in 2..=7u32 {
+        // Save extended features at standard (fixed) offsets.
+        // Bit numbering matches Bochs xcr0_t: 2=YMM .. 9=PKRU. Components beyond
+        // PKRU (CET_U/CET_S, UINTR, ...) live in the compacted XSAVEC area.
+        for feature in 2..=9u32 {
             let mask = 1u64 << feature;
             if (requested & mask) != 0 {
                 let offset = Self::xsave_component_offset(feature);
@@ -2576,36 +2616,132 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
+    /// PKRU state — Bochs xsave.cc xsave_pkru_state. Single qword: low 32
+    /// bits hold the PKRU register; upper 32 are reserved.
+    fn xsave_pkru_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        self.v_write_qword(seg, base, self.pkru as u64)?;
+        Ok(())
+    }
+
+    /// PKRU restore — Bochs xsave.cc xrstor_pkru_state. Bochs reads into TMP32
+    /// and defers the set_PKeys side-effect to the end of XRSTOR; we have no
+    /// equivalent staging register, so write directly.
+    fn xrstor_pkru_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        let val = self.v_read_qword(seg, base)?;
+        self.pkru = val as u32;
+        Ok(())
+    }
+
+    fn xrstor_init_pkru_state(&mut self) {
+        self.pkru = 0;
+    }
+
+    /// CET U state — Bochs xsave.cc xsave_cet_u_state.
+    /// Saves IA32_U_CET (control[1]) at offset+0 and IA32_PL3_SSP at offset+8 (16 bytes total).
+    fn xsave_cet_u_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        self.v_write_qword(seg, base, self.msr.ia32_cet_control[1])?;
+        self.v_write_qword(seg, base.wrapping_add(8), self.msr.ia32_pl_ssp[3])?;
+        Ok(())
+    }
+
+    /// CET U state restore — Bochs xsave.cc xrstor_cet_u_state. Validates the
+    /// loaded values via the same WRMSR path so canonical/CET-control checks
+    /// raise #GP exactly as Bochs does (xrstor of CET state == wrmsr).
+    fn xrstor_cet_u_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        let ctrl = self.v_read_qword(seg, base)?;
+        let pl3_ssp = self.v_read_qword(seg, base.wrapping_add(8))?;
+
+        // U_CET: canonical + CET-control bit pattern.
+        if !self.is_canonical(ctrl) || super::cet::is_invalid_cet_control(ctrl) {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        self.msr.ia32_cet_control[1] = ctrl;
+
+        // PL3_SSP: canonical + 4-byte aligned.
+        if !self.is_canonical(pl3_ssp) || (pl3_ssp & 0x03) != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        self.msr.ia32_pl_ssp[3] = pl3_ssp;
+        Ok(())
+    }
+
+    fn xrstor_init_cet_u_state(&mut self) {
+        self.msr.ia32_cet_control[1] = 0;
+        self.msr.ia32_pl_ssp[3] = 0;
+    }
+
+    /// CET S state — Bochs xsave.cc xsave_cet_s_state.
+    /// Saves IA32_PL0/1/2_SSP at offsets 0/8/16 (24 bytes total).
+    fn xsave_cet_s_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        self.v_write_qword(seg, base, self.msr.ia32_pl_ssp[0])?;
+        self.v_write_qword(seg, base.wrapping_add(8), self.msr.ia32_pl_ssp[1])?;
+        self.v_write_qword(seg, base.wrapping_add(16), self.msr.ia32_pl_ssp[2])?;
+        Ok(())
+    }
+
+    fn xrstor_cet_s_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        let pl0_ssp = self.v_read_qword(seg, base)?;
+        let pl1_ssp = self.v_read_qword(seg, base.wrapping_add(8))?;
+        let pl2_ssp = self.v_read_qword(seg, base.wrapping_add(16))?;
+        for &val in &[pl0_ssp, pl1_ssp, pl2_ssp] {
+            if !self.is_canonical(val) || (val & 0x03) != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+        self.msr.ia32_pl_ssp[0] = pl0_ssp;
+        self.msr.ia32_pl_ssp[1] = pl1_ssp;
+        self.msr.ia32_pl_ssp[2] = pl2_ssp;
+        Ok(())
+    }
+
+    fn xrstor_init_cet_s_state(&mut self) {
+        for n in 0..3 {
+            self.msr.ia32_pl_ssp[n] = 0;
+        }
+    }
+
     /// Save an extended component at the given offset
     /// Used by both standard XSAVE and compacted XSAVEC
     fn xsave_extended_component(&mut self, seg: super::decoder::BxSegregs, base: u64, feature: u32) -> super::Result<()> {
-        match feature {
-            2 => self.xsave_ymm_state(seg, base),
-            5 => self.xsave_opmask_state(seg, base),
-            6 => self.xsave_zmm_hi256_state(seg, base),
-            7 => self.xsave_hi_zmm_state(seg, base),
+        use super::crregs::Xcr0Component;
+        match Xcr0Component::from_bit(feature) {
+            Some(Xcr0Component::Ymm) => self.xsave_ymm_state(seg, base),
+            Some(Xcr0Component::Opmask) => self.xsave_opmask_state(seg, base),
+            Some(Xcr0Component::ZmmHi256) => self.xsave_zmm_hi256_state(seg, base),
+            Some(Xcr0Component::HiZmm) => self.xsave_hi_zmm_state(seg, base),
+            Some(Xcr0Component::Pkru) => self.xsave_pkru_state(seg, base),
+            Some(Xcr0Component::CetU) => self.xsave_cet_u_state(seg, base),
+            Some(Xcr0Component::CetS) => self.xsave_cet_s_state(seg, base),
             _ => Ok(()),
         }
     }
 
     /// Restore an extended component from the given offset
     fn xrstor_extended_component(&mut self, seg: super::decoder::BxSegregs, base: u64, feature: u32) -> super::Result<()> {
-        match feature {
-            2 => self.xrstor_ymm_state(seg, base),
-            5 => self.xrstor_opmask_state(seg, base),
-            6 => self.xrstor_zmm_hi256_state(seg, base),
-            7 => self.xrstor_hi_zmm_state(seg, base),
+        use super::crregs::Xcr0Component;
+        match Xcr0Component::from_bit(feature) {
+            Some(Xcr0Component::Ymm) => self.xrstor_ymm_state(seg, base),
+            Some(Xcr0Component::Opmask) => self.xrstor_opmask_state(seg, base),
+            Some(Xcr0Component::ZmmHi256) => self.xrstor_zmm_hi256_state(seg, base),
+            Some(Xcr0Component::HiZmm) => self.xrstor_hi_zmm_state(seg, base),
+            Some(Xcr0Component::Pkru) => self.xrstor_pkru_state(seg, base),
+            Some(Xcr0Component::CetU) => self.xrstor_cet_u_state(seg, base),
+            Some(Xcr0Component::CetS) => self.xrstor_cet_s_state(seg, base),
             _ => Ok(()),
         }
     }
 
     /// Init an extended component to reset values
     fn xrstor_init_extended_component(&mut self, feature: u32) {
-        match feature {
-            2 => self.xrstor_init_ymm_state(),
-            5 => self.xrstor_init_opmask_state(),
-            6 => self.xrstor_init_zmm_hi256_state(),
-            7 => self.xrstor_init_hi_zmm_state(),
+        use super::crregs::Xcr0Component;
+        match Xcr0Component::from_bit(feature) {
+            Some(Xcr0Component::Ymm) => self.xrstor_init_ymm_state(),
+            Some(Xcr0Component::Opmask) => self.xrstor_init_opmask_state(),
+            Some(Xcr0Component::ZmmHi256) => self.xrstor_init_zmm_hi256_state(),
+            Some(Xcr0Component::HiZmm) => self.xrstor_init_hi_zmm_state(),
+            Some(Xcr0Component::Pkru) => self.xrstor_init_pkru_state(),
+            Some(Xcr0Component::CetU) => self.xrstor_init_cet_u_state(),
+            Some(Xcr0Component::CetS) => self.xrstor_init_cet_s_state(),
             _ => {}
         }
     }
@@ -2613,13 +2749,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Get the size of an extended XSAVE component
     /// Bochs xsave_restore[] table sizes
     fn xsave_component_len(feature: u32) -> u64 {
-        match feature {
-            0 => 160,   // FPU
-            1 => 256,   // SSE
-            2 => 256,   // YMM
-            5 => 64,    // OPMASK
-            6 => 512,   // ZMM_HI256
-            7 => 1024,  // HI_ZMM
+        use super::crregs::Xcr0Component;
+        match Xcr0Component::from_bit(feature) {
+            Some(Xcr0Component::Fpu) => 160,
+            Some(Xcr0Component::Sse) => 256,
+            Some(Xcr0Component::Ymm) => 256,
+            Some(Xcr0Component::Opmask) => 64,
+            Some(Xcr0Component::ZmmHi256) => 512,
+            Some(Xcr0Component::HiZmm) => 1024,
+            Some(Xcr0Component::Pkru) => 8,
+            Some(Xcr0Component::CetU) => 16,
+            Some(Xcr0Component::CetS) => 24,
             _ => 0,
         }
     }
@@ -2627,11 +2767,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Get the standard (non-compacted) offset for an extended component
     /// From CPUID leaf 0xD sub-leaves
     fn xsave_component_offset(feature: u32) -> u64 {
-        match feature {
-            2 => 576,   // YMM
-            5 => 1088,  // OPMASK
-            6 => 1152,  // ZMM_HI256
-            7 => 1664,  // HI_ZMM
+        use super::crregs::Xcr0Component;
+        match Xcr0Component::from_bit(feature) {
+            Some(Xcr0Component::Ymm) => 576,
+            Some(Xcr0Component::Opmask) => 1088,
+            Some(Xcr0Component::ZmmHi256) => 1152,
+            Some(Xcr0Component::HiZmm) => 1664,
+            Some(Xcr0Component::Pkru) => 2688,
             _ => 0,
         }
     }
@@ -2802,8 +2944,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
-        // Extended features at standard offsets
-        for feature in 2..=7u32 {
+        // Extended features at standard offsets (2..=9 covers YMM through PKRU).
+        for feature in 2..=9u32 {
             let mask = 1u64 << feature;
             if (requested & mask) != 0 {
                 if (xinuse & mask) != 0 {

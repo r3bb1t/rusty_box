@@ -402,6 +402,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::Pause => self.pause(instr),
             Opcode::Endbranch32 => self.endbranch32(instr),
             Opcode::Endbranch64 => self.endbranch64(instr),
+            // CET shadow-stack control (Bochs cet.cc)
+            Opcode::Incsspd => self.incsspd(instr),
+            Opcode::Incsspq => self.incsspq(instr),
+            Opcode::Rdsspd => self.rdsspd(instr),
+            Opcode::Rdsspq => self.rdsspq(instr),
+            Opcode::Saveprevssp => self.saveprevssp(instr),
+            Opcode::Rstorssp => self.rstorssp(instr),
+            Opcode::Wrssd => self.wrssd(instr),
+            Opcode::Wrssq => self.wrssq(instr),
+            Opcode::Wrussd => self.wrussd(instr),
+            Opcode::Wrussq => self.wrussq(instr),
+            Opcode::Setssbsy => self.setssbsy(instr),
+            Opcode::Clrssbsy => self.clrssbsy(instr),
 
             // =========================================================================
             // I/O port instructions
@@ -846,14 +859,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 Ok(())
             }
             Opcode::TestEwIw | Opcode::TestEwsIb => {
-                // TestEwsIb: Bochs ia_opcodes.def:201 — sign-extended imm8 aliases
+                // TestEwsIb: Bochs ia_opcodes.def — sign-extended imm8 aliases
                 // into the same TEST_EwIwR/TEST_EwIwM handlers. Decoder front-end
                 // widens the imm8 to imm16 before populating the Instruction.
                 self.test_ew_iw(instr)?;
                 Ok(())
             }
             Opcode::TestEdId | Opcode::TestEdsIb => {
-                // TestEdsIb: Bochs ia_opcodes.def:221 — sign-extended imm8 aliases
+                // TestEdsIb: Bochs ia_opcodes.def — sign-extended imm8 aliases
                 // into the same TEST_EdIdR/TEST_EdIdM handlers.
                 self.test_ed_id(instr)?;
                 Ok(())
@@ -1162,7 +1175,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::IntIb => self.int_ib(instr),
             Opcode::INT3 => self.int3(instr),
             Opcode::INT1 => self.int1(instr),
-            // INTO: Bochs ia_opcodes.def:354 BX_IA_INTO → BX_CPU_C::INTO.
+            // INTO: Bochs ia_opcodes.def BX_IA_INTO → BX_CPU_C::INTO.
             // Decoder emits Opcode::Int0 for 0xCE (fetchdecode_opmap.h:1138).
             Opcode::Int0 => self.into(instr),
             Opcode::IretOp16 => {
@@ -1465,7 +1478,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::Monitor | Opcode::Monitorx => self.monitor(instr),
             Opcode::Mwait | Opcode::Mwaitx => self.mwait(instr),
             // WAITPKG: user-mode MONITOR / MWAIT / timed-PAUSE.
-            // Bochs mwait.cc:244-377. UmonitorEq=64-bit addr, UmonitorEd=32-bit addr;
+            // Bochs mwait.cc. UmonitorEq=64-bit addr, UmonitorEd=32-bit addr;
             // Bochs routes both through UMONITOR_Eq.
             Opcode::UmonitorEq | Opcode::UmonitorEd => self.umonitor(instr),
             Opcode::UmwaitEd => self.umwait(instr),

@@ -636,29 +636,64 @@ impl Xcr0 {
     }
 }
 
-#[derive(Debug)]
-enum Xcr0Enum {
-    BxXcr0FpuBit = 0,
-    BxXcr0SseBit = 1,
-    BxXcr0YmmBit = 2,
-    BxXcr0BndregsBit = 3, // not implemented, deprecated
-    BxXcr0BndcfgBit = 4,  // not implemented, deprecated
-    BxXcr0OpmaskBit = 5,
-    BxXcr0ZmmHi256Bit = 6,
-    BxXcr0HiZmmBit = 7,
-    BxXcr0PtBit = 8, // not implemented yet
-    BxXcr0PkruBit = 9,
-    BxXcr0PasidBit = 10, // not implemented yet
-    BxXcr0CetUBit = 11,
-    BxXcr0CetSBit = 12,
-    BxXcr0HdcBit = 13, // not implemented yet
-    BxXcr0UintrBit = 14,
-    BxXcr0LbrBit = 15, // not implemented yet
-    BxXcr0HwpBit = 16, // not implemented yet
-    BxXcr0XtilecfgBit = 17,
-    BxXcr0XtiledataBit = 18,
-    BxXcr0ApxBit = 19,
-    BxXcr0Last, // make sure it is < 32
+/// XCR0 / XSAVE state-component bit positions.
+/// The discriminant equals the bit number in XCR0 and the XSAVE component
+/// index used throughout xsave/xrstor dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub(super) enum Xcr0Component {
+    Fpu = 0,
+    Sse = 1,
+    Ymm = 2,
+    /// MPX bound registers — Intel deprecated MPX in 2019.
+    Bndregs = 3,
+    /// MPX configuration — Intel deprecated MPX in 2019.
+    Bndcfg = 4,
+    Opmask = 5,
+    ZmmHi256 = 6,
+    HiZmm = 7,
+    Pt = 8,
+    Pkru = 9,
+    Pasid = 10,
+    CetU = 11,
+    CetS = 12,
+    Hdc = 13,
+    Uintr = 14,
+    Lbr = 15,
+    Hwp = 16,
+    Xtilecfg = 17,
+    Xtiledata = 18,
+    Apx = 19,
+}
+
+impl Xcr0Component {
+    /// Convert a bit index (0..32) to a defined XCR0 component, if any.
+    #[inline]
+    pub(super) fn from_bit(bit: u32) -> Option<Self> {
+        Some(match bit {
+            0 => Self::Fpu,
+            1 => Self::Sse,
+            2 => Self::Ymm,
+            3 => Self::Bndregs,
+            4 => Self::Bndcfg,
+            5 => Self::Opmask,
+            6 => Self::ZmmHi256,
+            7 => Self::HiZmm,
+            8 => Self::Pt,
+            9 => Self::Pkru,
+            10 => Self::Pasid,
+            11 => Self::CetU,
+            12 => Self::CetS,
+            13 => Self::Hdc,
+            14 => Self::Uintr,
+            15 => Self::Lbr,
+            16 => Self::Hwp,
+            17 => Self::Xtilecfg,
+            18 => Self::Xtiledata,
+            19 => Self::Apx,
+            _ => return None,
+        })
+    }
 }
 
 #[allow(clippy::upper_case_acronyms)]

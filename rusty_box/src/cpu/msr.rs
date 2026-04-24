@@ -30,7 +30,7 @@ pub const BX_MSR_IA32_APERF: u32 = 0x0E7;
 pub const BX_MSR_IA32_MPERF: u32 = 0x0E8;
 
 /// IA32_UMWAIT_CONTROL (WAITPKG: TPAUSE/UMWAIT max-delay control)
-/// Bochs msr.h:49 BX_MSR_IA32_UMWAIT_CONTROL.
+/// Bochs msr.h BX_MSR_IA32_UMWAIT_CONTROL.
 pub const BX_MSR_IA32_UMWAIT_CONTROL: u32 = 0x0E1;
 
 /// MTRR Capability register
@@ -88,6 +88,21 @@ pub const BX_MSR_MTRR_DEFTYPE: u32 = 0x2FF;
 
 /// IA32_TSC_DEADLINE
 pub const BX_MSR_TSC_DEADLINE: u32 = 0x6E0;
+
+// =========================================================================
+// CET MSRs — Bochs msr.h
+// =========================================================================
+
+/// IA32_U_CET — user-mode CET control (shadow stack + ENDBRANCH).
+pub const BX_MSR_IA32_U_CET: u32 = 0x6A0;
+/// IA32_S_CET — supervisor-mode CET control.
+pub const BX_MSR_IA32_S_CET: u32 = 0x6A2;
+/// IA32_PL0_SSP — Privilege Level 0 Shadow Stack Pointer.
+pub const BX_MSR_IA32_PL0_SSP: u32 = 0x6A4;
+/// IA32_PL3_SSP — Privilege Level 3 Shadow Stack Pointer (last in PLn_SSP block).
+pub const BX_MSR_IA32_PL3_SSP: u32 = 0x6A7;
+/// IA32_INTERRUPT_SSP_TABLE_ADDR — interrupt-SSP-table base address.
+pub const BX_MSR_IA32_INTERRUPT_SSP_TABLE_ADDR: u32 = 0x6A8;
 
 // =========================================================================
 // Long-mode MSRs (AMD64/Intel EM64T) — Bochs msr.h

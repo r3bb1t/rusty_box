@@ -35,6 +35,9 @@ bitflags! {
         const CODE_ACCESS  = 0x10;
         /// Protection key violation (bit 5)
         const PKEY         = 0x20;
+        /// Shadow stack access (bit 6) — set when access type was SS read/write.
+        /// Bochs paging.cc raises ERROR_SHADOW_STACK on SS-page-vs-regular mismatch.
+        const SHADOW_STACK = 0x40;
     }
 }
 
@@ -51,10 +54,15 @@ bitflags! {
     /// DTLB access permission bits (matching Bochs tlb.h).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct TlbAccess: u32 {
-        const SYS_READ_OK   = 0x01;
-        const USER_READ_OK  = 0x02;
-        const SYS_WRITE_OK  = 0x04;
-        const USER_WRITE_OK = 0x08;
+        const SYS_READ_OK            = 0x01;
+        const USER_READ_OK           = 0x02;
+        const SYS_WRITE_OK           = 0x04;
+        const USER_WRITE_OK          = 0x08;
+        // CET shadow-stack access bits (Bochs tlb.h).
+        const SYS_READ_SS_OK         = 0x10;
+        const USER_READ_SS_OK        = 0x20;
+        const SYS_WRITE_SS_OK        = 0x40;
+        const USER_WRITE_SS_OK       = 0x80;
     }
 }
 
@@ -1381,17 +1389,37 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs `translate_linear` for legacy 32-bit paging.
     #[inline]
     pub(super) fn translate_data_read(&mut self, laddr: u64) -> Result<u64> {
-        self.translate_data_access(laddr, false)
+        self.translate_data_access(laddr, false, false)
     }
 
     /// Translate a linear address to physical for a data write.
     #[inline]
     pub(super) fn translate_data_write(&mut self, laddr: u64) -> Result<u64> {
-        self.translate_data_access(laddr, true)
+        self.translate_data_access(laddr, true, false)
+    }
+
+    /// CET: translate a linear address to physical for a shadow-stack read.
+    /// Bochs paging.cc encodes shadow-stack as `rw & 4`. The walk requires the
+    /// leaf PTE to be a shadow-stack page (R/W=0, D=1) — see check at the leaf
+    /// step in each `page_walk_for_dtlb_*` function.
+    #[inline]
+    pub(super) fn translate_shadow_stack_read(&mut self, laddr: u64) -> Result<u64> {
+        self.translate_data_access(laddr, false, true)
+    }
+
+    /// CET: translate a linear address to physical for a shadow-stack write.
+    #[inline]
+    pub(super) fn translate_shadow_stack_write(&mut self, laddr: u64) -> Result<u64> {
+        self.translate_data_access(laddr, true, true)
     }
 
     #[inline]
-    fn translate_data_access(&mut self, laddr: u64, is_write: bool) -> Result<u64> {
+    fn translate_data_access(
+        &mut self,
+        laddr: u64,
+        is_write: bool,
+        is_shadow_stack: bool,
+    ) -> Result<u64> {
         // Mask to 32 bits if not in long mode
         let laddr = if self.long_mode() {
             laddr
@@ -1408,12 +1436,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let lpf = laddr & LPF_MASK; // linear page frame
 
         // ---- DTLB lookup ----
-        // Compute which access bit we need:
-        //   read  + supervisor(0) → bit 0 (TlbAccess::SYS_READ_OK.bits())
-        //   read  + user(1)       → bit 1 (TlbAccess::USER_READ_OK.bits())
-        //   write + supervisor(0) → bit 2 (TlbAccess::SYS_WRITE_OK.bits())
-        //   write + user(1)       → bit 3 (TlbAccess::USER_WRITE_OK.bits())
-        let needed_bit = 1u32 << (((is_write as u32) << 1) | (user as u32));
+        // Bochs paging.cc — `(1 << (isShadowStack | (isWrite<<1) | user))`.
+        // Encodes the four normal {sys/user} × {read/write} bits and, with bit 4
+        // set (isShadowStack), the four SS variants 0x10..0x80.
+        let is_ss = is_shadow_stack as u32;
+        let needed_bit = 1u32 << ((is_ss << 2) | ((is_write as u32) << 1) | (user as u32));
         {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
             if tlb_entry.lpf == lpf && (tlb_entry.access_bits & needed_bit) != 0 {
@@ -1426,37 +1453,56 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // ---- DTLB miss — full page table walk ----
         self.perf_tlb_miss += 1;
-        let (paddr, combined_access, lpf_mask, pkey) = self.page_walk_for_dtlb(laddr, user, is_write)?;
+        let (paddr, combined_access, lpf_mask, pkey) =
+            self.page_walk_for_dtlb(laddr, user, is_write, is_shadow_stack)?;
         let paddr = self.apply_a20(paddr);
         let is_large_page = lpf_mask > 0xFFF;
 
         // ---- Populate DTLB entry ----
-        // Compute full access bits for this page so future accesses with
-        // different user/write combinations can also hit the TLB.
-        let wp = self.cr0.wp() as u32;
         let mut access_bits = 0u32;
-        // Check all 4 combinations: {sys_read, user_read, sys_write, user_write}
-        for &(bit, u, w) in &[
-            (TlbAccess::SYS_READ_OK.bits(), 0u32, 0u32),
-            (TlbAccess::USER_READ_OK.bits(), 1, 0),
-            (TlbAccess::SYS_WRITE_OK.bits(), 0, 1),
-            (TlbAccess::USER_WRITE_OK.bits(), 1, 1),
-        ] {
-            let priv_index = (wp << 4) | (u << 3) | combined_access | w;
-            if PRIV_CHECK[priv_index as usize] != 0 {
-                access_bits |= bit;
+        if is_shadow_stack {
+            // Bochs paging.cc — SS pages get only SS bits (+ matching ReadOK).
+            if (combined_access & CombinedAccess::USER.bits()) == 0 {
+                access_bits |=
+                    TlbAccess::SYS_READ_OK.bits() | TlbAccess::SYS_READ_SS_OK.bits();
+                if is_write {
+                    access_bits |= TlbAccess::SYS_WRITE_SS_OK.bits();
+                }
+            } else {
+                access_bits |=
+                    TlbAccess::USER_READ_OK.bits() | TlbAccess::USER_READ_SS_OK.bits();
+                if is_write {
+                    access_bits |= TlbAccess::USER_WRITE_SS_OK.bits();
+                }
             }
-        }
-        // For writes, we also need the dirty bit to have been set.
-        // If this was a read access but the page is writable, the dirty bit
-        // may not be set yet. When a future write hits this TLB entry, we
-        // need to ensure the dirty bit gets set. We handle this by only
-        // granting write permission in the TLB if the dirty bit is already set,
-        // OR if this was a write access (which already set the dirty bit).
-        // For simplicity and correctness, only grant write TLB permission
-        // when the current access is a write (dirty bit was just set).
-        if !is_write {
-            access_bits &= !(TlbAccess::SYS_WRITE_OK.bits() | TlbAccess::USER_WRITE_OK.bits());
+        } else {
+            // Compute full access bits for this page so future accesses with
+            // different user/write combinations can also hit the TLB.
+            let wp = self.cr0.wp() as u32;
+            // Check all 4 combinations: {sys_read, user_read, sys_write, user_write}
+            for &(bit, u, w) in &[
+                (TlbAccess::SYS_READ_OK.bits(), 0u32, 0u32),
+                (TlbAccess::USER_READ_OK.bits(), 1, 0),
+                (TlbAccess::SYS_WRITE_OK.bits(), 0, 1),
+                (TlbAccess::USER_WRITE_OK.bits(), 1, 1),
+            ] {
+                let priv_index = (wp << 4) | (u << 3) | combined_access | w;
+                if PRIV_CHECK[priv_index as usize] != 0 {
+                    access_bits |= bit;
+                }
+            }
+            // For writes, we also need the dirty bit to have been set.
+            // If this was a read access but the page is writable, the dirty bit
+            // may not be set yet. When a future write hits this TLB entry, we
+            // need to ensure the dirty bit gets set. We handle this by only
+            // granting write permission in the TLB if the dirty bit is already set,
+            // OR if this was a write access (which already set the dirty bit).
+            // For simplicity and correctness, only grant write TLB permission
+            // when the current access is a write (dirty bit was just set).
+            if !is_write {
+                access_bits &=
+                    !(TlbAccess::SYS_WRITE_OK.bits() | TlbAccess::USER_WRITE_OK.bits());
+            }
         }
 
         let ppf = paddr & LPF_MASK;
@@ -1613,16 +1659,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         user: bool,
         is_write: bool,
+        is_shadow_stack: bool,
     ) -> Result<(u64, u32, u32, u32)> {
         self.perf_page_walk += 1;
         if self.long_mode() {
-            return self.page_walk_for_dtlb_long_mode(laddr, user, is_write);
+            return self.page_walk_for_dtlb_long_mode(laddr, user, is_write, is_shadow_stack);
         }
         // Legacy and PAE modes don't support protection keys — pkey=0
         let (paddr, combined_access, lpf_mask) = if self.cr4.pae() {
-            self.page_walk_for_dtlb_pae(laddr, user, is_write)?
+            self.page_walk_for_dtlb_pae(laddr, user, is_write, is_shadow_stack)?
         } else {
-            self.page_walk_for_dtlb_legacy(laddr, user, is_write)?
+            self.page_walk_for_dtlb_legacy(laddr, user, is_write, is_shadow_stack)?
         };
         Ok((paddr, combined_access, lpf_mask, 0))
     }
@@ -1633,6 +1680,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         user: bool,
         is_write: bool,
+        is_shadow_stack: bool,
     ) -> Result<(u64, u32, u32)> {
         // ---- PDE ----
         let pde_addr = (self.cr3 & BX_CR3_PAGING_MASK) | (((laddr >> 22) & 0x3FF) << 2);
@@ -1651,13 +1699,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
-            let combined = pde & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
-            let priv_index =
-                ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);
-            if PRIV_CHECK[priv_index as usize] == 0 {
-                self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
-                return Err(super::CpuError::CpuLoopRestart);
-            }
+            let combined = if is_shadow_stack {
+                // Bochs paging.cc — shadow-stack leaf check.
+                let upper_ca = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
+                self.check_shadow_stack_leaf(pde as u64, upper_ca, laddr, user, is_write)?
+            } else {
+                let combined = pde & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+                let priv_index = ((self.cr0.wp() as u32) << 4)
+                    | ((user as u32) << 3)
+                    | combined
+                    | (is_write as u32);
+                if PRIV_CHECK[priv_index as usize] == 0 {
+                    self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                    return Err(super::CpuError::CpuLoopRestart);
+                }
+                combined
+            };
             // Set A/D bits on the PDE.
             let needed = pte_bits32::ACCESSED | if is_write { pte_bits32::DIRTY } else { 0 };
             if pde & needed != needed {
@@ -1676,13 +1733,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return Err(super::CpuError::CpuLoopRestart);
         }
 
-        let combined = (pde & pte) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
-        let priv_index =
-            ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);
-        if PRIV_CHECK[priv_index as usize] == 0 {
-            self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
-            return Err(super::CpuError::CpuLoopRestart);
-        }
+        let combined = if is_shadow_stack {
+            // Bochs paging.cc — leaf SS check uses upper-levels combined.
+            let upper_ca =
+                pde & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+            self.check_shadow_stack_leaf(pte as u64, upper_ca, laddr, user, is_write)?
+        } else {
+            let combined =
+                (pde & pte) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+            let priv_index = ((self.cr0.wp() as u32) << 4)
+                | ((user as u32) << 3)
+                | combined
+                | (is_write as u32);
+            if PRIV_CHECK[priv_index as usize] == 0 {
+                self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
+            combined
+        };
 
         // Set A bit on PDE if needed.
         if pde & pte_bits32::ACCESSED == 0 {
@@ -1705,6 +1773,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         user: bool,
         is_write: bool,
+        is_shadow_stack: bool,
     ) -> Result<(u64, u32, u32)> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
@@ -1782,24 +1851,35 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             ppf = entry[BX_LEVEL_PDE].bits() & 0x000F_FFFF_FFE0_0000;
 
             // Leaf entry permission check
-            combined_access &=
-                (entry[BX_LEVEL_PDE].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+            if is_shadow_stack {
+                // Bochs paging.cc — leaf SS check.
+                combined_access = self.check_shadow_stack_leaf(
+                    entry[BX_LEVEL_PDE].bits(),
+                    combined_access,
+                    laddr,
+                    user,
+                    is_write,
+                )?;
+            } else {
+                combined_access &= (entry[BX_LEVEL_PDE].bits() as u32)
+                    & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
 
-            let priv_index = ((self.cr0.wp() as u32) << 4)
-                | ((user as u32) << 3)
-                | combined_access
-                | (is_write as u32);
-            if PRIV_CHECK[priv_index as usize] == 0 {
-                self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
-                return Err(super::CpuError::CpuLoopRestart);
-            }
-
-            // SMAP check for 2MB page
-            if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
-                && self.get_ac() == 0 {
+                let priv_index = ((self.cr0.wp() as u32) << 4)
+                    | ((user as u32) << 3)
+                    | combined_access
+                    | (is_write as u32);
+                if PRIV_CHECK[priv_index as usize] == 0 {
                     self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                     return Err(super::CpuError::CpuLoopRestart);
                 }
+
+                // SMAP check for 2MB page (skipped for SS — Bochs doesn't apply SMAP on SS access)
+                if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
+                    && self.get_ac() == 0 {
+                        self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                        return Err(super::CpuError::CpuLoopRestart);
+                    }
+            }
 
             // Update A/D bits on PDE (leaf for 2MB page)
             let needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
@@ -1837,24 +1917,34 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Leaf permission check
-        combined_access &=
-            (entry[BX_LEVEL_PTE].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+        if is_shadow_stack {
+            combined_access = self.check_shadow_stack_leaf(
+                entry[BX_LEVEL_PTE].bits(),
+                combined_access,
+                laddr,
+                user,
+                is_write,
+            )?;
+        } else {
+            combined_access &= (entry[BX_LEVEL_PTE].bits() as u32)
+                & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
 
-        let priv_index = ((self.cr0.wp() as u32) << 4)
-            | ((user as u32) << 3)
-            | combined_access
-            | (is_write as u32);
-        if PRIV_CHECK[priv_index as usize] == 0 {
-            self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
-            return Err(super::CpuError::CpuLoopRestart);
-        }
-
-        // SMAP check: supervisor data access to user page when AC=0
-        if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
-            && self.get_ac() == 0 {
+            let priv_index = ((self.cr0.wp() as u32) << 4)
+                | ((user as u32) << 3)
+                | combined_access
+                | (is_write as u32);
+            if PRIV_CHECK[priv_index as usize] == 0 {
                 self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
+
+            // SMAP check: supervisor data access to user page when AC=0
+            if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
+                && self.get_ac() == 0 {
+                    self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                    return Err(super::CpuError::CpuLoopRestart);
+                }
+        }
 
         // Update A/D bits — PDE gets A bit, PTE gets A+D
         if !entry[BX_LEVEL_PDE].contains(PteBits::ACCESSED) {
@@ -1870,6 +1960,55 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         ppf = entry[BX_LEVEL_PTE].bits() & 0x000F_FFFF_FFFF_F000;
         let paddr = ppf | (laddr & 0xFFF);
         Ok((paddr, combined_access, 0xFFF)) // 4KB lpf_mask
+    }
+
+    /// CET shadow-stack leaf-entry check, mirrors Bochs paging.cc.
+    ///
+    /// `combined_access` is the (USER, WRITE) intersection accumulated across
+    /// upper levels, BEFORE being AND-ed with the leaf entry. `leaf_entry` is
+    /// the raw u64 leaf PDE/PTE value (legacy callers widen u32 → u64).
+    ///
+    /// On success, returns the post-AND combined_access. On failure raises #PF.
+    fn check_shadow_stack_leaf(
+        &mut self,
+        leaf_entry: u64,
+        combined_access: u32,
+        laddr: u64,
+        user: bool,
+        is_write: bool,
+    ) -> Result<u32> {
+        // Bochs paging.cc — `shadow_stack_page = WRITEABLE && (entry & 0x40 == D) && (entry & 0x02 == 0 == !R/W)`.
+        let combined_writeable = (combined_access & CombinedAccess::WRITE.bits()) != 0;
+        let leaf_d = (leaf_entry & PteBits::DIRTY.bits()) != 0;
+        let leaf_rw_clear = (leaf_entry & PteBits::RW.bits()) == 0;
+        let shadow_stack_page = combined_writeable && leaf_d && leaf_rw_clear;
+        let mut err = PageFaultError::PROTECTION.bits()
+            | PageFaultError::SHADOW_STACK.bits();
+        if is_write {
+            err |= PageFaultError::WRITE_ACCESS.bits();
+        }
+        if user {
+            err |= PageFaultError::USER_ACCESS.bits();
+        }
+        if !shadow_stack_page {
+            tracing::trace!(
+                "shadow stack access on non-SS page: laddr={:#x} leaf={:#x} CA={:#x}",
+                laddr, leaf_entry, combined_access
+            );
+            self.page_fault(err, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+        let combined = combined_access & (leaf_entry as u32);
+        // Bochs paging.cc — U/S of leaf must match user (1=user shadow stack, 0=supervisor).
+        if (combined & CombinedAccess::USER.bits()) ^ ((user as u32) << 2) != 0 {
+            tracing::trace!(
+                "shadow stack U/S mismatch: laddr={:#x} CA={:#x} user={}",
+                laddr, combined, user
+            );
+            self.page_fault(err, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+        Ok(combined)
     }
 
     /// Handle protection keys (PKRU/PKS) for a page table leaf entry.
@@ -1949,6 +2088,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         user: bool,
         is_write: bool,
+        is_shadow_stack: bool,
     ) -> Result<(u64, u32, u32, u32)> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
@@ -2033,32 +2173,45 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             leaf -= 1;
         }
 
+        // Protection keys check (Bochs handle_pkeys) — runs for both regular and SS paths.
+        // Bochs paging.cc calls handle_pkeys before check_leaf_entry_faults; we
+        // mirror that order so PKEY faults still take precedence.
+        let pre_leaf_user = ((entry[leaf].bits() as u32) & CombinedAccess::USER.bits()) != 0;
+        let pkey = self.handle_pkeys(laddr, entry[leaf].bits(), user, pre_leaf_user, is_write)?;
+
         // Leaf entry permission check
-        combined_access &=
-            (entry[leaf].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+        if is_shadow_stack {
+            combined_access = self.check_shadow_stack_leaf(
+                entry[leaf].bits(),
+                combined_access,
+                laddr,
+                user,
+                is_write,
+            )?;
+        } else {
+            combined_access &= (entry[leaf].bits() as u32)
+                & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
 
-        // Protection keys check (Bochs handle_pkeys)
-        let user_page = (combined_access & CombinedAccess::USER.bits()) != 0;
-        let pkey = self.handle_pkeys(laddr, entry[leaf].bits(), user, user_page, is_write)?;
-
-        let priv_index = ((self.cr0.wp() as u32) << 4)
-            | ((user as u32) << 3)
-            | combined_access
-            | (is_write as u32);
-        if PRIV_CHECK[priv_index as usize] == 0 {
-            self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
-            return Err(super::CpuError::CpuLoopRestart);
-        }
-
-        // SMEP check: not applicable for data access (handled by translate_linear for execute)
-
-        // SMAP check: supervisor data access to user page when AC=0
-        // Bochs paging.cc
-        if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
-            && self.get_ac() == 0 {
+            let priv_index = ((self.cr0.wp() as u32) << 4)
+                | ((user as u32) << 3)
+                | combined_access
+                | (is_write as u32);
+            if PRIV_CHECK[priv_index as usize] == 0 {
                 self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
+
+            // SMEP check: not applicable for data access (handled by translate_linear for execute)
+
+            // SMAP check: supervisor data access to user page when AC=0
+            // Bochs paging.cc — skipped for SS access (Bochs check_leaf_entry_faults
+            // doesn't apply SMAP on shadow-stack accesses).
+            if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
+                && self.get_ac() == 0 {
+                    self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                    return Err(super::CpuError::CpuLoopRestart);
+                }
+        }
 
         // Update A/D bits for all levels
         // Non-leaf levels get A bit, leaf gets A+D

@@ -7,7 +7,7 @@
 
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
-use super::decoder::BxSegregs;
+use super::decoder::{BxSegregs, Instruction};
 use super::Result;
 
 // CET control MSR bit constants — matches Bochs cet.cc
@@ -188,25 +188,29 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Shadow stack memory operations — Bochs access2.cc
     // =========================================================================
 
+    /// Read a dword from the shadow stack.
+    /// Bochs access2.cc shadow_stack_read_dword. The CPL drives the
+    /// SS U/S match in the page walker via translate_shadow_stack_read.
+    pub(super) fn shadow_stack_read_dword(&mut self, offset: u64, cpl: u8) -> Result<u32> {
+        self.shadow_stack_read_linear_dword(offset, cpl)
+    }
+
     /// Read a qword from the shadow stack.
-    /// Bochs access2.cc shadow_stack_read_qword()
-    pub(super) fn shadow_stack_read_qword(&mut self, offset: u64, _cpl: u8) -> Result<u64> {
-        // Shadow stack reads use the same linear access path as regular reads
-        // but with shadow-stack privilege semantics. In our emulator, delegate
-        // to the linear read path since TLB fast-path is not modelled.
-        self.read_linear_qword(BxSegregs::Ss, offset)
+    /// Bochs access2.cc shadow_stack_read_qword.
+    pub(super) fn shadow_stack_read_qword(&mut self, offset: u64, cpl: u8) -> Result<u64> {
+        self.shadow_stack_read_linear_qword(offset, cpl)
     }
 
     /// Write a dword to the shadow stack.
-    /// Bochs access2.cc shadow_stack_write_dword()
-    pub(super) fn shadow_stack_write_dword(&mut self, offset: u64, _cpl: u8, data: u32) -> Result<()> {
-        self.write_linear_dword(BxSegregs::Ss, offset, data)
+    /// Bochs access2.cc shadow_stack_write_dword.
+    pub(super) fn shadow_stack_write_dword(&mut self, offset: u64, cpl: u8, data: u32) -> Result<()> {
+        self.shadow_stack_write_linear_dword(offset, cpl, data)
     }
 
     /// Write a qword to the shadow stack.
-    /// Bochs access2.cc shadow_stack_write_qword()
-    pub(super) fn shadow_stack_write_qword(&mut self, offset: u64, _cpl: u8, data: u64) -> Result<()> {
-        self.write_linear_qword(BxSegregs::Ss, offset, data)
+    /// Bochs access2.cc shadow_stack_write_qword.
+    pub(super) fn shadow_stack_write_qword(&mut self, offset: u64, cpl: u8, data: u64) -> Result<()> {
+        self.shadow_stack_write_linear_qword(offset, cpl, data)
     }
 
     /// Pop a qword from the shadow stack: read SSP, then SSP += 8.
@@ -216,6 +220,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let cpl = self.cs_rpl();
         let val = self.shadow_stack_read_qword(ssp, cpl)?;
         self.set_ssp(ssp + 8);
+        Ok(val)
+    }
+
+    /// Pop a dword from the shadow stack: read SSP, then SSP += 4.
+    /// Bochs stack.h shadow_stack_pop_32()
+    pub(super) fn shadow_stack_pop_32(&mut self) -> Result<u32> {
+        let ssp = self.ssp();
+        let cpl = self.cs_rpl();
+        let val = self.shadow_stack_read_dword(ssp, cpl)?;
+        self.set_ssp(ssp + 4);
         Ok(val)
     }
 
@@ -306,7 +320,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs cet.cc
     pub(super) fn endbranch32(
         &mut self,
-        _instr: &crate::cpu::decoder::Instruction,
+        _instr: &Instruction,
     ) -> Result<()> {
         if !self.long64_mode() {
             let cpl = self.cs_rpl();
@@ -322,7 +336,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs cet.cc
     pub(super) fn endbranch64(
         &mut self,
-        _instr: &crate::cpu::decoder::Instruction,
+        _instr: &Instruction,
     ) -> Result<()> {
         if self.long64_mode() {
             let cpl = self.cs_rpl();
@@ -341,7 +355,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs cet.cc SETSSBSY()
     pub(super) fn setssbsy(
         &mut self,
-        _instr: &crate::cpu::decoder::Instruction,
+        _instr: &Instruction,
     ) -> Result<()> {
         // FRED check: SETSSBSY is not supported when FRED is enabled in CR4.
         if self.cr4.fred() {
@@ -379,7 +393,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs cet.cc CLRSSBSY()
     pub(super) fn clrssbsy(
         &mut self,
-        instr: &crate::cpu::decoder::Instruction,
+        instr: &Instruction,
     ) -> Result<()> {
         // FRED check: CLRSSBSY is not supported when FRED is enabled in CR4.
         if self.cr4.fred() {
@@ -421,6 +435,290 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // =========================================================================
+    // Shadow-stack pointer manipulation — Bochs cet.cc
+    // =========================================================================
+
+    /// INCSSPD — Increment SSP by 32-bit register value (dword stride).
+    /// Bochs cet.cc BX_CPU_C::INCSSPD.
+    pub(super) fn incsspd(
+        &mut self,
+        instr: &Instruction,
+    ) -> Result<()> {
+        let cpl = self.cs_rpl();
+        if !self.shadow_stack_enabled(cpl) {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        let src = self.get_gpr32(instr.dst() as usize) & 0xff;
+        let tmpsrc = if src == 0 { 1 } else { src };
+
+        // Bochs touches the first and last dword of the increment range to
+        // trigger any page faults / privilege checks the increment would have.
+        let ssp = self.ssp();
+        let _ = self.shadow_stack_read_dword(ssp, cpl)?;
+        let _ = self
+            .shadow_stack_read_dword(ssp + (tmpsrc as u64 - 1) * 4, cpl)?;
+        self.set_ssp(ssp + (src as u64) * 4);
+        Ok(())
+    }
+
+    /// INCSSPQ — Increment SSP by 32-bit register value (qword stride).
+    /// Bochs cet.cc BX_CPU_C::INCSSPQ.
+    pub(super) fn incsspq(
+        &mut self,
+        instr: &Instruction,
+    ) -> Result<()> {
+        let cpl = self.cs_rpl();
+        if !self.shadow_stack_enabled(cpl) {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        let src = self.get_gpr32(instr.dst() as usize) & 0xff;
+        let tmpsrc = if src == 0 { 1 } else { src };
+
+        let ssp = self.ssp();
+        let _ = self.shadow_stack_read_qword(ssp, cpl)?;
+        let _ = self
+            .shadow_stack_read_qword(ssp + (tmpsrc as u64 - 1) * 8, cpl)?;
+        self.set_ssp(ssp + (src as u64) * 8);
+        Ok(())
+    }
+
+    /// RDSSPD — Read SSP into 32-bit destination (zero-extended).
+    /// Bochs cet.cc BX_CPU_C::RDSSPD. NOP when shadow stack disabled.
+    pub(super) fn rdsspd(
+        &mut self,
+        instr: &Instruction,
+    ) -> Result<()> {
+        if self.shadow_stack_enabled(self.cs_rpl()) {
+            // Bochs writes BX_READ_32BIT_REG(BX_32BIT_REG_SSP) — low 32 bits of SSP.
+            let val = self.ssp() as u32;
+            self.set_gpr32(instr.dst() as usize, val);
+        }
+        Ok(())
+    }
+
+    /// RDSSPQ — Read SSP into 64-bit destination.
+    /// Bochs cet.cc BX_CPU_C::RDSSPQ. NOP when shadow stack disabled.
+    pub(super) fn rdsspq(
+        &mut self,
+        instr: &Instruction,
+    ) -> Result<()> {
+        if self.shadow_stack_enabled(self.cs_rpl()) {
+            let val = self.ssp();
+            self.set_gpr64(instr.dst() as usize, val);
+        }
+        Ok(())
+    }
+
+    /// SAVEPREVSSP — Save previous-SSP token to the previous shadow stack.
+    /// Bochs cet.cc BX_CPU_C::SAVEPREVSSP.
+    pub(super) fn saveprevssp(
+        &mut self,
+        _instr: &Instruction,
+    ) -> Result<()> {
+        let cpl = self.cs_rpl();
+        if !self.shadow_stack_enabled(cpl) {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        let ssp = self.ssp();
+        if ssp & 0x7 != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let previous_ssp_token = self.shadow_stack_read_qword(ssp, cpl)?;
+
+        // Bochs cet.cc — pop alignment hole in legacy/compat mode.
+        if self.get_cf() {
+            if self.long64_mode() {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            if self.shadow_stack_pop_32()? != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+
+        // Bochs cet.cc — token validity checks.
+        if (previous_ssp_token & 0x02) == 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        if !self.long64_mode() && (previous_ssp_token >> 32) != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Bochs cet.cc — write Prev SSP to old shadow stack.
+        let mut old_ssp = previous_ssp_token & !0x03u64;
+        let tmp = old_ssp | (self.long64_mode() as u64);
+        self.shadow_stack_write_dword(old_ssp - 4, cpl, 0)?;
+        old_ssp &= !0x07u64;
+        self.shadow_stack_write_qword(old_ssp - 8, cpl, tmp)?;
+
+        self.set_ssp(self.ssp() + 8);
+        Ok(())
+    }
+
+    /// RSTORSSP — Restore SSP from a shadow-stack restore token.
+    /// Bochs cet.cc BX_CPU_C::RSTORSSP.
+    pub(super) fn rstorssp(
+        &mut self,
+        instr: &Instruction,
+    ) -> Result<()> {
+        let cpl = self.cs_rpl();
+        if !self.shadow_stack_enabled(cpl) {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = if self.long64_mode() {
+            self.get_laddr64(seg as usize, eaddr)
+        } else {
+            self.agen_read32(seg, eaddr as u32, 8)? as u64
+        };
+        if laddr & 0x7 != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let previous_ssp_token = self.ssp() | (self.long64_mode() as u64) | 0x02;
+
+        // Bochs cet.cc — token validation. Should be atomic RMW per Bochs.
+        let ssp_tmp = self.shadow_stack_read_qword(laddr, cpl)?;
+        if (ssp_tmp & 0x03) != (self.long64_mode() as u64) {
+            return self.exception(super::cpu::Exception::Cp, BX_CP_RSTORSSP);
+        }
+        if !self.long64_mode() && (ssp_tmp >> 32) != 0 {
+            return self.exception(super::cpu::Exception::Cp, BX_CP_RSTORSSP);
+        }
+
+        // Bochs cet.cc — derive prior top-of-stack from token, must equal laddr.
+        let mut tmp = ssp_tmp & !0x01u64;
+        tmp = (tmp - 8) & !0x07u64;
+        if tmp != laddr {
+            return self.exception(super::cpu::Exception::Cp, BX_CP_RSTORSSP);
+        }
+        self.shadow_stack_write_qword(laddr, cpl, previous_ssp_token)?;
+
+        self.set_ssp(laddr);
+
+        // Bochs cet.cc — clearEFlagsOSZAPC; set CF if 4-byte alignment hole present.
+        self.oszapc.set_oszapc_logic_32(1);
+        if ssp_tmp & 0x04 != 0 {
+            self.oszapc.set_cf(true);
+        }
+        Ok(())
+    }
+
+    /// WRSSD — Write 32-bit register to shadow stack at memory operand.
+    /// Bochs cet.cc BX_CPU_C::WRSSD.
+    pub(super) fn wrssd(
+        &mut self,
+        instr: &Instruction,
+    ) -> Result<()> {
+        let cpl = self.cs_rpl();
+        if !self.shadow_stack_write_enabled(cpl) {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = if self.long64_mode() {
+            self.get_laddr64(seg as usize, eaddr)
+        } else {
+            self.agen_write32(seg, eaddr as u32, 4)? as u64
+        };
+        if laddr & 0x3 != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let val = self.get_gpr32(instr.src() as usize);
+        self.shadow_stack_write_dword(laddr, cpl, val)?;
+        Ok(())
+    }
+
+    /// WRSSQ — Write 64-bit register to shadow stack at memory operand.
+    /// Bochs cet.cc BX_CPU_C::WRSSQ.
+    pub(super) fn wrssq(
+        &mut self,
+        instr: &Instruction,
+    ) -> Result<()> {
+        let cpl = self.cs_rpl();
+        if !self.shadow_stack_write_enabled(cpl) {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = if self.long64_mode() {
+            self.get_laddr64(seg as usize, eaddr)
+        } else {
+            self.agen_write32(seg, eaddr as u32, 8)? as u64
+        };
+        if laddr & 0x7 != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let val = self.get_gpr64(instr.src() as usize);
+        self.shadow_stack_write_qword(laddr, cpl, val)?;
+        Ok(())
+    }
+
+    /// WRUSSD — Write 32-bit register to user shadow stack (CPL=0 only).
+    /// Bochs cet.cc BX_CPU_C::WRUSSD.
+    pub(super) fn wrussd(
+        &mut self,
+        instr: &Instruction,
+    ) -> Result<()> {
+        if !self.cr4.cet() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if self.cs_rpl() > 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = if self.long64_mode() {
+            self.get_laddr64(seg as usize, eaddr)
+        } else {
+            self.agen_write32(seg, eaddr as u32, 4)? as u64
+        };
+        if laddr & 0x3 != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        // Bochs cet.cc — writes with cpl=3 (user-mode shadow stack).
+        let val = self.get_gpr32(instr.src() as usize);
+        self.shadow_stack_write_dword(laddr, 3, val)?;
+        Ok(())
+    }
+
+    /// WRUSSQ — Write 64-bit register to user shadow stack (CPL=0 only).
+    /// Bochs cet.cc BX_CPU_C::WRUSSQ.
+    pub(super) fn wrussq(
+        &mut self,
+        instr: &Instruction,
+    ) -> Result<()> {
+        if !self.cr4.cet() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if self.cs_rpl() > 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = if self.long64_mode() {
+            self.get_laddr64(seg as usize, eaddr)
+        } else {
+            self.agen_write32(seg, eaddr as u32, 8)? as u64
+        };
+        if laddr & 0x7 != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let val = self.get_gpr64(instr.src() as usize);
+        self.shadow_stack_write_qword(laddr, 3, val)?;
+        Ok(())
+    }
+
+    // =========================================================================
     // PAUSE instruction handler — Bochs proc_ctrl.cc
     // =========================================================================
 
@@ -428,7 +726,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs proc_ctrl.cc
     pub(super) fn pause(
         &mut self,
-        _instr: &crate::cpu::decoder::Instruction,
+        _instr: &Instruction,
     ) -> Result<()> {
         // Bochs proc_ctrl.cc — VMX PAUSE exit
         if self.in_vmx_guest {

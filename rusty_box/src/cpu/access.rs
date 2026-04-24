@@ -1421,6 +1421,98 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// CET shadow-stack: read a dword given a pre-computed linear address.
+    /// Bochs access2.cc BX_CPU_C::shadow_stack_read_dword.
+    /// `curr_pl` is the privilege level used for SS U/S matching (CPL).
+    pub(crate) fn shadow_stack_read_linear_dword(
+        &mut self,
+        laddr: u64,
+        curr_pl: u8,
+    ) -> Result<u32> {
+        let user = (curr_pl == 3) as u32;
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let tlb = self.dtlb.get_entry_of(laddr, 3);
+        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user) && tlb.host_page_addr != 0 {
+            let host = tlb.host_page_addr as *const u8;
+            let ptr = host_at_page_offset(host, laddr);
+            // SAFETY: TLB-validated host pointer; unaligned read OK.
+            return Ok(read_unaligned_u32(ptr));
+        }
+        // Slow path — Bochs access2.cc access_read_linear with BX_SHADOW_STACK_READ.
+        let paddr = self.translate_shadow_stack_read(laddr)?;
+        Ok(self.mem_read_dword(paddr))
+    }
+
+    /// CET shadow-stack: read a qword given a pre-computed linear address.
+    /// Bochs access2.cc BX_CPU_C::shadow_stack_read_qword.
+    pub(crate) fn shadow_stack_read_linear_qword(
+        &mut self,
+        laddr: u64,
+        curr_pl: u8,
+    ) -> Result<u64> {
+        let user = (curr_pl == 3) as u32;
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let tlb = self.dtlb.get_entry_of(laddr, 7);
+        if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user) && tlb.host_page_addr != 0 {
+            let host = tlb.host_page_addr as *const u8;
+            let ptr = host_at_page_offset(host, laddr);
+            return Ok(read_unaligned_u64(ptr));
+        }
+        let paddr = self.translate_shadow_stack_read(laddr)?;
+        Ok(self.mem_read_qword(paddr))
+    }
+
+    /// CET shadow-stack: write a dword given a pre-computed linear address.
+    /// Bochs access2.cc BX_CPU_C::shadow_stack_write_dword.
+    pub(crate) fn shadow_stack_write_linear_dword(
+        &mut self,
+        laddr: u64,
+        curr_pl: u8,
+        val: u32,
+    ) -> Result<()> {
+        let user = (curr_pl == 3) as u32;
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let tlb = self.dtlb.get_entry_of(laddr, 3);
+        if tlb.lpf == lpf && tlb.is_shadow_stack_write_ok(user) && tlb.host_page_addr != 0 {
+            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let host = tlb.host_page_addr as *mut u8;
+            self.i_cache.smc_write_check(paddr, 4);
+            let ptr = host_at_page_offset_mut(host, laddr);
+            // SAFETY: TLB-validated host pointer; unaligned write OK.
+            write_unaligned_u32(ptr, val);
+            return Ok(());
+        }
+        let paddr = self.translate_shadow_stack_write(laddr)?;
+        self.i_cache.smc_write_check(paddr, 4);
+        self.mem_write_dword(paddr, val);
+        Ok(())
+    }
+
+    /// CET shadow-stack: write a qword given a pre-computed linear address.
+    /// Bochs access2.cc BX_CPU_C::shadow_stack_write_qword.
+    pub(crate) fn shadow_stack_write_linear_qword(
+        &mut self,
+        laddr: u64,
+        curr_pl: u8,
+        val: u64,
+    ) -> Result<()> {
+        let user = (curr_pl == 3) as u32;
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let tlb = self.dtlb.get_entry_of(laddr, 7);
+        if tlb.lpf == lpf && tlb.is_shadow_stack_write_ok(user) && tlb.host_page_addr != 0 {
+            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let host = tlb.host_page_addr as *mut u8;
+            self.i_cache.smc_write_check(paddr, 8);
+            let ptr = host_at_page_offset_mut(host, laddr);
+            write_unaligned_u64(ptr, val);
+            return Ok(());
+        }
+        let paddr = self.translate_shadow_stack_write(laddr)?;
+        self.i_cache.smc_write_check(paddr, 8);
+        self.mem_write_qword(paddr, val);
+        Ok(())
+    }
+
     /// Read phase of a RMW qword given a pre-computed linear address.
     /// Bochs: read_RMW_linear_qword (access2.cc)
     /// Returns (value, laddr). Caches translation in address_xlation.
