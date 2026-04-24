@@ -1243,7 +1243,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.invalidate_prefetch_q();
 
-        // Clear VM, IF, RF (Bochs proc_ctrl.cc)
+        // Bochs proc_ctrl.cc:890-892 — clear VM, IF, RF
         self.clear_vm();
         self.clear_if();
         self.clear_rf();
@@ -1611,6 +1611,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             );
             self.setup_flat_ss(0);
 
+            // Bochs proc_ctrl.cc:1096-1098 — SYSCALL legacy mode: clear VM, IF, RF
             self.clear_vm();
             self.clear_if();
             self.clear_rf();

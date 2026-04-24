@@ -888,9 +888,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.sregs[cs_index].cache.u.set_segment_base((new_cs as u64) << 4);
         self.set_ip(new_ip);
 
-        // Bochs exception.cc: clear IF, TF, AC, RF
-        self.eflags
-            .remove(EFlags::IF_ | EFlags::TF | EFlags::AC | EFlags::RF);
+        // Bochs exception.cc:724-729 — clear IF, TF, AC, RF
+        self.eflags.remove(EFlags::IF_ | EFlags::TF | EFlags::AC);
+        self.clear_rf();
         self.handle_interrupt_mask_change();
 
         // Invalidate prefetch

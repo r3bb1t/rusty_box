@@ -202,7 +202,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.eflags.remove(EFlags::TF);
         self.eflags.remove(EFlags::NT);
         self.eflags.remove(EFlags::VM);
-        self.eflags.remove(EFlags::RF);
+        // Bochs exception.cc:692 — clear_RF() at end of protected_mode_int()
+        self.clear_rf();
 
         Ok(())
     }
@@ -1138,7 +1139,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         self.eflags.remove(EFlags::TF);
         // VM is clear in long mode (already 0)
-        self.eflags.remove(EFlags::RF);
+        // Bochs exception.cc:280 — clear_RF() at end of long_mode_int()
+        self.clear_rf();
         self.eflags.remove(EFlags::NT);
 
         Ok(())

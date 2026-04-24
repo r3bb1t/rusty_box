@@ -447,24 +447,63 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_insb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 { self.on_repeat_iteration(instr); self.insb16(instr)?; cx -= 1;
-        self.set_cx(cx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if cx != 0 {
+                self.on_repeat_iteration(instr);
+                self.insb16(instr)?;
+                cx = cx.wrapping_sub(1);
+                self.set_cx(cx);
+            }
+            if cx == 0 { return Ok(()); }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_insw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 { self.on_repeat_iteration(instr); self.insw16(instr)?; cx -= 1;
-        self.set_cx(cx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if cx != 0 {
+                self.on_repeat_iteration(instr);
+                self.insw16(instr)?;
+                cx = cx.wrapping_sub(1);
+                self.set_cx(cx);
+            }
+            if cx == 0 { return Ok(()); }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_insd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 { self.on_repeat_iteration(instr); self.insd16(instr)?; cx -= 1;
-        self.set_cx(cx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if cx != 0 {
+                self.on_repeat_iteration(instr);
+                self.insd16(instr)?;
+                cx = cx.wrapping_sub(1);
+                self.set_cx(cx);
+            }
+            if cx == 0 { return Ok(()); }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -473,8 +512,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_insb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 { self.on_repeat_iteration(instr); self.insb32(instr)?; ecx -= 1;
-        self.set_ecx(ecx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if ecx != 0 {
+                self.on_repeat_iteration(instr);
+                self.insb32(instr)?;
+                ecx = ecx.wrapping_sub(1);
+                self.set_ecx(ecx);
+            }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -553,6 +609,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                                 if transferred > 1 {
                                     self.tickn_fastrep(transferred as usize - 1);
                                 }
+                                // Bochs tail: assert_RF + RIP=prev_rip before stop (cpu.cc:462).
+                                self.assert_rf();
+                                self.set_rip(self.prev_rip);
                                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                                 return Ok(());
                             }
@@ -581,8 +640,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
 
         // Per-word fallback (handles DF=1, non-TLB-resolvable pages, or remainder)
-        while ecx != 0 { self.on_repeat_iteration(instr); self.insw32(instr)?; ecx -= 1;
-        self.set_ecx(ecx); }
+        // Per-word fallback Bochs cpu.cc:395-467 repeat(): natural exit returns;
+        // async break falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if ecx != 0 {
+                self.on_repeat_iteration(instr);
+                self.insw32(instr)?;
+                ecx = ecx.wrapping_sub(1);
+                self.set_ecx(ecx);
+            }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -663,6 +739,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                                 if transferred > 1 {
                                     self.tickn_fastrep(transferred as usize - 1);
                                 }
+                                // Bochs tail: assert_RF + RIP=prev_rip before stop (cpu.cc:462).
+                                self.assert_rf();
+                                self.set_rip(self.prev_rip);
                                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                                 return Ok(());
                             }
@@ -693,8 +772,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
 
         // Per-dword fallback (handles DF=1, non-TLB-resolvable pages, or remainder)
-        while ecx != 0 { self.on_repeat_iteration(instr); self.insd32(instr)?; ecx -= 1;
-        self.set_ecx(ecx); }
+        // Per-dword fallback Bochs cpu.cc:395-467 repeat(): natural exit returns;
+        // async break falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if ecx != 0 {
+                self.on_repeat_iteration(instr);
+                self.insd32(instr)?;
+                ecx = ecx.wrapping_sub(1);
+                self.set_ecx(ecx);
+            }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -703,24 +799,63 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_outsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 { self.on_repeat_iteration(instr); self.outsb16(instr)?; cx -= 1;
-        self.set_cx(cx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if cx != 0 {
+                self.on_repeat_iteration(instr);
+                self.outsb16(instr)?;
+                cx = cx.wrapping_sub(1);
+                self.set_cx(cx);
+            }
+            if cx == 0 { return Ok(()); }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_outsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 { self.on_repeat_iteration(instr); self.outsw16(instr)?; cx -= 1;
-        self.set_cx(cx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if cx != 0 {
+                self.on_repeat_iteration(instr);
+                self.outsw16(instr)?;
+                cx = cx.wrapping_sub(1);
+                self.set_cx(cx);
+            }
+            if cx == 0 { return Ok(()); }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_outsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        while cx != 0 { self.on_repeat_iteration(instr); self.outsd16(instr)?; cx -= 1;
-        self.set_cx(cx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if cx != 0 {
+                self.on_repeat_iteration(instr);
+                self.outsd16(instr)?;
+                cx = cx.wrapping_sub(1);
+                self.set_cx(cx);
+            }
+            if cx == 0 { return Ok(()); }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -729,24 +864,75 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_outsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 { self.on_repeat_iteration(instr); self.outsb32(instr)?; ecx -= 1;
-        self.set_ecx(ecx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if ecx != 0 {
+                self.on_repeat_iteration(instr);
+                self.outsb32(instr)?;
+                ecx = ecx.wrapping_sub(1);
+                self.set_ecx(ecx);
+            }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_outsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 { self.on_repeat_iteration(instr); self.outsw32(instr)?; ecx -= 1;
-        self.set_ecx(ecx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if ecx != 0 {
+                self.on_repeat_iteration(instr);
+                self.outsw32(instr)?;
+                ecx = ecx.wrapping_sub(1);
+                self.set_ecx(ecx);
+            }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_outsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        while ecx != 0 { self.on_repeat_iteration(instr); self.outsd32(instr)?; ecx -= 1;
-        self.set_ecx(ecx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if ecx != 0 {
+                self.on_repeat_iteration(instr);
+                self.outsd32(instr)?;
+                ecx = ecx.wrapping_sub(1);
+                self.set_ecx(ecx);
+            }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -875,8 +1061,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_insb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 { self.on_repeat_iteration(instr); self.insb64(instr)?; rcx -= 1;
-        self.set_rcx(rcx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if rcx != 0 {
+                self.on_repeat_iteration(instr);
+                self.insb64(instr)?;
+                rcx = rcx.wrapping_sub(1);
+                self.set_rcx(rcx);
+            }
+            if rcx == 0 { return Ok(()); }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -950,6 +1149,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                                 if transferred > 1 {
                                     self.tickn_fastrep(transferred as usize - 1);
                                 }
+                                // Bochs tail: assert_RF + RIP=prev_rip before stop (cpu.cc:462).
+                                self.assert_rf();
+                                self.set_rip(self.prev_rip);
                                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                                 return Ok(());
                             }
@@ -977,8 +1179,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
 
         // Per-word fallback
-        while rcx != 0 { self.on_repeat_iteration(instr); self.insw64(instr)?; rcx -= 1;
-        self.set_rcx(rcx); }
+        // Per-word fallback Bochs cpu.cc:395-467 repeat(): natural exit returns;
+        // async break falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if rcx != 0 {
+                self.on_repeat_iteration(instr);
+                self.insw64(instr)?;
+                rcx = rcx.wrapping_sub(1);
+                self.set_rcx(rcx);
+            }
+            if rcx == 0 { return Ok(()); }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1053,6 +1268,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                                 if transferred > 1 {
                                     self.tickn_fastrep(transferred as usize - 1);
                                 }
+                                // Bochs tail: assert_RF + RIP=prev_rip before stop (cpu.cc:462).
+                                self.assert_rf();
+                                self.set_rip(self.prev_rip);
                                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                                 return Ok(());
                             }
@@ -1081,8 +1299,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
 
         // Per-dword fallback
-        while rcx != 0 { self.on_repeat_iteration(instr); self.insd64(instr)?; rcx -= 1;
-        self.set_rcx(rcx); }
+        // Per-dword fallback Bochs cpu.cc:395-467 repeat(): natural exit returns;
+        // async break falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if rcx != 0 {
+                self.on_repeat_iteration(instr);
+                self.insd64(instr)?;
+                rcx = rcx.wrapping_sub(1);
+                self.set_rcx(rcx);
+            }
+            if rcx == 0 { return Ok(()); }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -1091,24 +1322,63 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_outsb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 { self.on_repeat_iteration(instr); self.outsb64(instr)?; rcx -= 1;
-        self.set_rcx(rcx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if rcx != 0 {
+                self.on_repeat_iteration(instr);
+                self.outsb64(instr)?;
+                rcx = rcx.wrapping_sub(1);
+                self.set_rcx(rcx);
+            }
+            if rcx == 0 { return Ok(()); }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_outsw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 { self.on_repeat_iteration(instr); self.outsw64(instr)?; rcx -= 1;
-        self.set_rcx(rcx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if rcx != 0 {
+                self.on_repeat_iteration(instr);
+                self.outsw64(instr)?;
+                rcx = rcx.wrapping_sub(1);
+                self.set_rcx(rcx);
+            }
+            if rcx == 0 { return Ok(()); }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     fn rep_outsd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        while rcx != 0 { self.on_repeat_iteration(instr); self.outsd64(instr)?; rcx -= 1;
-        self.set_rcx(rcx); }
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if rcx != 0 {
+                self.on_repeat_iteration(instr);
+                self.outsd64(instr)?;
+                rcx = rcx.wrapping_sub(1);
+                self.set_rcx(rcx);
+            }
+            if rcx == 0 { return Ok(()); }
+            if self.async_event != 0 { break; }
+            self.icount += 1;
+        }
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
