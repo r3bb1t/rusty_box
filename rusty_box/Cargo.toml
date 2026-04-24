@@ -25,6 +25,7 @@ bx_debugger = []
 bx_gdb_stub = []
 instrumentation = ["alloc"]
 profiling = ["std"]
+bench = ["std", "dep:criterion"]
 
 [dependencies]
 tracing.workspace = true
@@ -37,6 +38,7 @@ rusty_box_decoder = { path = "../rusty_box_decoder" }
 crossterm = { version = "0.29", optional = true }
 egui = { workspace = true, optional = true }
 eframe = { workspace = true, optional = true, features = ["default_fonts", "glow"] }
+criterion = { version = "0.5", features = ["html_reports"], optional = true }
 
 [[example]]
 name = "alpine"
@@ -77,8 +79,8 @@ required-features = ["std", "instrumentation"]
 [dev-dependencies]
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
-criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "cpu_bench"
 harness = false
+required-features = ["bench"]
