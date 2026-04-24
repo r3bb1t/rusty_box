@@ -9,6 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Prefer LSP tools (definition, references, hover, diagnostics) over grep for code navigation.
 - Use `lsp references` before modifying any function, type, or exported symbol to find all consumers.
 - **Never skip an inaccuracy against the original Bochs.** Every divergence from `cpp_orig/bochs/` is a bug, *unless* the divergence is purely an improvement to idiomatic Rust (enum instead of magic-number int, bitflags instead of raw u32, RAII instead of manual lifecycle, etc.) that does not change observable behavior. If a Bochs feature is too large to fix in the current change, **call it out explicitly** in the end-of-work overview so the user can decide whether to defer it — never silently leave it as a stub or `// not implemented yet` comment.
+- **Thread safety trumps Bochs literalness.** If a Bochs construct is non-thread-safe (sequenced read+write that says "should be atomic RMW", shared state accessed without a lock, etc.), fix it with Rust atomics / Mutex / lock-free primitives — even when Bochs itself doesn't. Single-threaded-per-CPU Bochs assumptions silently transfer correctness obligations to the caller; don't inherit them. Scope: cross-thread / shared state only; CPU-local state doesn't need atomics.
 - Bochs-source comments must cite the file + symbol (e.g. `// Bochs cet.cc INCSSPD`), never the specific line number — the upstream snapshot rebases.
 
 ## Project Overview
