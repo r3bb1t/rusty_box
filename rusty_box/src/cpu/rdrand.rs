@@ -14,12 +14,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         x
     }
 
-    /// Clear OSZAPC then set CF=1 (hardware always ready).
+    /// Bochs `clearEFlagsOSZAPC()` then `assert_CF()`.
     #[inline]
-    fn clear_flags_set_cf(&mut self) {
-        self.set_of(false); self.set_sf(false); self.set_zf(false);
-        self.set_af(false); self.set_pf(false); self.set_cf(false);
-        self.set_cf(true);
+    fn clear_oszapc_and_assert_cf(&mut self) {
+        // Bochs cpu.h clearEFlagsOSZAPC(): SET_FLAGS_OSZAPC_LOGIC_32(1)
+        self.oszapc.set_oszapc_logic_32(1);
+        // Bochs: assert_CF()
+        self.oszapc.set_cf(true);
     }
 
     // ── RDRAND ──────────────────────────────────────────────────────
@@ -27,7 +28,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// RDRAND r16  (0F C7 /6, opsize 16)
     /// Bochs BX_WRITE_16BIT_REG: only writes low 16 bits, preserves 63:16.
     pub fn rdrand_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.clear_flags_set_cf();
+        self.clear_oszapc_and_assert_cf();
         let val = self.hw_rand64() as u16;
         self.set_gpr16(instr.dst() as usize, val);
         Ok(())
@@ -35,7 +36,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// RDRAND r32  (0F C7 /6, opsize 32)
     pub fn rdrand_ed(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.clear_flags_set_cf();
+        self.clear_oszapc_and_assert_cf();
         let val = self.hw_rand64() as u32;
         self.set_gpr32(instr.dst() as usize, val);
         Ok(())
@@ -43,7 +44,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// RDRAND r64  (0F C7 /6, opsize 64, REX.W)
     pub fn rdrand_eq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.clear_flags_set_cf();
+        self.clear_oszapc_and_assert_cf();
         let val = self.hw_rand64();
         self.set_gpr64(instr.dst() as usize, val);
         Ok(())
@@ -54,7 +55,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// RDSEED r16  (0F C7 /7, opsize 16)
     /// Bochs BX_WRITE_16BIT_REG: only writes low 16 bits, preserves 63:16.
     pub fn rdseed_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.clear_flags_set_cf();
+        self.clear_oszapc_and_assert_cf();
         let val = self.hw_rand64() as u16;
         self.set_gpr16(instr.dst() as usize, val);
         Ok(())
@@ -62,7 +63,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// RDSEED r32  (0F C7 /7, opsize 32)
     pub fn rdseed_ed(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.clear_flags_set_cf();
+        self.clear_oszapc_and_assert_cf();
         let val = self.hw_rand64() as u32;
         self.set_gpr32(instr.dst() as usize, val);
         Ok(())
@@ -70,7 +71,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// RDSEED r64  (0F C7 /7, opsize 64, REX.W)
     pub fn rdseed_eq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.clear_flags_set_cf();
+        self.clear_oszapc_and_assert_cf();
         let val = self.hw_rand64();
         self.set_gpr64(instr.dst() as usize, val);
         Ok(())

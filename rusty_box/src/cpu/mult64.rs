@@ -353,8 +353,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs: if (((Bit64u)(product_128.hi) + (product_128.lo >> 63)) != 0)
         if product_64h.wrapping_add(product_64l >> 63) != 0 {
             self.oszapc.set_flags_oxxxxc(1, 1);
-        } else {
-            self.oszapc.set_flags_oxxxxc(0, 0);
         }
 
         Ok(())
@@ -382,8 +380,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_flags_oszapc_logic_64(product_64l);
         if product_64h.wrapping_add(product_64l >> 63) != 0 {
             self.oszapc.set_flags_oxxxxc(1, 1);
-        } else {
-            self.oszapc.set_flags_oxxxxc(0, 0);
         }
 
         Ok(())
@@ -412,8 +408,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_flags_oszapc_logic_64(product_64l);
         if product_64h.wrapping_add(product_64l >> 63) != 0 {
             self.oszapc.set_flags_oxxxxc(1, 1);
-        } else {
-            self.oszapc.set_flags_oxxxxc(0, 0);
         }
 
         Ok(())
@@ -440,8 +434,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_flags_oszapc_logic_64(product_64l);
         if product_64h.wrapping_add(product_64l >> 63) != 0 {
             self.oszapc.set_flags_oxxxxc(1, 1);
-        } else {
-            self.oszapc.set_flags_oxxxxc(0, 0);
         }
 
         Ok(())

@@ -9,7 +9,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
     error::Result,
 };
 
@@ -270,12 +269,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
 
     /// LAHF - Load AH from Flags (SF:ZF:0:AF:0:PF:1:CF)
+    /// Bochs flag_ctrl.cc: `AH = read_eflags() & 0xFF;`
     pub fn lahf(&mut self, _instr: &Instruction) {
-        // Force lazy OSZAPC bits into eflags before reading the low byte.
-        let flags = (self.read_eflags() & 0xFF) as u8;
-        // AH = SF:ZF:0:AF:0:PF:1:CF (bits 7,6,4,2,0 from flags, bit 1 always 1)
-        let lahf_mask = EFlags::LAHF_MASK.bits() as u8;
-        let ah = (flags & lahf_mask) | EFlags::R1.bits() as u8;
+        let ah = (self.read_eflags() & 0xFF) as u8;
         self.set_ah(ah);
     }
 

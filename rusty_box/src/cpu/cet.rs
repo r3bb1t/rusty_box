@@ -410,10 +410,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         let invalid_token = self.shadow_stack_atomic_clear_busy(laddr, cpl)?;
-        self.set_of(false); self.set_sf(false); self.set_zf(false);
-        self.set_af(false); self.set_pf(false); self.set_cf(false);
+        // Bochs cet.cc CLRSSBSY: clearEFlagsOSZAPC(); if (invalid_token) assert_CF();
+        self.oszapc.set_oszapc_logic_32(1);
         if invalid_token {
-            self.set_cf(true);
+            self.oszapc.set_cf(true);
         }
         self.set_ssp(0);
 

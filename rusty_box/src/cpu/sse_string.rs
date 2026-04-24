@@ -438,21 +438,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 result.set_xmm64u(0, result2 as u64);
         }
 
-        // Set flags: CF, ZF, SF, OF; clear AF, PF
-        self.set_of(false); self.set_sf(false); self.set_zf(false);
-                self.set_af(false); self.set_pf(false); self.set_cf(false);
-        if result2 != 0 {
-            self.set_cf(true);
-        }
-        if len1 < num_elements {
-            self.set_sf(true);
-        }
-        if len2 < num_elements {
-            self.set_zf(true);
-        }
-        if result2 & 0x1 != 0 {
-            self.set_of(true);
-        }
+        // Bochs sse_string.cc PCMPESTRM: setEFlagsOSZAPC(flags)
+        let mut flags: u32 = 0;
+        use super::eflags::EFlags;
+        if result2 != 0 { flags |= EFlags::CF.bits(); }
+        if len1 < num_elements { flags |= EFlags::SF.bits(); }
+        if len2 < num_elements { flags |= EFlags::ZF.bits(); }
+        if result2 & 0x1 != 0 { flags |= EFlags::OF.bits(); }
+        self.set_eflags_oszapc(flags);
 
         // Store result to XMM0
         self.write_xmm_reg_lo128(0, result);
@@ -524,21 +517,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         self.set_rcx(index as u64);
 
-        // Set flags: CF, ZF, SF, OF; clear AF, PF
-        self.set_of(false); self.set_sf(false); self.set_zf(false);
-                self.set_af(false); self.set_pf(false); self.set_cf(false);
-        if result2 != 0 {
-            self.set_cf(true);
-        }
-        if len1 < num_elements {
-            self.set_sf(true);
-        }
-        if len2 < num_elements {
-            self.set_zf(true);
-        }
-        if result2 & 0x1 != 0 {
-            self.set_of(true);
-        }
+        // Bochs sse_string.cc PCMPESTRI: setEFlagsOSZAPC(flags)
+        let mut flags: u32 = 0;
+        use super::eflags::EFlags;
+        if result2 != 0 { flags |= EFlags::CF.bits(); }
+        if len1 < num_elements { flags |= EFlags::SF.bits(); }
+        if len2 < num_elements { flags |= EFlags::ZF.bits(); }
+        if result2 & 0x1 != 0 { flags |= EFlags::OF.bits(); }
+        self.set_eflags_oszapc(flags);
 
         Ok(())
     }
@@ -586,21 +572,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 result.set_xmm64u(0, result2 as u64);
         }
 
-        // Set flags: CF, ZF, SF, OF; clear AF, PF
-        self.set_of(false); self.set_sf(false); self.set_zf(false);
-                self.set_af(false); self.set_pf(false); self.set_cf(false);
-        if result2 != 0 {
-            self.set_cf(true);
-        }
-        if len1 < num_elements {
-            self.set_sf(true);
-        }
-        if len2 < num_elements {
-            self.set_zf(true);
-        }
-        if result2 & 0x1 != 0 {
-            self.set_of(true);
-        }
+        // Bochs sse_string.cc PCMPISTRM: setEFlagsOSZAPC(flags)
+        let mut flags: u32 = 0;
+        use super::eflags::EFlags;
+        if result2 != 0 { flags |= EFlags::CF.bits(); }
+        if len1 < num_elements { flags |= EFlags::SF.bits(); }
+        if len2 < num_elements { flags |= EFlags::ZF.bits(); }
+        if result2 & 0x1 != 0 { flags |= EFlags::OF.bits(); }
+        self.set_eflags_oszapc(flags);
 
         // Store result to XMM0
         self.write_xmm_reg_lo128(0, result);
@@ -661,21 +640,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         self.set_rcx(index as u64);
 
-        // Set flags: CF, ZF, SF, OF; clear AF, PF
-        self.set_of(false); self.set_sf(false); self.set_zf(false);
-                self.set_af(false); self.set_pf(false); self.set_cf(false);
-        if result2 != 0 {
-            self.set_cf(true);
-        }
-        if len1 < num_elements {
-            self.set_sf(true);
-        }
-        if len2 < num_elements {
-            self.set_zf(true);
-        }
-        if result2 & 0x1 != 0 {
-            self.set_of(true);
-        }
+        // Bochs sse_string.cc PCMPISTRI: setEFlagsOSZAPC(flags)
+        let mut flags: u32 = 0;
+        use super::eflags::EFlags;
+        if result2 != 0 { flags |= EFlags::CF.bits(); }
+        if len1 < num_elements { flags |= EFlags::SF.bits(); }
+        if len2 < num_elements { flags |= EFlags::ZF.bits(); }
+        if result2 & 0x1 != 0 { flags |= EFlags::OF.bits(); }
+        self.set_eflags_oszapc(flags);
 
         Ok(())
     }

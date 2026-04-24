@@ -658,8 +658,8 @@ pub fn INC_Eb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
     let op1 = cpu.read_8bit_regx(dst, instr.extend8bit_l());
     let result = op1.wrapping_add(1);
     cpu.write_8bit_regx(dst, instr.extend8bit_l(), result);
-    // Bochs SET_FLAGS_OSZAP_ADD_8(op1, 1, result) — INC preserves CF.
-    cpu.oszapc.set_oszap_add_8(op1, 1, result);
+    // Bochs arith8.cc INC_EbR: SET_FLAGS_OSZAP_ADD_8(op1_8 - 1, 0, op1_8)
+    cpu.oszapc.set_oszap_add_8(op1, 0, result);
     Ok(())
 }
 
@@ -675,8 +675,8 @@ pub fn DEC_Eb<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
     let op1 = cpu.read_8bit_regx(dst, instr.extend8bit_l());
     let result = op1.wrapping_sub(1);
     cpu.write_8bit_regx(dst, instr.extend8bit_l(), result);
-    // Bochs SET_FLAGS_OSZAP_SUB_8(op1, 1, result) — DEC preserves CF.
-    cpu.oszapc.set_oszap_sub_8(op1, 1, result);
+    // Bochs arith8.cc DEC_EbR: SET_FLAGS_OSZAP_SUB_8(op1_8 + 1, 0, op1_8)
+    cpu.oszapc.set_oszap_sub_8(op1, 0, result);
     Ok(())
 }
 
@@ -690,7 +690,8 @@ pub fn INC_EbM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let result = op1.wrapping_add(1);
     cpu.write_rmw_linear_byte(result);
-    cpu.oszapc.set_oszap_add_8(op1, 1, result);
+    // Bochs arith8.cc INC_EbM: SET_FLAGS_OSZAP_ADD_8(op1_8 - 1, 0, op1_8)
+    cpu.oszapc.set_oszap_add_8(op1, 0, result);
     Ok(())
 }
 
@@ -704,7 +705,8 @@ pub fn DEC_EbM<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let result = op1.wrapping_sub(1);
     cpu.write_rmw_linear_byte(result);
-    cpu.oszapc.set_oszap_sub_8(op1, 1, result);
+    // Bochs arith8.cc DEC_EbM: SET_FLAGS_OSZAP_SUB_8(op1_8 + 1, 0, op1_8)
+    cpu.oszapc.set_oszap_sub_8(op1, 0, result);
     Ok(())
 }
 

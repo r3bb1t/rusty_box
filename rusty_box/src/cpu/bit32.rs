@@ -59,6 +59,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
 
     /// POPCNT r32, r/m32 — count set bits
+    /// POPCNT r32, r/m32 — Bochs bit32.cc POPCNT_GdEdR / POPCNT_GdEdM
     pub fn popcnt_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize)
@@ -68,19 +69,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.v_read_dword(seg, eaddr)?
         };
         let result = op2.count_ones();
+        // Bochs: clearEFlagsOSZAPC(); if (!op_32) assert_ZF();
+        self.oszapc.set_oszapc_logic_32(1);
+        if result == 0 { self.oszapc.set_zf(true); }
         self.set_gpr32(instr.dst() as usize, result);
-
-        // POPCNT clears OF, SF, AF, CF, PF; sets ZF if result is 0
-        self.set_of(false);
-        self.set_sf(false);
-        self.set_af(false);
-        self.set_cf(false);
-        self.set_pf(false);
-        self.set_zf(result == 0);
         Ok(())
     }
 
     /// POPCNT r16, r/m16 — count set bits (16-bit)
+    /// POPCNT r16, r/m16 — Bochs bit.cc POPCNT_GwEwR (analogous 16-bit)
     pub fn popcnt_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize) as u16
@@ -90,17 +87,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.v_read_word(seg, eaddr)?
         };
         let result = op2.count_ones() as u16;
-        // Write 16-bit result (preserve upper 16 bits)
         let dst = instr.dst() as usize;
         let current = self.get_gpr32(dst);
         self.set_gpr32(dst, (current & 0xFFFF0000) | result as u32);
-
-        self.set_of(false);
-        self.set_sf(false);
-        self.set_af(false);
-        self.set_cf(false);
-        self.set_pf(false);
-        self.set_zf(result == 0);
+        // Bochs: clearEFlagsOSZAPC(); if (!op_16) assert_ZF();
+        self.oszapc.set_oszapc_logic_32(1);
+        if result == 0 { self.oszapc.set_zf(true); }
         Ok(())
     }
 
@@ -109,6 +101,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
 
     /// LZCNT r32, r/m32 — count leading zeros
+    /// LZCNT r32, r/m32 — Bochs bit32.cc LZCNT_GdEdR
     pub fn lzcnt_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize)
@@ -118,19 +111,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.v_read_dword(seg, eaddr)?
         };
         let result = op2.leading_zeros();
+        // Bochs: set_CF(!op1_32); set_ZF(!result_32);  (OF/SF/AF/PF left as-is)
+        self.oszapc.set_cf(op2 == 0);
+        self.oszapc.set_zf(result == 0);
         self.set_gpr32(instr.dst() as usize, result);
-
-        // CF = (op2 == 0), ZF = (result == 0 i.e. op2 has bit 31 set)
-        self.set_of(false);
-        self.set_sf(false);
-        self.set_af(false);
-        self.set_pf(false);
-        self.set_cf(op2 == 0);
-        self.set_zf(result == 0);
         Ok(())
     }
 
     /// LZCNT r16, r/m16 — count leading zeros (16-bit)
+    /// LZCNT r16, r/m16 — Bochs bit.cc LZCNT_GwEwR (analogous 16-bit)
     pub fn lzcnt_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize) as u16
@@ -143,13 +132,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let dst = instr.dst() as usize;
         let current = self.get_gpr32(dst);
         self.set_gpr32(dst, (current & 0xFFFF0000) | result as u32);
-
-        self.set_of(false);
-        self.set_sf(false);
-        self.set_af(false);
-        self.set_pf(false);
-        self.set_cf(op2 == 0);
-        self.set_zf(result == 0);
+        // Bochs: set_CF(!op1_16); set_ZF(!result_16);
+        self.oszapc.set_cf(op2 == 0);
+        self.oszapc.set_zf(result == 0);
         Ok(())
     }
 
@@ -157,7 +142,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // TZCNT — Trailing Zero Count (F3 0F BC /r)
     // =========================================================================
 
-    /// TZCNT r32, r/m32 — count trailing zeros
+    /// TZCNT r32, r/m32 — Bochs bit32.cc TZCNT_GdEdR
     pub fn tzcnt_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize)
@@ -167,18 +152,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.v_read_dword(seg, eaddr)?
         };
         let result = op2.trailing_zeros();
+        // Bochs: set_CF(!op1_32); set_ZF(!result_32);  (OF/SF/AF/PF left as-is)
+        self.oszapc.set_cf(op2 == 0);
+        self.oszapc.set_zf(result == 0);
         self.set_gpr32(instr.dst() as usize, result);
-
-        self.set_of(false);
-        self.set_sf(false);
-        self.set_af(false);
-        self.set_pf(false);
-        self.set_cf(op2 == 0);
-        self.set_zf(result == 0);
         Ok(())
     }
 
-    /// TZCNT r16, r/m16 — count trailing zeros (16-bit)
+    /// TZCNT r16, r/m16 — Bochs bit.cc TZCNT_GwEwR (analogous 16-bit)
     pub fn tzcnt_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize) as u16
@@ -191,13 +172,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let dst = instr.dst() as usize;
         let current = self.get_gpr32(dst);
         self.set_gpr32(dst, (current & 0xFFFF0000) | result as u32);
-
-        self.set_of(false);
-        self.set_sf(false);
-        self.set_af(false);
-        self.set_pf(false);
-        self.set_cf(op2 == 0);
-        self.set_zf(result == 0);
+        // Bochs: set_CF(!op1_16); set_ZF(!result_16);
+        self.oszapc.set_cf(op2 == 0);
+        self.oszapc.set_zf(result == 0);
         Ok(())
     }
 

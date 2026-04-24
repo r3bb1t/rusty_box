@@ -1680,21 +1680,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
-        // Clear OF, SF, AF, ZF, PF, CF
-        self.set_of(false); self.set_sf(false); self.set_af(false);
-        self.set_zf(false); self.set_pf(false); self.set_cf(false);
-
-            if (op2.xmm64u(0) & op1.xmm64u(0)) == 0
-                && (op2.xmm64u(1) & op1.xmm64u(1)) == 0
-            {
-                self.set_zf(true);
-            }
-
-            if (op2.xmm64u(0) & !op1.xmm64u(0)) == 0
-                && (op2.xmm64u(1) & !op1.xmm64u(1)) == 0
-            {
-                self.set_cf(true);
-            }
+        // Bochs sse.cc PTEST_VdqWdqR: clearEFlagsOSZAPC();
+        self.oszapc.set_oszapc_logic_32(1);
+        if (op2.xmm64u(0) & op1.xmm64u(0)) == 0
+            && (op2.xmm64u(1) & op1.xmm64u(1)) == 0
+        {
+            self.oszapc.set_zf(true);
+        }
+        if (op2.xmm64u(0) & !op1.xmm64u(0)) == 0
+            && (op2.xmm64u(1) & !op1.xmm64u(1)) == 0
+        {
+            self.oszapc.set_cf(true);
+        }
         Ok(())
     }
 

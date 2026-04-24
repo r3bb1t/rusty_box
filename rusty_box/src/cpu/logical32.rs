@@ -266,8 +266,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.get_gpr32(dst);
         let result = op1.wrapping_add(1);
         self.set_gpr32(dst, result);
-        // Bochs SET_FLAGS_OSZAP_ADD_32(op1, 1, result) — INC preserves CF.
-        self.oszapc.set_oszap_add_32(op1, 1, result);
+        // Bochs arith32.cc INC: SET_FLAGS_OSZAP_ADD_32(op1_32 - 1, 0, op1_32)
+        self.oszapc.set_oszap_add_32(op1, 0, result);
     }
 
     /// DEC r32
@@ -276,8 +276,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.get_gpr32(dst);
         let result = op1.wrapping_sub(1);
         self.set_gpr32(dst, result);
-        // Bochs SET_FLAGS_OSZAP_SUB_32(op1, 1, result) — DEC preserves CF.
-        self.oszapc.set_oszap_sub_32(op1, 1, result);
+        // Bochs arith32.cc DEC: SET_FLAGS_OSZAP_SUB_32(op1_32 + 1, 0, op1_32)
+        self.oszapc.set_oszap_sub_32(op1, 0, result);
     }
 
     /// INC r/m32 (memory form) — matches Bochs INC_EdM
@@ -287,7 +287,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.v_read_rmw_dword(seg, eaddr)?;
         let result = op1.wrapping_add(1);
         self.write_rmw_linear_dword(result);
-        self.oszapc.set_oszap_add_32(op1, 1, result);
+        // Bochs arith32.cc INC_EdM: SET_FLAGS_OSZAP_ADD_32(op1_32 - 1, 0, op1_32)
+        self.oszapc.set_oszap_add_32(op1, 0, result);
         Ok(())
     }
 
@@ -298,7 +299,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.v_read_rmw_dword(seg, eaddr)?;
         let result = op1.wrapping_sub(1);
         self.write_rmw_linear_dword(result);
-        self.oszapc.set_oszap_sub_32(op1, 1, result);
+        // Bochs arith32.cc DEC_EdM: SET_FLAGS_OSZAP_SUB_32(op1_32 + 1, 0, op1_32)
+        self.oszapc.set_oszap_sub_32(op1, 0, result);
         Ok(())
     }
 

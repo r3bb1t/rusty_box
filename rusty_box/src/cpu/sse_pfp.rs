@@ -146,25 +146,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
-    /// Set EFLAGS for COMISS/COMISD/UCOMISS/UCOMISD comparison.
-    /// Clears OF, SF, AF. Sets ZF, PF, CF based on result.
+    /// Mirrors Bochs fpu/fpu_compare.cc `write_eflags_fpu_compare(int float_relation)`.
+    /// - unordered (NaN): setEFlagsOSZAPC(ZF|PF|CF)
+    /// - greater:         clearEFlagsOSZAPC()
+    /// - less:            clearEFlagsOSZAPC(); assert_CF()
+    /// - equal:           clearEFlagsOSZAPC(); assert_ZF()
     #[inline]
     fn sse_set_eflags_compare(&mut self, unordered: bool, less: bool, equal: bool) {
-        // Bochs COMISS/UCOMISS: reset OF/SF/AF and write ZF/PF/CF per compare.
-        self.set_of(false); self.set_sf(false); self.set_af(false);
-        self.set_zf(false); self.set_pf(false); self.set_cf(false);
-
         if unordered {
-            // NaN: ZF=1, PF=1, CF=1
-            self.set_zf(true); self.set_pf(true); self.set_cf(true);
+            // Bochs: setEFlagsOSZAPC(ZFMask | PFMask | CFMask)
+            // = set_oszapc with CF=1, PF=1, ZF=1, others=0
+            self.set_eflags_oszapc(
+                super::eflags::EFlags::ZF.bits()
+                    | super::eflags::EFlags::PF.bits()
+                    | super::eflags::EFlags::CF.bits(),
+            );
         } else if less {
-            // op1 < op2: CF=1
-            self.set_cf(true);
+            // Bochs: clearEFlagsOSZAPC(); assert_CF()
+            self.oszapc.set_oszapc_logic_32(1);
+            self.oszapc.set_cf(true);
         } else if equal {
-            // op1 == op2: ZF=1
-            self.set_zf(true);
+            // Bochs: clearEFlagsOSZAPC(); assert_ZF()
+            self.oszapc.set_oszapc_logic_32(1);
+            self.oszapc.set_zf(true);
+        } else {
+            // greater: clearEFlagsOSZAPC()
+            self.oszapc.set_oszapc_logic_32(1);
         }
-        // op1 > op2: all clear (done above)
     }
 
     // ========================================================================

@@ -486,7 +486,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn update_flags_sar8(&mut self, result: u8, cf: bool) {
         self.update_flags_logic8(result);
-        // OF is always 0 for SAR by 1.
+        // Bochs shift8.cc SAR: signed overflow cannot happen, OF=0.
         self.set_cf_of(cf, false);
     }
 

@@ -230,7 +230,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs: bit64.cc POPCNT_GqEqR / POPCNT_GqEqM
     // =========================================================================
 
-    /// POPCNT r64, r/m64 — count set bits
+    /// POPCNT r64, r/m64 — Bochs bit64.cc POPCNT_GqEqR / POPCNT_GqEqM
     pub fn popcnt_gq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
             self.get_gpr64(instr.src() as usize)
@@ -240,12 +240,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.read_virtual_qword_64(seg, eaddr)?
         };
         let result = op2.count_ones() as u64;
+        // Bochs: clearEFlagsOSZAPC(); if (!op_32) assert_ZF();
+        self.oszapc.set_oszapc_logic_32(1);
+        if result == 0 { self.oszapc.set_zf(true); }
         self.set_gpr64(instr.dst() as usize, result);
-
-        // POPCNT clears OF, SF, AF, CF, PF; sets ZF if result is 0
-        self.set_of(false); self.set_sf(false); self.set_af(false);
-        self.set_cf(false); self.set_pf(false);
-        self.set_zf(result == 0);
         Ok(())
     }
 
@@ -253,7 +251,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // LZCNT — Leading Zero Count (64-bit) (F3 REX.W 0F BD /r)
     // =========================================================================
 
-    /// LZCNT r64, r/m64 — count leading zeros
+    /// LZCNT r64, r/m64 — Bochs bit64.cc LZCNT_GqEqR
     pub fn lzcnt_gq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
             self.get_gpr64(instr.src() as usize)
@@ -263,12 +261,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.read_virtual_qword_64(seg, eaddr)?
         };
         let result = op2.leading_zeros() as u64;
+        // Bochs: set_CF(!op1_64); set_ZF(!result_64);  (OF/SF/AF/PF left as-is)
+        self.oszapc.set_cf(op2 == 0);
+        self.oszapc.set_zf(result == 0);
         self.set_gpr64(instr.dst() as usize, result);
-
-        // CF = (op2 == 0), ZF = (result == 0 i.e. op2 has bit 63 set)
-        self.set_of(false); self.set_sf(false); self.set_af(false); self.set_pf(false);
-        self.set_cf(op2 == 0);
-        self.set_zf(result == 0);
         Ok(())
     }
 
@@ -299,7 +295,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // TZCNT — Trailing Zero Count (64-bit) (F3 REX.W 0F BC /r)
     // =========================================================================
 
-    /// TZCNT r64, r/m64 — count trailing zeros
+    /// TZCNT r64, r/m64 — Bochs bit64.cc TZCNT_GqEqR
     pub fn tzcnt_gq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
             self.get_gpr64(instr.src() as usize)
@@ -309,11 +305,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.read_virtual_qword_64(seg, eaddr)?
         };
         let result = op2.trailing_zeros() as u64;
+        // Bochs: set_CF(!op1_64); set_ZF(!result_64);
+        self.oszapc.set_cf(op2 == 0);
+        self.oszapc.set_zf(result == 0);
         self.set_gpr64(instr.dst() as usize, result);
-
-        self.set_of(false); self.set_sf(false); self.set_af(false); self.set_pf(false);
-        self.set_cf(op2 == 0);
-        self.set_zf(result == 0);
         Ok(())
     }
 }

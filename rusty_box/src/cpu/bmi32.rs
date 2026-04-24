@@ -15,14 +15,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Internal helpers
     // =====================================================================
 
-    /// Clear OF, SF, ZF, AF, CF; set SF if sign bit set, set ZF if zero.
-    /// Leaves PF unchanged (matching Bochs SET_FLAGS_OSZAxC_LOGIC_32).
+    /// Bochs `SET_FLAGS_OSZAxC_LOGIC_32`: like SET_FLAGS_OSZAPC_LOGIC_32 but PF is preserved.
     fn set_flags_oszaxc_logic_32(&mut self, result: u32) {
-        self.set_of(false);
-        self.set_sf((result & 0x8000_0000) != 0);
-        self.set_zf(result == 0);
-        self.set_af(false);
-        self.set_cf(false);
+        let saved_pf = self.oszapc.getb_pf() != 0;
+        self.oszapc.set_oszapc_logic_32(result);
+        self.oszapc.set_pf(saved_pf);
     }
 
     /// Read 32-bit r/m operand: register if mod=11, memory read otherwise.

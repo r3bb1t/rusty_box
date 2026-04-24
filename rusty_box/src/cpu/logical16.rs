@@ -23,16 +23,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.oszapc.set_oszapc_sub_16(op1, op2, result);
     }
 
-    /// Update flags for INC (preserves CF) — Bochs SET_FLAGS_OSZAP_INC_16.
+    /// Update flags for INC (preserves CF) — Bochs arith16.cc INC: SET_FLAGS_OSZAP_ADD_16(op1 - 1, 0, op1).
     pub fn set_flags_oszap_inc_16(&mut self, result: u16, op1: u16) {
-        // Bochs uses SET_FLAGS_OSZAP_16(op1, 1, result) for INC.
-        self.oszapc.set_oszap_add_16(op1, 1, result);
+        // result is the post-increment value; op1 is the pre-increment value.
+        self.oszapc.set_oszap_add_16(op1, 0, result);
     }
 
-    /// Update flags for DEC (preserves CF) — Bochs SET_FLAGS_OSZAP_DEC_16.
+    /// Update flags for DEC (preserves CF) — Bochs arith16.cc DEC: SET_FLAGS_OSZAP_SUB_16(op1 + 1, 0, op1).
     pub fn set_flags_oszap_dec_16(&mut self, result: u16, op1: u16) {
-        // Bochs uses SET_FLAGS_OSZAP_16(op1, 1, result) for DEC.
-        self.oszapc.set_oszap_sub_16(op1, 1, result);
+        self.oszapc.set_oszap_sub_16(op1, 0, result);
     }
 
     // =========================================================================

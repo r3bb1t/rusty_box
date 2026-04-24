@@ -267,10 +267,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_gpr16(dst_reg, result_16 as u16);
 
+        // Bochs mult16.cc IMUL_GwEwR: SET_FLAGS_OSZAPC_LOGIC_16(product_16)
+        // then conditionally assert_flags_OxxxxC if product doesn't fit.
+        self.update_flags_logic16(result_16 as u16);
         if product_32 != (result_16 as i32) {
-            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
-        } else {
-            self.oszapc.set_flags_oxxxxc(0, 0); // CF=0, OF=0
+            self.oszapc.set_flags_oxxxxc(1, 1);
         }
 
         Ok(())
@@ -290,10 +291,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_gpr16(dst_reg, result_16 as u16);
 
+        // Bochs mult16.cc IMUL_GwEwM: SET_FLAGS_OSZAPC_LOGIC_16 then conditional OF/CF.
+        self.update_flags_logic16(result_16 as u16);
         if product_32 != (result_16 as i32) {
-            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
-        } else {
-            self.oszapc.set_flags_oxxxxc(0, 0); // CF=0, OF=0
+            self.oszapc.set_flags_oxxxxc(1, 1);
         }
 
         Ok(())
@@ -313,10 +314,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_gpr16(dst_reg, result_16 as u16);
 
+        // Bochs mult16.cc IMUL_GwEwIwR: SET_FLAGS_OSZAPC_LOGIC_16 then conditional OF/CF.
+        self.update_flags_logic16(result_16 as u16);
         if product_32 != (result_16 as i32) {
             self.oszapc.set_flags_oxxxxc(1, 1);
-        } else {
-            self.oszapc.set_flags_oxxxxc(0, 0);
         }
 
         Ok(())
@@ -336,10 +337,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_gpr16(dst_reg, result_16 as u16);
 
+        // Bochs mult16.cc IMUL_GwEwIwM: SET_FLAGS_OSZAPC_LOGIC_16 then conditional OF/CF.
+        self.update_flags_logic16(result_16 as u16);
         if product_32 != (result_16 as i32) {
             self.oszapc.set_flags_oxxxxc(1, 1);
-        } else {
-            self.oszapc.set_flags_oxxxxc(0, 0);
         }
 
         Ok(())
@@ -358,10 +359,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_gpr16(dst_reg, result_16 as u16);
 
+        // Bochs mult16.cc: SET_FLAGS_OSZAPC_LOGIC_16 then conditional OF/CF.
+        self.update_flags_logic16(result_16 as u16);
         if product_32 != (result_16 as i32) {
             self.oszapc.set_flags_oxxxxc(1, 1);
-        } else {
-            self.oszapc.set_flags_oxxxxc(0, 0);
         }
 
         Ok(())
@@ -381,10 +382,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_gpr16(dst_reg, result_16 as u16);
 
+        // Bochs mult16.cc: SET_FLAGS_OSZAPC_LOGIC_16 then conditional OF/CF.
+        self.update_flags_logic16(result_16 as u16);
         if product_32 != (result_16 as i32) {
             self.oszapc.set_flags_oxxxxc(1, 1);
-        } else {
-            self.oszapc.set_flags_oxxxxc(0, 0);
         }
 
         Ok(())
