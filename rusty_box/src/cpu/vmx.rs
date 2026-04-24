@@ -1,11 +1,4 @@
 // Intel VT-x (VMX) — Bochs cpu/vmx.cc.
-//
-// Session 3 scope: VMX operation-mode entry/exit (VMXON/VMXOFF), the
-// flag-based success/failure helpers (VMsucceed / VMfailInvalid / VMfail),
-// the IA32_FEATURE_CONTROL and IA32_VMX_* MSR surface, and the VMX
-// instruction-error enum. VMCS-manipulation opcodes (VMCLEAR / VMPTRLD /
-// VMREAD / VMWRITE / VMLAUNCH / VMRESUME) and the VM-entry/exit state
-// machine are deferred to Sessions 4+.
 
 #![allow(dead_code, non_camel_case_types)]
 
@@ -250,6 +243,53 @@ pub enum VmxVmexitReason {
     RdmsrImm = 84,
     Wrmsrns = 85,
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// VM-execution control bits — Bochs cpu/vmx_ctrls.h.
+//
+// The storage in `BxVmcs` is still raw u32 (proc_based_ctls, etc.), so the
+// intercept checks below `& mask != 0` against the right control word. A
+// later pass can replace the u32s with bitflags once the control-storage
+// refactor lands; the bit numbers stay stable either way.
+// ──────────────────────────────────────────────────────────────────────────
+
+// Pin-based VM-execution controls.
+pub(super) const VMX_PIN_BASED_VMEXEC_CTRL_EXTERNAL_INTERRUPT_VMEXIT: u32 = 1 << 0;
+pub(super) const VMX_PIN_BASED_VMEXEC_CTRL_NMI_EXITING: u32 = 1 << 3;
+pub(super) const VMX_PIN_BASED_VMEXEC_CTRL_VIRTUAL_NMI: u32 = 1 << 5;
+pub(super) const VMX_PIN_BASED_VMEXEC_CTRL_VMX_PREEMPTION_TIMER_VMEXIT: u32 = 1 << 6;
+
+// Primary processor-based VM-execution controls (Bochs VmxVmexec1Controls).
+pub(super) const VMX_VM_EXEC_CTRL1_INTERRUPT_WINDOW_VMEXIT: u32 = 1 << 2;
+pub(super) const VMX_VM_EXEC_CTRL1_HLT_VMEXIT: u32 = 1 << 7;
+pub(super) const VMX_VM_EXEC_CTRL1_INVLPG_VMEXIT: u32 = 1 << 9;
+pub(super) const VMX_VM_EXEC_CTRL1_MWAIT_VMEXIT: u32 = 1 << 10;
+pub(super) const VMX_VM_EXEC_CTRL1_RDPMC_VMEXIT: u32 = 1 << 11;
+pub(super) const VMX_VM_EXEC_CTRL1_RDTSC_VMEXIT: u32 = 1 << 12;
+pub(super) const VMX_VM_EXEC_CTRL1_CR3_WRITE_VMEXIT: u32 = 1 << 15;
+pub(super) const VMX_VM_EXEC_CTRL1_CR3_READ_VMEXIT: u32 = 1 << 16;
+pub(super) const VMX_VM_EXEC_CTRL1_CR8_WRITE_VMEXIT: u32 = 1 << 19;
+pub(super) const VMX_VM_EXEC_CTRL1_CR8_READ_VMEXIT: u32 = 1 << 20;
+pub(super) const VMX_VM_EXEC_CTRL1_NMI_WINDOW_EXITING: u32 = 1 << 22;
+pub(super) const VMX_VM_EXEC_CTRL1_DRX_ACCESS_VMEXIT: u32 = 1 << 23;
+pub(super) const VMX_VM_EXEC_CTRL1_IO_VMEXIT: u32 = 1 << 24;
+pub(super) const VMX_VM_EXEC_CTRL1_IO_BITMAPS: u32 = 1 << 25;
+pub(super) const VMX_VM_EXEC_CTRL1_MONITOR_TRAP_FLAG: u32 = 1 << 27;
+pub(super) const VMX_VM_EXEC_CTRL1_MSR_BITMAPS: u32 = 1 << 28;
+pub(super) const VMX_VM_EXEC_CTRL1_MONITOR_VMEXIT: u32 = 1 << 29;
+pub(super) const VMX_VM_EXEC_CTRL1_PAUSE_VMEXIT: u32 = 1 << 30;
+pub(super) const VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS: u32 = 1 << 31;
+
+// Secondary processor-based VM-execution controls (Bochs VmxVmexec2Controls).
+pub(super) const VMX_VM_EXEC_CTRL2_DESCRIPTOR_TABLE_VMEXIT: u32 = 1 << 2;
+pub(super) const VMX_VM_EXEC_CTRL2_RDTSCP: u32 = 1 << 3;
+pub(super) const VMX_VM_EXEC_CTRL2_WBINVD_VMEXIT: u32 = 1 << 6;
+pub(super) const VMX_VM_EXEC_CTRL2_PAUSE_LOOP_VMEXIT: u32 = 1 << 10;
+pub(super) const VMX_VM_EXEC_CTRL2_RDRAND_VMEXIT: u32 = 1 << 11;
+pub(super) const VMX_VM_EXEC_CTRL2_INVPCID: u32 = 1 << 12;
+pub(super) const VMX_VM_EXEC_CTRL2_RDSEED_VMEXIT: u32 = 1 << 16;
+pub(super) const VMX_VM_EXEC_CTRL2_XSAVES_XRSTORS: u32 = 1 << 20;
+pub(super) const VMX_VM_EXEC_CTRL2_UMWAIT_TPAUSE_VMEXIT: u32 = 1 << 26;
 
 /// VMX-instruction error codes written into the VMCS 32-bit
 /// VMCS_32BIT_INSTRUCTION_ERROR field by `VMfail`.
@@ -1191,5 +1231,228 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     fn a20_enabled(&self) -> bool {
         // A20 masks bit 20 to 0 when disabled → `a20_mask` lacks bit 20.
         (self.a20_mask & (1u64 << 20)) != 0
+    }
+
+    // =========================================================================
+    // VM-exit intercept predicates — Bochs cpu/vmx.cc + vmexit.cc.
+    //
+    // Each `vmexit_check_*` method returns `Ok(true)` if the running guest
+    // should trigger a VM-exit for this instruction (and performs the exit
+    // as a side effect), `Ok(false)` if the guest keeps executing natively.
+    //
+    // The caller pattern for wrapped handlers is:
+    //
+    //     if self.in_vmx_guest && self.vmexit_check_hlt()? { return Ok(()); }
+    //
+    // Unconditional-intercept opcodes (CPUID, RSM, XSETBV, GETSEC, INVD, all
+    // VMX instructions) use `vmexit_unconditional` — there's no control bit
+    // to test, the exit is mandated by the SDM.
+    // =========================================================================
+
+    #[inline]
+    fn proc_based_ctls1(&self) -> u32 {
+        self.vmcs.proc_based_ctls
+    }
+
+    #[inline]
+    fn proc_based_ctls2(&self) -> u32 {
+        // The secondary controls are only honoured when the primary
+        // ACTIVATE_SECONDARY_CONTROLS bit is set (Bochs gate).
+        if self.vmcs.proc_based_ctls & VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS != 0 {
+            self.vmcs.secondary_proc_based_ctls
+        } else {
+            0
+        }
+    }
+
+    #[inline]
+    fn pin_based_ctls(&self) -> u32 {
+        self.vmcs.pin_based_ctls
+    }
+
+    /// Trigger an unconditional VM-exit (caller has already verified
+    /// `self.in_vmx_guest`). Returns `Ok(true)` so call sites can chain.
+    pub(super) fn vmexit_unconditional(
+        &mut self,
+        reason: VmxVmexitReason,
+        qualification: u64,
+    ) -> Result<bool> {
+        self.vmx_vmexit(reason, qualification)?;
+        Ok(true)
+    }
+
+    /// Conditional VM-exit: `mask` is the control bit(s) in `ctls`; if any
+    /// are set, trigger `reason` with `qualification` and return Ok(true).
+    pub(super) fn vmexit_if_ctls_set(
+        &mut self,
+        ctls: u32,
+        mask: u32,
+        reason: VmxVmexitReason,
+        qualification: u64,
+    ) -> Result<bool> {
+        if ctls & mask != 0 {
+            self.vmx_vmexit(reason, qualification)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub(super) fn vmexit_check_hlt(&mut self) -> Result<bool> {
+        let ctls = self.proc_based_ctls1();
+        self.vmexit_if_ctls_set(ctls, VMX_VM_EXEC_CTRL1_HLT_VMEXIT, VmxVmexitReason::Hlt, 0)
+    }
+
+    pub(super) fn vmexit_check_invlpg(&mut self, linear_addr: u64) -> Result<bool> {
+        let ctls = self.proc_based_ctls1();
+        self.vmexit_if_ctls_set(
+            ctls,
+            VMX_VM_EXEC_CTRL1_INVLPG_VMEXIT,
+            VmxVmexitReason::Invlpg,
+            linear_addr,
+        )
+    }
+
+    pub(super) fn vmexit_check_rdtsc(&mut self) -> Result<bool> {
+        let ctls = self.proc_based_ctls1();
+        self.vmexit_if_ctls_set(
+            ctls,
+            VMX_VM_EXEC_CTRL1_RDTSC_VMEXIT,
+            VmxVmexitReason::Rdtsc,
+            0,
+        )
+    }
+
+    pub(super) fn vmexit_check_rdtscp(&mut self) -> Result<bool> {
+        // RDTSCP exits unconditionally unless secondary RDTSCP bit is set AND
+        // the primary RDTSC_VMEXIT bit is clear. Bochs vmexit.cc VMexit_Rdtscp.
+        if self.proc_based_ctls2() & VMX_VM_EXEC_CTRL2_RDTSCP == 0 {
+            // RDTSCP is disabled in the guest → #UD is raised at decode time;
+            // we shouldn't reach here. If we do, fall through to native.
+            return Ok(false);
+        }
+        self.vmexit_check_rdtsc()
+    }
+
+    pub(super) fn vmexit_check_rdpmc(&mut self) -> Result<bool> {
+        let ctls = self.proc_based_ctls1();
+        self.vmexit_if_ctls_set(
+            ctls,
+            VMX_VM_EXEC_CTRL1_RDPMC_VMEXIT,
+            VmxVmexitReason::Rdpmc,
+            0,
+        )
+    }
+
+    pub(super) fn vmexit_check_monitor(&mut self) -> Result<bool> {
+        let ctls = self.proc_based_ctls1();
+        self.vmexit_if_ctls_set(
+            ctls,
+            VMX_VM_EXEC_CTRL1_MONITOR_VMEXIT,
+            VmxVmexitReason::Monitor,
+            0,
+        )
+    }
+
+    pub(super) fn vmexit_check_mwait(&mut self, monitor_armed: bool) -> Result<bool> {
+        let ctls = self.proc_based_ctls1();
+        if ctls & VMX_VM_EXEC_CTRL1_MWAIT_VMEXIT == 0 {
+            return Ok(false);
+        }
+        // Bochs vmexit.cc: qualification[0] = monitor hardware armed.
+        let qual = if monitor_armed { 1 } else { 0 };
+        self.vmx_vmexit(VmxVmexitReason::Mwait, qual)?;
+        Ok(true)
+    }
+
+    pub(super) fn vmexit_check_pause(&mut self) -> Result<bool> {
+        let ctls = self.proc_based_ctls1();
+        self.vmexit_if_ctls_set(
+            ctls,
+            VMX_VM_EXEC_CTRL1_PAUSE_VMEXIT,
+            VmxVmexitReason::Pause,
+            0,
+        )
+    }
+
+    pub(super) fn vmexit_check_wbinvd(&mut self) -> Result<bool> {
+        let ctls = self.proc_based_ctls2();
+        self.vmexit_if_ctls_set(
+            ctls,
+            VMX_VM_EXEC_CTRL2_WBINVD_VMEXIT,
+            VmxVmexitReason::Wbinvd,
+            0,
+        )
+    }
+
+    pub(super) fn vmexit_check_invpcid(&mut self) -> Result<bool> {
+        let ctls = self.proc_based_ctls2();
+        self.vmexit_if_ctls_set(
+            ctls,
+            VMX_VM_EXEC_CTRL2_INVPCID,
+            VmxVmexitReason::Invpcid,
+            0,
+        )
+    }
+
+    /// RDMSR: unconditional if no MSR bitmaps, otherwise consult bitmap.
+    /// Bochs vmx.cc VMexit_MSR. Until the MSR-bitmap walker lands we err on
+    /// the side of "exit always when MSR_BITMAPS is clear" — i.e. exit iff
+    /// the no-bitmaps policy mandates it.
+    pub(super) fn vmexit_check_rdmsr(&mut self, _msr: u32) -> Result<bool> {
+        // Without MSR bitmaps, every RDMSR exits unconditionally. With
+        // bitmaps, the bitmap walk decides — wired later.
+        if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_MSR_BITMAPS == 0 {
+            self.vmx_vmexit(VmxVmexitReason::Rdmsr, 0)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub(super) fn vmexit_check_wrmsr(&mut self, _msr: u32) -> Result<bool> {
+        if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_MSR_BITMAPS == 0 {
+            self.vmx_vmexit(VmxVmexitReason::Wrmsr, 0)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// I/O port intercept — Bochs vmx.cc VMexit_IO.
+    /// Without I/O bitmaps, any IO_VMEXIT bit triggers exits for every port.
+    /// With bitmaps, the per-port bit in io_bitmap_addr decides. Bitmap walk
+    /// is deferred; current stub exits-all when IO_VMEXIT is set and bitmaps
+    /// are off.
+    pub(super) fn vmexit_check_io(
+        &mut self,
+        port: u16,
+        size: u32,
+        direction_in: bool,
+        string: bool,
+        rep: bool,
+    ) -> Result<bool> {
+        let ctls = self.proc_based_ctls1();
+        if ctls & (VMX_VM_EXEC_CTRL1_IO_VMEXIT | VMX_VM_EXEC_CTRL1_IO_BITMAPS) == 0 {
+            return Ok(false);
+        }
+        // Qualification bits mirror Bochs vmx.cc VMexit_IO:
+        //   [2:0]  access size in bytes - 1
+        //   [3]    direction (0 = OUT, 1 = IN)
+        //   [4]    string instruction
+        //   [5]    REP prefix
+        //   [6]    operand encoding (0 = DX, 1 = immediate) — left zero here
+        //   [31:16] port number
+        let mut qual: u64 = 0;
+        qual |= (size.saturating_sub(1) & 0x7) as u64;
+        if direction_in {
+            qual |= 1 << 3;
+        }
+        if string {
+            qual |= 1 << 4;
+        }
+        if rep {
+            qual |= 1 << 5;
+        }
+        qual |= (port as u64) << 16;
+        self.vmx_vmexit(VmxVmexitReason::IoInstruction, qual)?;
+        Ok(true)
     }
 }

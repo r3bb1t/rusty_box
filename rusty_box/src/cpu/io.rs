@@ -68,6 +68,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn in_al_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         self.svm_intercept_io(port, 1, true)?;
+        if self.in_vmx_guest && self.vmexit_check_io(port, 1, true, false, false)? {
+            return Ok(());
+        }
         if !self.allow_io(port, 1)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -81,6 +84,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn in_ax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         self.svm_intercept_io(port, 2, true)?;
+        if self.in_vmx_guest && self.vmexit_check_io(port, 2, true, false, false)? {
+            return Ok(());
+        }
         if !self.allow_io(port, 2)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -94,6 +100,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn in_eax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         self.svm_intercept_io(port, 4, true)?;
+        if self.in_vmx_guest && self.vmexit_check_io(port, 4, true, false, false)? {
+            return Ok(());
+        }
         if !self.allow_io(port, 4)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -107,6 +116,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn out_ib_al(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         self.svm_intercept_io(port, 1, false)?;
+        if self.in_vmx_guest && self.vmexit_check_io(port, 1, false, false, false)? {
+            return Ok(());
+        }
         if !self.allow_io(port, 1)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -120,6 +132,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn out_ib_ax(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         self.svm_intercept_io(port, 2, false)?;
+        if self.in_vmx_guest && self.vmexit_check_io(port, 2, false, false, false)? {
+            return Ok(());
+        }
         if !self.allow_io(port, 2)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -133,6 +148,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn out_ib_eax(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         self.svm_intercept_io(port, 4, false)?;
+        if self.in_vmx_guest && self.vmexit_check_io(port, 4, false, false, false)? {
+            return Ok(());
+        }
         if !self.allow_io(port, 4)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -146,6 +164,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn in_al_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         self.svm_intercept_io(port, 1, true)?;
+        if self.in_vmx_guest && self.vmexit_check_io(port, 1, true, false, false)? {
+            return Ok(());
+        }
         if !self.allow_io(port, 1)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -159,6 +180,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn in_ax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         self.svm_intercept_io(port, 2, true)?;
+        if self.in_vmx_guest && self.vmexit_check_io(port, 2, true, false, false)? {
+            return Ok(());
+        }
         if !self.allow_io(port, 2)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -172,6 +196,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn in_eax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         self.svm_intercept_io(port, 4, true)?;
+        if self.in_vmx_guest && self.vmexit_check_io(port, 4, true, false, false)? {
+            return Ok(());
+        }
         if !self.allow_io(port, 4)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -185,6 +212,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn out_dx_al(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         self.svm_intercept_io(port, 1, false)?;
+        if self.in_vmx_guest && self.vmexit_check_io(port, 1, false, false, false)? {
+            return Ok(());
+        }
         if !self.allow_io(port, 1)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -198,6 +228,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn out_dx_ax(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         self.svm_intercept_io(port, 2, false)?;
+        if self.in_vmx_guest && self.vmexit_check_io(port, 2, false, false, false)? {
+            return Ok(());
+        }
         if !self.allow_io(port, 2)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -211,6 +244,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn out_dx_eax(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         self.svm_intercept_io(port, 4, false)?;
+        if self.in_vmx_guest && self.vmexit_check_io(port, 4, false, false, false)? {
+            return Ok(());
+        }
         if !self.allow_io(port, 4)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }

@@ -958,6 +958,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         {
             return self.svm_vmexit(super::svm::SvmVmexit::Hlt as i32, 0, 0);
         }
+        // Bochs vmx.cc VMexit_HLT.
+        if self.in_vmx_guest && self.vmexit_check_hlt()? {
+            return Ok(());
+        }
 
         // Check if interrupts are disabled (IF=0) - matches Bochs proc_ctrl.cc
         if !self.eflags.contains(EFlags::IF_) {
@@ -1070,6 +1074,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_CPUID)
         {
             let _ = self.svm_vmexit(super::svm::SvmVmexit::Cpuid as i32, 0, 0);
+            return;
+        }
+        // Bochs vmx.cc VMexit_CPUID — unconditional when in VMX guest.
+        if self.in_vmx_guest {
+            let _ = self.vmx_vmexit(super::vmx::VmxVmexitReason::Cpuid, 0);
             return;
         }
 

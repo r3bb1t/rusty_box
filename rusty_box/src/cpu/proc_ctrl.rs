@@ -217,6 +217,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         {
             return self.svm_vmexit(super::svm::SvmVmexit::Wbinvd as i32, 0, 0);
         }
+        // Bochs vmx.cc VMexit_WBINVD.
+        if self.in_vmx_guest && self.vmexit_check_wbinvd()? {
+            return Ok(());
+        }
         // BOCHS BX_INSTR_CACHE_CNTRL(cpu_id, BX_INSTR_WBINVD)
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cache() {
@@ -243,6 +247,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_INVD)
         {
             return self.svm_vmexit(super::svm::SvmVmexit::Invd as i32, 0, 0);
+        }
+        // Bochs vmx.cc VMexit_INVD — unconditional VM-exit when in VMX guest.
+        if self.in_vmx_guest {
+            return self.vmx_vmexit(super::vmx::VmxVmexitReason::Invd, 0);
         }
         // BOCHS BX_INSTR_CACHE_CNTRL(cpu_id, BX_INSTR_INVD)
         #[cfg(feature = "instrumentation")]
@@ -288,6 +296,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             self.get_laddr32(seg as usize, eaddr as u32) as u64
         };
+        // Bochs vmx.cc VMexit_INVLPG — qualification carries the linear addr.
+        if self.in_vmx_guest && self.vmexit_check_invlpg(laddr)? {
+            return Ok(());
+        }
         // Bochs paging.cc TLB_invlpg: invalidate prefetch, stack cache, TLB entries, icache links
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
@@ -346,6 +358,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             && self.svm_intercept_check(super::svm::SVM_INTERCEPT1_MONITOR)
         {
             return self.svm_vmexit(super::svm::SvmVmexit::Monitor as i32, 0, 0);
+        }
+        // Bochs vmx.cc VMexit_MONITOR.
+        if self.in_vmx_guest && self.vmexit_check_monitor()? {
+            return Ok(());
         }
 
         // Bochs mwait.cc: RCX must be 0 (no optional extensions supported)
@@ -434,6 +450,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if self.svm_intercept_check(super::svm::SVM_INTERCEPT1_MWAIT) {
                 return self.svm_vmexit(super::svm::SvmVmexit::Mwait as i32, 0, 0);
             }
+        }
+        // Bochs vmx.cc VMexit_MWAIT — qualification[0] = monitor hardware armed.
+        if self.in_vmx_guest && self.vmexit_check_mwait(self.monitor.armed())? {
+            return Ok(());
         }
 
         // Bochs mwait.cc: MWAIT requires CPL==0 (CPL always 0 in real mode)
@@ -770,6 +790,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return self.svm_vmexit(super::svm::SvmVmexit::Rdtsc as i32, 0, 0);
             }
         }
+        // Bochs vmx.cc VMexit_Rdtscp.
+        if self.in_vmx_guest && self.vmexit_check_rdtscp()? {
+            return Ok(());
+        }
 
         let ticks = self.get_tsc(self.system_ticks());
         self.set_rax(ticks & 0xFFFF_FFFF  );
@@ -801,6 +825,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_RDTSC)
         {
             return self.svm_vmexit(super::svm::SvmVmexit::Rdtsc as i32, 0, 0);
+        }
+        // Bochs vmx.cc VMexit_Rdtsc.
+        if self.in_vmx_guest && self.vmexit_check_rdtsc()? {
+            return Ok(());
         }
 
         // Use system_ticks (pc_system.time_ticks) as time source.
@@ -835,6 +863,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // SVM MSR intercept
         if self.in_svm_guest {
             self.svm_intercept_msr(0, msr)?; // 0 = read
+        }
+        // Bochs vmx.cc VMexit_MSR_READ.
+        if self.in_vmx_guest && self.vmexit_check_rdmsr(msr)? {
+            return Ok(());
         }
         let val: u64 = match msr {
             BX_MSR_TSC => self.get_tsc(self.system_ticks()),
@@ -984,6 +1016,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // SVM MSR intercept
         if self.in_svm_guest {
             self.svm_intercept_msr(1, msr)?; // 1 = write
+        }
+        // Bochs vmx.cc VMexit_MSR_WRITE.
+        if self.in_vmx_guest && self.vmexit_check_wrmsr(msr)? {
+            return Ok(());
         }
 
         match msr {
@@ -2182,6 +2218,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         {
             return self.svm_vmexit(super::svm::SvmVmexit::Xsetbv as i32, 0, 0);
         }
+        // Bochs vmx.cc VMexit_XSETBV — unconditional.
+        if self.in_vmx_guest {
+            return self.vmx_vmexit(super::vmx::VmxVmexitReason::Xsetbv, 0);
+        }
 
         let ecx = self.ecx();
         if ecx != 0 {
@@ -2526,6 +2566,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             && self.svm_intercept_check(super::svm::SVM_INTERCEPT2_INVPCID)
         {
             return self.svm_vmexit(super::svm::SvmVmexit::Invpcid as i32, 0, 0);
+        }
+        // Bochs vmx.cc VMexit_INVPCID.
+        if self.in_vmx_guest && self.vmexit_check_invpcid()? {
+            return Ok(());
         }
 
         // Read type from register operand (Bochs: i->dst())

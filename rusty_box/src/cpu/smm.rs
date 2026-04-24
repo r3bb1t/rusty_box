@@ -248,6 +248,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         {
             return self.svm_vmexit(super::svm::SvmVmexit::Rsm as i32, 0, 0);
         }
+        // Bochs vmx.cc VMexit_RSM — unconditional when in VMX guest.
+        if self.in_vmx_guest {
+            return self.vmx_vmexit(super::vmx::VmxVmexitReason::Rsm, 0);
+        }
 
         tracing::trace!("RSM: resuming from SMM (smbase={:#010x})", self.smbase);
 

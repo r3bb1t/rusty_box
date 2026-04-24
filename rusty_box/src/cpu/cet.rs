@@ -793,15 +793,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// VMX PAUSE exit handler.
-    /// Bochs vmexit.cc VMexit_PAUSE()
-    /// Checks PAUSE Exiting and PAUSE Loop Exiting (PLE) controls.
+    /// Bochs vmexit.cc VMexit_PAUSE() — checks PAUSE Exiting control. PAUSE
+    /// Loop Exiting (PLE) timing is deferred (PLE needs the TSC gap tracker).
     fn vmexit_pause(&mut self) -> Result<()> {
-        // TODO: Implement full VMexit_PAUSE when VMX exit machinery is ported.
-        // Bochs checks:
-        //   1. vmexec_ctrls1.PAUSE_VMEXIT() → VMexit(VMX_VMEXIT_PAUSE, 0)
-        //   2. vmexec_ctrls2.PAUSE_LOOP_VMEXIT() && CPL==0 → PLE timing check
-        //      - If gap since last PAUSE > pause_loop_exiting_gap: reset window
-        //      - If time in PAUSE loop > pause_loop_exiting_window: VMexit
+        let _ = self.vmexit_check_pause()?;
         Ok(())
     }
 }
