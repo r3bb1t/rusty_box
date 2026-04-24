@@ -33,7 +33,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_flags_oszapc_logic_64(product_64l);
         if product_64h != 0 {
             // assert CF and OF
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -61,7 +61,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_flags_oszapc_logic_64(product_64l);
         if product_64h != 0 {
             // assert CF and OF
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -89,7 +89,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs: if (((Bit64u)(product_128.hi) + (product_128.lo >> 63)) != 0)
         // This checks: does hi equal the sign-extension of lo's sign bit?
         if (product_64h).wrapping_add(product_64l >> 63) != 0 {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -119,7 +119,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // IMUL r/m64: CF and OF set if result doesn't fit in signed 64-bit
         // Bochs: if (((Bit64u)(product_128.hi) + (product_128.lo >> 63)) != 0)
         if (product_64h).wrapping_add(product_64l >> 63) != 0 {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -299,7 +299,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_flags_oszapc_logic_64(product_64l);
         // Bochs: if (((Bit64u)(product_128.hi) + (product_128.lo >> 63)) != 0)
         if product_64h.wrapping_add(product_64l >> 63) != 0 {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -325,7 +325,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_flags_oszapc_logic_64(product_64l);
         if product_64h.wrapping_add(product_64l >> 63) != 0 {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -352,7 +352,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_flags_oszapc_logic_64(product_64l);
         // Bochs: if (((Bit64u)(product_128.hi) + (product_128.lo >> 63)) != 0)
         if product_64h.wrapping_add(product_64l >> 63) != 0 {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -379,7 +379,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_flags_oszapc_logic_64(product_64l);
         if product_64h.wrapping_add(product_64l >> 63) != 0 {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -407,7 +407,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_flags_oszapc_logic_64(product_64l);
         if product_64h.wrapping_add(product_64l >> 63) != 0 {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -433,7 +433,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_flags_oszapc_logic_64(product_64l);
         if product_64h.wrapping_add(product_64l >> 63) != 0 {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())

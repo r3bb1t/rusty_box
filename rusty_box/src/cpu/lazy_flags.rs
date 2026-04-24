@@ -260,6 +260,12 @@ impl BxLazyflagsEntry {
             | (new_cf << LF_BIT_CF)) as BxAddress;
     }
 
+    /// Assert both OF and CF (Bochs `assert_flags_OxxxxC` = `set_flags_OxxxxC(1, 1)`).
+    #[inline]
+    pub(super) fn assert_flags_oxxxxc(&mut self) {
+        self.set_flags_oxxxxc(1, 1);
+    }
+
     #[inline]
     pub(super) fn set_cf(&mut self, val: bool) {
         let temp_of = self.getb_of();

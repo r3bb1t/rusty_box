@@ -270,9 +270,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Update registers defining context
         self.set_rip(new_rip);
-        // New context clears EFLAGS (bit 1 = reserved-1), including OSZAPC in the lazy store.
+        // Bochs fred.cc: BX_CPU_THIS_PTR eflags = 0x2; clearEFlagsOSZAPC();
         self.eflags = EFlags::from_bits_retain(0x2);
-        self.set_eflags_oszapc(0x2);
+        self.oszapc.set_oszapc_logic_32(1);
         self.set_rsp(new_rsp.wrapping_sub(64));
         self.set_csl(new_csl);
 

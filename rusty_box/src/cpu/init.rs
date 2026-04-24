@@ -103,8 +103,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // (includes ESP — BIOS sets SS:SP before any stack operations)
 
         self.eflags = EFlags::from_bits_retain(0x2); // Bit1 is always set
-
-        // clearEFlagsOSZAPC();
+        // Bochs init.cc: clearEFlagsOSZAPC() = SET_FLAGS_OSZAPC_LOGIC_32(1).
+        self.oszapc.set_oszapc_logic_32(1);
         if source == ResetReason::Hardware {
             self.icount = 0;
         }
@@ -520,6 +520,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Interrupts disabled, direction flag clear
         self.eflags = EFlags::from_bits_retain(0x2); // Bit 1 always set
+        // Bochs-equivalent clearEFlagsOSZAPC(): SET_FLAGS_OSZAPC_LOGIC_32(1).
+        self.oszapc.set_oszapc_logic_32(1);
 
         // Set up GDTR to point to GDT in memory
         self.gdtr.base = gdt_addr;

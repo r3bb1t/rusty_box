@@ -33,7 +33,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_flags_logic16(product_16l);
         if product_16h != 0 {
             // Set CF and OF if high word is non-zero
-            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
+            self.oszapc.assert_flags_oxxxxc(); // CF=1, OF=1
         }
 
         Ok(())
@@ -59,7 +59,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_flags_logic16(product_16l);
         if product_16h != 0 {
             // Set CF and OF if high word is non-zero
-            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
+            self.oszapc.assert_flags_oxxxxc(); // CF=1, OF=1
         }
 
         Ok(())
@@ -86,7 +86,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Matching C++: if(product_32 != (Bit16s)product_32)
         // This checks if the 32-bit value equals its sign-extended 16-bit version
         if product_32 != (product_32 as i16 as i32) {
-            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
+            self.oszapc.assert_flags_oxxxxc(); // CF=1, OF=1
         }
 
         Ok(())
@@ -114,7 +114,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Matching C++: if(product_32 != (Bit16s)product_32)
         // This checks if the 32-bit value equals its sign-extended 16-bit version
         if product_32 != (product_32 as i16 as i32) {
-            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
+            self.oszapc.assert_flags_oxxxxc(); // CF=1, OF=1
         }
 
         Ok(())
@@ -271,7 +271,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // then conditionally assert_flags_OxxxxC if product doesn't fit.
         self.update_flags_logic16(result_16 as u16);
         if product_32 != (result_16 as i32) {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -294,7 +294,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs mult16.cc IMUL_GwEwM: SET_FLAGS_OSZAPC_LOGIC_16 then conditional OF/CF.
         self.update_flags_logic16(result_16 as u16);
         if product_32 != (result_16 as i32) {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -317,7 +317,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs mult16.cc IMUL_GwEwIwR: SET_FLAGS_OSZAPC_LOGIC_16 then conditional OF/CF.
         self.update_flags_logic16(result_16 as u16);
         if product_32 != (result_16 as i32) {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -340,7 +340,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs mult16.cc IMUL_GwEwIwM: SET_FLAGS_OSZAPC_LOGIC_16 then conditional OF/CF.
         self.update_flags_logic16(result_16 as u16);
         if product_32 != (result_16 as i32) {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -362,7 +362,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs mult16.cc: SET_FLAGS_OSZAPC_LOGIC_16 then conditional OF/CF.
         self.update_flags_logic16(result_16 as u16);
         if product_32 != (result_16 as i32) {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
@@ -385,7 +385,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs mult16.cc: SET_FLAGS_OSZAPC_LOGIC_16 then conditional OF/CF.
         self.update_flags_logic16(result_16 as u16);
         if product_32 != (result_16 as i32) {
-            self.oszapc.set_flags_oxxxxc(1, 1);
+            self.oszapc.assert_flags_oxxxxc();
         }
 
         Ok(())
