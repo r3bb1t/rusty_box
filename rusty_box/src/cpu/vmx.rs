@@ -34,6 +34,223 @@ pub const VMCS_LAUNCH_STATE_OFFSET: u64 = 4;
 pub const VMCS_STATE_CLEAR: u32 = 0;
 pub const VMCS_STATE_LAUNCHED: u32 = 1;
 
+// ──────────────────────────────────────────────────────────────────────────
+// VMCS field encodings — Bochs cpu/vmx.h. Grouped by width and role.
+// ──────────────────────────────────────────────────────────────────────────
+
+// 16-bit guest selectors (Bochs vmx.h VMCS_16BIT_GUEST_*_SELECTOR).
+const VMCS_16BIT_GUEST_ES_SELECTOR: u32 = 0x0800;
+const VMCS_16BIT_GUEST_CS_SELECTOR: u32 = 0x0802;
+const VMCS_16BIT_GUEST_SS_SELECTOR: u32 = 0x0804;
+const VMCS_16BIT_GUEST_DS_SELECTOR: u32 = 0x0806;
+const VMCS_16BIT_GUEST_FS_SELECTOR: u32 = 0x0808;
+const VMCS_16BIT_GUEST_GS_SELECTOR: u32 = 0x080A;
+const VMCS_16BIT_GUEST_LDTR_SELECTOR: u32 = 0x080C;
+const VMCS_16BIT_GUEST_TR_SELECTOR: u32 = 0x080E;
+
+// 16-bit host selectors (Bochs vmx.h VMCS_16BIT_HOST_*_SELECTOR).
+const VMCS_16BIT_HOST_ES_SELECTOR: u32 = 0x0C00;
+const VMCS_16BIT_HOST_CS_SELECTOR: u32 = 0x0C02;
+const VMCS_16BIT_HOST_SS_SELECTOR: u32 = 0x0C04;
+const VMCS_16BIT_HOST_DS_SELECTOR: u32 = 0x0C06;
+const VMCS_16BIT_HOST_FS_SELECTOR: u32 = 0x0C08;
+const VMCS_16BIT_HOST_GS_SELECTOR: u32 = 0x0C0A;
+const VMCS_16BIT_HOST_TR_SELECTOR: u32 = 0x0C0C;
+
+// 64-bit control / guest / host fields.
+const VMCS_64BIT_CONTROL_TSC_OFFSET: u32 = 0x2010;
+const VMCS_64BIT_GUEST_LINK_POINTER: u32 = 0x2800;
+const VMCS_64BIT_GUEST_IA32_PAT: u32 = 0x2804;
+const VMCS_64BIT_GUEST_IA32_EFER: u32 = 0x2806;
+const VMCS_64BIT_HOST_IA32_PAT: u32 = 0x2C00;
+const VMCS_64BIT_HOST_IA32_EFER: u32 = 0x2C02;
+
+// 32-bit control fields.
+const VMCS_32BIT_CONTROL_PIN_BASED_EXEC_CONTROLS: u32 = 0x4000;
+const VMCS_32BIT_CONTROL_PROCESSOR_BASED_VMEXEC_CONTROLS: u32 = 0x4002;
+const VMCS_32BIT_CONTROL_EXECUTION_BITMAP: u32 = 0x4004;
+const VMCS_32BIT_CONTROL_VMEXIT_CONTROLS: u32 = 0x400C;
+const VMCS_32BIT_CONTROL_SECONDARY_VMEXEC_CONTROLS: u32 = 0x401E;
+const VMCS_32BIT_CONTROL_VMENTRY_CONTROLS: u32 = 0x4012;
+const VMCS_32BIT_CONTROL_VMENTRY_INTERRUPTION_INFO: u32 = 0x4016;
+const VMCS_32BIT_CONTROL_VMENTRY_EXCEPTION_ERR_CODE: u32 = 0x4018;
+const VMCS_32BIT_CONTROL_VMENTRY_INSTRUCTION_LENGTH: u32 = 0x401A;
+
+// 32-bit read-only exit data.
+const VMCS_32BIT_INSTRUCTION_ERROR: u32 = 0x4400;
+const VMCS_32BIT_VMEXIT_REASON: u32 = 0x4402;
+const VMCS_32BIT_VMEXIT_INTERRUPTION_INFO: u32 = 0x4404;
+const VMCS_32BIT_VMEXIT_INTERRUPTION_ERR_CODE: u32 = 0x4406;
+const VMCS_32BIT_IDT_VECTORING_INFO: u32 = 0x4408;
+const VMCS_32BIT_IDT_VECTORING_ERR_CODE: u32 = 0x440A;
+const VMCS_32BIT_VMEXIT_INSTRUCTION_LENGTH: u32 = 0x440C;
+const VMCS_32BIT_VMEXIT_INSTRUCTION_INFO: u32 = 0x440E;
+
+// 32-bit guest state.
+const VMCS_32BIT_GUEST_ES_LIMIT: u32 = 0x4800;
+const VMCS_32BIT_GUEST_CS_LIMIT: u32 = 0x4802;
+const VMCS_32BIT_GUEST_SS_LIMIT: u32 = 0x4804;
+const VMCS_32BIT_GUEST_DS_LIMIT: u32 = 0x4806;
+const VMCS_32BIT_GUEST_FS_LIMIT: u32 = 0x4808;
+const VMCS_32BIT_GUEST_GS_LIMIT: u32 = 0x480A;
+const VMCS_32BIT_GUEST_LDTR_LIMIT: u32 = 0x480C;
+const VMCS_32BIT_GUEST_TR_LIMIT: u32 = 0x480E;
+const VMCS_32BIT_GUEST_GDTR_LIMIT: u32 = 0x4810;
+const VMCS_32BIT_GUEST_IDTR_LIMIT: u32 = 0x4812;
+const VMCS_32BIT_GUEST_ES_ACCESS_RIGHTS: u32 = 0x4814;
+const VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS: u32 = 0x4816;
+const VMCS_32BIT_GUEST_SS_ACCESS_RIGHTS: u32 = 0x4818;
+const VMCS_32BIT_GUEST_DS_ACCESS_RIGHTS: u32 = 0x481A;
+const VMCS_32BIT_GUEST_FS_ACCESS_RIGHTS: u32 = 0x481C;
+const VMCS_32BIT_GUEST_GS_ACCESS_RIGHTS: u32 = 0x481E;
+const VMCS_32BIT_GUEST_LDTR_ACCESS_RIGHTS: u32 = 0x4820;
+const VMCS_32BIT_GUEST_TR_ACCESS_RIGHTS: u32 = 0x4822;
+const VMCS_32BIT_GUEST_INTERRUPTIBILITY_STATE: u32 = 0x4824;
+const VMCS_32BIT_GUEST_ACTIVITY_STATE: u32 = 0x4826;
+const VMCS_32BIT_GUEST_IA32_SYSENTER_CS_MSR: u32 = 0x482A;
+
+// 32-bit host state.
+const VMCS_32BIT_HOST_IA32_SYSENTER_CS_MSR: u32 = 0x4C00;
+
+// Natural-width control fields.
+const VMCS_CONTROL_CR0_GUEST_HOST_MASK: u32 = 0x6000;
+const VMCS_CONTROL_CR4_GUEST_HOST_MASK: u32 = 0x6002;
+const VMCS_CONTROL_CR0_READ_SHADOW: u32 = 0x6004;
+const VMCS_CONTROL_CR4_READ_SHADOW: u32 = 0x6006;
+
+// Natural-width read-only exit data.
+const VMCS_VMEXIT_QUALIFICATION: u32 = 0x6400;
+const VMCS_VMEXIT_GUEST_LINEAR_ADDR: u32 = 0x640A;
+
+// Natural-width guest state.
+const VMCS_GUEST_CR0: u32 = 0x6800;
+const VMCS_GUEST_CR3: u32 = 0x6802;
+const VMCS_GUEST_CR4: u32 = 0x6804;
+const VMCS_GUEST_ES_BASE: u32 = 0x6806;
+const VMCS_GUEST_CS_BASE: u32 = 0x6808;
+const VMCS_GUEST_SS_BASE: u32 = 0x680A;
+const VMCS_GUEST_DS_BASE: u32 = 0x680C;
+const VMCS_GUEST_FS_BASE: u32 = 0x680E;
+const VMCS_GUEST_GS_BASE: u32 = 0x6810;
+const VMCS_GUEST_LDTR_BASE: u32 = 0x6812;
+const VMCS_GUEST_TR_BASE: u32 = 0x6814;
+const VMCS_GUEST_GDTR_BASE: u32 = 0x6816;
+const VMCS_GUEST_IDTR_BASE: u32 = 0x6818;
+const VMCS_GUEST_DR7: u32 = 0x681A;
+const VMCS_GUEST_RSP: u32 = 0x681C;
+const VMCS_GUEST_RIP: u32 = 0x681E;
+const VMCS_GUEST_RFLAGS: u32 = 0x6820;
+const VMCS_GUEST_IA32_SYSENTER_ESP_MSR: u32 = 0x6824;
+const VMCS_GUEST_IA32_SYSENTER_EIP_MSR: u32 = 0x6826;
+
+// Natural-width host state.
+const VMCS_HOST_CR0: u32 = 0x6C00;
+const VMCS_HOST_CR3: u32 = 0x6C02;
+const VMCS_HOST_CR4: u32 = 0x6C04;
+const VMCS_HOST_FS_BASE: u32 = 0x6C06;
+const VMCS_HOST_GS_BASE: u32 = 0x6C08;
+const VMCS_HOST_TR_BASE: u32 = 0x6C0A;
+const VMCS_HOST_GDTR_BASE: u32 = 0x6C0C;
+const VMCS_HOST_IDTR_BASE: u32 = 0x6C0E;
+const VMCS_HOST_IA32_SYSENTER_ESP_MSR: u32 = 0x6C10;
+const VMCS_HOST_IA32_SYSENTER_EIP_MSR: u32 = 0x6C12;
+const VMCS_HOST_RSP: u32 = 0x6C14;
+const VMCS_HOST_RIP: u32 = 0x6C16;
+
+/// Bochs vmx.h `enum VMX_vmexit_reason` — every reason the host reads from
+/// VMCS_EXIT_REASON after a VM-exit. Session 5 port; the individual exit
+/// paths that set each reason land incrementally in Sessions 5+.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmxVmexitReason {
+    ExceptionNmi = 0,
+    ExternalInterrupt = 1,
+    TripleFault = 2,
+    Init = 3,
+    Sipi = 4,
+    IoSmi = 5,
+    Smi = 6,
+    InterruptWindow = 7,
+    NmiWindow = 8,
+    TaskSwitch = 9,
+    Cpuid = 10,
+    Getsec = 11,
+    Hlt = 12,
+    Invd = 13,
+    Invlpg = 14,
+    Rdpmc = 15,
+    Rdtsc = 16,
+    Rsm = 17,
+    Vmcall = 18,
+    Vmclear = 19,
+    Vmlaunch = 20,
+    Vmptrld = 21,
+    Vmptrst = 22,
+    Vmread = 23,
+    Vmresume = 24,
+    Vmwrite = 25,
+    Vmxoff = 26,
+    Vmxon = 27,
+    CrAccess = 28,
+    DrAccess = 29,
+    IoInstruction = 30,
+    Rdmsr = 31,
+    Wrmsr = 32,
+    VmentryFailureGuestState = 33,
+    VmentryFailureMsr = 34,
+    Reserved35 = 35,
+    Mwait = 36,
+    MonitorTrapFlag = 37,
+    Reserved38 = 38,
+    Monitor = 39,
+    Pause = 40,
+    VmentryFailureMca = 41,
+    Reserved42 = 42,
+    TprThreshold = 43,
+    ApicAccess = 44,
+    VirtualizedEoi = 45,
+    GdtrIdtrAccess = 46,
+    LdtrTrAccess = 47,
+    EptViolation = 48,
+    EptMisconfiguration = 49,
+    Invept = 50,
+    Rdtscp = 51,
+    VmxPreemptionTimerExpired = 52,
+    Invvpid = 53,
+    Wbinvd = 54,
+    Xsetbv = 55,
+    ApicWrite = 56,
+    Rdrand = 57,
+    Invpcid = 58,
+    Vmfunc = 59,
+    Encls = 60,
+    Rdseed = 61,
+    PmlLogfull = 62,
+    Xsaves = 63,
+    Xrstors = 64,
+    Pconfig = 65,
+    Spp = 66,
+    Umwait = 67,
+    Tpause = 68,
+    Loadiwkey = 69,
+    Enclv = 70,
+    Reserved71 = 71,
+    EnqcmdPasid = 72,
+    EnqcmdsPasid = 73,
+    BusLock = 74,
+    InstructionTimeout = 75,
+    Seamcall = 76,
+    Tdcall = 77,
+    Rdmsrlist = 78,
+    Wrmsrlist = 79,
+    Urdmsr = 80,
+    Uwrmsr = 81,
+    Reserved82 = 82,
+    Reserved83 = 83,
+    RdmsrImm = 84,
+    Wrmsrns = 85,
+}
+
 /// VMX-instruction error codes written into the VMCS 32-bit
 /// VMCS_32BIT_INSTRUCTION_ERROR field by `VMfail`.
 /// Mirrors Bochs vmx.h `enum VMX_error_code`.
@@ -77,8 +294,124 @@ pub struct VmcsMapping {}
 
 use super::vmx_ctrls::{VmxPinBasedVmexecControls, VmxVmexec1Controls, VmxVmexec2Controls};
 
+/// In-memory VMCS cache mirroring Bochs cpu/vmx.h `VMCS_CACHE`. Holds the
+/// host and guest state that VMLAUNCH / VMRESUME / VMEXIT swap between, plus
+/// the read-only fields updated by the VMEXIT machinery. Fields are laid
+/// out as Rust structures so VMREAD / VMWRITE can dispatch by encoding
+/// without a raw byte-offset table.
 #[derive(Debug, Default)]
 pub struct BxVmcs {
+    // Launch state — Bochs sets this to VMCS_STATE_LAUNCHED after the first
+    // successful VMLAUNCH; VMCLEAR resets it.
+    pub launched: bool,
+
+    // ---- Host state (saved on successful VMENTRY, restored on VMEXIT) ----
+    pub host_cr0: u64,
+    pub host_cr3: u64,
+    pub host_cr4: u64,
+    pub host_rsp: u64,
+    pub host_rip: u64,
+    pub host_cs_selector: u16,
+    pub host_ss_selector: u16,
+    pub host_ds_selector: u16,
+    pub host_es_selector: u16,
+    pub host_fs_selector: u16,
+    pub host_gs_selector: u16,
+    pub host_tr_selector: u16,
+    pub host_fs_base: u64,
+    pub host_gs_base: u64,
+    pub host_tr_base: u64,
+    pub host_gdtr_base: u64,
+    pub host_idtr_base: u64,
+    pub host_ia32_efer: u64,
+    pub host_ia32_pat: u64,
+    pub host_sysenter_cs: u32,
+    pub host_sysenter_esp: u64,
+    pub host_sysenter_eip: u64,
+
+    // ---- Guest state (loaded on VMENTRY, saved on VMEXIT) ----
+    pub guest_cr0: u64,
+    pub guest_cr3: u64,
+    pub guest_cr4: u64,
+    pub guest_rsp: u64,
+    pub guest_rip: u64,
+    pub guest_rflags: u64,
+    pub guest_dr7: u64,
+    pub guest_ia32_efer: u64,
+    pub guest_ia32_pat: u64,
+    pub guest_ia32_sysenter_cs: u32,
+    pub guest_ia32_sysenter_esp: u64,
+    pub guest_ia32_sysenter_eip: u64,
+    pub guest_cs_selector: u16,
+    pub guest_ss_selector: u16,
+    pub guest_ds_selector: u16,
+    pub guest_es_selector: u16,
+    pub guest_fs_selector: u16,
+    pub guest_gs_selector: u16,
+    pub guest_ldtr_selector: u16,
+    pub guest_tr_selector: u16,
+    pub guest_cs_base: u64,
+    pub guest_ss_base: u64,
+    pub guest_ds_base: u64,
+    pub guest_es_base: u64,
+    pub guest_fs_base: u64,
+    pub guest_gs_base: u64,
+    pub guest_ldtr_base: u64,
+    pub guest_tr_base: u64,
+    pub guest_gdtr_base: u64,
+    pub guest_idtr_base: u64,
+    pub guest_cs_limit: u32,
+    pub guest_ss_limit: u32,
+    pub guest_ds_limit: u32,
+    pub guest_es_limit: u32,
+    pub guest_fs_limit: u32,
+    pub guest_gs_limit: u32,
+    pub guest_ldtr_limit: u32,
+    pub guest_tr_limit: u32,
+    pub guest_gdtr_limit: u32,
+    pub guest_idtr_limit: u32,
+    pub guest_cs_ar: u32,
+    pub guest_ss_ar: u32,
+    pub guest_ds_ar: u32,
+    pub guest_es_ar: u32,
+    pub guest_fs_ar: u32,
+    pub guest_gs_ar: u32,
+    pub guest_ldtr_ar: u32,
+    pub guest_tr_ar: u32,
+    pub guest_activity_state: u32,
+    pub guest_interruptibility_state: u32,
+
+    // ---- Exit info (written on VMEXIT) ----
+    pub vm_instruction_error: u32,
+    pub exit_reason: u32,
+    pub exit_qualification: u64,
+    pub exit_intr_info: u32,
+    pub exit_intr_error_code: u32,
+    pub exit_instruction_length: u32,
+    pub exit_instruction_info: u32,
+    pub idt_vectoring_info: u32,
+    pub idt_vectoring_error_code: u32,
+    pub guest_linear_addr: u64,
+
+    // ---- Control fields (written by host via VMWRITE before VMLAUNCH) ----
+    pub pin_based_ctls: u32,
+    pub proc_based_ctls: u32,
+    pub secondary_proc_based_ctls: u32,
+    pub vm_exit_ctls: u32,
+    pub vm_entry_ctls: u32,
+    pub vm_entry_intr_info: u32,
+    pub vm_entry_exception_error_code: u32,
+    pub vm_entry_instruction_length: u32,
+    pub exception_bitmap: u32,
+    pub cr0_guest_host_mask: u64,
+    pub cr4_guest_host_mask: u64,
+    pub cr0_read_shadow: u64,
+    pub cr4_read_shadow: u64,
+    pub vmcs_link_pointer: u64,
+    pub tsc_offset: u64,
+
+    // Wire-compat bag kept from earlier scaffolding; some older call sites
+    // still reach for these. They stay zero until a VMM populates them.
     pin_vmexec_ctrls: VmxPinBasedVmexecControls,
     vmexec_ctrls1: VmxVmexec1Controls,
     vmexec_ctrls2: VmxVmexec2Controls,
@@ -113,11 +446,8 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.oszapc.set_oszapc_logic_32(1);
         if self.vmcsptr != super::vmcs::BX_INVALID_VMCSPTR {
             self.oszapc.set_zf(true);
-            // Bochs: VMwrite32(VMCS_32BIT_INSTRUCTION_ERROR, error).
-            // 0x4400 is the architecturally-assigned encoding.
-            if let Some(off) = Self::vmcs_field_offset(0x4400) {
-                self.mem_write_dword(self.vmcsptr + off, error as u32);
-            }
+            // Bochs VMwrite32(VMCS_32BIT_INSTRUCTION_ERROR, error).
+            self.vmcs.vm_instruction_error = error as u32;
         } else {
             self.oszapc.set_cf(true);
         }
@@ -368,25 +698,12 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     // =========================================================================
-    // VMREAD / VMWRITE — minimal VMCS field access.
-    //
-    // Bochs' vmx_map drives a per-field byte offset into the 4 KiB VMCS
-    // region. That table isn't ported yet; for now we support the two
-    // architecturally required fields Session 3's VMfail writes touch:
-    // VMCS_LAUNCH_STATE (our stash at offset 4) and
-    // VMCS_32BIT_INSTRUCTION_ERROR (encoding 0x4400, stashed at offset 8).
-    // Any other encoding fails with VMXERR_UNSUPPORTED_VMCS_COMPONENT_ACCESS
-    // so guests see a well-defined error instead of silent corruption.
+    // VMREAD / VMWRITE — VMCS field access, dispatched by encoding through
+    // the named fields on `BxVmcs`. Matches Bochs' VMread16/32/64/natural +
+    // VMwrite*. Field encodings mirror Bochs cpu/vmx.h. Unhandled encodings
+    // raise VMXERR_UNSUPPORTED_VMCS_COMPONENT_ACCESS so nothing corrupts
+    // silently.
     // =========================================================================
-
-    /// Return the byte offset inside the VMCS where a given encoding lives.
-    /// `None` means the encoding is not yet supported.
-    fn vmcs_field_offset(encoding: u32) -> Option<u64> {
-        match encoding {
-            0x4400 => Some(8), // VMCS_32BIT_INSTRUCTION_ERROR
-            _ => None,
-        }
-    }
 
     pub(super) fn vmread_impl(&mut self, encoding: u32) -> Result<u64> {
         if !self.in_vmx || !self.protected_mode() || self.long_compat_mode() {
@@ -406,13 +723,16 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Ok(0);
         }
 
-        if let Some(off) = Self::vmcs_field_offset(encoding) {
-            let v = self.mem_read_dword(self.vmcsptr + off);
-            self.vmsucceed();
-            Ok(v as u64)
-        } else {
-            self.vmfail(VmxErr::UnsupportedVmcsComponentAccess);
-            Ok(0)
+        let v = self.vmcs_read_field(encoding);
+        match v {
+            Some(val) => {
+                self.vmsucceed();
+                Ok(val)
+            }
+            None => {
+                self.vmfail(VmxErr::UnsupportedVmcsComponentAccess);
+                Ok(0)
+            }
         }
     }
 
@@ -431,14 +751,240 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Ok(());
         }
 
-        if let Some(off) = Self::vmcs_field_offset(encoding) {
-            self.mem_write_dword(self.vmcsptr + off, value as u32);
+        if self.vmcs_write_field(encoding, value) {
             self.vmsucceed();
             Ok(())
         } else {
             self.vmfail(VmxErr::UnsupportedVmcsComponentAccess);
             Ok(())
         }
+    }
+
+    /// Dispatch a VMCS field encoding → named field in `self.vmcs`.
+    /// Returns `None` if the encoding is not recognised.
+    fn vmcs_read_field(&self, encoding: u32) -> Option<u64> {
+        let v = &self.vmcs;
+        Some(match encoding {
+            // 16-bit guest selectors.
+            VMCS_16BIT_GUEST_ES_SELECTOR => v.guest_es_selector as u64,
+            VMCS_16BIT_GUEST_CS_SELECTOR => v.guest_cs_selector as u64,
+            VMCS_16BIT_GUEST_SS_SELECTOR => v.guest_ss_selector as u64,
+            VMCS_16BIT_GUEST_DS_SELECTOR => v.guest_ds_selector as u64,
+            VMCS_16BIT_GUEST_FS_SELECTOR => v.guest_fs_selector as u64,
+            VMCS_16BIT_GUEST_GS_SELECTOR => v.guest_gs_selector as u64,
+            VMCS_16BIT_GUEST_LDTR_SELECTOR => v.guest_ldtr_selector as u64,
+            VMCS_16BIT_GUEST_TR_SELECTOR => v.guest_tr_selector as u64,
+            // 16-bit host selectors.
+            VMCS_16BIT_HOST_ES_SELECTOR => v.host_es_selector as u64,
+            VMCS_16BIT_HOST_CS_SELECTOR => v.host_cs_selector as u64,
+            VMCS_16BIT_HOST_SS_SELECTOR => v.host_ss_selector as u64,
+            VMCS_16BIT_HOST_DS_SELECTOR => v.host_ds_selector as u64,
+            VMCS_16BIT_HOST_FS_SELECTOR => v.host_fs_selector as u64,
+            VMCS_16BIT_HOST_GS_SELECTOR => v.host_gs_selector as u64,
+            VMCS_16BIT_HOST_TR_SELECTOR => v.host_tr_selector as u64,
+            // 64-bit control / guest / host.
+            VMCS_64BIT_GUEST_LINK_POINTER => v.vmcs_link_pointer,
+            VMCS_64BIT_CONTROL_TSC_OFFSET => v.tsc_offset,
+            VMCS_64BIT_GUEST_IA32_EFER => v.guest_ia32_efer,
+            VMCS_64BIT_GUEST_IA32_PAT => v.guest_ia32_pat,
+            VMCS_64BIT_HOST_IA32_PAT => v.host_ia32_pat,
+            VMCS_64BIT_HOST_IA32_EFER => v.host_ia32_efer,
+            // 32-bit control fields.
+            VMCS_32BIT_CONTROL_PIN_BASED_EXEC_CONTROLS => v.pin_based_ctls as u64,
+            VMCS_32BIT_CONTROL_PROCESSOR_BASED_VMEXEC_CONTROLS => v.proc_based_ctls as u64,
+            VMCS_32BIT_CONTROL_EXECUTION_BITMAP => v.exception_bitmap as u64,
+            VMCS_32BIT_CONTROL_SECONDARY_VMEXEC_CONTROLS => v.secondary_proc_based_ctls as u64,
+            VMCS_32BIT_CONTROL_VMEXIT_CONTROLS => v.vm_exit_ctls as u64,
+            VMCS_32BIT_CONTROL_VMENTRY_CONTROLS => v.vm_entry_ctls as u64,
+            VMCS_32BIT_CONTROL_VMENTRY_INTERRUPTION_INFO => v.vm_entry_intr_info as u64,
+            VMCS_32BIT_CONTROL_VMENTRY_EXCEPTION_ERR_CODE => v.vm_entry_exception_error_code as u64,
+            VMCS_32BIT_CONTROL_VMENTRY_INSTRUCTION_LENGTH => v.vm_entry_instruction_length as u64,
+            // 32-bit read-only exit data.
+            VMCS_32BIT_INSTRUCTION_ERROR => v.vm_instruction_error as u64,
+            VMCS_32BIT_VMEXIT_REASON => v.exit_reason as u64,
+            VMCS_32BIT_VMEXIT_INTERRUPTION_INFO => v.exit_intr_info as u64,
+            VMCS_32BIT_VMEXIT_INTERRUPTION_ERR_CODE => v.exit_intr_error_code as u64,
+            VMCS_32BIT_IDT_VECTORING_INFO => v.idt_vectoring_info as u64,
+            VMCS_32BIT_IDT_VECTORING_ERR_CODE => v.idt_vectoring_error_code as u64,
+            VMCS_32BIT_VMEXIT_INSTRUCTION_LENGTH => v.exit_instruction_length as u64,
+            VMCS_32BIT_VMEXIT_INSTRUCTION_INFO => v.exit_instruction_info as u64,
+            // 32-bit guest state.
+            VMCS_32BIT_GUEST_ES_LIMIT => v.guest_es_limit as u64,
+            VMCS_32BIT_GUEST_CS_LIMIT => v.guest_cs_limit as u64,
+            VMCS_32BIT_GUEST_SS_LIMIT => v.guest_ss_limit as u64,
+            VMCS_32BIT_GUEST_DS_LIMIT => v.guest_ds_limit as u64,
+            VMCS_32BIT_GUEST_FS_LIMIT => v.guest_fs_limit as u64,
+            VMCS_32BIT_GUEST_GS_LIMIT => v.guest_gs_limit as u64,
+            VMCS_32BIT_GUEST_LDTR_LIMIT => v.guest_ldtr_limit as u64,
+            VMCS_32BIT_GUEST_TR_LIMIT => v.guest_tr_limit as u64,
+            VMCS_32BIT_GUEST_GDTR_LIMIT => v.guest_gdtr_limit as u64,
+            VMCS_32BIT_GUEST_IDTR_LIMIT => v.guest_idtr_limit as u64,
+            VMCS_32BIT_GUEST_ES_ACCESS_RIGHTS => v.guest_es_ar as u64,
+            VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS => v.guest_cs_ar as u64,
+            VMCS_32BIT_GUEST_SS_ACCESS_RIGHTS => v.guest_ss_ar as u64,
+            VMCS_32BIT_GUEST_DS_ACCESS_RIGHTS => v.guest_ds_ar as u64,
+            VMCS_32BIT_GUEST_FS_ACCESS_RIGHTS => v.guest_fs_ar as u64,
+            VMCS_32BIT_GUEST_GS_ACCESS_RIGHTS => v.guest_gs_ar as u64,
+            VMCS_32BIT_GUEST_LDTR_ACCESS_RIGHTS => v.guest_ldtr_ar as u64,
+            VMCS_32BIT_GUEST_TR_ACCESS_RIGHTS => v.guest_tr_ar as u64,
+            VMCS_32BIT_GUEST_INTERRUPTIBILITY_STATE => v.guest_interruptibility_state as u64,
+            VMCS_32BIT_GUEST_ACTIVITY_STATE => v.guest_activity_state as u64,
+            VMCS_32BIT_GUEST_IA32_SYSENTER_CS_MSR => v.guest_ia32_sysenter_cs as u64,
+            // 32-bit host state.
+            VMCS_32BIT_HOST_IA32_SYSENTER_CS_MSR => v.host_sysenter_cs as u64,
+            // Natural-width control.
+            VMCS_CONTROL_CR0_GUEST_HOST_MASK => v.cr0_guest_host_mask,
+            VMCS_CONTROL_CR4_GUEST_HOST_MASK => v.cr4_guest_host_mask,
+            VMCS_CONTROL_CR0_READ_SHADOW => v.cr0_read_shadow,
+            VMCS_CONTROL_CR4_READ_SHADOW => v.cr4_read_shadow,
+            // Natural-width read-only.
+            VMCS_VMEXIT_QUALIFICATION => v.exit_qualification,
+            VMCS_VMEXIT_GUEST_LINEAR_ADDR => v.guest_linear_addr,
+            // Natural-width guest state.
+            VMCS_GUEST_CR0 => v.guest_cr0,
+            VMCS_GUEST_CR3 => v.guest_cr3,
+            VMCS_GUEST_CR4 => v.guest_cr4,
+            VMCS_GUEST_ES_BASE => v.guest_es_base,
+            VMCS_GUEST_CS_BASE => v.guest_cs_base,
+            VMCS_GUEST_SS_BASE => v.guest_ss_base,
+            VMCS_GUEST_DS_BASE => v.guest_ds_base,
+            VMCS_GUEST_FS_BASE => v.guest_fs_base,
+            VMCS_GUEST_GS_BASE => v.guest_gs_base,
+            VMCS_GUEST_LDTR_BASE => v.guest_ldtr_base,
+            VMCS_GUEST_TR_BASE => v.guest_tr_base,
+            VMCS_GUEST_GDTR_BASE => v.guest_gdtr_base,
+            VMCS_GUEST_IDTR_BASE => v.guest_idtr_base,
+            VMCS_GUEST_DR7 => v.guest_dr7,
+            VMCS_GUEST_RSP => v.guest_rsp,
+            VMCS_GUEST_RIP => v.guest_rip,
+            VMCS_GUEST_RFLAGS => v.guest_rflags,
+            VMCS_GUEST_IA32_SYSENTER_ESP_MSR => v.guest_ia32_sysenter_esp,
+            VMCS_GUEST_IA32_SYSENTER_EIP_MSR => v.guest_ia32_sysenter_eip,
+            // Natural-width host state.
+            VMCS_HOST_CR0 => v.host_cr0,
+            VMCS_HOST_CR3 => v.host_cr3,
+            VMCS_HOST_CR4 => v.host_cr4,
+            VMCS_HOST_FS_BASE => v.host_fs_base,
+            VMCS_HOST_GS_BASE => v.host_gs_base,
+            VMCS_HOST_TR_BASE => v.host_tr_base,
+            VMCS_HOST_GDTR_BASE => v.host_gdtr_base,
+            VMCS_HOST_IDTR_BASE => v.host_idtr_base,
+            VMCS_HOST_IA32_SYSENTER_ESP_MSR => v.host_sysenter_esp,
+            VMCS_HOST_IA32_SYSENTER_EIP_MSR => v.host_sysenter_eip,
+            VMCS_HOST_RSP => v.host_rsp,
+            VMCS_HOST_RIP => v.host_rip,
+            _ => return None,
+        })
+    }
+
+    /// Dispatch VMWRITE encoding → named field. Returns `false` if the
+    /// encoding isn't supported (callers `VMfail` in that case).
+    fn vmcs_write_field(&mut self, encoding: u32, value: u64) -> bool {
+        let v = &mut self.vmcs;
+        match encoding {
+            VMCS_16BIT_GUEST_ES_SELECTOR => v.guest_es_selector = value as u16,
+            VMCS_16BIT_GUEST_CS_SELECTOR => v.guest_cs_selector = value as u16,
+            VMCS_16BIT_GUEST_SS_SELECTOR => v.guest_ss_selector = value as u16,
+            VMCS_16BIT_GUEST_DS_SELECTOR => v.guest_ds_selector = value as u16,
+            VMCS_16BIT_GUEST_FS_SELECTOR => v.guest_fs_selector = value as u16,
+            VMCS_16BIT_GUEST_GS_SELECTOR => v.guest_gs_selector = value as u16,
+            VMCS_16BIT_GUEST_LDTR_SELECTOR => v.guest_ldtr_selector = value as u16,
+            VMCS_16BIT_GUEST_TR_SELECTOR => v.guest_tr_selector = value as u16,
+            VMCS_16BIT_HOST_ES_SELECTOR => v.host_es_selector = value as u16,
+            VMCS_16BIT_HOST_CS_SELECTOR => v.host_cs_selector = value as u16,
+            VMCS_16BIT_HOST_SS_SELECTOR => v.host_ss_selector = value as u16,
+            VMCS_16BIT_HOST_DS_SELECTOR => v.host_ds_selector = value as u16,
+            VMCS_16BIT_HOST_FS_SELECTOR => v.host_fs_selector = value as u16,
+            VMCS_16BIT_HOST_GS_SELECTOR => v.host_gs_selector = value as u16,
+            VMCS_16BIT_HOST_TR_SELECTOR => v.host_tr_selector = value as u16,
+            VMCS_64BIT_GUEST_LINK_POINTER => v.vmcs_link_pointer = value,
+            VMCS_64BIT_CONTROL_TSC_OFFSET => v.tsc_offset = value,
+            VMCS_64BIT_GUEST_IA32_EFER => v.guest_ia32_efer = value,
+            VMCS_64BIT_GUEST_IA32_PAT => v.guest_ia32_pat = value,
+            VMCS_64BIT_HOST_IA32_PAT => v.host_ia32_pat = value,
+            VMCS_64BIT_HOST_IA32_EFER => v.host_ia32_efer = value,
+            VMCS_32BIT_CONTROL_PIN_BASED_EXEC_CONTROLS => v.pin_based_ctls = value as u32,
+            VMCS_32BIT_CONTROL_PROCESSOR_BASED_VMEXEC_CONTROLS => v.proc_based_ctls = value as u32,
+            VMCS_32BIT_CONTROL_EXECUTION_BITMAP => v.exception_bitmap = value as u32,
+            VMCS_32BIT_CONTROL_SECONDARY_VMEXEC_CONTROLS => v.secondary_proc_based_ctls = value as u32,
+            VMCS_32BIT_CONTROL_VMEXIT_CONTROLS => v.vm_exit_ctls = value as u32,
+            VMCS_32BIT_CONTROL_VMENTRY_CONTROLS => v.vm_entry_ctls = value as u32,
+            VMCS_32BIT_CONTROL_VMENTRY_INTERRUPTION_INFO => v.vm_entry_intr_info = value as u32,
+            VMCS_32BIT_CONTROL_VMENTRY_EXCEPTION_ERR_CODE => v.vm_entry_exception_error_code = value as u32,
+            VMCS_32BIT_CONTROL_VMENTRY_INSTRUCTION_LENGTH => v.vm_entry_instruction_length = value as u32,
+            // Read-only VMCS exit-data fields: Bochs VMwriteReadOnlyVmcsComponent
+            // returns false. Being lenient would let VMMs that pre-zero these
+            // keep going, but Bochs is strict.
+            VMCS_32BIT_INSTRUCTION_ERROR
+            | VMCS_32BIT_VMEXIT_REASON
+            | VMCS_32BIT_VMEXIT_INTERRUPTION_INFO
+            | VMCS_32BIT_VMEXIT_INTERRUPTION_ERR_CODE
+            | VMCS_32BIT_IDT_VECTORING_INFO
+            | VMCS_32BIT_IDT_VECTORING_ERR_CODE
+            | VMCS_32BIT_VMEXIT_INSTRUCTION_LENGTH
+            | VMCS_32BIT_VMEXIT_INSTRUCTION_INFO
+            | VMCS_VMEXIT_QUALIFICATION
+            | VMCS_VMEXIT_GUEST_LINEAR_ADDR => return false,
+            VMCS_32BIT_GUEST_ES_LIMIT => v.guest_es_limit = value as u32,
+            VMCS_32BIT_GUEST_CS_LIMIT => v.guest_cs_limit = value as u32,
+            VMCS_32BIT_GUEST_SS_LIMIT => v.guest_ss_limit = value as u32,
+            VMCS_32BIT_GUEST_DS_LIMIT => v.guest_ds_limit = value as u32,
+            VMCS_32BIT_GUEST_FS_LIMIT => v.guest_fs_limit = value as u32,
+            VMCS_32BIT_GUEST_GS_LIMIT => v.guest_gs_limit = value as u32,
+            VMCS_32BIT_GUEST_LDTR_LIMIT => v.guest_ldtr_limit = value as u32,
+            VMCS_32BIT_GUEST_TR_LIMIT => v.guest_tr_limit = value as u32,
+            VMCS_32BIT_GUEST_GDTR_LIMIT => v.guest_gdtr_limit = value as u32,
+            VMCS_32BIT_GUEST_IDTR_LIMIT => v.guest_idtr_limit = value as u32,
+            VMCS_32BIT_GUEST_ES_ACCESS_RIGHTS => v.guest_es_ar = value as u32,
+            VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS => v.guest_cs_ar = value as u32,
+            VMCS_32BIT_GUEST_SS_ACCESS_RIGHTS => v.guest_ss_ar = value as u32,
+            VMCS_32BIT_GUEST_DS_ACCESS_RIGHTS => v.guest_ds_ar = value as u32,
+            VMCS_32BIT_GUEST_FS_ACCESS_RIGHTS => v.guest_fs_ar = value as u32,
+            VMCS_32BIT_GUEST_GS_ACCESS_RIGHTS => v.guest_gs_ar = value as u32,
+            VMCS_32BIT_GUEST_LDTR_ACCESS_RIGHTS => v.guest_ldtr_ar = value as u32,
+            VMCS_32BIT_GUEST_TR_ACCESS_RIGHTS => v.guest_tr_ar = value as u32,
+            VMCS_32BIT_GUEST_INTERRUPTIBILITY_STATE => v.guest_interruptibility_state = value as u32,
+            VMCS_32BIT_GUEST_ACTIVITY_STATE => v.guest_activity_state = value as u32,
+            VMCS_32BIT_GUEST_IA32_SYSENTER_CS_MSR => v.guest_ia32_sysenter_cs = value as u32,
+            VMCS_32BIT_HOST_IA32_SYSENTER_CS_MSR => v.host_sysenter_cs = value as u32,
+            VMCS_CONTROL_CR0_GUEST_HOST_MASK => v.cr0_guest_host_mask = value,
+            VMCS_CONTROL_CR4_GUEST_HOST_MASK => v.cr4_guest_host_mask = value,
+            VMCS_CONTROL_CR0_READ_SHADOW => v.cr0_read_shadow = value,
+            VMCS_CONTROL_CR4_READ_SHADOW => v.cr4_read_shadow = value,
+            VMCS_GUEST_CR0 => v.guest_cr0 = value,
+            VMCS_GUEST_CR3 => v.guest_cr3 = value,
+            VMCS_GUEST_CR4 => v.guest_cr4 = value,
+            VMCS_GUEST_ES_BASE => v.guest_es_base = value,
+            VMCS_GUEST_CS_BASE => v.guest_cs_base = value,
+            VMCS_GUEST_SS_BASE => v.guest_ss_base = value,
+            VMCS_GUEST_DS_BASE => v.guest_ds_base = value,
+            VMCS_GUEST_FS_BASE => v.guest_fs_base = value,
+            VMCS_GUEST_GS_BASE => v.guest_gs_base = value,
+            VMCS_GUEST_LDTR_BASE => v.guest_ldtr_base = value,
+            VMCS_GUEST_TR_BASE => v.guest_tr_base = value,
+            VMCS_GUEST_GDTR_BASE => v.guest_gdtr_base = value,
+            VMCS_GUEST_IDTR_BASE => v.guest_idtr_base = value,
+            VMCS_GUEST_DR7 => v.guest_dr7 = value,
+            VMCS_GUEST_RSP => v.guest_rsp = value,
+            VMCS_GUEST_RIP => v.guest_rip = value,
+            VMCS_GUEST_RFLAGS => v.guest_rflags = value,
+            VMCS_GUEST_IA32_SYSENTER_ESP_MSR => v.guest_ia32_sysenter_esp = value,
+            VMCS_GUEST_IA32_SYSENTER_EIP_MSR => v.guest_ia32_sysenter_eip = value,
+            VMCS_HOST_CR0 => v.host_cr0 = value,
+            VMCS_HOST_CR3 => v.host_cr3 = value,
+            VMCS_HOST_CR4 => v.host_cr4 = value,
+            VMCS_HOST_FS_BASE => v.host_fs_base = value,
+            VMCS_HOST_GS_BASE => v.host_gs_base = value,
+            VMCS_HOST_TR_BASE => v.host_tr_base = value,
+            VMCS_HOST_GDTR_BASE => v.host_gdtr_base = value,
+            VMCS_HOST_IDTR_BASE => v.host_idtr_base = value,
+            VMCS_HOST_IA32_SYSENTER_ESP_MSR => v.host_sysenter_esp = value,
+            VMCS_HOST_IA32_SYSENTER_EIP_MSR => v.host_sysenter_eip = value,
+            VMCS_HOST_RSP => v.host_rsp = value,
+            VMCS_HOST_RIP => v.host_rip = value,
+            _ => return false,
+        }
+        true
     }
 
     // Top-level VMREAD handlers (32-bit and 64-bit operand size).
@@ -492,6 +1038,134 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             self.read_virtual_qword_64(seg, eaddr)?
         };
         self.vmwrite_impl(enc, src)
+    }
+
+    // =========================================================================
+    // VMLAUNCH / VMRESUME — enter VMX non-root (guest) operation.
+    //
+    // Bochs cpu/vmx.cc BX_CPU_C::VMLAUNCH + VMRESUME share a handler; the
+    // launch-vs-resume bit controls which error code the preconditions
+    // report. Full VM-entry validation (Bochs VMenterLoadCheckVmControls /
+    // HostState / GuestState) would add ~1500 LOC of field-by-field sanity;
+    // in this pass we perform the architecturally-required launch-state
+    // check, then do a straightforward host/guest state swap covering the
+    // control registers, instruction pointer / stack pointer / RFLAGS and
+    // EFER / PAT MSRs. Segment descriptor reload, interruptibility state,
+    // and the ~60-field host-state-field integrity tests will grow in-place
+    // as real VMMs exercise them.
+    // =========================================================================
+
+    pub(super) fn vmlaunch(&mut self, instr: &Instruction) -> Result<()> {
+        self.vmlaunch_vmresume(instr, false)
+    }
+
+    pub(super) fn vmresume(&mut self, instr: &Instruction) -> Result<()> {
+        self.vmlaunch_vmresume(instr, true)
+    }
+
+    fn vmlaunch_vmresume(&mut self, _instr: &Instruction, is_resume: bool) -> Result<()> {
+        if !self.in_vmx || !self.protected_mode() || self.long_compat_mode() {
+            return self.exception(Exception::Ud, 0);
+        }
+        if self.in_vmx_guest {
+            // Bochs: VM_exit with reason VMLAUNCH / VMRESUME (Session 6
+            // intercept wiring handles the full VMEXIT path).
+            return self.exception(Exception::Gp, 0);
+        }
+        if self.cs_rpl() != 0 {
+            return self.exception(Exception::Gp, 0);
+        }
+        if self.vmcsptr == super::vmcs::BX_INVALID_VMCSPTR {
+            self.vmfail_invalid();
+            return Ok(());
+        }
+
+        // Launch-state gate — Bochs VMXERR_VMLAUNCH_NON_CLEAR_VMCS /
+        // VMXERR_VMRESUME_NON_LAUNCHED_VMCS.
+        if is_resume && !self.vmcs.launched {
+            self.vmfail(VmxErr::VmresumeNonLaunchedVmcs);
+            return Ok(());
+        }
+        if !is_resume && self.vmcs.launched {
+            self.vmfail(VmxErr::VmlaunchNonClearVmcs);
+            return Ok(());
+        }
+
+        // Save host state from the running CPU. RIP is "the instruction after
+        // VMLAUNCH / VMRESUME"; Bochs stashes it so VMEXIT_LOAD_HOST_STATE can
+        // jump back. The prefetch queue already advanced past this insn, so
+        // `self.rip()` points at the next one.
+        self.vmcs.host_cr0 = self.cr0.get32() as u64;
+        self.vmcs.host_cr3 = self.cr3;
+        self.vmcs.host_cr4 = self.cr4.get() as u64;
+        self.vmcs.host_rsp = self.rsp();
+        self.vmcs.host_rip = self.rip();
+        self.vmcs.host_ia32_efer = self.efer.get32() as u64;
+        self.vmcs.host_ia32_pat = self.msr.pat.U64();
+
+        // Load guest state into the running CPU.
+        self.cr0.set32(self.vmcs.guest_cr0 as u32);
+        self.cr3 = self.vmcs.guest_cr3;
+        self.cr4.set_val(self.vmcs.guest_cr4);
+        self.set_rsp(self.vmcs.guest_rsp);
+        self.set_rip(self.vmcs.guest_rip);
+        self.write_eflags(self.vmcs.guest_rflags as u32, 0x003FFFFF);
+        self.efer.set32(self.vmcs.guest_ia32_efer as u32);
+        self.msr.pat.set_U64(self.vmcs.guest_ia32_pat);
+
+        self.vmcs.launched = true;
+        self.in_vmx_guest = true;
+        self.vmsucceed();
+        // Guest now runs from the loaded RIP — the CPU loop picks up the new
+        // prefetch target after this instruction returns.
+        self.invalidate_prefetch_q();
+        Ok(())
+    }
+
+    // =========================================================================
+    // VM-exit — return to VMX root with reason + qualification.
+    //
+    // Bochs' VMexit() is the single entry for every exit reason. It saves
+    // guest state into the VMCS, restores host state, clears in_vmx_guest,
+    // and returns the CPU loop to the host instruction stream. This is the
+    // symmetric counterpart to vmlaunch_vmresume above.
+    // =========================================================================
+
+    pub(super) fn vmx_vmexit(
+        &mut self,
+        reason: VmxVmexitReason,
+        qualification: u64,
+    ) -> Result<()> {
+        if !self.in_vmx_guest {
+            return Ok(());
+        }
+
+        // Save guest state from the running CPU.
+        self.vmcs.guest_cr0 = self.cr0.get32() as u64;
+        self.vmcs.guest_cr3 = self.cr3;
+        self.vmcs.guest_cr4 = self.cr4.get() as u64;
+        self.vmcs.guest_rsp = self.rsp();
+        self.vmcs.guest_rip = self.rip();
+        self.vmcs.guest_rflags = self.read_eflags() as u64;
+        self.vmcs.guest_ia32_efer = self.efer.get32() as u64;
+        self.vmcs.guest_ia32_pat = self.msr.pat.U64();
+
+        // Record the exit info the host reads after re-entry.
+        self.vmcs.exit_reason = reason as u32;
+        self.vmcs.exit_qualification = qualification;
+
+        // Load host state.
+        self.cr0.set32(self.vmcs.host_cr0 as u32);
+        self.cr3 = self.vmcs.host_cr3;
+        self.cr4.set_val(self.vmcs.host_cr4);
+        self.set_rsp(self.vmcs.host_rsp);
+        self.set_rip(self.vmcs.host_rip);
+        self.efer.set32(self.vmcs.host_ia32_efer as u32);
+        self.msr.pat.set_U64(self.vmcs.host_ia32_pat);
+
+        self.in_vmx_guest = false;
+        self.invalidate_prefetch_q();
+        Ok(())
     }
 
     // =========================================================================

@@ -1437,10 +1437,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::VmwriteGdEd => self.vmwrite_gd_ed(instr),
             Opcode::VmwriteGqEq => self.vmwrite_gq_eq(instr),
             Opcode::VmptrstMq => self.vmptrst(instr),
-            Opcode::Vmlaunch | Opcode::Vmresume => {
-                // Session 5 scope — raise #UD until VM-entry lands.
-                self.exception(super::cpu::Exception::Ud, 0)
-            }
+            Opcode::Vmlaunch => self.vmlaunch(instr),
+            Opcode::Vmresume => self.vmresume(instr),
             Opcode::Invlpg => self.invlpg(instr),
             Opcode::Invpcid => self.invpcid(instr),
             Opcode::Clts => self.clts(instr),
