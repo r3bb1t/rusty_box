@@ -845,11 +845,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.test_eax_id(instr);
                 Ok(())
             }
-            Opcode::TestEwIw => {
+            Opcode::TestEwIw | Opcode::TestEwsIb => {
+                // TestEwsIb: Bochs ia_opcodes.def:201 — sign-extended imm8 aliases
+                // into the same TEST_EwIwR/TEST_EwIwM handlers. Decoder front-end
+                // widens the imm8 to imm16 before populating the Instruction.
                 self.test_ew_iw(instr)?;
                 Ok(())
             }
-            Opcode::TestEdId => {
+            Opcode::TestEdId | Opcode::TestEdsIb => {
+                // TestEdsIb: Bochs ia_opcodes.def:221 — sign-extended imm8 aliases
+                // into the same TEST_EdIdR/TEST_EdIdM handlers.
                 self.test_ed_id(instr)?;
                 Ok(())
             }
@@ -1157,6 +1162,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::IntIb => self.int_ib(instr),
             Opcode::INT3 => self.int3(instr),
             Opcode::INT1 => self.int1(instr),
+            // INTO: Bochs ia_opcodes.def:354 BX_IA_INTO → BX_CPU_C::INTO.
+            // Decoder emits Opcode::Int0 for 0xCE (fetchdecode_opmap.h:1138).
+            Opcode::Int0 => self.into(instr),
             Opcode::IretOp16 => {
                 self.iret16(instr)?;
                 Ok(())
@@ -1456,9 +1464,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::Xrstors => self.xrstor_unified(instr, true),
             Opcode::Monitor | Opcode::Monitorx => self.monitor(instr),
             Opcode::Mwait | Opcode::Mwaitx => self.mwait(instr),
+            // WAITPKG: user-mode MONITOR / MWAIT / timed-PAUSE.
+            // Bochs mwait.cc:244-377. UmonitorEq=64-bit addr, UmonitorEd=32-bit addr;
+            // Bochs routes both through UMONITOR_Eq.
+            Opcode::UmonitorEq | Opcode::UmonitorEd => self.umonitor(instr),
+            Opcode::UmwaitEd => self.umwait(instr),
+            Opcode::TpauseEd => self.tpause(instr),
             Opcode::Clac => self.clac(instr),
             Opcode::Stac => self.stac(instr),
             Opcode::Clflush | Opcode::Clflushopt | Opcode::Clwb => self.clflush(instr),
+            Opcode::Clzero => self.clzero(instr),
             Opcode::Rdtscp => self.rdtscp(instr),
             Opcode::Swapgs => self.swapgs(instr),
 

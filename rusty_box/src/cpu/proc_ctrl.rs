@@ -445,6 +445,153 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // =========================================================================
+    // UMONITOR — User-mode Monitor setup (WAITPKG, opcode F3 0F AE /6)
+    // Bochs: mwait.cc:244-284 BX_CPU_C::UMONITOR_Eq
+    // =========================================================================
+
+    pub(super) fn umonitor(
+        &mut self,
+        instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
+        // Bochs relies on per-CPU decoder tables to suppress WAITPKG opcodes
+        // when the CPU doesn't support them. Enforce the CPUID gate at exec.
+        if !self.bx_cpuid_support_isa_extension(
+            crate::cpu::decoder::X86Feature::IsaWaitpkg,
+        ) {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        // Bochs mwait.cc:248-255: VMX intercept. If guest without UMWAIT_TPAUSE_VMEXIT
+        // control bit → #UD. (Intercept plumbing ships in Session 6; #UD-only for now.)
+        if self.in_vmx_guest {
+            tracing::trace!("UMONITOR: VMX guest without UMWAIT_TPAUSE_VMEXIT control, #UD");
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        // Bochs mwait.cc:257-261: bx_address eaddr = BX_READ_*_REG(i->dst()) & i->asize_mask();
+        const ASIZE_MASK: [u64; 4] = [
+            0xFFFF,
+            0xFFFF_FFFF,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0xFFFF_FFFF_FFFF_FFFF,
+        ];
+        let asize = (instr.as32_l() != 0) as usize | (((instr.as64_l() != 0) as usize) << 1);
+        let reg_idx = instr.dst() as usize;
+        let raw = if self.long64_mode() {
+            self.get_gpr64(reg_idx)
+        } else {
+            self.get_gpr32(reg_idx) as u64
+        };
+        let eaddr = raw & ASIZE_MASK[asize];
+
+        // Bochs mwait.cc:263-264: UMONITOR performs the same segmentation and
+        // paging checks as a 1-byte read (tickle_read_virtual).
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let laddr: u64 = if self.long64_mode() {
+            eaddr
+        } else {
+            self.get_segment_base(seg).wrapping_add(eaddr)
+        };
+        let paddr = self.translate_data_read(laddr)?;
+
+        // Bochs mwait.cc:267-272: skip arm for non-WB memory types.
+        // We don't track MTRR memory types per-page, so always arm. Warn only on
+        // MMIO-like addresses (no host mapping) to match MONITOR's behavior.
+        if self.get_host_write_ptr(laddr).is_none() {
+            tracing::warn!(
+                "UMONITOR: laddr={:#x} paddr={:#x} has no host mapping (MMIO?), UMWAIT may never wake",
+                laddr, paddr
+            );
+        }
+
+        // Bochs mwait.cc:276-278: bx_pc_system.invlpg(paddr); monitor.arm(paddr, UMONITOR).
+        self.monitor
+            .arm(paddr, super::cpu::BX_MONITOR_ARMED_BY_UMONITOR);
+        tracing::trace!(
+            "UMONITOR: armed for phys_addr={:#x}",
+            self.monitor.monitor_addr
+        );
+        Ok(())
+    }
+
+    // =========================================================================
+    // UMWAIT — User-mode Monitor Wait (WAITPKG, opcode F2 0F AE /6)
+    // TPAUSE — Timed PAUSE (WAITPKG, opcode 66 0F AE /6)
+    // Bochs: mwait.cc:286-377 BX_CPU_C::UMWAIT_Ed / TPAUSE_Ed (shared handler)
+    // =========================================================================
+
+    pub(super) fn umwait(
+        &mut self,
+        instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
+        self.umwait_tpause_impl(instr, /*is_tpause=*/ false)
+    }
+
+    pub(super) fn tpause(
+        &mut self,
+        instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
+        self.umwait_tpause_impl(instr, /*is_tpause=*/ true)
+    }
+
+    fn umwait_tpause_impl(
+        &mut self,
+        instr: &super::decoder::Instruction,
+        is_tpause: bool,
+    ) -> crate::cpu::Result<()> {
+        // CPUID gate (see umonitor comment).
+        if !self.bx_cpuid_support_isa_extension(
+            crate::cpu::decoder::X86Feature::IsaWaitpkg,
+        ) {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        // Bochs mwait.cc:291-298: VMX intercept check (UMWAIT_TPAUSE_VMEXIT).
+        // Full intercept plumbing ships in Session 6.
+        if self.in_vmx_guest {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        // Bochs mwait.cc:300-303: CR4.TSD && CPL != 0 → #GP(0).
+        if self.cr4.tsd() {
+            let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+                .selector
+                .rpl;
+            if cpl != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+
+        // Bochs mwait.cc:311-315: req_sleep_state = BX_READ_32BIT_REG(i->dst());
+        // if (req_sleep_state & ~0x1) → #GP(0).
+        let req_sleep_state = self.get_gpr32(instr.dst() as usize);
+        if req_sleep_state & !0x1 != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Bochs mwait.cc:317: clearEFlagsOSZAPC().
+        self.oszapc.set_oszapc_logic_32(1);
+
+        // Bochs mwait.cc:319-328: UMWAIT returns early if monitor is not armed
+        // by UMONITOR; TPAUSE unconditionally clears any armed-by-UMONITOR state.
+        if !is_tpause {
+            if !self.monitor.armed_by_umonitor() {
+                tracing::trace!("UMWAIT: UMONITOR not armed or already triggered, returning");
+                return Ok(());
+            }
+        } else {
+            self.monitor.reset_umonitor();
+        }
+
+        // Bochs mwait.cc:330-377: Full deadline-based sleep requires the LAPIC
+        // MWAITX timer (set_mwaitx_timer). That infrastructure isn't wired yet,
+        // so follow Bochs' mwait_is_nop=true early-return path — treats the
+        // instruction as a PAUSE-equivalent. The monitor state above has already
+        // been updated correctly, so this remains Bochs-compliant behavior.
+        Ok(())
+    }
+
+    // =========================================================================
     // CLAC — Clear AC Flag (SMAP, opcode 0F 01 CA)
     // =========================================================================
 
@@ -502,6 +649,47 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         #[cfg(not(feature = "instrumentation"))]
         let _ = instr;
+        Ok(())
+    }
+
+    // =========================================================================
+    // CLZERO — Zero Cache Line (AMD, opcode F3 0F 01 FC)
+    // Bochs: proc_ctrl.cc:321-334 BX_CPU_C::CLZERO
+    // =========================================================================
+
+    pub(super) fn clzero(
+        &mut self,
+        instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
+        // Bochs relies on per-CPU decoder tables to suppress CLZERO when the
+        // CPU doesn't support it. rusty_box has a single decoder table, so
+        // enforce the CPUID gate at execute time.
+        if !self.bx_cpuid_support_isa_extension(
+            crate::cpu::decoder::X86Feature::IsaClzero,
+        ) {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        // Bochs proc_ctrl.cc:321-334. Bochs line 324:
+        //   bx_address eaddr = RAX & ~BX_CONST64(CACHE_LINE_SIZE-1) & i->asize_mask();
+        const CACHE_LINE_SIZE: u64 = 64;
+        const ASIZE_MASK: [u64; 4] = [
+            0xFFFF,
+            0xFFFF_FFFF,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0xFFFF_FFFF_FFFF_FFFF,
+        ];
+        let asize = (instr.as32_l() != 0) as usize | (((instr.as64_l() != 0) as usize) << 1);
+        let eaddr = self.rax() & !(CACHE_LINE_SIZE - 1) & ASIZE_MASK[asize];
+
+        // Bochs writes a zmmword (64 bytes) via write_virtual_zmmword.
+        // Emit 8 qwords instead — segmentation + paging checks cover the
+        // same bytes the single 64-byte write would touch.
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        for n in (0..CACHE_LINE_SIZE).step_by(8) {
+            self.write_virtual_qword_64(seg, eaddr.wrapping_add(n), 0)?;
+        }
+
         Ok(())
     }
 
@@ -588,6 +776,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_APICBASE => self.msr.apicbase,
             BX_MSR_PLATFORM_ID => 0, // read-only, returns 0
             BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => self.get_tsc(self.system_ticks()), // stub: return TSC
+            // Bochs msr.cc:354-356 — WAITPKG umwait max-delay control.
+            BX_MSR_IA32_UMWAIT_CONTROL => self.msr.ia32_umwait_ctrl as u64,
             BX_MSR_BIOS_SIGN_ID => 0x02000065, // Skylake-X microcode revision
             BX_MSR_MTRRCAP => BX_MSR_MTRRCAP_DEFAULT,
             BX_MSR_PMC0..=BX_MSR_PMC7 => 0, // Performance counters — return 0
@@ -717,6 +907,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             BX_MSR_IA32_APERF => { /* ignore write */ }
             BX_MSR_IA32_MPERF => { /* ignore write */ }
+            // Bochs msr.cc:1019-1021 — stores low 32 bits of value.
+            BX_MSR_IA32_UMWAIT_CONTROL => self.msr.ia32_umwait_ctrl = val as u32,
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr = val as u32,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr = val,
             BX_MSR_SYSENTER_EIP => self.msr.sysenter_eip_msr = val,

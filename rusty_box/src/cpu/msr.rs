@@ -29,6 +29,10 @@ pub const BX_MSR_IA32_APERF: u32 = 0x0E7;
 /// IA32_MPERF (Maximum Performance Frequency Clock Count)
 pub const BX_MSR_IA32_MPERF: u32 = 0x0E8;
 
+/// IA32_UMWAIT_CONTROL (WAITPKG: TPAUSE/UMWAIT max-delay control)
+/// Bochs msr.h:49 BX_MSR_IA32_UMWAIT_CONTROL.
+pub const BX_MSR_IA32_UMWAIT_CONTROL: u32 = 0x0E1;
+
 /// MTRR Capability register
 pub const BX_MSR_MTRRCAP: u32 = 0x0FE;
 
