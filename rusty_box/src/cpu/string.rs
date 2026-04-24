@@ -1670,6 +1670,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch MOVSB: 16/32/64-bit address, with or without REP prefix.
     pub fn movsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
+                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
             if rep { self.rep_movsb64(instr)?; } else { self.movsb64(instr)?; }
         } else if instr.as32_l() != 0 {
@@ -1683,6 +1684,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch MOVSW: 16/32/64-bit address, with or without REP prefix.
     pub fn movsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
+                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
             if rep { self.rep_movsw64(instr)?; } else { self.movsw64(instr)?; }
         } else if instr.as32_l() != 0 {
@@ -1696,6 +1698,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch MOVSD: 16/32/64-bit address, with or without REP prefix.
     pub fn movsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
+                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
             if rep { self.rep_movsd64(instr)?; } else { self.movsd64(instr)?; }
         } else if instr.as32_l() != 0 {
@@ -1711,6 +1714,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch STOSB: 16/32/64-bit address, with or without REP prefix.
     pub fn stosb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
+                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
             if rep { self.rep_stosb64(instr)?; } else { self.stosb64(instr)?; }
         } else if instr.as32_l() != 0 {
@@ -1724,6 +1728,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch STOSW: 16/32/64-bit address, with or without REP prefix.
     pub fn stosw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
+                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
             if rep { self.rep_stosw64(instr)?; } else { self.stosw64(instr)?; }
         } else if instr.as32_l() != 0 {
@@ -1737,6 +1742,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch STOSD: 16/32/64-bit address, with or without REP prefix.
     pub fn stosd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
+                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
             if rep { self.rep_stosd64(instr)?; } else { self.stosd64(instr)?; }
         } else if instr.as32_l() != 0 {
@@ -1752,6 +1758,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch LODSB: 16/32/64-bit address, with or without REP prefix.
     pub fn lodsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
+                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
             if rep { self.rep_lodsb64(instr)?; } else { self.lodsb64(instr)?; }
         } else if instr.as32_l() != 0 {
@@ -1765,6 +1772,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch LODSW: 16/32/64-bit address, with or without REP prefix.
     pub fn lodsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
+                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
             if rep { self.rep_lodsw64(instr)?; } else { self.lodsw64(instr)?; }
         } else if instr.as32_l() != 0 {
@@ -1778,6 +1786,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch LODSD: 16/32/64-bit address, with or without REP prefix.
     pub fn lodsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
+                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
             if rep { self.rep_lodsd64(instr)?; } else { self.lodsd64(instr)?; }
         } else if instr.as32_l() != 0 {
@@ -1793,6 +1802,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch SCASB: 16/32/64-bit address, with REPE/REPNE/no-REP prefix.
     pub fn scasb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
+                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if instr.as64_l() != 0 {
             if rep == 3 { self.repe_scasb64(instr)?; }
             else if rep == 2 { self.repne_scasb64(instr)?; }
@@ -1812,6 +1822,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch SCASW: 16/32/64-bit address, with REPE/REPNE/no-REP prefix.
     pub fn scasw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
+                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if instr.as64_l() != 0 {
             if rep == 3 { self.repe_scasw64(instr)?; }
             else if rep == 2 { self.repne_scasw64(instr)?; }
@@ -1831,6 +1842,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch SCASD: 16/32/64-bit address, with REPE/REPNE/no-REP prefix.
     pub fn scasd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
+                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if instr.as64_l() != 0 {
             if rep == 3 { self.repe_scasd64(instr)?; }
             else if rep == 2 { self.repne_scasd64(instr)?; }
@@ -1852,6 +1864,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch CMPSB: 16/32/64-bit address, with REPE/REPNE/no-REP prefix.
     pub fn cmpsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
+                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if instr.as64_l() != 0 {
             if rep == 3 { self.repe_cmpsb64(instr)?; }
             else if rep == 2 { self.repne_cmpsb64(instr)?; }
@@ -1871,6 +1884,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch CMPSW: 16/32/64-bit address, with REPE/REPNE/no-REP prefix.
     pub fn cmpsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
+                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if instr.as64_l() != 0 {
             if rep == 3 { self.repe_cmpsw64(instr)?; }
             else if rep == 2 { self.repne_cmpsw64(instr)?; }
@@ -1890,6 +1904,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch CMPSD: 16/32/64-bit address, with REPE/REPNE/no-REP prefix.
     pub fn cmpsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
+                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if instr.as64_l() != 0 {
             if rep == 3 { self.repe_cmpsd64(instr)?; }
             else if rep == 2 { self.repne_cmpsd64(instr)?; }
@@ -2830,33 +2845,37 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch MOVSQ: 64-bit only, with or without REP prefix.
     pub fn movsq_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.lock_rep_used_value() != 0 {
-            self.rep_movsq64(instr)
-        } else {
-            self.movsq64(instr)
-        }
+                    self.clear_rf(); // Bochs cpu.cc repeat(): clear_RF() when REP prefix used
+                    self.rep_movsq64(instr)
+                } else {
+                    self.movsq64(instr)
+                }
     }
 
     /// Dispatch STOSQ: 64-bit only, with or without REP prefix.
     pub fn stosq_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.lock_rep_used_value() != 0 {
-            self.rep_stosq64(instr)
-        } else {
-            self.stosq64(instr)
-        }
+                    self.clear_rf(); // Bochs cpu.cc repeat(): clear_RF() when REP prefix used
+                    self.rep_stosq64(instr)
+                } else {
+                    self.stosq64(instr)
+                }
     }
 
     /// Dispatch LODSQ: 64-bit only, with or without REP prefix.
     pub fn lodsq_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.lock_rep_used_value() != 0 {
-            self.rep_lodsq64(instr)
-        } else {
-            self.lodsq64(instr)
-        }
+                    self.clear_rf(); // Bochs cpu.cc repeat(): clear_RF() when REP prefix used
+                    self.rep_lodsq64(instr)
+                } else {
+                    self.lodsq64(instr)
+                }
     }
 
     /// Dispatch CMPSQ: 64-bit only, with REPE/REPNE/no-REP prefix.
     pub fn cmpsq_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
+                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if rep == 3 { self.repe_cmpsq64(instr) }
         else if rep == 2 { self.repne_cmpsq64(instr) }
         else { self.cmpsq64(instr) }
@@ -2865,6 +2884,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch SCASQ: 64-bit only, with REPE/REPNE/no-REP prefix.
     pub fn scasq_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
+                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if rep == 3 { self.repe_scasq64(instr) }
         else if rep == 2 { self.repne_scasq64(instr) }
         else { self.scasq64(instr) }
