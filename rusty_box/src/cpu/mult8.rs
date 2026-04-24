@@ -6,7 +6,6 @@ use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
     decoder::Instruction,
-    eflags::EFlags,
     error::Result,
 };
 
@@ -34,7 +33,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_flags_logic8(product_8l);
         if product_8h != 0 {
             // Set CF and OF if high byte is non-zero
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
         }
 
         Ok(())
@@ -59,7 +58,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_flags_logic8(product_8l);
         if product_8h != 0 {
             // Set CF and OF if high byte is non-zero
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
         }
 
         Ok(())
@@ -85,7 +84,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Matching C++: if(product_16 != (Bit8s) product_16)
         // This checks if the 16-bit value equals its sign-extended 8-bit version
         if product_16 != (product_16 as i8 as i16) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
         }
 
         Ok(())
@@ -111,7 +110,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Matching C++: if(product_16 != (Bit8s) product_16)
         // This checks if the 16-bit value equals its sign-extended 8-bit version
         if product_16 != (product_16 as i8 as i16) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
         }
 
         Ok(())

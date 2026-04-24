@@ -18,12 +18,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     #[inline]
     pub(crate) fn rflags_for_api(&self) -> u64 {
-        self.eflags.bits() as u64
+        self.eflags_materialized() as u64
     }
 
     #[inline]
     pub(crate) fn set_rflags_for_api(&mut self, v: u64) {
         self.eflags = super::eflags::EFlags::from_bits_retain(v as u32);
+        // Keep lazy store in sync when API callers rewrite the full flags word.
+        self.set_eflags_oszapc(v as u32);
     }
 
     // ── Segment selectors (raw) ────────────────────────────────────────

@@ -340,14 +340,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let is_386_gate = gate_descriptor.r#type >= 14;
 
             if is_386_gate {
-                self.push_32(self.eflags.bits())?;
+                self.push_32(self.eflags_materialized())?;
                 self.push_32(self.sregs[BxSegregs::Cs as usize].selector.value as u32)?;
                 self.push_32(self.eip())?;
                 if push_error {
                     self.push_32(error_code as u32)?;
                 }
             } else {
-                self.push_16((self.eflags.bits() & 0xFFFF) as u16)?;
+                self.push_16((self.eflags_materialized() & 0xFFFF) as u16)?;
                 self.push_16(self.sregs[BxSegregs::Cs as usize].selector.value)?;
                 self.push_16(self.eip() as u16)?;
                 if push_error {
@@ -625,7 +625,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     &new_stack,
                     temp_esp.wrapping_sub(12),
                     cs_descriptor.dpl,
-                    self.eflags.bits(),
+                    self.eflags_materialized(),
                 )?;
                 self.write_new_stack_dword(
                     &new_stack,
@@ -668,7 +668,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     &new_stack,
                     temp_esp.wrapping_sub(6),
                     cs_descriptor.dpl,
-                    (self.eflags.bits() & 0xFFFF) as u16,
+                    (self.eflags_materialized() & 0xFFFF) as u16,
                 )?;
                 self.write_new_stack_word(
                     &new_stack,
@@ -770,7 +770,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     &new_stack,
                     temp_sp.wrapping_sub(12) as u32,
                     cs_descriptor.dpl,
-                    self.eflags.bits(),
+                    self.eflags_materialized(),
                 )?;
                 self.write_new_stack_dword(
                     &new_stack,
@@ -813,7 +813,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     &new_stack,
                     temp_sp.wrapping_sub(6) as u32,
                     cs_descriptor.dpl,
-                    (self.eflags.bits() & 0xFFFF) as u16,
+                    (self.eflags_materialized() & 0xFFFF) as u16,
                 )?;
                 self.write_new_stack_word(
                     &new_stack,
@@ -1064,7 +1064,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Push old stack, flags, return address onto new stack
             self.write_new_stack_qword_64(rsp - 8, cs_descriptor.dpl, old_ss)?;
             self.write_new_stack_qword_64(rsp - 16, cs_descriptor.dpl, old_rsp)?;
-            self.write_new_stack_qword_64(rsp - 24, cs_descriptor.dpl, self.eflags.bits() as u64)?;
+            self.write_new_stack_qword_64(rsp - 24, cs_descriptor.dpl, self.eflags_materialized() as u64)?;
             self.write_new_stack_qword_64(rsp - 32, cs_descriptor.dpl, old_cs)?;
             self.write_new_stack_qword_64(rsp - 40, cs_descriptor.dpl, old_rip)?;
             rsp -= 40;
@@ -1102,7 +1102,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Push SS, RSP, RFLAGS, CS, RIP
             self.write_new_stack_qword_64(rsp - 8, cs_descriptor.dpl, old_ss)?;
             self.write_new_stack_qword_64(rsp - 16, cs_descriptor.dpl, old_rsp)?;
-            self.write_new_stack_qword_64(rsp - 24, cs_descriptor.dpl, self.eflags.bits() as u64)?;
+            self.write_new_stack_qword_64(rsp - 24, cs_descriptor.dpl, self.eflags_materialized() as u64)?;
             self.write_new_stack_qword_64(rsp - 32, cs_descriptor.dpl, old_cs)?;
             self.write_new_stack_qword_64(rsp - 40, cs_descriptor.dpl, old_rip)?;
             rsp -= 40;

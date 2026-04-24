@@ -851,7 +851,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Save current FLAGS, CS, IP on stack
         // Bochs exception.cc: push FLAGS, CS, IP
-        let flags = (self.eflags.bits() & 0xFFFF) as u16;
+        let flags = (self.read_eflags() & 0xFFFF) as u16;
         let cs = self.sregs[BxSegregs::Cs as usize].selector.value;
         let ip = self.get_ip();
 
@@ -946,7 +946,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ];
                 self.diag_first_pm_hlt_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
                 self.diag_first_pm_hlt_ss = self.sregs[BxSegregs::Ss as usize].selector.value;
-                self.diag_first_pm_hlt_eflags = self.eflags.bits();
+                self.diag_first_pm_hlt_eflags = self.read_eflags();
                 // Read 16 dwords from stack
                 let esp = self.esp();
                 for i in 0..16u32 {

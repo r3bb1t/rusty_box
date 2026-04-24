@@ -1564,7 +1564,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Long mode SYSCALL (Bochs proc_ctrl.cc)
             let saved_rip = self.rip();
             self.set_rcx(saved_rip);
-            let saved_rflags = self.eflags.bits() & !EFlags::RF.bits();
+            let saved_rflags = self.read_eflags() & !EFlags::RF.bits();
             self.set_r11(saved_rflags as u64);
 
             let temp_rip = if self.cpu_mode == super::cpu::CpuMode::Long64 {

@@ -231,7 +231,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // If bit is 0, redirect through virtual-mode IVT (vm8086.cc)
             if (vme_redirection_bitmap & (1 << (vector & 7))) == 0 {
                 // Redirect interrupt through virtual-mode IVT (vm8086.cc)
-                let mut temp_flags = (self.eflags.bits() & 0xFFFF) as u16;
+                let mut temp_flags = (self.read_eflags() & 0xFFFF) as u16;
 
                 // Read CS:IP from IVT (real-mode interrupt vector table at address 0)
                 let temp_cs = self.system_read_word((vector as u64) * 4 + 2)?;

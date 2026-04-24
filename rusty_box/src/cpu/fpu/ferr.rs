@@ -23,7 +23,6 @@ use super::super::softfloat3e::specialize::*;
 
 use super::super::cpu::Exception;
 use super::super::softfloat3e::softfloat_types::floatx80;
-use crate::cpu::eflags::EFlags;
 
 // ---------------------------------------------------------------------------
 // Free function: convert i387 control word → SoftFloat status
@@ -312,26 +311,29 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     ///   Unordered          1   1   1
     /// ```
     pub fn write_eflags_fpu_compare(&mut self, float_relation: i32) {
-        // Bochs clearEFlagsOSZAPC(): clear OF, SF, ZF, AF, PF, CF
-        self.eflags
-            .remove(EFlags::CF | EFlags::PF | EFlags::AF | EFlags::ZF | EFlags::SF | EFlags::OF);
-
+        // Mirrors Bochs fpu/fpu_compare.cc `write_eflags_fpu_compare(int float_relation)`.
         match float_relation {
             RELATION_LESS => {
-                // ST(0) < src: CF=1, PF=0, ZF=0
-                self.eflags.insert(EFlags::CF);
+                // clearEFlagsOSZAPC(); assert_CF();
+                self.oszapc.set_oszapc_logic_32(1);
+                self.oszapc.set_cf(true);
             }
             RELATION_EQUAL => {
-                // ST(0) == src: CF=0, PF=0, ZF=1
-                self.eflags.insert(EFlags::ZF);
+                // clearEFlagsOSZAPC(); assert_ZF();
+                self.oszapc.set_oszapc_logic_32(1);
+                self.oszapc.set_zf(true);
             }
             RELATION_GREATER => {
-                // ST(0) > src: CF=0, PF=0, ZF=0
-                // (all cleared above)
+                // clearEFlagsOSZAPC();
+                self.oszapc.set_oszapc_logic_32(1);
             }
             _ => {
-                // Unordered (NaN): CF=1, PF=1, ZF=1
-                self.eflags.insert(EFlags::CF | EFlags::PF | EFlags::ZF);
+                // softfloat_relation_unordered: setEFlagsOSZAPC(ZF|PF|CF)
+                self.set_eflags_oszapc(
+                    super::super::eflags::EFlags::ZF.bits()
+                        | super::super::eflags::EFlags::PF.bits()
+                        | super::super::eflags::EFlags::CF.bits(),
+                );
             }
         }
     }

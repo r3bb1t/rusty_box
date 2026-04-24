@@ -4,7 +4,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -23,11 +22,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.read_virtual_qword_64(seg, eaddr)?
         };
         if op2 == 0 {
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         } else {
             let idx = op2.trailing_zeros() as u64;
             self.set_flags_oszapc_logic_64(idx);
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             self.set_gpr64(instr.dst() as usize, idx);
         }
         Ok(())
@@ -43,11 +42,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.read_virtual_qword_64(seg, eaddr)?
         };
         if op2 == 0 {
-            self.eflags.insert(EFlags::ZF);
+            self.set_zf(true);
         } else {
             let idx = (63 - op2.leading_zeros()) as u64;
             self.set_flags_oszapc_logic_64(idx);
-            self.eflags.remove(EFlags::ZF);
+            self.set_zf(false);
             self.set_gpr64(instr.dst() as usize, idx);
         }
         Ok(())
@@ -65,11 +64,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if instr.mod_c0() {
             let op1 = self.get_gpr64(instr.dst() as usize);
             let bit_index = op2 & 0x3F;
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
         } else {
             // Memory form: bit index can extend beyond the qword
             let eaddr = self.resolve_addr64(instr);
@@ -80,11 +75,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if instr.as64_l() == 0 { addr &= 0xFFFF_FFFF; }
             let op1 = self.read_virtual_qword_64(seg, addr)?;
             let bit_index = op2 & 0x3F;
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
         }
         Ok(())
     }
@@ -97,11 +88,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let dst_reg = instr.dst() as usize;
             let op1 = self.get_gpr64(dst_reg);
             let bit_index = op2 & 0x3F;
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
             self.set_gpr64(dst_reg, op1 | (1u64 << bit_index));
         } else {
             let eaddr = self.resolve_addr64(instr);
@@ -111,11 +98,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if instr.as64_l() == 0 { addr &= 0xFFFF_FFFF; }
             let op1 = self.read_rmw_virtual_qword_64(seg, addr)?;
             let bit_index = op2 & 0x3F;
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
             self.write_rmw_virtual_qword_back_64(op1 | (1u64 << bit_index));
         }
         Ok(())
@@ -129,11 +112,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let dst_reg = instr.dst() as usize;
             let op1 = self.get_gpr64(dst_reg);
             let bit_index = op2 & 0x3F;
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
             self.set_gpr64(dst_reg, op1 & !(1u64 << bit_index));
         } else {
             let eaddr = self.resolve_addr64(instr);
@@ -143,11 +122,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if instr.as64_l() == 0 { addr &= 0xFFFF_FFFF; }
             let op1 = self.read_rmw_virtual_qword_64(seg, addr)?;
             let bit_index = op2 & 0x3F;
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
             self.write_rmw_virtual_qword_back_64(op1 & !(1u64 << bit_index));
         }
         Ok(())
@@ -161,11 +136,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let dst_reg = instr.dst() as usize;
             let op1 = self.get_gpr64(dst_reg);
             let bit_index = op2 & 0x3F;
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
             self.set_gpr64(dst_reg, op1 ^ (1u64 << bit_index));
         } else {
             let eaddr = self.resolve_addr64(instr);
@@ -175,11 +146,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if instr.as64_l() == 0 { addr &= 0xFFFF_FFFF; }
             let op1 = self.read_rmw_virtual_qword_64(seg, addr)?;
             let bit_index = op2 & 0x3F;
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
             self.write_rmw_virtual_qword_back_64(op1 ^ (1u64 << bit_index));
         }
         Ok(())
@@ -200,11 +167,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let seg = BxSegregs::from(instr.seg());
             self.read_virtual_qword_64(seg, eaddr)?
         };
-        if (op1 >> bit_index) & 1 != 0 {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
+        self.set_cf((op1 >> bit_index) & 1 != 0);
         Ok(())
     }
 
@@ -214,21 +177,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if instr.mod_c0() {
             let dst_reg = instr.dst() as usize;
             let op1 = self.get_gpr64(dst_reg);
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
             self.set_gpr64(dst_reg, op1 | (1u64 << bit_index));
         } else {
             let eaddr = self.resolve_addr64(instr);
             let seg = BxSegregs::from(instr.seg());
             let op1 = self.read_rmw_virtual_qword_64(seg, eaddr)?;
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
             self.write_rmw_virtual_qword_back_64(op1 | (1u64 << bit_index));
         }
         Ok(())
@@ -240,21 +195,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if instr.mod_c0() {
             let dst_reg = instr.dst() as usize;
             let op1 = self.get_gpr64(dst_reg);
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
             self.set_gpr64(dst_reg, op1 & !(1u64 << bit_index));
         } else {
             let eaddr = self.resolve_addr64(instr);
             let seg = BxSegregs::from(instr.seg());
             let op1 = self.read_rmw_virtual_qword_64(seg, eaddr)?;
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
             self.write_rmw_virtual_qword_back_64(op1 & !(1u64 << bit_index));
         }
         Ok(())
@@ -266,21 +213,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if instr.mod_c0() {
             let dst_reg = instr.dst() as usize;
             let op1 = self.get_gpr64(dst_reg);
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
             self.set_gpr64(dst_reg, op1 ^ (1u64 << bit_index));
         } else {
             let eaddr = self.resolve_addr64(instr);
             let seg = BxSegregs::from(instr.seg());
             let op1 = self.read_rmw_virtual_qword_64(seg, eaddr)?;
-            if (op1 >> bit_index) & 1 != 0 {
-                self.eflags.insert(EFlags::CF);
-            } else {
-                self.eflags.remove(EFlags::CF);
-            }
+            self.set_cf((op1 >> bit_index) & 1 != 0);
             self.write_rmw_virtual_qword_back_64(op1 ^ (1u64 << bit_index));
         }
         Ok(())
@@ -291,7 +230,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs: bit64.cc POPCNT_GqEqR / POPCNT_GqEqM
     // =========================================================================
 
-    /// POPCNT r64, r/m64 — count set bits
+    /// POPCNT r64, r/m64 — Bochs bit64.cc POPCNT_GqEqR / POPCNT_GqEqM
     pub fn popcnt_gq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
             self.get_gpr64(instr.src() as usize)
@@ -301,16 +240,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.read_virtual_qword_64(seg, eaddr)?
         };
         let result = op2.count_ones() as u64;
+        // Bochs: clearEFlagsOSZAPC(); if (!op_32) assert_ZF();
+        self.oszapc.set_oszapc_logic_32(1);
+        if result == 0 { self.oszapc.set_zf(true); }
         self.set_gpr64(instr.dst() as usize, result);
-
-        // POPCNT clears OF, SF, AF, CF, PF; sets ZF if result is 0
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::CF | EFlags::PF);
-        if result == 0 {
-            self.eflags.insert(EFlags::ZF);
-        } else {
-            self.eflags.remove(EFlags::ZF);
-        }
         Ok(())
     }
 
@@ -318,7 +251,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // LZCNT — Leading Zero Count (64-bit) (F3 REX.W 0F BD /r)
     // =========================================================================
 
-    /// LZCNT r64, r/m64 — count leading zeros
+    /// LZCNT r64, r/m64 — Bochs bit64.cc LZCNT_GqEqR
     pub fn lzcnt_gq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
             self.get_gpr64(instr.src() as usize)
@@ -328,21 +261,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.read_virtual_qword_64(seg, eaddr)?
         };
         let result = op2.leading_zeros() as u64;
+        // Bochs: set_CF(!op1_64); set_ZF(!result_64);  (OF/SF/AF/PF left as-is)
+        self.oszapc.set_cf(op2 == 0);
+        self.oszapc.set_zf(result == 0);
         self.set_gpr64(instr.dst() as usize, result);
-
-        // CF = (op2 == 0), ZF = (result == 0 i.e. op2 has bit 63 set)
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
-        if op2 == 0 {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
-        if result == 0 {
-            self.eflags.insert(EFlags::ZF);
-        } else {
-            self.eflags.remove(EFlags::ZF);
-        }
         Ok(())
     }
 
@@ -373,7 +295,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // TZCNT — Trailing Zero Count (64-bit) (F3 REX.W 0F BC /r)
     // =========================================================================
 
-    /// TZCNT r64, r/m64 — count trailing zeros
+    /// TZCNT r64, r/m64 — Bochs bit64.cc TZCNT_GqEqR
     pub fn tzcnt_gq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
             self.get_gpr64(instr.src() as usize)
@@ -383,20 +305,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.read_virtual_qword_64(seg, eaddr)?
         };
         let result = op2.trailing_zeros() as u64;
+        // Bochs: set_CF(!op1_64); set_ZF(!result_64);
+        self.oszapc.set_cf(op2 == 0);
+        self.oszapc.set_zf(result == 0);
         self.set_gpr64(instr.dst() as usize, result);
-
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
-        if op2 == 0 {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
-        if result == 0 {
-            self.eflags.insert(EFlags::ZF);
-        } else {
-            self.eflags.remove(EFlags::ZF);
-        }
         Ok(())
     }
 }

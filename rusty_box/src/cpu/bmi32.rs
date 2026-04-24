@@ -8,7 +8,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -16,17 +15,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Internal helpers
     // =====================================================================
 
-    /// Clear OF, SF, ZF, AF, CF; set SF if sign bit set, set ZF if zero.
-    /// Leaves PF unchanged (matching Bochs SET_FLAGS_OSZAxC_LOGIC_32).
+    /// Bochs `SET_FLAGS_OSZAxC_LOGIC_32`: like SET_FLAGS_OSZAPC_LOGIC_32 but PF is preserved.
     fn set_flags_oszaxc_logic_32(&mut self, result: u32) {
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::ZF | EFlags::AF | EFlags::CF);
-        if result == 0 {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if (result & 0x8000_0000) != 0 {
-            self.eflags.insert(EFlags::SF);
-        }
+        let saved_pf = self.oszapc.getb_pf() != 0;
+        self.oszapc.set_oszapc_logic_32(result);
+        self.oszapc.set_pf(saved_pf);
     }
 
     /// Read 32-bit r/m operand: register if mod=11, memory read otherwise.
@@ -69,9 +62,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let tmp_cf = op1 != 0;
         let result = (op1.wrapping_neg()) & op1;
         self.set_flags_oszaxc_logic_32(result);
-        if tmp_cf {
-            self.eflags.insert(EFlags::CF);
-        }
+        self.set_cf(tmp_cf);
         self.set_gpr32(instr.src2() as usize, result);
         Ok(())
     }
@@ -83,9 +74,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let tmp_cf = op1 == 0;
         let result = op1.wrapping_sub(1) ^ op1;
         self.set_flags_oszaxc_logic_32(result);
-        if tmp_cf {
-            self.eflags.insert(EFlags::CF);
-        }
+        self.set_cf(tmp_cf);
         self.set_gpr32(instr.src2() as usize, result);
         Ok(())
     }
@@ -97,9 +86,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let tmp_cf = op1 == 0;
         let result = op1.wrapping_sub(1) & op1;
         self.set_flags_oszaxc_logic_32(result);
-        if tmp_cf {
-            self.eflags.insert(EFlags::CF);
-        }
+        self.set_cf(tmp_cf);
         self.set_gpr32(instr.src2() as usize, result);
         Ok(())
     }
@@ -195,9 +182,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
 
         self.set_flags_oszaxc_logic_32(op1);
-        if tmp_cf {
-            self.eflags.insert(EFlags::CF);
-        }
+        self.set_cf(tmp_cf);
         self.set_gpr32(instr.dst() as usize, op1);
         Ok(())
     }
@@ -259,7 +244,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn adcx_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = self.get_gpr32(instr.dst() as usize);
         let op2 = self.read_ed32(instr, instr.src())?;
-        let cf_in = if self.eflags.contains(EFlags::CF) {
+        let cf_in = if self.getb_cf() != 0 {
             1u32
         } else {
             0u32
@@ -268,11 +253,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_gpr32(instr.dst() as usize, sum);
 
         let carry_out = (op1 & op2) | ((op1 | op2) & !sum);
-        if (carry_out >> 31) & 1 != 0 {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
+        self.set_cf(((carry_out >> 31) & 1) != 0);
         Ok(())
     }
 
@@ -281,7 +262,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn adox_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = self.get_gpr32(instr.dst() as usize);
         let op2 = self.read_ed32(instr, instr.src())?;
-        let of_in = if self.eflags.contains(EFlags::OF) {
+        let of_in = if self.getb_of() != 0 {
             1u32
         } else {
             0u32
@@ -290,11 +271,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_gpr32(instr.dst() as usize, sum);
 
         let carry_out = (op1 & op2) | ((op1 | op2) & !sum);
-        if (carry_out >> 31) & 1 != 0 {
-            self.eflags.insert(EFlags::OF);
-        } else {
-            self.eflags.remove(EFlags::OF);
-        }
+        self.set_of(((carry_out >> 31) & 1) != 0);
         Ok(())
     }
 }

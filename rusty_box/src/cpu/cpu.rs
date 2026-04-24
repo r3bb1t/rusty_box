@@ -2262,75 +2262,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
 
     pub(super) fn update_flags_add32(&mut self, op1: u32, op2: u32, res: u32) {
-        // Bochs ADD_COUT_VEC: carry-out at each bit position
-        // Works correctly for both ADD and ADC (result includes carry-in)
-        let cout_vec = (op1 & op2) | ((op1 | op2) & !res);
-        let cf = (cout_vec >> 31) & 1 != 0;
-        let zf = res == 0;
-        let sf = (res & 0x8000_0000) != 0;
-        // Bochs GET_ADD_OVERFLOW
-        let of = ((op1 ^ res) & (op2 ^ res) & 0x8000_0000) != 0;
-        let af = (cout_vec >> 3) & 1 != 0;
-        let low = (res & 0xff) as u8;
-        let parity = low.count_ones().is_multiple_of(2);
-
-        // clear relevant flags
-        self.eflags.remove(EFlags::OSZAPC);
-
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        }
-        if parity {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
+        // Bochs SET_FLAGS_OSZAPC_ADD_32: works for ADD and ADC
+        // (result already includes the carry-in from ADC).
         self.oszapc.set_oszapc_add_32(op1, op2, res);
     }
 
     pub(super) fn update_flags_sub32(&mut self, op1: u32, op2: u32, res: u32) {
-        // Bochs SUB_COUT_VEC: borrow at each bit position
-        // Works correctly for both SUB and SBB (result includes borrow-in)
-        let cout_vec = (!op1 & op2) | ((!op1 ^ op2) & res);
-        let cf = (cout_vec >> 31) & 1 != 0;
-        let zf = res == 0;
-        let sf = (res & 0x8000_0000) != 0;
-        // Bochs GET_SUB_OVERFLOW
-        let of = ((op1 ^ op2) & (op1 ^ res) & 0x8000_0000) != 0;
-        let af = (cout_vec >> 3) & 1 != 0;
-        let low = (res & 0xff) as u8;
-        let parity = low.count_ones().is_multiple_of(2);
-
-        self.eflags.remove(EFlags::OSZAPC);
-
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        }
-        if parity {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
+        // Bochs SET_FLAGS_OSZAPC_SUB_32: works for SUB and SBB
+        // (result already includes the borrow-in from SBB).
         self.oszapc.set_oszapc_sub_32(op1, op2, res);
     }
 
@@ -2339,156 +2278,27 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
     // 8-bit flag updates
     pub(super) fn update_flags_add8(&mut self, op1: u8, op2: u8, result: u8) {
-        // Bochs ADD_COUT_VEC: carry-out at each bit position
-        let cout_vec = (op1 & op2) | ((op1 | op2) & !result);
-        let cf = (cout_vec >> 7) & 1 != 0;
-        let zf = result == 0;
-        let sf = (result & 0x80) != 0;
-        // Bochs GET_ADD_OVERFLOW
-        let of = ((op1 ^ result) & (op2 ^ result) & 0x80) != 0;
-        let af = (cout_vec >> 3) & 1 != 0;
-        let pf = result.count_ones().is_multiple_of(2);
-
-        self.eflags.remove(EFlags::OSZAPC);
-
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        }
-        if pf {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
         self.oszapc.set_oszapc_add_8(op1, op2, result);
     }
 
     pub(super) fn update_flags_add16(&mut self, op1: u16, op2: u16, result: u16) {
-        // Bochs ADD_COUT_VEC: carry-out at each bit position
-        let cout_vec = (op1 & op2) | ((op1 | op2) & !result);
-        let cf = (cout_vec >> 15) & 1 != 0;
-        let zf = result == 0;
-        let sf = (result & 0x8000) != 0;
-        // Bochs GET_ADD_OVERFLOW
-        let of = ((op1 ^ result) & (op2 ^ result) & 0x8000) != 0;
-        let af = (cout_vec >> 3) & 1 != 0;
-        let pf = ((result & 0xFF) as u8).count_ones().is_multiple_of(2);
-
-        self.eflags.remove(EFlags::OSZAPC);
-
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        }
-        if pf {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
         self.oszapc.set_oszapc_add_16(op1, op2, result);
     }
 
     pub(super) fn update_flags_sub8(&mut self, op1: u8, op2: u8, result: u8) {
-        // Bochs SUB_COUT_VEC: borrow at each bit position
-        let cout_vec = (!op1 & op2) | ((!op1 ^ op2) & result);
-        let cf = (cout_vec >> 7) & 1 != 0;
-        let zf = result == 0;
-        let sf = (result & 0x80) != 0;
-        // Bochs GET_SUB_OVERFLOW
-        let of = ((op1 ^ op2) & (op1 ^ result) & 0x80) != 0;
-        let af = (cout_vec >> 3) & 1 != 0;
-        let pf = result.count_ones().is_multiple_of(2);
-
-        self.eflags.remove(EFlags::OSZAPC);
-
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        }
-        if pf {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
         self.oszapc.set_oszapc_sub_8(op1, op2, result);
     }
 
     pub(super) fn update_flags_sub16(&mut self, op1: u16, op2: u16, result: u16) {
-        // Bochs SUB_COUT_VEC: borrow at each bit position
-        let cout_vec = (!op1 & op2) | ((!op1 ^ op2) & result);
-        let cf = (cout_vec >> 15) & 1 != 0;
-        let zf = result == 0;
-        let sf = (result & 0x8000) != 0;
-        // Bochs GET_SUB_OVERFLOW
-        let of = ((op1 ^ op2) & (op1 ^ result) & 0x8000) != 0;
-        let af = (cout_vec >> 3) & 1 != 0;
-        let pf = ((result & 0xFF) as u8).count_ones().is_multiple_of(2);
-
-        self.eflags.remove(EFlags::OSZAPC);
-
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        }
-        if pf {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
         self.oszapc.set_oszapc_sub_16(op1, op2, result);
     }
 
     pub(super) fn update_flags_logic8(&mut self, result: u8) {
-        // Bochs SET_FLAGS_OSZAPC_LOGIC clears OF, CF, AF
-        self.eflags.remove(EFlags::OF | EFlags::CF | EFlags::AF);
-        self.eflags.set(EFlags::SF, (result & 0x80) != 0);
-        self.eflags.set(EFlags::ZF, result == 0);
-        self.eflags.set(EFlags::PF, result.count_ones().is_multiple_of(2));
+        // Bochs SET_FLAGS_OSZAPC_LOGIC_8 clears OF/CF/AF, sets SF/ZF/PF from result.
         self.oszapc.set_oszapc_logic_8(result);
     }
 
     pub(super) fn update_flags_logic16(&mut self, result: u16) {
-        self.eflags.remove(EFlags::OF | EFlags::CF | EFlags::AF);
-        self.eflags.set(EFlags::SF, (result & 0x8000) != 0);
-        self.eflags.set(EFlags::ZF, result == 0);
-        self.eflags
-            .set(EFlags::PF, ((result & 0xFF) as u8).count_ones().is_multiple_of(2));
         self.oszapc.set_oszapc_logic_16(result);
     }
 
@@ -2513,18 +2323,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     }
 
     pub(super) fn update_flags_logic32(&mut self, result: u32) {
-        // Bochs SET_FLAGS_OSZAPC_LOGIC clears OF, CF, AF
-        self.eflags.remove(EFlags::OF | EFlags::CF | EFlags::AF);
-
-        // Set SF (sign flag) - bit 31 of result for 32-bit
-        self.eflags.set(EFlags::SF, (result & 0x80000000) != 0);
-
-        // Set ZF (zero flag)
-        self.eflags.set(EFlags::ZF, result == 0);
-
-        // Set PF (parity flag), based on low 8 bits
-        let low_byte = (result & 0xFF) as u8;
-        self.eflags.set(EFlags::PF, low_byte.count_ones().is_multiple_of(2));
         self.oszapc.set_oszapc_logic_32(result);
     }
 
@@ -2552,7 +2350,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Materialize all six arithmetic flags from `oszapc` into `eflags`.
     /// Bochs `force_flags()`. Call before any code that reads the full
     /// `eflags` register (PUSHF, LAHF, interrupt delivery, etc.).
-    #[allow(dead_code)]
     pub(super) fn force_flags(&mut self) {
         let new = self.oszapc.getb_cf()
             | (self.oszapc.getb_pf() << 2)
@@ -2569,7 +2366,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Materialize lazy flags then return the full `eflags` value.
     /// Bochs `read_eflags()`.
     #[inline]
-    #[allow(dead_code)]
     pub(crate) fn read_eflags(&mut self) -> u32 {
         self.force_flags();
         self.eflags.bits()
@@ -2578,7 +2374,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Compute the full eflags value without mutating state.
     /// Use when only `&self` is available (snapshot, API reads).
     #[inline]
-    #[allow(dead_code)]
     pub(crate) fn eflags_materialized(&self) -> u32 {
         let new = self.oszapc.getb_cf()
             | (self.oszapc.getb_pf() << 2)
@@ -2593,7 +2388,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Sync raw `eflags` arithmetic bits into `oszapc`.
     /// Bochs `setEFlagsOSZAPC()`. Call after any code that writes
     /// raw arithmetic bits into `eflags` (POPF, SAHF, IRET, etc.).
-    #[allow(dead_code)]
     pub(super) fn set_eflags_oszapc(&mut self, flags32: u32) {
         self.oszapc.set_of((flags32 >> 11) & 1 != 0);
         self.oszapc.set_sf((flags32 >> 7) & 1 != 0);
@@ -2601,22 +2395,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         self.oszapc.set_af((flags32 >> 4) & 1 != 0);
         self.oszapc.set_pf((flags32 >> 2) & 1 != 0);
         self.oszapc.set_cf(flags32 & 1 != 0);
-    }
-
-    /// Debug helper: assert oszapc matches eager eflags.
-    /// Call after any flag-setting operation during development.
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
-    pub(super) fn assert_oszapc_matches_eflags(&self, ctx: &str) {
-        let ef = self.eflags.bits();
-        let ecf = ef & 1; let epf = (ef >> 2) & 1; let eaf = (ef >> 4) & 1;
-        let ezf = (ef >> 6) & 1; let esf = (ef >> 7) & 1; let eof = (ef >> 11) & 1;
-        let ocf = self.oszapc.getb_cf(); let opf = self.oszapc.getb_pf();
-        let oaf = self.oszapc.getb_af(); let ozf = self.oszapc.getb_zf();
-        let osf = self.oszapc.getb_sf(); let oof = self.oszapc.getb_of();
-        assert!(ecf == ocf && epf == opf && eaf == oaf && ezf == ozf && esf == osf && eof == oof,
-            "{ctx}: eflags CF={ecf} PF={epf} AF={eaf} ZF={ezf} SF={esf} OF={eof} \
-             vs oszapc CF={ocf} PF={opf} AF={oaf} ZF={ozf} SF={osf} OF={oof}");
     }
 
     fn before_execution(&mut self, _cpu_id: u32) {

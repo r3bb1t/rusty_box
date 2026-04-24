@@ -8,7 +8,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -487,13 +486,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn update_flags_sar8(&mut self, result: u8, cf: bool) {
         self.update_flags_logic8(result);
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
-        // OF is always 0 for SAR by 1
-        self.eflags.remove(EFlags::OF);
+        // Bochs shift8.cc SAR: signed overflow cannot happen, OF=0.
+        self.set_cf_of(cf, false);
     }
 
     // =========================================================================
@@ -501,16 +495,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Used by shift8, shift16, and shift32
     // =========================================================================
 
+    /// Set CF and OF together via the Bochs lazy-flag helper
+    /// `set_flags_OxxxxC(of, cf)`. Used by all shift/rotate instructions.
     pub(super) fn set_cf_of(&mut self, cf: bool, of: bool) {
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        } else {
-            self.eflags.remove(EFlags::OF);
-        }
+        self.oszapc.set_flags_oxxxxc(of as u32, cf as u32);
     }
 }

@@ -9,7 +9,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
     error::Result,
 };
 
@@ -270,20 +269,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
 
     /// LAHF - Load AH from Flags (SF:ZF:0:AF:0:PF:1:CF)
+    /// Bochs flag_ctrl.cc: `AH = read_eflags() & 0xFF;`
     pub fn lahf(&mut self, _instr: &Instruction) {
-        let flags = (self.eflags.bits() & 0xFF) as u8;
-        // AH = SF:ZF:0:AF:0:PF:1:CF (bits 7,6,4,2,0 from flags, bit 1 always 1)
-        let lahf_mask = EFlags::LAHF_MASK.bits() as u8;
-        let ah = (flags & lahf_mask) | EFlags::R1.bits() as u8;
+        let ah = (self.read_eflags() & 0xFF) as u8;
         self.set_ah(ah);
     }
 
-    /// SAHF - Store AH into Flags
+    /// SAHF - Store AH into Flags (SF, ZF, AF, PF, CF)
     pub fn sahf(&mut self, _instr: &Instruction) {
-        let ah = self.ah();
-        // Only modify SF, ZF, AF, PF, CF (LAHF_MASK bits)
-        let mask = EFlags::LAHF_MASK.bits();
-        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !mask) | ((ah as u32) & mask));
+        let ah = self.ah() as u32;
+        // Bochs flag_ctrl.cc SAHF: individual lazy-flag setters.
+        self.set_sf((ah >> 7) & 1 != 0);
+        self.set_zf((ah >> 6) & 1 != 0);
+        self.set_af((ah >> 4) & 1 != 0);
+        self.set_pf((ah >> 2) & 1 != 0);
+        self.set_cf(ah & 1 != 0);
     }
 
     // =========================================================================

@@ -221,7 +221,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // VM & RF flags cleared in image stored on the stack
-        let flags = self.eflags.bits() & 0x00FCFFFF;
+        let flags = self.read_eflags() & 0x00FCFFFF;
         self.push_32(flags)?;
         Ok(())
     }

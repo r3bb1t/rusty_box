@@ -30,6 +30,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let old = self.eflags;
         self.eflags = EFlags::from_bits_retain(new_eflags);
+        // Sync OSZAPC bits of the new value into lazy store.
+        self.set_eflags_oszapc(new_eflags);
         let new_flags = self.eflags;
 
         // RF set => invalidate prefetch queue
@@ -63,7 +65,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Triggers side effects: TF/IF/AC/VM/RF checks.
     pub(super) fn write_eflags(&mut self, flags: u32, change_mask: u32) {
         let change_mask = change_mask & EFlags::SUPPORT_MASK.bits();
-        let new_eflags = (self.eflags.bits() & !change_mask) | (flags & change_mask);
+        // Bochs: read_eflags() materializes lazy OSZAPC before merging.
+        let new_eflags = (self.read_eflags() & !change_mask) | (flags & change_mask);
         self.set_eflags_internal(new_eflags);
     }
 

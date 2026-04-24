@@ -463,7 +463,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let rip = self.rip();
         let rsp = self.rsp();
         let rax = self.rax();
-        let eflags = self.eflags.bits();
+        let eflags = self.read_eflags();
         let sregs = self.sregs.clone();
         let gdtr = self.gdtr.clone();
         let idtr = self.idtr.clone();
@@ -566,7 +566,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.vmcb_write64(SVM_GUEST_DR6, self.dr6.get32() as u64);
         self.vmcb_write64(SVM_GUEST_DR7, self.dr7.get32() as u64);
 
-        self.vmcb_write64(SVM_GUEST_RFLAGS, self.eflags.bits() as u64);
+        self.vmcb_write64(SVM_GUEST_RFLAGS, self.eflags_materialized() as u64);
         self.vmcb_write64(SVM_GUEST_RAX, self.rax());
         self.vmcb_write64(SVM_GUEST_RSP, self.rsp());
         self.vmcb_write64(SVM_GUEST_RIP, self.rip());

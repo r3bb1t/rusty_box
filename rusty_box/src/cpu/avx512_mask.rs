@@ -11,7 +11,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
 };
 
 /// Helper: read opmask register value (full 64-bit)
@@ -418,52 +417,36 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // KORTEST — OR-test opmask (sets EFLAGS)
     // ========================================================================
 
-    /// KORTESTB KGb, KEb — sets ZF if (src1 | src2) == 0, CF if (src1 | src2) == MASK_B
+    /// KORTESTB KGb, KEb — Bochs KORTESTB_KGbKEbR
     pub fn kortestb_kgb_keb_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.dst()) & MASK_B;
-        let s2 = read_opmask(self, instr.src()) & MASK_B;
-        let result = s1 | s2;
-        let zf = result == 0;
-        let cf = result == MASK_B;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        let tmp = (read_opmask(self, instr.dst()) | read_opmask(self, instr.src())) & MASK_B;
+        self.oszapc.set_oszapc_logic_32(1); // clearEFlagsOSZAPC
+        if tmp == 0 { self.oszapc.set_zf(true); }
+        else if tmp == MASK_B { self.oszapc.set_cf(true); }
         Ok(())
     }
-    /// KORTESTW KGw, KEw
+    /// KORTESTW KGw, KEw — Bochs KORTESTW_KGwKEwR
     pub fn kortestw_kgw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.dst()) & MASK_W;
-        let s2 = read_opmask(self, instr.src()) & MASK_W;
-        let result = s1 | s2;
-        let zf = result == 0;
-        let cf = result == MASK_W;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        let tmp = (read_opmask(self, instr.dst()) | read_opmask(self, instr.src())) & MASK_W;
+        self.oszapc.set_oszapc_logic_32(1);
+        if tmp == 0 { self.oszapc.set_zf(true); }
+        else if tmp == MASK_W { self.oszapc.set_cf(true); }
         Ok(())
     }
-    /// KORTESTD KGd, KEd
+    /// KORTESTD KGd, KEd — Bochs KORTESTD_KGdKEdR
     pub fn kortestd_kgd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.dst()) & MASK_D;
-        let s2 = read_opmask(self, instr.src()) & MASK_D;
-        let result = s1 | s2;
-        let zf = result == 0;
-        let cf = result == MASK_D;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        let tmp = (read_opmask(self, instr.dst()) | read_opmask(self, instr.src())) & MASK_D;
+        self.oszapc.set_oszapc_logic_32(1);
+        if tmp == 0 { self.oszapc.set_zf(true); }
+        else if tmp == MASK_D { self.oszapc.set_cf(true); }
         Ok(())
     }
-    /// KORTESTQ KGq, KEq
+    /// KORTESTQ KGq, KEq — Bochs KORTESTQ_KGqKEqR
     pub fn kortestq_kgq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.dst());
-        let s2 = read_opmask(self, instr.src());
-        let result = s1 | s2;
-        let zf = result == 0;
-        let cf = result == MASK_Q;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        let tmp = read_opmask(self, instr.dst()) | read_opmask(self, instr.src());
+        self.oszapc.set_oszapc_logic_32(1);
+        if tmp == 0 { self.oszapc.set_zf(true); }
+        else if tmp == MASK_Q { self.oszapc.set_cf(true); }
         Ok(())
     }
 
@@ -471,48 +454,40 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // KTEST — Test opmask (sets EFLAGS based on AND)
     // ========================================================================
 
-    /// KTESTB KGb, KEb — ZF = (s1 & s2) == 0, CF = (!s1 & s2) == 0
+    /// KTESTB KGb, KEb — Bochs KTESTB_KGbKEbR
     pub fn ktestb_kgb_keb_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.dst()) & MASK_B;
-        let s2 = read_opmask(self, instr.src()) & MASK_B;
-        let zf = (s1 & s2) == 0;
-        let cf = ((!s1) & s2 & MASK_B) == 0;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        let op1 = read_opmask(self, instr.dst()) & MASK_B;
+        let op2 = read_opmask(self, instr.src()) & MASK_B;
+        self.oszapc.set_oszapc_logic_32(1); // clearEFlagsOSZAPC
+        if (op1 & op2) == 0 { self.oszapc.set_zf(true); }
+        if ((!op1) & op2 & MASK_B) == 0 { self.oszapc.set_cf(true); }
         Ok(())
     }
-    /// KTESTW KGw, KEw
+    /// KTESTW KGw, KEw — Bochs KTESTW_KGwKEwR
     pub fn ktestw_kgw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.dst()) & MASK_W;
-        let s2 = read_opmask(self, instr.src()) & MASK_W;
-        let zf = (s1 & s2) == 0;
-        let cf = ((!s1) & s2 & MASK_W) == 0;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        let op1 = read_opmask(self, instr.dst()) & MASK_W;
+        let op2 = read_opmask(self, instr.src()) & MASK_W;
+        self.oszapc.set_oszapc_logic_32(1);
+        if (op1 & op2) == 0 { self.oszapc.set_zf(true); }
+        if ((!op1) & op2 & MASK_W) == 0 { self.oszapc.set_cf(true); }
         Ok(())
     }
-    /// KTESTD KGd, KEd
+    /// KTESTD KGd, KEd — Bochs KTESTD_KGdKEdR
     pub fn ktestd_kgd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.dst()) & MASK_D;
-        let s2 = read_opmask(self, instr.src()) & MASK_D;
-        let zf = (s1 & s2) == 0;
-        let cf = ((!s1) & s2 & MASK_D) == 0;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        let op1 = read_opmask(self, instr.dst()) & MASK_D;
+        let op2 = read_opmask(self, instr.src()) & MASK_D;
+        self.oszapc.set_oszapc_logic_32(1);
+        if (op1 & op2) == 0 { self.oszapc.set_zf(true); }
+        if ((!op1) & op2 & MASK_D) == 0 { self.oszapc.set_cf(true); }
         Ok(())
     }
-    /// KTESTQ KGq, KEq
+    /// KTESTQ KGq, KEq — Bochs KTESTQ_KGqKEqR
     pub fn ktestq_kgq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.dst());
-        let s2 = read_opmask(self, instr.src());
-        let zf = (s1 & s2) == 0;
-        let cf = ((!s1) & s2) == 0;
-        self.eflags.remove(EFlags::OSZAPC);
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if cf { self.eflags.insert(EFlags::CF); }
+        let op1 = read_opmask(self, instr.dst());
+        let op2 = read_opmask(self, instr.src());
+        self.oszapc.set_oszapc_logic_32(1);
+        if (op1 & op2) == 0 { self.oszapc.set_zf(true); }
+        if ((!op1) & op2) == 0 { self.oszapc.set_cf(true); }
         Ok(())
     }
 

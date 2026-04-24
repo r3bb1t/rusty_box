@@ -19,7 +19,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
     xmm::BxPackedXmmRegister,
 };
 
@@ -1681,21 +1680,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
-        // Clear OF, SF, AF, ZF, PF, CF
-        self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::ZF | EFlags::PF | EFlags::CF);
-
-            if (op2.xmm64u(0) & op1.xmm64u(0)) == 0
-                && (op2.xmm64u(1) & op1.xmm64u(1)) == 0
-            {
-                self.eflags.insert(EFlags::ZF);
-            }
-
-            if (op2.xmm64u(0) & !op1.xmm64u(0)) == 0
-                && (op2.xmm64u(1) & !op1.xmm64u(1)) == 0
-            {
-                self.eflags.insert(EFlags::CF);
-            }
+        // Bochs sse.cc PTEST_VdqWdqR: clearEFlagsOSZAPC();
+        self.oszapc.set_oszapc_logic_32(1);
+        if (op2.xmm64u(0) & op1.xmm64u(0)) == 0
+            && (op2.xmm64u(1) & op1.xmm64u(1)) == 0
+        {
+            self.oszapc.set_zf(true);
+        }
+        if (op2.xmm64u(0) & !op1.xmm64u(0)) == 0
+            && (op2.xmm64u(1) & !op1.xmm64u(1)) == 0
+        {
+            self.oszapc.set_cf(true);
+        }
         Ok(())
     }
 

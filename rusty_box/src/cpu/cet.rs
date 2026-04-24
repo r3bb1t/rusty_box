@@ -8,7 +8,6 @@
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 use super::decoder::BxSegregs;
-use super::eflags::EFlags;
 use super::Result;
 
 // CET control MSR bit constants — matches Bochs cet.cc
@@ -411,9 +410,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         let invalid_token = self.shadow_stack_atomic_clear_busy(laddr, cpl)?;
-        self.eflags.remove(EFlags::OSZAPC);
+        // Bochs cet.cc CLRSSBSY: clearEFlagsOSZAPC(); if (invalid_token) assert_CF();
+        self.oszapc.set_oszapc_logic_32(1);
         if invalid_token {
-            self.set_cf(true);
+            self.oszapc.set_cf(true);
         }
         self.set_ssp(0);
 

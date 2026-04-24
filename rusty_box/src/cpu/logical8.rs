@@ -6,7 +6,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction, BX_64BIT_REG_RIP},
-    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -14,59 +13,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Flag update helpers
     // =========================================================================
 
-    /// Update flags for 8-bit logical operations (AND, OR, XOR, TEST)
+    /// Update flags for 8-bit logical operations (AND, OR, XOR, TEST).
+    /// Bochs SET_FLAGS_OSZAPC_LOGIC_8: clears OF/CF/AF, sets SF/ZF/PF from result.
     pub fn set_flags_oszapc_logic_8(&mut self, result: u8) {
-        // Clear OF, CF (always 0 for logical operations)
-        // Set SF, ZF, PF based on result
-        // AF is undefined
-        let sf = (result & 0x80) != 0;
-        let zf = result == 0;
-        let pf = result.count_ones().is_multiple_of(2);
-
-        self.eflags.remove(EFlags::LOGIC_MASK);
-
-        if pf {
-            self.eflags.insert(EFlags::PF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        // OF=0, CF=0 are already cleared
         self.oszapc.set_oszapc_logic_8(result);
     }
 
-    /// Update flags for 8-bit subtraction (CMP, SUB)
+    /// Update flags for 8-bit subtraction (CMP, SUB).
+    /// Bochs SET_FLAGS_OSZAPC_SUB_8.
     pub fn set_flags_oszapc_sub_8(&mut self, op1: u8, op2: u8, result: u8) {
-        let cf = op1 < op2;
-        let zf = result == 0;
-        let sf = (result & 0x80) != 0;
-        let of = ((op1 ^ op2) & (op1 ^ result) & 0x80) != 0;
-        let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
-        let pf = result.count_ones().is_multiple_of(2);
-
-        self.eflags.remove(EFlags::OSZAPC);
-
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        }
-        if pf {
-            self.eflags.insert(EFlags::PF);
-        }
-        if af {
-            self.eflags.insert(EFlags::AF);
-        }
-        if zf {
-            self.eflags.insert(EFlags::ZF);
-        }
-        if sf {
-            self.eflags.insert(EFlags::SF);
-        }
-        if of {
-            self.eflags.insert(EFlags::OF);
-        }
         self.oszapc.set_oszapc_sub_8(op1, op2, result);
     }
 

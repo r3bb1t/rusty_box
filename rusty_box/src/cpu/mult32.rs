@@ -6,7 +6,6 @@ use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
     decoder::Instruction,
-    eflags::EFlags,
     error::Result,
 };
 
@@ -34,7 +33,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_flags_logic32(product_32l);
         if product_32h != 0 {
             // Set CF and OF if high dword is non-zero
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
         }
 
         Ok(())
@@ -60,7 +59,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.update_flags_logic32(product_32l);
         if product_32h != 0 {
             // Set CF and OF if high dword is non-zero
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
         }
 
         Ok(())
@@ -87,7 +86,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Matching C++: if(product_64 != (Bit32s)product_64)
         // This checks if the 64-bit value equals its sign-extended 32-bit version
         if product_64 != (product_64 as i32 as i64) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
         }
 
         Ok(())
@@ -115,7 +114,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Matching C++: if(product_64 != (Bit32s)product_64)
         // This checks if the 64-bit value equals its sign-extended 32-bit version
         if product_64 != (product_64 as i32 as i64) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
         }
 
         Ok(())
@@ -272,7 +271,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.update_flags_logic32(product_32);
         if product_64 != (product_64 as i32 as i64) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
         }
 
         Ok(())
@@ -295,7 +294,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.update_flags_logic32(product_32);
         if product_64 != (product_64 as i32 as i64) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+            self.oszapc.set_flags_oxxxxc(1, 1); // CF=1, OF=1
         }
 
         Ok(())
@@ -325,7 +324,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_flags_oszapc_logic_32(product_32);
         if product_64 != (product_32 as i32 as i64) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF));
+            self.oszapc.set_flags_oxxxxc(1, 1);
         }
 
         Ok(())
@@ -346,7 +345,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_flags_oszapc_logic_32(product_32);
         if product_64 != (product_32 as i32 as i64) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF));
+            self.oszapc.set_flags_oxxxxc(1, 1);
         }
 
         Ok(())
@@ -369,7 +368,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs: SET_FLAGS_OSZAPC_LOGIC_32 then assert CF/OF if overflow
         self.set_flags_oszapc_logic_32(product_32);
         if product_64 != (product_32 as i32 as i64) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF));
+            self.oszapc.set_flags_oxxxxc(1, 1);
         }
 
         Ok(())
@@ -392,7 +391,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs: SET_FLAGS_OSZAPC_LOGIC_32 then assert CF/OF if overflow
         self.set_flags_oszapc_logic_32(product_32);
         if product_64 != (product_32 as i32 as i64) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF));
+            self.oszapc.set_flags_oxxxxc(1, 1);
         }
 
         Ok(())

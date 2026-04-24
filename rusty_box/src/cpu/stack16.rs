@@ -206,7 +206,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// PUSHF - Push flags (16-bit)
     /// Based on Bochs flag_ctrl.cc PUSHF_Fw
     pub fn pushf_fw(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let mut flags = (self.eflags.bits() & 0xFFFF) as u16;
+        let mut flags = (self.read_eflags() & 0xFFFF) as u16;
 
         if self.v8086_mode()
             && self.eflags.iopl() < 3 {

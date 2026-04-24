@@ -6,7 +6,6 @@ use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
     error::{CpuError, Result},
 };
 
@@ -51,34 +50,34 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Flag getters for conditional jumps
     // =========================================================================
 
-    /// Get Carry Flag
+    /// Get Carry Flag (lazy)
     pub fn get_cf(&self) -> bool {
-        self.eflags.contains(EFlags::CF)
+        self.getb_cf() != 0
     }
 
-    /// Get Zero Flag
+    /// Get Zero Flag (lazy)
     pub fn get_zf(&self) -> bool {
-        self.eflags.contains(EFlags::ZF)
+        self.getb_zf() != 0
     }
 
-    /// Get Sign Flag
+    /// Get Sign Flag (lazy)
     pub fn get_sf(&self) -> bool {
-        self.eflags.contains(EFlags::SF)
+        self.getb_sf() != 0
     }
 
-    /// Get Overflow Flag
+    /// Get Overflow Flag (lazy)
     pub fn get_of(&self) -> bool {
-        self.eflags.contains(EFlags::OF)
+        self.getb_of() != 0
     }
 
-    /// Get Parity Flag
+    /// Get Parity Flag (lazy)
     pub fn get_pf(&self) -> bool {
-        self.eflags.contains(EFlags::PF)
+        self.getb_pf() != 0
     }
 
-    /// Get Auxiliary Flag (not directly used in conditionals, but useful)
+    /// Get Auxiliary Flag (lazy)
     pub fn get_af(&self) -> bool {
-        self.eflags.contains(EFlags::AF)
+        self.getb_af() != 0
     }
 
     // =========================================================================

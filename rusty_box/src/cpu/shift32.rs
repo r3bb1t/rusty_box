@@ -8,7 +8,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -455,12 +454,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn update_flags_sar32(&mut self, result: u32, cf: bool) {
         self.update_flags_logic32(result);
-        if cf {
-            self.eflags.insert(EFlags::CF);
-        } else {
-            self.eflags.remove(EFlags::CF);
-        }
-        self.eflags.remove(EFlags::OF);
+        self.set_cf_of(cf, false);
     }
 
     // =========================================================================

@@ -54,7 +54,6 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
     xmm::BxPackedXmmRegister,
 };
 
@@ -147,26 +146,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
-    /// Set EFLAGS for COMISS/COMISD/UCOMISS/UCOMISD comparison.
-    /// Clears OF, SF, AF. Sets ZF, PF, CF based on result.
+    /// Mirrors Bochs fpu/fpu_compare.cc `write_eflags_fpu_compare(int float_relation)`.
+    /// - unordered (NaN): setEFlagsOSZAPC(ZF|PF|CF)
+    /// - greater:         clearEFlagsOSZAPC()
+    /// - less:            clearEFlagsOSZAPC(); assert_CF()
+    /// - equal:           clearEFlagsOSZAPC(); assert_ZF()
     #[inline]
     fn sse_set_eflags_compare(&mut self, unordered: bool, less: bool, equal: bool) {
-        // Clear OF, SF, AF first
-        self.eflags.remove(EFlags::OF | EFlags::SF | EFlags::AF);
-        // Clear ZF, PF, CF — then set as needed
-        self.eflags.remove(EFlags::ZF | EFlags::PF | EFlags::CF);
-
         if unordered {
-            // NaN: ZF=1, PF=1, CF=1
-            self.eflags.insert(EFlags::ZF | EFlags::PF | EFlags::CF);
+            // Bochs: setEFlagsOSZAPC(ZFMask | PFMask | CFMask)
+            // = set_oszapc with CF=1, PF=1, ZF=1, others=0
+            self.set_eflags_oszapc(
+                super::eflags::EFlags::ZF.bits()
+                    | super::eflags::EFlags::PF.bits()
+                    | super::eflags::EFlags::CF.bits(),
+            );
         } else if less {
-            // op1 < op2: CF=1
-            self.eflags.insert(EFlags::CF);
+            // Bochs: clearEFlagsOSZAPC(); assert_CF()
+            self.oszapc.set_oszapc_logic_32(1);
+            self.oszapc.set_cf(true);
         } else if equal {
-            // op1 == op2: ZF=1
-            self.eflags.insert(EFlags::ZF);
+            // Bochs: clearEFlagsOSZAPC(); assert_ZF()
+            self.oszapc.set_oszapc_logic_32(1);
+            self.oszapc.set_zf(true);
+        } else {
+            // greater: clearEFlagsOSZAPC()
+            self.oszapc.set_oszapc_logic_32(1);
         }
-        // op1 > op2: all clear (done above)
     }
 
     // ========================================================================

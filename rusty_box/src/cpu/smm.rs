@@ -392,7 +392,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // EIP, EFLAGS
         smram_set!(SMRAM_FIELD_EIP, self.eip());
-        smram_set!(SMRAM_FIELD_EFLAGS, self.eflags.bits());
+        smram_set!(SMRAM_FIELD_EFLAGS, self.eflags_materialized());
 
         // DR6, DR7
         smram_set!(SMRAM_FIELD_DR6, self.dr6.get32());

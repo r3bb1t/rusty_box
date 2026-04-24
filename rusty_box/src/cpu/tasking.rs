@@ -101,7 +101,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
         }
 
         // Capture old EFLAGS before modification (Bochs tasking.cc)
-        let mut old_eflags = self.eflags.bits();
+        let mut old_eflags = self.read_eflags();
 
         // If moving to busy task, clear NT bit (Bochs tasking.cc)
         if tss_descriptor.r#type == 0x3 || tss_descriptor.r#type == 0xB {
