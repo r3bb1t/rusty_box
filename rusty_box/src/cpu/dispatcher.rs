@@ -1426,12 +1426,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::Wbinvd => self.wbinvd(instr),
             Opcode::Invd => self.invd(instr),
             // VMX stubs — #GP(0) in VMX root, #UD outside VMX
-            Opcode::VmxonMq | Opcode::Vmxoff | Opcode::Vmlaunch | Opcode::Vmresume
+            // VMX operation-mode entry/exit — wired in Session 3. The remaining
+            // VMX opcodes (VMLAUNCH/VMRESUME/VMCLEAR/VMPTRLD/VMREAD/VMWRITE)
+            // still fall through to #UD pending Session 4 VMCS work.
+            Opcode::VmxonMq => self.vmxon(instr),
+            Opcode::Vmxoff => self.vmxoff(instr),
+            Opcode::Vmlaunch | Opcode::Vmresume
             | Opcode::VmclearMq | Opcode::VmptrldMq
             | Opcode::VmreadEdGd | Opcode::VmwriteGdEd
             | Opcode::VmreadEqGq | Opcode::VmwriteGqEq => {
-                // VMX not implemented — raise #UD (matches hardware behavior
-                // when CR4.VMXE is not set or LOCK prefix missing)
+                // Session 4 scope — raise #UD for now.
                 self.exception(super::cpu::Exception::Ud, 0)
             }
             Opcode::Invlpg => self.invlpg(instr),

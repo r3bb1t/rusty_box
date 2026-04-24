@@ -863,6 +863,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_IA32_UINTR_TT => self.uintr.uitt_addr,
             // Bochs msr.cc — PKS read.
             BX_MSR_IA32_PKRS => self.pkrs as u64,
+            // Bochs msr.cc IA32_FEATURE_CONTROL read — carries the VMX enable
+            // and LOCK bits firmware programs before VMXON.
+            BX_MSR_IA32_FEATURE_CONTROL => self.msr.ia32_feature_ctrl as u64,
             BX_MSR_BIOS_SIGN_ID => 0x02000065, // Skylake-X microcode revision
             BX_MSR_MTRRCAP => BX_MSR_MTRRCAP_DEFAULT,
             BX_MSR_PMC0..=BX_MSR_PMC7 => 0, // Performance counters — return 0
@@ -1062,6 +1065,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Bochs msr.cc PKS write — val stored, then set_PKeys recomputes allow masks.
             BX_MSR_IA32_PKRS => {
                 self.set_pkeys(self.pkru, val as u32);
+            }
+            // Bochs msr.cc IA32_FEATURE_CONTROL write — once the LOCK bit
+            // (bit 0) is set, further writes raise #GP. Only the low bits
+            // (LOCK + VMX_ENABLE_IN_SMX + VMX_ENABLE_OUTSIDE_SMX + senter
+            // control bits) are writable.
+            BX_MSR_IA32_FEATURE_CONTROL => {
+                if (self.msr.ia32_feature_ctrl
+                    & super::vmx::BX_IA32_FEATURE_CONTROL_LOCK_BIT)
+                    != 0
+                {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.ia32_feature_ctrl = val as u32;
+            }
+            // Bochs msr.cc: the IA32_VMX_* capability MSRs (0x480..0x492) are
+            // read-only; writes raise #GP(0). Fall into the catch-all.
+            BX_MSR_VMX_BASIC..=BX_MSR_VMX_VMEXIT_CTRLS2 => {
+                tracing::trace!("WRMSR: VMX capability MSR {:#x} is read-only, #GP(0)", msr);
+                return self.exception(super::cpu::Exception::Gp, 0);
             }
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr = val as u32,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr = val,

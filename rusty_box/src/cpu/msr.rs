@@ -125,6 +125,34 @@ pub const BX_MSR_IA32_UINTR_TT: u32 = 0x98A;
 pub const BX_MSR_IA32_PKRS: u32 = 0x6E1;
 
 // =========================================================================
+// VMX MSRs — Bochs msr.h
+// =========================================================================
+
+/// IA32_FEATURE_CONTROL — VMX enable + LOCK bits.
+pub const BX_MSR_IA32_FEATURE_CONTROL: u32 = 0x03A;
+
+pub const BX_MSR_VMX_BASIC: u32 = 0x480;
+pub const BX_MSR_VMX_PINBASED_CTRLS: u32 = 0x481;
+pub const BX_MSR_VMX_PROCBASED_CTRLS: u32 = 0x482;
+pub const BX_MSR_VMX_VMEXIT_CTRLS: u32 = 0x483;
+pub const BX_MSR_VMX_VMENTRY_CTRLS: u32 = 0x484;
+pub const BX_MSR_VMX_MISC: u32 = 0x485;
+pub const BX_MSR_VMX_CR0_FIXED0: u32 = 0x486;
+pub const BX_MSR_VMX_CR0_FIXED1: u32 = 0x487;
+pub const BX_MSR_VMX_CR4_FIXED0: u32 = 0x488;
+pub const BX_MSR_VMX_CR4_FIXED1: u32 = 0x489;
+pub const BX_MSR_VMX_VMCS_ENUM: u32 = 0x48A;
+pub const BX_MSR_VMX_PROCBASED_CTRLS2: u32 = 0x48B;
+pub const BX_MSR_VMX_EPT_VPID_CAP: u32 = 0x48C;
+pub const BX_MSR_VMX_TRUE_PINBASED_CTRLS: u32 = 0x48D;
+pub const BX_MSR_VMX_TRUE_PROCBASED_CTRLS: u32 = 0x48E;
+pub const BX_MSR_VMX_TRUE_VMEXIT_CTRLS: u32 = 0x48F;
+pub const BX_MSR_VMX_TRUE_VMENTRY_CTRLS: u32 = 0x490;
+pub const BX_MSR_VMX_VMFUNC: u32 = 0x491;
+pub const BX_MSR_VMX_PROCBASED_CTRLS3: u32 = 0x492;
+pub const BX_MSR_VMX_VMEXIT_CTRLS2: u32 = 0x493;
+
+// =========================================================================
 // Long-mode MSRs (AMD64/Intel EM64T) — Bochs msr.h
 // =========================================================================
 
