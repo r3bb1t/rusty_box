@@ -137,14 +137,7 @@ cd rusty_box_decoder && cargo +nightly fuzz run fuzz_target_1
 
 ## Performance
 
-Release build on modern hardware: ~22-40 MIPS depending on workload phase.
-
-| Phase | MIPS |
-|-------|------|
-| BIOS real-mode | ~22 |
-| Kernel decompressor | ~25-50 |
-| Kernel init | ~22-27 |
-| Alpine steady-state | ~40 |
+Release build on modern hardware: typically **50+ MIPS** on a recent laptop and **100+ MIPS** on newer desktops, depending on workload phase. Numbers vary with CPU model, clock, and the guest's instruction mix (BIOS real-mode is slower than long-mode kernel/userspace).
 
 ## References
 
