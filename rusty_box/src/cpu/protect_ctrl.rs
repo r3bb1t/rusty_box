@@ -26,6 +26,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
+        // Bochs protect_ctrl.cc LGDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+            return Ok(());
+        }
         // Bochs: (eaddr + 2) & i->asize_mask() — mask for 16-bit address wrap
         let asize_mask: u64 = if self.long64_mode() {
             0xFFFF_FFFF_FFFF_FFFF
@@ -61,6 +65,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
+        // Bochs protect_ctrl.cc SGDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+            return Ok(());
+        }
         let asize_mask: u64 = if self.long64_mode() {
             0xFFFF_FFFF_FFFF_FFFF
         } else if instr.as32_l() == 0 {
@@ -89,6 +97,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
+        // Bochs protect_ctrl.cc LIDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+            return Ok(());
+        }
         let asize_mask: u64 = if self.long64_mode() {
             0xFFFF_FFFF_FFFF_FFFF
         } else if instr.as32_l() == 0 {
@@ -123,6 +135,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
+        // Bochs protect_ctrl.cc SIDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+            return Ok(());
+        }
         let asize_mask: u64 = if self.long64_mode() {
             0xFFFF_FFFF_FFFF_FFFF
         } else if instr.as32_l() == 0 {
@@ -150,6 +166,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
             if cpl != 0 {
                 return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+        // Bochs protect_ctrl.cc SLDT_Ew — DESCRIPTOR_TABLE_VMEXIT gate. Qualification
+        // carries the resolved address when the operand is memory; zero for register.
+        if self.in_vmx_guest {
+            let qual = if instr.mod_c0() { 0 } else { self.resolve_addr(instr) };
+            if self.vmexit_check_ldtr_tr_access(qual)? {
+                return Ok(());
             }
         }
         let val = self.ldtr.selector.value;
@@ -211,6 +235,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
             if cpl != 0 {
                 return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+        // Bochs protect_ctrl.cc STR_Ew — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest {
+            let qual = if instr.mod_c0() { 0 } else { self.resolve_addr(instr) };
+            if self.vmexit_check_ldtr_tr_access(qual)? {
+                return Ok(());
             }
         }
         let val = self.tr.selector.value;
@@ -672,6 +703,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
         let laddr = self.get_laddr64(seg as usize, eaddr);
+        // Bochs protect_ctrl.cc LGDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+            return Ok(());
+        }
         let limit = self.system_read_word(laddr)?;
         let base = self.system_read_qword(laddr.wrapping_add(2))?;
         if !self.is_canonical(base) {
@@ -692,6 +727,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
         let laddr = self.get_laddr64(seg as usize, eaddr);
+        // Bochs protect_ctrl.cc LIDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+            return Ok(());
+        }
         let limit = self.system_read_word(laddr)?;
         let base = self.system_read_qword(laddr.wrapping_add(2))?;
         if !self.is_canonical(base) {
@@ -715,6 +754,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
         let laddr = self.get_laddr64(seg as usize, eaddr);
+        // Bochs protect_ctrl.cc SGDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+            return Ok(());
+        }
         self.system_write_word(laddr, self.gdtr.limit)?;
         self.system_write_qword(laddr.wrapping_add(2), self.gdtr.base)?;
         Ok(())
@@ -732,6 +775,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
         let laddr = self.get_laddr64(seg as usize, eaddr);
+        // Bochs protect_ctrl.cc SIDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+            return Ok(());
+        }
         self.system_write_word(laddr, self.idtr.limit)?;
         self.system_write_qword(laddr.wrapping_add(2), self.idtr.base)?;
         Ok(())

@@ -387,9 +387,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // bx_dbg_exception(BX_CPU_ID, vector, error_code);
         // #endif
 
-        // #if BX_SUPPORT_VMX
-        // VMexit_Event(BX_HARDWARE_EXCEPTION, vector, error_code, push_error);
-        // #endif
+        // VMX exception intercept — Bochs vmexit.cc VMexit_Event. Consults
+        // the exception bitmap (with PF mask/match for #PF) and, if the bit
+        // is set, takes a VMEXIT with interruption info populated.
+        if self.in_vmx_guest
+            && self.vmexit_check_exception(vector as u32, u32::from(error_code), push_error)?
+        {
+            return Ok(());
+        }
 
         // SVM exception intercept
         if self.in_svm_guest {

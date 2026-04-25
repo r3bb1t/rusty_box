@@ -62,6 +62,13 @@ const VMCS_64BIT_HOST_IA32_EFER: u32 = 0x2C02;
 const VMCS_32BIT_CONTROL_PIN_BASED_EXEC_CONTROLS: u32 = 0x4000;
 const VMCS_32BIT_CONTROL_PROCESSOR_BASED_VMEXEC_CONTROLS: u32 = 0x4002;
 const VMCS_32BIT_CONTROL_EXECUTION_BITMAP: u32 = 0x4004;
+const VMCS_32BIT_CONTROL_PAGE_FAULT_ERR_CODE_MASK: u32 = 0x4006;
+const VMCS_32BIT_CONTROL_PAGE_FAULT_ERR_CODE_MATCH: u32 = 0x4008;
+const VMCS_32BIT_CONTROL_CR3_TARGET_COUNT: u32 = 0x400A;
+const VMCS_CR3_TARGET0: u32 = 0x6008;
+const VMCS_CR3_TARGET1: u32 = 0x600A;
+const VMCS_CR3_TARGET2: u32 = 0x600C;
+const VMCS_CR3_TARGET3: u32 = 0x600E;
 const VMCS_32BIT_CONTROL_VMEXIT_CONTROLS: u32 = 0x400C;
 const VMCS_32BIT_CONTROL_SECONDARY_VMEXEC_CONTROLS: u32 = 0x401E;
 const VMCS_32BIT_CONTROL_VMENTRY_CONTROLS: u32 = 0x4012;
@@ -443,6 +450,16 @@ pub struct BxVmcs {
     pub vm_entry_exception_error_code: u32,
     pub vm_entry_instruction_length: u32,
     pub exception_bitmap: u32,
+    // Page-fault error code mask/match for VMEXIT on #PF:
+    // a #PF takes a VMEXIT iff `(errcode & vm_pf_mask) == vm_pf_match` equals
+    // the exception_bitmap bit for #PF. Bochs vm_pf_mask / vm_pf_match.
+    pub vm_pf_mask: u32,
+    pub vm_pf_match: u32,
+    // CR3-target filter for MOV CR3 writes (Bochs vm_cr3_target_cnt /
+    // vm_cr3_target_value). A CR3 write that matches any enabled target
+    // value does *not* VMEXIT even when CR3_WRITE_VMEXIT is set.
+    pub vm_cr3_target_cnt: u32,
+    pub vm_cr3_target_value: [u64; 4],
     pub cr0_guest_host_mask: u64,
     pub cr4_guest_host_mask: u64,
     pub cr0_read_shadow: u64,
@@ -833,6 +850,13 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_32BIT_CONTROL_PIN_BASED_EXEC_CONTROLS => v.pin_based_ctls as u64,
             VMCS_32BIT_CONTROL_PROCESSOR_BASED_VMEXEC_CONTROLS => v.proc_based_ctls as u64,
             VMCS_32BIT_CONTROL_EXECUTION_BITMAP => v.exception_bitmap as u64,
+            VMCS_32BIT_CONTROL_PAGE_FAULT_ERR_CODE_MASK => v.vm_pf_mask as u64,
+            VMCS_32BIT_CONTROL_PAGE_FAULT_ERR_CODE_MATCH => v.vm_pf_match as u64,
+            VMCS_32BIT_CONTROL_CR3_TARGET_COUNT => v.vm_cr3_target_cnt as u64,
+            VMCS_CR3_TARGET0 => v.vm_cr3_target_value[0],
+            VMCS_CR3_TARGET1 => v.vm_cr3_target_value[1],
+            VMCS_CR3_TARGET2 => v.vm_cr3_target_value[2],
+            VMCS_CR3_TARGET3 => v.vm_cr3_target_value[3],
             VMCS_32BIT_CONTROL_SECONDARY_VMEXEC_CONTROLS => v.secondary_proc_based_ctls as u64,
             VMCS_32BIT_CONTROL_VMEXIT_CONTROLS => v.vm_exit_ctls as u64,
             VMCS_32BIT_CONTROL_VMENTRY_CONTROLS => v.vm_entry_ctls as u64,
@@ -946,6 +970,13 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_32BIT_CONTROL_PIN_BASED_EXEC_CONTROLS => v.pin_based_ctls = value as u32,
             VMCS_32BIT_CONTROL_PROCESSOR_BASED_VMEXEC_CONTROLS => v.proc_based_ctls = value as u32,
             VMCS_32BIT_CONTROL_EXECUTION_BITMAP => v.exception_bitmap = value as u32,
+            VMCS_32BIT_CONTROL_PAGE_FAULT_ERR_CODE_MASK => v.vm_pf_mask = value as u32,
+            VMCS_32BIT_CONTROL_PAGE_FAULT_ERR_CODE_MATCH => v.vm_pf_match = value as u32,
+            VMCS_32BIT_CONTROL_CR3_TARGET_COUNT => v.vm_cr3_target_cnt = value as u32,
+            VMCS_CR3_TARGET0 => v.vm_cr3_target_value[0] = value,
+            VMCS_CR3_TARGET1 => v.vm_cr3_target_value[1] = value,
+            VMCS_CR3_TARGET2 => v.vm_cr3_target_value[2] = value,
+            VMCS_CR3_TARGET3 => v.vm_cr3_target_value[3] = value,
             VMCS_32BIT_CONTROL_SECONDARY_VMEXEC_CONTROLS => v.secondary_proc_based_ctls = value as u32,
             VMCS_32BIT_CONTROL_VMEXIT_CONTROLS => v.vm_exit_ctls = value as u32,
             VMCS_32BIT_CONTROL_VMENTRY_CONTROLS => v.vm_entry_ctls = value as u32,
@@ -1416,6 +1447,272 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         Ok(false)
     }
 
+    /// LGDT / SGDT / LIDT / SIDT intercept — Bochs protect_ctrl.cc gates each
+    /// on `vmexec_ctrls2.DESCRIPTOR_TABLE_VMEXIT()`. Qualification here carries
+    /// the resolved displacement / effective address per Bochs vmexit.cc
+    /// VMexit_Instruction; the INSTRUCTION_INFO field is left unpopulated until
+    /// a VMM needs it.
+    pub(super) fn vmexit_check_gdtr_idtr_access(
+        &mut self,
+        qualification: u64,
+    ) -> Result<bool> {
+        let ctls = self.proc_based_ctls2();
+        self.vmexit_if_ctls_set(
+            ctls,
+            VMX_VM_EXEC_CTRL2_DESCRIPTOR_TABLE_VMEXIT,
+            VmxVmexitReason::GdtrIdtrAccess,
+            qualification,
+        )
+    }
+
+    /// LLDT / SLDT / LTR / STR intercept — same gate as GDTR/IDTR above but
+    /// reported as `LdtrTrAccess`.
+    pub(super) fn vmexit_check_ldtr_tr_access(
+        &mut self,
+        qualification: u64,
+    ) -> Result<bool> {
+        let ctls = self.proc_based_ctls2();
+        self.vmexit_if_ctls_set(
+            ctls,
+            VMX_VM_EXEC_CTRL2_DESCRIPTOR_TABLE_VMEXIT,
+            VmxVmexitReason::LdtrTrAccess,
+            qualification,
+        )
+    }
+
+    /// MOV from CR3 intercept — Bochs vmexit.cc VMexit_CR3_Read.
+    /// Qualification layout for CR-access VM-exits (Bochs vmexit.cc):
+    ///   [3:0]   CR number
+    ///   [5:4]   access type: 0 = MOV to CR, 1 = MOV from CR, 2 = CLTS, 3 = LMSW
+    ///   [6]     LMSW memory operand flag (not used here)
+    ///   [11:8]  source/destination GPR
+    ///   [31:16] LMSW source data (cleared for CR access)
+    pub(super) fn vmexit_check_cr3_read(&mut self, gpr: u8) -> Result<bool> {
+        if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_CR3_READ_VMEXIT == 0 {
+            return Ok(false);
+        }
+        let qual: u64 = 3 | (1 << 4) | ((u64::from(gpr) & 0xF) << 8);
+        self.vmx_vmexit(VmxVmexitReason::CrAccess, qual)?;
+        Ok(true)
+    }
+
+    /// MOV to CR3 intercept — Bochs vmexit.cc VMexit_CR3_Write. The CR3-target
+    /// list provides a fast-path: if the new value matches any enabled target
+    /// value, the write is allowed without VMEXIT.
+    pub(super) fn vmexit_check_cr3_write(&mut self, val: u64, gpr: u8) -> Result<bool> {
+        if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_CR3_WRITE_VMEXIT == 0 {
+            return Ok(false);
+        }
+        let cnt = usize::try_from(self.vmcs.vm_cr3_target_cnt).unwrap_or(0);
+        let cnt = cnt.min(self.vmcs.vm_cr3_target_value.len());
+        for i in 0..cnt {
+            if self.vmcs.vm_cr3_target_value[i] == val {
+                return Ok(false);
+            }
+        }
+        let qual: u64 = 3 | ((u64::from(gpr) & 0xF) << 8);
+        self.vmx_vmexit(VmxVmexitReason::CrAccess, qual)?;
+        Ok(true)
+    }
+
+    /// MOV to CR0 intercept — Bochs vmexit.cc VMexit_CR0_Write. The guest
+    /// cannot touch bits pinned by `cr0_guest_host_mask` (aka `vm_cr0_mask`);
+    /// an attempted change triggers a VMEXIT, otherwise the write proceeds
+    /// but masked bits keep their hardware value (read shadow merge).
+    ///
+    /// Returns `(exited, effective_val)`. When `exited` is true the caller
+    /// must return `Ok(())` immediately; otherwise it must write
+    /// `effective_val` (not the raw `val`) to CR0.
+    pub(super) fn vmexit_check_cr0_write(
+        &mut self,
+        val: u64,
+        gpr: u8,
+    ) -> Result<(bool, u64)> {
+        let mask = self.vmcs.cr0_guest_host_mask;
+        let shadow = self.vmcs.cr0_read_shadow;
+        if (mask & shadow) != (mask & val) {
+            self.vmx_vmexit(VmxVmexitReason::CrAccess, (u64::from(gpr) & 0xF) << 8)?;
+            return Ok((true, val));
+        }
+        // Keep bits set in the mask untouched.
+        let cur = u64::from(self.cr0.get32());
+        Ok((false, (cur & mask) | (val & !mask)))
+    }
+
+    /// MOV to CR4 intercept — Bochs vmexit.cc VMexit_CR4_Write. Same shape
+    /// as CR0: VMEXIT when the masked shadow bits change, else merge.
+    pub(super) fn vmexit_check_cr4_write(
+        &mut self,
+        val: u64,
+        gpr: u8,
+    ) -> Result<(bool, u64)> {
+        let mask = self.vmcs.cr4_guest_host_mask;
+        let shadow = self.vmcs.cr4_read_shadow;
+        if (mask & shadow) != (mask & val) {
+            self.vmx_vmexit(
+                VmxVmexitReason::CrAccess,
+                4 | ((u64::from(gpr) & 0xF) << 8),
+            )?;
+            return Ok((true, val));
+        }
+        let cur = self.cr4.get();
+        Ok((false, (cur & mask) | (val & !mask)))
+    }
+
+    /// CLTS intercept — Bochs vmexit.cc VMexit_CLTS. The TS bit (CR0 bit 3)
+    /// is masked: when both the host-mask and read-shadow have TS=1, CLTS
+    /// triggers a VMEXIT with `access type = 2`. Independently, if the host
+    /// pinned TS=0 in the shadow while masking it, CLTS is suppressed and
+    /// CR0.TS is left untouched.
+    ///
+    /// Returns `(exited, suppress_clear)`:
+    /// - `exited`: caller must return `Ok(())` immediately.
+    /// - `suppress_clear`: when true (and `exited` is false), the handler
+    ///   must skip the CR0.TS clear but otherwise complete normally.
+    pub(super) fn vmexit_check_clts(&mut self) -> Result<(bool, bool)> {
+        let mask = self.vmcs.cr0_guest_host_mask;
+        let shadow = self.vmcs.cr0_read_shadow;
+        if (mask & shadow & 0x8) != 0 {
+            // Access type 2 (CLTS) << 4. CR# = 0, GPR = 0.
+            self.vmx_vmexit(VmxVmexitReason::CrAccess, 2u64 << 4)?;
+            return Ok((true, false));
+        }
+        let suppress = (mask & 0x8) != 0 && (shadow & 0x8) == 0;
+        Ok((false, suppress))
+    }
+
+    /// LMSW intercept — Bochs vmexit.cc VMexit_LMSW. LMSW touches only the
+    /// low 4 bits of CR0; an attempted change to a masked bit (relative to
+    /// the read shadow) triggers a VMEXIT. Bit 0 (PE) is one-way: a 0→1
+    /// transition is significant only when shadow.PE=0. Bits 1..3 use plain
+    /// equality against the masked shadow.
+    ///
+    /// Returns `(exited, effective_msw)`. When `exited` is false the caller
+    /// must build the merged value `(cr0 & mask) | (msw & !mask)` for the
+    /// low 4 bits using the returned `effective_msw`.
+    pub(super) fn vmexit_check_lmsw(
+        &mut self,
+        msw: u32,
+        is_memory: bool,
+        laddr: u64,
+    ) -> Result<(bool, u32)> {
+        let mask = (self.vmcs.cr0_guest_host_mask as u32) & 0xF;
+        let shadow = self.vmcs.cr0_read_shadow as u32;
+        let mut vmexit = false;
+        if (mask & msw & 0x1) != 0 && (shadow & 0x1) == 0 {
+            vmexit = true;
+        }
+        if (mask & shadow & 0xE) != (mask & msw & 0xE) {
+            vmexit = true;
+        }
+        if vmexit {
+            let mut qual: u64 = (3u64 << 4) | (u64::from(msw) << 16);
+            if is_memory {
+                qual |= 1 << 6;
+                self.vmcs.guest_linear_addr = laddr;
+            }
+            self.vmx_vmexit(VmxVmexitReason::CrAccess, qual)?;
+            return Ok((true, msw));
+        }
+        // Merge: keep masked bits at their CR0 value.
+        let cr0_lo = self.cr0.get32() & 0xF;
+        let mask_lo = mask & 0xF;
+        let merged = (cr0_lo & mask_lo) | (msw & !mask_lo);
+        Ok((false, merged & 0xF))
+    }
+
+    /// MOV to/from DR intercept — Bochs vmexit.cc VMexit_DR_Access.
+    /// Qualification layout for DR-access VM-exits:
+    ///   [3:0]   DR number
+    ///   [4]     direction: 0 = MOV to DR, 1 = MOV from DR
+    ///   [11:8]  source/destination GPR
+    pub(super) fn vmexit_check_dr_access(
+        &mut self,
+        read: bool,
+        dr: u8,
+        gpr: u8,
+    ) -> Result<bool> {
+        if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_DRX_ACCESS_VMEXIT == 0 {
+            return Ok(false);
+        }
+        let mut qual: u64 = (u64::from(dr) & 0xF) | ((u64::from(gpr) & 0xF) << 8);
+        if read {
+            qual |= 1 << 4;
+        }
+        self.vmx_vmexit(VmxVmexitReason::DrAccess, qual)?;
+        Ok(true)
+    }
+
+    /// Hardware-exception intercept — Bochs vmexit.cc VMexit_Event (the
+    /// `BX_HARDWARE_EXCEPTION` branch). Consults `exception_bitmap` for every
+    /// vector; for #PF the decision additionally depends on the error-code
+    /// mask/match pair. If the guest takes the VMEXIT, the VMCS interruption
+    /// info + error code are recorded and the qualification encodes CR2 for
+    /// #PF or the masked `debug_trap` for #DB. Returns `Ok(true)` when the
+    /// VMEXIT is taken.
+    pub(super) fn vmexit_check_exception(
+        &mut self,
+        vector: u32,
+        error_code: u32,
+        push_error: bool,
+    ) -> Result<bool> {
+        // Bochs vmexit.cc VMexit_Event: #PF does `(err & pf_mask) == pf_match`
+        // XNOR'd with the bitmap; all other vectors just look up the bit.
+        let pf_vector = Exception::Pf as u32;
+        let db_vector = Exception::Db as u32;
+        let vmexit = if vector == pf_vector {
+            let err_match = (error_code & self.vmcs.vm_pf_mask) == self.vmcs.vm_pf_match;
+            let bitmap = (self.vmcs.exception_bitmap >> pf_vector) & 1 != 0;
+            err_match == bitmap
+        } else {
+            (self.vmcs.exception_bitmap >> vector) & 1 != 0
+        };
+        if !vmexit {
+            return Ok(false);
+        }
+
+        // Qualification per Bochs: CR2 for #PF, masked debug_trap for #DB,
+        // 0 otherwise. On #DB, Bochs also clears debug_trap.
+        let qualification = if vector == pf_vector {
+            self.cr2
+        } else if vector == db_vector {
+            let q = self.debug_trap & 0x0000_600F;
+            self.debug_trap = 0;
+            u64::from(q)
+        } else {
+            0
+        };
+
+        // Interruption info layout (Bochs vmexit.cc):
+        //   [7:0] vector, [10:8] type (3 = hardware exception), [11] error
+        //   code delivered, [31] valid. Bits 12 (NMI-unblock) and 13 (FRED
+        //   nested) are not populated yet.
+        const BX_HARDWARE_EXCEPTION: u32 = 3;
+        let mut intr_info = vector | (BX_HARDWARE_EXCEPTION << 8) | (1 << 31);
+        if push_error {
+            intr_info |= 1 << 11;
+        }
+        self.vmcs.exit_intr_info = intr_info;
+        self.vmcs.exit_intr_error_code = error_code;
+
+        self.vmx_vmexit(VmxVmexitReason::ExceptionNmi, qualification)?;
+        Ok(true)
+    }
+
+    /// Task-switch intercept — unconditional in VMX (Bochs vmexit.cc
+    /// VMexit_TaskSwitch has no control-bit gate; fires whenever a task
+    /// switch is attempted from the guest). Qualification layout matches
+    /// Bochs: `tss_selector | (source << 30)`.
+    pub(super) fn vmexit_check_task_switch(
+        &mut self,
+        tss_selector: u16,
+        source: u32,
+    ) -> Result<bool> {
+        let qual = u64::from(tss_selector) | (u64::from(source) << 30);
+        self.vmx_vmexit(VmxVmexitReason::TaskSwitch, qual)?;
+        Ok(true)
+    }
+
     /// I/O port intercept — Bochs vmx.cc VMexit_IO.
     /// Without I/O bitmaps, any IO_VMEXIT bit triggers exits for every port.
     /// With bitmaps, the per-port bit in io_bitmap_addr decides. Bitmap walk
@@ -1441,7 +1738,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         //   [6]    operand encoding (0 = DX, 1 = immediate) — left zero here
         //   [31:16] port number
         let mut qual: u64 = 0;
-        qual |= (size.saturating_sub(1) & 0x7) as u64;
+        qual |= u64::from(size.saturating_sub(1) & 0x7);
         if direction_in {
             qual |= 1 << 3;
         }
@@ -1451,7 +1748,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if rep {
             qual |= 1 << 5;
         }
-        qual |= (port as u64) << 16;
+        qual |= u64::from(port) << 16;
         self.vmx_vmexit(VmxVmexitReason::IoInstruction, qual)?;
         Ok(true)
     }

@@ -1465,6 +1465,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 Ok(())
             }
             Opcode::Rdtsc => self.rdtsc(instr),
+            Opcode::Rdpmc => self.rdpmc(instr),
             Opcode::Rdmsr => self.rdmsr(instr),
             Opcode::Wrmsr => self.wrmsr(instr),
             Opcode::Sysenter => self.sysenter(instr),

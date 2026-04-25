@@ -1049,6 +1049,14 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             return Ok(());
         }
 
+        // Bochs protect_ctrl.cc LLDT_Ew — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest {
+            let qual = if instr.mod_c0() { 0 } else { self.resolve_addr(instr) };
+            if self.vmexit_check_ldtr_tr_access(qual)? {
+                return Ok(());
+            }
+        }
+
         // Read selector from register or memory
         // Group 6 (0F 00): dst()=rm (Bochs: i->dst())
         let raw_selector = if instr.mod_c0() {
@@ -1147,6 +1155,14 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             tracing::error!("LTR: CPL != 0");
             self.exception(Exception::Gp, 0)?;
             return Ok(());
+        }
+
+        // Bochs protect_ctrl.cc LTR_Ew — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest {
+            let qual = if instr.mod_c0() { 0 } else { self.resolve_addr(instr) };
+            if self.vmexit_check_ldtr_tr_access(qual)? {
+                return Ok(());
+            }
         }
 
         // Read selector from register or memory

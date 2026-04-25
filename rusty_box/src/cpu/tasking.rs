@@ -55,6 +55,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
             error_code,
         )?;
 
+        // VMX task switch intercept — unconditional when in VMX guest mode
+        // (Bochs vmexit.cc VMexit_TaskSwitch).
+        if self.in_vmx_guest {
+            self.vmexit_check_task_switch(tss_selector.value, source)?;
+            return Ok(());
+        }
+
         // STEP 2: The processor performs limit-checking on the target TSS
         // Gather info about new TSS (matches lines 158-164)
         let new_tss_max = if tss_descriptor.r#type <= 3 {

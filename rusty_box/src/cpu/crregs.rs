@@ -778,9 +778,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn mov_rd_cr3(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
+        let gpr = instr.src();
+        // Bochs vmexit.cc VMexit_CR3_Read — gated on CR3_READ_VMEXIT.
+        if self.in_vmx_guest && self.vmexit_check_cr3_read(gpr)? {
+            return Ok(());
+        }
         let val_32 = self.cr3 as u32;
-        let gpr = instr.src() as usize;
-        self.set_gpr32(gpr, val_32);
+        self.set_gpr32(usize::from(gpr), val_32);
 
         Ok(())
     }
@@ -800,8 +804,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.check_cpl0_for_cr_dr()?;
         self.invalidate_prefetch_q();
 
-        let src = instr.src1() as usize;
-        let val_32 = self.get_gpr32(src);
+        let src = instr.src1();
+        let raw_val_32 = self.get_gpr32(usize::from(src));
+
+        // Bochs vmexit.cc VMexit_CR0_Write — either VMEXIT or merge the value
+        // so masked (pinned) bits retain their hardware state.
+        let val_32 = if self.in_vmx_guest {
+            let (exited, merged) =
+                self.vmexit_check_cr0_write(u64::from(raw_val_32), src)?;
+            if exited {
+                return Ok(());
+            }
+            merged as u32
+        } else {
+            raw_val_32
+        };
+
         let old_cr0 = self.cr0.get32();
 
         // Bochs check_CR0(): PG without PE is illegal, NW without CD is illegal
@@ -941,19 +959,26 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.check_cpl0_for_cr_dr()?;
         // Bochs crregs.cc — invalidate prefetch queue before CR3 change
         self.invalidate_prefetch_q();
-        let src = instr.src1() as usize;
+        let src = instr.src1();
+        let src_idx = usize::from(src);
 
         // Bochs crregs.cc: In long mode, CR3 gets full 64-bit value
         let mut val = if self.long_mode() {
-            self.get_gpr64(src)
+            self.get_gpr64(src_idx)
         } else {
-            self.get_gpr32(src) as u64
+            u64::from(self.get_gpr32(src_idx))
         };
 
         // Bochs crregs.cc — allow NOFLUSH hint (bit 63) when PCIDE is set,
         // but ignore the hint: always clear it before storing to CR3
         if self.cr4.pcide() {
             val &= !(1u64 << 63);
+        }
+
+        // Bochs vmexit.cc VMexit_CR3_Write — gated on CR3_WRITE_VMEXIT, with
+        // a fast-path when the new value matches any enabled CR3-target value.
+        if self.in_vmx_guest && self.vmexit_check_cr3_write(val, src)? {
+            return Ok(());
         }
 
         self.cr3 = val;
@@ -991,8 +1016,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.check_cpl0_for_cr_dr()?;
         self.invalidate_prefetch_q();
 
-        let src = instr.src1() as usize;
-        let val_32 = self.get_gpr32(src) as u64;
+        let src = instr.src1();
+        let raw_val_32 = u64::from(self.get_gpr32(usize::from(src)));
+
+        // Bochs vmexit.cc VMexit_CR4_Write — VMEXIT or merge per mask/shadow.
+        let val_32 = if self.in_vmx_guest {
+            let (exited, merged) =
+                self.vmexit_check_cr4_write(raw_val_32, src)?;
+            if exited {
+                return Ok(());
+            }
+            merged
+        } else {
+            raw_val_32
+        };
 
         // Bochs check_CR4(): reject unsupported bits using cr4_suppmask
         // computed at reset from CPUID features (matches crregs.cc)
@@ -1152,6 +1189,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
+        let is_memory = !instr.mod_c0();
+        let mut linear_addr: u64 = 0;
         let mut msw = if instr.mod_c0() {
             // For Group 7 (0F 01): b1=0x101, (b1 & 0x0F)==0x01 → Ed,Gd branch: DST=rm, SRC1=nnn
             // So dst() = rm = actual register. Matches Bochs: BX_READ_16BIT_REG(i->src()) where
@@ -1160,8 +1199,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = super::decoder::BxSegregs::from(instr.seg());
+            linear_addr = self.get_laddr64(seg as usize, u64::from(eaddr));
             self.v_read_word(seg, eaddr)?
         };
+
+        // Bochs vmexit.cc VMexit_LMSW: the intercept inspects the raw source
+        // value and either VMEXITs or returns the masked-merged value.
+        if self.in_vmx_guest {
+            let (exited, merged) =
+                self.vmexit_check_lmsw(u32::from(msw), is_memory, linear_addr)?;
+            if exited {
+                return Ok(());
+            }
+            msw = merged as u16;
+        }
 
         // LMSW cannot clear PE (Bochs crregs.cc)
         if self.cr0.pe() {
@@ -1406,7 +1457,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn mov_rq_cr3(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
-        self.set_gpr64(instr.src() as usize, self.cr3);
+        let gpr = instr.src();
+        // Bochs vmexit.cc VMexit_CR3_Read — gated on CR3_READ_VMEXIT.
+        if self.in_vmx_guest && self.vmexit_check_cr3_read(gpr)? {
+            return Ok(());
+        }
+        self.set_gpr64(usize::from(gpr), self.cr3);
         Ok(())
     }
 

@@ -329,6 +329,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             tracing::trace!("CLTS: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
+        // Bochs vmexit.cc VMexit_CLTS.
+        if self.in_vmx_guest {
+            let (exited, suppress) = self.vmexit_check_clts()?;
+            if exited {
+                return Ok(());
+            }
+            if suppress {
+                return Ok(());
+            }
+        }
         let cr0_val = self.cr0.get32();
         self.cr0.set32(cr0_val & !(1u32 << 3));
         Ok(())
@@ -842,6 +852,50 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// RDPMC — Read Performance-Monitoring Counter.
+    /// Bochs proc_ctrl.cc RDPMC. We don't emulate the performance counters
+    /// themselves, so the return value matches Bochs: EAX=EDX=0.
+    pub(super) fn rdpmc(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+        // CR4.PCE=0 and CPL!=0 → #GP. In real mode CPL=0 so this always passes.
+        if !self.cr4.pce() {
+            let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+                .selector
+                .rpl;
+            if cpl != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+
+        // Bochs vmx.cc VMexit_Rdpmc.
+        if self.in_vmx_guest && self.vmexit_check_rdpmc()? {
+            return Ok(());
+        }
+        // Bochs svm.cc SVM_INTERCEPT0_RDPMC.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_RDPMC)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::Rdpmc as i32, 0, 0);
+        }
+
+        // Bochs clips the counter index: P4 (SSE2) allows 0..17, earlier
+        // families 0..1. Out-of-range → #GP.
+        let ecx = self.ecx();
+        let limit = if self
+            .bx_cpuid_support_isa_extension(super::decoder::X86Feature::IsaSse2)
+        {
+            18
+        } else {
+            2
+        };
+        if (ecx & 0x7fff_ffff) >= limit {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        self.set_rax(0);
+        self.set_rdx(0);
+        Ok(())
+    }
+
     // =========================================================================
     // MSR instructions
     // =========================================================================
@@ -1271,14 +1325,23 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // DST=rm=GPR destination, SRC1=nnn=DR number
         // Bochs crregs.cc: switch(i->src())=DR, BX_WRITE_32BIT_REGZ(i->dst())=GPR
         // Our decoder maps: dst()=rm=GPR, src1()=nnn=DR
-        let dr_idx = instr.src1() as usize; // nnn = DR register number
-        let dst_gpr = instr.dst() as usize; // rm = GPR destination register
+        let dr_idx = instr.src1(); // nnn = DR register number
+        let dst_gpr = instr.dst(); // rm = GPR destination register
 
         // Bochs crregs.cc: CR4.DE check — DR4/DR5 access raises #UD when DE=1
         if (dr_idx == 4 || dr_idx == 5) && self.cr4.de() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
+        // Bochs vmexit.cc VMexit_DR_Access — gated on DRx_ACCESS_VMEXIT.
+        if self.in_vmx_guest
+            && self.vmexit_check_dr_access(true, dr_idx, dst_gpr)?
+        {
+            return Ok(());
+        }
+
+        let dr_idx = usize::from(dr_idx);
+        let dst_gpr = usize::from(dst_gpr);
         let val: u32 = match dr_idx {
             0..=3 => self.dr[dr_idx] as u32,
             4 | 6 => self.dr6.get32(), // DR4 aliases DR6 when CR4.DE=0
@@ -1303,14 +1366,23 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         self.invalidate_prefetch_q();
 
-        let dr_idx = instr.dst() as usize;
-        let src_gpr = instr.src1() as usize;
+        let dr_idx = instr.dst();
+        let src_gpr = instr.src1();
 
         // Bochs crregs.cc: CR4.DE check — DR4/DR5 access raises #UD when DE=1
         if (dr_idx == 4 || dr_idx == 5) && self.cr4.de() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
+        // Bochs vmexit.cc VMexit_DR_Access — gated on DRx_ACCESS_VMEXIT.
+        if self.in_vmx_guest
+            && self.vmexit_check_dr_access(false, dr_idx, src_gpr)?
+        {
+            return Ok(());
+        }
+
+        let dr_idx = usize::from(dr_idx);
+        let src_gpr = usize::from(src_gpr);
         let val = self.get_gpr32(src_gpr);
         match dr_idx {
             0..=3 => {
