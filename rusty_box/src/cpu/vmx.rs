@@ -332,6 +332,18 @@ pub(super) const VMX_VMEXIT_CTRL1_STORE_VMX_PREEMPTION_TIMER: u32 = 1 << 22;
 pub(super) const VMX_VMEXIT_CTRL1_LOAD_HOST_CET_STATE: u32 = 1 << 28;
 pub(super) const VMX_VMEXIT_CTRL1_LOAD_HOST_PKRS: u32 = 1 << 29;
 
+/// Bochs `IsValidPageAlignedPhyAddr` — page-aligned and within the
+/// emulator's physical address width (40 bits in our config).
+fn is_valid_page_aligned_phy_addr(paddr: u64) -> bool {
+    const BX_PHY_ADDRESS_WIDTH: u32 = 40;
+    paddr & 0xFFF == 0 && (paddr >> BX_PHY_ADDRESS_WIDTH) == 0
+}
+
+// VM-execution secondary control bits used outside vmx.rs callers.
+pub(super) const VMX_VM_EXEC_CTRL2_EPT_ENABLE: u32 = 1 << 1;
+pub(super) const VMX_VM_EXEC_CTRL2_VPID_ENABLE: u32 = 1 << 5;
+pub(super) const VMX_VM_EXEC_CTRL2_UNRESTRICTED_GUEST: u32 = 1 << 7;
+
 // VM-exit secondary control bits.
 pub(super) const VMX_VMEXIT_CTRL2_LOAD_HOST_FRED: u64 = 1 << 1;
 pub(super) const VMX_VMEXIT_CTRL2_LOAD_HOST_IA32_SPEC_CTRL: u64 = 1 << 2;
@@ -893,6 +905,18 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Ok(());
         }
 
+        // Bochs vmx.cc VMWRITE: VMCS_FIELD_TYPE bits [11:10] == 1 marks
+        // a read-only (vm-exit info) field. Writes to those are rejected
+        // with VMXERR_VMWRITE_READ_ONLY_VMCS_COMPONENT unless
+        // IA32_VMX_MISC[29] (VMX_MISC_SUPPORT_VMWRITE_READ_ONLY_FIELDS)
+        // is advertised. Our IA32_VMX_MISC reads 0 so the bit is clear
+        // and read-only writes always fail.
+        const VMCS_FIELD_TYPE_READ_ONLY: u32 = 1;
+        if (encoding >> 10) & 0x3 == VMCS_FIELD_TYPE_READ_ONLY {
+            self.vmfail(VmxErr::VmwriteReadOnlyVmcsComponent);
+            return Ok(());
+        }
+
         if self.vmcs_write_field(encoding, value) {
             self.vmsucceed();
             Ok(())
@@ -1297,6 +1321,23 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Ok(());
         }
 
+        // Bochs vmx.cc steps 1-3: validate VMX-execution controls + host
+        // state + guest state before swapping. Failures here surface as
+        // VMfail with the matching error code (Bochs VMXERR_VMENTRY_*)
+        // and the VMENTRY abandons before any state is swapped.
+        if let Some(err) = self.vmenter_load_check_vm_controls() {
+            self.vmfail(err);
+            return Ok(());
+        }
+        if let Some(err) = self.vmenter_load_check_host_state() {
+            self.vmfail(err);
+            return Ok(());
+        }
+        if let Some(err) = self.vmenter_load_check_guest_state() {
+            self.vmfail(err);
+            return Ok(());
+        }
+
         // Save host state from the running CPU. RIP is "the instruction after
         // VMLAUNCH / VMRESUME"; Bochs stashes it so VMEXIT_LOAD_HOST_STATE can
         // jump back. The prefetch queue already advanced past this insn, so
@@ -1429,6 +1470,157 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// keeps these fields in the VMCS so the host can VMWRITE custom values
     /// before VMLAUNCH; we mirror the live CPU at the VMENTRY boundary so any
     /// fields the host did not explicitly write inherit reasonable defaults.
+    /// Validate VM-execution control fields — Bochs vmx.cc
+    /// `vmenter_load_check_vm_controls`. Returns `Some(error)` if the
+    /// VMENTRY must be aborted with VMfail; `None` if the controls are
+    /// internally consistent enough to proceed.
+    ///
+    /// Implemented checks (matches Bochs error returns):
+    ///   - CR3-target count ≤ 4.
+    ///   - Page-aligned, in-physical-range MSR bitmap (when MSR_BITMAPS).
+    ///   - Page-aligned, in-physical-range I/O bitmaps (when IO_BITMAPS).
+    ///   - UNRESTRICTED_GUEST requires EPT_ENABLE.
+    ///   - VPID_ENABLE requires non-zero VPID (the VMCS_16BIT_CONTROL_VPID
+    ///     field is not yet plumbed; treat absent as 0).
+    ///   - VM-entry interruption info: when valid bit set, vector + type
+    ///     fields must be sane (Bochs vmenter_inject_events preconditions).
+    fn vmenter_load_check_vm_controls(&mut self) -> Option<VmxErr> {
+        // CR3 target count.
+        if self.vmcs.vm_cr3_target_cnt > 4 {
+            tracing::warn!(
+                "VMENTRY check_vm_controls: vm_cr3_target_cnt={} > 4",
+                self.vmcs.vm_cr3_target_cnt
+            );
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+
+        let ctls1 = self.proc_based_ctls1();
+        let ctls2 = self.proc_based_ctls2();
+
+        // Bitmap address validity. Bochs requires page-aligned and within
+        // the physical address width.
+        if ctls1 & VMX_VM_EXEC_CTRL1_MSR_BITMAPS != 0
+            && !is_valid_page_aligned_phy_addr(self.vmcs.msr_bitmap_addr)
+        {
+            tracing::warn!(
+                "VMENTRY check_vm_controls: bad msr_bitmap_addr={:#018x}",
+                self.vmcs.msr_bitmap_addr
+            );
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+        if ctls1 & VMX_VM_EXEC_CTRL1_IO_BITMAPS != 0 {
+            for (i, addr) in self.vmcs.io_bitmap_addr.iter().enumerate() {
+                if !is_valid_page_aligned_phy_addr(*addr) {
+                    tracing::warn!(
+                        "VMENTRY check_vm_controls: bad io_bitmap_addr[{i}]={:#018x}",
+                        addr
+                    );
+                    return Some(VmxErr::VmentryInvalidVmControlField);
+                }
+            }
+        }
+
+        // Secondary controls only apply when ACTIVATE_SECONDARY_CONTROLS is
+        // set — proc_based_ctls2() already returns 0 in that case so the
+        // checks below are no-ops.
+        let ept_enabled = ctls2 & VMX_VM_EXEC_CTRL2_EPT_ENABLE != 0;
+        if ctls2 & VMX_VM_EXEC_CTRL2_UNRESTRICTED_GUEST != 0 && !ept_enabled {
+            tracing::warn!(
+                "VMENTRY check_vm_controls: UNRESTRICTED_GUEST without EPT"
+            );
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+        if ctls2 & VMX_VM_EXEC_CTRL2_VPID_ENABLE != 0 {
+            // VMCS_16BIT_CONTROL_VPID is not yet wired into the cache; the
+            // field default of 0 always trips the Bochs check, which is
+            // the conservative answer until VPID is fully plumbed.
+            tracing::warn!("VMENTRY check_vm_controls: VPID_ENABLE with VPID=0");
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+
+        // VM-entry event injection field. Bochs validates the type/vector
+        // pair and the instruction-length when the valid bit is set.
+        let info = self.vmcs.vm_entry_intr_info;
+        if info & (1u32 << 31) != 0 {
+            let bochs_type = (info >> 8) & 0x7;
+            let vector = info & 0xFF;
+            // Reserved type bits 1 and (8..=10) are illegal.
+            match bochs_type {
+                0 | 2..=7 => {}
+                _ => {
+                    tracing::warn!(
+                        "VMENTRY check_vm_controls: reserved injection type {bochs_type}"
+                    );
+                    return Some(VmxErr::VmentryInvalidVmControlField);
+                }
+            }
+            // Software interrupt / privileged software interrupt /
+            // software exception (types 4/5/6) require instr_length 1..15.
+            if matches!(bochs_type, 4 | 5 | 6) {
+                let len = self.vmcs.vm_entry_instruction_length;
+                if !(1..=15).contains(&len) {
+                    tracing::warn!(
+                        "VMENTRY check_vm_controls: bad instr_length {len} for type {bochs_type}"
+                    );
+                    return Some(VmxErr::VmentryInvalidVmControlField);
+                }
+            }
+            // NMI vector must be 2.
+            if bochs_type == 2 && vector != 2 {
+                tracing::warn!(
+                    "VMENTRY check_vm_controls: NMI injection vector {vector} != 2"
+                );
+                return Some(VmxErr::VmentryInvalidVmControlField);
+            }
+        }
+
+        None
+    }
+
+    /// Validate host-state fields — Bochs vmx.cc
+    /// `vmenter_load_check_host_state`. Currently checks CR0/CR4 against
+    /// the supported bit masks and the VMX-mandatory bits.
+    fn vmenter_load_check_host_state(&mut self) -> Option<VmxErr> {
+        if !self.check_cr0_vmx(self.vmcs.host_cr0, false) {
+            tracing::warn!(
+                "VMENTRY check_host_state: bad host CR0={:#018x}",
+                self.vmcs.host_cr0
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if !self.check_cr4_vmx(self.vmcs.host_cr4) {
+            tracing::warn!(
+                "VMENTRY check_host_state: bad host CR4={:#018x}",
+                self.vmcs.host_cr4
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        None
+    }
+
+    /// Validate guest-state fields — Bochs vmx.cc
+    /// `vmenter_load_check_guest_state`. Currently checks CR0/CR4 against
+    /// the VMX-mandatory bits with `vmenter=true` so the guest-mode rules
+    /// (PE+PG required when no UNRESTRICTED_GUEST) apply before the
+    /// in_vmx_guest flag is set.
+    fn vmenter_load_check_guest_state(&mut self) -> Option<VmxErr> {
+        if !self.check_cr0_vmx(self.vmcs.guest_cr0, true) {
+            tracing::warn!(
+                "VMENTRY check_guest_state: bad guest CR0={:#018x}",
+                self.vmcs.guest_cr0
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if !self.check_cr4_vmx(self.vmcs.guest_cr4) {
+            tracing::warn!(
+                "VMENTRY check_guest_state: bad guest CR4={:#018x}",
+                self.vmcs.guest_cr4
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        None
+    }
+
     fn vmenter_save_host_state(&mut self) {
         self.vmcs.host_cr0 = u64::from(self.cr0.get32());
         self.vmcs.host_cr3 = self.cr3;

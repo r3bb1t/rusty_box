@@ -832,6 +832,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             tracing::trace!("MOV CR0: NW=1 without CD=1, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
+        // Bochs check_CR0(): VMX-specific bit checks (NE in vmx, PE+PG in
+        // vmx guest unless UNRESTRICTED_GUEST).
+        if !self.check_cr0_vmx(u64::from(val_32), false) {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
 
         let pg = new_cr0.contains(BxCr0::PG);
 
@@ -1062,6 +1067,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             tracing::trace!("MOV CR4: attempt to set PCIDE while EFER.LMA=0, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
+        // Bochs check_CR4(): VMX-specific bit checks (VMXE pinned in vmx,
+        // forbidden in SMM).
+        if !self.check_cr4_vmx(val_32) {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
 
         let old_cr4 = self.cr4.get();
         self.cr4.set_val(val_32);
@@ -1284,6 +1294,70 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.cr0.pe()
         );
         Ok(())
+    }
+
+    // =========================================================================
+    // VMX-specific CR0 / CR4 validity checks — Bochs crregs.cc check_CR0
+    // and check_CR4 (the in_vmx / in_vmx_guest branches).
+    // =========================================================================
+
+    /// Validate the VMX-mandatory bits of a CR0 value — Bochs crregs.cc
+    /// check_CR0.
+    ///
+    /// `vmenter` should be `true` when validating guest CR0 from the
+    /// VMENTRY load path (so the guest-mode bit checks apply even before
+    /// `in_vmx_guest` flips). Returns `true` when the value is valid; the
+    /// caller raises #GP(0).
+    ///
+    /// Bochs rules in VMX:
+    ///   - CR0.NE must be set whenever in_vmx (root or guest).
+    ///   - CR0.PE and CR0.PG must be set in VMX guest mode unless the
+    ///     UNRESTRICTED_GUEST secondary control is enabled.
+    pub(super) fn check_cr0_vmx(&self, val: u64, vmenter: bool) -> bool {
+        if !self.in_vmx {
+            return true;
+        }
+        let cr0 = super::crregs::BxCr0::from_bits_retain(val as u32);
+        if !cr0.contains(super::crregs::BxCr0::NE) {
+            tracing::trace!("check_cr0_vmx: CR0.NE clear in VMX mode, #GP(0)");
+            return false;
+        }
+        let vmx_guest = self.in_vmx_guest || vmenter;
+        if vmx_guest {
+            let unrestricted = self.vmcs.secondary_proc_based_ctls
+                & super::vmx::VMX_VM_EXEC_CTRL2_UNRESTRICTED_GUEST
+                != 0;
+            if !unrestricted
+                && (!cr0.contains(super::crregs::BxCr0::PE)
+                    || !cr0.contains(super::crregs::BxCr0::PG))
+            {
+                tracing::trace!(
+                    "check_cr0_vmx: CR0.PE/PG clear in VMX guest without UNRESTRICTED_GUEST"
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Validate the VMX-mandatory bits of a CR4 value — Bochs crregs.cc
+    /// check_CR4.
+    ///
+    /// Bochs rules:
+    ///   - CR4.VMXE must remain set whenever in_vmx.
+    ///   - CR4.VMXE may not be set while in SMM.
+    pub(super) fn check_cr4_vmx(&self, val: u64) -> bool {
+        let cr4 = super::crregs::BxCr4::from_bits_retain(val);
+        let vmxe = cr4.contains(super::crregs::BxCr4::VMXE);
+        if !vmxe && self.in_vmx {
+            tracing::trace!("check_cr4_vmx: clearing CR4.VMXE in VMX mode, #GP(0)");
+            return false;
+        }
+        if vmxe && self.in_smm {
+            tracing::trace!("check_cr4_vmx: setting CR4.VMXE in SMM, #GP(0)");
+            return false;
+        }
+        true
     }
 
     // =========================================================================
