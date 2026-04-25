@@ -488,6 +488,30 @@ fn is_valid_phy_addr(paddr: u64) -> bool {
     (paddr >> BX_PHY_ADDRESS_WIDTH) == 0
 }
 
+/// Bochs `isValidMSR_PAT`. Each of the eight 8-bit entries must encode
+/// a supported memory type: 0 (UC), 1 (WC), 4 (WT), 5 (WP), 6 (WB),
+/// 7 (UC-). Other values (2, 3, ≥8) are reserved.
+fn is_valid_pat_msr(value: u64) -> bool {
+    for byte in 0..8 {
+        let memtype = (value >> (byte * 8)) & 0xFF;
+        if !matches!(memtype, 0 | 1 | 4 | 5 | 6 | 7) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Bochs `isValidMSR_IA32_SPEC_CTRL`. Bits documented in Bochs:
+/// IBRS (1<<0), STIBP (1<<1), SSBD (1<<2), IPRED_DIS_U/S (3..=4),
+/// RRSBA_DIS_U/S (5..=6), PSFD (1<<7), DDPD_U (1<<8), BHI_DIS_S (1<<10).
+/// Other bits are reserved.
+fn is_valid_spec_ctrl(value: u64) -> bool {
+    const ALLOWED: u64 =
+        (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4)
+            | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 10);
+    (value & !ALLOWED) == 0
+}
+
 // VMX-control allowed-{0,1} bit masks — Bochs vmx.cc reads these from
 // IA32_VMX_*_CTLS MSRs and uses the low half ("allowed-0", bits that
 // MUST be 1) and the high half ("allowed-1", bits that MAY be 1) to
@@ -559,6 +583,11 @@ pub(super) const VMX_VM_EXEC_CTRL2_UNRESTRICTED_GUEST: u32 = 1 << 7;
 // VM-exit secondary control bits.
 pub(super) const VMX_VMEXIT_CTRL2_LOAD_HOST_FRED: u64 = 1 << 1;
 pub(super) const VMX_VMEXIT_CTRL2_LOAD_HOST_IA32_SPEC_CTRL: u64 = 1 << 2;
+
+// VM-entry control bits — Bochs vmx_ctrls.h.
+pub(super) const VMX_VMENTRY_CTRL_X86_64_GUEST: u32 = 1 << 9;
+pub(super) const VMX_VMENTRY_CTRL_LOAD_GUEST_EFER_MSR: u32 = 1 << 15;
+pub(super) const VMX_VMENTRY_CTRL_LOAD_GUEST_PAT_MSR: u32 = 1 << 14;
 
 /// VMX-instruction error codes written into the VMCS 32-bit
 /// VMCS_32BIT_INSTRUCTION_ERROR field by `VMfail`.
@@ -1994,47 +2023,373 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         None
     }
 
-    /// Validate host-state fields — Bochs vmx.cc
-    /// `vmenter_load_check_host_state`. Currently checks CR0/CR4 against
-    /// the supported bit masks and the VMX-mandatory bits.
+    /// Validate host-state fields — Bochs vmx.cc VMenterLoadCheckHostState
+    /// (vmx.cc:1143-1435). Each failure surfaces with
+    /// VMXERR_VMENTRY_INVALID_VM_HOST_STATE_FIELD.
     fn vmenter_load_check_host_state(&mut self) -> Option<VmxErr> {
-        if !self.check_cr0_vmx(self.vmcs.host_cr0, false) {
+        let exit_ctls = self.vmcs.vm_exit_ctls;
+        let entry_ctls = self.vmcs.vm_entry_ctls;
+        let x86_64_host = exit_ctls & VMX_VMEXIT_CTRL1_HOST_ADDR_SPACE_SIZE != 0;
+        let x86_64_guest = entry_ctls & VMX_VMENTRY_CTRL_X86_64_GUEST != 0;
+
+        // Bochs vmx.cc:1156-1169 address-space-size consistency.
+        if self.long_mode() {
+            if !x86_64_host {
+                tracing::warn!(
+                    "VMENTRY check_host_state: long-mode host without X86_64_HOST"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        } else if x86_64_host || x86_64_guest {
             tracing::warn!(
-                "VMENTRY check_host_state: bad host CR0={:#018x}",
-                self.vmcs.host_cr0
+                "VMENTRY check_host_state: x86-64 host/guest control set in non-long mode"
             );
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
+
+        // CR0 / CR4 VMX-mandatory bits (Bochs vmx.cc:1175-1202).
+        if !self.check_cr0_vmx(self.vmcs.host_cr0, false) {
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
         if !self.check_cr4_vmx(self.vmcs.host_cr4) {
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+
+        // CR3 must be a valid physical address (Bochs vmx.cc:1188).
+        if !is_valid_phy_addr(self.vmcs.host_cr3) {
             tracing::warn!(
-                "VMENTRY check_host_state: bad host CR4={:#018x}",
-                self.vmcs.host_cr4
+                "VMENTRY check_host_state: bad host CR3={:#018x}",
+                self.vmcs.host_cr3
             );
             return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+
+        // Segment selectors: TI must be clear and RPL must be 0 for all
+        // six host segment registers (Bochs vmx.cc:1204-1210).
+        let segs = [
+            ("ES", self.vmcs.host_es_selector),
+            ("CS", self.vmcs.host_cs_selector),
+            ("SS", self.vmcs.host_ss_selector),
+            ("DS", self.vmcs.host_ds_selector),
+            ("FS", self.vmcs.host_fs_selector),
+            ("GS", self.vmcs.host_gs_selector),
+        ];
+        for (name, sel) in segs {
+            if sel & 7 != 0 {
+                tracing::warn!(
+                    "VMENTRY check_host_state: host {name} selector {:#06x} TI/RPL != 0",
+                    sel
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        }
+        if self.vmcs.host_cs_selector == 0 {
+            tracing::warn!("VMENTRY check_host_state: host CS selector is 0");
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if !x86_64_host && self.vmcs.host_ss_selector == 0 {
+            tracing::warn!(
+                "VMENTRY check_host_state: 32-bit host with SS selector 0"
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if self.vmcs.host_tr_selector == 0 || self.vmcs.host_tr_selector & 7 != 0 {
+            tracing::warn!(
+                "VMENTRY check_host_state: bad host TR selector {:#06x}",
+                self.vmcs.host_tr_selector
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+
+        // Canonical checks for the natural-width host fields
+        // (Bochs vmx.cc:1230-1276 — only meaningful in long mode).
+        let canonical_fields = [
+            ("TR base", self.vmcs.host_tr_base),
+            ("FS base", self.vmcs.host_fs_base),
+            ("GS base", self.vmcs.host_gs_base),
+            ("GDTR base", self.vmcs.host_gdtr_base),
+            ("IDTR base", self.vmcs.host_idtr_base),
+            ("SYSENTER ESP", self.vmcs.host_sysenter_esp),
+            ("SYSENTER EIP", self.vmcs.host_sysenter_eip),
+        ];
+        for (name, val) in canonical_fields {
+            if !self.is_canonical(val) {
+                tracing::warn!(
+                    "VMENTRY check_host_state: host {name}={:#018x} not canonical",
+                    val
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        }
+
+        // PAT validity (Bochs vmx.cc:1279-1284): each of the eight 8-bit
+        // entries must encode a supported memory type (UC/WC/WT/WP/WB/UC-).
+        if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_PAT_MSR != 0
+            && !is_valid_pat_msr(self.vmcs.host_ia32_pat)
+        {
+            tracing::warn!(
+                "VMENTRY check_host_state: invalid host PAT={:#018x}",
+                self.vmcs.host_ia32_pat
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        // SPEC_CTRL validity (Bochs vmx.cc:1287-1291): only documented
+        // bits may be set. We accept the same masks Bochs documents.
+        if self.vmcs.vm_exit_ctls2 & VMX_VMEXIT_CTRL2_LOAD_HOST_IA32_SPEC_CTRL != 0
+            && !is_valid_spec_ctrl(self.vmcs.host_ia32_spec_ctrl)
+        {
+            tracing::warn!(
+                "VMENTRY check_host_state: invalid host SPEC_CTRL={:#018x}",
+                self.vmcs.host_ia32_spec_ctrl
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        // EFER bits, when LOAD_EFER_MSR is set, must match the
+        // x86_64_host control (Bochs vmx.cc:1295-1308).
+        if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_EFER_MSR != 0 {
+            use super::crregs::BxEfer;
+            let efer = self.vmcs.host_ia32_efer;
+            // Reserved bits must be clear.
+            const EFER_RESERVED: u64 =
+                !(BxEfer::SCE.bits() as u64
+                    | BxEfer::LME.bits() as u64
+                    | BxEfer::LMA.bits() as u64
+                    | BxEfer::NXE.bits() as u64
+                    | BxEfer::SVME.bits() as u64
+                    | BxEfer::FFXSR.bits() as u64);
+            if efer & EFER_RESERVED != 0 {
+                tracing::warn!(
+                    "VMENTRY check_host_state: host EFER {:#018x} has reserved bits",
+                    efer
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            let lme = efer & BxEfer::LME.bits() as u64 != 0;
+            let lma = efer & BxEfer::LMA.bits() as u64 != 0;
+            if lma != x86_64_host || lme != x86_64_host {
+                tracing::warn!(
+                    "VMENTRY check_host_state: host EFER LME/LMA disagree with X86_64_HOST"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
         }
         None
     }
 
     /// Validate guest-state fields — Bochs vmx.cc
-    /// `vmenter_load_check_guest_state`. Currently checks CR0/CR4 against
-    /// the VMX-mandatory bits with `vmenter=true` so the guest-mode rules
-    /// (PE+PG required when no UNRESTRICTED_GUEST) apply before the
-    /// in_vmx_guest flag is set.
+    /// `vmenter_load_check_guest_state` (vmx.cc:1436-2310).
     fn vmenter_load_check_guest_state(&mut self) -> Option<VmxErr> {
+        let entry_ctls = self.vmcs.vm_entry_ctls;
+        let ctls2 = self.vmcs.secondary_proc_based_ctls;
+        let x86_64_guest = entry_ctls & VMX_VMENTRY_CTRL_X86_64_GUEST != 0;
+        let unrestricted = ctls2 & VMX_VM_EXEC_CTRL2_UNRESTRICTED_GUEST != 0;
+
+        // RFLAGS validation (Bochs vmx.cc:1449-1473).
+        // Reserved bits [63:22], bit 15, bit 5, bit 3 must be zero;
+        // bit 1 must be 1; VM=1 incompatible with x86_64_guest.
+        const RFLAGS_RESERVED: u64 = 0xFFFF_FFFF_FFC0_8028;
+        let rflags = self.vmcs.guest_rflags;
+        if rflags & RFLAGS_RESERVED != 0 {
+            tracing::warn!(
+                "VMENTRY check_guest_state: RFLAGS {:#018x} reserved bits set",
+                rflags
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if rflags & 0x2 == 0 {
+            tracing::warn!("VMENTRY check_guest_state: RFLAGS[1] cleared");
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        const EFLAGS_VM_MASK: u64 = 1 << 17;
+        let v8086_guest = rflags & EFLAGS_VM_MASK != 0;
+        if x86_64_guest && v8086_guest {
+            tracing::warn!(
+                "VMENTRY check_guest_state: x86-64 guest with RFLAGS.VM=1"
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+
+        // CR0 (Bochs vmx.cc:1475-1503). Under UNRESTRICTED_GUEST the
+        // CR0_FIXED0 mask is relaxed to drop PE+PG (the VMM may run a
+        // real-mode guest); otherwise the standard fixed-0 mask applies.
+        // We delegate the NE / PE / PG bit logic to check_cr0_vmx with
+        // vmenter=true; an additional explicit `PG without PE` check
+        // applies under UNRESTRICTED_GUEST.
         if !self.check_cr0_vmx(self.vmcs.guest_cr0, true) {
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if unrestricted {
+            use super::crregs::BxCr0;
+            let cr0 = BxCr0::from_bits_truncate(self.vmcs.guest_cr0 as u32);
+            if cr0.contains(BxCr0::PG) && !cr0.contains(BxCr0::PE) {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: UNRESTRICTED guest CR0.PG without CR0.PE"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        }
+
+        // CR3 must fit in physical address width (Bochs vmx.cc:1513).
+        if !is_valid_phy_addr(self.vmcs.guest_cr3) {
             tracing::warn!(
-                "VMENTRY check_guest_state: bad guest CR0={:#018x}",
-                self.vmcs.guest_cr0
+                "VMENTRY check_guest_state: bad guest CR3={:#018x}",
+                self.vmcs.guest_cr3
             );
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
+
+        // CR4 — VMX-mandatory + long-mode consistency (Bochs vmx.cc:1519-1548).
         if !self.check_cr4_vmx(self.vmcs.guest_cr4) {
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        use super::crregs::BxCr4;
+        let cr4 = BxCr4::from_bits_truncate(self.vmcs.guest_cr4);
+        if x86_64_guest {
+            if !cr4.contains(BxCr4::PAE) {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: x86-64 guest with CR4.PAE=0"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        } else if cr4.contains(BxCr4::PCIDE) {
             tracing::warn!(
-                "VMENTRY check_guest_state: bad guest CR4={:#018x}",
-                self.vmcs.guest_cr4
+                "VMENTRY check_guest_state: 32-bit guest with CR4.PCIDE=1"
             );
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
+
+        // DR7 — when LOAD_DBG_CTRLS is set the upper 32 bits must be zero
+        // (Bochs vmx.cc:1550-1556).
+        const VMX_VMENTRY_CTRL_LOAD_DBG_CTRLS: u32 = 1 << 2;
+        if entry_ctls & VMX_VMENTRY_CTRL_LOAD_DBG_CTRLS != 0
+            && (self.vmcs.guest_dr7 >> 32) != 0
+        {
+            tracing::warn!(
+                "VMENTRY check_guest_state: bad guest DR7={:#018x}",
+                self.vmcs.guest_dr7
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+
+        // CET interlock — CR4.CET requires CR0.WP (Bochs vmx.cc:1560-1563).
+        use super::crregs::BxCr0;
+        let cr0_bits = BxCr0::from_bits_truncate(self.vmcs.guest_cr0 as u32);
+        if cr4.contains(BxCr4::CET) && !cr0_bits.contains(BxCr0::WP) {
+            tracing::warn!(
+                "VMENTRY check_guest_state: CR4.CET=1 with CR0.WP=0"
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+
+        // Long-mode-only canonical checks (Bochs vmx.cc:1670-1691). RSP
+        // is naturally signed, RIP for x86-64 must be canonical too.
+        if x86_64_guest {
+            if !self.is_canonical(self.vmcs.guest_rip) {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: guest RIP={:#018x} non-canonical",
+                    self.vmcs.guest_rip
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        } else {
+            // 32-bit guest: RIP must fit in 32 bits.
+            if (self.vmcs.guest_rip >> 32) != 0 {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: 32-bit guest RIP={:#018x} > 32 bits",
+                    self.vmcs.guest_rip
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        }
+
+        // SYSENTER ESP / EIP canonical (Bochs vmx.cc — guest state
+        // checks). guest_ia32_sysenter_* fields are populated via
+        // VMWRITE before VMENTRY.
+        let canonical = [
+            ("SYSENTER ESP", self.vmcs.guest_ia32_sysenter_esp),
+            ("SYSENTER EIP", self.vmcs.guest_ia32_sysenter_eip),
+        ];
+        for (name, val) in canonical {
+            if !self.is_canonical(val) {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: guest {name}={:#018x} non-canonical",
+                    val
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        }
+
+        // Guest EFER under LOAD_GUEST_EFER must agree with X86_64_GUEST
+        // in the LME/LMA bits and have only documented bits (Bochs
+        // vmx.cc:1738-1771).
+        if entry_ctls & VMX_VMENTRY_CTRL_LOAD_GUEST_EFER_MSR != 0 {
+            use super::crregs::BxEfer;
+            let efer = self.vmcs.guest_ia32_efer;
+            const EFER_RESERVED: u64 =
+                !(BxEfer::SCE.bits() as u64
+                    | BxEfer::LME.bits() as u64
+                    | BxEfer::LMA.bits() as u64
+                    | BxEfer::NXE.bits() as u64
+                    | BxEfer::SVME.bits() as u64
+                    | BxEfer::FFXSR.bits() as u64);
+            if efer & EFER_RESERVED != 0 {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: guest EFER {:#018x} reserved bits set",
+                    efer
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            let lme = efer & BxEfer::LME.bits() as u64 != 0;
+            let lma = efer & BxEfer::LMA.bits() as u64 != 0;
+            if lma != x86_64_guest {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: guest EFER.LMA disagrees with X86_64_GUEST"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            // CR0.PG=1 + LME=1 demands LMA=1 (long mode active).
+            if cr0_bits.contains(BxCr0::PG) && lme && !lma {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: CR0.PG && EFER.LME without LMA"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        }
+
+        // Guest PAT — same memory-type validation Bochs applies for the
+        // host PAT (Bochs vmx.cc).
+        if entry_ctls & VMX_VMENTRY_CTRL_LOAD_GUEST_PAT_MSR != 0
+            && !is_valid_pat_msr(self.vmcs.guest_ia32_pat)
+        {
+            tracing::warn!(
+                "VMENTRY check_guest_state: invalid guest PAT={:#018x}",
+                self.vmcs.guest_ia32_pat
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+
+        // Activity state must be one of the four documented values
+        // (0=Active, 1=HLT, 2=Shutdown, 3=Wait-for-SIPI). Bochs
+        // vmx.cc validates against a per-CPU allow-list; we accept the
+        // SDM-documented set.
+        if self.vmcs.guest_activity_state > 3 {
+            tracing::warn!(
+                "VMENTRY check_guest_state: invalid activity_state={}",
+                self.vmcs.guest_activity_state
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+
+        // Interruptibility state: only bits 0..=4 are defined (Bochs
+        // vmx.cc); reserved bits must be zero.
+        if self.vmcs.guest_interruptibility_state & !0x1F != 0 {
+            tracing::warn!(
+                "VMENTRY check_guest_state: bad interruptibility_state={:#x}",
+                self.vmcs.guest_interruptibility_state
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+
         None
     }
 
