@@ -123,16 +123,81 @@ impl BxRwAccess {
 }
 
 bitflags::bitflags! {
-    /// Per-page EPT permission bits — Bochs paging.cc `BX_EPT_READ /
-    /// _WRITE / _EXECUTE / _MBE_USER_EXECUTE`. Used both in the
-    /// access-mask the walker tests against and in the cumulative
-    /// `combined_access` it computes from the path.
+    /// Per-page EPT permission bits — Bochs paging.cc
+    /// `BX_EPT_READ / _WRITE / _EXECUTE / _MBE_USER_EXECUTE /
+    /// _MBE_SUPERVISOR_EXECUTE`. Used both in the access-mask the
+    /// walker tests against and in the cumulative `combined_access`
+    /// it computes from the path.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct EptPerm: u32 {
-        const READ            = 1 << 0;
-        const WRITE           = 1 << 1;
-        const EXECUTE         = 1 << 2;
-        const MBE_USER_EXEC   = 1 << 10;
+        const READ                  = 1 << 0;
+        const WRITE                 = 1 << 1;
+        const EXECUTE               = 1 << 2;
+        /// Bit 10 — when MBE_CTRL is enabled, user-mode pages take
+        /// EPT_MBE_USER_EXECUTE in place of EPT_EXECUTE.
+        const MBE_USER_EXEC         = 1 << 10;
+    }
+
+    /// Single-bit flags of the I/O VMEXIT qualification — Bochs
+    /// vmexit.cc VMexit_IO. Multi-bit fields stay packed:
+    ///   [2:0]   access size - 1
+    ///   [31:16] port number
+    /// Bits 7 and 12-15 are reserved by the SDM.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct IoExitQual: u64 {
+        /// Bit 3: direction is IN (1) vs OUT (0).
+        const PORT_IN   = 1 << 3;
+        /// Bit 4: string instruction (INS / OUTS).
+        const STRING    = 1 << 4;
+        /// Bit 5: REP prefix is in effect.
+        const REP       = 1 << 5;
+        /// Bit 6: immediate-port encoding (`IN AL,Ib`-form). When clear
+        /// the port is taken from DX.
+        const IMMEDIATE = 1 << 6;
+    }
+
+    /// Full EPT_VIOLATION VMEXIT qualification — Bochs paging.cc
+    /// builder. All bit fields named so the builder is one bitflags
+    /// value end-to-end (no mixed `flags.bits() | packed_int` assembly).
+    /// The MBE_USER_EXEC bit is bit 6 here because that's where Bochs
+    /// places the "user-execute" indicator under MBE_CTRL+EXECUTE,
+    /// not the EPT-permission bit 10 used by EptPerm.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct EptViolationQual: u64 {
+        // [2:0] — access mask: Bochs `vmexit_qualification = access_mask`.
+        /// Bit 0: read access requested.
+        const ACCESS_R     = 1 << 0;
+        /// Bit 1: write access requested.
+        const ACCESS_W     = 1 << 1;
+        /// Bit 2: instruction-fetch access requested. Doubles as the
+        /// "instruction fetch" indicator under MBE_CTRL+EXECUTE.
+        const ACCESS_X     = 1 << 2;
+        // [5:3] — combined access actually granted by the EPT path.
+        const GRANTED_R    = 1 << 3;
+        const GRANTED_W    = 1 << 4;
+        const GRANTED_X    = 1 << 5;
+        /// Bit 6: under MBE_CTRL+EXECUTE, the leaf page is user-
+        /// executable (Bochs `(combined_access & BX_EPT_MBE_USER_
+        /// EXECUTE)`).
+        const MBE_USER_EXEC = 1 << 6;
+        /// Bit 7: guest_laddr field is valid.
+        const LADDR_VALID  = 1 << 7;
+        /// Bit 8: this was a data/instruction access (not a page-walk
+        /// paging-structure access).
+        const DATA_ACCESS  = 1 << 8;
+        /// Bit 9: the leaf page maps user-mode memory (MBE_CONTROL).
+        const USER_PAGE    = 1 << 9;
+        /// Bit 10: the leaf page is writeable in the guest paging
+        /// structures (MBE_CONTROL).
+        const WRITEABLE    = 1 << 10;
+        /// Bit 11: the leaf page has the NX bit set (MBE_CONTROL).
+        const NX_PAGE      = 1 << 11;
+        /// Bit 12: the access happened on the instruction boundary
+        /// where IRET unblocked NMI delivery (Bochs
+        /// `nmi_unblocking_iret`).
+        const NMI_UNBLOCK  = 1 << 12;
+        /// Bit 13: shadow-stack access (Bochs `rw & 4`).
+        const SHADOW_STACK = 1 << 13;
     }
 }
 const VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS: u32 = 0x2044;
@@ -396,6 +461,7 @@ pub(super) const VMX_VM_EXEC_CTRL2_INVPCID: u32 = 1 << 12;
 pub(super) const VMX_VM_EXEC_CTRL2_RDSEED_VMEXIT: u32 = 1 << 16;
 pub(super) const VMX_VM_EXEC_CTRL2_XSAVES_XRSTORS: u32 = 1 << 20;
 pub(super) const VMX_VM_EXEC_CTRL2_UMWAIT_TPAUSE_VMEXIT: u32 = 1 << 26;
+pub(super) const VMX_VM_EXEC_CTRL2_MBE_CTRL: u32 = 1 << 22;
 
 // VM-exit control bits — Bochs vmx_ctrls.h.
 pub(super) const VMX_VMEXIT_CTRL1_LOAD_PERF_GLOBAL_CTRL_MSR: u32 = 1 << 12;
@@ -2557,14 +2623,34 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     ) -> Result<u64> {
         let eptptr = self.vmcs.eptptr;
         let mut ppf = eptptr & 0x000F_FFFF_FFFF_F000;
+        let mbe_ctrl = self.vmcs.secondary_proc_based_ctls
+            & VMX_VM_EXEC_CTRL2_MBE_CTRL
+            != 0;
+        // combined_access starts as "all permissions granted"; the walker
+        // ANDs each level's bits in. Under MBE_CTRL the user-execute bit
+        // additionally rides along (Bochs paging.cc).
         let mut combined_access = EptPerm::READ | EptPerm::WRITE | EptPerm::EXECUTE;
+        if mbe_ctrl {
+            combined_access |= EptPerm::MBE_USER_EXEC;
+        }
         // Bochs paging.cc access-mask construction (BxRwAccess helpers
         // mirror the `rw == BX_EXECUTE`, `rw & 1`, `(rw & 3) == BX_READ`
         // predicates). Shadow-stack reads still set the READ bit because
         // `(rw & 3) == 0` matches both BX_READ and BX_SHADOW_STACK_READ.
         let mut access_mask = EptPerm::empty();
         if rw == BxRwAccess::Execute {
-            access_mask |= EptPerm::EXECUTE;
+            // Under MBE_CTRL the EXECUTE bit is split into user / supervisor
+            // variants; for the user-page path Bochs sets EPT_MBE_USER_EXEC.
+            // Without MBE_CTRL the legacy EPT_EXECUTE bit applies.
+            if mbe_ctrl {
+                access_mask |= if user_page {
+                    EptPerm::MBE_USER_EXEC
+                } else {
+                    EptPerm::EXECUTE
+                };
+            } else {
+                access_mask |= EptPerm::EXECUTE;
+            }
         }
         if rw.is_write() {
             access_mask |= EptPerm::WRITE;
@@ -2586,7 +2672,14 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             entry[leaf as usize] = self.mem_read_qword(entry_addr[leaf as usize]);
             offset_mask >>= 9;
             let curr = entry[leaf as usize];
-            let curr_access = EptPerm::from_bits_truncate((curr as u32) & 0x7);
+            // Bochs paging.cc: per-entry access bits are R/W/X plus the
+            // MBE-user-execute bit (only meaningful when MBE_CTRL set).
+            let mut curr_access = EptPerm::from_bits_truncate((curr as u32) & 0x7);
+            if mbe_ctrl {
+                curr_access |= EptPerm::from_bits_truncate(
+                    (curr as u32) & EptPerm::MBE_USER_EXEC.bits(),
+                );
+            }
 
             // R=0/W=0/X=0 → entry not present (Bochs `BX_EPT_ENTRY_NOT_
             // PRESENT`).
@@ -2621,10 +2714,18 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 break; // BX_LEVEL_PTE
             }
             if curr & 0x80 != 0 {
-                // Large-page leaf. Bochs allows only PDE / (PDPTE if
-                // BX_ISA_1G_PAGES); our model advertises 1G pages so
-                // accept up to PDPTE (leaf=2). Reject at PML4 (leaf=3).
-                if leaf > 2 {
+                // Large-page leaf. Bochs allows the leaf at PDE level
+                // unconditionally and at PDPTE level only when the CPU
+                // model advertises BX_ISA_1G_PAGES; PML4/PML5 large-page
+                // entries are reserved.
+                let max_large_page_leaf = if self
+                    .bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::Isa1gPages)
+                {
+                    2 // PDPTE
+                } else {
+                    1 // PDE
+                };
+                if leaf > max_large_page_leaf {
                     vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
                     break;
                 }
@@ -2669,25 +2770,54 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             // sets on shadow-stack accesses (rw & 4) per BX_SUPPORT_CET.
             let qual = if reason == VmxVmexitReason::EptViolation {
                 combined_access &= EptPerm::from_bits_truncate(entry[leaf as usize] as u32);
-                let mut q = u64::from(access_mask.bits()) | (u64::from(combined_access.bits()) << 3);
+                let mut q = EptViolationQual::empty();
+                if mbe_ctrl && rw == BxRwAccess::Execute {
+                    // Bochs paging.cc MBE+execute branch: low bits =
+                    // {bit2 instruction-fetch, bit6 user-execute}.
+                    q |= EptViolationQual::ACCESS_X;
+                    q.set(
+                        EptViolationQual::MBE_USER_EXEC,
+                        combined_access.contains(EptPerm::MBE_USER_EXEC),
+                    );
+                } else {
+                    // Standard layout: access_mask at [2:0],
+                    // combined_access at [5:3]. EptPerm::READ/WRITE/EXECUTE
+                    // map onto ACCESS_R/W/X bit-for-bit; combined gets
+                    // shifted up to GRANTED_R/W/X.
+                    q.set(EptViolationQual::ACCESS_R, access_mask.contains(EptPerm::READ));
+                    q.set(EptViolationQual::ACCESS_W, access_mask.contains(EptPerm::WRITE));
+                    q.set(EptViolationQual::ACCESS_X, access_mask.contains(EptPerm::EXECUTE));
+                    q.set(EptViolationQual::GRANTED_R, combined_access.contains(EptPerm::READ));
+                    q.set(EptViolationQual::GRANTED_W, combined_access.contains(EptPerm::WRITE));
+                    q.set(EptViolationQual::GRANTED_X, combined_access.contains(EptPerm::EXECUTE));
+                }
                 if guest_laddr_valid {
-                    q |= 1 << 7;
+                    q |= EptViolationQual::LADDR_VALID;
                     if !is_page_walk {
-                        q |= 1 << 8;
-                        // MBE_CONTROL is gated on a VMX extension that
-                        // rusty_box does not advertise, so the advanced
-                        // user/writeable/nx page bits stay clear (Bochs
-                        // matches real hardware: bits absent unless the
-                        // extension is on).
-                        let _ = (user_page, writeable_page, nx_page);
+                        q |= EptViolationQual::DATA_ACCESS;
+                        // Bochs paging.cc gates the advanced VM-exit
+                        // information bits on BX_VMX_MBE_CONTROL.
+                        let mbe = self
+                            .vmx_extensions_bitmask
+                            .as_ref()
+                            .map_or(false, |m| {
+                                m.contains(super::cpuid::VMXExtensions::MbeControl)
+                            });
+                        if mbe {
+                            q.set(EptViolationQual::USER_PAGE, user_page);
+                            q.set(EptViolationQual::WRITEABLE, writeable_page);
+                            q.set(EptViolationQual::NX_PAGE, nx_page);
+                        }
                     }
                 }
-                if rw.is_shadow_stack() {
-                    q |= 1 << 13; // shadow-stack access (Bochs `rw & 4`)
-                }
+                // Bochs paging.cc: bit 12 from the CPU's nmi_unblocking_iret
+                // flag (set by IRET when the IRET unblocked NMI delivery,
+                // cleared on next instruction-boundary).
+                q.set(EptViolationQual::NMI_UNBLOCK, self.nmi_unblocking_iret);
+                q.set(EptViolationQual::SHADOW_STACK, rw.is_shadow_stack());
                 self.vmcs.guest_linear_addr = guest_laddr;
                 self.vmcs.guest_physical_addr = guest_paddr;
-                q
+                q.bits()
             } else {
                 self.vmcs.guest_physical_addr = guest_paddr;
                 0
@@ -3144,12 +3274,12 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     /// Build the I/O exit qualification — Bochs vmexit.cc VMexit_IO:
-    ///   [2:0]   access size - 1
+    ///   [2:0]   access size - 1     (packed value)
     ///   [3]     direction (0 = OUT, 1 = IN)
     ///   [4]     string instruction
     ///   [5]     REP prefix
     ///   [6]     operand encoding (0 = DX, 1 = immediate)
-    ///   [31:16] port number
+    ///   [31:16] port number          (packed value)
     fn io_qualification(
         port: u16,
         size: u32,
@@ -3158,19 +3288,13 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         rep: bool,
         imm: bool,
     ) -> u64 {
-        let mut qual: u64 = u64::from(size.saturating_sub(1) & 0x7);
-        if direction_in {
-            qual |= 1 << 3;
-        }
-        if string {
-            qual |= 1 << 4;
-        }
-        if rep {
-            qual |= 1 << 5;
-        }
-        if imm {
-            qual |= 1 << 6;
-        }
+        let mut flags = IoExitQual::empty();
+        flags.set(IoExitQual::PORT_IN, direction_in);
+        flags.set(IoExitQual::STRING, string);
+        flags.set(IoExitQual::REP, rep);
+        flags.set(IoExitQual::IMMEDIATE, imm);
+        let mut qual = flags.bits();
+        qual |= u64::from(size.saturating_sub(1) & 0x7);
         qual |= u64::from(port) << 16;
         qual
     }
