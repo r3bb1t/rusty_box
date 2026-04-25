@@ -54,6 +54,12 @@ const VMCS_16BIT_HOST_TR_SELECTOR: u32 = 0x0C0C;
 const VMCS_64BIT_CONTROL_IO_BITMAP_A: u32 = 0x2000;
 const VMCS_64BIT_CONTROL_IO_BITMAP_B: u32 = 0x2002;
 const VMCS_64BIT_CONTROL_MSR_BITMAPS: u32 = 0x2004;
+const VMCS_64BIT_CONTROL_VMEXIT_MSR_STORE_ADDR: u32 = 0x2006;
+const VMCS_64BIT_CONTROL_VMEXIT_MSR_LOAD_ADDR: u32 = 0x2008;
+const VMCS_64BIT_CONTROL_VMENTRY_MSR_LOAD_ADDR: u32 = 0x200A;
+const VMCS_32BIT_CONTROL_VMEXIT_MSR_STORE_COUNT: u32 = 0x400E;
+const VMCS_32BIT_CONTROL_VMEXIT_MSR_LOAD_COUNT: u32 = 0x4010;
+const VMCS_32BIT_CONTROL_VMENTRY_MSR_LOAD_COUNT: u32 = 0x4014;
 const VMCS_64BIT_CONTROL_TSC_OFFSET: u32 = 0x2010;
 const VMCS_64BIT_GUEST_LINK_POINTER: u32 = 0x2800;
 const VMCS_64BIT_GUEST_IA32_PAT: u32 = 0x2804;
@@ -485,6 +491,15 @@ pub struct BxVmcs {
     /// back at VMEXIT. Bochs reads this from the guest VMCS in
     /// vmlaunch/vmresume; ticking happens through the LAPIC.
     pub vmx_preemption_timer_value: u32,
+    /// MSR load/store list addresses + counts — Bochs vmx.cc LoadMSRs /
+    /// StoreMSRs. Each list is an array of 16-byte entries (low 4 bytes
+    /// = MSR index, high 8 bytes = value).
+    pub vmentry_msr_load_addr: u64,
+    pub vmexit_msr_store_addr: u64,
+    pub vmexit_msr_load_addr: u64,
+    pub vmentry_msr_load_cnt: u32,
+    pub vmexit_msr_store_cnt: u32,
+    pub vmexit_msr_load_cnt: u32,
 
     // Wire-compat bag kept from earlier scaffolding; some older call sites
     // still reach for these. They stay zero until a VMM populates them.
@@ -596,11 +611,13 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Ok(());
         }
 
-        // Already in VMX non-root → VMEXIT (deferred until Session 4 wires the
-        // VMX exit path). For now, surface as #GP so guests observe a failure.
+        // Bochs vmx.cc VMXON in non-root operation: VMEXIT with reason
+        // VMX_VMEXIT_VMXON. The qualification is zero (Bochs writes
+        // exit_qualification=0 in VMexit_Instruction for VMX instruction
+        // intercepts).
         if self.in_vmx_guest {
-            tracing::trace!("VMXON: in VMX guest — VMEXIT reason VMXON (stub #GP)");
-            return self.exception(Exception::Gp, 0);
+            self.vmx_vmexit(VmxVmexitReason::Vmxon, 0)?;
+            return Ok(());
         }
 
         // Already in VMX root operation.
@@ -863,6 +880,12 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_64BIT_CONTROL_IO_BITMAP_A => v.io_bitmap_addr[0],
             VMCS_64BIT_CONTROL_IO_BITMAP_B => v.io_bitmap_addr[1],
             VMCS_64BIT_CONTROL_MSR_BITMAPS => v.msr_bitmap_addr,
+            VMCS_64BIT_CONTROL_VMEXIT_MSR_STORE_ADDR => v.vmexit_msr_store_addr,
+            VMCS_64BIT_CONTROL_VMEXIT_MSR_LOAD_ADDR => v.vmexit_msr_load_addr,
+            VMCS_64BIT_CONTROL_VMENTRY_MSR_LOAD_ADDR => v.vmentry_msr_load_addr,
+            VMCS_32BIT_CONTROL_VMEXIT_MSR_STORE_COUNT => v.vmexit_msr_store_cnt as u64,
+            VMCS_32BIT_CONTROL_VMEXIT_MSR_LOAD_COUNT => v.vmexit_msr_load_cnt as u64,
+            VMCS_32BIT_CONTROL_VMENTRY_MSR_LOAD_COUNT => v.vmentry_msr_load_cnt as u64,
             VMCS_64BIT_CONTROL_TSC_OFFSET => v.tsc_offset,
             VMCS_64BIT_GUEST_IA32_EFER => v.guest_ia32_efer,
             VMCS_64BIT_GUEST_IA32_PAT => v.guest_ia32_pat,
@@ -988,6 +1011,12 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_64BIT_CONTROL_IO_BITMAP_A => v.io_bitmap_addr[0] = value,
             VMCS_64BIT_CONTROL_IO_BITMAP_B => v.io_bitmap_addr[1] = value,
             VMCS_64BIT_CONTROL_MSR_BITMAPS => v.msr_bitmap_addr = value,
+            VMCS_64BIT_CONTROL_VMEXIT_MSR_STORE_ADDR => v.vmexit_msr_store_addr = value,
+            VMCS_64BIT_CONTROL_VMEXIT_MSR_LOAD_ADDR => v.vmexit_msr_load_addr = value,
+            VMCS_64BIT_CONTROL_VMENTRY_MSR_LOAD_ADDR => v.vmentry_msr_load_addr = value,
+            VMCS_32BIT_CONTROL_VMEXIT_MSR_STORE_COUNT => v.vmexit_msr_store_cnt = value as u32,
+            VMCS_32BIT_CONTROL_VMEXIT_MSR_LOAD_COUNT => v.vmexit_msr_load_cnt = value as u32,
+            VMCS_32BIT_CONTROL_VMENTRY_MSR_LOAD_COUNT => v.vmentry_msr_load_cnt = value as u32,
             VMCS_64BIT_CONTROL_TSC_OFFSET => v.tsc_offset = value,
             VMCS_64BIT_GUEST_IA32_EFER => v.guest_ia32_efer = value,
             VMCS_64BIT_GUEST_IA32_PAT => v.guest_ia32_pat = value,
@@ -1207,6 +1236,23 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
         self.vmcs.launched = true;
         self.in_vmx_guest = true;
+        // Bochs vmx.cc step 5: walk the VM-entry MSR-load list and write
+        // each (msr, value) pair into the guest. A non-zero return is a
+        // Bochs VMX abort (state malformed) — Bochs panics; we propagate
+        // a #UD into the host so the failure isn't silently masked.
+        let load_cnt = self.vmcs.vmentry_msr_load_cnt;
+        let load_addr = self.vmcs.vmentry_msr_load_addr;
+        if load_cnt != 0 {
+            let failing = self.vmx_load_msrs(load_cnt, load_addr)?;
+            if failing != 0 {
+                tracing::error!(
+                    "VMENTRY MSR load list rejected entry {failing}; signalling VMX abort"
+                );
+                self.in_vmx_guest = false;
+                self.invalidate_prefetch_q();
+                return self.exception(Exception::Ud, 0);
+            }
+        }
         // Bochs vmx.cc step 6: arm the preemption timer when the pin-based
         // control is set. Reads vmx_preemption_timer_value from the VMCS.
         self.vmenter_arm_preemption_timer();
@@ -1246,6 +1292,35 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // into the VMCS when STORE_VMX_PREEMPTION_TIMER is set, then disarm.
         self.vmexit_disarm_preemption_timer();
 
+        // Bochs vmx.cc VMexit step 1.5: snapshot guest MSRs into the
+        // VMEXIT_MSR_STORE list, then preload host MSRs from the
+        // VMEXIT_MSR_LOAD list before host-state restoration. A non-zero
+        // failing index is a Bochs VMX abort (state malformed); we log
+        // and continue host-state load so the host at least observes the
+        // exit reason rather than getting wedged.
+        let store_cnt = self.vmcs.vmexit_msr_store_cnt;
+        let store_addr = self.vmcs.vmexit_msr_store_addr;
+        if store_cnt != 0 {
+            match self.vmx_store_msrs(store_cnt, store_addr) {
+                Ok(0) => {}
+                Ok(failing) => tracing::error!(
+                    "VMEXIT MSR store list rejected entry {failing}; VMX abort"
+                ),
+                Err(e) => return Err(e),
+            }
+        }
+        let load_cnt = self.vmcs.vmexit_msr_load_cnt;
+        let load_addr = self.vmcs.vmexit_msr_load_addr;
+        if load_cnt != 0 {
+            match self.vmx_load_msrs(load_cnt, load_addr) {
+                Ok(0) => {}
+                Ok(failing) => tracing::error!(
+                    "VMEXIT MSR load list rejected entry {failing}; VMX abort"
+                ),
+                Err(e) => return Err(e),
+            }
+        }
+
         // Save guest state from the running CPU.
         self.vmcs.guest_cr0 = self.cr0.get32() as u64;
         self.vmcs.guest_cr3 = self.cr3;
@@ -1260,8 +1335,10 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.vmcs.exit_reason = reason as u32;
         self.vmcs.exit_qualification = qualification;
 
-        // Load host state.
-        self.vmexit_load_host_state();
+        // Load host state. A failure here means the host VMCS is corrupt
+        // — propagate so the surrounding cpu loop can raise the exception
+        // rather than silently drop the error.
+        self.vmexit_load_host_state()?;
 
         self.in_vmx_guest = false;
         self.invalidate_prefetch_q();
@@ -1302,13 +1379,14 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.vmcs.host_sysenter_eip = self.msr.sysenter_eip_msr;
     }
 
-    /// Restore host state on VMEXIT — Bochs vmx.cc VMexitLoadHostState
-    /// (~vmx.cc:2834-3041). Restores all CR/segment/MSR/DR state listed in
-    /// the SDM Vol. 3C §28.5. Several optional state areas (CET, FRED, UINTR,
-    /// PKRS, SPEC_CTRL) are not modelled here and stay at their pre-exit
-    /// values; that matches Bochs when the corresponding LOAD_HOST_* exit
-    /// controls are clear.
-    fn vmexit_load_host_state(&mut self) {
+    /// Restore host state on VMEXIT — Bochs vmx.cc VMexitLoadHostState.
+    /// Restores all CR/segment/MSR/DR state listed in the SDM Vol. 3C §28.5.
+    /// Bochs uses raw `fetch_raw_descriptor` + `parse_descriptor` (no full
+    /// validation) because host state was already vetted at VMENTRY; we
+    /// mirror that. Optional CET / FRED / UINTR / PKRS / SPEC_CTRL areas
+    /// stay at their pre-exit values when their `LOAD_HOST_*` controls
+    /// are clear (the only mode rusty_box currently models).
+    fn vmexit_load_host_state(&mut self) -> Result<()> {
         self.cr0.set32(self.vmcs.host_cr0 as u32);
         self.cr3 = self.vmcs.host_cr3;
         self.cr4.set_val(self.vmcs.host_cr4);
@@ -1317,18 +1395,22 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.efer.set32(self.vmcs.host_ia32_efer as u32);
         self.msr.pat.set_U64(self.vmcs.host_ia32_pat);
 
-        // Segment selectors. Bochs re-parses each from the host GDT; rusty_box
-        // delegates to load_seg_reg which performs the same fetch + descriptor
-        // cache update. Failures are silently swallowed because host state was
-        // (or should have been) validated at VMENTRY.
-        let _ = self.load_seg_reg(BxSegregs::Es, self.vmcs.host_es_selector);
-        let _ = self.load_seg_reg(BxSegregs::Cs, self.vmcs.host_cs_selector);
-        let _ = self.load_seg_reg(BxSegregs::Ss, self.vmcs.host_ss_selector);
-        let _ = self.load_seg_reg(BxSegregs::Ds, self.vmcs.host_ds_selector);
-        let _ = self.load_seg_reg(BxSegregs::Fs, self.vmcs.host_fs_selector);
-        let _ = self.load_seg_reg(BxSegregs::Gs, self.vmcs.host_gs_selector);
+        // Segment selectors. Bochs LoadHostSeg sequence: parse selector →
+        // fetch raw descriptor → parse → write into segment cache.
+        // GDTR/IDTR must be restored first so the descriptor fetches use
+        // the host's tables.
+        self.gdtr.base = self.vmcs.host_gdtr_base;
+        self.idtr.base = self.vmcs.host_idtr_base;
+        self.idtr.limit = 0xFFFF;
+
+        self.vmexit_load_host_seg(BxSegregs::Es, self.vmcs.host_es_selector)?;
+        self.vmexit_load_host_seg(BxSegregs::Cs, self.vmcs.host_cs_selector)?;
+        self.vmexit_load_host_seg(BxSegregs::Ss, self.vmcs.host_ss_selector)?;
+        self.vmexit_load_host_seg(BxSegregs::Ds, self.vmcs.host_ds_selector)?;
+        self.vmexit_load_host_seg(BxSegregs::Fs, self.vmcs.host_fs_selector)?;
+        self.vmexit_load_host_seg(BxSegregs::Gs, self.vmcs.host_gs_selector)?;
         // FS / GS base override (Bochs sets these from VMCS regardless of
-        // what the descriptor in the host GDT says — useful for swapgs).
+        // what the descriptor in the host GDT says — needed for swapgs).
         self.sregs[BxSegregs::Fs as usize]
             .cache
             .u
@@ -1337,27 +1419,55 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             .cache
             .u
             .set_segment_base(self.vmcs.host_gs_base);
-        // TR is loaded directly; LDTR is marked unusable (Bochs).
-        self.tr.selector.value = self.vmcs.host_tr_selector;
-        self.tr.cache.u.set_segment_base(self.vmcs.host_tr_base);
-        self.ldtr.cache.valid = 0;
 
-        self.gdtr.base = self.vmcs.host_gdtr_base;
-        self.idtr.base = self.vmcs.host_idtr_base;
-        // Bochs hardcodes IDTR limit to 0xFFFF on VMEXIT; GDTR is left as set.
-        self.idtr.limit = 0xFFFF;
+        // TR + LDTR. Bochs marks LDTR unusable (valid=0) and parses TR from
+        // the host GDT, then overrides TR.base from the VMCS field.
+        super::segment_ctrl_pro::parse_selector(
+            self.vmcs.host_tr_selector,
+            &mut self.tr.selector,
+        );
+        let (d1, d2) = self.fetch_raw_descriptor(&self.tr.selector.clone())?;
+        self.tr.cache = self.parse_descriptor(d1, d2)?;
+        self.tr.cache.u.set_segment_base(self.vmcs.host_tr_base);
+        self.tr.cache.valid = 1;
+        self.ldtr.cache.valid = 0;
 
         self.msr.sysenter_cs_msr = self.vmcs.host_sysenter_cs;
         self.msr.sysenter_esp_msr = self.vmcs.host_sysenter_esp;
         self.msr.sysenter_eip_msr = self.vmcs.host_sysenter_eip;
 
-        // Bochs vmx.cc VMexitLoadHostState: DR7 reset, RFLAGS to reserved-bit
-        // only, debug/inhibit/activity reset, monitor disarmed.
+        // Bochs VMexitLoadHostState: DR7 reset, RFLAGS to reserved-bit only,
+        // debug/inhibit/activity reset, monitor disarmed.
         self.dr7 = super::crregs::BxDr7::from_bits_retain(0x400);
         self.write_eflags(0x2, 0x003F_FFFF);
         self.debug_trap = 0;
         self.activity_state = super::cpu::CpuActivityState::Active;
         self.monitor.reset_monitor();
+        Ok(())
+    }
+
+    /// Bochs LoadHostSeg helper inlined per segment register. A null
+    /// selector marks the cache unusable (Bochs `valid = 0`); a non-null
+    /// selector goes through fetch_raw_descriptor + parse_descriptor and
+    /// the cache is populated directly.
+    fn vmexit_load_host_seg(
+        &mut self,
+        seg: BxSegregs,
+        raw_selector: u16,
+    ) -> Result<()> {
+        super::segment_ctrl_pro::parse_selector(
+            raw_selector,
+            &mut self.sregs[seg as usize].selector,
+        );
+        if (raw_selector & 0xFFFC) == 0 {
+            self.sregs[seg as usize].cache.valid = 0;
+            return Ok(());
+        }
+        let sel = self.sregs[seg as usize].selector.clone();
+        let (d1, d2) = self.fetch_raw_descriptor(&sel)?;
+        self.sregs[seg as usize].cache = self.parse_descriptor(d1, d2)?;
+        self.sregs[seg as usize].cache.valid = 1;
+        Ok(())
     }
 
     // =========================================================================
@@ -1457,6 +1567,96 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.vmcs.exit_intr_error_code = 0;
         self.vmx_vmexit(VmxVmexitReason::ExceptionNmi, 0)?;
         Ok(true)
+    }
+
+    /// VM-entry / VM-exit MSR load helper — Bochs vmx.cc LoadMSRs.
+    /// Walks `count` 16-byte entries starting at `phys_addr`. Each entry is
+    /// `(msr_index : Bit32, _reserved : Bit32, value : Bit64)`. Returns the
+    /// 1-based index of the failing MSR or `0` on full success. Index `0`
+    /// is reserved (Bochs counts from `msr = 1`).
+    ///
+    /// Validation matches Bochs:
+    ///   - High 32 bits of the index field must be zero.
+    ///   - FSBASE / GSBASE cannot be restored via this list — those use the
+    ///     dedicated VMCS host segment-base fields.
+    ///   - X2APIC MSR range (0x800..=0x8FF) is also rejected.
+    ///
+    /// On a wrmsr that itself raises an exception (e.g. canonical-address
+    /// check failure), the exception propagates to the caller; Bochs
+    /// triggers a VMX abort in that case which the caller handles.
+    pub(super) fn vmx_load_msrs(
+        &mut self,
+        count: u32,
+        phys_addr: u64,
+    ) -> Result<u32> {
+        let mut paddr = phys_addr;
+        for msr in 1..=count {
+            let lo = self.mem_read_qword(paddr);
+            let value = self.mem_read_qword(paddr + 8);
+            paddr = paddr.wrapping_add(16);
+            if (lo >> 32) != 0 {
+                tracing::warn!(
+                    "VMX LoadMSRs[{msr}]: broken msr index {:#018x}",
+                    lo
+                );
+                return Ok(msr);
+            }
+            let index = lo as u32;
+            // Bochs rejects FSBASE (0xC0000100) / GSBASE (0xC0000101) loads
+            // — host saves these via dedicated VMCS host segment-base fields.
+            if index == 0xC000_0100 || index == 0xC000_0101 {
+                tracing::warn!(
+                    "VMX LoadMSRs[{msr}]: cannot restore FSBASE/GSBASE via list"
+                );
+                return Ok(msr);
+            }
+            if (0x800..=0x8FF).contains(&index) {
+                tracing::warn!(
+                    "VMX LoadMSRs[{msr}]: X2APIC MSR {:#x} not allowed",
+                    index
+                );
+                return Ok(msr);
+            }
+            // wrmsr_value bypasses CPL / VMX-intercept gates that the
+            // instruction handler enforces; the list is host-supplied so
+            // those checks would be inappropriate here.
+            self.wrmsr_value(index, value)?;
+        }
+        Ok(0)
+    }
+
+    /// VM-exit MSR store helper — Bochs vmx.cc StoreMSRs. Walks the store
+    /// list, calls `rdmsr_value` for each index, and writes the result into
+    /// the high qword of each 16-byte entry. Returns the 1-based failing
+    /// index or `0` on success. X2APIC MSRs are rejected per Bochs.
+    pub(super) fn vmx_store_msrs(
+        &mut self,
+        count: u32,
+        phys_addr: u64,
+    ) -> Result<u32> {
+        let mut paddr = phys_addr;
+        for msr in 1..=count {
+            let lo = self.mem_read_qword(paddr);
+            if (lo >> 32) != 0 {
+                tracing::warn!(
+                    "VMX StoreMSRs[{msr}]: broken msr index {:#018x}",
+                    lo
+                );
+                return Ok(msr);
+            }
+            let index = lo as u32;
+            if (0x800..=0x8FF).contains(&index) {
+                tracing::warn!(
+                    "VMX StoreMSRs[{msr}]: X2APIC MSR {:#x} not allowed",
+                    index
+                );
+                return Ok(msr);
+            }
+            let value = self.rdmsr_value(index)?;
+            self.mem_write_qword(paddr + 8, value);
+            paddr = paddr.wrapping_add(16);
+        }
+        Ok(0)
     }
 
     /// VM-entry event injection — Bochs vmx.cc VMenterInjectEvents
@@ -2122,11 +2322,6 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         Ok(true)
     }
 
-    /// I/O port intercept — Bochs vmx.cc VMexit_IO.
-    /// Without I/O bitmaps, any IO_VMEXIT bit triggers exits for every port.
-    /// With bitmaps, the per-port bit in io_bitmap_addr decides. Bitmap walk
-    /// is deferred; current stub exits-all when IO_VMEXIT is set and bitmaps
-    /// are off.
     /// I/O port bitmap walker — Bochs vmexit.cc VMexit_IO. The pair of 4 KiB
     /// bitmaps `io_bitmap_addr[0..1]` covers ports `0x0000..0x7FFF` and
     /// `0x8000..0xFFFF` respectively. A multi-byte access whose port range

@@ -902,9 +902,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// RDMSR — Read Model Specific Register
     /// Based on Bochs msr.cc
+    /// RDMSR — Read Model Specific Register (instruction handler).
+    /// Bochs msr.cc BX_CPU_C::RDMSR. Performs the CPL/intercept gate, then
+    /// delegates the actual MSR-table dispatch to `rdmsr_value`. The split
+    /// lets VMX VM-entry / VM-exit MSR lists reuse the dispatch without the
+    /// CPL+intercept ceremony.
     pub(super) fn rdmsr(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
-        use super::msr::*;
-
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .rpl;
@@ -914,14 +917,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         let msr = self.ecx();
-        // SVM MSR intercept
         if self.in_svm_guest {
-            self.svm_intercept_msr(0, msr)?; // 0 = read
+            self.svm_intercept_msr(0, msr)?;
         }
-        // Bochs vmx.cc VMexit_MSR_READ.
         if self.in_vmx_guest && self.vmexit_check_rdmsr(msr)? {
             return Ok(());
         }
+        let val = self.rdmsr_value(msr)?;
+        tracing::trace!("RDMSR: MSR={:#010x} -> {:#018x}", msr, val);
+        self.set_rax(val & 0xFFFF_FFFF);
+        self.set_rdx(val >> 32);
+        Ok(())
+    }
+
+    /// MSR-table dispatch for read — Bochs msr.cc switch body. Does not
+    /// perform CPL or VMX/SVM intercept checks; callers (`rdmsr` and the
+    /// VMX MSR-store list helper) own those gates.
+    pub(super) fn rdmsr_value(&mut self, msr: u32) -> crate::cpu::Result<u64> {
+        use super::msr::*;
         let val: u64 = match msr {
             BX_MSR_TSC => self.get_tsc(self.system_ticks()),
             BX_MSR_APICBASE => self.msr.apicbase,
@@ -1029,25 +1042,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             super::svm::BX_SVM_SMM_CTL_MSR => 0, // SMM_CTL not supported
             super::svm::BX_SVM_VM_HSAVE_PA_MSR => self.msr.svm_hsave_pa,
             _ => {
-                // Bochs: unknown MSRs raise #GP(0)
+                // Bochs msr.cc: unknown MSRs raise #GP(0).
                 if !self.ignore_bad_msrs {
                     tracing::trace!("RDMSR: unknown MSR={:#010x}, #GP(0)", msr);
-                    return self.exception(super::cpu::Exception::Gp, 0);
+                    self.exception(super::cpu::Exception::Gp, 0)?;
                 }
                 0
             }
         };
-        tracing::trace!("RDMSR: MSR={:#010x} -> {:#018x}", msr, val);
-        self.set_rax((val & 0xFFFF_FFFF) as u64);
-        self.set_rdx((val >> 32) as u64);
-        Ok(())
+        Ok(val)
     }
 
-    /// WRMSR — Write Model Specific Register
-    /// Based on Bochs msr.cc
+    /// WRMSR — Write Model Specific Register (instruction handler).
+    /// Bochs msr.cc BX_CPU_C::WRMSR. Performs CPL / instrumentation /
+    /// SVM+VMX intercept checks, then delegates to `wrmsr_value`. The
+    /// split lets VMX VM-entry / VM-exit MSR lists reuse the dispatch.
     pub(super) fn wrmsr(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
-        use super::msr::*;
-
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .rpl;
@@ -1061,21 +1071,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let msr = self.ecx();
         let val = ((self.edx() as u64) << 32) | (self.eax() as u64);
 
-        // BOCHS BX_INSTR_WRMSR(cpu_id, addr, value)
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cpuid_msr() {
             self.instrumentation.fire_wrmsr(msr, val);
         }
 
-        // SVM MSR intercept
         if self.in_svm_guest {
-            self.svm_intercept_msr(1, msr)?; // 1 = write
+            self.svm_intercept_msr(1, msr)?;
         }
-        // Bochs vmx.cc VMexit_MSR_WRITE.
         if self.in_vmx_guest && self.vmexit_check_wrmsr(msr)? {
             return Ok(());
         }
 
+        self.wrmsr_value(msr, val)?;
+        tracing::trace!("WRMSR: MSR={:#010x} = {:#018x}", msr, val);
+        Ok(())
+    }
+
+    /// MSR-table dispatch for write — Bochs msr.cc switch body. Does not
+    /// perform CPL or VMX/SVM intercept checks; callers own those gates.
+    pub(super) fn wrmsr_value(&mut self, msr: u32, val: u64) -> crate::cpu::Result<()> {
+        use super::msr::*;
         match msr {
             BX_MSR_TSC => self.set_tsc(val, self.system_ticks()),
             BX_MSR_APICBASE => self.msr.apicbase = val as _,
