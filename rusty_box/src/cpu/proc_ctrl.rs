@@ -1029,7 +1029,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             0x488 => 0x0000_0000_0000_2000u64, // IA32_VMX_CR4_FIXED0
             0x489 => 0x0000_0000_003F_27FFu64, // IA32_VMX_CR4_FIXED1
             0x48A => 0x0000_002C_0000_0000u64, // IA32_VMX_VMCS_ENUM
-            0x48B => 0x0000_0000_0000_0000u64, // IA32_VMX_PROCBASED_CTLS2
+            0x48B => {
+                // IA32_VMX_PROCBASED_CTLS2 — high 32 bits advertise the
+                // "allowed-1" set, low 32 bits the "must-be-1" set. We
+                // advertise EPT_ENABLE (1<<1), VPID_ENABLE (1<<5), and
+                // INVPCID (1<<12) — each backed by a real implementation
+                // (EPT walker, INVEPT/INVVPID handlers, INVPCID intercept).
+                const ALLOWED_1: u64 =
+                    super::vmx::VMX_VM_EXEC_CTRL2_EPT_ENABLE as u64
+                        | super::vmx::VMX_VM_EXEC_CTRL2_VPID_ENABLE as u64
+                        | super::vmx::VMX_VM_EXEC_CTRL2_INVPCID as u64;
+                ALLOWED_1 << 32
+            }
             0x48C => 0x0000_003F_0000_003Fu64, // IA32_VMX_TRUE_PINBASED_CTLS
             0x48D => 0x0401_E172_0401_E172u64, // IA32_VMX_TRUE_PROCBASED_CTLS
             0x48E => 0x0003_6FFF_0000_0000u64, // IA32_VMX_TRUE_EXIT_CTLS

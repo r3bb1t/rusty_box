@@ -2364,6 +2364,67 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         Ok(true)
     }
 
+    /// True when guest-physical → host-physical translation must go
+    /// through the EPT walker. Bochs precondition for every call into
+    /// `translate_guest_physical`.
+    #[inline]
+    pub(super) fn ept_active(&self) -> bool {
+        self.in_vmx_guest
+            && self.proc_based_ctls2() & VMX_VM_EXEC_CTRL2_EPT_ENABLE != 0
+    }
+
+    /// EPT translation for a paging-structure access — Bochs uses
+    /// `translate_guest_physical(paddr, laddr, true, true, /*user*/false,
+    /// /*writeable*/false, /*nx*/false, BX_READ)` from inside page walks.
+    /// When EPT is inactive returns the input unchanged.
+    pub(super) fn ept_translate_for_walk(
+        &mut self,
+        guest_paddr: u64,
+        guest_laddr: u64,
+    ) -> Result<u64> {
+        if !self.ept_active() {
+            return Ok(guest_paddr);
+        }
+        self.translate_guest_physical(
+            guest_paddr,
+            guest_laddr,
+            true,
+            true,
+            false,
+            false,
+            false,
+            EPT_RW_READ,
+        )
+    }
+
+    /// EPT translation for a data access — Bochs `translate_guest_physical`
+    /// with `is_page_walk=false`. The user/writeable/nx page metadata
+    /// flows from the inner page walk and feeds the EPT-violation
+    /// qualification.
+    pub(super) fn ept_translate_for_data(
+        &mut self,
+        guest_paddr: u64,
+        guest_laddr: u64,
+        user_page: bool,
+        writeable_page: bool,
+        nx_page: bool,
+        rw: u32,
+    ) -> Result<u64> {
+        if !self.ept_active() {
+            return Ok(guest_paddr);
+        }
+        self.translate_guest_physical(
+            guest_paddr,
+            guest_laddr,
+            true,
+            false,
+            user_page,
+            writeable_page,
+            nx_page,
+            rw,
+        )
+    }
+
     /// EPT 4-level walker — Bochs paging.cc `translate_guest_physical`.
     /// Translates a 52-bit guest-physical address to a host-physical
     /// address through the EPT page tables rooted at `vmcs.eptptr`. On
