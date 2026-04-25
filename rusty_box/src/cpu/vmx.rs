@@ -2490,6 +2490,24 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.set_rsp(self.vmcs.host_rsp);
         self.set_rip(self.vmcs.host_rip);
 
+        // Bochs vmx.cc:2879-2883: 32-bit PAE host requires PDPTR
+        // validation. A failure aborts the VMEXIT (Bochs VMABORT_HOST_
+        // PDPTR_CORRUPTED). We surface #UD into the host so the failure
+        // is visible.
+        if !x86_64_host
+            && super::crregs::BxCr4::from_bits_truncate(self.vmcs.host_cr4)
+                .contains(super::crregs::BxCr4::PAE)
+            && !self.check_pdptrs(self.vmcs.host_cr3)
+        {
+            tracing::error!(
+                "VMABORT: host PDPTRs corrupted (cr3={:#018x})",
+                self.vmcs.host_cr3
+            );
+            self.in_vmx_guest = false;
+            self.invalidate_prefetch_q();
+            return self.exception(Exception::Ud, 0);
+        }
+
         // Optional MSR loads — Bochs vmx.cc VMexitLoadHostState gates each
         // on the corresponding LOAD_HOST_* bit; with the bit clear the
         // host inherits the guest's value (per SDM 28.5).

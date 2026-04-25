@@ -1722,6 +1722,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
+    /// Bochs `CheckPDPTR(cr3_val)` — read four PAE PDPTE entries from
+    /// physical memory and validate. Returns `true` when each present
+    /// PDPTE has its reserved bits clear; `false` would cause a Bochs
+    /// VMABORT on host-state load of a 32-bit PAE host.
+    pub(super) fn check_pdptrs(&mut self, cr3_val: u64) -> bool {
+        let cr3_val = cr3_val & 0xFFFF_FFE0;
+        for n in 0..4u64 {
+            let entry_addr = cr3_val | (n << 3);
+            let pdpte = self.page_walk_read_qword(entry_addr);
+            if pdpte & 0x1 != 0 && pdpte & PAGING_PAE_PDPTE_RESERVED_BITS != 0 {
+                return false;
+            }
+        }
+        true
+    }
+
     /// DIAGNOSTIC: Read-only 4-level page walk that does NOT modify PTEs or TLB.
     /// Returns the physical address for the given linear address, or None if not present.
     /// Used to verify TLB entries against actual page table state.
