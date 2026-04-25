@@ -1654,6 +1654,31 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         Ok(true)
     }
 
+    /// MOV from CR8 intercept — Bochs vmexit.cc VMexit_CR8_Read. Gated on
+    /// `CR8_READ_VMEXIT`; qualification matches the standard CR-access
+    /// layout with `CR# = 8`, access type = MOV from CR (1), `gpr` in
+    /// `[11:8]`.
+    pub(super) fn vmexit_check_cr8_read(&mut self, gpr: u8) -> Result<bool> {
+        if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_CR8_READ_VMEXIT == 0 {
+            return Ok(false);
+        }
+        let qual: u64 = 8 | (1 << 4) | ((u64::from(gpr) & 0xF) << 8);
+        self.vmx_vmexit(VmxVmexitReason::CrAccess, qual)?;
+        Ok(true)
+    }
+
+    /// MOV to CR8 intercept — Bochs vmexit.cc VMexit_CR8_Write. Gated on
+    /// `CR8_WRITE_VMEXIT`; qualification has `CR# = 8`, access type = MOV
+    /// to CR (0), `gpr` in `[11:8]`.
+    pub(super) fn vmexit_check_cr8_write(&mut self, gpr: u8) -> Result<bool> {
+        if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_CR8_WRITE_VMEXIT == 0 {
+            return Ok(false);
+        }
+        let qual: u64 = 8 | ((u64::from(gpr) & 0xF) << 8);
+        self.vmx_vmexit(VmxVmexitReason::CrAccess, qual)?;
+        Ok(true)
+    }
+
     /// MOV to CR0 intercept — Bochs vmexit.cc VMexit_CR0_Write. The guest
     /// cannot touch bits pinned by `cr0_guest_host_mask` (aka `vm_cr0_mask`);
     /// an attempted change triggers a VMEXIT, otherwise the write proceeds

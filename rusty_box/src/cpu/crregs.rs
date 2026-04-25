@@ -1103,16 +1103,57 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    // ----- CR8 helpers -----
+
+    /// CR8 read — Bochs crregs.cc ReadCR8. CR8 is aliased to LAPIC.TPR[7:4],
+    /// returning the high nibble of the TPR. VMX `CR8_READ_VMEXIT` shadows
+    /// the read; with TPR-shadow mode the value would come from the virtual-
+    /// APIC page (not modelled).
+    pub(super) fn read_cr8(&mut self, gpr: u8) -> super::Result<u64> {
+        if self.in_vmx_guest && self.vmexit_check_cr8_read(gpr)? {
+            // VMEXIT consumed the read; the destination GPR is left untouched
+            // because the host re-emits the load after handling the exit.
+            // Sentinel value never reaches the guest.
+            return Ok(0);
+        }
+        Ok(u64::from((self.lapic.get_tpr() >> 4) & 0xF))
+    }
+
+    /// CR8 write — Bochs crregs.cc WriteCR8. Validates that only the low
+    /// four bits are set (#GP otherwise), then writes `(val & 0xF) << 4`
+    /// into LAPIC.TPR. VMX `CR8_WRITE_VMEXIT` exits before the LAPIC update.
+    pub(super) fn write_cr8(&mut self, val: u64, gpr: u8) -> super::Result<()> {
+        if self.in_vmx_guest && self.vmexit_check_cr8_write(gpr)? {
+            return Ok(());
+        }
+        if val & 0xFFFF_FFFF_FFFF_FFF0 != 0 {
+            tracing::trace!("WriteCR8: reserved bits set in {:#018x}, #GP(0)", val);
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let tpr = ((val as u8) & 0xF) << 4;
+        self.lapic.set_tpr(tpr);
+        Ok(())
+    }
+
     // ----- 64-bit MOV CRn, Rq (writes in long mode) -----
 
     /// MOV CR0, Rq — Bochs crregs.cc
     /// Reads full 64-bit register; upper 32 bits must be zero (#GP if not).
+    /// With REX.R the destination index can be 8, in which case Bochs routes
+    /// the write to CR8 (TPR alias).
     pub fn mov_cr0_rq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
         self.invalidate_prefetch_q();
 
-        let src = instr.src1() as usize;
-        let val_64 = self.get_gpr64(src);
+        let src_gpr = instr.src1();
+        let cr_idx = instr.dst();
+        let val_64 = self.get_gpr64(usize::from(src_gpr));
+
+        if cr_idx == 8 {
+            return self.write_cr8(val_64, src_gpr);
+        }
+
+        let src = usize::from(src_gpr);
 
         // Bochs check_CR0(): upper 32 bits must be zero
         if (val_64 >> 32) != 0 {
@@ -1444,8 +1485,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn mov_rq_cr0(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
-        let val = self.cr0.get32() as u64;
-        self.set_gpr64(instr.src() as usize, val);
+        // Bochs MOV_RqCR0: src() carries the CR index (extended by REX.R), so
+        // CR8 reads land here too. Bochs reads i->src() and dispatches.
+        let cr_idx = instr.dst();
+        let dst_gpr = instr.src();
+        if cr_idx == 8 {
+            let val = self.read_cr8(dst_gpr)?;
+            self.set_gpr64(usize::from(dst_gpr), val);
+            return Ok(());
+        }
+        let val = u64::from(self.cr0.get32());
+        self.set_gpr64(usize::from(dst_gpr), val);
         Ok(())
     }
 
