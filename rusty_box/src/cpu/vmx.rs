@@ -413,6 +413,49 @@ fn is_valid_page_aligned_phy_addr(paddr: u64) -> bool {
     paddr & 0xFFF == 0 && (paddr >> BX_PHY_ADDRESS_WIDTH) == 0
 }
 
+/// INVEPT type field — Bochs vmx.cc INVEPT decodes this from the GPR
+/// dereferenced by `i->dst()`. Numeric values are part of the SDM ABI.
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InveptType {
+    SingleContext = 1,
+    AllContext = 2,
+}
+
+/// INVVPID type field — Bochs vmx.cc INVVPID. Same SDM-defined values.
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvvpidType {
+    IndividualAddress = 0,
+    SingleContext = 1,
+    AllContext = 2,
+    SingleContextNonGlobal = 3,
+}
+
+impl InveptType {
+    /// Convert from the raw `type` field carried in the GPR. Returns
+    /// `None` when the value is reserved — Bochs `VMfail` path.
+    pub const fn from_raw(v: u64) -> Option<Self> {
+        match v {
+            1 => Some(Self::SingleContext),
+            2 => Some(Self::AllContext),
+            _ => None,
+        }
+    }
+}
+
+impl InvvpidType {
+    pub const fn from_raw(v: u64) -> Option<Self> {
+        match v {
+            0 => Some(Self::IndividualAddress),
+            1 => Some(Self::SingleContext),
+            2 => Some(Self::AllContext),
+            3 => Some(Self::SingleContextNonGlobal),
+            _ => None,
+        }
+    }
+}
+
 // VM-execution secondary control bits used outside vmx.rs callers.
 pub(super) const VMX_VM_EXEC_CTRL2_EPT_ENABLE: u32 = 1 << 1;
 pub(super) const VMX_VM_EXEC_CTRL2_VPID_ENABLE: u32 = 1 << 5;
