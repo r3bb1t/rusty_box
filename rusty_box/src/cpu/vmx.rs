@@ -62,6 +62,7 @@ const VMCS_32BIT_CONTROL_VMEXIT_MSR_STORE_COUNT: u32 = 0x400E;
 const VMCS_32BIT_CONTROL_VMEXIT_MSR_LOAD_COUNT: u32 = 0x4010;
 const VMCS_32BIT_CONTROL_VMENTRY_MSR_LOAD_COUNT: u32 = 0x4014;
 const VMCS_64BIT_CONTROL_TSC_OFFSET: u32 = 0x2010;
+const VMCS_32BIT_CONTROL_TPR_THRESHOLD: u32 = 0x401C;
 const VMCS_64BIT_CONTROL_EPTPTR: u32 = 0x201A;
 const VMCS_64BIT_GUEST_PHYSICAL_ADDR: u32 = 0x2400;
 
@@ -428,6 +429,7 @@ pub enum VmxVmexitReason {
 pub(super) const VMX_PIN_BASED_VMEXEC_CTRL_EXTERNAL_INTERRUPT_VMEXIT: u32 = 1 << 0;
 pub(super) const VMX_PIN_BASED_VMEXEC_CTRL_NMI_EXITING: u32 = 1 << 3;
 pub(super) const VMX_PIN_BASED_VMEXEC_CTRL_VIRTUAL_NMI: u32 = 1 << 5;
+pub(super) const VMX_VM_EXEC_CTRL1_TPR_SHADOW: u32 = 1 << 21;
 pub(super) const VMX_PIN_BASED_VMEXEC_CTRL_VMX_PREEMPTION_TIMER_VMEXIT: u32 = 1 << 6;
 
 // Primary processor-based VM-execution controls (Bochs VmxVmexec1Controls).
@@ -465,6 +467,7 @@ pub(super) const VMX_VM_EXEC_CTRL2_MBE_CTRL: u32 = 1 << 22;
 
 // VM-exit control bits — Bochs vmx_ctrls.h.
 pub(super) const VMX_VMEXIT_CTRL1_LOAD_PERF_GLOBAL_CTRL_MSR: u32 = 1 << 12;
+pub(super) const VMX_VMEXIT_CTRL1_HOST_ADDR_SPACE_SIZE: u32 = 1 << 9;
 pub(super) const VMX_VMEXIT_CTRL1_INTA_ON_VMEXIT: u32 = 1 << 15;
 pub(super) const VMX_VMEXIT_CTRL1_LOAD_PAT_MSR: u32 = 1 << 19;
 pub(super) const VMX_VMEXIT_CTRL1_LOAD_EFER_MSR: u32 = 1 << 21;
@@ -735,6 +738,10 @@ pub struct BxVmcs {
     /// back at VMEXIT. Bochs reads this from the guest VMCS in
     /// vmlaunch/vmresume; ticking happens through the LAPIC.
     pub vmx_preemption_timer_value: u32,
+    /// VMX TPR threshold — Bochs `tpr_threshold`. Bochs vmenter check
+    /// requires this to be ≤ 15 because only the high 4 bits of TPR are
+    /// virtualised (CR8 = TPR[7:4]).
+    pub tpr_threshold: u32,
     /// Virtual Processor Identifier — Bochs `vpid`. VMCS_16BIT_CONTROL_VPID
     /// (encoding 0x0). When `VPID_ENABLE` is set the guest's TLB entries
     /// are tagged with this value; must be non-zero per VMENTRY check.
@@ -1193,6 +1200,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_32BIT_CONTROL_VMEXIT_CONTROLS => v.vm_exit_ctls as u64,
             VMCS_32BIT_CONTROL_VMENTRY_CONTROLS => v.vm_entry_ctls as u64,
             VMCS_32BIT_CONTROL_VMENTRY_INTERRUPTION_INFO => v.vm_entry_intr_info as u64,
+            VMCS_32BIT_CONTROL_TPR_THRESHOLD => v.tpr_threshold as u64,
             VMCS_32BIT_CONTROL_VMENTRY_EXCEPTION_ERR_CODE => v.vm_entry_exception_error_code as u64,
             VMCS_32BIT_CONTROL_VMENTRY_INSTRUCTION_LENGTH => v.vm_entry_instruction_length as u64,
             // 32-bit read-only exit data.
@@ -1340,6 +1348,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_32BIT_CONTROL_VMEXIT_CONTROLS => v.vm_exit_ctls = value as u32,
             VMCS_32BIT_CONTROL_VMENTRY_CONTROLS => v.vm_entry_ctls = value as u32,
             VMCS_32BIT_CONTROL_VMENTRY_INTERRUPTION_INFO => v.vm_entry_intr_info = value as u32,
+            VMCS_32BIT_CONTROL_TPR_THRESHOLD => v.tpr_threshold = value as u32,
             VMCS_32BIT_CONTROL_VMENTRY_EXCEPTION_ERR_CODE => v.vm_entry_exception_error_code = value as u32,
             VMCS_32BIT_CONTROL_VMENTRY_INSTRUCTION_LENGTH => v.vm_entry_instruction_length = value as u32,
             // Read-only VMCS exit-data fields: Bochs VMwriteReadOnlyVmcsComponent
@@ -1735,6 +1744,37 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
 
+        // Bochs vmx.cc:665-673 NMI/VIRTUAL_NMI consistency:
+        //   - VIRTUAL_NMI requires NMI_EXITING.
+        //   - NMI_WINDOW_EXITING requires VIRTUAL_NMI.
+        let pin = self.vmcs.pin_based_ctls;
+        if pin & VMX_PIN_BASED_VMEXEC_CTRL_VIRTUAL_NMI != 0
+            && pin & VMX_PIN_BASED_VMEXEC_CTRL_NMI_EXITING == 0
+        {
+            tracing::warn!("VMENTRY check_vm_controls: VIRTUAL_NMI without NMI_EXITING");
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+        if ctls1 & VMX_VM_EXEC_CTRL1_NMI_WINDOW_EXITING != 0
+            && pin & VMX_PIN_BASED_VMEXEC_CTRL_VIRTUAL_NMI == 0
+        {
+            tracing::warn!(
+                "VMENTRY check_vm_controls: NMI_WINDOW_EXITING without VIRTUAL_NMI"
+            );
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+
+        // Bochs vmx.cc:699-761 TPR-shadow checks. We model the threshold
+        // bound (0..=15) — only the high 4 bits of TPR matter. The
+        // virtual-APIC page validity is gated on a feature we don't yet
+        // model, so the threshold check is what's reachable.
+        if ctls1 & VMX_VM_EXEC_CTRL1_TPR_SHADOW != 0 && self.vmcs.tpr_threshold > 15 {
+            tracing::warn!(
+                "VMENTRY check_vm_controls: TPR_THRESHOLD={} > 15",
+                self.vmcs.tpr_threshold
+            );
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+
         // VM-entry event injection field. Bochs validates the type/vector
         // pair and the instruction-length when the valid bit is set.
         let info = self.vmcs.vm_entry_intr_info;
@@ -1874,6 +1914,41 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// when the bit is clear the host inherits the guest value, per the
     /// SDM. PMU host-state isn't modelled, so PERF_GLOBAL_CTRL just logs.
     fn vmexit_load_host_state(&mut self) -> Result<()> {
+        let exit_ctls = self.vmcs.vm_exit_ctls;
+        let x86_64_host = exit_ctls & VMX_VMEXIT_CTRL1_HOST_ADDR_SPACE_SIZE != 0;
+
+        // Bochs vmx.cc VMexitLoadHostState: VMABORT when a 64-bit guest
+        // exits to a host configured as 32-bit (the host can't continue
+        // safely after coming out of long mode mid-flight).
+        if self.long64_mode() && !x86_64_host {
+            tracing::error!(
+                "VMABORT: VMEXIT to 32-bit host from 64-bit guest"
+            );
+            // Bochs panics with VMABORT_VMEXIT_TO_32BIT_HOST_FROM_64BIT_GUEST.
+            // Without a panic-on-abort path we surface a #UD into the host
+            // so the failure is visible.
+            self.in_vmx_guest = false;
+            self.invalidate_prefetch_q();
+            return self.exception(Exception::Ud, 0);
+        }
+
+        // EFER must be set BEFORE CR4/CR0 because long-mode bits influence
+        // paging-mode validation downstream (Bochs comment).
+        if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_EFER_MSR != 0 {
+            self.efer.set32(self.vmcs.host_ia32_efer as u32);
+        } else {
+            // Bochs vmx.cc:2858-2861 fallback: when LOAD_EFER_MSR is clear,
+            // EFER.LME and EFER.LMA track x86_64_host directly.
+            use super::crregs::BxEfer;
+            let mut efer = self.efer.bits();
+            if x86_64_host {
+                efer |= (BxEfer::LME | BxEfer::LMA).bits();
+            } else {
+                efer &= !(BxEfer::LME | BxEfer::LMA).bits();
+            }
+            self.efer = BxEfer::from_bits_truncate(efer);
+        }
+
         self.cr0.set32(self.vmcs.host_cr0 as u32);
         self.cr3 = self.vmcs.host_cr3;
         self.cr4.set_val(self.vmcs.host_cr4);
@@ -1883,10 +1958,6 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // Optional MSR loads — Bochs vmx.cc VMexitLoadHostState gates each
         // on the corresponding LOAD_HOST_* bit; with the bit clear the
         // host inherits the guest's value (per SDM 28.5).
-        let exit_ctls = self.vmcs.vm_exit_ctls;
-        if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_EFER_MSR != 0 {
-            self.efer.set32(self.vmcs.host_ia32_efer as u32);
-        }
         if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_PAT_MSR != 0 {
             self.msr.pat.set_U64(self.vmcs.host_ia32_pat);
         }
@@ -1937,16 +2008,22 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.vmexit_load_host_seg(BxSegregs::Ds, self.vmcs.host_ds_selector)?;
         self.vmexit_load_host_seg(BxSegregs::Fs, self.vmcs.host_fs_selector)?;
         self.vmexit_load_host_seg(BxSegregs::Gs, self.vmcs.host_gs_selector)?;
-        // FS / GS base override (Bochs sets these from VMCS regardless of
-        // what the descriptor in the host GDT says — needed for swapgs).
-        self.sregs[BxSegregs::Fs as usize]
-            .cache
-            .u
-            .set_segment_base(self.vmcs.host_fs_base);
-        self.sregs[BxSegregs::Gs as usize]
-            .cache
-            .u
-            .set_segment_base(self.vmcs.host_gs_base);
+        // FS / GS base override — Bochs vmx.cc gates this on
+        // `x86_64_host || segreg.cache.valid`. In 32-bit hosts a null
+        // selector leaves the descriptor cache unusable; overriding the
+        // base would corrupt the segment record.
+        if x86_64_host || self.sregs[BxSegregs::Fs as usize].cache.valid != 0 {
+            self.sregs[BxSegregs::Fs as usize]
+                .cache
+                .u
+                .set_segment_base(self.vmcs.host_fs_base);
+        }
+        if x86_64_host || self.sregs[BxSegregs::Gs as usize].cache.valid != 0 {
+            self.sregs[BxSegregs::Gs as usize]
+                .cache
+                .u
+                .set_segment_base(self.vmcs.host_gs_base);
+        }
 
         // TR + LDTR. Bochs marks LDTR unusable (valid=0) and parses TR from
         // the host GDT, then overrides TR.base from the VMCS field.
@@ -1965,10 +2042,12 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.msr.sysenter_eip_msr = self.vmcs.host_sysenter_eip;
 
         // Bochs VMexitLoadHostState: DR7 reset, RFLAGS to reserved-bit only,
-        // debug/inhibit/activity reset, monitor disarmed.
+        // debug/inhibit/activity reset, monitor disarmed. inhibit_mask
+        // tracks STI / MOV-SS shadow + NMI block; the host comes back fresh.
         self.dr7 = super::crregs::BxDr7::from_bits_retain(0x400);
         self.write_eflags(0x2, 0x003F_FFFF);
         self.debug_trap = 0;
+        self.inhibit_mask = 0;
         self.activity_state = super::cpu::CpuActivityState::Active;
         self.monitor.reset_monitor();
         Ok(())
@@ -2269,6 +2348,13 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             self.set_rip(new_rip);
         }
 
+        // Bochs vmx.cc:2484-2488 records the exception classification
+        // for HARDWARE_EXCEPTION injections so a fault during delivery
+        // can be classified for double-fault detection.
+        if bochs_type == 3 && (vector as usize) < super::cpu::BX_CPU_HANDLED_EXCEPTIONS as usize {
+            self.last_exception_type = super::exception::exception_type_for(vector) as i32;
+        }
+
         // Bochs records the injection in IDT-vectoring info (with valid bit
         // cleared per spec) so a fault during delivery is attributed correctly.
         self.vmcs.idt_vectoring_info = info & !(1u32 << 31);
@@ -2277,6 +2363,10 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         let err16 = (error_code & 0xFFFF) as u16;
         let res = self.interrupt(vector, intr_type, push_error, push_error, err16);
         self.ext = false;
+        // Bochs vmx.cc:2510: clear last_exception_type after delivery so
+        // subsequent unrelated faults aren't classified as double-fault
+        // continuations.
+        self.last_exception_type = -1; // BX_ET_NONE
         res
     }
 

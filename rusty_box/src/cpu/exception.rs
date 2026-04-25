@@ -33,6 +33,18 @@ enum ExceptionType {
 /// Sentinel value for "no pending exception" (Bochs BX_ET_NONE = -1).
 const BX_ET_NONE: i32 = -1;
 
+/// Bochs `get_exception_type` lookup — returns the ExceptionType enum
+/// (Benign/Contributory/PageFault/DoubleFault) value from the static
+/// EXCEPTIONS_INFO table for the given exception vector. Used by the
+/// VMX `vmenter_inject_events` HARDWARE_EXCEPTION classification.
+pub(super) fn exception_type_for(vector: u8) -> i32 {
+    let idx = vector as usize;
+    if idx >= EXCEPTIONS_INFO.len() {
+        return BX_ET_NONE;
+    }
+    EXCEPTIONS_INFO[idx].exception_type as i32
+}
+
 // Match Bochs `is_exception_OK[3][3]` (cpu/exception.cc..855).
 // Indexes are {Benign, Contributory, PageFault}.
 const IS_EXCEPTION_OK: [[bool; 3]; 3] = [
