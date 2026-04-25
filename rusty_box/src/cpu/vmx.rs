@@ -65,10 +65,13 @@ const VMCS_64BIT_CONTROL_TSC_OFFSET: u32 = 0x2010;
 const VMCS_64BIT_CONTROL_EPTPTR: u32 = 0x201A;
 const VMCS_64BIT_GUEST_PHYSICAL_ADDR: u32 = 0x2400;
 
-// EPT walker access classification — Bochs paging.cc rw enum.
+// EPT walker access classification — Bochs `bochs.h` enum
+// `{BX_READ=0, BX_WRITE=1, BX_EXECUTE=2, BX_RW=3, BX_SHADOW_STACK_READ=4,
+// BX_SHADOW_STACK_WRITE=5}`. We re-export under EPT_RW_* names so the
+// paging-side callers don't pull in the bochs.h shim.
 pub(super) const EPT_RW_READ: u32 = 0;
 pub(super) const EPT_RW_WRITE: u32 = 1;
-pub(super) const EPT_RW_EXECUTE: u32 = 4;
+pub(super) const EPT_RW_EXECUTE: u32 = 2;
 const VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS: u32 = 0x2044;
 const VMCS_64BIT_GUEST_LINK_POINTER: u32 = 0x2800;
 const VMCS_64BIT_GUEST_IA32_PAT: u32 = 0x2804;
@@ -2455,15 +2458,21 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         let eptptr = self.vmcs.eptptr;
         let mut ppf = eptptr & 0x000F_FFFF_FFFF_F000;
         let mut combined_access: u32 = EPT_READ | EPT_WRITE | EPT_EXECUTE;
-        let mut access_mask: u32 = match rw {
-            r if r == EPT_RW_EXECUTE => EPT_EXECUTE,
-            r if r & 1 != 0 => EPT_WRITE,
-            _ => EPT_READ,
-        };
-        if rw & 0x1 != 0 {
+        // Bochs paging.cc access-mask construction:
+        //   if (rw == BX_EXECUTE)  access_mask |= BX_EPT_EXECUTE;
+        //   if (rw & 1)            access_mask |= BX_EPT_WRITE; // write or r-m-w
+        //   if ((rw & 3) == BX_READ) access_mask |= BX_EPT_READ;
+        // Where BX_READ=0, BX_WRITE=1, BX_EXECUTE=2, BX_SHADOW_STACK_READ=4,
+        // BX_SHADOW_STACK_WRITE=5. The `(rw & 3) == 0` test catches both
+        // plain reads and shadow-stack reads (bit 2 set).
+        let mut access_mask: u32 = 0;
+        if rw == EPT_RW_EXECUTE {
+            access_mask |= EPT_EXECUTE;
+        }
+        if rw & 1 != 0 {
             access_mask |= EPT_WRITE;
         }
-        if rw == EPT_RW_READ {
+        if rw & 3 == 0 {
             access_mask |= EPT_READ;
         }
 
@@ -2552,22 +2561,28 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             //   [9]     user-mode access
             //   [10]    writeable page
             //   [11]    NX page
+            // Bochs paging.cc EPT VMEXIT qualification builder. Bits 9/10/11
+            // (user / writeable / nx page) require BX_VMX_MBE_CONTROL — we
+            // don't advertise that, so they stay clear. Bit 12 needs the
+            // CPU's `nmi_unblocking_iret` flag, also not modelled. Bit 13
+            // sets on shadow-stack accesses (rw & 4) per BX_SUPPORT_CET.
             let qual = if reason == VmxVmexitReason::EptViolation {
+                combined_access &= entry[leaf as usize] as u32;
                 let mut q = u64::from(access_mask) | (u64::from(combined_access) << 3);
                 if guest_laddr_valid {
                     q |= 1 << 7;
                     if !is_page_walk {
                         q |= 1 << 8;
-                        if user_page {
-                            q |= 1 << 9;
-                        }
-                        if writeable_page {
-                            q |= 1 << 10;
-                        }
-                        if nx_page {
-                            q |= 1 << 11;
-                        }
+                        // MBE_CONTROL is gated on a VMX extension that
+                        // rusty_box does not advertise, so the advanced
+                        // user/writeable/nx page bits stay clear (Bochs
+                        // matches real hardware: bits absent unless the
+                        // extension is on).
+                        let _ = (user_page, writeable_page, nx_page);
                     }
+                }
+                if rw & 4 != 0 {
+                    q |= 1 << 13; // shadow-stack access
                 }
                 self.vmcs.guest_linear_addr = guest_laddr;
                 self.vmcs.guest_physical_addr = guest_paddr;
