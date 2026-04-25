@@ -482,6 +482,32 @@ fn is_valid_page_aligned_phy_addr(paddr: u64) -> bool {
     paddr & 0xFFF == 0 && (paddr >> BX_PHY_ADDRESS_WIDTH) == 0
 }
 
+/// Bochs `IsValidPhyAddr` — fits in BX_PHY_ADDRESS_WIDTH bits.
+fn is_valid_phy_addr(paddr: u64) -> bool {
+    const BX_PHY_ADDRESS_WIDTH: u32 = 40;
+    (paddr >> BX_PHY_ADDRESS_WIDTH) == 0
+}
+
+// VMX-control allowed-{0,1} bit masks — Bochs vmx.cc reads these from
+// IA32_VMX_*_CTLS MSRs and uses the low half ("allowed-0", bits that
+// MUST be 1) and the high half ("allowed-1", bits that MAY be 1) to
+// validate guest-supplied control values at VMENTRY. These must stay
+// in lock-step with the values rdmsr_value returns for those MSRs in
+// proc_ctrl.rs.
+pub(super) const VMX_PINBASED_CTLS_ALLOWED_0: u32 = 0x0000_003F;
+pub(super) const VMX_PINBASED_CTLS_ALLOWED_1: u32 = 0x0000_003F;
+pub(super) const VMX_PROCBASED_CTLS_ALLOWED_0: u32 = 0x0401_E172;
+pub(super) const VMX_PROCBASED_CTLS_ALLOWED_1: u32 = 0x0401_E172;
+pub(super) const VMX_EXIT_CTLS_ALLOWED_0: u32 = 0;
+pub(super) const VMX_EXIT_CTLS_ALLOWED_1: u32 = 0x0003_6FFF;
+pub(super) const VMX_ENTRY_CTLS_ALLOWED_0: u32 = 0x0000_0011;
+pub(super) const VMX_ENTRY_CTLS_ALLOWED_1: u32 = 0x0000_FFFF;
+pub(super) const VMX_PROCBASED_CTLS2_ALLOWED_0: u32 = 0;
+pub(super) const VMX_PROCBASED_CTLS2_ALLOWED_1: u32 =
+    VMX_VM_EXEC_CTRL2_EPT_ENABLE
+        | VMX_VM_EXEC_CTRL2_VPID_ENABLE
+        | VMX_VM_EXEC_CTRL2_INVPCID;
+
 /// INVEPT type field — Bochs vmx.cc INVEPT decodes this from the GPR
 /// dereferenced by `i->dst()`. Numeric values are part of the SDM ABI.
 #[repr(u64)]
@@ -1693,7 +1719,95 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     ///   - VPID_ENABLE requires non-zero VPID (VMCS_16BIT_CONTROL_VPID).
     ///   - VM-entry interruption info: when valid bit set, vector + type
     ///     fields must be sane (Bochs vmenter_inject_events preconditions).
+    /// Bochs MSR-list address check (vmx.cc:929-955). Used for the
+    /// VMEXIT-store / VMEXIT-load / VMENTRY-load lists. When `count`
+    /// is non-zero the base address must be 16-byte aligned and
+    /// `[addr, addr + count*16 - 1]` must lie inside the host physical
+    /// address space. Returns `Some(VmentryInvalidVmControlField)` to
+    /// be propagated by `?`.
+    fn check_msr_list_addr(
+        count: u32,
+        addr: u64,
+        what: &'static str,
+    ) -> Option<VmxErr> {
+        if count == 0 {
+            return None;
+        }
+        if (addr & 0xF) != 0 || !is_valid_phy_addr(addr) {
+            tracing::warn!("VMENTRY check: {what} addr {:#018x} malformed", addr);
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+        let last = addr.wrapping_add(u64::from(count).saturating_mul(16)).wrapping_sub(1);
+        if !is_valid_phy_addr(last) {
+            tracing::warn!(
+                "VMENTRY check: {what} count {count} pushes last byte beyond phys range"
+            );
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+        None
+    }
+
+    /// Bochs control-mask test: each bit of `value` must be permitted by
+    /// `allowed_1` and every required-1 bit (set in `allowed_0`) must be
+    /// present. Returns true when the value violates either constraint.
+    fn ctls_out_of_bounds(value: u32, allowed_0: u32, allowed_1: u32) -> bool {
+        // Required-1 bits missing → fail.
+        if !value & allowed_0 != 0 {
+            return true;
+        }
+        // Bits set that aren't permitted → fail.
+        if value & !allowed_1 != 0 {
+            return true;
+        }
+        false
+    }
+
     fn vmenter_load_check_vm_controls(&mut self) -> Option<VmxErr> {
+        // Bochs vmx.cc:580-621 — every control field must respect its
+        // IA32_VMX_*_CTLS allowed-0 / allowed-1 mask: bits cleared in
+        // the value that are required by allowed-0 fail; bits set in
+        // the value that aren't permitted by allowed-1 fail.
+        let pin = self.vmcs.pin_based_ctls;
+        if Self::ctls_out_of_bounds(pin, VMX_PINBASED_CTLS_ALLOWED_0, VMX_PINBASED_CTLS_ALLOWED_1) {
+            tracing::warn!("VMENTRY check_vm_controls: pin-based controls out of bounds");
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+        let proc1 = self.vmcs.proc_based_ctls;
+        if Self::ctls_out_of_bounds(
+            proc1,
+            VMX_PROCBASED_CTLS_ALLOWED_0,
+            VMX_PROCBASED_CTLS_ALLOWED_1,
+        ) {
+            tracing::warn!("VMENTRY check_vm_controls: primary proc-based controls out of bounds");
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+        // Bochs vmx.cc:599-602: secondary controls only consulted when
+        // ACTIVATE_SECONDARY_CONTROLS is set.
+        if proc1 & VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS != 0 {
+            let proc2 = self.vmcs.secondary_proc_based_ctls;
+            if Self::ctls_out_of_bounds(
+                proc2,
+                VMX_PROCBASED_CTLS2_ALLOWED_0,
+                VMX_PROCBASED_CTLS2_ALLOWED_1,
+            ) {
+                tracing::warn!(
+                    "VMENTRY check_vm_controls: secondary proc-based controls out of bounds"
+                );
+                return Some(VmxErr::VmentryInvalidVmControlField);
+            }
+        }
+        let exit_ctls = self.vmcs.vm_exit_ctls;
+        if Self::ctls_out_of_bounds(exit_ctls, VMX_EXIT_CTLS_ALLOWED_0, VMX_EXIT_CTLS_ALLOWED_1) {
+            tracing::warn!("VMENTRY check_vm_controls: VM-exit controls out of bounds");
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+        let entry_ctls = self.vmcs.vm_entry_ctls;
+        if Self::ctls_out_of_bounds(entry_ctls, VMX_ENTRY_CTLS_ALLOWED_0, VMX_ENTRY_CTLS_ALLOWED_1)
+        {
+            tracing::warn!("VMENTRY check_vm_controls: VM-entry controls out of bounds");
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+
         // CR3 target count.
         if self.vmcs.vm_cr3_target_cnt > 4 {
             tracing::warn!(
@@ -1741,6 +1855,72 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         }
         if ctls2 & VMX_VM_EXEC_CTRL2_VPID_ENABLE != 0 && self.vmcs.vpid == 0 {
             tracing::warn!("VMENTRY check_vm_controls: VPID_ENABLE with VPID=0");
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+
+        // Bochs vmx.cc:789-805: when EPT_ENABLE is set the EPTPTR must
+        // pass is_eptptr_valid; when it's clear, UNRESTRICTED_GUEST and
+        // MBE_CTRL are illegal (each requires EPT).
+        if ept_enabled {
+            if !self.is_eptptr_valid(self.vmcs.eptptr) {
+                tracing::warn!(
+                    "VMENTRY check_vm_controls: invalid EPTPTR={:#018x}",
+                    self.vmcs.eptptr
+                );
+                return Some(VmxErr::VmentryInvalidVmControlField);
+            }
+        } else if ctls2 & VMX_VM_EXEC_CTRL2_MBE_CTRL != 0 {
+            tracing::warn!("VMENTRY check_vm_controls: MBE_CTRL without EPT");
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+
+        // Bochs vmx.cc:923-926: STORE_VMX_PREEMPTION_TIMER VMEXIT control
+        // requires the pin-based VMX_PREEMPTION_TIMER_VMEXIT.
+        if exit_ctls & VMX_VMEXIT_CTRL1_STORE_VMX_PREEMPTION_TIMER != 0
+            && self.vmcs.pin_based_ctls
+                & VMX_PIN_BASED_VMEXEC_CTRL_VMX_PREEMPTION_TIMER_VMEXIT
+                == 0
+        {
+            tracing::warn!(
+                "VMENTRY check_vm_controls: STORE_VMX_PREEMPTION_TIMER without pin-based timer"
+            );
+            return Some(VmxErr::VmentryInvalidVmControlField);
+        }
+
+        // Bochs vmx.cc:929-955: VMEXIT MSR-store / -load areas — when
+        // count > 0 the address must be 16-byte aligned, in physical
+        // range, and `addr + count*16 - 1` must also be in range.
+        // ? on Option propagates None, but here the success value IS
+        // None — propagate failure (Some) explicitly.
+        if let Some(err) = Self::check_msr_list_addr(
+            self.vmcs.vmexit_msr_store_cnt,
+            self.vmcs.vmexit_msr_store_addr,
+            "VMEXIT msr-store",
+        ) {
+            return Some(err);
+        }
+        if let Some(err) = Self::check_msr_list_addr(
+            self.vmcs.vmexit_msr_load_cnt,
+            self.vmcs.vmexit_msr_load_addr,
+            "VMEXIT msr-load",
+        ) {
+            return Some(err);
+        }
+        if let Some(err) = Self::check_msr_list_addr(
+            self.vmcs.vmentry_msr_load_cnt,
+            self.vmcs.vmentry_msr_load_addr,
+            "VMENTRY msr-load",
+        ) {
+            return Some(err);
+        }
+
+        // Bochs vmx.cc:982-987: DEACTIVATE_DUAL_MONITOR_TREATMENT VM-entry
+        // control requires the CPU to be in SMM.
+        const VMX_VMENTRY_CTRL_DEACTIVATE_DUAL_MONITOR: u32 = 1 << 10;
+        if entry_ctls & VMX_VMENTRY_CTRL_DEACTIVATE_DUAL_MONITOR != 0 && !self.in_smm {
+            tracing::warn!(
+                "VMENTRY check_vm_controls: DEACTIVATE_DUAL_MONITOR_TREATMENT outside SMM"
+            );
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
 
