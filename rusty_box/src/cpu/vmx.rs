@@ -512,6 +512,76 @@ fn is_valid_spec_ctrl(value: u64) -> bool {
     (value & !ALLOWED) == 0
 }
 
+bitflags::bitflags! {
+    /// Decoded segment access-rights field as it lives in the VMCS —
+    /// Bochs `vmx_unpack_ar_field`. Layout (32-bit packed):
+    ///   [3:0]  = type (segment-type-specific, 4-bit value)
+    ///   [4]    = S (segment vs system)
+    ///   [6:5]  = DPL (privilege level)
+    ///   [7]    = P (present)
+    ///   [12]   = AVL (available)
+    ///   [13]   = L (long-mode code)
+    ///   [14]   = D/B (default operand size)
+    ///   [15]   = G (granularity)
+    ///   [16]   = unusable
+    /// The `TYPE_*` and `DPL_*` constants are expressed as bit masks so
+    /// callers can use `intersection().bits()` to read the packed values
+    /// without leaving the bitflags namespace.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SegAr: u32 {
+        const TYPE_MASK = 0xF;
+        const S_BIT     = 1 << 4;
+        const DPL_MASK  = 0x3 << 5;
+        const P_BIT     = 1 << 7;
+        const AVL_BIT   = 1 << 12;
+        const L_BIT     = 1 << 13;
+        const DB_BIT    = 1 << 14;
+        const G_BIT     = 1 << 15;
+        const UNUSABLE  = 1 << 16;
+    }
+}
+
+impl SegAr {
+    #[inline]
+    pub fn type_field(self) -> u32 {
+        (self & Self::TYPE_MASK).bits()
+    }
+    #[inline]
+    pub fn dpl(self) -> u8 {
+        ((self & Self::DPL_MASK).bits() >> 5) as u8
+    }
+}
+
+/// Bochs `IsLimitAccessRightsConsistent` (cpu/segment_ctrl_pro.cc):
+/// when G=1 the low 12 bits of the byte-limit must all be 1; when G=0
+/// the limit must fit in 20 bits (otherwise the descriptor would
+/// overrun the `limit_scaled` field in the segment cache).
+fn is_limit_access_rights_consistent(limit: u32, ar: SegAr) -> bool {
+    if ar.contains(SegAr::G_BIT) {
+        // Page granularity: bottom 12 bits of stored limit must be 0xFFF.
+        if limit & 0xFFF != 0xFFF {
+            return false;
+        }
+    } else if limit > 0xFFFFF {
+        // Byte granularity: limit must fit in 20 bits.
+        return false;
+    }
+    true
+}
+
+// Bochs descriptor type constants used by VMENTRY guest-state checks.
+// Matches the four-bit type encoding for code/data segments and the
+// pair of TSS types we care about.
+const BX_SEG_TYPE_DATA_RW_ACCESSED: u32 = 0x3;        // R/W data, accessed
+const BX_SEG_TYPE_DATA_RW_EXP_DOWN_ACCESSED: u32 = 0x7; // R/W expand-down, accessed
+const BX_SEG_TYPE_CODE_EXEC_ONLY_ACCESSED: u32 = 0x9;
+const BX_SEG_TYPE_CODE_EXEC_READ_ACCESSED: u32 = 0xB;
+const BX_SEG_TYPE_CODE_EXEC_ONLY_CONF_ACCESSED: u32 = 0xD;
+const BX_SEG_TYPE_CODE_EXEC_READ_CONF_ACCESSED: u32 = 0xF;
+const BX_SEG_TYPE_LDT: u32 = 0x2;
+const BX_SEG_TYPE_BUSY_286_TSS: u32 = 0x3;
+const BX_SEG_TYPE_BUSY_386_TSS: u32 = 0xB;
+
 // VMX-control allowed-{0,1} bit masks — Bochs vmx.cc reads these from
 // IA32_VMX_*_CTLS MSRs and uses the low half ("allowed-0", bits that
 // MUST be 1) and the high half ("allowed-1", bits that MAY be 1) to
@@ -2388,6 +2458,403 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 self.vmcs.guest_interruptibility_state
             );
             return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+
+        // Per-segment validation (Bochs vmx.cc:1632-1837). The order
+        // matters because CS/SS DPL/RPL relations consult both.
+        self.check_guest_segments(v8086_guest, x86_64_guest, unrestricted)?;
+
+        // GDTR/IDTR — Bochs vmx.cc:1840-1857. Limit ≤ 0xFFFF and base
+        // canonical (in long mode).
+        if self.vmcs.guest_gdtr_limit > 0xFFFF {
+            tracing::warn!(
+                "VMENTRY check_guest_state: GDTR limit {:#x} > 0xFFFF",
+                self.vmcs.guest_gdtr_limit
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if self.vmcs.guest_idtr_limit > 0xFFFF {
+            tracing::warn!(
+                "VMENTRY check_guest_state: IDTR limit {:#x} > 0xFFFF",
+                self.vmcs.guest_idtr_limit
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if !self.is_canonical(self.vmcs.guest_gdtr_base)
+            || !self.is_canonical(self.vmcs.guest_idtr_base)
+        {
+            tracing::warn!(
+                "VMENTRY check_guest_state: GDTR/IDTR base non-canonical"
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+
+        // LDTR — Bochs vmx.cc:1860-1899. Only checked when not unusable.
+        let ldtr_ar = SegAr::from_bits_truncate(self.vmcs.guest_ldtr_ar);
+        if !ldtr_ar.contains(SegAr::UNUSABLE) {
+            // TI bit (bit 2 of selector) must be clear (must be in GDT).
+            if self.vmcs.guest_ldtr_selector & 4 != 0 {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: LDTR selector TI=1"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            if ldtr_ar.type_field() != BX_SEG_TYPE_LDT {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: LDTR type {} != LDT",
+                    ldtr_ar.type_field()
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            // S=0 (system descriptor) required.
+            if ldtr_ar.contains(SegAr::S_BIT) {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: LDTR is not a system segment"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            if !ldtr_ar.contains(SegAr::P_BIT) {
+                tracing::warn!("VMENTRY check_guest_state: LDTR not present");
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            if !is_limit_access_rights_consistent(self.vmcs.guest_ldtr_limit, ldtr_ar)
+            {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: LDTR AR/limit malformed"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            if !self.is_canonical(self.vmcs.guest_ldtr_base) {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: LDTR base non-canonical"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        }
+
+        // TR — Bochs vmx.cc:1905-1952. Always required (must be valid).
+        let tr_ar = SegAr::from_bits_truncate(self.vmcs.guest_tr_ar);
+        if !self.is_canonical(self.vmcs.guest_tr_base) {
+            tracing::warn!("VMENTRY check_guest_state: TR base non-canonical");
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if tr_ar.contains(SegAr::UNUSABLE) {
+            tracing::warn!("VMENTRY check_guest_state: TR unusable");
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if self.vmcs.guest_tr_selector & 4 != 0 {
+            tracing::warn!("VMENTRY check_guest_state: TR selector TI=1");
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if tr_ar.contains(SegAr::S_BIT) {
+            tracing::warn!(
+                "VMENTRY check_guest_state: TR is not a system segment"
+            );
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if !tr_ar.contains(SegAr::P_BIT) {
+            tracing::warn!("VMENTRY check_guest_state: TR not present");
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        if !is_limit_access_rights_consistent(self.vmcs.guest_tr_limit, tr_ar) {
+            tracing::warn!("VMENTRY check_guest_state: TR AR/limit malformed");
+            return Some(VmxErr::VmentryInvalidVmHostStateField);
+        }
+        // Type: BUSY_386_TSS always allowed; BUSY_286_TSS only for non-
+        // x86-64 guests.
+        match tr_ar.type_field() {
+            t if t == BX_SEG_TYPE_BUSY_386_TSS => {}
+            t if t == BX_SEG_TYPE_BUSY_286_TSS && !x86_64_guest => {}
+            t => {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: TR type {} invalid (x86_64_guest={x86_64_guest})",
+                    t
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        }
+
+        // VMCS link pointer — Bochs vmx.cc:2028-2049. When != BX_INVALID
+        // _VMCSPTR (~0u64), must be page-aligned and have the matching
+        // VMCS revision ID. Reading the revision ID requires a physical
+        // memory access; mirror Bochs. We don't yet model VMCS_SHADOWING
+        // so the shadow-bit branch reduces to the basic revision check.
+        const BX_INVALID_VMCSPTR: u64 = !0u64;
+        let linkptr = self.vmcs.vmcs_link_pointer;
+        if linkptr != BX_INVALID_VMCSPTR {
+            if !is_valid_page_aligned_phy_addr(linkptr) {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: VMCS link pointer {:#018x} malformed",
+                    linkptr
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            // Bochs reads the revision-ID dword at linkptr; we approximate
+            // with the same dword read used during VMPTRLD.
+            let revision = self.vmx_read_revision_id(linkptr);
+            // BX_VMCS_SHADOW_BIT_MASK is bit 31 of the revision word —
+            // unset when VMCS_SHADOWING is off (our model).
+            if revision & 0x8000_0000 != 0 {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: linked VMCS is a shadow VMCS but VMCS_SHADOWING off"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            // Bochs also checks the ID matches `vmcs_map->get_vmcs_revision_id()`;
+            // our model uses 1 (Skylake-X-style fixed revision).
+            if revision != 1 {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: linked VMCS revision {revision} != 1"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+        }
+
+        None
+    }
+
+    /// Per-segment guest validation — Bochs vmx.cc:1632-1837. Order:
+    /// validate ES, CS, SS, DS, FS, GS individually, then enforce
+    /// CS/SS DPL+RPL relations and unrestricted-guest exceptions.
+    fn check_guest_segments(
+        &mut self,
+        v8086_guest: bool,
+        x86_64_guest: bool,
+        unrestricted: bool,
+    ) -> Option<VmxErr> {
+        // Snapshot per-segment fields so we don't borrow self mutably
+        // while comparing CS/SS later.
+        let segs: [(&'static str, u16, u64, u32, u32, BxSegregs); 6] = [
+            ("ES", self.vmcs.guest_es_selector, self.vmcs.guest_es_base, self.vmcs.guest_es_limit, self.vmcs.guest_es_ar, BxSegregs::Es),
+            ("CS", self.vmcs.guest_cs_selector, self.vmcs.guest_cs_base, self.vmcs.guest_cs_limit, self.vmcs.guest_cs_ar, BxSegregs::Cs),
+            ("SS", self.vmcs.guest_ss_selector, self.vmcs.guest_ss_base, self.vmcs.guest_ss_limit, self.vmcs.guest_ss_ar, BxSegregs::Ss),
+            ("DS", self.vmcs.guest_ds_selector, self.vmcs.guest_ds_base, self.vmcs.guest_ds_limit, self.vmcs.guest_ds_ar, BxSegregs::Ds),
+            ("FS", self.vmcs.guest_fs_selector, self.vmcs.guest_fs_base, self.vmcs.guest_fs_limit, self.vmcs.guest_fs_ar, BxSegregs::Fs),
+            ("GS", self.vmcs.guest_gs_selector, self.vmcs.guest_gs_base, self.vmcs.guest_gs_limit, self.vmcs.guest_gs_ar, BxSegregs::Gs),
+        ];
+
+        let cs_ar = SegAr::from_bits_truncate(self.vmcs.guest_cs_ar);
+        let ss_ar = SegAr::from_bits_truncate(self.vmcs.guest_ss_ar);
+        let cs_l = cs_ar.contains(SegAr::L_BIT);
+
+        for (name, selector, base, limit, ar_raw, seg) in segs {
+            let ar = SegAr::from_bits_truncate(ar_raw);
+            let invalid = ar.contains(SegAr::UNUSABLE);
+
+            // v8086 mode (Bochs vmx.cc:1647-1664): all six segments must
+            // have base = (selector << 4), limit = 0xFFFF, AR = 0xF3.
+            if v8086_guest {
+                if base != (u64::from(selector) << 4) {
+                    tracing::warn!(
+                        "VMENTRY check_guest_state: v8086 {name}.base != selector<<4"
+                    );
+                    return Some(VmxErr::VmentryInvalidVmHostStateField);
+                }
+                if limit != 0xFFFF {
+                    tracing::warn!(
+                        "VMENTRY check_guest_state: v8086 {name}.limit != 0xFFFF"
+                    );
+                    return Some(VmxErr::VmentryInvalidVmHostStateField);
+                }
+                if ar_raw != 0xF3 {
+                    tracing::warn!(
+                        "VMENTRY check_guest_state: v8086 {name}.ar {:#x} != 0xF3",
+                        ar_raw
+                    );
+                    return Some(VmxErr::VmentryInvalidVmHostStateField);
+                }
+                continue;
+            }
+
+            // FS/GS base canonical (long-mode-style — bases for these
+            // are loaded in long mode regardless of guest mode).
+            if matches!(seg, BxSegregs::Fs | BxSegregs::Gs) && !self.is_canonical(base) {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: {name}.base {:#018x} non-canonical",
+                    base
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+
+            // Unusable segments (other than CS) skip the rest.
+            if !matches!(seg, BxSegregs::Cs) && invalid {
+                continue;
+            }
+
+            // SS=NULL allowed in 64-bit guest mode when CS.L=1 (long-
+            // mode kernel transition trick).
+            if matches!(seg, BxSegregs::Ss)
+                && (selector & 3) == 0
+                && x86_64_guest
+                && cs_l
+            {
+                continue;
+            }
+
+            // ES/CS/SS/DS bases must fit in 32 bits (Bochs vmx.cc:1685-1690).
+            if matches!(seg, BxSegregs::Es | BxSegregs::Cs | BxSegregs::Ss | BxSegregs::Ds)
+                && (base >> 32) != 0
+            {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: {name}.base {:#018x} > 32 bits",
+                    base
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+
+            // S=1 (segment, not system).
+            if !ar.contains(SegAr::S_BIT) {
+                tracing::warn!("VMENTRY check_guest_state: {name} not segment");
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            if !ar.contains(SegAr::P_BIT) {
+                tracing::warn!("VMENTRY check_guest_state: {name} not present");
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+            if !is_limit_access_rights_consistent(limit, ar) {
+                tracing::warn!(
+                    "VMENTRY check_guest_state: {name} AR/limit malformed"
+                );
+                return Some(VmxErr::VmentryInvalidVmHostStateField);
+            }
+
+            let ty = ar.type_field();
+            match seg {
+                BxSegregs::Cs => {
+                    let allowed_code = matches!(
+                        ty,
+                        t if t == BX_SEG_TYPE_CODE_EXEC_ONLY_ACCESSED
+                            || t == BX_SEG_TYPE_CODE_EXEC_READ_ACCESSED
+                            || t == BX_SEG_TYPE_CODE_EXEC_ONLY_CONF_ACCESSED
+                            || t == BX_SEG_TYPE_CODE_EXEC_READ_CONF_ACCESSED
+                    );
+                    if !allowed_code {
+                        // UNRESTRICTED_GUEST permits CS as a R/W data
+                        // segment (real-mode entry) with DPL=0.
+                        if unrestricted && ty == BX_SEG_TYPE_DATA_RW_ACCESSED {
+                            if ar.dpl() != 0 {
+                                tracing::warn!(
+                                    "VMENTRY check_guest_state: unrestricted CS.DPL != 0"
+                                );
+                                return Some(VmxErr::VmentryInvalidVmHostStateField);
+                            }
+                        } else {
+                            tracing::warn!(
+                                "VMENTRY check_guest_state: CS.type {} invalid",
+                                ty
+                            );
+                            return Some(VmxErr::VmentryInvalidVmHostStateField);
+                        }
+                    }
+                    if x86_64_guest && cs_ar.contains(SegAr::DB_BIT) && cs_ar.contains(SegAr::L_BIT)
+                    {
+                        tracing::warn!(
+                            "VMENTRY check_guest_state: x86-64 CS.D_B and CS.L both set"
+                        );
+                        return Some(VmxErr::VmentryInvalidVmHostStateField);
+                    }
+                }
+                BxSegregs::Ss => {
+                    let valid = ty == BX_SEG_TYPE_DATA_RW_ACCESSED
+                        || ty == BX_SEG_TYPE_DATA_RW_EXP_DOWN_ACCESSED;
+                    if !valid {
+                        tracing::warn!("VMENTRY check_guest_state: SS.type {} invalid", ty);
+                        return Some(VmxErr::VmentryInvalidVmHostStateField);
+                    }
+                }
+                _ => {
+                    // DS / ES / FS / GS: accessed bit must be set (low
+                    // bit of type), and code segments must be readable
+                    // (bit 1 of type).
+                    if ty & 0x1 == 0 {
+                        tracing::warn!(
+                            "VMENTRY check_guest_state: {name} not ACCESSED"
+                        );
+                        return Some(VmxErr::VmentryInvalidVmHostStateField);
+                    }
+                    if ty & 0x8 != 0 && ty & 0x2 == 0 {
+                        tracing::warn!(
+                            "VMENTRY check_guest_state: {name} CODE not READABLE"
+                        );
+                        return Some(VmxErr::VmentryInvalidVmHostStateField);
+                    }
+                    // Conforming-vs-non-conforming RPL/DPL relation,
+                    // skipped under UNRESTRICTED_GUEST.
+                    if !unrestricted && ty <= 11 {
+                        let rpl = (selector & 3) as u8;
+                        if rpl > ar.dpl() {
+                            tracing::warn!(
+                                "VMENTRY check_guest_state: non-conforming {name}.RPL > DPL"
+                            );
+                            return Some(VmxErr::VmentryInvalidVmHostStateField);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cross-segment CS/SS DPL relations (Bochs vmx.cc:1799-1814).
+        let cs_ty = cs_ar.type_field();
+        let ss_dpl = ss_ar.dpl();
+        let cs_dpl = cs_ar.dpl();
+        match cs_ty {
+            t if t == BX_SEG_TYPE_CODE_EXEC_ONLY_ACCESSED
+                || t == BX_SEG_TYPE_CODE_EXEC_READ_ACCESSED =>
+            {
+                // Non-conforming code: CS.DPL must equal SS.DPL.
+                if cs_dpl != ss_dpl {
+                    tracing::warn!(
+                        "VMENTRY check_guest_state: non-conforming CS.DPL != SS.DPL"
+                    );
+                    return Some(VmxErr::VmentryInvalidVmHostStateField);
+                }
+            }
+            t if t == BX_SEG_TYPE_CODE_EXEC_ONLY_CONF_ACCESSED
+                || t == BX_SEG_TYPE_CODE_EXEC_READ_CONF_ACCESSED =>
+            {
+                // Conforming code: CS.DPL ≤ SS.DPL.
+                if cs_dpl > ss_dpl {
+                    tracing::warn!(
+                        "VMENTRY check_guest_state: conforming CS.DPL > SS.DPL"
+                    );
+                    return Some(VmxErr::VmentryInvalidVmHostStateField);
+                }
+            }
+            _ => {}
+        }
+
+        // RPL relations between CS and SS (Bochs vmx.cc:1816-1836).
+        if !v8086_guest {
+            let cs_rpl = (self.vmcs.guest_cs_selector & 3) as u8;
+            let ss_rpl = (self.vmcs.guest_ss_selector & 3) as u8;
+            if !unrestricted {
+                if ss_rpl != cs_rpl {
+                    tracing::warn!(
+                        "VMENTRY check_guest_state: SS.RPL != CS.RPL"
+                    );
+                    return Some(VmxErr::VmentryInvalidVmHostStateField);
+                }
+                if ss_rpl != ss_dpl {
+                    tracing::warn!(
+                        "VMENTRY check_guest_state: SS.RPL != SS.DPL"
+                    );
+                    return Some(VmxErr::VmentryInvalidVmHostStateField);
+                }
+            } else {
+                // Unrestricted guest: in real-mode-like CS or actual
+                // real mode, SS.DPL must be 0.
+                use super::crregs::BxCr0;
+                let cr0 = BxCr0::from_bits_truncate(self.vmcs.guest_cr0 as u32);
+                let real_mode_guest = !cr0.contains(BxCr0::PE);
+                if (real_mode_guest || cs_ty == BX_SEG_TYPE_DATA_RW_ACCESSED)
+                    && ss_dpl != 0
+                {
+                    tracing::warn!(
+                        "VMENTRY check_guest_state: unrestricted SS.DPL != 0"
+                    );
+                    return Some(VmxErr::VmentryInvalidVmHostStateField);
+                }
+            }
         }
 
         None
