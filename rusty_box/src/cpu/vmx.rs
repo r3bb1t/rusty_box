@@ -65,13 +65,76 @@ const VMCS_64BIT_CONTROL_TSC_OFFSET: u32 = 0x2010;
 const VMCS_64BIT_CONTROL_EPTPTR: u32 = 0x201A;
 const VMCS_64BIT_GUEST_PHYSICAL_ADDR: u32 = 0x2400;
 
-// EPT walker access classification — Bochs `bochs.h` enum
-// `{BX_READ=0, BX_WRITE=1, BX_EXECUTE=2, BX_RW=3, BX_SHADOW_STACK_READ=4,
-// BX_SHADOW_STACK_WRITE=5}`. We re-export under EPT_RW_* names so the
-// paging-side callers don't pull in the bochs.h shim.
-pub(super) const EPT_RW_READ: u32 = 0;
-pub(super) const EPT_RW_WRITE: u32 = 1;
-pub(super) const EPT_RW_EXECUTE: u32 = 2;
+bitflags::bitflags! {
+    /// Memory access classification — Bochs `bochs.h` enum
+    /// `{BX_READ, BX_WRITE, BX_EXECUTE, BX_RW, BX_SHADOW_STACK_READ,
+    /// BX_SHADOW_STACK_WRITE, BX_SHADOW_STACK_INVALID}`.
+    ///
+    /// The Bochs paging.cc bit-pattern tests map directly onto bitflags
+    /// idioms. The crate's docs warn against `contains` / `intersects`
+    /// against zero-bit flags, but rusty_box never tests against `Read`
+    /// itself (we use `is_empty()` and direct equality `== Self::Read`
+    /// when needed). The helpers below stay non-zero masks so contains/
+    /// intersects behave correctly.
+    ///
+    /// Bit semantics:
+    ///   bit 0 — write happens (`rw & 1` in Bochs)
+    ///   bit 1 — non-read indicator (set for EXECUTE / RW / SS_INVALID)
+    ///   bit 2 — shadow-stack access (`rw & 4` in Bochs)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct BxRwAccess: u32 {
+        // Single-bit flags used by the helper predicates.
+        const WRITE_BIT        = 1 << 0;
+        const NON_READ_BIT     = 1 << 1;
+        const SHADOW_STACK_BIT = 1 << 2;
+
+        // Bochs enum value aliases (`bochs.h`).
+        const Read               = 0;
+        const Write              = Self::WRITE_BIT.bits();
+        const Execute            = Self::NON_READ_BIT.bits();
+        const ReadWrite          = Self::WRITE_BIT.bits() | Self::NON_READ_BIT.bits();
+        const ShadowStackRead    = Self::SHADOW_STACK_BIT.bits();
+        const ShadowStackWrite   = Self::WRITE_BIT.bits() | Self::SHADOW_STACK_BIT.bits();
+        const ShadowStackInvalid = Self::NON_READ_BIT.bits() | Self::SHADOW_STACK_BIT.bits();
+    }
+}
+
+impl BxRwAccess {
+    /// Bochs `rw & 1` — the access writes (WRITE / RW / SHADOW_STACK_WRITE).
+    #[inline]
+    pub const fn is_write(self) -> bool {
+        self.contains(Self::WRITE_BIT)
+    }
+
+    /// Bochs `(rw & 3) == 0` — plain read or shadow-stack read. Tests
+    /// the union mask (non-zero) via `intersects` so the zero-bit-flag
+    /// caveat doesn't apply.
+    #[inline]
+    pub fn is_read_like(self) -> bool {
+        !self.intersects(Self::WRITE_BIT.union(Self::NON_READ_BIT))
+    }
+
+    /// Bochs `rw & 4` — shadow-stack access (EPT-violation qualification
+    /// bit 13).
+    #[inline]
+    pub const fn is_shadow_stack(self) -> bool {
+        self.contains(Self::SHADOW_STACK_BIT)
+    }
+}
+
+bitflags::bitflags! {
+    /// Per-page EPT permission bits — Bochs paging.cc `BX_EPT_READ /
+    /// _WRITE / _EXECUTE / _MBE_USER_EXECUTE`. Used both in the
+    /// access-mask the walker tests against and in the cumulative
+    /// `combined_access` it computes from the path.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct EptPerm: u32 {
+        const READ            = 1 << 0;
+        const WRITE           = 1 << 1;
+        const EXECUTE         = 1 << 2;
+        const MBE_USER_EXEC   = 1 << 10;
+    }
+}
 const VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS: u32 = 0x2044;
 const VMCS_64BIT_GUEST_LINK_POINTER: u32 = 0x2800;
 const VMCS_64BIT_GUEST_IA32_PAT: u32 = 0x2804;
@@ -2396,7 +2459,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             false,
             false,
             false,
-            EPT_RW_READ,
+            BxRwAccess::Read,
         )
     }
 
@@ -2411,7 +2474,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         user_page: bool,
         writeable_page: bool,
         nx_page: bool,
-        rw: u32,
+        rw: BxRwAccess,
     ) -> Result<u64> {
         if !self.ept_active() {
             return Ok(guest_paddr);
@@ -2447,33 +2510,24 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         user_page: bool,
         writeable_page: bool,
         nx_page: bool,
-        rw: u32,
+        rw: BxRwAccess,
     ) -> Result<u64> {
-        const EPT_READ: u32 = 0x1;
-        const EPT_WRITE: u32 = 0x2;
-        const EPT_EXECUTE: u32 = 0x4;
-        const EPT_ENTRY_NOT_PRESENT: u32 = 0;
-        const EPT_ENTRY_WRITE_ONLY: u32 = EPT_WRITE; // R=0, W=1, X=0
-
         let eptptr = self.vmcs.eptptr;
         let mut ppf = eptptr & 0x000F_FFFF_FFFF_F000;
-        let mut combined_access: u32 = EPT_READ | EPT_WRITE | EPT_EXECUTE;
-        // Bochs paging.cc access-mask construction:
-        //   if (rw == BX_EXECUTE)  access_mask |= BX_EPT_EXECUTE;
-        //   if (rw & 1)            access_mask |= BX_EPT_WRITE; // write or r-m-w
-        //   if ((rw & 3) == BX_READ) access_mask |= BX_EPT_READ;
-        // Where BX_READ=0, BX_WRITE=1, BX_EXECUTE=2, BX_SHADOW_STACK_READ=4,
-        // BX_SHADOW_STACK_WRITE=5. The `(rw & 3) == 0` test catches both
-        // plain reads and shadow-stack reads (bit 2 set).
-        let mut access_mask: u32 = 0;
-        if rw == EPT_RW_EXECUTE {
-            access_mask |= EPT_EXECUTE;
+        let mut combined_access = EptPerm::READ | EptPerm::WRITE | EptPerm::EXECUTE;
+        // Bochs paging.cc access-mask construction (BxRwAccess helpers
+        // mirror the `rw == BX_EXECUTE`, `rw & 1`, `(rw & 3) == BX_READ`
+        // predicates). Shadow-stack reads still set the READ bit because
+        // `(rw & 3) == 0` matches both BX_READ and BX_SHADOW_STACK_READ.
+        let mut access_mask = EptPerm::empty();
+        if rw == BxRwAccess::Execute {
+            access_mask |= EptPerm::EXECUTE;
         }
-        if rw & 1 != 0 {
-            access_mask |= EPT_WRITE;
+        if rw.is_write() {
+            access_mask |= EptPerm::WRITE;
         }
-        if rw & 3 == 0 {
-            access_mask |= EPT_READ;
+        if rw.is_read_like() {
+            access_mask |= EptPerm::READ;
         }
 
         let mut entry = [0u64; 4];
@@ -2489,13 +2543,17 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             entry[leaf as usize] = self.mem_read_qword(entry_addr[leaf as usize]);
             offset_mask >>= 9;
             let curr = entry[leaf as usize];
-            let curr_access = (curr as u32) & 0x7;
+            let curr_access = EptPerm::from_bits_truncate((curr as u32) & 0x7);
 
-            if curr_access == EPT_ENTRY_NOT_PRESENT {
+            // R=0/W=0/X=0 → entry not present (Bochs `BX_EPT_ENTRY_NOT_
+            // PRESENT`).
+            if curr_access.is_empty() {
                 vmexit_reason = Some(VmxVmexitReason::EptViolation);
                 break;
             }
-            if (curr_access & (EPT_READ | EPT_WRITE)) == EPT_ENTRY_WRITE_ONLY {
+            // R=0/W=1/X=0 is the illegal "write-only" combination; Bochs
+            // `BX_EPT_ENTRY_WRITE_ONLY` triggers EPT_MISCONFIGURATION.
+            if (curr_access & (EptPerm::READ | EptPerm::WRITE)) == EptPerm::WRITE {
                 vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
                 break;
             }
@@ -2545,7 +2603,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         }
 
         if vmexit_reason.is_none() {
-            combined_access &= entry[leaf as usize] as u32;
+            combined_access &= EptPerm::from_bits_truncate(entry[leaf as usize] as u32);
             if (access_mask & combined_access) != access_mask {
                 vmexit_reason = Some(VmxVmexitReason::EptViolation);
             }
@@ -2567,8 +2625,8 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             // CPU's `nmi_unblocking_iret` flag, also not modelled. Bit 13
             // sets on shadow-stack accesses (rw & 4) per BX_SUPPORT_CET.
             let qual = if reason == VmxVmexitReason::EptViolation {
-                combined_access &= entry[leaf as usize] as u32;
-                let mut q = u64::from(access_mask) | (u64::from(combined_access) << 3);
+                combined_access &= EptPerm::from_bits_truncate(entry[leaf as usize] as u32);
+                let mut q = u64::from(access_mask.bits()) | (u64::from(combined_access.bits()) << 3);
                 if guest_laddr_valid {
                     q |= 1 << 7;
                     if !is_page_walk {
@@ -2581,8 +2639,8 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                         let _ = (user_page, writeable_page, nx_page);
                     }
                 }
-                if rw & 4 != 0 {
-                    q |= 1 << 13; // shadow-stack access
+                if rw.is_shadow_stack() {
+                    q |= 1 << 13; // shadow-stack access (Bochs `rw & 4`)
                 }
                 self.vmcs.guest_linear_addr = guest_laddr;
                 self.vmcs.guest_physical_addr = guest_paddr;

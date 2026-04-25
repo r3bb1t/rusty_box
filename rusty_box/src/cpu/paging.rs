@@ -345,11 +345,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 (combined & CombinedAccess::WRITE.bits()) != 0,
                 false,
                 if matches!(rw, MemoryAccessType::Execute) {
-                    super::vmx::EPT_RW_EXECUTE
+                    super::vmx::BxRwAccess::Execute
                 } else if is_write {
-                    super::vmx::EPT_RW_WRITE
+                    super::vmx::BxRwAccess::Write
                 } else {
-                    super::vmx::EPT_RW_READ
+                    super::vmx::BxRwAccess::Read
                 },
             )?;
             let offset = laddr & 0x3FFFFF;
@@ -418,11 +418,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             (combined_access & CombinedAccess::WRITE.bits()) != 0,
             false,
             if matches!(rw, MemoryAccessType::Execute) {
-                super::vmx::EPT_RW_EXECUTE
+                super::vmx::BxRwAccess::Execute
             } else if is_write {
-                super::vmx::EPT_RW_WRITE
+                super::vmx::BxRwAccess::Write
             } else {
-                super::vmx::EPT_RW_READ
+                super::vmx::BxRwAccess::Read
             },
         )?;
         let offset = (laddr & 0xFFF) as u32;
@@ -693,11 +693,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 (combined_access & CombinedAccess::WRITE.bits()) != 0,
                 nx_page,
                 if matches!(rw, MemoryAccessType::Execute) {
-                    super::vmx::EPT_RW_EXECUTE
+                    super::vmx::BxRwAccess::Execute
                 } else if matches!(rw, MemoryAccessType::Write) {
-                    super::vmx::EPT_RW_WRITE
+                    super::vmx::BxRwAccess::Write
                 } else {
-                    super::vmx::EPT_RW_READ
+                    super::vmx::BxRwAccess::Read
                 },
             )?;
             return Ok(host_ppf | (laddr & 0x1FFFFF));
@@ -803,11 +803,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             (combined_access & CombinedAccess::WRITE.bits()) != 0,
             nx_page,
             if matches!(rw, MemoryAccessType::Execute) {
-                super::vmx::EPT_RW_EXECUTE
+                super::vmx::BxRwAccess::Execute
             } else if matches!(rw, MemoryAccessType::Write) {
-                super::vmx::EPT_RW_WRITE
+                super::vmx::BxRwAccess::Write
             } else {
-                super::vmx::EPT_RW_READ
+                super::vmx::BxRwAccess::Read
             },
         )?;
         Ok(host_ppf | (laddr & 0xFFF))
@@ -1038,11 +1038,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let writeable_page = (combined_access & CombinedAccess::WRITE.bits()) != 0;
         let is_write_local = matches!(rw, MemoryAccessType::Write);
         let ept_rw = if matches!(rw, MemoryAccessType::Execute) {
-            super::vmx::EPT_RW_EXECUTE
+            super::vmx::BxRwAccess::Execute
         } else if is_write_local {
-            super::vmx::EPT_RW_WRITE
+            super::vmx::BxRwAccess::Write
         } else {
-            super::vmx::EPT_RW_READ
+            super::vmx::BxRwAccess::Read
         };
         let host_ppf = self.ept_translate_for_data(
             ppf,
