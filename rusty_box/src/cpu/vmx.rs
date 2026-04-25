@@ -1193,13 +1193,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // VMLAUNCH / VMRESUME"; Bochs stashes it so VMEXIT_LOAD_HOST_STATE can
         // jump back. The prefetch queue already advanced past this insn, so
         // `self.rip()` points at the next one.
-        self.vmcs.host_cr0 = self.cr0.get32() as u64;
-        self.vmcs.host_cr3 = self.cr3;
-        self.vmcs.host_cr4 = self.cr4.get() as u64;
-        self.vmcs.host_rsp = self.rsp();
-        self.vmcs.host_rip = self.rip();
-        self.vmcs.host_ia32_efer = self.efer.get32() as u64;
-        self.vmcs.host_ia32_pat = self.msr.pat.U64();
+        self.vmenter_save_host_state();
 
         // Load guest state into the running CPU.
         self.cr0.set32(self.vmcs.guest_cr0 as u32);
@@ -1260,6 +1254,54 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.vmcs.exit_qualification = qualification;
 
         // Load host state.
+        self.vmexit_load_host_state();
+
+        self.in_vmx_guest = false;
+        self.invalidate_prefetch_q();
+        Ok(())
+    }
+
+    /// Snapshot the running CPU's host context into the VMCS so VMEXIT can
+    /// later restore it — Bochs vmx.cc VMexit "host state" save split. Bochs
+    /// keeps these fields in the VMCS so the host can VMWRITE custom values
+    /// before VMLAUNCH; we mirror the live CPU at the VMENTRY boundary so any
+    /// fields the host did not explicitly write inherit reasonable defaults.
+    fn vmenter_save_host_state(&mut self) {
+        self.vmcs.host_cr0 = u64::from(self.cr0.get32());
+        self.vmcs.host_cr3 = self.cr3;
+        self.vmcs.host_cr4 = self.cr4.get();
+        self.vmcs.host_rsp = self.rsp();
+        self.vmcs.host_rip = self.rip();
+        self.vmcs.host_ia32_efer = u64::from(self.efer.get32());
+        self.vmcs.host_ia32_pat = self.msr.pat.U64();
+
+        // Segment selectors (Bochs vmx.cc VMexitSaveHostState).
+        self.vmcs.host_es_selector = self.sregs[BxSegregs::Es as usize].selector.value;
+        self.vmcs.host_cs_selector = self.sregs[BxSegregs::Cs as usize].selector.value;
+        self.vmcs.host_ss_selector = self.sregs[BxSegregs::Ss as usize].selector.value;
+        self.vmcs.host_ds_selector = self.sregs[BxSegregs::Ds as usize].selector.value;
+        self.vmcs.host_fs_selector = self.sregs[BxSegregs::Fs as usize].selector.value;
+        self.vmcs.host_gs_selector = self.sregs[BxSegregs::Gs as usize].selector.value;
+        self.vmcs.host_tr_selector = self.tr.selector.value;
+        self.vmcs.host_fs_base = self.sregs[BxSegregs::Fs as usize].cache.u.segment_base();
+        self.vmcs.host_gs_base = self.sregs[BxSegregs::Gs as usize].cache.u.segment_base();
+        self.vmcs.host_tr_base = self.tr.cache.u.segment_base();
+
+        self.vmcs.host_gdtr_base = self.gdtr.base;
+        self.vmcs.host_idtr_base = self.idtr.base;
+
+        self.vmcs.host_sysenter_cs = self.msr.sysenter_cs_msr;
+        self.vmcs.host_sysenter_esp = self.msr.sysenter_esp_msr;
+        self.vmcs.host_sysenter_eip = self.msr.sysenter_eip_msr;
+    }
+
+    /// Restore host state on VMEXIT — Bochs vmx.cc VMexitLoadHostState
+    /// (~vmx.cc:2834-3041). Restores all CR/segment/MSR/DR state listed in
+    /// the SDM Vol. 3C §28.5. Several optional state areas (CET, FRED, UINTR,
+    /// PKRS, SPEC_CTRL) are not modelled here and stay at their pre-exit
+    /// values; that matches Bochs when the corresponding LOAD_HOST_* exit
+    /// controls are clear.
+    fn vmexit_load_host_state(&mut self) {
         self.cr0.set32(self.vmcs.host_cr0 as u32);
         self.cr3 = self.vmcs.host_cr3;
         self.cr4.set_val(self.vmcs.host_cr4);
@@ -1268,9 +1310,47 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.efer.set32(self.vmcs.host_ia32_efer as u32);
         self.msr.pat.set_U64(self.vmcs.host_ia32_pat);
 
-        self.in_vmx_guest = false;
-        self.invalidate_prefetch_q();
-        Ok(())
+        // Segment selectors. Bochs re-parses each from the host GDT; rusty_box
+        // delegates to load_seg_reg which performs the same fetch + descriptor
+        // cache update. Failures are silently swallowed because host state was
+        // (or should have been) validated at VMENTRY.
+        let _ = self.load_seg_reg(BxSegregs::Es, self.vmcs.host_es_selector);
+        let _ = self.load_seg_reg(BxSegregs::Cs, self.vmcs.host_cs_selector);
+        let _ = self.load_seg_reg(BxSegregs::Ss, self.vmcs.host_ss_selector);
+        let _ = self.load_seg_reg(BxSegregs::Ds, self.vmcs.host_ds_selector);
+        let _ = self.load_seg_reg(BxSegregs::Fs, self.vmcs.host_fs_selector);
+        let _ = self.load_seg_reg(BxSegregs::Gs, self.vmcs.host_gs_selector);
+        // FS / GS base override (Bochs sets these from VMCS regardless of
+        // what the descriptor in the host GDT says — useful for swapgs).
+        self.sregs[BxSegregs::Fs as usize]
+            .cache
+            .u
+            .set_segment_base(self.vmcs.host_fs_base);
+        self.sregs[BxSegregs::Gs as usize]
+            .cache
+            .u
+            .set_segment_base(self.vmcs.host_gs_base);
+        // TR is loaded directly; LDTR is marked unusable (Bochs).
+        self.tr.selector.value = self.vmcs.host_tr_selector;
+        self.tr.cache.u.set_segment_base(self.vmcs.host_tr_base);
+        self.ldtr.cache.valid = 0;
+
+        self.gdtr.base = self.vmcs.host_gdtr_base;
+        self.idtr.base = self.vmcs.host_idtr_base;
+        // Bochs hardcodes IDTR limit to 0xFFFF on VMEXIT; GDTR is left as set.
+        self.idtr.limit = 0xFFFF;
+
+        self.msr.sysenter_cs_msr = self.vmcs.host_sysenter_cs;
+        self.msr.sysenter_esp_msr = self.vmcs.host_sysenter_esp;
+        self.msr.sysenter_eip_msr = self.vmcs.host_sysenter_eip;
+
+        // Bochs vmx.cc VMexitLoadHostState: DR7 reset, RFLAGS to reserved-bit
+        // only, debug/inhibit/activity reset, monitor disarmed.
+        self.dr7 = super::crregs::BxDr7::from_bits_retain(0x400);
+        self.write_eflags(0x2, 0x003F_FFFF);
+        self.debug_trap = 0;
+        self.activity_state = super::cpu::CpuActivityState::Active;
+        self.monitor.reset_monitor();
     }
 
     // =========================================================================
