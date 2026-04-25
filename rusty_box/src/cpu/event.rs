@@ -96,9 +96,31 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         } else if self.is_unmasked_event_pending(Self::BX_EVENT_NMI) {
             // NMI delivery (Bochs event.cc)
             self.clear_event(Self::BX_EVENT_NMI);
+            self.ext = true;
+            // Bochs vmexit.cc VMexit_Event(BX_NMI, 2, 0, 0): pin-based NMI
+            // exit fires before delivery into the guest IDT.
+            if self.in_vmx_guest {
+                match self.vmexit_check_nmi() {
+                    Ok(true) => {
+                        self.ext = false;
+                        self.mask_event(Self::BX_EVENT_NMI);
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Ok(false) => {}
+                    Err(super::error::CpuError::CpuLoopRestart) => {
+                        self.ext = false;
+                        self.mask_event(Self::BX_EVENT_NMI);
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Err(e) => {
+                        tracing::warn!("VMX NMI vmexit failed: {:?}", e);
+                    }
+                }
+            }
             self.mask_event(Self::BX_EVENT_NMI); // Block further NMIs until IRET
             self.activity_state = CpuActivityState::Active;
-            self.ext = true;
             let result = self.interrupt(2, super::exception::InterruptType::Nmi, false, false, 0); // NMI vector = 2
             self.ext = false;
             match result {
@@ -116,7 +138,31 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         } else if self.is_unmasked_event_pending(
             Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
         ) {
-            // HandleExtInterrupt (Bochs event.cc)
+            // HandleExtInterrupt (Bochs event.cc).
+            //
+            // Bochs vmexit.cc VMexit_ExtInterrupt: with EXTERNAL_INTERRUPT_VMEXIT
+            // set and INTA_ON_VMEXIT clear, the VMEXIT happens BEFORE the
+            // controller is acknowledged so the interrupt remains pending in
+            // the host PIC/LAPIC for re-delivery. The INTA_ON_VMEXIT path
+            // acknowledges first and routes through vmexit_check_event_intr
+            // below so the vector lands in exit_intr_info.
+            if self.in_vmx_guest {
+                match self.vmexit_check_ext_intr_no_ack() {
+                    Ok(true) => {
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Ok(false) => {}
+                    Err(super::error::CpuError::CpuLoopRestart) => {
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Err(e) => {
+                        tracing::warn!("VMX ext-intr no-ack vmexit failed: {:?}", e);
+                    }
+                }
+            }
+
             // Deliver exactly ONE interrupt: LAPIC first, then PIC.
             let mut delivered = false;
 
@@ -133,6 +179,27 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     }
                     self.activity_state = CpuActivityState::Active;
                     self.ext = true;
+                    // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
+                    // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set
+                    // — the acknowledged vector is recorded in exit_intr_info.
+                    if self.in_vmx_guest {
+                        match self.vmexit_check_event_intr(vector) {
+                            Ok(true) => {
+                                self.ext = false;
+                                self.prev_rip = self.rip();
+                                return false;
+                            }
+                            Ok(false) => {}
+                            Err(super::error::CpuError::CpuLoopRestart) => {
+                                self.ext = false;
+                                self.prev_rip = self.rip();
+                                return false;
+                            }
+                            Err(e) => {
+                                tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
+                            }
+                        }
+                    }
                     let result = self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, false, 0);
                     self.ext = false;
                     delivered = true;
@@ -166,6 +233,26 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     self.activity_state = CpuActivityState::Active;
                     // Mark as external interrupt (EXT=1)
                     self.ext = true;
+                    // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
+                    // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set.
+                    if self.in_vmx_guest {
+                        match self.vmexit_check_event_intr(vector) {
+                            Ok(true) => {
+                                self.ext = false;
+                                self.prev_rip = self.rip();
+                                return false;
+                            }
+                            Ok(false) => {}
+                            Err(super::error::CpuError::CpuLoopRestart) => {
+                                self.ext = false;
+                                self.prev_rip = self.rip();
+                                return false;
+                            }
+                            Err(e) => {
+                                tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
+                            }
+                        }
+                    }
                     // Deliver interrupt (matches Bochs interrupt() call in event.cc)
                     let result = self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, false, 0);
                     self.ext = false;

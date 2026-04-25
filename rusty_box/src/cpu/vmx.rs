@@ -301,6 +301,9 @@ pub(super) const VMX_VM_EXEC_CTRL2_RDSEED_VMEXIT: u32 = 1 << 16;
 pub(super) const VMX_VM_EXEC_CTRL2_XSAVES_XRSTORS: u32 = 1 << 20;
 pub(super) const VMX_VM_EXEC_CTRL2_UMWAIT_TPAUSE_VMEXIT: u32 = 1 << 26;
 
+// VM-exit control bits — Bochs vmx_ctrls.h.
+pub(super) const VMX_VMEXIT_CTRL1_INTA_ON_VMEXIT: u32 = 1 << 15;
+
 /// VMX-instruction error codes written into the VMCS 32-bit
 /// VMCS_32BIT_INSTRUCTION_ERROR field by `VMfail`.
 /// Mirrors Bochs vmx.h `enum VMX_error_code`.
@@ -1315,6 +1318,58 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     #[inline]
     fn pin_based_ctls(&self) -> u32 {
         self.vmcs.pin_based_ctls
+    }
+
+    /// External-interrupt pin-based VMEXIT — Bochs vmexit.cc
+    /// `VMexit_ExtInterrupt`. Called from the event-delivery path BEFORE the
+    /// PIC/LAPIC is acknowledged. With `INTA_ON_VMEXIT` cleared, the
+    /// interrupt stays pending in the controller; with it set we let the
+    /// caller acknowledge first and route through `vmexit_check_event_intr`
+    /// below so the vector ends up in `exit_intr_info`.
+    ///
+    /// Returns `Ok(true)` when the no-ack VMEXIT path was taken.
+    pub(super) fn vmexit_check_ext_intr_no_ack(&mut self) -> Result<bool> {
+        if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_EXTERNAL_INTERRUPT_VMEXIT == 0 {
+            return Ok(false);
+        }
+        if self.vmcs.vm_exit_ctls & VMX_VMEXIT_CTRL1_INTA_ON_VMEXIT != 0 {
+            // Defer to the post-ack path; caller will acknowledge then
+            // vmexit_check_event_intr.
+            return Ok(false);
+        }
+        // No INTA on exit: interruption-info field is invalid.
+        self.vmcs.exit_intr_info = 0;
+        self.vmx_vmexit(VmxVmexitReason::ExternalInterrupt, 0)?;
+        Ok(true)
+    }
+
+    /// Pin-based NMI VMEXIT — Bochs vmexit.cc `VMexit_Event` with
+    /// `type == BX_NMI`. Called immediately before delivering NMI to the
+    /// guest. Records interruption info `vector=2 | type=NMI<<8 | valid<<31`.
+    pub(super) fn vmexit_check_nmi(&mut self) -> Result<bool> {
+        if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_NMI_EXITING == 0 {
+            return Ok(false);
+        }
+        // intr_info: vector=2, type=NMI(2)<<8, valid bit 31.
+        self.vmcs.exit_intr_info = 2 | (2 << 8) | (1u32 << 31);
+        self.vmcs.exit_intr_error_code = 0;
+        self.vmx_vmexit(VmxVmexitReason::ExceptionNmi, 0)?;
+        Ok(true)
+    }
+
+    /// External-interrupt VMEXIT after the controller has been acknowledged
+    /// — Bochs vmexit.cc `VMexit_Event` with `type == BX_EXTERNAL_INTERRUPT`.
+    /// Records the acknowledged vector in `exit_intr_info` so the host can
+    /// re-deliver it.
+    pub(super) fn vmexit_check_event_intr(&mut self, vector: u8) -> Result<bool> {
+        if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_EXTERNAL_INTERRUPT_VMEXIT == 0 {
+            return Ok(false);
+        }
+        // type=ExternalInterrupt(0), vector, valid bit 31.
+        self.vmcs.exit_intr_info = u32::from(vector) | (1u32 << 31);
+        self.vmcs.exit_intr_error_code = 0;
+        self.vmx_vmexit(VmxVmexitReason::ExternalInterrupt, 0)?;
+        Ok(true)
     }
 
     /// Trigger an unconditional VM-exit (caller has already verified
