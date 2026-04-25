@@ -1256,7 +1256,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let msr_offset = (msr & 0x1fff) * 2 + op;
 
             let paddr = msr_bitmap_addr + (msr_offset / 8) as u64;
-            let msr_bitmap = self.read_physical_byte_for_svm(paddr);
+            let msr_bitmap = self.read_physical_byte(paddr);
             vmexit = (msr_bitmap >> (msr_offset & 7)) & 1 != 0;
         }
 
@@ -1288,8 +1288,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // single physical reads since read_physical_byte can't cross 4K).
         let iopm_base = self.vmcb.as_ref().map_or(0, |v| v.ctrls.iopm_base);
         let bit_addr = iopm_base + (port as u64 / 8);
-        let b0 = self.read_physical_byte_for_svm(bit_addr);
-        let b1 = self.read_physical_byte_for_svm(bit_addr + 1);
+        let b0 = self.read_physical_byte(bit_addr);
+        let b1 = self.read_physical_byte(bit_addr + 1);
         let combined = ((b1 as u16) << 8) | (b0 as u16);
         let mask = ((1u32 << len) - 1) << (port & 7);
         if (combined as u32 & mask) == 0 {
@@ -1430,13 +1430,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Helper: read a single byte from physical memory (for IOPM/MSRPM bitmaps).
-    fn read_physical_byte_for_svm(&mut self, paddr: u64) -> u8 {
+    /// Read one byte directly from guest physical memory.
+    ///
+    /// Bochs `BX_CPU_C::read_physical_byte`. Used by both SVM (MSR / IO
+    /// permission bitmaps) and VMX (MSR bitmap walker). Returns `0xff` on
+    /// failure to match Bochs' "intercept everything" default for unmapped
+    /// bitmap regions.
+    pub(super) fn read_physical_byte(&mut self, paddr: u64) -> u8 {
         if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let mut data = [0u8; 1];
             let _ = mem.read_physical_page(&[cpu_ref], paddr, 1, &mut data);
             data[0]
         } else {
-            0xff // Default: all bits set = intercept everything
+            0xff
         }
     }
 

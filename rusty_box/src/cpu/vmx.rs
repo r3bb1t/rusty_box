@@ -51,6 +51,9 @@ const VMCS_16BIT_HOST_GS_SELECTOR: u32 = 0x0C0A;
 const VMCS_16BIT_HOST_TR_SELECTOR: u32 = 0x0C0C;
 
 // 64-bit control / guest / host fields.
+const VMCS_64BIT_CONTROL_IO_BITMAP_A: u32 = 0x2000;
+const VMCS_64BIT_CONTROL_IO_BITMAP_B: u32 = 0x2002;
+const VMCS_64BIT_CONTROL_MSR_BITMAPS: u32 = 0x2004;
 const VMCS_64BIT_CONTROL_TSC_OFFSET: u32 = 0x2010;
 const VMCS_64BIT_GUEST_LINK_POINTER: u32 = 0x2800;
 const VMCS_64BIT_GUEST_IA32_PAT: u32 = 0x2804;
@@ -466,6 +469,13 @@ pub struct BxVmcs {
     pub cr4_read_shadow: u64,
     pub vmcs_link_pointer: u64,
     pub tsc_offset: u64,
+    /// Guest-physical address of the 4KiB MSR bitmap when
+    /// `VMX_VM_EXEC_CTRL1_MSR_BITMAPS` is set. Bochs `msr_bitmap_addr`.
+    pub msr_bitmap_addr: u64,
+    /// Guest-physical addresses of the two 4KiB I/O permission bitmaps
+    /// (A: ports 0x0000..=0x7FFF, B: ports 0x8000..=0xFFFF) when
+    /// `VMX_VM_EXEC_CTRL1_IO_BITMAPS` is set. Bochs `io_bitmap_addr[2]`.
+    pub io_bitmap_addr: [u64; 2],
 
     // Wire-compat bag kept from earlier scaffolding; some older call sites
     // still reach for these. They stay zero until a VMM populates them.
@@ -841,6 +851,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_16BIT_HOST_TR_SELECTOR => v.host_tr_selector as u64,
             // 64-bit control / guest / host.
             VMCS_64BIT_GUEST_LINK_POINTER => v.vmcs_link_pointer,
+            VMCS_64BIT_CONTROL_IO_BITMAP_A => v.io_bitmap_addr[0],
+            VMCS_64BIT_CONTROL_IO_BITMAP_B => v.io_bitmap_addr[1],
+            VMCS_64BIT_CONTROL_MSR_BITMAPS => v.msr_bitmap_addr,
             VMCS_64BIT_CONTROL_TSC_OFFSET => v.tsc_offset,
             VMCS_64BIT_GUEST_IA32_EFER => v.guest_ia32_efer,
             VMCS_64BIT_GUEST_IA32_PAT => v.guest_ia32_pat,
@@ -962,6 +975,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_16BIT_HOST_GS_SELECTOR => v.host_gs_selector = value as u16,
             VMCS_16BIT_HOST_TR_SELECTOR => v.host_tr_selector = value as u16,
             VMCS_64BIT_GUEST_LINK_POINTER => v.vmcs_link_pointer = value,
+            VMCS_64BIT_CONTROL_IO_BITMAP_A => v.io_bitmap_addr[0] = value,
+            VMCS_64BIT_CONTROL_IO_BITMAP_B => v.io_bitmap_addr[1] = value,
+            VMCS_64BIT_CONTROL_MSR_BITMAPS => v.msr_bitmap_addr = value,
             VMCS_64BIT_CONTROL_TSC_OFFSET => v.tsc_offset = value,
             VMCS_64BIT_GUEST_IA32_EFER => v.guest_ia32_efer = value,
             VMCS_64BIT_GUEST_IA32_PAT => v.guest_ia32_pat = value,
@@ -1425,22 +1441,64 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         )
     }
 
-    /// RDMSR: unconditional if no MSR bitmaps, otherwise consult bitmap.
-    /// Bochs vmx.cc VMexit_MSR. Until the MSR-bitmap walker lands we err on
-    /// the side of "exit always when MSR_BITMAPS is clear" — i.e. exit iff
-    /// the no-bitmaps policy mandates it.
-    pub(super) fn vmexit_check_rdmsr(&mut self, _msr: u32) -> Result<bool> {
-        // Without MSR bitmaps, every RDMSR exits unconditionally. With
-        // bitmaps, the bitmap walk decides — wired later.
+    /// MSR bitmap walker — Bochs vmexit.cc VMexit_MSR.
+    ///
+    /// Layout of the 4 KiB bitmap at `msr_bitmap_addr`:
+    /// - Bytes `0x000..0x400` — read bitmap for low MSRs `0x00000000..=0x00001FFF`
+    /// - Bytes `0x400..0x800` — read bitmap for high MSRs `0xC0000000..=0xC0001FFF`
+    /// - Bytes `0x800..0xC00` — write bitmap for low MSRs
+    /// - Bytes `0xC00..0x1000` — write bitmap for high MSRs
+    ///
+    /// MSR indices outside both ranges always force a VMEXIT.
+    fn msr_bitmap_says_vmexit(&mut self, msr: u32, readmsr: bool) -> bool {
+        const LO_END: u32 = 0x0000_1FFF;
+        const HI_START: u32 = 0xC000_0000;
+        const HI_END: u32 = 0xC000_1FFF;
+
+        let bitmap = self.vmcs.msr_bitmap_addr;
+        let write_off: u64 = if readmsr { 0 } else { 2048 };
+
+        if msr >= HI_START {
+            if msr > HI_END {
+                return true;
+            }
+            let paddr = bitmap
+                + u64::from((msr - HI_START) >> 3)
+                + 1024
+                + write_off;
+            let field = self.read_physical_byte(paddr);
+            (field & (1 << (msr & 7))) != 0
+        } else {
+            if msr > LO_END {
+                return true;
+            }
+            let paddr = bitmap + u64::from(msr >> 3) + write_off;
+            let field = self.read_physical_byte(paddr);
+            (field & (1 << (msr & 7))) != 0
+        }
+    }
+
+    /// RDMSR intercept — Bochs vmexit.cc VMexit_MSR with `readmsr=true`.
+    pub(super) fn vmexit_check_rdmsr(&mut self, msr: u32) -> Result<bool> {
         if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_MSR_BITMAPS == 0 {
+            // Without bitmaps every RDMSR exits unconditionally; qualification 0.
+            self.vmx_vmexit(VmxVmexitReason::Rdmsr, 0)?;
+            return Ok(true);
+        }
+        if self.msr_bitmap_says_vmexit(msr, true) {
             self.vmx_vmexit(VmxVmexitReason::Rdmsr, 0)?;
             return Ok(true);
         }
         Ok(false)
     }
 
-    pub(super) fn vmexit_check_wrmsr(&mut self, _msr: u32) -> Result<bool> {
+    /// WRMSR intercept — Bochs vmexit.cc VMexit_MSR with `readmsr=false`.
+    pub(super) fn vmexit_check_wrmsr(&mut self, msr: u32) -> Result<bool> {
         if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_MSR_BITMAPS == 0 {
+            self.vmx_vmexit(VmxVmexitReason::Wrmsr, 0)?;
+            return Ok(true);
+        }
+        if self.msr_bitmap_says_vmexit(msr, false) {
             self.vmx_vmexit(VmxVmexitReason::Wrmsr, 0)?;
             return Ok(true);
         }
@@ -1718,6 +1776,41 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// With bitmaps, the per-port bit in io_bitmap_addr decides. Bitmap walk
     /// is deferred; current stub exits-all when IO_VMEXIT is set and bitmaps
     /// are off.
+    /// I/O port bitmap walker — Bochs vmexit.cc VMexit_IO. The pair of 4 KiB
+    /// bitmaps `io_bitmap_addr[0..1]` covers ports `0x0000..0x7FFF` and
+    /// `0x8000..0xFFFF` respectively. A multi-byte access whose port range
+    /// straddles the 0x8000 split must consult both bitmaps; access ranges
+    /// wrapping past 0xFFFF always force a VMEXIT.
+    fn io_bitmap_says_vmexit(&mut self, port: u16, len: u32) -> bool {
+        // Wrap-around forces VMEXIT (Bochs guard).
+        let end = u32::from(port) + len;
+        if end > 0x10000 {
+            return true;
+        }
+
+        let port_lo = u32::from(port) & 0x7FFF;
+        let bitmap = if (port_lo + len) > 0x8000 {
+            // Straddles the bitmap-A/B boundary. Bochs reads byte 0xFFF of
+            // bitmap A and byte 0x000 of bitmap B.
+            let pa = self.vmcs.io_bitmap_addr[0] + 0xFFF;
+            let pb = self.vmcs.io_bitmap_addr[1];
+            let b0 = u16::from(self.read_physical_byte(pa));
+            let b1 = u16::from(self.read_physical_byte(pb));
+            (b1 << 8) | b0
+        } else {
+            // read_physical_byte cannot cross 4 KiB; do two single-byte reads.
+            let which = usize::from((port >> 15) & 1);
+            let pa = self.vmcs.io_bitmap_addr[which] + u64::from(port_lo / 8);
+            let b0 = u16::from(self.read_physical_byte(pa));
+            let b1 = u16::from(self.read_physical_byte(pa + 1));
+            (b1 << 8) | b0
+        };
+
+        let len_mask = (1u16 << len) - 1;
+        let mask = len_mask << (port & 7);
+        (bitmap & mask) != 0
+    }
+
     pub(super) fn vmexit_check_io(
         &mut self,
         port: u16,
@@ -1726,8 +1819,17 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         string: bool,
         rep: bool,
     ) -> Result<bool> {
+        // Bochs vmx.cc VMexit_IO: bitmap path takes precedence over the
+        // unconditional IO_VMEXIT bit.
         let ctls = self.proc_based_ctls1();
-        if ctls & (VMX_VM_EXEC_CTRL1_IO_VMEXIT | VMX_VM_EXEC_CTRL1_IO_BITMAPS) == 0 {
+        let exit = if ctls & VMX_VM_EXEC_CTRL1_IO_BITMAPS != 0 {
+            self.io_bitmap_says_vmexit(port, size)
+        } else if ctls & VMX_VM_EXEC_CTRL1_IO_VMEXIT != 0 {
+            true
+        } else {
+            false
+        };
+        if !exit {
             return Ok(false);
         }
         // Qualification bits mirror Bochs vmx.cc VMexit_IO:
