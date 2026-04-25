@@ -1210,6 +1210,13 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // Bochs vmx.cc step 6: arm the preemption timer when the pin-based
         // control is set. Reads vmx_preemption_timer_value from the VMCS.
         self.vmenter_arm_preemption_timer();
+        // Bochs vmx.cc step 7: inject any event the host queued in
+        // VMCS_32BIT_CONTROL_VMENTRY_INTERRUPTION_INFO. Failure to deliver
+        // is propagated up through the standard exception path.
+        if let Err(e) = self.vmenter_inject_events() {
+            self.invalidate_prefetch_q();
+            return Err(e);
+        }
         self.vmsucceed();
         // Guest now runs from the loaded RIP — the CPU loop picks up the new
         // prefetch target after this instruction returns.
@@ -1450,6 +1457,91 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.vmcs.exit_intr_error_code = 0;
         self.vmx_vmexit(VmxVmexitReason::ExceptionNmi, 0)?;
         Ok(true)
+    }
+
+    /// VM-entry event injection — Bochs vmx.cc VMenterInjectEvents
+    /// (~vmx.cc:2421-2511). When the high bit (valid) of
+    /// `VMCS_32BIT_CONTROL_VMENTRY_INTERRUPTION_INFO` is set, the host has
+    /// requested an immediate interrupt/exception in the guest. Vector,
+    /// type, and push-error flag are decoded from the field; error code is
+    /// taken from `VMENTRY_EXCEPTION_ERR_CODE`. For software-int /
+    /// soft-exception types, RIP is advanced by `vmentry_instr_length`
+    /// before delivery so the handler returns to the next instruction.
+    pub(super) fn vmenter_inject_events(&mut self) -> Result<()> {
+        let info = self.vmcs.vm_entry_intr_info;
+        if info & (1u32 << 31) == 0 {
+            return Ok(()); // valid bit clear → nothing to inject
+        }
+        let vector = (info & 0xFF) as u8;
+        let bochs_type = (info >> 8) & 0x7;
+        let push_error = (info & (1 << 11)) != 0;
+        let error_code = if push_error {
+            self.vmcs.vm_entry_exception_error_code
+        } else {
+            0
+        };
+
+        // Bochs BX_EXTERNAL_INTERRUPT=0, BX_NMI=2, BX_HARDWARE_EXCEPTION=3,
+        // BX_SOFTWARE_INTERRUPT=4, BX_PRIVILEGED_SOFTWARE_INTERRUPT=5,
+        // BX_SOFTWARE_EXCEPTION=6, BX_EVENT_OTHER=7.
+        let mut is_int = false;
+        let intr_type = match bochs_type {
+            0 => {
+                self.ext = true;
+                super::exception::InterruptType::ExternalInterrupt
+            }
+            2 => {
+                // Bochs masks BX_EVENT_VMX_VIRTUAL_NMI when VIRTUAL_NMI is set,
+                // BX_EVENT_NMI otherwise. The virtual-NMI event isn't modelled
+                // here so always mask BX_EVENT_NMI.
+                self.mask_event(Self::BX_EVENT_NMI);
+                self.ext = true;
+                super::exception::InterruptType::Nmi
+            }
+            3 => {
+                self.ext = true;
+                super::exception::InterruptType::HardwareException
+            }
+            4 => {
+                is_int = true;
+                super::exception::InterruptType::SoftwareInterrupt
+            }
+            5 => {
+                self.ext = true;
+                is_int = true;
+                super::exception::InterruptType::PrivilegedSoftwareInterrupt
+            }
+            6 => {
+                is_int = true;
+                super::exception::InterruptType::SoftwareException
+            }
+            7 => {
+                if vector == 0 {
+                    // Bochs: signal_event(BX_EVENT_VMX_MONITOR_TRAP_FLAG).
+                    // MTF isn't fully modelled; leave the event unsignalled.
+                    return Ok(());
+                }
+                super::exception::InterruptType::EventOther
+            }
+            _ => return Ok(()),
+        };
+
+        if is_int {
+            let new_rip = self
+                .rip()
+                .wrapping_add(u64::from(self.vmcs.vm_entry_instruction_length));
+            self.set_rip(new_rip);
+        }
+
+        // Bochs records the injection in IDT-vectoring info (with valid bit
+        // cleared per spec) so a fault during delivery is attributed correctly.
+        self.vmcs.idt_vectoring_info = info & !(1u32 << 31);
+        self.vmcs.idt_vectoring_error_code = error_code;
+
+        let err16 = (error_code & 0xFFFF) as u16;
+        let res = self.interrupt(vector, intr_type, push_error, push_error, err16);
+        self.ext = false;
+        res
     }
 
     /// Arm the VMX preemption timer at VM-entry — Bochs vmx.cc:3520.
