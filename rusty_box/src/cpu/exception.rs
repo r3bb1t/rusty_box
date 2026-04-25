@@ -31,19 +31,12 @@ enum ExceptionType {
 }
 
 /// Sentinel value for "no pending exception" (Bochs BX_ET_NONE = -1).
-const BX_ET_NONE: i32 = -1;
+pub(super) const BX_ET_NONE: i32 = -1;
 
-/// Bochs `get_exception_type` lookup — returns the ExceptionType enum
-/// (Benign/Contributory/PageFault/DoubleFault) value from the static
-/// EXCEPTIONS_INFO table for the given exception vector. Used by the
-/// VMX `vmenter_inject_events` HARDWARE_EXCEPTION classification.
-pub(super) fn exception_type_for(vector: u8) -> i32 {
-    let idx = vector as usize;
-    if idx >= EXCEPTIONS_INFO.len() {
-        return BX_ET_NONE;
-    }
-    EXCEPTIONS_INFO[idx].exception_type as i32
-}
+/// Vector for #CP (Control Protection Exception) — Bochs `BX_CP_EXCEPTION`.
+const BX_CP_EXCEPTION: u8 = 21;
+/// Vector for #SX (Security Exception) — Bochs `BX_SX_EXCEPTION`.
+const BX_SX_EXCEPTION: u8 = 30;
 
 // Match Bochs `is_exception_OK[3][3]` (cpu/exception.cc..855).
 // Indexes are {Benign, Contributory, PageFault}.
@@ -256,6 +249,32 @@ const EXCEPTIONS_INFO: [BxExceptionInfo; BX_CPU_HANDLED_EXCEPTIONS as _] = [
 ];
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+    /// Bochs `BX_CPU_C::get_exception_type` — returns the exception-type
+    /// classification (BENIGN/CONTRIBUTORY/PAGE_FAULT/DOUBLE_FAULT) for
+    /// the given vector. Out-of-range vectors return BENIGN. #CP and
+    /// #SX downgrade to BENIGN when the corresponding ISA extension
+    /// (CET / SVM) is not supported by the CPU model. Used by VMX
+    /// `vmenter_inject_events` to set `last_exception_type` and by
+    /// double-fault detection.
+    pub(super) fn exception_type_for(&self, vector: u8) -> i32 {
+        use super::decoder::features::X86Feature;
+        let idx = vector as usize;
+        if idx >= EXCEPTIONS_INFO.len() {
+            return ExceptionType::Benign as i32;
+        }
+        if vector == BX_CP_EXCEPTION
+            && !self.bx_cpuid_support_isa_extension(X86Feature::IsaCet)
+        {
+            return ExceptionType::Benign as i32;
+        }
+        if vector == BX_SX_EXCEPTION
+            && !self.bx_cpuid_support_isa_extension(X86Feature::IsaSvm)
+        {
+            return ExceptionType::Benign as i32;
+        }
+        EXCEPTIONS_INFO[idx].exception_type as i32
+    }
+
     // vector:     0..255: vector in IDT
     // error_code: if exception generates and error, push this error code
     #[track_caller]

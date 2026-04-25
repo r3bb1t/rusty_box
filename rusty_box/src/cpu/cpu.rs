@@ -767,52 +767,58 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// outer-loop iteration to check for wake conditions.
     pub(super) const BX_ASYNC_EVENT_SLEEP: u32 = 1;
 
-    /// Event bit: external interrupt pending (PIC int_pin asserted).
-    /// Bochs uses bit 10; we use bit 0 for internal consistency.
-    pub(crate) const BX_EVENT_PENDING_INTR: u32 = 1 << 0;
+    // Event bit layout — matches Bochs `cpu.h:1193-1208` exactly.
+    // Each bit identifies a single asynchronous event in the
+    // `pending_event` / `event_mask` bitmaps the cpu maintains.
 
-    /// Event bit: NMI pending/masked. Bochs cpu.h uses bit 0,
-    /// but we use bit 1 to avoid conflict with PENDING_INTR.
-    /// Masked on NMI delivery, unmasked on IRET.
-    pub(super) const BX_EVENT_NMI: u32 = 1 << 1;
+    /// Bochs cpu.h `BX_EVENT_NMI`. Masked on NMI delivery, unmasked
+    /// on IRET.
+    pub(super) const BX_EVENT_NMI: u32 = 1 << 0;
 
-    /// Event bit: LAPIC interrupt pending.
-    /// Bochs cpu.h uses bit 11; we use bit 2.
-    pub(crate) const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 2;
-
-    /// Event bit: System Management Interrupt pending.
-    /// Bochs cpu.h uses bit 1; we use bit 6 (bits 0-2 already taken).
-    /// SMI enters System Management Mode — not implemented for single-CPU Alpine/DLX.
+    /// Bochs cpu.h `BX_EVENT_SMI`. SMI enters System Management Mode
+    /// — not implemented for single-CPU Alpine/DLX.
     #[allow(dead_code)]
-    pub(super) const BX_EVENT_SMI: u32 = 1 << 6;
+    pub(super) const BX_EVENT_SMI: u32 = 1 << 1;
 
-    /// Event bit: INIT signal pending (CPU reset).
-    /// Bochs cpu.h uses bit 2; we use bit 7 (bits 0-2 already taken).
-    /// INIT is used by multiprocessor startup (INIT-SIPI-SIPI) — not implemented.
+    /// Bochs cpu.h `BX_EVENT_INIT`. INIT is used by multiprocessor
+    /// startup (INIT-SIPI-SIPI) — not implemented.
     #[allow(dead_code)]
-    pub(super) const BX_EVENT_INIT: u32 = 1 << 7;
+    pub(super) const BX_EVENT_INIT: u32 = 1 << 2;
 
-    /// Event bit: user-level interrupt pending (UINTR).
-    /// Bochs cpu.h BX_EVENT_PENDING_UINTR.
-    pub(super) const BX_EVENT_PENDING_UINTR: u32 = 1 << 8;
+    /// Bochs cpu.h `BX_EVENT_VMX_MONITOR_TRAP_FLAG`. Signalled at
+    /// VMENTRY when MONITOR_TRAP_FLAG ctrl is set, or by injected MTF
+    /// (type=Other, vector=0); consumed after the next guest
+    /// instruction to fire the MTF VMEXIT.
+    pub(super) const BX_EVENT_VMX_MONITOR_TRAP_FLAG: u32 = 1 << 4;
 
-    /// Event bit: VMX preemption timer expired.
-    /// Bochs cpu.h `BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED`. Signalled by
-    /// the LAPIC tick callback when the preemption-timer fire deadline is
-    /// reached; consumed by `handle_async_event` which triggers VMEXIT.
-    pub(super) const BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED: u32 = 1 << 9;
+    /// Bochs cpu.h `BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED`. Signalled
+    /// by the LAPIC tick callback when the preemption-timer fire
+    /// deadline is reached; consumed by `handle_async_event`.
+    pub(super) const BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED: u32 = 1 << 5;
 
-    /// Event bit: virtual-NMI is "blocked". Bochs cpu.h `BX_EVENT_VMX_
-    /// VIRTUAL_NMI`. Used in place of `BX_EVENT_NMI` for masking when
-    /// the pin-based VIRTUAL_NMI control is set, so the host-side NMI
-    /// state is independent of the guest's virtual-NMI tracking.
-    pub(super) const BX_EVENT_VMX_VIRTUAL_NMI: u32 = 1 << 10;
+    /// Bochs cpu.h `BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING`. Signalled
+    /// at VMENTRY when `INTERRUPT_WINDOW_VMEXIT` is set in proc-based
+    /// controls; consumed by `handle_async_event` whenever
+    /// `RFLAGS.IF=1` and external-interrupt inhibition is clear.
+    pub(super) const BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING: u32 = 1 << 6;
 
-    /// Event bit: VMX Monitor Trap Flag pending. Bochs cpu.h
-    /// `BX_EVENT_VMX_MONITOR_TRAP_FLAG`. Signalled by VM-entry when a
-    /// host injection requests an MTF (type=Other, vector=0); consumed
-    /// after the next guest instruction to fire the MTF VMEXIT.
-    pub(super) const BX_EVENT_VMX_MONITOR_TRAP_FLAG: u32 = 1 << 11;
+    /// Bochs cpu.h `BX_EVENT_VMX_VIRTUAL_NMI`. Used in place of
+    /// `BX_EVENT_NMI` for masking when the pin-based VIRTUAL_NMI
+    /// control is set, so the host-side NMI state is independent of
+    /// the guest's virtual-NMI tracking.
+    pub(super) const BX_EVENT_VMX_VIRTUAL_NMI: u32 = 1 << 7;
+
+    /// Bochs cpu.h `BX_EVENT_PENDING_INTR`. External interrupt pending
+    /// (PIC int_pin asserted).
+    pub(crate) const BX_EVENT_PENDING_INTR: u32 = 1 << 10;
+
+    /// Bochs cpu.h `BX_EVENT_PENDING_LAPIC_INTR`. LAPIC interrupt
+    /// pending.
+    pub(crate) const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 11;
+
+    /// Bochs cpu.h `BX_EVENT_PENDING_UINTR`. User-level interrupt
+    /// pending.
+    pub(super) const BX_EVENT_PENDING_UINTR: u32 = 1 << 12;
 
     /// Returns a mutable raw pointer to the Local APIC for cross-module wiring.
     /// Used by emulator.rs to wire I/O APIC → LAPIC interrupt delivery.
@@ -2560,20 +2566,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         let fetch_ptr_option = if tlb_hit {
             self.p_addr_fetch_page = tlb_ppf;
-            // Bochs populates ITLB from DTLB, so whenever ITLB has an entry
-            // the DTLB also had it (though it may have been evicted since).
-            // Ensure the DTLB still has this page — if evicted, re-populate
-            // via a page walk. This is critical during kernel startup where
-            // boot page tables overlap with decompressed kernel data: the
-            // DTLB must cache translations so data accesses don't walk
-            // through corrupted page table entries.
-            {
-                let dtlb_lpf = self.dtlb.get_entry_of(laddr, 0).lpf;
-                if dtlb_lpf != lpf {
-                    // Speculative TLB population — miss is expected and harmless
-                    let _ = self.translate_data_read(laddr);
-                }
-            }
+            // Bochs cpu/cpu.cc prefetch path does NOT speculatively
+            // populate the DTLB on an ITLB hit. The earlier rusty_box
+            // workaround that called `translate_data_read(laddr)` here
+            // could synchronously raise #PF (mutating CR2 + pushing the
+            // exception frame) for an unrelated data access, then
+            // swallow the `CpuLoopRestart` and continue prefetching
+            // from a stale RIP. Removed to match Bochs.
             Some(tlb_host_addr)
         } else {
             // TLB miss - need to walk page tables
@@ -2603,16 +2602,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         p_addr,
                         self.p_addr_fetch_page
                     );
-                    // Bochs behaviour: ITLB miss page walk populates BOTH DTLB
-                    // and ITLB. The DTLB entry ensures that subsequent data
-                    // accesses to the same page as code hit the DTLB without
-                    // re-walking the page tables. This is critical during Linux
-                    // kernel startup where boot page tables overlap with the
-                    // decompressed kernel's page table symbols — the TLB must
-                    // shield data accesses from the corrupted boot page tables
-                    // until CR3 is switched.
-                    // Speculative TLB population — miss is expected and harmless
-                    let _ = self.translate_data_read(laddr);
+                    // Bochs `BX_CPU_C::prefetch` (cpu.cc) does NOT
+                    // populate the DTLB after an ITLB miss — only the
+                    // ITLB entry it just walked. The earlier rusty_box
+                    // workaround that called `translate_data_read(laddr)`
+                    // here could synchronously raise #PF (mutating CR2 +
+                    // pushing the exception frame) for an unrelated data
+                    // access, then swallow the `CpuLoopRestart` and
+                    // continue prefetching from a stale RIP. Removed to
+                    // match Bochs.
                     None
                 }
                 Err(e) => {

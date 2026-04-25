@@ -54,6 +54,28 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             tracing::trace!("INIT event cleared (SMP not implemented)");
         }
 
+        // VMX Monitor-Trap-Flag — Bochs event.cc handleAsyncEvent runs
+        // this in Priority 3 (between INIT and the Priority-4 debug-trap
+        // check), gated only on the event being pending; the unmasked
+        // path takes the VMEXIT, the masked path simply unmasks for the
+        // next boundary.
+        if self.in_vmx_guest {
+            match self.vmexit_check_monitor_trap_flag() {
+                Ok(true) => {
+                    self.prev_rip = self.rip();
+                    return false;
+                }
+                Err(super::error::CpuError::CpuLoopRestart) => {
+                    self.prev_rip = self.rip();
+                    return false;
+                }
+                Err(e) => {
+                    tracing::warn!("VMX MTF vmexit failed: {:?}", e);
+                }
+                Ok(false) => {}
+            }
+        }
+
         // Priority 4: Debug trap exceptions (TF single-step, data/I/O breakpoints)
         // Bochs event.cc — check inhibition FIRST, then debug_trap
         if !self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG) {
@@ -91,21 +113,27 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // pic.iac() → BX_CLEAR_INTR → clear_event(). If cleared here and
         // IF=0, the interrupt would be permanently lost.
 
-        // Bochs event.cc Priority 5: the VMX-specific exits (preemption
-        // timer, MTF, NMI/interrupt windows) take precedence over the
-        // NMI/external-interrupt delivery branches below. Cold path
-        // outside VMX guest mode. The LAPIC poll matches Bochs's
-        // `vmx_preemption_timer_expired` callback by signalling
-        // BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED when the absolute fire
-        // time has been reached.
+        // Bochs event.cc Priority 5: external interrupts. Bochs structures
+        // this as a single if/else-if chain so each branch is mutually
+        // exclusive — exactly one of {skip, preemption-timer VMEXIT,
+        // NMI-window VMEXIT, NMI delivery, interrupt-window VMEXIT,
+        // external-interrupt delivery} runs per boundary. The LAPIC poll
+        // matches Bochs's `vmx_preemption_timer_expired` callback by
+        // signalling BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED when the
+        // absolute fire time has been reached.
         if self.in_vmx_guest {
             self.poll_vmx_preemption_timer();
+        }
+
+        if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
+            // STI/MOV SS shadow — skip all external interrupts this boundary
+            // (Bochs event.cc)
+        } else if self.in_vmx_guest
+            && self.is_unmasked_event_pending(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED)
+        {
+            // Bochs event.cc — VMexit(VMX_VMEXIT_VMX_PREEMPTION_TIMER_EXPIRED, 0).
             match self.vmexit_check_preemption_timer() {
-                Ok(true) => {
-                    self.prev_rip = self.rip();
-                    return false;
-                }
-                Err(super::error::CpuError::CpuLoopRestart) => {
+                Ok(true) | Err(super::error::CpuError::CpuLoopRestart) => {
                     self.prev_rip = self.rip();
                     return false;
                 }
@@ -114,67 +142,20 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 }
                 Ok(false) => {}
             }
-            match self.vmexit_check_monitor_trap_flag() {
-                Ok(true) => {
-                    self.prev_rip = self.rip();
-                    return false;
-                }
-                Err(super::error::CpuError::CpuLoopRestart) => {
+        } else if self.in_vmx_guest
+            && self.is_unmasked_event_pending(Self::BX_EVENT_VMX_VIRTUAL_NMI)
+        {
+            // Bochs event.cc — VMexit(VMX_VMEXIT_NMI_WINDOW, 0).
+            match self.vmexit_check_nmi_window() {
+                Ok(true) | Err(super::error::CpuError::CpuLoopRestart) => {
                     self.prev_rip = self.rip();
                     return false;
                 }
                 Err(e) => {
-                    tracing::warn!("VMX MTF vmexit failed: {:?}", e);
+                    tracing::warn!("VMX NMI-window vmexit failed: {:?}", e);
                 }
                 Ok(false) => {}
             }
-        }
-
-        // Bochs event.cc Priority-5 window-exits run when external interrupts
-        // are not inhibited:
-        //   - NMI-window exit fires before NMI delivery when the window is
-        //     open (NMI not currently blocked).
-        //   - Interrupt-window exit fires before external-interrupt delivery
-        //     when there is no pending NMI to deliver first.
-        // Both are pin-/proc-based VMX exits and stay cold outside VMX guest.
-        if self.in_vmx_guest && !self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
-            if (self.event_mask & Self::BX_EVENT_NMI) == 0 {
-                match self.vmexit_check_nmi_window() {
-                    Ok(true) => {
-                        self.prev_rip = self.rip();
-                        return false;
-                    }
-                    Err(super::error::CpuError::CpuLoopRestart) => {
-                        self.prev_rip = self.rip();
-                        return false;
-                    }
-                    Err(e) => {
-                        tracing::warn!("VMX NMI-window vmexit failed: {:?}", e);
-                    }
-                    Ok(false) => {}
-                }
-            }
-            if !self.is_unmasked_event_pending(Self::BX_EVENT_NMI) {
-                match self.vmexit_check_interrupt_window() {
-                    Ok(true) => {
-                        self.prev_rip = self.rip();
-                        return false;
-                    }
-                    Err(super::error::CpuError::CpuLoopRestart) => {
-                        self.prev_rip = self.rip();
-                        return false;
-                    }
-                    Err(e) => {
-                        tracing::warn!("VMX interrupt-window vmexit failed: {:?}", e);
-                    }
-                    Ok(false) => {}
-                }
-            }
-        }
-
-        if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
-            // STI/MOV SS shadow — skip all external interrupts this boundary
-            // (Bochs event.cc)
         } else if self.is_unmasked_event_pending(Self::BX_EVENT_NMI) {
             // NMI delivery (Bochs event.cc)
             self.clear_event(Self::BX_EVENT_NMI);
@@ -216,6 +197,21 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 Err(e) => {
                     tracing::warn!("NMI delivery failed: {:?}", e);
                 }
+            }
+        } else if self.in_vmx_guest
+            && (self.pending_event & Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING) != 0
+            && self.eflags.contains(EFlags::IF_)
+        {
+            // Bochs event.cc — VMexit(VMX_VMEXIT_INTERRUPT_WINDOW, 0).
+            match self.vmexit_check_interrupt_window() {
+                Ok(true) | Err(super::error::CpuError::CpuLoopRestart) => {
+                    self.prev_rip = self.rip();
+                    return false;
+                }
+                Err(e) => {
+                    tracing::warn!("VMX interrupt-window vmexit failed: {:?}", e);
+                }
+                Ok(false) => {}
             }
         } else if self.is_unmasked_event_pending(
             Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,

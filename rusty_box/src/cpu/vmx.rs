@@ -83,7 +83,7 @@ bitflags::bitflags! {
     ///   bit 1 — non-read indicator (set for EXECUTE / RW / SS_INVALID)
     ///   bit 2 — shadow-stack access (`rw & 4` in Bochs)
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct BxRwAccess: u32 {
+    pub(super) struct BxRwAccess: u32 {
         // Single-bit flags used by the helper predicates.
         const WRITE_BIT        = 1 << 0;
         const NON_READ_BIT     = 1 << 1;
@@ -103,7 +103,7 @@ bitflags::bitflags! {
 impl BxRwAccess {
     /// Bochs `rw & 1` — the access writes (WRITE / RW / SHADOW_STACK_WRITE).
     #[inline]
-    pub const fn is_write(self) -> bool {
+    pub(super) const fn is_write(self) -> bool {
         self.contains(Self::WRITE_BIT)
     }
 
@@ -111,14 +111,14 @@ impl BxRwAccess {
     /// the union mask (non-zero) via `intersects` so the zero-bit-flag
     /// caveat doesn't apply.
     #[inline]
-    pub fn is_read_like(self) -> bool {
+    pub(super) fn is_read_like(self) -> bool {
         !self.intersects(Self::WRITE_BIT.union(Self::NON_READ_BIT))
     }
 
     /// Bochs `rw & 4` — shadow-stack access (EPT-violation qualification
     /// bit 13).
     #[inline]
-    pub const fn is_shadow_stack(self) -> bool {
+    pub(super) const fn is_shadow_stack(self) -> bool {
         self.contains(Self::SHADOW_STACK_BIT)
     }
 }
@@ -130,7 +130,7 @@ bitflags::bitflags! {
     /// walker tests against and in the cumulative `combined_access`
     /// it computes from the path.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct EptPerm: u32 {
+    pub(super) struct EptPerm: u32 {
         const READ                  = 1 << 0;
         const WRITE                 = 1 << 1;
         const EXECUTE               = 1 << 2;
@@ -145,7 +145,7 @@ bitflags::bitflags! {
     ///   [31:16] port number
     /// Bits 7 and 12-15 are reserved by the SDM.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct IoExitQual: u64 {
+    pub(super) struct IoExitQual: u64 {
         /// Bit 3: direction is IN (1) vs OUT (0).
         const PORT_IN   = 1 << 3;
         /// Bit 4: string instruction (INS / OUTS).
@@ -164,7 +164,7 @@ bitflags::bitflags! {
     /// places the "user-execute" indicator under MBE_CTRL+EXECUTE,
     /// not the EPT-permission bit 10 used by EptPerm.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct EptViolationQual: u64 {
+    pub(super) struct EptViolationQual: u64 {
         // [2:0] — access mask: Bochs `vmexit_qualification = access_mask`.
         /// Bit 0: read access requested.
         const ACCESS_R     = 1 << 0;
@@ -528,7 +528,7 @@ bitflags::bitflags! {
     /// callers can use `intersection().bits()` to read the packed values
     /// without leaving the bitflags namespace.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct SegAr: u32 {
+    pub(super) struct SegAr: u32 {
         const TYPE_MASK = 0xF;
         const S_BIT     = 1 << 4;
         const DPL_MASK  = 0x3 << 5;
@@ -542,13 +542,21 @@ bitflags::bitflags! {
 }
 
 impl SegAr {
+    /// Extract a packed sub-field defined as a bitflags mask. The shift
+    /// amount is derived from the mask itself (`trailing_zeros`), so the
+    /// extractor stays correct if the mask is ever repositioned and the
+    /// position information lives in exactly one place — the mask const.
     #[inline]
-    pub fn type_field(self) -> u32 {
-        (self & Self::TYPE_MASK).bits()
+    fn extract(self, mask: Self) -> u32 {
+        self.intersection(mask).bits() >> mask.bits().trailing_zeros()
     }
     #[inline]
-    pub fn dpl(self) -> u8 {
-        ((self & Self::DPL_MASK).bits() >> 5) as u8
+    pub(super) fn type_field(self) -> u32 {
+        self.extract(Self::TYPE_MASK)
+    }
+    #[inline]
+    pub(super) fn dpl(self) -> u8 {
+        self.extract(Self::DPL_MASK) as u8
     }
 }
 
@@ -606,7 +614,7 @@ pub(super) const VMX_PROCBASED_CTLS2_ALLOWED_1: u32 =
 /// dereferenced by `i->dst()`. Numeric values are part of the SDM ABI.
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InveptType {
+pub(super) enum InveptType {
     SingleContext = 1,
     AllContext = 2,
 }
@@ -614,7 +622,7 @@ pub enum InveptType {
 /// INVVPID type field — Bochs vmx.cc INVVPID. Same SDM-defined values.
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InvvpidType {
+pub(super) enum InvvpidType {
     IndividualAddress = 0,
     SingleContext = 1,
     AllContext = 2,
@@ -624,7 +632,7 @@ pub enum InvvpidType {
 impl InveptType {
     /// Convert from the raw `type` field carried in the GPR. Returns
     /// `None` when the value is reserved — Bochs `VMfail` path.
-    pub const fn from_raw(v: u64) -> Option<Self> {
+    pub(super) const fn from_raw(v: u64) -> Option<Self> {
         match v {
             1 => Some(Self::SingleContext),
             2 => Some(Self::AllContext),
@@ -634,7 +642,7 @@ impl InveptType {
 }
 
 impl InvvpidType {
-    pub const fn from_raw(v: u64) -> Option<Self> {
+    pub(super) const fn from_raw(v: u64) -> Option<Self> {
         match v {
             0 => Some(Self::IndividualAddress),
             1 => Some(Self::SingleContext),
@@ -1668,9 +1676,16 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             self.vmfail(err);
             return Ok(());
         }
-        if let Some(err) = self.vmenter_load_check_guest_state() {
-            self.vmfail(err);
-            return Ok(());
+        // Bochs vmx.cc VMLAUNCH: guest-state failure is a VMEXIT with
+        // VMX_VMEXIT_VMENTRY_FAILURE_GUEST_STATE | (1<<31) and a
+        // qualification — not a VMfail. The error placeholder threaded
+        // out of vmenter_load_check_guest_state currently doubles as the
+        // qualification placeholder until per-check qualifications are
+        // wired through (Bochs writes a non-zero VMENTER_ERR_* code into
+        // *qualification at each failure site).
+        if let Some(_err) = self.vmenter_load_check_guest_state() {
+            return self
+                .vmx_vmexit_vmentry_failure(VmxVmexitReason::VmentryFailureGuestState, 0);
         }
 
         // Save host state from the running CPU. RIP is "the instruction after
@@ -1691,21 +1706,65 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
         self.vmcs.launched = true;
         self.in_vmx_guest = true;
+
+        // Bochs vmx.cc VMenter — initial NMI mask state:
+        //   unmask_event(BX_EVENT_VMX_VIRTUAL_NMI | BX_EVENT_NMI);
+        //   if (interruptibility_state & NMI_BLOCKED) {
+        //     if (VIRTUAL_NMI()) mask_event(VMX_VIRTUAL_NMI);
+        //     else               mask_event(NMI);
+        //   }
+        // The unmask resets any stale mask carried in from the host;
+        // the conditional re-mask honours guest interruptibility.
+        const BX_VMX_INTERRUPTS_BLOCKED_NMI_BLOCKED: u32 = 1 << 3;
+        self.unmask_event(Self::BX_EVENT_VMX_VIRTUAL_NMI | Self::BX_EVENT_NMI);
+        if self.vmcs.guest_interruptibility_state
+            & BX_VMX_INTERRUPTS_BLOCKED_NMI_BLOCKED
+            != 0
+        {
+            if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_VIRTUAL_NMI != 0 {
+                self.mask_event(Self::BX_EVENT_VMX_VIRTUAL_NMI);
+            } else {
+                self.mask_event(Self::BX_EVENT_NMI);
+            }
+        }
+
+        // Bochs vmx.cc VMenter post-state-load event signaling:
+        //   if (MONITOR_TRAP_FLAG) { signal_event(MTF); mask_event(MTF); }
+        //   if (NMI_WINDOW_EXITING)         signal_event(VMX_VIRTUAL_NMI);
+        //   if (INTERRUPT_WINDOW_VMEXIT)    signal_event(VMX_INTERRUPT_WINDOW_EXITING);
+        // The MTF signal+mask pair lets the next instruction-boundary
+        // unmask MTF (Bochs event.cc Priority-3 branch) so the MTF
+        // VMEXIT fires AFTER the first guest instruction, not during
+        // VMENTRY itself. All three events are cleared at VMEXIT.
+        let proc1 = self.vmcs.proc_based_ctls;
+        if proc1 & VMX_VM_EXEC_CTRL1_MONITOR_TRAP_FLAG != 0 {
+            self.signal_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
+            self.mask_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
+        }
+        if proc1 & VMX_VM_EXEC_CTRL1_NMI_WINDOW_EXITING != 0 {
+            self.signal_event(Self::BX_EVENT_VMX_VIRTUAL_NMI);
+        }
+        if proc1 & VMX_VM_EXEC_CTRL1_INTERRUPT_WINDOW_VMEXIT != 0 {
+            self.signal_event(Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING);
+        }
+
         // Bochs vmx.cc step 5: walk the VM-entry MSR-load list and write
-        // each (msr, value) pair into the guest. A non-zero return is a
-        // Bochs VMX abort (state malformed) — Bochs panics; we propagate
-        // a #UD into the host so the failure isn't silently masked.
+        // each (msr, value) pair into the guest. A non-zero failing index
+        // is a VMENTRY-failure VMEXIT with reason VMX_VMEXIT_VMENTRY_
+        // FAILURE_MSR | (1<<31) and the failing index as qualification —
+        // not a host #UD.
         let load_cnt = self.vmcs.vmentry_msr_load_cnt;
         let load_addr = self.vmcs.vmentry_msr_load_addr;
         if load_cnt != 0 {
             let failing = self.vmx_load_msrs(load_cnt, load_addr)?;
             if failing != 0 {
                 tracing::error!(
-                    "VMENTRY MSR load list rejected entry {failing}; signalling VMX abort"
+                    "VMENTRY MSR load list rejected entry {failing}; VMENTRY-failure VMEXIT"
                 );
-                self.in_vmx_guest = false;
-                self.invalidate_prefetch_q();
-                return self.exception(Exception::Ud, 0);
+                return self.vmx_vmexit_vmentry_failure(
+                    VmxVmexitReason::VmentryFailureMsr,
+                    u64::from(failing),
+                );
             }
         }
         // Bochs vmx.cc step 6: arm the preemption timer when the pin-based
@@ -1790,12 +1849,98 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.vmcs.exit_reason = reason as u32;
         self.vmcs.exit_qualification = qualification;
 
+        // Bochs vmx.cc VMexit ordering (lines 3144-3159): set
+        // `in_vmx_guest = false` BEFORE clear_event + VMexitLoadHostState
+        // so the host-mode invariant holds for the entire host-state load
+        // and so any exception raised during host-state restoration sees
+        // host context.
+        self.in_vmx_guest = false;
+        // Clear the VMX-guest-pending events so a re-entered host doesn't
+        // see stale window/MTF/preemption-timer requests
+        // (`clear_event(BX_EVENT_VMX_*)` at vmx.cc:3147-3154).
+        self.clear_event(
+            Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG
+                | Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING
+                | Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED
+                | Self::BX_EVENT_VMX_VIRTUAL_NMI,
+        );
+
         // Load host state. A failure here means the host VMCS is corrupt
         // — propagate so the surrounding cpu loop can raise the exception
         // rather than silently drop the error.
         self.vmexit_load_host_state()?;
 
+        self.invalidate_prefetch_q();
+        Ok(())
+    }
+
+    /// VMENTRY-failure VMEXIT — Bochs `BX_CPU_C::VMexit` with bit 31 of
+    /// the reason set. The architectural difference from a regular VMEXIT
+    /// is narrow (Bochs vmx.cc VMexit gates only STEP 1 on the
+    /// VMENTRY-failure reasons):
+    ///   - STEP 1 (guest-state save + VMEXIT MSR-STORE list) is skipped
+    ///     because the VMENTRY never loaded any guest state.
+    ///   - STEP 2 (host-state load) and STEP 3 (host MSR-LOAD list) run
+    ///     unconditionally, mirroring the regular VMEXIT path.
+    ///   - The early `!in_vmx_guest` panic-guard at the top of Bochs
+    ///     VMexit is suppressed (bit 31 set explicitly opts out).
+    /// Bit 31 is OR'd into the recorded exit reason so the host can
+    /// distinguish a VMENTRY failure from a normal exit. Used by VMLAUNCH
+    /// / VMRESUME when guest-state checking or the VMENTRY MSR-load list
+    /// rejects the entry.
+    pub(super) fn vmx_vmexit_vmentry_failure(
+        &mut self,
+        reason: VmxVmexitReason,
+        qualification: u64,
+    ) -> Result<()> {
+        // Snapshot any armed preemption timer back into the VMCS before
+        // unwinding. Mirrors the unconditional disarm in Bochs VMexit
+        // step 0 — we never armed it for this VMENTRY (still pre-step-6),
+        // but the helper is idempotent.
+        self.vmexit_disarm_preemption_timer();
+
+        // Bochs vmx.cc VMexit: bit 31 distinguishes the VMENTRY-failure
+        // reason from a regular VMEXIT for the same numeric reason code.
+        self.vmcs.exit_reason = (reason as u32) | 0x8000_0000;
+        self.vmcs.exit_qualification = qualification;
+
+        // Bochs vmx.cc VMexit ordering (lines 3144-3154): in_vmx_guest
+        // first, then unconditional clear of the VMX-guest-pending
+        // events. The window-exit / MTF / preemption-timer events
+        // signaled at the start of this VMENTRY would otherwise stay
+        // armed and fire as phantom VMEXITs once the host re-enters.
         self.in_vmx_guest = false;
+        self.clear_event(
+            Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG
+                | Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING
+                | Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED
+                | Self::BX_EVENT_VMX_VIRTUAL_NMI,
+        );
+
+        // STEP 2: load host state. The host VMCS fields were validated
+        // by vmenter_load_check_host_state earlier; even though the live
+        // CPU is still the host (no guest swap happened), Bochs always
+        // re-loads the host VMCS fields here for architectural
+        // consistency.
+        self.vmexit_load_host_state()?;
+
+        // STEP 3: host MSR load list — Bochs vmx.cc VMexit walks
+        // VMEXIT_MSR_LOAD unconditionally, including for VMENTRY-failure
+        // reasons. A non-zero failing index is a Bochs VMX abort
+        // (state malformed); we log and continue so the host at least
+        // observes the recorded exit reason.
+        let load_cnt = self.vmcs.vmexit_msr_load_cnt;
+        let load_addr = self.vmcs.vmexit_msr_load_addr;
+        if load_cnt != 0 {
+            match self.vmx_load_msrs(load_cnt, load_addr) {
+                Ok(0) => {}
+                Ok(failing) => tracing::error!(
+                    "VMENTRY-failure VMEXIT: host MSR-load list rejected entry {failing}"
+                ),
+                Err(e) => return Err(e),
+            }
+        }
+
         self.invalidate_prefetch_q();
         Ok(())
     }
@@ -2085,6 +2230,16 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             if bochs_type == 2 && vector != 2 {
                 tracing::warn!(
                     "VMENTRY check_vm_controls: NMI injection vector {vector} != 2"
+                );
+                return Some(VmxErr::VmentryInvalidVmControlField);
+            }
+            // Bochs vmx.cc VMenterInjectEvents: type 7 (BX_EVENT_OTHER) is
+            // only valid as the MTF marker (vector=0). Any other vector at
+            // type 7 is rejected at VMENTRY rather than reaching the
+            // injection switch's panic arm.
+            if bochs_type == 7 && vector != 0 {
+                tracing::warn!(
+                    "VMENTRY check_vm_controls: type=7 (event-other) requires vector=0, got {vector}"
                 );
                 return Some(VmxErr::VmentryInvalidVmControlField);
             }
@@ -2964,7 +3119,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if !x86_64_host
             && super::crregs::BxCr4::from_bits_truncate(self.vmcs.host_cr4)
                 .contains(super::crregs::BxCr4::PAE)
-            && !self.check_pdptrs(self.vmcs.host_cr3)
+            && !self.check_pdptrs(self.vmcs.host_cr3)?
         {
             tracing::error!(
                 "VMABORT: host PDPTRs corrupted (cr3={:#018x})",
@@ -3348,17 +3503,31 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 super::exception::InterruptType::SoftwareException
             }
             7 => {
+                // Bochs vmx.cc VMenterInjectEvents BX_EVENT_OTHER: the
+                // MTF marker (vector=0) signals BX_EVENT_VMX_MONITOR_
+                // TRAP_FLAG so the next instruction-boundary fires the
+                // MTF VMEXIT. Any other vector at this type is rejected
+                // by `vmenter_load_check_vm_controls` before we get
+                // here; if a stale value sneaks through, abort the
+                // VMENTRY rather than silently fabricating an event.
                 if vector == 0 {
-                    // Bochs vmx.cc VMenterInjectEvents BX_EVENT_OTHER: the
-                    // MTF marker (vector=0) signals BX_EVENT_VMX_MONITOR_
-                    // TRAP_FLAG so the next instruction-boundary fires the
-                    // MTF VMEXIT.
                     self.signal_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
                     return Ok(());
                 }
-                super::exception::InterruptType::EventOther
+                tracing::error!(
+                    "VMENTRY inject_events: unsupported type=7 vector={vector} reached injection (controls check missed it)"
+                );
+                return Err(super::error::CpuError::CpuLoopRestart);
             }
-            _ => return Ok(()),
+            // Bochs `default: BX_PANIC`. Unreachable in practice — types
+            // 1 and 8..=15 are rejected at VMENTRY validation. Restart
+            // the cpu loop rather than silently swallow.
+            _ => {
+                tracing::error!(
+                    "VMENTRY inject_events: reserved type {bochs_type} reached injection"
+                );
+                return Err(super::error::CpuError::CpuLoopRestart);
+            }
         };
 
         if is_int {
@@ -3372,7 +3541,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // for HARDWARE_EXCEPTION injections so a fault during delivery
         // can be classified for double-fault detection.
         if bochs_type == 3 && (vector as usize) < super::cpu::BX_CPU_HANDLED_EXCEPTIONS as usize {
-            self.last_exception_type = super::exception::exception_type_for(vector) as i32;
+            self.last_exception_type = self.exception_type_for(vector);
         }
 
         // Bochs records the injection in IDT-vectoring info (with valid bit
@@ -3441,15 +3610,25 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     /// Monitor-trap-flag VMEXIT — Bochs event.cc
-    /// `BX_EVENT_VMX_MONITOR_TRAP_FLAG` branch. Fires after the next guest
-    /// instruction boundary when the host injected an MTF event at VMENTRY.
+    /// `BX_EVENT_VMX_MONITOR_TRAP_FLAG` branch (event.cc lines 312-319):
+    ///   if (is_pending(MTF)) {
+    ///     if (is_unmasked_event_pending(MTF)) VMexit(...);
+    ///     else                                unmask_event(MTF);
+    ///   }
+    /// The masked-then-unmask path is required so the MTF fires on the
+    /// NEXT instruction boundary after VMENTRY masked it for one
+    /// instruction.
     pub(super) fn vmexit_check_monitor_trap_flag(&mut self) -> Result<bool> {
-        if !self.is_unmasked_event_pending(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG) {
+        if (self.pending_event & Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG) == 0 {
             return Ok(false);
         }
-        self.clear_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
-        self.vmx_vmexit(VmxVmexitReason::MonitorTrapFlag, 0)?;
-        Ok(true)
+        if self.is_unmasked_event_pending(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG) {
+            self.clear_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
+            self.vmx_vmexit(VmxVmexitReason::MonitorTrapFlag, 0)?;
+            return Ok(true);
+        }
+        self.unmask_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
+        Ok(false)
     }
 
     /// Per-tick LAPIC poll — Bochs `vmx_preemption_timer_expired` callback.
@@ -3465,13 +3644,13 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         false
     }
 
-    /// NMI-window VMEXIT — Bochs event.cc `BX_EVENT_VMX_VIRTUAL_NMI` branch.
-    /// When `NMI_WINDOW_EXITING` is set in the primary processor controls,
-    /// any instruction boundary at which virtual-NMI blocking is clear
-    /// triggers a VMEXIT. The caller must verify NMI is not currently
-    /// blocked before invoking this predicate.
+    /// NMI-window VMEXIT — Bochs event.cc
+    /// `is_unmasked_event_pending(BX_EVENT_VMX_VIRTUAL_NMI)` branch.
+    /// VMENTRY signals the event when `NMI_WINDOW_EXITING` is set in
+    /// proc-based controls; virtual-NMI blocking masks it. The exit
+    /// fires when the event is both pending and unmasked.
     pub(super) fn vmexit_check_nmi_window(&mut self) -> Result<bool> {
-        if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_NMI_WINDOW_EXITING == 0 {
+        if !self.is_unmasked_event_pending(Self::BX_EVENT_VMX_VIRTUAL_NMI) {
             return Ok(false);
         }
         self.vmx_vmexit(VmxVmexitReason::NmiWindow, 0)?;
@@ -3479,12 +3658,16 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     /// Interrupt-window VMEXIT — Bochs event.cc
-    /// `BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING` branch. With
-    /// `INTERRUPT_WINDOW_VMEXIT` set, VMEXIT fires at any boundary where
-    /// `RFLAGS.IF=1` and external-interrupt inhibition is clear. Caller
-    /// guarantees the inhibit/IF preconditions.
+    /// `is_pending(BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING) && get_IF()`
+    /// branch. VMENTRY signals the event when `INTERRUPT_WINDOW_VMEXIT`
+    /// is set in proc-based controls. The exit fires whenever the event
+    /// is pending, `RFLAGS.IF=1`, and external-interrupt inhibition is
+    /// clear (the inhibit gate is in the caller's chain).
     pub(super) fn vmexit_check_interrupt_window(&mut self) -> Result<bool> {
-        if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_INTERRUPT_WINDOW_VMEXIT == 0 {
+        if (self.pending_event & Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING) == 0 {
+            return Ok(false);
+        }
+        if !self.eflags.contains(super::eflags::EFlags::IF_) {
             return Ok(false);
         }
         self.vmx_vmexit(VmxVmexitReason::InterruptWindow, 0)?;
@@ -3736,6 +3919,20 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         let mbe_ctrl = self.vmcs.secondary_proc_based_ctls
             & VMX_VM_EXEC_CTRL2_MBE_CTRL
             != 0;
+        // Bochs `BX_VMX_EPT_ACCESS_DIRTY_ENABLED` (paging.cc): EPTP bit 6.
+        let ept_ad_enabled = (eptptr & 0x40) != 0;
+
+        // Bochs paging.cc translate_guest_physical: when EPT-A/D is on
+        // and we're walking a guest paging structure, treat the access
+        // as a write so the EPT permission check requires WRITE — the
+        // companion `update_ept_access_dirty` (called below on success)
+        // updates the EPT entries' own A/D bits.
+        let rw = if ept_ad_enabled && is_page_walk && guest_laddr_valid {
+            BxRwAccess::Write
+        } else {
+            rw
+        };
+
         // combined_access starts as "all permissions granted"; the walker
         // ANDs each level's bits in. Under MBE_CTRL the user-execute bit
         // additionally rides along (Bochs paging.cc).
@@ -3810,10 +4007,14 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
                 break;
             }
-            // Reserved bits at [63:52] (rusty_box's BX_PHY_ADDRESS_WIDTH=40
-            // makes [51:40] reserved as well).
-            const PAGING_EPT_RESERVED_BITS: u64 = 0xFFF0_0000_0000_0000
-                | (((1u64 << 12) - 1) << 40);
+            // Bochs PAGING_EPT_RESERVED_BITS = BX_PHY_ADDRESS_RESERVED_BITS
+            // & 0xFFFFFFFFFFFFF (paging.cc) — only bits [51:phy_width] are
+            // reserved. Bits [63:52] are NOT reserved here: architecturally
+            // they hold #VE-suppress (63), SPP (61), SSS (60), paging-write
+            // (58), VGP (57), so the EPT walker must not flag them as
+            // misconfig. With BX_PHY_ADDRESS_WIDTH=40 only bits [51:40]
+            // are reserved at the phy-addr boundary.
+            const PAGING_EPT_RESERVED_BITS: u64 = ((1u64 << 12) - 1) << 40;
             if curr & PAGING_EPT_RESERVED_BITS != 0 {
                 vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
                 break;
@@ -3839,7 +4040,13 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                     vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
                     break;
                 }
-                ppf &= 0x000F_FFFF_FFFE_0000;
+                // Bochs paging.cc: `ppf &= 0x000fffffffffe000` — clears
+                // bit 12 only on top of the 4 KiB ppf mask. The
+                // subsequent `ppf & offset_mask` reserved-bit check then
+                // sees bits [20:13] (2 MiB leaf) or [29:13] (1 GiB leaf)
+                // and rejects unaligned PFNs. Clearing more bits here
+                // hides reserved-bit violations.
+                ppf &= 0x000F_FFFF_FFFF_E000;
                 if ppf & offset_mask != 0 {
                     vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
                     break;
@@ -3880,26 +4087,26 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             // sets on shadow-stack accesses (rw & 4) per BX_SUPPORT_CET.
             let qual = if reason == VmxVmexitReason::EptViolation {
                 combined_access &= EptPerm::from_bits_truncate(entry[leaf as usize] as u32);
+                // Bochs paging.cc qualification builder: always start with
+                // access_mask at [2:0] | combined_access at [5:3]. The
+                // MBE+execute branch then masks to bits [5:0] (preserving
+                // the granted bits at [5:3]), forces bit 2 (instruction
+                // fetch), and copies user-execute up to bit 6.
                 let mut q = EptViolationQual::empty();
+                q.set(EptViolationQual::ACCESS_R, access_mask.contains(EptPerm::READ));
+                q.set(EptViolationQual::ACCESS_W, access_mask.contains(EptPerm::WRITE));
+                q.set(EptViolationQual::ACCESS_X, access_mask.contains(EptPerm::EXECUTE));
+                q.set(EptViolationQual::GRANTED_R, combined_access.contains(EptPerm::READ));
+                q.set(EptViolationQual::GRANTED_W, combined_access.contains(EptPerm::WRITE));
+                q.set(EptViolationQual::GRANTED_X, combined_access.contains(EptPerm::EXECUTE));
                 if mbe_ctrl && rw == BxRwAccess::Execute {
-                    // Bochs paging.cc MBE+execute branch: low bits =
-                    // {bit2 instruction-fetch, bit6 user-execute}.
+                    // Force bit 2 (instruction fetch) and lift the leaf's
+                    // MBE_USER_EXECUTE permission into bit 6.
                     q |= EptViolationQual::ACCESS_X;
                     q.set(
                         EptViolationQual::MBE_USER_EXEC,
                         combined_access.contains(EptPerm::MBE_USER_EXEC),
                     );
-                } else {
-                    // Standard layout: access_mask at [2:0],
-                    // combined_access at [5:3]. EptPerm::READ/WRITE/EXECUTE
-                    // map onto ACCESS_R/W/X bit-for-bit; combined gets
-                    // shifted up to GRANTED_R/W/X.
-                    q.set(EptViolationQual::ACCESS_R, access_mask.contains(EptPerm::READ));
-                    q.set(EptViolationQual::ACCESS_W, access_mask.contains(EptPerm::WRITE));
-                    q.set(EptViolationQual::ACCESS_X, access_mask.contains(EptPerm::EXECUTE));
-                    q.set(EptViolationQual::GRANTED_R, combined_access.contains(EptPerm::READ));
-                    q.set(EptViolationQual::GRANTED_W, combined_access.contains(EptPerm::WRITE));
-                    q.set(EptViolationQual::GRANTED_X, combined_access.contains(EptPerm::EXECUTE));
                 }
                 if guest_laddr_valid {
                     q |= EptViolationQual::LADDR_VALID;
@@ -3936,7 +4143,43 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Err(super::error::CpuError::CpuLoopRestart);
         }
 
+        // Bochs paging.cc translate_guest_physical lines 2116-2123: when
+        // EPT-A/D is enabled, write the EPT entries' own A/D bits back.
+        // The leaf gets A and (when the access is a write) D; every
+        // higher-level entry gets A.
+        if ept_ad_enabled {
+            self.update_ept_access_dirty(&entry_addr, &mut entry, leaf as usize, rw.is_write());
+        }
+
         Ok(ppf | (guest_paddr & 0xFFF))
+    }
+
+    /// Bochs `BX_CPU_C::update_ept_access_dirty` (paging.cc lines
+    /// 2130-2145). Walks from PML4 down to the leaf level, setting the
+    /// A bit (0x100, bit 8) on every non-leaf entry that doesn't yet
+    /// have it. The leaf entry gets A AND (when the access is a write)
+    /// D (0x200, bit 9). Updates are written back to the EPT entry
+    /// addresses cached during the walk.
+    fn update_ept_access_dirty(
+        &mut self,
+        entry_addr: &[u64; 4],
+        entry: &mut [u64; 4],
+        leaf: usize,
+        write: bool,
+    ) {
+        // Non-leaf levels (PML4 down to just above leaf): set A bit.
+        for level in ((leaf + 1)..4).rev() {
+            if entry[level] & 0x100 == 0 {
+                entry[level] |= 0x100;
+                self.mem_write_qword(entry_addr[level], entry[level]);
+            }
+        }
+        // Leaf: set A, plus D if this was a write access.
+        let needed = 0x100 | if write { 0x200 } else { 0 };
+        if (entry[leaf] & needed) != needed {
+            entry[leaf] |= needed;
+            self.mem_write_qword(entry_addr[leaf], entry[leaf]);
+        }
     }
 
     /// EPTPTR-validity check — Bochs vmx.cc `is_eptptr_valid`.
@@ -3955,11 +4198,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if walk_length != 3 {
             return false;
         }
-        // [6] EPT A/D — extension is not advertised, bit must be clear.
-        if eptptr & 0x40 != 0 {
-            tracing::trace!("is_eptptr_valid: EPTPTR A/D bit set, not supported");
-            return false;
-        }
+        // [6] EPT A/D — supported. translate_guest_physical reads this
+        // bit to drive the rw=BX_WRITE upgrade for guest-paging walks
+        // and to call update_ept_access_dirty after a successful walk.
         // [7] CET supervisor shadow stack control — gated on CET ISA bit.
         // We don't yet advertise the EPT-CET extension, so reject.
         if eptptr & 0x80 != 0 {
