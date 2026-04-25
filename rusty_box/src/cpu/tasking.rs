@@ -15,11 +15,13 @@ use super::{
     Result,
 };
 
-// Task switch source constants (matches Bochs)
-pub(super) const BX_TASK_FROM_JUMP: u32 = 0x0;
-pub(super) const BX_TASK_FROM_CALL: u32 = 0x1;
-pub(super) const BX_TASK_FROM_INT: u32 = 0x2;
-pub(super) const BX_TASK_FROM_IRET: u32 = 0x3;
+// Task switch source constants — Bochs cpu.h enum task_switch_source.
+// SVM/VMX task-switch qualification reads these values directly so the
+// numeric ordering is part of the ABI.
+pub(super) const BX_TASK_FROM_CALL: u32 = 0;
+pub(super) const BX_TASK_FROM_IRET: u32 = 1;
+pub(super) const BX_TASK_FROM_JUMP: u32 = 2;
+pub(super) const BX_TASK_FROM_INT: u32 = 3;
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cpu::BxCpuC<'_, I, T> {
     /// Perform task switch

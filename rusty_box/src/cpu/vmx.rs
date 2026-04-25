@@ -1892,36 +1892,36 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         (bitmap & mask) != 0
     }
 
-    pub(super) fn vmexit_check_io(
-        &mut self,
-        port: u16,
-        size: u32,
-        direction_in: bool,
-        string: bool,
-        rep: bool,
-    ) -> Result<bool> {
-        // Bochs vmx.cc VMexit_IO: bitmap path takes precedence over the
-        // unconditional IO_VMEXIT bit.
+    /// Decide whether a guest I/O access takes a VMEXIT — Bochs vmexit.cc
+    /// VMexit_IO common predicate. Bitmap path beats the unconditional
+    /// `IO_VMEXIT` bit when both might apply.
+    fn io_should_vmexit(&mut self, port: u16, size: u32) -> bool {
         let ctls = self.proc_based_ctls1();
-        let exit = if ctls & VMX_VM_EXEC_CTRL1_IO_BITMAPS != 0 {
+        if ctls & VMX_VM_EXEC_CTRL1_IO_BITMAPS != 0 {
             self.io_bitmap_says_vmexit(port, size)
         } else if ctls & VMX_VM_EXEC_CTRL1_IO_VMEXIT != 0 {
             true
         } else {
             false
-        };
-        if !exit {
-            return Ok(false);
         }
-        // Qualification bits mirror Bochs vmx.cc VMexit_IO:
-        //   [2:0]  access size in bytes - 1
-        //   [3]    direction (0 = OUT, 1 = IN)
-        //   [4]    string instruction
-        //   [5]    REP prefix
-        //   [6]    operand encoding (0 = DX, 1 = immediate) — left zero here
-        //   [31:16] port number
-        let mut qual: u64 = 0;
-        qual |= u64::from(size.saturating_sub(1) & 0x7);
+    }
+
+    /// Build the I/O exit qualification — Bochs vmexit.cc VMexit_IO:
+    ///   [2:0]   access size - 1
+    ///   [3]     direction (0 = OUT, 1 = IN)
+    ///   [4]     string instruction
+    ///   [5]     REP prefix
+    ///   [6]     operand encoding (0 = DX, 1 = immediate)
+    ///   [31:16] port number
+    fn io_qualification(
+        port: u16,
+        size: u32,
+        direction_in: bool,
+        string: bool,
+        rep: bool,
+        imm: bool,
+    ) -> u64 {
+        let mut qual: u64 = u64::from(size.saturating_sub(1) & 0x7);
         if direction_in {
             qual |= 1 << 3;
         }
@@ -1931,7 +1931,61 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if rep {
             qual |= 1 << 5;
         }
+        if imm {
+            qual |= 1 << 6;
+        }
         qual |= u64::from(port) << 16;
+        qual
+    }
+
+    /// IN/OUT (non-string) intercept — Bochs vmexit.cc VMexit_IO with the
+    /// `BX_IA_IN_*` / `BX_IA_OUT_*` cases that don't touch GUEST_LINEAR_ADDR
+    /// or INSTRUCTION_INFO. Caller passes `imm=true` for the immediate-port
+    /// variants (`IN AL, ib`, `OUT ib, AL`, …).
+    pub(super) fn vmexit_check_io(
+        &mut self,
+        port: u16,
+        size: u32,
+        direction_in: bool,
+        imm: bool,
+    ) -> Result<bool> {
+        if !self.io_should_vmexit(port, size) {
+            return Ok(false);
+        }
+        let qual = Self::io_qualification(port, size, direction_in, false, false, imm);
+        self.vmx_vmexit(VmxVmexitReason::IoInstruction, qual)?;
+        Ok(true)
+    }
+
+    /// INS/OUTS string-form intercept — Bochs vmexit.cc VMexit_IO with the
+    /// `BX_IA_REP_INSx` / `BX_IA_REP_OUTSx` cases. Writes the buffer linear
+    /// address into `VMCS_GUEST_LINEAR_ADDR` and a packed
+    /// `(seg << 15) | (as64 ? 1<<8 : 0) | (as32 ? 1<<7 : 0)` value into
+    /// `VMCS_32BIT_VMEXIT_INSTRUCTION_INFO`. `port_in` semantics use ES:RDI;
+    /// `port_out` (OUTS) uses the prefix segment with RSI.
+    pub(super) fn vmexit_check_io_string(
+        &mut self,
+        port: u16,
+        size: u32,
+        direction_in: bool,
+        rep: bool,
+        linear_addr: u64,
+        seg: u8,
+        as64: bool,
+        as32: bool,
+    ) -> Result<bool> {
+        if !self.io_should_vmexit(port, size) {
+            return Ok(false);
+        }
+        let qual = Self::io_qualification(port, size, direction_in, true, rep, false);
+        self.vmcs.guest_linear_addr = linear_addr;
+        let mut info: u32 = u32::from(seg) << 15;
+        if as64 {
+            info |= 1 << 8;
+        } else if as32 {
+            info |= 1 << 7;
+        }
+        self.vmcs.exit_instruction_info = info;
         self.vmx_vmexit(VmxVmexitReason::IoInstruction, qual)?;
         Ok(true)
     }

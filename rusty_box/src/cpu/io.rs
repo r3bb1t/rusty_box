@@ -68,7 +68,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn in_al_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         self.svm_intercept_io(port, 1, true)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 1, true, false, false)? {
+        if self.in_vmx_guest && self.vmexit_check_io(port, 1, true, true)? {
             return Ok(());
         }
         if !self.allow_io(port, 1)? {
@@ -84,7 +84,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn in_ax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         self.svm_intercept_io(port, 2, true)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 2, true, false, false)? {
+        if self.in_vmx_guest && self.vmexit_check_io(port, 2, true, true)? {
             return Ok(());
         }
         if !self.allow_io(port, 2)? {
@@ -100,7 +100,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn in_eax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         self.svm_intercept_io(port, 4, true)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 4, true, false, false)? {
+        if self.in_vmx_guest && self.vmexit_check_io(port, 4, true, true)? {
             return Ok(());
         }
         if !self.allow_io(port, 4)? {
@@ -116,7 +116,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn out_ib_al(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         self.svm_intercept_io(port, 1, false)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 1, false, false, false)? {
+        if self.in_vmx_guest && self.vmexit_check_io(port, 1, false, true)? {
             return Ok(());
         }
         if !self.allow_io(port, 1)? {
@@ -132,7 +132,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn out_ib_ax(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         self.svm_intercept_io(port, 2, false)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 2, false, false, false)? {
+        if self.in_vmx_guest && self.vmexit_check_io(port, 2, false, true)? {
             return Ok(());
         }
         if !self.allow_io(port, 2)? {
@@ -148,7 +148,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn out_ib_eax(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         self.svm_intercept_io(port, 4, false)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 4, false, false, false)? {
+        if self.in_vmx_guest && self.vmexit_check_io(port, 4, false, true)? {
             return Ok(());
         }
         if !self.allow_io(port, 4)? {
@@ -164,7 +164,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn in_al_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         self.svm_intercept_io(port, 1, true)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 1, true, false, false)? {
+        if self.in_vmx_guest && self.vmexit_check_io(port, 1, true, false)? {
             return Ok(());
         }
         if !self.allow_io(port, 1)? {
@@ -180,7 +180,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn in_ax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         self.svm_intercept_io(port, 2, true)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 2, true, false, false)? {
+        if self.in_vmx_guest && self.vmexit_check_io(port, 2, true, false)? {
             return Ok(());
         }
         if !self.allow_io(port, 2)? {
@@ -196,7 +196,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn in_eax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         self.svm_intercept_io(port, 4, true)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 4, true, false, false)? {
+        if self.in_vmx_guest && self.vmexit_check_io(port, 4, true, false)? {
             return Ok(());
         }
         if !self.allow_io(port, 4)? {
@@ -212,7 +212,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn out_dx_al(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         self.svm_intercept_io(port, 1, false)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 1, false, false, false)? {
+        if self.in_vmx_guest && self.vmexit_check_io(port, 1, false, false)? {
             return Ok(());
         }
         if !self.allow_io(port, 1)? {
@@ -228,7 +228,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn out_dx_ax(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         self.svm_intercept_io(port, 2, false)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 2, false, false, false)? {
+        if self.in_vmx_guest && self.vmexit_check_io(port, 2, false, false)? {
             return Ok(());
         }
         if !self.allow_io(port, 2)? {
@@ -244,7 +244,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn out_dx_eax(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         self.svm_intercept_io(port, 4, false)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 4, false, false, false)? {
+        if self.in_vmx_guest && self.vmexit_check_io(port, 4, false, false)? {
             return Ok(());
         }
         if !self.allow_io(port, 4)? {
@@ -1435,9 +1435,46 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Unified INS/OUTS dispatch methods
     // ========================================================================
 
+    /// SVM + VMX intercept for INS/OUTS (Bochs vmexit.cc VMexit_IO with the
+    /// `BX_IA_REP_INSx` / `BX_IA_REP_OUTSx` cases). For INS the source linear
+    /// address is `ES:rDI`; for OUTS it is the prefix-segment with `rSI`. The
+    /// effective offset is masked by the address size.
+    fn intercept_string_io(
+        &mut self,
+        instr: &Instruction,
+        size: u32,
+        direction_in: bool,
+    ) -> super::Result<bool> {
+        let port = self.dx();
+        self.svm_intercept_io(port, size, direction_in)?;
+        if !self.in_vmx_guest {
+            return Ok(false);
+        }
+        let as64 = instr.as64_l() != 0;
+        let as32 = instr.as32_l() != 0;
+        let rep = instr.lock_rep_used_value() != 0;
+        let asize_mask: u64 = if as64 {
+            u64::MAX
+        } else if as32 {
+            u64::from(u32::MAX)
+        } else {
+            u64::from(u16::MAX)
+        };
+        let (seg, offset) = if direction_in {
+            (BxSegregs::Es as u8, self.rdi() & asize_mask)
+        } else {
+            (instr.seg(), self.rsi() & asize_mask)
+        };
+        let laddr = self.get_laddr64(usize::from(seg), offset);
+        self.vmexit_check_io_string(port, size, direction_in, rep, laddr, seg, as64, as32)
+    }
+
     /// INSB dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     /// Bochs io.cc REP_INSB_YbDX: checks as64L, as32L, then 16-bit
     pub fn insb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if self.intercept_string_io(instr, 1, true)? {
+            return Ok(());
+        }
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
             if rep { self.rep_insb64(instr)?; } else { self.insb64(instr)?; }
@@ -1453,6 +1490,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// INSW dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn insw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if self.intercept_string_io(instr, 2, true)? {
+            return Ok(());
+        }
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
             if rep { self.rep_insw64(instr)?; } else { self.insw64(instr)?; }
@@ -1468,6 +1508,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// INSD dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn insd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if self.intercept_string_io(instr, 4, true)? {
+            return Ok(());
+        }
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
             if rep { self.rep_insd64(instr)?; } else { self.insd64(instr)?; }
@@ -1483,6 +1526,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// OUTSB dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn outsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if self.intercept_string_io(instr, 1, false)? {
+            return Ok(());
+        }
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
             if rep { self.rep_outsb64(instr)?; } else { self.outsb64(instr)?; }
@@ -1498,6 +1544,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// OUTSW dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn outsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if self.intercept_string_io(instr, 2, false)? {
+            return Ok(());
+        }
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
             if rep { self.rep_outsw64(instr)?; } else { self.outsw64(instr)?; }
@@ -1513,6 +1562,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// OUTSD dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn outsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if self.intercept_string_io(instr, 4, false)? {
+            return Ok(());
+        }
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
             if rep { self.rep_outsd64(instr)?; } else { self.outsd64(instr)?; }
