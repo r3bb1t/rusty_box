@@ -323,6 +323,45 @@ impl BxCpuIdTrait for AmdRyzen {
                 )
             }
 
+            // Leaf 0x80000019 — 1G Page TLB Identifiers (Bochs ryzen.cc).
+            0x80000019 => (0xF040F040, 0, 0, 0),
+
+            // Leaf 0x8000001A — Performance Optimization Identifiers
+            // (Bochs ryzen.cc). EAX bit 0 = FP128 ops native, bit 1 =
+            // MOVU faster than MOVL/MOVH.
+            0x8000001A => (0x00000003, 0, 0, 0),
+
+            // Leaf 0x8000001B — Instruction Based Sampling Identifiers
+            // (Bochs ryzen.cc). IBS itself is not implemented in
+            // rusty_box; we return Bochs's static feature mask so guests
+            // that probe for IBS see the same answer they would on real
+            // Bochs.
+            0x8000001B => (0x000003FF, 0, 0, 0),
+
+            // Leaf 0x8000001C — Lightweight Profiling Capabilities
+            // (Bochs ryzen.cc returns all zeros — LWP not implemented).
+            0x8000001C => (0, 0, 0, 0),
+
+            // Leaf 0x8000001D — Cache Properties (multi-subleaf, Bochs
+            // ryzen.cc). Sub-leaves 0..=3 describe L1D / L1I / L2 / L3.
+            0x8000001D => match ecx {
+                0 => (0x00004121, 0x01C0003F, 0x0000003F, 0x00000000),
+                1 => (0x00004122, 0x00C0003F, 0x000000FF, 0x00000000),
+                2 => (0x00004143, 0x01C0003F, 0x000003FF, 0x00000002),
+                3 => (0x0001C163, 0x03C0003F, 0x00001FFF, 0x00000001),
+                _ => (0, 0, 0, 0),
+            },
+
+            // Leaf 0x8000001E — Topology Extensions (Bochs ryzen.cc).
+            // EBX [15:8] = (ncores - 1); single-core configuration here.
+            0x8000001E => (0, 0x00000000, 0, 0),
+
+            // Leaf 0x8000001F — Encrypted Memory Capabilities (Bochs
+            // ryzen.cc). EAX = SME/SEV/SEV-ES/Secure-NPT/SME-Coherent
+            // / Hardware-Enforced-Cache-Coherency feature mask;
+            // EBX = bit-position info; ECX = number of encrypted guests.
+            0x8000001F => (0x00000007, 0x0000016F, 0x0000000F, 0),
+
             // Other ext leaves reserved / zero — Bochs ryzen.cc falls back to get_reserved_leaf.
             _ => (0, 0, 0, 0),
         }
