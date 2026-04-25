@@ -1435,14 +1435,23 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs `BX_CPU_C::read_physical_byte`. Used by both SVM (MSR / IO
     /// permission bitmaps) and VMX (MSR bitmap walker). Returns `0xff` on
     /// failure to match Bochs' "intercept everything" default for unmapped
-    /// bitmap regions.
+    /// bitmap regions, with the read failure logged so the cause is
+    /// visible in traces.
     pub(super) fn read_physical_byte(&mut self, paddr: u64) -> u8 {
-        if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
-            let mut data = [0u8; 1];
-            let _ = mem.read_physical_page(&[cpu_ref], paddr, 1, &mut data);
-            data[0]
-        } else {
-            0xff
+        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else {
+            return 0xff;
+        };
+        let mut data = [0u8; 1];
+        match mem.read_physical_page(&[cpu_ref], paddr, 1, &mut data) {
+            Ok(()) => data[0],
+            Err(e) => {
+                tracing::warn!(
+                    "read_physical_byte({:#018x}) failed: {:?}; defaulting to 0xff",
+                    paddr,
+                    e
+                );
+                0xff
+            }
         }
     }
 

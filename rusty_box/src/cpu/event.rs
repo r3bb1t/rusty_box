@@ -91,10 +91,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // pic.iac() → BX_CLEAR_INTR → clear_event(). If cleared here and
         // IF=0, the interrupt would be permanently lost.
 
-        // Bochs event.cc Priority 5: VMX preemption timer expiry takes
-        // precedence over the window-exits and the NMI/external-interrupt
-        // delivery branches below. Cold path outside VMX guest mode.
-        if self.in_vmx_guest && self.vmx_preemption_timer_active {
+        // Bochs event.cc Priority 5: the VMX-specific exits (preemption
+        // timer, MTF, NMI/interrupt windows) take precedence over the
+        // NMI/external-interrupt delivery branches below. Cold path
+        // outside VMX guest mode. The LAPIC poll matches Bochs's
+        // `vmx_preemption_timer_expired` callback by signalling
+        // BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED when the absolute fire
+        // time has been reached.
+        if self.in_vmx_guest {
+            self.poll_vmx_preemption_timer();
             match self.vmexit_check_preemption_timer() {
                 Ok(true) => {
                     self.prev_rip = self.rip();
@@ -106,6 +111,20 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 }
                 Err(e) => {
                     tracing::warn!("VMX preemption-timer vmexit failed: {:?}", e);
+                }
+                Ok(false) => {}
+            }
+            match self.vmexit_check_monitor_trap_flag() {
+                Ok(true) => {
+                    self.prev_rip = self.rip();
+                    return false;
+                }
+                Err(super::error::CpuError::CpuLoopRestart) => {
+                    self.prev_rip = self.rip();
+                    return false;
+                }
+                Err(e) => {
+                    tracing::warn!("VMX MTF vmexit failed: {:?}", e);
                 }
                 Ok(false) => {}
             }

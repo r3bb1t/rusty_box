@@ -1266,6 +1266,64 @@ impl BxLocalApic {
         ppr as u8
     }
 
+    // -------------------------------------------------------------------
+    // VMX preemption timer — Bochs apic.cc set/read/deactivate/expired.
+    // -------------------------------------------------------------------
+
+    /// Bochs `bx_local_apic_c::set_vmx_preemption_timer`. Records the
+    /// initial system-tick reading and computes the absolute fire time as
+    /// `((initial >> rate) + value) << rate`, so the timer ticks with
+    /// granularity 2^rate (rate is `IA32_VMX_MISC[4:0]`, default 0).
+    pub(crate) fn set_vmx_preemption_timer(&mut self, value: u32, current_ticks: u64) {
+        self.vmx_preemption_timer_value = value;
+        self.vmx_preemption_timer_initial = current_ticks;
+        let rate = self.vmx_preemption_timer_rate;
+        self.vmx_preemption_timer_fire =
+            ((current_ticks >> rate).wrapping_add(u64::from(value))) << rate;
+        self.vmx_timer_active = true;
+    }
+
+    /// Bochs `bx_local_apic_c::read_vmx_preemption_timer`. Returns the
+    /// remaining countdown — `value - elapsed_ticks_at_rate`, saturated to
+    /// zero once the timer has expired.
+    pub(crate) fn read_vmx_preemption_timer(&self, current_ticks: u64) -> u32 {
+        let rate = self.vmx_preemption_timer_rate;
+        let diff = (current_ticks >> rate)
+            .wrapping_sub(self.vmx_preemption_timer_initial >> rate);
+        if u64::from(self.vmx_preemption_timer_value) <= diff {
+            0
+        } else {
+            self.vmx_preemption_timer_value - (diff as u32)
+        }
+    }
+
+    /// Bochs `bx_local_apic_c::deactivate_vmx_preemption_timer`. Idempotent.
+    pub(crate) fn deactivate_vmx_preemption_timer(&mut self) {
+        self.vmx_timer_active = false;
+    }
+
+    /// Bochs `bx_local_apic_c::vmx_preemption_timer_expired`. Returns
+    /// `true` exactly when an active timer's fire deadline has been
+    /// reached, then deactivates the timer (single-shot). Caller signals
+    /// `BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED`.
+    pub(crate) fn vmx_preemption_timer_expired(&mut self, current_ticks: u64) -> bool {
+        if !self.vmx_timer_active {
+            return false;
+        }
+        if current_ticks < self.vmx_preemption_timer_fire {
+            return false;
+        }
+        self.vmx_timer_active = false;
+        true
+    }
+
+    /// Configure the IA32_VMX_MISC[4:0] preemption-timer rate (TSC ticks
+    /// per countdown decrement). Set once when the CPU model is built.
+    #[allow(dead_code)]
+    pub(crate) fn set_vmx_preemption_timer_rate(&mut self, rate: u32) {
+        self.vmx_preemption_timer_rate = rate;
+    }
+
     /// Set the Task Priority Register (TPR).
     /// If lowered, re-check for deliverable interrupts.
     /// Bochs: set_tpr (apic.cc)

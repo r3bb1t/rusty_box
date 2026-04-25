@@ -471,12 +471,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     pub(super) in_smm_vmx: bool,
     pub(super) in_smm_vmx_guest: bool,
     pub(super) vmcsptr: u64,
-    /// VMX preemption timer absolute deadline in `icount` units (acts as a
-    /// TSC proxy). Bochs delegates to the LAPIC; rusty_box keeps it on the
-    /// CPU since the LAPIC tick path doesn't currently model the divider.
-    /// Inactive when `vmx_preemption_timer_active` is false.
-    pub(super) vmx_preemption_timer_active: bool,
-    pub(super) vmx_preemption_timer_deadline: u64,
 
     pub(super) vmcs_memtype: BxMemType,
 
@@ -801,6 +795,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Event bit: user-level interrupt pending (UINTR).
     /// Bochs cpu.h BX_EVENT_PENDING_UINTR.
     pub(super) const BX_EVENT_PENDING_UINTR: u32 = 1 << 8;
+
+    /// Event bit: VMX preemption timer expired.
+    /// Bochs cpu.h `BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED`. Signalled by
+    /// the LAPIC tick callback when the preemption-timer fire deadline is
+    /// reached; consumed by `handle_async_event` which triggers VMEXIT.
+    pub(super) const BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED: u32 = 1 << 9;
+
+    /// Event bit: virtual-NMI is "blocked". Bochs cpu.h `BX_EVENT_VMX_
+    /// VIRTUAL_NMI`. Used in place of `BX_EVENT_NMI` for masking when
+    /// the pin-based VIRTUAL_NMI control is set, so the host-side NMI
+    /// state is independent of the guest's virtual-NMI tracking.
+    pub(super) const BX_EVENT_VMX_VIRTUAL_NMI: u32 = 1 << 10;
+
+    /// Event bit: VMX Monitor Trap Flag pending. Bochs cpu.h
+    /// `BX_EVENT_VMX_MONITOR_TRAP_FLAG`. Signalled by VM-entry when a
+    /// host injection requests an MTF (type=Other, vector=0); consumed
+    /// after the next guest instruction to fire the MTF VMEXIT.
+    pub(super) const BX_EVENT_VMX_MONITOR_TRAP_FLAG: u32 = 1 << 11;
 
     /// Returns a mutable raw pointer to the Local APIC for cross-module wiring.
     /// Used by emulator.rs to wire I/O APIC → LAPIC interrupt delivery.

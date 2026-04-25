@@ -61,11 +61,26 @@ const VMCS_32BIT_CONTROL_VMEXIT_MSR_STORE_COUNT: u32 = 0x400E;
 const VMCS_32BIT_CONTROL_VMEXIT_MSR_LOAD_COUNT: u32 = 0x4010;
 const VMCS_32BIT_CONTROL_VMENTRY_MSR_LOAD_COUNT: u32 = 0x4014;
 const VMCS_64BIT_CONTROL_TSC_OFFSET: u32 = 0x2010;
+const VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS: u32 = 0x2044;
 const VMCS_64BIT_GUEST_LINK_POINTER: u32 = 0x2800;
 const VMCS_64BIT_GUEST_IA32_PAT: u32 = 0x2804;
 const VMCS_64BIT_GUEST_IA32_EFER: u32 = 0x2806;
 const VMCS_64BIT_HOST_IA32_PAT: u32 = 0x2C00;
 const VMCS_64BIT_HOST_IA32_EFER: u32 = 0x2C02;
+const VMCS_64BIT_HOST_IA32_PERF_GLOBAL_CTRL: u32 = 0x2C04;
+const VMCS_64BIT_HOST_IA32_PKRS: u32 = 0x2C06;
+const VMCS_64BIT_HOST_IA32_FRED_CONFIG: u32 = 0x2C08;
+const VMCS_64BIT_HOST_IA32_FRED_RSP1: u32 = 0x2C0A;
+const VMCS_64BIT_HOST_IA32_FRED_RSP2: u32 = 0x2C0C;
+const VMCS_64BIT_HOST_IA32_FRED_RSP3: u32 = 0x2C0E;
+const VMCS_64BIT_HOST_IA32_FRED_STACK_LEVELS: u32 = 0x2C10;
+const VMCS_64BIT_HOST_IA32_FRED_SSP1: u32 = 0x2C12;
+const VMCS_64BIT_HOST_IA32_FRED_SSP2: u32 = 0x2C14;
+const VMCS_64BIT_HOST_IA32_FRED_SSP3: u32 = 0x2C16;
+const VMCS_64BIT_HOST_IA32_SPEC_CTRL: u32 = 0x2C1A;
+const VMCS_HOST_IA32_S_CET: u32 = 0x6C18;
+const VMCS_HOST_SSP: u32 = 0x6C1A;
+const VMCS_HOST_INTERRUPT_SSP_TABLE_ADDR: u32 = 0x6C1C;
 
 // 32-bit control fields.
 const VMCS_32BIT_CONTROL_PIN_BASED_EXEC_CONTROLS: u32 = 0x4000;
@@ -309,7 +324,17 @@ pub(super) const VMX_VM_EXEC_CTRL2_XSAVES_XRSTORS: u32 = 1 << 20;
 pub(super) const VMX_VM_EXEC_CTRL2_UMWAIT_TPAUSE_VMEXIT: u32 = 1 << 26;
 
 // VM-exit control bits — Bochs vmx_ctrls.h.
+pub(super) const VMX_VMEXIT_CTRL1_LOAD_PERF_GLOBAL_CTRL_MSR: u32 = 1 << 12;
 pub(super) const VMX_VMEXIT_CTRL1_INTA_ON_VMEXIT: u32 = 1 << 15;
+pub(super) const VMX_VMEXIT_CTRL1_LOAD_PAT_MSR: u32 = 1 << 19;
+pub(super) const VMX_VMEXIT_CTRL1_LOAD_EFER_MSR: u32 = 1 << 21;
+pub(super) const VMX_VMEXIT_CTRL1_STORE_VMX_PREEMPTION_TIMER: u32 = 1 << 22;
+pub(super) const VMX_VMEXIT_CTRL1_LOAD_HOST_CET_STATE: u32 = 1 << 28;
+pub(super) const VMX_VMEXIT_CTRL1_LOAD_HOST_PKRS: u32 = 1 << 29;
+
+// VM-exit secondary control bits.
+pub(super) const VMX_VMEXIT_CTRL2_LOAD_HOST_FRED: u64 = 1 << 1;
+pub(super) const VMX_VMEXIT_CTRL2_LOAD_HOST_IA32_SPEC_CTRL: u64 = 1 << 2;
 
 /// VMX-instruction error codes written into the VMCS 32-bit
 /// VMCS_32BIT_INSTRUCTION_ERROR field by `VMfail`.
@@ -388,6 +413,27 @@ pub struct BxVmcs {
     pub host_sysenter_cs: u32,
     pub host_sysenter_esp: u64,
     pub host_sysenter_eip: u64,
+    /// Bochs `host_perf_global_ctrl` — IA32_PERF_GLOBAL_CTRL value loaded
+    /// when `LOAD_PERF_GLOBAL_CTRL_MSR` exit control is set.
+    pub host_perf_global_ctrl: u64,
+    /// Bochs `host_pkrs` — IA32_PKRS value loaded when `LOAD_HOST_PKRS`
+    /// exit control is set.
+    pub host_pkrs: u64,
+    /// Bochs `host_ia32_spec_ctrl` — IA32_SPEC_CTRL value loaded when
+    /// `LOAD_HOST_IA32_SPEC_CTRL` (vmexit2 ctrl) is set.
+    pub host_ia32_spec_ctrl: u64,
+    /// CET host-state — Bochs `host_ia32_s_cet`, `host_ssp`,
+    /// `host_intr_ssp_table_addr`. Loaded when `LOAD_HOST_CET_STATE`
+    /// (vmexit1 ctrl bit 28) is set.
+    pub host_ia32_s_cet: u64,
+    pub host_ssp: u64,
+    pub host_interrupt_ssp_table_addr: u64,
+    /// FRED host-state. Loaded when `LOAD_HOST_FRED` (vmexit2 ctrl
+    /// bit 1) is set. Bochs `host_fred_*`.
+    pub host_fred_config: u64,
+    pub host_fred_rsp: [u64; 4],
+    pub host_fred_stack_levels: u64,
+    pub host_fred_ssp: [u64; 4],
 
     // ---- Guest state (loaded on VMENTRY, saved on VMEXIT) ----
     pub guest_cr0: u64,
@@ -458,6 +504,9 @@ pub struct BxVmcs {
     pub proc_based_ctls: u32,
     pub secondary_proc_based_ctls: u32,
     pub vm_exit_ctls: u32,
+    /// Bochs `vmexit_ctrls2` — VMCS 0x2044, holds VMX_VMEXIT_CTRL2_*
+    /// (LOAD_HOST_FRED, LOAD_HOST_IA32_SPEC_CTRL, etc.).
+    pub vm_exit_ctls2: u64,
     pub vm_entry_ctls: u32,
     pub vm_entry_intr_info: u32,
     pub vm_entry_exception_error_code: u32,
@@ -887,10 +936,25 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_32BIT_CONTROL_VMEXIT_MSR_LOAD_COUNT => v.vmexit_msr_load_cnt as u64,
             VMCS_32BIT_CONTROL_VMENTRY_MSR_LOAD_COUNT => v.vmentry_msr_load_cnt as u64,
             VMCS_64BIT_CONTROL_TSC_OFFSET => v.tsc_offset,
+            VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS => v.vm_exit_ctls2,
             VMCS_64BIT_GUEST_IA32_EFER => v.guest_ia32_efer,
             VMCS_64BIT_GUEST_IA32_PAT => v.guest_ia32_pat,
             VMCS_64BIT_HOST_IA32_PAT => v.host_ia32_pat,
             VMCS_64BIT_HOST_IA32_EFER => v.host_ia32_efer,
+            VMCS_64BIT_HOST_IA32_PERF_GLOBAL_CTRL => v.host_perf_global_ctrl,
+            VMCS_64BIT_HOST_IA32_PKRS => v.host_pkrs,
+            VMCS_64BIT_HOST_IA32_SPEC_CTRL => v.host_ia32_spec_ctrl,
+            VMCS_64BIT_HOST_IA32_FRED_CONFIG => v.host_fred_config,
+            VMCS_64BIT_HOST_IA32_FRED_RSP1 => v.host_fred_rsp[1],
+            VMCS_64BIT_HOST_IA32_FRED_RSP2 => v.host_fred_rsp[2],
+            VMCS_64BIT_HOST_IA32_FRED_RSP3 => v.host_fred_rsp[3],
+            VMCS_64BIT_HOST_IA32_FRED_STACK_LEVELS => v.host_fred_stack_levels,
+            VMCS_64BIT_HOST_IA32_FRED_SSP1 => v.host_fred_ssp[1],
+            VMCS_64BIT_HOST_IA32_FRED_SSP2 => v.host_fred_ssp[2],
+            VMCS_64BIT_HOST_IA32_FRED_SSP3 => v.host_fred_ssp[3],
+            VMCS_HOST_IA32_S_CET => v.host_ia32_s_cet,
+            VMCS_HOST_SSP => v.host_ssp,
+            VMCS_HOST_INTERRUPT_SSP_TABLE_ADDR => v.host_interrupt_ssp_table_addr,
             // 32-bit control fields.
             VMCS_32BIT_CONTROL_PIN_BASED_EXEC_CONTROLS => v.pin_based_ctls as u64,
             VMCS_32BIT_CONTROL_PROCESSOR_BASED_VMEXEC_CONTROLS => v.proc_based_ctls as u64,
@@ -1018,10 +1082,25 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_32BIT_CONTROL_VMEXIT_MSR_LOAD_COUNT => v.vmexit_msr_load_cnt = value as u32,
             VMCS_32BIT_CONTROL_VMENTRY_MSR_LOAD_COUNT => v.vmentry_msr_load_cnt = value as u32,
             VMCS_64BIT_CONTROL_TSC_OFFSET => v.tsc_offset = value,
+            VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS => v.vm_exit_ctls2 = value,
             VMCS_64BIT_GUEST_IA32_EFER => v.guest_ia32_efer = value,
             VMCS_64BIT_GUEST_IA32_PAT => v.guest_ia32_pat = value,
             VMCS_64BIT_HOST_IA32_PAT => v.host_ia32_pat = value,
             VMCS_64BIT_HOST_IA32_EFER => v.host_ia32_efer = value,
+            VMCS_64BIT_HOST_IA32_PERF_GLOBAL_CTRL => v.host_perf_global_ctrl = value,
+            VMCS_64BIT_HOST_IA32_PKRS => v.host_pkrs = value,
+            VMCS_64BIT_HOST_IA32_SPEC_CTRL => v.host_ia32_spec_ctrl = value,
+            VMCS_64BIT_HOST_IA32_FRED_CONFIG => v.host_fred_config = value,
+            VMCS_64BIT_HOST_IA32_FRED_RSP1 => v.host_fred_rsp[1] = value,
+            VMCS_64BIT_HOST_IA32_FRED_RSP2 => v.host_fred_rsp[2] = value,
+            VMCS_64BIT_HOST_IA32_FRED_RSP3 => v.host_fred_rsp[3] = value,
+            VMCS_64BIT_HOST_IA32_FRED_STACK_LEVELS => v.host_fred_stack_levels = value,
+            VMCS_64BIT_HOST_IA32_FRED_SSP1 => v.host_fred_ssp[1] = value,
+            VMCS_64BIT_HOST_IA32_FRED_SSP2 => v.host_fred_ssp[2] = value,
+            VMCS_64BIT_HOST_IA32_FRED_SSP3 => v.host_fred_ssp[3] = value,
+            VMCS_HOST_IA32_S_CET => v.host_ia32_s_cet = value,
+            VMCS_HOST_SSP => v.host_ssp = value,
+            VMCS_HOST_INTERRUPT_SSP_TABLE_ADDR => v.host_interrupt_ssp_table_addr = value,
             VMCS_32BIT_CONTROL_PIN_BASED_EXEC_CONTROLS => v.pin_based_ctls = value as u32,
             VMCS_32BIT_CONTROL_PROCESSOR_BASED_VMEXEC_CONTROLS => v.proc_based_ctls = value as u32,
             VMCS_32BIT_CONTROL_EXECUTION_BITMAP => v.exception_bitmap = value as u32,
@@ -1377,23 +1456,83 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.vmcs.host_sysenter_cs = self.msr.sysenter_cs_msr;
         self.vmcs.host_sysenter_esp = self.msr.sysenter_esp_msr;
         self.vmcs.host_sysenter_eip = self.msr.sysenter_eip_msr;
+
+        // Optional host MSR / CET / FRED / PKRS / SPEC_CTRL state. Bochs
+        // saves these unconditionally so VMEXIT can restore them when the
+        // matching LOAD_HOST_* bits are set; we mirror the snapshot here
+        // so the host state stays self-consistent across the VMENTRY/EXIT
+        // round trip.
+        self.vmcs.host_perf_global_ctrl = 0; // PMU not modelled in rusty_box
+        self.vmcs.host_pkrs = u64::from(self.pkrs);
+        self.vmcs.host_ia32_spec_ctrl = u64::from(self.msr.ia32_spec_ctrl);
+        self.vmcs.host_ia32_s_cet = self.msr.ia32_cet_control[0];
+        self.vmcs.host_ssp = self.msr.ia32_pl_ssp[3];
+        self.vmcs.host_interrupt_ssp_table_addr = self.msr.ia32_interrupt_ssp_table;
+        self.vmcs.host_fred_config = self.msr.ia32_fred_cfg;
+        for i in 0..4 {
+            self.vmcs.host_fred_rsp[i] = self.msr.ia32_fred_rsp[i];
+            self.vmcs.host_fred_ssp[i] = self.msr.ia32_fred_ssp[i];
+        }
+        self.vmcs.host_fred_stack_levels = self.msr.ia32_fred_stack_levels;
     }
 
     /// Restore host state on VMEXIT — Bochs vmx.cc VMexitLoadHostState.
-    /// Restores all CR/segment/MSR/DR state listed in the SDM Vol. 3C §28.5.
+    /// Restores all CR/segment/MSR/DR state listed in SDM Vol. 3C §28.5.
     /// Bochs uses raw `fetch_raw_descriptor` + `parse_descriptor` (no full
     /// validation) because host state was already vetted at VMENTRY; we
-    /// mirror that. Optional CET / FRED / UINTR / PKRS / SPEC_CTRL areas
-    /// stay at their pre-exit values when their `LOAD_HOST_*` controls
-    /// are clear (the only mode rusty_box currently models).
+    /// mirror that. Optional MSR/CET/FRED/PKRS/SPEC_CTRL/PERF_GLOBAL_CTRL
+    /// areas are gated on the matching `LOAD_HOST_*` exit-control bits —
+    /// when the bit is clear the host inherits the guest value, per the
+    /// SDM. PMU host-state isn't modelled, so PERF_GLOBAL_CTRL just logs.
     fn vmexit_load_host_state(&mut self) -> Result<()> {
         self.cr0.set32(self.vmcs.host_cr0 as u32);
         self.cr3 = self.vmcs.host_cr3;
         self.cr4.set_val(self.vmcs.host_cr4);
         self.set_rsp(self.vmcs.host_rsp);
         self.set_rip(self.vmcs.host_rip);
-        self.efer.set32(self.vmcs.host_ia32_efer as u32);
-        self.msr.pat.set_U64(self.vmcs.host_ia32_pat);
+
+        // Optional MSR loads — Bochs vmx.cc VMexitLoadHostState gates each
+        // on the corresponding LOAD_HOST_* bit; with the bit clear the
+        // host inherits the guest's value (per SDM 28.5).
+        let exit_ctls = self.vmcs.vm_exit_ctls;
+        if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_EFER_MSR != 0 {
+            self.efer.set32(self.vmcs.host_ia32_efer as u32);
+        }
+        if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_PAT_MSR != 0 {
+            self.msr.pat.set_U64(self.vmcs.host_ia32_pat);
+        }
+        if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_PERF_GLOBAL_CTRL_MSR != 0 {
+            // PMU not modelled; the host VMCS field is preserved so the
+            // VMM still observes the value it wrote.
+            tracing::trace!(
+                "VMEXIT LOAD_PERF_GLOBAL_CTRL_MSR={:#018x} (PMU not modelled)",
+                self.vmcs.host_perf_global_ctrl
+            );
+        }
+        if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_HOST_PKRS != 0 {
+            // Bochs crregs.cc set_PKeys recomputes allow masks from PKRU
+            // and PKRS together.
+            self.set_pkeys(self.pkru, self.vmcs.host_pkrs as u32);
+        }
+        if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_HOST_CET_STATE != 0 {
+            // Bochs vmx.cc loads supervisor-CET MSR + SSP + interrupt SSP
+            // table; user-CET stays at its current value.
+            self.msr.ia32_cet_control[0] = self.vmcs.host_ia32_s_cet;
+            self.msr.ia32_pl_ssp[3] = self.vmcs.host_ssp;
+            self.msr.ia32_interrupt_ssp_table = self.vmcs.host_interrupt_ssp_table_addr;
+        }
+        let exit_ctls2 = self.vmcs.vm_exit_ctls2;
+        if exit_ctls2 & VMX_VMEXIT_CTRL2_LOAD_HOST_FRED != 0 {
+            self.msr.ia32_fred_cfg = self.vmcs.host_fred_config;
+            for i in 1..4 {
+                self.msr.ia32_fred_rsp[i] = self.vmcs.host_fred_rsp[i];
+                self.msr.ia32_fred_ssp[i] = self.vmcs.host_fred_ssp[i];
+            }
+            self.msr.ia32_fred_stack_levels = self.vmcs.host_fred_stack_levels;
+        }
+        if exit_ctls2 & VMX_VMEXIT_CTRL2_LOAD_HOST_IA32_SPEC_CTRL != 0 {
+            self.msr.ia32_spec_ctrl = self.vmcs.host_ia32_spec_ctrl as u32;
+        }
 
         // Segment selectors. Bochs LoadHostSeg sequence: parse selector →
         // fetch raw descriptor → parse → write into segment cache.
@@ -1691,10 +1830,15 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 super::exception::InterruptType::ExternalInterrupt
             }
             2 => {
-                // Bochs masks BX_EVENT_VMX_VIRTUAL_NMI when VIRTUAL_NMI is set,
-                // BX_EVENT_NMI otherwise. The virtual-NMI event isn't modelled
-                // here so always mask BX_EVENT_NMI.
-                self.mask_event(Self::BX_EVENT_NMI);
+                // Bochs vmx.cc VMenterInjectEvents BX_NMI: with VIRTUAL_NMI
+                // set the guest-side virtual-NMI tracking is masked (the
+                // host's real NMI line is independent); without VIRTUAL_NMI
+                // the standard NMI mask is set.
+                if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_VIRTUAL_NMI != 0 {
+                    self.mask_event(Self::BX_EVENT_VMX_VIRTUAL_NMI);
+                } else {
+                    self.mask_event(Self::BX_EVENT_NMI);
+                }
                 self.ext = true;
                 super::exception::InterruptType::Nmi
             }
@@ -1717,8 +1861,11 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             }
             7 => {
                 if vector == 0 {
-                    // Bochs: signal_event(BX_EVENT_VMX_MONITOR_TRAP_FLAG).
-                    // MTF isn't fully modelled; leave the event unsignalled.
+                    // Bochs vmx.cc VMenterInjectEvents BX_EVENT_OTHER: the
+                    // MTF marker (vector=0) signals BX_EVENT_VMX_MONITOR_
+                    // TRAP_FLAG so the next instruction-boundary fires the
+                    // MTF VMEXIT.
+                    self.signal_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
                     return Ok(());
                 }
                 super::exception::InterruptType::EventOther
@@ -1744,62 +1891,79 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         res
     }
 
-    /// Arm the VMX preemption timer at VM-entry — Bochs vmx.cc:3520.
-    /// Loads `vmx_preemption_timer_value` from the cached VMCS and stores an
-    /// absolute deadline in `icount` units. Bochs scales by `IA32_VMX_MISC[4:0]`
-    /// which we leave at 0 (no extra division), matching rusty_box's TSC-as-
-    /// icount convention.
+    /// Arm the VMX preemption timer at VM-entry — Bochs vmx.cc step 6.
+    /// Reads `vmx_preemption_timer_value` from the cached VMCS, hands it to
+    /// `lapic.set_vmx_preemption_timer`, and clears any stale expiry event.
+    /// A zero-valued timer signals the expiry event immediately (Bochs
+    /// `signal_event(BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED)`).
     pub(super) fn vmenter_arm_preemption_timer(&mut self) {
         if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_VMX_PREEMPTION_TIMER_VMEXIT == 0 {
-            self.vmx_preemption_timer_active = false;
+            self.lapic.deactivate_vmx_preemption_timer();
+            self.clear_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
             return;
         }
-        let val = u64::from(self.vmcs.vmx_preemption_timer_value);
-        self.vmx_preemption_timer_active = true;
-        self.vmx_preemption_timer_deadline = self.icount.wrapping_add(val);
-        // A zero-valued timer signals the expiry event immediately; the
-        // event-delivery path will exit on the next async-event boundary.
-        if val == 0 {
-            self.async_event |= 1;
+        let value = self.vmcs.vmx_preemption_timer_value;
+        self.clear_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+        if value == 0 {
+            self.signal_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+        } else {
+            let now = self.system_ticks();
+            self.lapic.set_vmx_preemption_timer(value, now);
         }
     }
 
-    /// Disarm the VMX preemption timer at VM-exit — Bochs vmx.cc:2818. When
-    /// `STORE_VMX_PREEMPTION_TIMER` is set the remaining value is snapshotted
-    /// back into the guest VMCS field. Bochs' value is `lapic->read_vmx_
-    /// preemption_timer()`; here we approximate as `deadline - icount` (zero
-    /// if expired).
+    /// Disarm the VMX preemption timer at VM-exit — Bochs vmx.cc VMexit
+    /// step 1. When `STORE_VMX_PREEMPTION_TIMER` is set the remaining
+    /// countdown (from `lapic.read_vmx_preemption_timer`) is snapshotted
+    /// back into the VMCS field; the LAPIC timer and the pending event
+    /// are then cleared.
     pub(super) fn vmexit_disarm_preemption_timer(&mut self) {
-        if !self.vmx_preemption_timer_active {
-            return;
+        if self.vmcs.vm_exit_ctls & VMX_VMEXIT_CTRL1_STORE_VMX_PREEMPTION_TIMER != 0 {
+            let now = self.system_ticks();
+            self.vmcs.vmx_preemption_timer_value =
+                self.lapic.read_vmx_preemption_timer(now);
         }
-        // STORE control bit per VMX_VMEXIT_CTRL1 (bit 22); plumbed as a raw
-        // mask to avoid pulling another import for one bit.
-        const VMX_VMEXIT_CTRL1_STORE_PREEMPTION_TIMER: u32 = 1 << 22;
-        if self.vmcs.vm_exit_ctls & VMX_VMEXIT_CTRL1_STORE_PREEMPTION_TIMER != 0 {
-            let remaining = self
-                .vmx_preemption_timer_deadline
-                .saturating_sub(self.icount);
-            self.vmcs.vmx_preemption_timer_value = remaining as u32;
-        }
-        self.vmx_preemption_timer_active = false;
+        self.lapic.deactivate_vmx_preemption_timer();
+        self.clear_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
     }
 
     /// Preemption-timer expiry check — Bochs event.cc
     /// `BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED` branch. Called from
-    /// `handle_async_event`; exits with reason
-    /// `VMX_VMEXIT_VMX_PREEMPTION_TIMER_EXPIRED` when the deadline is
-    /// reached.
+    /// `handle_async_event` after the LAPIC tick has had a chance to
+    /// signal the event; exits with reason
+    /// `VMX_VMEXIT_VMX_PREEMPTION_TIMER_EXPIRED`.
     pub(super) fn vmexit_check_preemption_timer(&mut self) -> Result<bool> {
-        if !self.vmx_preemption_timer_active {
+        if !self.is_unmasked_event_pending(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED) {
             return Ok(false);
         }
-        if self.icount < self.vmx_preemption_timer_deadline {
-            return Ok(false);
-        }
-        self.vmx_preemption_timer_active = false;
+        self.clear_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
         self.vmx_vmexit(VmxVmexitReason::VmxPreemptionTimerExpired, 0)?;
         Ok(true)
+    }
+
+    /// Monitor-trap-flag VMEXIT — Bochs event.cc
+    /// `BX_EVENT_VMX_MONITOR_TRAP_FLAG` branch. Fires after the next guest
+    /// instruction boundary when the host injected an MTF event at VMENTRY.
+    pub(super) fn vmexit_check_monitor_trap_flag(&mut self) -> Result<bool> {
+        if !self.is_unmasked_event_pending(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG) {
+            return Ok(false);
+        }
+        self.clear_event(Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG);
+        self.vmx_vmexit(VmxVmexitReason::MonitorTrapFlag, 0)?;
+        Ok(true)
+    }
+
+    /// Per-tick LAPIC poll — Bochs `vmx_preemption_timer_expired` callback.
+    /// Returns true after signalling the event the first time the LAPIC
+    /// reports the timer has fired, so the next async-event boundary
+    /// triggers VMEXIT.
+    pub(super) fn poll_vmx_preemption_timer(&mut self) -> bool {
+        let now = self.system_ticks();
+        if self.lapic.vmx_preemption_timer_expired(now) {
+            self.signal_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
+            return true;
+        }
+        false
     }
 
     /// NMI-window VMEXIT — Bochs event.cc `BX_EVENT_VMX_VIRTUAL_NMI` branch.
