@@ -90,6 +90,49 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Critical: do NOT clear PENDING_INTR here — it is cleared only by
         // pic.iac() → BX_CLEAR_INTR → clear_event(). If cleared here and
         // IF=0, the interrupt would be permanently lost.
+
+        // Bochs event.cc Priority-5 window-exits run when external interrupts
+        // are not inhibited:
+        //   - NMI-window exit fires before NMI delivery when the window is
+        //     open (NMI not currently blocked).
+        //   - Interrupt-window exit fires before external-interrupt delivery
+        //     when there is no pending NMI to deliver first.
+        // Both are pin-/proc-based VMX exits and stay cold outside VMX guest.
+        if self.in_vmx_guest && !self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
+            if (self.event_mask & Self::BX_EVENT_NMI) == 0 {
+                match self.vmexit_check_nmi_window() {
+                    Ok(true) => {
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Err(super::error::CpuError::CpuLoopRestart) => {
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Err(e) => {
+                        tracing::warn!("VMX NMI-window vmexit failed: {:?}", e);
+                    }
+                    Ok(false) => {}
+                }
+            }
+            if !self.is_unmasked_event_pending(Self::BX_EVENT_NMI) {
+                match self.vmexit_check_interrupt_window() {
+                    Ok(true) => {
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Err(super::error::CpuError::CpuLoopRestart) => {
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Err(e) => {
+                        tracing::warn!("VMX interrupt-window vmexit failed: {:?}", e);
+                    }
+                    Ok(false) => {}
+                }
+            }
+        }
+
         if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
             // STI/MOV SS shadow — skip all external interrupts this boundary
             // (Bochs event.cc)

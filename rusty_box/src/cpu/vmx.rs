@@ -1357,6 +1357,32 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         Ok(true)
     }
 
+    /// NMI-window VMEXIT — Bochs event.cc `BX_EVENT_VMX_VIRTUAL_NMI` branch.
+    /// When `NMI_WINDOW_EXITING` is set in the primary processor controls,
+    /// any instruction boundary at which virtual-NMI blocking is clear
+    /// triggers a VMEXIT. The caller must verify NMI is not currently
+    /// blocked before invoking this predicate.
+    pub(super) fn vmexit_check_nmi_window(&mut self) -> Result<bool> {
+        if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_NMI_WINDOW_EXITING == 0 {
+            return Ok(false);
+        }
+        self.vmx_vmexit(VmxVmexitReason::NmiWindow, 0)?;
+        Ok(true)
+    }
+
+    /// Interrupt-window VMEXIT — Bochs event.cc
+    /// `BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING` branch. With
+    /// `INTERRUPT_WINDOW_VMEXIT` set, VMEXIT fires at any boundary where
+    /// `RFLAGS.IF=1` and external-interrupt inhibition is clear. Caller
+    /// guarantees the inhibit/IF preconditions.
+    pub(super) fn vmexit_check_interrupt_window(&mut self) -> Result<bool> {
+        if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_INTERRUPT_WINDOW_VMEXIT == 0 {
+            return Ok(false);
+        }
+        self.vmx_vmexit(VmxVmexitReason::InterruptWindow, 0)?;
+        Ok(true)
+    }
+
     /// External-interrupt VMEXIT after the controller has been acknowledged
     /// — Bochs vmexit.cc `VMexit_Event` with `type == BX_EXTERNAL_INTERRUPT`.
     /// Records the acknowledged vector in `exit_intr_info` so the host can
