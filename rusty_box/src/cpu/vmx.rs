@@ -32,6 +32,7 @@ pub const VMCS_STATE_LAUNCHED: u32 = 1;
 // ──────────────────────────────────────────────────────────────────────────
 
 // 16-bit guest selectors (Bochs vmx.h VMCS_16BIT_GUEST_*_SELECTOR).
+const VMCS_16BIT_CONTROL_VPID: u32 = 0x0000;
 const VMCS_16BIT_GUEST_ES_SELECTOR: u32 = 0x0800;
 const VMCS_16BIT_GUEST_CS_SELECTOR: u32 = 0x0802;
 const VMCS_16BIT_GUEST_SS_SELECTOR: u32 = 0x0804;
@@ -552,6 +553,10 @@ pub struct BxVmcs {
     /// back at VMEXIT. Bochs reads this from the guest VMCS in
     /// vmlaunch/vmresume; ticking happens through the LAPIC.
     pub vmx_preemption_timer_value: u32,
+    /// Virtual Processor Identifier — Bochs `vpid`. VMCS_16BIT_CONTROL_VPID
+    /// (encoding 0x0). When `VPID_ENABLE` is set the guest's TLB entries
+    /// are tagged with this value; must be non-zero per VMENTRY check.
+    pub vpid: u16,
     /// MSR load/store list addresses + counts — Bochs vmx.cc LoadMSRs /
     /// StoreMSRs. Each list is an array of 16-byte entries (low 4 bytes
     /// = MSR index, high 8 bytes = value).
@@ -932,6 +937,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         let v = &self.vmcs;
         Some(match encoding {
             // 16-bit guest selectors.
+            VMCS_16BIT_CONTROL_VPID => u64::from(v.vpid),
             VMCS_16BIT_GUEST_ES_SELECTOR => v.guest_es_selector as u64,
             VMCS_16BIT_GUEST_CS_SELECTOR => v.guest_cs_selector as u64,
             VMCS_16BIT_GUEST_SS_SELECTOR => v.guest_ss_selector as u64,
@@ -1080,6 +1086,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     fn vmcs_write_field(&mut self, encoding: u32, value: u64) -> bool {
         let v = &mut self.vmcs;
         match encoding {
+            VMCS_16BIT_CONTROL_VPID => v.vpid = value as u16,
             VMCS_16BIT_GUEST_ES_SELECTOR => v.guest_es_selector = value as u16,
             VMCS_16BIT_GUEST_CS_SELECTOR => v.guest_cs_selector = value as u16,
             VMCS_16BIT_GUEST_SS_SELECTOR => v.guest_ss_selector = value as u16,
@@ -1480,8 +1487,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     ///   - Page-aligned, in-physical-range MSR bitmap (when MSR_BITMAPS).
     ///   - Page-aligned, in-physical-range I/O bitmaps (when IO_BITMAPS).
     ///   - UNRESTRICTED_GUEST requires EPT_ENABLE.
-    ///   - VPID_ENABLE requires non-zero VPID (the VMCS_16BIT_CONTROL_VPID
-    ///     field is not yet plumbed; treat absent as 0).
+    ///   - VPID_ENABLE requires non-zero VPID (VMCS_16BIT_CONTROL_VPID).
     ///   - VM-entry interruption info: when valid bit set, vector + type
     ///     fields must be sane (Bochs vmenter_inject_events preconditions).
     fn vmenter_load_check_vm_controls(&mut self) -> Option<VmxErr> {
@@ -1530,10 +1536,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             );
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
-        if ctls2 & VMX_VM_EXEC_CTRL2_VPID_ENABLE != 0 {
-            // VMCS_16BIT_CONTROL_VPID is not yet wired into the cache; the
-            // field default of 0 always trips the Bochs check, which is
-            // the conservative answer until VPID is fully plumbed.
+        if ctls2 & VMX_VM_EXEC_CTRL2_VPID_ENABLE != 0 && self.vmcs.vpid == 0 {
             tracing::warn!("VMENTRY check_vm_controls: VPID_ENABLE with VPID=0");
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
