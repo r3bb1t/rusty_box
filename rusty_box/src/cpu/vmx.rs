@@ -3389,9 +3389,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             //   [10]    writeable page
             //   [11]    NX page
             // Bochs paging.cc EPT VMEXIT qualification builder. Bits 9/10/11
-            // (user / writeable / nx page) require BX_VMX_MBE_CONTROL — we
-            // don't advertise that, so they stay clear. Bit 12 needs the
-            // CPU's `nmi_unblocking_iret` flag, also not modelled. Bit 13
+            // (user / writeable / nx page) gate on the CPU model
+            // advertising BX_VMX_MBE_CONTROL via vmx_extensions_bitmask;
+            // bit 12 reads `nmi_unblocking_iret` from CPU state; bit 13
             // sets on shadow-stack accesses (rw & 4) per BX_SUPPORT_CET.
             let qual = if reason == VmxVmexitReason::EptViolation {
                 combined_access &= EptPerm::from_bits_truncate(entry[leaf as usize] as u32);
