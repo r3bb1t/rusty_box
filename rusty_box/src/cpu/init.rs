@@ -389,6 +389,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.in_smm_vmx = false;
         self.in_smm_vmx_guest = false;
 
+        self.vmx_preemption_timer_active = false;
+        self.vmx_preemption_timer_deadline = 0;
+
         self.vmcsptr = BX_INVALID_VMCSPTR;
         self.vmxonptr = BX_INVALID_VMCSPTR;
 

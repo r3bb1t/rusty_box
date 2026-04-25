@@ -88,6 +88,7 @@ const VMCS_32BIT_IDT_VECTORING_INFO: u32 = 0x4408;
 const VMCS_32BIT_IDT_VECTORING_ERR_CODE: u32 = 0x440A;
 const VMCS_32BIT_VMEXIT_INSTRUCTION_LENGTH: u32 = 0x440C;
 const VMCS_32BIT_VMEXIT_INSTRUCTION_INFO: u32 = 0x440E;
+const VMCS_32BIT_GUEST_PREEMPTION_TIMER_VALUE: u32 = 0x482E;
 
 // 32-bit guest state.
 const VMCS_32BIT_GUEST_ES_LIMIT: u32 = 0x4800;
@@ -479,6 +480,11 @@ pub struct BxVmcs {
     /// (A: ports 0x0000..=0x7FFF, B: ports 0x8000..=0xFFFF) when
     /// `VMX_VM_EXEC_CTRL1_IO_BITMAPS` is set. Bochs `io_bitmap_addr[2]`.
     pub io_bitmap_addr: [u64; 2],
+    /// 32-bit countdown value loaded into the VMX preemption timer at
+    /// VMENTER and (when STORE_VMX_PREEMPTION_TIMER is set) snapshotted
+    /// back at VMEXIT. Bochs reads this from the guest VMCS in
+    /// vmlaunch/vmresume; ticking happens through the LAPIC.
+    pub vmx_preemption_timer_value: u32,
 
     // Wire-compat bag kept from earlier scaffolding; some older call sites
     // still reach for these. They stay zero until a VMM populates them.
@@ -888,6 +894,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_32BIT_IDT_VECTORING_ERR_CODE => v.idt_vectoring_error_code as u64,
             VMCS_32BIT_VMEXIT_INSTRUCTION_LENGTH => v.exit_instruction_length as u64,
             VMCS_32BIT_VMEXIT_INSTRUCTION_INFO => v.exit_instruction_info as u64,
+            VMCS_32BIT_GUEST_PREEMPTION_TIMER_VALUE => v.vmx_preemption_timer_value as u64,
             // 32-bit guest state.
             VMCS_32BIT_GUEST_ES_LIMIT => v.guest_es_limit as u64,
             VMCS_32BIT_GUEST_CS_LIMIT => v.guest_cs_limit as u64,
@@ -1015,6 +1022,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             | VMCS_32BIT_VMEXIT_INSTRUCTION_INFO
             | VMCS_VMEXIT_QUALIFICATION
             | VMCS_VMEXIT_GUEST_LINEAR_ADDR => return false,
+            VMCS_32BIT_GUEST_PREEMPTION_TIMER_VALUE => v.vmx_preemption_timer_value = value as u32,
             VMCS_32BIT_GUEST_ES_LIMIT => v.guest_es_limit = value as u32,
             VMCS_32BIT_GUEST_CS_LIMIT => v.guest_cs_limit = value as u32,
             VMCS_32BIT_GUEST_SS_LIMIT => v.guest_ss_limit = value as u32,
@@ -1205,6 +1213,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
         self.vmcs.launched = true;
         self.in_vmx_guest = true;
+        // Bochs vmx.cc step 6: arm the preemption timer when the pin-based
+        // control is set. Reads vmx_preemption_timer_value from the VMCS.
+        self.vmenter_arm_preemption_timer();
         self.vmsucceed();
         // Guest now runs from the loaded RIP — the CPU loop picks up the new
         // prefetch target after this instruction returns.
@@ -1229,6 +1240,10 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if !self.in_vmx_guest {
             return Ok(());
         }
+
+        // Bochs vmx.cc VMexit (step 1): snapshot the preemption timer back
+        // into the VMCS when STORE_VMX_PREEMPTION_TIMER is set, then disarm.
+        self.vmexit_disarm_preemption_timer();
 
         // Save guest state from the running CPU.
         self.vmcs.guest_cr0 = self.cr0.get32() as u64;
@@ -1354,6 +1369,64 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.vmcs.exit_intr_info = 2 | (2 << 8) | (1u32 << 31);
         self.vmcs.exit_intr_error_code = 0;
         self.vmx_vmexit(VmxVmexitReason::ExceptionNmi, 0)?;
+        Ok(true)
+    }
+
+    /// Arm the VMX preemption timer at VM-entry — Bochs vmx.cc:3520.
+    /// Loads `vmx_preemption_timer_value` from the cached VMCS and stores an
+    /// absolute deadline in `icount` units. Bochs scales by `IA32_VMX_MISC[4:0]`
+    /// which we leave at 0 (no extra division), matching rusty_box's TSC-as-
+    /// icount convention.
+    pub(super) fn vmenter_arm_preemption_timer(&mut self) {
+        if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_VMX_PREEMPTION_TIMER_VMEXIT == 0 {
+            self.vmx_preemption_timer_active = false;
+            return;
+        }
+        let val = u64::from(self.vmcs.vmx_preemption_timer_value);
+        self.vmx_preemption_timer_active = true;
+        self.vmx_preemption_timer_deadline = self.icount.wrapping_add(val);
+        // A zero-valued timer signals the expiry event immediately; the
+        // event-delivery path will exit on the next async-event boundary.
+        if val == 0 {
+            self.async_event |= 1;
+        }
+    }
+
+    /// Disarm the VMX preemption timer at VM-exit — Bochs vmx.cc:2818. When
+    /// `STORE_VMX_PREEMPTION_TIMER` is set the remaining value is snapshotted
+    /// back into the guest VMCS field. Bochs' value is `lapic->read_vmx_
+    /// preemption_timer()`; here we approximate as `deadline - icount` (zero
+    /// if expired).
+    pub(super) fn vmexit_disarm_preemption_timer(&mut self) {
+        if !self.vmx_preemption_timer_active {
+            return;
+        }
+        // STORE control bit per VMX_VMEXIT_CTRL1 (bit 22); plumbed as a raw
+        // mask to avoid pulling another import for one bit.
+        const VMX_VMEXIT_CTRL1_STORE_PREEMPTION_TIMER: u32 = 1 << 22;
+        if self.vmcs.vm_exit_ctls & VMX_VMEXIT_CTRL1_STORE_PREEMPTION_TIMER != 0 {
+            let remaining = self
+                .vmx_preemption_timer_deadline
+                .saturating_sub(self.icount);
+            self.vmcs.vmx_preemption_timer_value = remaining as u32;
+        }
+        self.vmx_preemption_timer_active = false;
+    }
+
+    /// Preemption-timer expiry check — Bochs event.cc
+    /// `BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED` branch. Called from
+    /// `handle_async_event`; exits with reason
+    /// `VMX_VMEXIT_VMX_PREEMPTION_TIMER_EXPIRED` when the deadline is
+    /// reached.
+    pub(super) fn vmexit_check_preemption_timer(&mut self) -> Result<bool> {
+        if !self.vmx_preemption_timer_active {
+            return Ok(false);
+        }
+        if self.icount < self.vmx_preemption_timer_deadline {
+            return Ok(false);
+        }
+        self.vmx_preemption_timer_active = false;
+        self.vmx_vmexit(VmxVmexitReason::VmxPreemptionTimerExpired, 0)?;
         Ok(true)
     }
 

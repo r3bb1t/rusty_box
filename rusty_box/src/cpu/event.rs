@@ -91,6 +91,26 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // pic.iac() → BX_CLEAR_INTR → clear_event(). If cleared here and
         // IF=0, the interrupt would be permanently lost.
 
+        // Bochs event.cc Priority 5: VMX preemption timer expiry takes
+        // precedence over the window-exits and the NMI/external-interrupt
+        // delivery branches below. Cold path outside VMX guest mode.
+        if self.in_vmx_guest && self.vmx_preemption_timer_active {
+            match self.vmexit_check_preemption_timer() {
+                Ok(true) => {
+                    self.prev_rip = self.rip();
+                    return false;
+                }
+                Err(super::error::CpuError::CpuLoopRestart) => {
+                    self.prev_rip = self.rip();
+                    return false;
+                }
+                Err(e) => {
+                    tracing::warn!("VMX preemption-timer vmexit failed: {:?}", e);
+                }
+                Ok(false) => {}
+            }
+        }
+
         // Bochs event.cc Priority-5 window-exits run when external interrupts
         // are not inhibited:
         //   - NMI-window exit fires before NMI delivery when the window is

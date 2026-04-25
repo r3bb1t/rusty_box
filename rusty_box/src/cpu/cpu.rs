@@ -471,6 +471,12 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     pub(super) in_smm_vmx: bool,
     pub(super) in_smm_vmx_guest: bool,
     pub(super) vmcsptr: u64,
+    /// VMX preemption timer absolute deadline in `icount` units (acts as a
+    /// TSC proxy). Bochs delegates to the LAPIC; rusty_box keeps it on the
+    /// CPU since the LAPIC tick path doesn't currently model the divider.
+    /// Inactive when `vmx_preemption_timer_active` is false.
+    pub(super) vmx_preemption_timer_active: bool,
+    pub(super) vmx_preemption_timer_deadline: u64,
 
     pub(super) vmcs_memtype: BxMemType,
 
