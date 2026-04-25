@@ -2718,6 +2718,134 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// INVEPT — Invalidate Translations Derived From EPT.
+    /// Bochs vmx.cc INVEPT.
+    pub(super) fn invept(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        if !self.in_vmx || !self.protected_mode() || self.long_compat_mode() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if self.in_vmx_guest && self.vmexit_check_invept()? {
+            return Ok(());
+        }
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        if cpl != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let inv_type = if instr.os64_l() != 0 {
+            self.get_gpr64(usize::from(instr.dst()))
+        } else {
+            u64::from(self.get_gpr32(usize::from(instr.dst())))
+        };
+
+        let eaddr = self.resolve_addr(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let desc = self.v_read_xmmword(seg, eaddr)?;
+        let desc_eptp = desc.xmm64u(0);
+
+        // Bochs INVEPT type values:
+        //   1 = single-context (per EPTP)
+        //   2 = all-context
+        const SINGLE_CONTEXT: u64 = 1;
+        const ALL_CONTEXT: u64 = 2;
+        match inv_type {
+            SINGLE_CONTEXT => {
+                if !self.is_eptptr_valid(desc_eptp) {
+                    tracing::warn!("INVEPT: invalid EPTPTR {:#018x}", desc_eptp);
+                    self.vmfail(super::vmx::VmxErr::InvalidInveptInvvpid);
+                    return Ok(());
+                }
+                self.tlb_flush();
+            }
+            ALL_CONTEXT => {
+                self.tlb_flush();
+            }
+            _ => {
+                tracing::warn!("INVEPT: unsupported type {inv_type}");
+                self.vmfail(super::vmx::VmxErr::InvalidInveptInvvpid);
+                return Ok(());
+            }
+        }
+        self.vmsucceed();
+        Ok(())
+    }
+
+    /// INVVPID — Invalidate Translations Based on VPID.
+    /// Bochs vmx.cc INVVPID.
+    pub(super) fn invvpid(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        if !self.in_vmx || !self.protected_mode() || self.long_compat_mode() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if self.in_vmx_guest && self.vmexit_check_invvpid()? {
+            return Ok(());
+        }
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        if cpl != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let inv_type = if instr.os64_l() != 0 {
+            self.get_gpr64(usize::from(instr.dst()))
+        } else {
+            u64::from(self.get_gpr32(usize::from(instr.dst())))
+        };
+
+        let eaddr = self.resolve_addr(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let desc = self.v_read_xmmword(seg, eaddr)?;
+        let desc_lo = desc.xmm64u(0);
+        let desc_hi = desc.xmm64u(1);
+
+        // High bits of the VPID field are reserved.
+        if desc_lo > 0xFFFF {
+            tracing::warn!("INVVPID: descriptor reserved bits set, lo={:#018x}", desc_lo);
+            self.vmfail(super::vmx::VmxErr::InvalidInveptInvvpid);
+            return Ok(());
+        }
+
+        let vpid = (desc_lo & 0xFFFF) as u16;
+        // Bochs INVVPID type values:
+        //   0 = individual address invalidation (per VPID + linear address)
+        //   1 = single-context invalidation
+        //   2 = all-context invalidation (across all VPIDs except VPID=0)
+        //   3 = single-context-non-global invalidation
+        const INDIVIDUAL: u64 = 0;
+        const SINGLE_CONTEXT: u64 = 1;
+        const ALL_CONTEXT: u64 = 2;
+        const SINGLE_CONTEXT_NON_GLOBAL: u64 = 3;
+
+        if vpid == 0 && inv_type != ALL_CONTEXT {
+            tracing::warn!("INVVPID: VPID=0 with type {inv_type}");
+            self.vmfail(super::vmx::VmxErr::InvalidInveptInvvpid);
+            return Ok(());
+        }
+
+        match inv_type {
+            INDIVIDUAL => {
+                // Bochs IsCanonical(invvpid_desc.xmm64u(1)).
+                if !self.is_canonical(desc_hi) {
+                    tracing::warn!("INVVPID: non-canonical LADDR {:#018x}", desc_hi);
+                    self.vmfail(super::vmx::VmxErr::InvalidInveptInvvpid);
+                    return Ok(());
+                }
+                self.tlb_flush();
+            }
+            SINGLE_CONTEXT | ALL_CONTEXT => {
+                self.tlb_flush();
+            }
+            SINGLE_CONTEXT_NON_GLOBAL => {
+                self.tlb_flush_non_global();
+            }
+            _ => {
+                tracing::warn!("INVVPID: unsupported type {inv_type}");
+                self.vmfail(super::vmx::VmxErr::InvalidInveptInvvpid);
+                return Ok(());
+            }
+        }
+        self.vmsucceed();
+        Ok(())
+    }
+
     /// Initialize SSE state to reset values
     fn xrstor_init_sse_state(&mut self) {
         let num = if self.long64_mode() { 16 } else { 8 };

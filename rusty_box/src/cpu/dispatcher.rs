@@ -1441,6 +1441,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::Vmresume => self.vmresume(instr),
             Opcode::Invlpg => self.invlpg(instr),
             Opcode::Invpcid => self.invpcid(instr),
+            Opcode::Invept => self.invept(instr),
+            Opcode::Invvpid => self.invvpid(instr),
             Opcode::Clts => self.clts(instr),
 
             // =========================================================================

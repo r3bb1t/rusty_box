@@ -62,6 +62,13 @@ const VMCS_32BIT_CONTROL_VMEXIT_MSR_STORE_COUNT: u32 = 0x400E;
 const VMCS_32BIT_CONTROL_VMEXIT_MSR_LOAD_COUNT: u32 = 0x4010;
 const VMCS_32BIT_CONTROL_VMENTRY_MSR_LOAD_COUNT: u32 = 0x4014;
 const VMCS_64BIT_CONTROL_TSC_OFFSET: u32 = 0x2010;
+const VMCS_64BIT_CONTROL_EPTPTR: u32 = 0x201A;
+const VMCS_64BIT_GUEST_PHYSICAL_ADDR: u32 = 0x2400;
+
+// EPT walker access classification — Bochs paging.cc rw enum.
+pub(super) const EPT_RW_READ: u32 = 0;
+pub(super) const EPT_RW_WRITE: u32 = 1;
+pub(super) const EPT_RW_EXECUTE: u32 = 4;
 const VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS: u32 = 0x2044;
 const VMCS_64BIT_GUEST_LINK_POINTER: u32 = 0x2800;
 const VMCS_64BIT_GUEST_IA32_PAT: u32 = 0x2804;
@@ -557,6 +564,15 @@ pub struct BxVmcs {
     /// (encoding 0x0). When `VPID_ENABLE` is set the guest's TLB entries
     /// are tagged with this value; must be non-zero per VMENTRY check.
     pub vpid: u16,
+    /// Extended Page Table Pointer — Bochs `eptptr`. VMCS_64BIT_CONTROL_
+    /// EPTPTR (0x201A). Valid when `VMX_VM_EXEC_CTRL2_EPT_ENABLE` is set;
+    /// low 12 bits encode memory type + page-walk length, bits [51:12]
+    /// are the EPT root paging-structure host-physical address.
+    pub eptptr: u64,
+    /// Guest-physical address that triggered the most recent EPT VMEXIT —
+    /// VMCS_64BIT_GUEST_PHYSICAL_ADDR (0x2400). Bochs writes this on
+    /// EPT violation / EPT misconfiguration exits.
+    pub guest_physical_addr: u64,
     /// MSR load/store list addresses + counts — Bochs vmx.cc LoadMSRs /
     /// StoreMSRs. Each list is an array of 16-byte entries (low 4 bytes
     /// = MSR index, high 8 bytes = value).
@@ -966,6 +982,8 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_32BIT_CONTROL_VMEXIT_MSR_LOAD_COUNT => v.vmexit_msr_load_cnt as u64,
             VMCS_32BIT_CONTROL_VMENTRY_MSR_LOAD_COUNT => v.vmentry_msr_load_cnt as u64,
             VMCS_64BIT_CONTROL_TSC_OFFSET => v.tsc_offset,
+            VMCS_64BIT_CONTROL_EPTPTR => v.eptptr,
+            VMCS_64BIT_GUEST_PHYSICAL_ADDR => v.guest_physical_addr,
             VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS => v.vm_exit_ctls2,
             VMCS_64BIT_GUEST_IA32_EFER => v.guest_ia32_efer,
             VMCS_64BIT_GUEST_IA32_PAT => v.guest_ia32_pat,
@@ -1113,6 +1131,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_32BIT_CONTROL_VMEXIT_MSR_LOAD_COUNT => v.vmexit_msr_load_cnt = value as u32,
             VMCS_32BIT_CONTROL_VMENTRY_MSR_LOAD_COUNT => v.vmentry_msr_load_cnt = value as u32,
             VMCS_64BIT_CONTROL_TSC_OFFSET => v.tsc_offset = value,
+            VMCS_64BIT_CONTROL_EPTPTR => v.eptptr = value,
             VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS => v.vm_exit_ctls2 = value,
             VMCS_64BIT_GUEST_IA32_EFER => v.guest_ia32_efer = value,
             VMCS_64BIT_GUEST_IA32_PAT => v.guest_ia32_pat = value,
@@ -1816,7 +1835,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
     /// Bochs cpu.h long_compat_mode — 32-bit compatibility sub-mode of long mode.
     #[inline]
-    fn long_compat_mode(&self) -> bool {
+    pub(super) fn long_compat_mode(&self) -> bool {
         self.long_mode() && !self.long64_mode()
     }
 
@@ -2324,6 +2343,223 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VmxVmexitReason::Invpcid,
             0,
         )
+    }
+
+    /// INVEPT in non-root operation always exits — Bochs vmx.cc INVEPT
+    /// `if (in_vmx_guest) VMexit_Instruction(VMX_VMEXIT_INVEPT, BX_WRITE)`.
+    pub(super) fn vmexit_check_invept(&mut self) -> Result<bool> {
+        if !self.in_vmx_guest {
+            return Ok(false);
+        }
+        self.vmx_vmexit(VmxVmexitReason::Invept, 0)?;
+        Ok(true)
+    }
+
+    /// INVVPID in non-root operation always exits — Bochs vmx.cc INVVPID.
+    pub(super) fn vmexit_check_invvpid(&mut self) -> Result<bool> {
+        if !self.in_vmx_guest {
+            return Ok(false);
+        }
+        self.vmx_vmexit(VmxVmexitReason::Invvpid, 0)?;
+        Ok(true)
+    }
+
+    /// EPT 4-level walker — Bochs paging.cc `translate_guest_physical`.
+    /// Translates a 52-bit guest-physical address to a host-physical
+    /// address through the EPT page tables rooted at `vmcs.eptptr`. On
+    /// permission failure raises `EPT_VIOLATION`; on a malformed EPT
+    /// entry raises `EPT_MISCONFIGURATION`. Both VMEXITs return
+    /// `Err(CpuLoopRestart)` so the caller's page walk aborts.
+    ///
+    /// `rw` is one of `EPT_RW_READ` / `EPT_RW_WRITE` / `EPT_RW_EXEC`.
+    /// `is_page_walk` is true when the caller is fetching a paging
+    /// structure (Bochs sets the qualification bit accordingly).
+    pub(super) fn translate_guest_physical(
+        &mut self,
+        guest_paddr: u64,
+        guest_laddr: u64,
+        guest_laddr_valid: bool,
+        is_page_walk: bool,
+        user_page: bool,
+        writeable_page: bool,
+        nx_page: bool,
+        rw: u32,
+    ) -> Result<u64> {
+        const EPT_READ: u32 = 0x1;
+        const EPT_WRITE: u32 = 0x2;
+        const EPT_EXECUTE: u32 = 0x4;
+        const EPT_ENTRY_NOT_PRESENT: u32 = 0;
+        const EPT_ENTRY_WRITE_ONLY: u32 = EPT_WRITE; // R=0, W=1, X=0
+
+        let eptptr = self.vmcs.eptptr;
+        let mut ppf = eptptr & 0x000F_FFFF_FFFF_F000;
+        let mut combined_access: u32 = EPT_READ | EPT_WRITE | EPT_EXECUTE;
+        let mut access_mask: u32 = match rw {
+            r if r == EPT_RW_EXECUTE => EPT_EXECUTE,
+            r if r & 1 != 0 => EPT_WRITE,
+            _ => EPT_READ,
+        };
+        if rw & 0x1 != 0 {
+            access_mask |= EPT_WRITE;
+        }
+        if rw == EPT_RW_READ {
+            access_mask |= EPT_READ;
+        }
+
+        let mut entry = [0u64; 4];
+        let mut entry_addr = [0u64; 4];
+        let mut offset_mask: u64 = 0x0000_FFFF_FFFF_FFFF;
+        let mut leaf: i32 = 3; // BX_LEVEL_PML4
+        let mut vmexit_reason: Option<VmxVmexitReason> = None;
+
+        loop {
+            let level = leaf as u32;
+            entry_addr[leaf as usize] =
+                ppf + ((guest_paddr >> (9 + 9 * level)) & 0xFF8);
+            entry[leaf as usize] = self.mem_read_qword(entry_addr[leaf as usize]);
+            offset_mask >>= 9;
+            let curr = entry[leaf as usize];
+            let curr_access = (curr as u32) & 0x7;
+
+            if curr_access == EPT_ENTRY_NOT_PRESENT {
+                vmexit_reason = Some(VmxVmexitReason::EptViolation);
+                break;
+            }
+            if (curr_access & (EPT_READ | EPT_WRITE)) == EPT_ENTRY_WRITE_ONLY {
+                vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
+                break;
+            }
+            // Memory type validity (Bochs isMemTypeValidMTRR): UC(0)/WC(1)/
+            // WT(4)/WP(5)/WB(6) accepted; 2/3/7 reject.
+            let memtype = ((curr >> 3) & 7) as u32;
+            if !matches!(memtype, 0 | 1 | 4 | 5 | 6) {
+                vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
+                break;
+            }
+            // Reserved bits at [63:52] (rusty_box's BX_PHY_ADDRESS_WIDTH=40
+            // makes [51:40] reserved as well).
+            const PAGING_EPT_RESERVED_BITS: u64 = 0xFFF0_0000_0000_0000
+                | (((1u64 << 12) - 1) << 40);
+            if curr & PAGING_EPT_RESERVED_BITS != 0 {
+                vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
+                break;
+            }
+            ppf = curr & 0x000F_FFFF_FFFF_F000;
+
+            if leaf == 0 {
+                break; // BX_LEVEL_PTE
+            }
+            if curr & 0x80 != 0 {
+                // Large-page leaf. Bochs allows only PDE / (PDPTE if
+                // BX_ISA_1G_PAGES); our model advertises 1G pages so
+                // accept up to PDPTE (leaf=2). Reject at PML4 (leaf=3).
+                if leaf > 2 {
+                    vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
+                    break;
+                }
+                ppf &= 0x000F_FFFF_FFFE_0000;
+                if ppf & offset_mask != 0 {
+                    vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
+                    break;
+                }
+                ppf += guest_paddr & offset_mask;
+                break;
+            }
+            // Non-leaf entry must have memtype-low/leaf reserved bits clear
+            if ((curr >> 3) & 0xF) != 0 {
+                vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
+                break;
+            }
+            combined_access &= curr_access;
+            leaf -= 1;
+        }
+
+        if vmexit_reason.is_none() {
+            combined_access &= entry[leaf as usize] as u32;
+            if (access_mask & combined_access) != access_mask {
+                vmexit_reason = Some(VmxVmexitReason::EptViolation);
+            }
+        }
+
+        if let Some(reason) = vmexit_reason {
+            // EPT_MISCONFIGURATION VMEXIT carries no qualification (Bochs).
+            // EPT_VIOLATION qualification bits per Bochs vmexit.cc:
+            //   [2:0]   access_mask (R/W/X bits requested)
+            //   [5:3]   combined_access (R/W/X bits actually granted)
+            //   [7]     guest_laddr valid
+            //   [8]     is data access (not page walk)
+            //   [9]     user-mode access
+            //   [10]    writeable page
+            //   [11]    NX page
+            let qual = if reason == VmxVmexitReason::EptViolation {
+                let mut q = u64::from(access_mask) | (u64::from(combined_access) << 3);
+                if guest_laddr_valid {
+                    q |= 1 << 7;
+                    if !is_page_walk {
+                        q |= 1 << 8;
+                        if user_page {
+                            q |= 1 << 9;
+                        }
+                        if writeable_page {
+                            q |= 1 << 10;
+                        }
+                        if nx_page {
+                            q |= 1 << 11;
+                        }
+                    }
+                }
+                self.vmcs.guest_linear_addr = guest_laddr;
+                self.vmcs.guest_physical_addr = guest_paddr;
+                q
+            } else {
+                self.vmcs.guest_physical_addr = guest_paddr;
+                0
+            };
+            self.vmx_vmexit(reason, qual)?;
+            return Err(super::error::CpuError::CpuLoopRestart);
+        }
+
+        Ok(ppf | (guest_paddr & 0xFFF))
+    }
+
+    /// EPTPTR-validity check — Bochs vmx.cc `is_eptptr_valid`.
+    /// Validates the EPT memory type, walk length, and reserved bit
+    /// pattern. Returns `true` when the host has set up a usable EPT.
+    pub(super) fn is_eptptr_valid(&self, eptptr: u64) -> bool {
+        const BX_MEMTYPE_UC: u64 = 0;
+        const BX_MEMTYPE_WB: u64 = 6;
+
+        let memtype = eptptr & 7;
+        if memtype != BX_MEMTYPE_UC && memtype != BX_MEMTYPE_WB {
+            return false;
+        }
+        // [5:3] is `walk_length - 1`. Bochs only accepts 4-level paging.
+        let walk_length = (eptptr >> 3) & 7;
+        if walk_length != 3 {
+            return false;
+        }
+        // [6] EPT A/D — extension is not advertised, bit must be clear.
+        if eptptr & 0x40 != 0 {
+            tracing::trace!("is_eptptr_valid: EPTPTR A/D bit set, not supported");
+            return false;
+        }
+        // [7] CET supervisor shadow stack control — gated on CET ISA bit.
+        // We don't yet advertise the EPT-CET extension, so reject.
+        if eptptr & 0x80 != 0 {
+            tracing::trace!("is_eptptr_valid: EPTPTR CET-SS bit set, not supported");
+            return false;
+        }
+        // [11:8] reserved.
+        if eptptr & 0xF00 != 0 {
+            tracing::trace!("is_eptptr_valid: EPTPTR reserved bits set");
+            return false;
+        }
+        // [BX_PHY_ADDRESS_WIDTH-1:12] page-frame address.
+        const BX_PHY_ADDRESS_WIDTH: u32 = 40;
+        if (eptptr >> BX_PHY_ADDRESS_WIDTH) != 0 {
+            return false;
+        }
+        true
     }
 
     /// MSR bitmap walker — Bochs vmexit.cc VMexit_MSR.
