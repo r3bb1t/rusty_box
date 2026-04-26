@@ -1347,14 +1347,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let val_64 = self.get_gpr64(usize::from(src_gpr));
 
         if cr_idx == 8 {
-            // Bochs crregs.cc MOV_CR0Rq: CR8 path runs intercept first so
-            // a VMEXIT skips the LAPIC TPR update entirely.
-            if self.in_vmx_guest && self.vmexit_check_cr8_write(src_gpr)? {
-                return Ok(());
-            }
-            // Bochs svm.cc — CR8 write SVM intercept.
+            // Bochs WriteCR8 (crregs.cc:1508-1517): SVM CR8 write intercept
+            // fires BEFORE the VMX intercept and BEFORE the LAPIC update.
             if self.in_svm_guest && self.svm_cr_write_intercepted(8) {
                 return self.svm_vmexit(super::svm::SvmVmexit::Cr8Write as i32, 0, 0);
+            }
+            // Bochs WriteCR8 (crregs.cc:1519-1522): VMX intercept fires
+            // AFTER the SVM check, before the LAPIC TPR update.
+            if self.in_vmx_guest && self.vmexit_check_cr8_write(src_gpr)? {
+                return Ok(());
             }
             return self.write_cr8(val_64);
         }
@@ -1427,6 +1428,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
+        // Bochs LMSW_Ew (crregs.cc:880-884): SVM CR0 write intercept fires
+        // BEFORE the source operand is read. For memory-form LMSW this means
+        // an SVM #VMEXIT preempts any #PF that the memory read might raise.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(0) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Write as i32, 0, 0);
+        }
+
+        // Bochs LMSW_Ew (crregs.cc:886-894): read the 16-bit source. For
+        // register form, BX_READ_16BIT_REG(i->src()); for memory form,
+        // resolve_addr + read_virtual_word. We track `linear_addr` so the VMX
+        // intercept below can report it on a VMEXIT.
         let is_memory = !instr.mod_c0();
         let mut linear_addr: u64 = 0;
         let mut msw = if instr.mod_c0() {
@@ -1441,8 +1453,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.v_read_word(seg, eaddr)?
         };
 
-        // Bochs vmexit.cc VMexit_LMSW: the intercept inspects the raw source
-        // value and either VMEXITs or returns the masked-merged value.
+        // Bochs LMSW_Ew (crregs.cc:898-901) / vmexit.cc VMexit_LMSW: VMX
+        // intercept fires AFTER the SVM check and AFTER the source read; it
+        // inspects the raw source value and either VMEXITs or returns the
+        // masked-merged value.
         if self.in_vmx_guest {
             let (exited, merged) =
                 self.vmexit_check_lmsw(u32::from(msw), is_memory, linear_addr)?;
@@ -1450,11 +1464,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return Ok(());
             }
             msw = merged as u16;
-        }
-
-        // Bochs svm.cc LMSW — SVM CR0 write intercept (LMSW writes CR0[0:3]).
-        if self.in_svm_guest && self.svm_cr_write_intercepted(0) {
-            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Write as i32, 0, 0);
         }
 
         // LMSW cannot clear PE (Bochs crregs.cc)
@@ -1754,14 +1763,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let cr_idx = instr.dst();
         let dst_gpr = instr.src();
         if cr_idx == 8 {
-            // Bochs crregs.cc MOV_RqCR0 → ReadCR8: VMX intercept first so a
-            // VMEXIT skips the GPR write entirely.
-            if self.in_vmx_guest && self.vmexit_check_cr8_read(dst_gpr)? {
-                return Ok(());
-            }
-            // Bochs svm.cc — CR8 read SVM intercept.
+            // Bochs ReadCR8 (crregs.cc:1566-1572): SVM CR8 read intercept
+            // fires BEFORE the VMX intercept.
             if self.in_svm_guest && self.svm_cr_read_intercepted(8) {
                 return self.svm_vmexit(super::svm::SvmVmexit::Cr8Read as i32, 0, 0);
+            }
+            // Bochs ReadCR8 (crregs.cc:1574-1582): VMX intercept fires
+            // AFTER the SVM check.
+            if self.in_vmx_guest && self.vmexit_check_cr8_read(dst_gpr)? {
+                return Ok(());
             }
             let val = self.read_cr8();
             self.set_gpr64(usize::from(dst_gpr), val);
