@@ -3,10 +3,31 @@
 //! Gather instructions load elements from memory using per-element indices
 //! from a vector register. Each element's address = base + index[i] * scale.
 //!
-//! These are STUB implementations that zero the destination and clear the
-//! opmask register (safe behavior matching post-gather opmask semantics).
-//! These handlers cannot compute correct per-element addresses because
-//! rusty_box's decoder does not parse the VSIB addressing form.
+//! These remain STUB implementations that zero the destination and clear the
+//! opmask register. The opmask-clearing behavior matches the architectural
+//! post-gather contract; zeroing the destination is conservative (Bochs
+//! `cpu/avx/gather.cc` writes per-element loads, but on a fault the unfetched
+//! tail is left untouched).
+//!
+//! ## Why these are still stubs
+//!
+//! Implementing real gather requires reading the SIB index field as a 5-bit
+//! VECTOR register index (0..31). The rusty_box decoder currently:
+//!   1. Computes EVEX.V' but discards it (`_evex_v_prime` in
+//!      `rusty_box_decoder/src/decoder/decode64.rs` ~line 358), so
+//!      `instr.sib_index()` only carries bits 3:0 — vmm16..31 are unreachable.
+//!   2. Stores the SIB index into `operands.index` as if it were a GPR, then
+//!      runs default-segment computation (`SREG_MOD0_BASE32_64` etc.) which
+//!      is meaningless for VSIB.
+//!
+//! Closing this gap is a decoder change that affects opcode-routing logic
+//! beyond gather (scatter, V[P]GATHER{D,Q}{PS,PD,DD,DQ}, V[P]SCATTER...)
+//! and must select V'-vs-vvvv interpretation per opcode form. That's tracked
+//! as a separate follow-up — see commit body.
+//!
+//! Alpine boot does NOT execute these handlers (verified — the `tracing::warn!`
+//! never fires across a 1B-instruction boot), so the stubs are dormant in
+//! the current workload.
 //!
 //! Mirrors Bochs `cpu/avx/gather.cc`.
 

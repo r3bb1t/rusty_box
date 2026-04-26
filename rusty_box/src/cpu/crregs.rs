@@ -821,11 +821,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.invalidate_prefetch_q();
         let src = instr.src1();
         let raw_val_32 = self.get_gpr32(usize::from(src));
-        // Bochs crregs.cc MOV_CR0Rd — SVM CR0 write intercept BEFORE SetCR0.
-        if self.in_svm_guest && self.svm_cr_write_intercepted(0) {
-            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Write as i32, 0, 0);
-        }
-        // Bochs MOV_CR0Rd (crregs.cc): VMexit_CR0_Write happens BEFORE
+        // Bochs MOV_CR0Rd (crregs.cc:412-415): VMexit_CR0_Write runs BEFORE
         // SetCR0; SetCR0 itself never re-runs the VMX intercept.
         let val = if self.in_vmx_guest {
             let (exited, merged) =
@@ -837,6 +833,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             u64::from(raw_val_32)
         };
+        // Bochs SetCR0 (crregs.cc:1112-1128): SVM CR0 write intercept fires
+        // AFTER the VMX merge, before the actual CR0 mutation. Bochs places
+        // this inside SetCR0; we keep it inline here so the VMEXIT exit point
+        // is visible at the call site.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(0) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Write as i32, 0, 0);
+        }
         self.set_cr0(val, src)
     }
 
@@ -1050,14 +1053,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = instr.src1();
         let val = u64::from(self.get_gpr32(usize::from(src)));
 
-        // Bochs crregs.cc MOV_CR3Rd — SVM CR3 write intercept BEFORE VMX gate.
-        if self.in_svm_guest && self.svm_cr_write_intercepted(3) {
-            return self.svm_vmexit(super::svm::SvmVmexit::Cr3Write as i32, 0, 0);
-        }
-        // Bochs vmexit.cc VMexit_CR3_Write — gated on CR3_WRITE_VMEXIT, with
-        // a fast-path when the new value matches any enabled CR3-target value.
+        // Bochs MOV_CR3Rd (crregs.cc:467-470): VMexit_CR3_Write fires BEFORE
+        // the SVM intercept, then SetCR3 runs.
         if self.in_vmx_guest && self.vmexit_check_cr3_write(val, src)? {
             return Ok(());
+        }
+        // Bochs MOV_CR3Rd (crregs.cc:472-481): SVM CR3 write intercept runs
+        // AFTER the VMX gate.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(3) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr3Write as i32, 0, 0);
         }
 
         // Bochs MOV_CR3Rd (cpu/crregs.cc:484): when paging is active in PAE-not-
@@ -1111,13 +1115,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = instr.src1();
         let mut val = self.get_gpr64(usize::from(src));
 
-        // Bochs crregs.cc MOV_CR3Rq — SVM CR3 write intercept BEFORE VMX gate.
-        if self.in_svm_guest && self.svm_cr_write_intercepted(3) {
-            return self.svm_vmexit(super::svm::SvmVmexit::Cr3Write as i32, 0, 0);
-        }
-        // Bochs vmexit.cc VMexit_CR3_Write — gated on CR3_WRITE_VMEXIT.
+        // Bochs MOV_CR3Rq (crregs.cc:703-706): VMexit_CR3_Write fires BEFORE
+        // the SVM intercept, then SetCR3 runs.
         if self.in_vmx_guest && self.vmexit_check_cr3_write(val, src)? {
             return Ok(());
+        }
+        // Bochs MOV_CR3Rq (crregs.cc:708-717): SVM CR3 write intercept runs
+        // AFTER the VMX gate.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(3) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr3Write as i32, 0, 0);
         }
 
         // Bochs MOV_CR3Rq: allow bit 63 (NOFLUSH hint) when PCIDE is set,
@@ -1147,10 +1153,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.check_cpl0_for_cr_dr()?;
         self.invalidate_prefetch_q();
         let src = instr.src1();
-        // Bochs crregs.cc MOV_CR4Rd — SVM CR4 write intercept BEFORE SetCR4.
-        if self.in_svm_guest && self.svm_cr_write_intercepted(4) {
-            return self.svm_vmexit(super::svm::SvmVmexit::Cr4Write as i32, 0, 0);
-        }
+        // Bochs MOV_CR4Rd (crregs.cc:512-515): VMexit_CR4_Write fires before
+        // SetCR4. Both VMX merge and SVM intercept live in `set_cr4` so the
+        // ordering relative to validation/CR4 write matches Bochs SetCR4.
         let raw_val_32 = u64::from(self.get_gpr32(usize::from(src)));
         self.set_cr4(raw_val_32, src)
     }
@@ -1268,6 +1273,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.tlb_flush();
         }
 
+        // Bochs SetCR4 (crregs.cc:1412-1421): SVM CR4 write intercept fires
+        // AFTER the full check_CR4 chain, immediately before the CR4 write.
+        // VMX merge ran above (`vmexit_check_cr4_write`).
+        if self.in_svm_guest && self.svm_cr_write_intercepted(4) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr4Write as i32, 0, 0);
+        }
+
         self.cr4.set_val(val_32);
 
         // Bochs crregs.cc — mode change handlers after CR4 write
@@ -1347,11 +1359,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.write_cr8(val_64);
         }
 
-        // Bochs crregs.cc MOV_CR0Rq — SVM CR0 write intercept BEFORE SetCR0.
-        if self.in_svm_guest && self.svm_cr_write_intercepted(0) {
-            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Write as i32, 0, 0);
-        }
-        // Bochs MOV_CR0Rq (crregs.cc): VMexit_CR0_Write runs BEFORE
+        // Bochs MOV_CR0Rq (crregs.cc:643-646): VMexit_CR0_Write runs BEFORE
         // SetCR0; SetCR0 itself never re-runs the VMX intercept.
         let val = if self.in_vmx_guest {
             let (exited, merged) =
@@ -1363,6 +1371,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             val_64
         };
+        // Bochs SetCR0 (crregs.cc:1112-1128): SVM CR0 write intercept fires
+        // AFTER the VMX merge, before the actual CR0 mutation. Bochs places
+        // this inside SetCR0; we keep it inline here so the VMEXIT exit point
+        // is visible at the call site.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(0) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Write as i32, 0, 0);
+        }
         self.set_cr0(val, src_gpr)
     }
 
@@ -1390,10 +1405,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.invalidate_prefetch_q();
 
         let src = instr.src1();
-        // Bochs crregs.cc MOV_CR4Rq — SVM CR4 write intercept BEFORE SetCR4.
-        if self.in_svm_guest && self.svm_cr_write_intercepted(4) {
-            return self.svm_vmexit(super::svm::SvmVmexit::Cr4Write as i32, 0, 0);
-        }
+        // Bochs MOV_CR4Rq (crregs.cc:748-751): VMexit_CR4_Write fires before
+        // SetCR4. Both VMX merge and SVM intercept live in `set_cr4`.
         let val_64 = self.get_gpr64(usize::from(src));
 
         self.set_cr4(val_64, src)

@@ -1261,9 +1261,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     tracing::trace!("WRMSR EFER: attempt to change LME when CR0.PG=1, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
+                // Bochs SetEFER (cpu/crregs.cc:1490-1494): if SVME is being set
+                // and VM_CR.SVMDIS is locked, the write must #GP(0). The
+                // architecturally-required protection is what BX_VM_CR_MSR_LOCK
+                // exists for: once SVMDIS is locked, EFER.SVME cannot be enabled
+                // until VM_CR is rewritten with LOCK=0 (which itself faults if
+                // LOCK was set). Without this check, a guest could re-enable SVM
+                // even after the host firmware locked it.
+                use super::crregs::BxEfer;
+                use super::svm::BX_VM_CR_MSR_SVMDIS_MASK;
+                if (val32 & BxEfer::SVME.bits()) != 0
+                    && (self.msr.svm_vm_cr & BX_VM_CR_MSR_SVMDIS_MASK) != 0
+                {
+                    tracing::trace!(
+                        "WRMSR EFER: attempt to set SVME with VM_CR.SVMDIS=1, #GP(0)"
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
                 // Keep LMA untouched — it's controlled by CR0.PG + EFER.LME
                 // Bochs crregs.cc
-                use super::crregs::BxEfer;
                 let new_efer = BxEfer::from_bits_truncate(
                     (val32 & self.efer_suppmask & !BxEfer::LMA.bits())
                         | (self.efer.get32() & BxEfer::LMA.bits()),
@@ -3904,5 +3920,76 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         Ok(())
+    }
+}
+
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    //! Bochs-parity tests for `proc_ctrl::wrmsr_value` MSR-write side effects.
+
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::crregs::BxEfer;
+    use crate::cpu::msr::BX_MSR_EFER;
+    use crate::cpu::svm::BX_VM_CR_MSR_SVMDIS_MASK;
+
+    /// Bochs `SetEFER` (cpu/crregs.cc:1490-1494): a write that tries to set
+    /// `EFER.SVME` while `VM_CR.SVMDIS` is locked must #GP(0) and leave the
+    /// EFER MSR unchanged. The Err return is sufficient evidence \u2014 we don't
+    /// inspect the IDT delivery side-effects, only that the gate fired.
+    #[test]
+    fn wrmsr_efer_rejects_svme_when_svmdis_locked() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                // Make SVME a supported bit so the reserved-bits gate doesn't
+                // shadow the SVMDIS check (AmdRyzen advertises IsaSvm so this
+                // is already set, but force it for clarity).
+                cpu.efer_suppmask |= BxEfer::SVME.bits();
+                // Lock SVMDIS \u2014 firmware-style \"no SVM available\".
+                cpu.msr.svm_vm_cr = BX_VM_CR_MSR_SVMDIS_MASK;
+
+                let efer_before = cpu.efer.get32();
+
+                let res = cpu.wrmsr_value(BX_MSR_EFER, BxEfer::SVME.bits() as u64);
+                assert!(
+                    res.is_err(),
+                    "WRMSR EFER with SVME=1 + VM_CR.SVMDIS=1 must #GP(0)"
+                );
+                assert_eq!(
+                    cpu.efer.get32(),
+                    efer_before,
+                    "EFER must not change after a rejected SVMDIS-gated write"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Companion test: when `VM_CR.SVMDIS` is NOT locked, the same write must
+    /// succeed and EFER.SVME must be set. Guards against the SVMDIS check
+    /// becoming over-eager (e.g. inverted polarity).
+    #[test]
+    fn wrmsr_efer_accepts_svme_when_svmdis_clear() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                cpu.efer_suppmask |= BxEfer::SVME.bits();
+                cpu.msr.svm_vm_cr = 0;
+
+                let res = cpu.wrmsr_value(BX_MSR_EFER, BxEfer::SVME.bits() as u64);
+                assert!(res.is_ok(), "WRMSR EFER with SVMDIS=0 must succeed");
+                assert!(
+                    cpu.efer.svme(),
+                    "EFER.SVME must be set after successful write"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
