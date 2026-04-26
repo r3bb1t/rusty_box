@@ -808,6 +808,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// the guest's virtual-NMI tracking.
     pub(super) const BX_EVENT_VMX_VIRTUAL_NMI: u32 = 1 << 7;
 
+    /// Bochs cpu.h `BX_EVENT_PENDING_VMX_VIRTUAL_INTR`. Pending
+    /// virtual-interrupt request (VMX virtual-interrupt-delivery).
+    /// Cleared on VMEXIT.
+    #[allow(dead_code)]
+    pub(super) const BX_EVENT_PENDING_VMX_VIRTUAL_INTR: u32 = 1 << 9;
+
     /// Bochs cpu.h `BX_EVENT_PENDING_INTR`. External interrupt pending
     /// (PIC int_pin asserted).
     pub(crate) const BX_EVENT_PENDING_INTR: u32 = 1 << 10;
@@ -819,6 +825,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs cpu.h `BX_EVENT_PENDING_UINTR`. User-level interrupt
     /// pending.
     pub(super) const BX_EVENT_PENDING_UINTR: u32 = 1 << 12;
+
+    /// Bochs cpu.h `BX_EVENT_VMX_VTPR_UPDATE`. Signalled when the
+    /// virtual-TPR shadow is mutated and the next instruction
+    /// boundary needs to re-evaluate TPR-threshold VMEXIT.
+    /// Cleared on VMEXIT.
+    #[allow(dead_code)]
+    pub(super) const BX_EVENT_VMX_VTPR_UPDATE: u32 = 1 << 13;
+
+    /// Bochs cpu.h `BX_EVENT_VMX_VEOI_UPDATE`. Signalled by virtual
+    /// EOI on the virtual-APIC page; consumed to deliver the
+    /// virtualized-EOI VMEXIT. Cleared on VMEXIT.
+    #[allow(dead_code)]
+    pub(super) const BX_EVENT_VMX_VEOI_UPDATE: u32 = 1 << 14;
+
+    /// Bochs cpu.h `BX_EVENT_VMX_VIRTUAL_APIC_WRITE`. Signalled when
+    /// a write hits the virtual-APIC page so the next instruction
+    /// boundary can deliver the APIC-WRITE VMEXIT. Cleared on VMEXIT.
+    #[allow(dead_code)]
+    pub(super) const BX_EVENT_VMX_VIRTUAL_APIC_WRITE: u32 = 1 << 15;
 
     /// Returns a mutable raw pointer to the Local APIC for cross-module wiring.
     /// Used by emulator.rs to wire I/O APIC → LAPIC interrupt delivery.

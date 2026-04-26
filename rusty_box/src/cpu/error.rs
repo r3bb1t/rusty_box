@@ -55,4 +55,19 @@ pub enum CpuError {
     /// (e.g., unhandled exception handler address is 0000:0000)
     #[error("x86 exception #{vector} delivered but unhandled")]
     Exception { vector: u8 },
+
+    /// Bochs vmx.cc `VMabort` — architecturally fatal VMM-state error
+    /// (MSR-load/store failure, host PDPTR corruption, MCE during
+    /// VMEXIT, etc.). Mirrors Bochs `shutdown()` propagation: the
+    /// surrounding cpu loop must terminate the emulated CPU.
+    #[error("VMX abort: code={code:?}")]
+    VmxAbort { code: super::vmx::VmxAbortCode },
+
+    /// Bochs `BX_PANIC` equivalents reachable from the VMX path —
+    /// "impossible" CPU states (e.g., VMEXIT requested while not in
+    /// VMX-guest mode without the bit-31 vmentry-failure flag).
+    /// Distinct from `VmxAbort` because these signal a host-side
+    /// implementation bug, not a guest-induced architectural fault.
+    #[error("VMX internal error: {reason:?}")]
+    VmxInternalError { reason: super::vmx::VmxInternalReason },
 }

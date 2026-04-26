@@ -337,9 +337,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 )?;
             }
             let ppf_4m = (entry[BX_LEVEL_PDE] & 0xFFC00000) as u64;
-            // Bochs translate_guest_physical for the 4 MB data page.
-            let host_4m = self.ept_translate_for_data(
-                ppf_4m,
+            // Bochs translate_linear (paging.cc): for a large-page leaf the
+            // outer caller merges `(laddr & lpf_mask)` into `paddress`
+            // BEFORE calling translate_guest_physical, so EPT walks with
+            // the full guest-physical including the in-page offset and
+            // returns `host_ppf | (paddress & 0xFFF)`. The result already
+            // carries the low 12 bits — never re-OR `(laddr & lpf_mask)`
+            // afterwards, which would land in the wrong host page when
+            // the EPT leaf is 4 KiB and the offset crosses a 4 KiB
+            // boundary.
+            let merged = ppf_4m | (laddr & 0x003F_FFFF);
+            return self.ept_translate_for_data(
+                merged,
                 laddr,
                 (combined & CombinedAccess::USER.bits()) != 0,
                 (combined & CombinedAccess::WRITE.bits()) != 0,
@@ -351,9 +360,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 } else {
                     BxRwAccess::Read
                 },
-            )?;
-            let offset = laddr & 0x3FFFFF;
-            return Ok(host_4m | offset);
+            );
         }
 
         // PDE points at the PT in guest-physical space.
@@ -410,9 +417,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Extract page frame from PTE
         ppf = entry[BX_LEVEL_PTE] & 0xFFFFF000;
-        // Bochs translate_guest_physical for the 4 KiB data page.
-        let host_ppf = self.ept_translate_for_data(
-            u64::from(ppf),
+        // Bochs translate_linear (paging.cc) merges (laddr & lpf_mask)
+        // into paddress before translate_guest_physical; the EPT walker
+        // returns `host_ppf | (paddress & 0xFFF)`.
+        let merged = u64::from(ppf) | (laddr & 0xFFF);
+        self.ept_translate_for_data(
+            merged,
             laddr,
             (combined_access & CombinedAccess::USER.bits()) != 0,
             (combined_access & CombinedAccess::WRITE.bits()) != 0,
@@ -424,10 +434,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             } else {
                 BxRwAccess::Read
             },
-        )?;
-        let offset = (laddr & 0xFFF) as u32;
-
-        Ok(host_ppf | (offset as u64))
+        )
     }
 
     /// Update accessed and dirty bits in page table entries — Bochs
@@ -691,9 +698,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     tracing::trace!("A/D bit update failed for PDE at {:#x}: {e}", entry_addr[BX_LEVEL_PDE]);
                 }
             }
-            // Bochs translate_guest_physical for the 2 MB data page.
-            let host_ppf = self.ept_translate_for_data(
-                ppf,
+            // Bochs translate_linear (paging.cc) merges `(laddr & lpf_mask)`
+            // into `paddress` BEFORE the translate_guest_physical call so
+            // the EPT walker sees the full guest-physical and returns
+            // `host_ppf | (paddress & 0xFFF)`; never re-OR offset bits on
+            // top of the result.
+            let merged = ppf | (laddr & 0x001F_FFFF);
+            return self.ept_translate_for_data(
+                merged,
                 laddr,
                 (combined_access & CombinedAccess::USER.bits()) != 0,
                 (combined_access & CombinedAccess::WRITE.bits()) != 0,
@@ -705,8 +717,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 } else {
                     BxRwAccess::Read
                 },
-            )?;
-            return Ok(host_ppf | (laddr & 0x1FFFFF));
+            );
         }
 
         combined_access &= entry[BX_LEVEL_PDE].bits() as u32;
@@ -803,9 +814,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         ppf = entry[BX_LEVEL_PTE].bits() & 0x000F_FFFF_FFFF_F000;
-        // Bochs translate_guest_physical for the 4 KiB data page.
-        let host_ppf = self.ept_translate_for_data(
-            ppf,
+        // Bochs translate_linear (paging.cc) merges (laddr & lpf_mask)
+        // into paddress before translate_guest_physical.
+        let merged = ppf | (laddr & 0xFFF);
+        self.ept_translate_for_data(
+            merged,
             laddr,
             (combined_access & CombinedAccess::USER.bits()) != 0,
             (combined_access & CombinedAccess::WRITE.bits()) != 0,
@@ -817,8 +830,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             } else {
                 BxRwAccess::Read
             },
-        )?;
-        Ok(host_ppf | (laddr & 0xFFF))
+        )
     }
 
     /// Long mode paging translation (slow path, used by translate_linear for prefetch).
@@ -1044,6 +1056,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Bochs paging.cc applies the EPT translation for the data page
         // last, after the leaf permission and A/D-bit updates have run.
+        // For both 4 KiB and large-page leaves Bochs merges
+        // `(laddr & lpf_mask)` into `paddress` BEFORE translate_guest_-
+        // physical so the EPT walker sees the full guest-physical
+        // (including in-page offset). The walker returns
+        // `host_ppf | (paddress & 0xFFF)`; never re-OR `laddr & lpf_mask`
+        // afterwards or we'd land in the wrong host page when the EPT
+        // leaf is 4 KiB and the offset crosses a 4 KiB boundary.
         let user_page = (combined_access & CombinedAccess::USER.bits()) != 0;
         let writeable_page = (combined_access & CombinedAccess::WRITE.bits()) != 0;
         let is_write_local = matches!(rw, MemoryAccessType::Write);
@@ -1054,15 +1073,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             BxRwAccess::Read
         };
-        let host_ppf = self.ept_translate_for_data(
-            ppf,
+        let merged = ppf | (laddr & u64::from(lpf_mask));
+        self.ept_translate_for_data(
+            merged,
             laddr,
             user_page,
             writeable_page,
             nx_page,
             ept_rw,
-        )?;
-        Ok(host_ppf | (laddr & lpf_mask as u64))
+        )
     }
 }
 
@@ -1779,30 +1798,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.page_walk_read_qword(paddr)
     }
 
-    /// Load PDPTE entries from physical memory into the PDPTR cache.
-    /// Called when CR3 is written in PAE mode (not long mode).
-    /// Based on Bochs CheckPDPTR (paging.cc).
-    pub(super) fn load_pdptrs(&mut self) {
-        let cr3_val = self.cr3 & 0xFFFF_FFE0; // bits 31:5 of CR3
-        for n in 0..4usize {
-            let pdpe_addr = cr3_val | ((n as u64) << 3);
-            let pdptr = self.page_walk_read_qword(pdpe_addr);
-            self.pdptrcache.entry[n] = pdptr;
-            // Bochs validates reserved bits and returns false on violation,
-            // which causes #GP(0). We check reserved bits at walk time.
-        }
-    }
-
     /// Bochs `CheckPDPTR(cr3_val)` — read four PAE PDPTE entries from
     /// physical memory and validate. Returns `Ok(true)` when each
     /// present PDPTE has its reserved bits clear; `Ok(false)` would
     /// cause a Bochs VMABORT on host-state load of a 32-bit PAE host.
     /// Returns `Err` when an EPT-violation surfaces during the cr3
     /// translation (only possible when running as a VMX guest with EPT
-    /// enabled). Bochs cpu/paging.cc CheckPDPTR EPT-translates the cr3
-    /// base ONCE with `guest_laddr_valid=false, is_page_walk=true,
-    /// rw=BX_READ` and then reads the four PDPTEs from the resulting
-    /// host base (the four entries cannot cross the 4 KiB EPT page).
+    /// enabled). Bochs cpu/paging.cc `CheckPDPTR` EPT-translates the
+    /// cr3 base ONCE with `guest_laddr_valid=false, is_page_walk=true,
+    /// rw=BX_READ`, reads the four PDPTEs from the resulting host base,
+    /// validates reserved bits, AND populates `PDPTR_CACHE.entry[n] =
+    /// pdptr[n]` (paging.cc `CheckPDPTR` final loop). Skipping the
+    /// cache load would leave the host PAE walker reading stale guest
+    /// PDPTRs.
     pub(super) fn check_pdptrs(&mut self, cr3_val: u64) -> Result<bool> {
         let cr3_base = cr3_val & 0xFFFF_FFE0;
         let host_base = if self.ept_active() {
@@ -1819,11 +1827,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             cr3_base
         };
+        let mut entries = [0u64; 4];
         for n in 0..4u64 {
             let pdpte = self.page_walk_read_qword(host_base | (n << 3));
             if pdpte & 0x1 != 0 && pdpte & PAGING_PAE_PDPTE_RESERVED_BITS != 0 {
                 return Ok(false);
             }
+            entries[n as usize] = pdpte;
+        }
+        // Bochs CheckPDPTR final loop: cache the validated PDPTEs.
+        for (n, e) in entries.iter().enumerate() {
+            self.pdptrcache.entry[n] = *e;
         }
         Ok(true)
     }

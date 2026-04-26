@@ -27,6 +27,31 @@ pub const VMCS_LAUNCH_STATE_OFFSET: u64 = 4;
 pub const VMCS_STATE_CLEAR: u32 = 0;
 pub const VMCS_STATE_LAUNCHED: u32 = 1;
 
+/// Bochs vmx.h `VMX_vmabort_code`. Written to the VMCS abort-indicator
+/// field by `VMabort` before the CPU shuts down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum VmxAbortCode {
+    SavingGuestMsrsFailure = 1,
+    HostPdptrCorrupted = 2,
+    VmexitVmcsCorrupted = 3,
+    LoadingHostMsrs = 4,
+    VmexitMachineCheckError = 5,
+    VmexitTo32BitHostFrom64BitGuest = 6,
+}
+
+/// Reasons rusty_box surfaces a `BX_PANIC` from Bochs' VMX path as a
+/// recoverable error instead of aborting the process. Each variant
+/// pinpoints a host-side implementation bug — the guest could never
+/// trigger one of these in correct VMM code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmxInternalReason {
+    /// `vmx_vmexit` was invoked while `in_vmx_guest == false` and the
+    /// reason did not have the bit-31 vmentry-failure flag set. Bochs
+    /// `BX_PANIC("VMEXIT not in VMX guest mode !")` at vmx.cc VMexit.
+    VmexitOutsideGuestMode,
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // VMCS field encodings — Bochs cpu/vmx.h. Grouped by width and role.
 // ──────────────────────────────────────────────────────────────────────────
@@ -199,6 +224,11 @@ bitflags::bitflags! {
         const NMI_UNBLOCK  = 1 << 12;
         /// Bit 13: shadow-stack access (Bochs `rw & 4`).
         const SHADOW_STACK = 1 << 13;
+        /// Bit 14: leaf entry has the EPT supervisor-shadow-stack page
+        /// indicator set (Bochs `BX_SUPERVISOR_SHADOW_STACK_PAGE`,
+        /// leaf bit 60). Gated on `EPTPTR.bit7` (the EPT-CET-SS control)
+        /// being enabled at VM-entry.
+        const SSS_PAGE = 1 << 14;
     }
 }
 const VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS: u32 = 0x2044;
@@ -414,6 +444,23 @@ pub enum VmxVmexitReason {
     Reserved83 = 83,
     RdmsrImm = 84,
     Wrmsrns = 85,
+}
+
+impl VmxVmexitReason {
+    /// Bochs vmx.h `IS_TRAP_LIKE_VMEXIT(reason)` — VMEXIT reasons whose
+    /// architectural delivery is *trap-like*: the RIP/RSP/SSP rollback
+    /// step is skipped because the exit happens AFTER the offending
+    /// instruction completes.
+    #[inline]
+    pub(super) fn is_trap_like(self) -> bool {
+        matches!(
+            self,
+            VmxVmexitReason::TprThreshold
+                | VmxVmexitReason::VirtualizedEoi
+                | VmxVmexitReason::ApicWrite
+                | VmxVmexitReason::BusLock
+        )
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1653,6 +1700,14 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Ok(());
         }
 
+        // Bochs vmx.cc VMLAUNCH/VMRESUME: a pending MOV_SS interrupt
+        // shadow makes VMENTRY illegal — the inhibition would otherwise
+        // suppress the host's first guest event.
+        if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS) {
+            self.vmfail(VmxErr::VmentryMovSsBlocking);
+            return Ok(());
+        }
+
         // Launch-state gate — Bochs VMXERR_VMLAUNCH_NON_CLEAR_VMCS /
         // VMXERR_VMRESUME_NON_LAUNCHED_VMCS.
         if is_resume && !self.vmcs.launched {
@@ -1704,8 +1759,30 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.efer.set32(self.vmcs.guest_ia32_efer as u32);
         self.msr.pat.set_U64(self.vmcs.guest_ia32_pat);
 
-        self.vmcs.launched = true;
+        // Bochs vmx.cc VMLAUNCH/VMRESUME ordering: enter guest mode
+        // first, then unmask INIT (allowed in non-root operation), then
+        // set up TSC offset / preemption timer / event signaling.
+        // `launched` is updated only on the VMLAUNCH path AFTER the
+        // VM-entry MSR-load succeeds — moved below.
         self.in_vmx_guest = true;
+        self.unmask_event(Self::BX_EVENT_INIT);
+
+        // Bochs vmx.cc VMenter — apply guest STI/MOV_SS shadow before
+        // any interrupt-relevant event signaling:
+        //   if (interruptibility_state & STI)         inhibit_interrupts(BX_INHIBIT_INTERRUPTS);
+        //   else if (interruptibility_state & MOV_SS) inhibit_interrupts(BX_INHIBIT_INTERRUPTS_BY_MOVSS);
+        //   else                                      inhibit_mask = 0;
+        const BX_VMX_INTERRUPTS_BLOCKED_BY_STI: u32 = 1 << 0;
+        const BX_VMX_INTERRUPTS_BLOCKED_BY_MOV_SS: u32 = 1 << 1;
+        const BX_VMX_INTERRUPTS_BLOCKED_NMI_BLOCKED: u32 = 1 << 3;
+        let interruptibility = self.vmcs.guest_interruptibility_state;
+        if interruptibility & BX_VMX_INTERRUPTS_BLOCKED_BY_STI != 0 {
+            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS);
+        } else if interruptibility & BX_VMX_INTERRUPTS_BLOCKED_BY_MOV_SS != 0 {
+            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
+        } else {
+            self.inhibit_mask = 0;
+        }
 
         // Bochs vmx.cc VMenter — initial NMI mask state:
         //   unmask_event(BX_EVENT_VMX_VIRTUAL_NMI | BX_EVENT_NMI);
@@ -1713,14 +1790,8 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         //     if (VIRTUAL_NMI()) mask_event(VMX_VIRTUAL_NMI);
         //     else               mask_event(NMI);
         //   }
-        // The unmask resets any stale mask carried in from the host;
-        // the conditional re-mask honours guest interruptibility.
-        const BX_VMX_INTERRUPTS_BLOCKED_NMI_BLOCKED: u32 = 1 << 3;
         self.unmask_event(Self::BX_EVENT_VMX_VIRTUAL_NMI | Self::BX_EVENT_NMI);
-        if self.vmcs.guest_interruptibility_state
-            & BX_VMX_INTERRUPTS_BLOCKED_NMI_BLOCKED
-            != 0
-        {
+        if interruptibility & BX_VMX_INTERRUPTS_BLOCKED_NMI_BLOCKED != 0 {
             if self.pin_based_ctls() & VMX_PIN_BASED_VMEXEC_CTRL_VIRTUAL_NMI != 0 {
                 self.mask_event(Self::BX_EVENT_VMX_VIRTUAL_NMI);
             } else {
@@ -1767,6 +1838,15 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 );
             }
         }
+
+        // Bochs vmx.cc VMLAUNCH/VMRESUME step 6: only the VMLAUNCH path
+        // promotes the launch state to LAUNCHED, and only AFTER the
+        // VM-entry MSR-load succeeds. VMRESUME leaves the launch state
+        // alone — Bochs gates this on the `vmlaunch` flag.
+        if !is_resume {
+            self.vmcs.launched = true;
+        }
+
         // Bochs vmx.cc step 6: arm the preemption timer when the pin-based
         // control is set. Reads vmx_preemption_timer_value from the VMCS.
         self.vmenter_arm_preemption_timer();
@@ -1798,80 +1878,185 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         reason: VmxVmexitReason,
         qualification: u64,
     ) -> Result<()> {
-        if !self.in_vmx_guest {
-            return Ok(());
+        // Bochs vmx.cc `BX_CPU_C::VMexit` head-guard: a VMEXIT outside
+        // VMX-guest mode without the bit-31 vmentry-failure flag is a
+        // host-side CPU implementation bug — Bochs `BX_PANIC`s. Our
+        // regular VMEXIT path is never called with bit-31 set (that's
+        // `vmx_vmexit_vmentry_failure`), so the guard reduces to a
+        // VmxInternalError when not in guest mode.
+        if !self.in_vmx || !self.in_vmx_guest {
+            tracing::error!(
+                "VMEXIT not in VMX guest mode (reason={reason:?}, qualification={qualification:#x})"
+            );
+            return Err(super::error::CpuError::VmxInternalError {
+                reason: VmxInternalReason::VmexitOutsideGuestMode,
+            });
         }
 
-        // Bochs vmx.cc VMexit (step 1): snapshot the preemption timer back
-        // into the VMCS when STORE_VMX_PREEMPTION_TIMER is set, then disarm.
+        // ── Bochs `BX_CPU_C::VMexit` STEP 0 ──────────────────────────
+        // Disarm the preemption timer (snapshots back into VMCS when
+        // STORE_VMX_PREEMPTION_TIMER is set), record reason +
+        // qualification, write the VMEXIT_INSTRUCTION_LENGTH field
+        // (`(RIP - prev_rip) & 0xf`).
         self.vmexit_disarm_preemption_timer();
+        self.vmcs.exit_reason = reason as u32;
+        self.vmcs.exit_qualification = qualification;
+        self.vmcs.exit_instruction_length =
+            ((self.rip().wrapping_sub(self.prev_rip)) & 0xF) as u32;
 
-        // Bochs vmx.cc VMexit step 1.5: snapshot guest MSRs into the
-        // VMEXIT_MSR_STORE list, then preload host MSRs from the
-        // VMEXIT_MSR_LOAD list before host-state restoration. A non-zero
-        // failing index is a Bochs VMX abort (state malformed); we log
-        // and continue host-state load so the host at least observes the
-        // exit reason rather than getting wedged.
-        let store_cnt = self.vmcs.vmexit_msr_store_cnt;
-        let store_addr = self.vmcs.vmexit_msr_store_addr;
-        if store_cnt != 0 {
-            match self.vmx_store_msrs(store_cnt, store_addr) {
-                Ok(0) => {}
-                Ok(failing) => tracing::error!(
-                    "VMEXIT MSR store list rejected entry {failing}; VMX abort"
-                ),
-                Err(e) => return Err(e),
+        // Bochs vmx.cc VMexit: when the reason is EXCEPTION_NMI the
+        // vector is the low byte of VMCS_32BIT_VMEXIT_INTERRUPTION_INFO;
+        // otherwise the field gets cleared.
+        let vector = if reason == VmxVmexitReason::ExceptionNmi {
+            (self.vmcs.exit_intr_info & 0xFF) as u8
+        } else {
+            0
+        };
+        if reason != VmxVmexitReason::ExceptionNmi
+            && reason != VmxVmexitReason::ExternalInterrupt
+        {
+            self.vmcs.exit_intr_info = 0;
+        }
+
+        // Bochs vmx.cc VMexit: surface the IDT-vectoring info captured
+        // by `interrupt()` when the exit happened *during* event
+        // delivery (`in_event`). The valid bit (bit 31) is OR'd in to
+        // tell the host the field is meaningful. When no event was in
+        // flight the field is cleared to 0.
+        if self.in_event {
+            self.vmcs.idt_vectoring_info = self.vmcs.idt_vectoring_info | 0x8000_0000;
+            // idt_vectoring_error_code already populated by the event
+            // dispatcher — leave it untouched.
+            self.in_event = false;
+        } else {
+            self.vmcs.idt_vectoring_info = 0;
+            self.vmcs.idt_vectoring_error_code = 0;
+        }
+
+        self.nmi_unblocking_iret = false;
+
+        // Bochs vmx.cc VMexit: VMEXITs are *fault-like* — restore RIP
+        // (and RSP/SSP if the instruction speculatively advanced them)
+        // to the value before the faulting instruction. Trap-like
+        // exits (TPR_THRESHOLD, VIRTUALIZED_EOI, APIC_WRITE, BUS_LOCK)
+        // are taken AFTER the instruction completes, so they keep the
+        // post-instruction RIP/RSP/SSP.
+        if !reason.is_trap_like() {
+            self.set_rip(self.prev_rip);
+            if self.speculative_rsp {
+                self.set_rsp(self.prev_rsp);
+                self.set_ssp(self.prev_ssp);
             }
         }
+        self.speculative_rsp = false;
+
+        // ── STEP 1: save guest state + walk MSR-STORE list ───────────
+        // Bochs vmx.cc gates this on non-vmentry-failure reasons. The
+        // regular vmx_vmexit path is never entered with these reasons
+        // (failure goes through vmx_vmexit_vmentry_failure), but the
+        // explicit guard mirrors Bochs and protects against future
+        // mis-dispatch.
+        if reason != VmxVmexitReason::VmentryFailureGuestState
+            && reason != VmxVmexitReason::VmentryFailureMsr
+        {
+            // Clear the VMENTRY interruption-info valid bit so a
+            // re-entry doesn't re-inject the previous event.
+            self.vmcs.vm_entry_intr_info &= !0x8000_0000;
+
+            self.vmcs.guest_cr0 = self.cr0.get32() as u64;
+            self.vmcs.guest_cr3 = self.cr3;
+            self.vmcs.guest_cr4 = self.cr4.get() as u64;
+            self.vmcs.guest_rsp = self.rsp();
+            self.vmcs.guest_rip = self.rip();
+            self.vmcs.guest_rflags = self.read_eflags() as u64;
+            self.vmcs.guest_ia32_efer = self.efer.get32() as u64;
+            self.vmcs.guest_ia32_pat = self.msr.pat.U64();
+
+            let store_cnt = self.vmcs.vmexit_msr_store_cnt;
+            let store_addr = self.vmcs.vmexit_msr_store_addr;
+            if store_cnt != 0 {
+                match self.vmx_store_msrs(store_cnt, store_addr) {
+                    Ok(0) => {}
+                    Ok(failing) => {
+                        tracing::error!(
+                            "VMABORT: error saving guest MSR number {failing}"
+                        );
+                        return Err(self.vmx_abort(VmxAbortCode::SavingGuestMsrsFailure));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        // Bochs vmx.cc VMexit: `in_vmx_guest = false` AFTER step 1 and
+        // BEFORE the `clear_event` mask + host-state load.
+        self.in_vmx_guest = false;
+        // Clear ALL VMX-guest-only pending events — Bochs vmx.cc clears
+        // the union of:
+        //   VTPR_UPDATE | VEOI_UPDATE | VIRTUAL_APIC_WRITE |
+        //   MONITOR_TRAP_FLAG | INTERRUPT_WINDOW_EXITING |
+        //   PREEMPTION_TIMER_EXPIRED | VIRTUAL_NMI |
+        //   PENDING_VMX_VIRTUAL_INTR
+        self.clear_event(
+            Self::BX_EVENT_VMX_VTPR_UPDATE
+                | Self::BX_EVENT_VMX_VEOI_UPDATE
+                | Self::BX_EVENT_VMX_VIRTUAL_APIC_WRITE
+                | Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG
+                | Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING
+                | Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED
+                | Self::BX_EVENT_VMX_VIRTUAL_NMI
+                | Self::BX_EVENT_PENDING_VMX_VIRTUAL_INTR,
+        );
+
+        // ── STEP 2: load host state ──────────────────────────────────
+        // A failure here means the host VMCS is corrupt — propagate so
+        // the surrounding cpu loop can raise the exception rather than
+        // silently drop the error.
+        self.vmexit_load_host_state()?;
+
+        // ── STEP 3: walk the host MSR-LOAD list (Bochs vmx.cc) ───────
         let load_cnt = self.vmcs.vmexit_msr_load_cnt;
         let load_addr = self.vmcs.vmexit_msr_load_addr;
         if load_cnt != 0 {
             match self.vmx_load_msrs(load_cnt, load_addr) {
                 Ok(0) => {}
-                Ok(failing) => tracing::error!(
-                    "VMEXIT MSR load list rejected entry {failing}; VMX abort"
-                ),
+                Ok(failing) => {
+                    tracing::error!(
+                        "VMABORT: error loading host MSR number {failing}"
+                    );
+                    return Err(self.vmx_abort(VmxAbortCode::LoadingHostMsrs));
+                }
                 Err(e) => return Err(e),
             }
         }
 
-        // Save guest state from the running CPU.
-        self.vmcs.guest_cr0 = self.cr0.get32() as u64;
-        self.vmcs.guest_cr3 = self.cr3;
-        self.vmcs.guest_cr4 = self.cr4.get() as u64;
-        self.vmcs.guest_rsp = self.rsp();
-        self.vmcs.guest_rip = self.rip();
-        self.vmcs.guest_rflags = self.read_eflags() as u64;
-        self.vmcs.guest_ia32_efer = self.efer.get32() as u64;
-        self.vmcs.guest_ia32_pat = self.msr.pat.U64();
-
-        // Record the exit info the host reads after re-entry.
-        self.vmcs.exit_reason = reason as u32;
-        self.vmcs.exit_qualification = qualification;
-
-        // Bochs vmx.cc VMexit ordering (lines 3144-3159): set
-        // `in_vmx_guest = false` BEFORE clear_event + VMexitLoadHostState
-        // so the host-mode invariant holds for the entire host-state load
-        // and so any exception raised during host-state restoration sees
-        // host context.
-        self.in_vmx_guest = false;
-        // Clear the VMX-guest-pending events so a re-entered host doesn't
-        // see stale window/MTF/preemption-timer requests
-        // (`clear_event(BX_EVENT_VMX_*)` at vmx.cc:3147-3154).
-        self.clear_event(
-            Self::BX_EVENT_VMX_MONITOR_TRAP_FLAG
-                | Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING
-                | Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED
-                | Self::BX_EVENT_VMX_VIRTUAL_NMI,
-        );
-
-        // Load host state. A failure here means the host VMCS is corrupt
-        // — propagate so the surrounding cpu loop can raise the exception
-        // rather than silently drop the error.
-        self.vmexit_load_host_state()?;
+        // ── STEP 4: VMX-root bookkeeping ─────────────────────────────
+        //   mask_event(BX_EVENT_INIT)             // disabled in VMX root
+        //   if (reason == EXCEPTION_NMI && vec==2) mask_event(BX_EVENT_NMI)
+        //   EXT = 0
+        //   last_exception_type = BX_ET_NONE
+        self.mask_event(Self::BX_EVENT_INIT);
+        if reason == VmxVmexitReason::ExceptionNmi && vector == 2 {
+            self.mask_event(Self::BX_EVENT_NMI);
+        }
+        self.ext = false;
+        self.last_exception_type = -1; // BX_ET_NONE
 
         self.invalidate_prefetch_q();
         Ok(())
+    }
+
+    /// Bochs vmx.cc `BX_CPU_C::VMabort`. Architecturally fatal — the
+    /// VMM's state has lost integrity. Bochs writes the abort code to
+    /// the VMCS abort-indicator field, deactivates the preemption
+    /// timer, then `shutdown()`s the CPU. We mirror the timer disarm
+    /// and surface the abort as `CpuError::VmxAbort` so the cpu loop
+    /// can terminate the emulated CPU — silently swallowing the error
+    /// would mask a serious VMM bug.
+    pub(super) fn vmx_abort(&mut self, code: VmxAbortCode) -> super::error::CpuError {
+        self.lapic.deactivate_vmx_preemption_timer();
+        tracing::error!("VMX abort (Bochs VMabort): code={code:?}");
+        super::error::CpuError::VmxAbort { code }
     }
 
     /// VMENTRY-failure VMEXIT — Bochs `BX_CPU_C::VMexit` with bit 31 of
@@ -1893,16 +2078,17 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         reason: VmxVmexitReason,
         qualification: u64,
     ) -> Result<()> {
-        // Snapshot any armed preemption timer back into the VMCS before
-        // unwinding. Mirrors the unconditional disarm in Bochs VMexit
-        // step 0 — we never armed it for this VMENTRY (still pre-step-6),
-        // but the helper is idempotent.
+        // ── Bochs `BX_CPU_C::VMexit` STEP 0 ──────────────────────────
+        // Disarm preemption timer (idempotent — we never armed it for
+        // this VMENTRY since failure happens before step 6); record
+        // reason + qualification with bit 31 set; write the
+        // VMEXIT_INSTRUCTION_LENGTH field; clear nmi_unblocking_iret.
         self.vmexit_disarm_preemption_timer();
-
-        // Bochs vmx.cc VMexit: bit 31 distinguishes the VMENTRY-failure
-        // reason from a regular VMEXIT for the same numeric reason code.
         self.vmcs.exit_reason = (reason as u32) | 0x8000_0000;
         self.vmcs.exit_qualification = qualification;
+        self.vmcs.exit_instruction_length =
+            ((self.rip().wrapping_sub(self.prev_rip)) & 0xF) as u32;
+        self.nmi_unblocking_iret = false;
 
         // Bochs vmx.cc VMexit ordering (lines 3144-3154): in_vmx_guest
         // first, then unconditional clear of the VMX-guest-pending
@@ -1926,20 +2112,30 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
         // STEP 3: host MSR load list — Bochs vmx.cc VMexit walks
         // VMEXIT_MSR_LOAD unconditionally, including for VMENTRY-failure
-        // reasons. A non-zero failing index is a Bochs VMX abort
-        // (state malformed); we log and continue so the host at least
-        // observes the recorded exit reason.
+        // reasons. A non-zero failing index triggers `VMabort` (Bochs
+        // VMABORT_LOADING_HOST_MSRS).
         let load_cnt = self.vmcs.vmexit_msr_load_cnt;
         let load_addr = self.vmcs.vmexit_msr_load_addr;
         if load_cnt != 0 {
             match self.vmx_load_msrs(load_cnt, load_addr) {
                 Ok(0) => {}
-                Ok(failing) => tracing::error!(
-                    "VMENTRY-failure VMEXIT: host MSR-load list rejected entry {failing}"
-                ),
+                Ok(failing) => {
+                    tracing::error!(
+                        "VMENTRY-failure VMEXIT: host MSR-load list rejected entry {failing}"
+                    );
+                    return Err(self.vmx_abort(VmxAbortCode::LoadingHostMsrs));
+                }
                 Err(e) => return Err(e),
             }
         }
+
+        // Bochs vmx.cc VMexit step 4 (lines 3175-3181): mask INIT (VMX
+        // root mode disables it), clear EXT and last_exception_type.
+        // The NMI-mask branch from the regular path doesn't apply here —
+        // VMENTRY-failure reasons are never EXCEPTION_NMI.
+        self.mask_event(Self::BX_EVENT_INIT);
+        self.ext = false;
+        self.last_exception_type = -1; // BX_ET_NONE
 
         self.invalidate_prefetch_q();
         Ok(())
@@ -4131,7 +4327,26 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 // flag (set by IRET when the IRET unblocked NMI delivery,
                 // cleared on next instruction-boundary).
                 q.set(EptViolationQual::NMI_UNBLOCK, self.nmi_unblocking_iret);
-                q.set(EptViolationQual::SHADOW_STACK, rw.is_shadow_stack());
+                // Bochs paging.cc gates the shadow-stack bit on
+                // BX_SUPPORT_CET; only set when the CPU model supports
+                // CET (otherwise `rw.is_shadow_stack()` cannot be
+                // observed in practice but the literal source check
+                // matters for forward-compat models).
+                if self
+                    .bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaCet)
+                {
+                    q.set(EptViolationQual::SHADOW_STACK, rw.is_shadow_stack());
+                    // Bochs paging.cc bit 14:
+                    //   `BX_VMX_EPT_SUPERVISOR_SHADOW_STACK_CTRL_ENABLED &&
+                    //    ept_supervisor_shadow_stack_page_bit(entry[leaf])`
+                    // The first conjunct is `EPTPTR & 0x80`; the second is
+                    // bit 60 of the EPT leaf entry.
+                    let leaf_idx = leaf as usize;
+                    let leaf_entry = entry[leaf_idx];
+                    let ept_sss_ctrl = (eptptr & 0x80) != 0;
+                    let leaf_sss_page = (leaf_entry & (1u64 << 60)) != 0;
+                    q.set(EptViolationQual::SSS_PAGE, ept_sss_ctrl && leaf_sss_page);
+                }
                 self.vmcs.guest_linear_addr = guest_laddr;
                 self.vmcs.guest_physical_addr = guest_paddr;
                 q.bits()
@@ -4198,13 +4413,32 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if walk_length != 3 {
             return false;
         }
-        // [6] EPT A/D — supported. translate_guest_physical reads this
-        // bit to drive the rw=BX_WRITE upgrade for guest-paging walks
-        // and to call update_ept_access_dirty after a successful walk.
-        // [7] CET supervisor shadow stack control — gated on CET ISA bit.
-        // We don't yet advertise the EPT-CET extension, so reject.
-        if eptptr & 0x80 != 0 {
-            tracing::trace!("is_eptptr_valid: EPTPTR CET-SS bit set, not supported");
+        // [6] EPT A/D — gated on the CPU model's EptAccessDirty
+        // extension. translate_guest_physical reads this bit to drive
+        // the rw=BX_WRITE upgrade for guest-paging walks and to call
+        // update_ept_access_dirty after a successful walk. Models that
+        // don't advertise EPT-A/D must reject this bit to match Bochs
+        // is_eptptr_valid (vmx.cc).
+        if eptptr & 0x40 != 0 {
+            let supported = self
+                .vmx_extensions_bitmask
+                .as_ref()
+                .map_or(false, |m| {
+                    m.contains(super::cpuid::VMXExtensions::EptAccessDirty)
+                });
+            if !supported {
+                tracing::trace!("is_eptptr_valid: EPTP A/D bit set but model lacks EptAccessDirty");
+                return false;
+            }
+        }
+        // [7] CET supervisor shadow stack control — Bochs is_eptptr_valid
+        // (vmx.cc) only rejects this bit when `BX_SUPPORT_CET` is off.
+        // CET-supporting models accept it (and the bit is observed by the
+        // EPT-violation qualification builder).
+        if eptptr & 0x80 != 0
+            && !self.bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaCet)
+        {
+            tracing::trace!("is_eptptr_valid: EPTPTR CET-SS bit set without IsaCet support");
             return false;
         }
         // [11:8] reserved.
