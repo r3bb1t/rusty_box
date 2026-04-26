@@ -45,6 +45,7 @@ pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 const BX_DTLB_SIZE: usize = 4096;
 const BX_ITLB_SIZE: usize = 1024;
 
+#[cfg(feature = "alloc")]
 use super::avx::AMX;
 
 use super::tlb::BxMemType;
@@ -461,9 +462,15 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
 
     pub(super) msrs: [MSR; BX_MSR_MAX_INDEX],
 
-    // Box-allocated because AMX carries 8 KiB of tile-data buffers — too big
-    // to inline into every CpuC when most CPUs (e.g. Skylake-X) never need it.
+    // Box-allocated under `feature = "alloc"` because AMX carries 8 KiB of
+    // tile-data buffers \u2014 too big to inline into every CpuC when most CPUs
+    // (e.g. Skylake-X) never need it. Without an allocator (UEFI / no_std)
+    // AMX is unsupported by construction; the Option degenerates to a
+    // zero-sized never-Some via `Infallible`.
+    #[cfg(feature = "alloc")]
     pub(super) amx: Option<alloc::boxed::Box<AMX>>,
+    #[cfg(not(feature = "alloc"))]
+    pub(super) amx: Option<core::convert::Infallible>,
 
     pub(super) in_vmx: bool,
     pub(super) in_vmx_guest: bool,
@@ -892,6 +899,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs: cpu_mode >= BX_MODE_IA32_PROTECTED (includes Protected, LongCompat, Long64)
     pub(super) fn protected_mode(&self) -> bool {
         self.cpu_mode >= CpuMode::Ia32Protected
+    }
+
+    /// Borrow the optional AMX state. Always `None` on no-alloc builds: the
+    /// `Option` storage degenerates to `Option<Infallible>` so this returns
+    /// `None` without any cfg-gating at the call site.
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub(super) fn amx_ref(&self) -> Option<&crate::cpu::avx::AMX> {
+        self.amx.as_deref()
+    }
+    #[cfg(not(feature = "alloc"))]
+    #[inline]
+    pub(super) fn amx_ref(&self) -> Option<&crate::cpu::avx::AMX> {
+        None
+    }
+
+    /// Mutable counterpart of [`amx_ref`]. Always `None` on no-alloc builds.
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub(super) fn amx_mut(&mut self) -> Option<&mut crate::cpu::avx::AMX> {
+        self.amx.as_deref_mut()
+    }
+    #[cfg(not(feature = "alloc"))]
+    #[inline]
+    pub(super) fn amx_mut(&mut self) -> Option<&mut crate::cpu::avx::AMX> {
+        None
     }
 
     pub(super) fn bx_write_opmask(&mut self, index: usize, val_64: u64) {

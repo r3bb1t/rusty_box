@@ -581,6 +581,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 new_eflags
             );
 
+            // Bochs iret.cc iret_protected \u2014 same-priv shadow-stack restore.
+            if self.shadow_stack_enabled(cpl) {
+                let return_lip = (cs_descriptor.u.segment_base()
+                    .wrapping_add(new_eip as u64))
+                    & 0xFFFF_FFFF;
+                let prev_ssp = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
+                self.set_ssp(prev_ssp);
+            }
+
             // Load CS from GDT descriptor (sets CS.base from descriptor, NOT << 4)
             self.branch_far(
                 &mut cs_selector,
@@ -654,6 +663,28 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return self.exception(Exception::Np, raw_ss_raw & 0xfffc);
             }
 
+            // Bochs iret.cc iret_protected \u2014 outer-priv shadow-stack restore.
+            // Capture prev CPL and pop the saved SSP token (when not returning to
+            // ring 3) before branch_far reloads CS.
+            let prev_cpl = cpl;
+            let mut new_ssp_cet = self.msr.ia32_pl_ssp[3];
+            if self.shadow_stack_enabled(cpl) {
+                if self.ssp() & 0x7 != 0 {
+                    tracing::error!("iret_protected: SSP not 8-byte aligned");
+                    self.exception(
+                        Exception::Cp,
+                        super::cet::BX_CP_FAR_RET_IRET,
+                    )?;
+                }
+                if cs_selector.rpl != 3 {
+                    let return_lip = (cs_descriptor.u.segment_base()
+                        .wrapping_add(new_eip as u64))
+                        & 0xFFFF_FFFF;
+                    new_ssp_cet =
+                        self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
+                }
+            }
+
             // Load CS (sets new CPL = new_cpl)
             self.branch_far(
                 &mut cs_selector,
@@ -671,6 +702,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_esp(new_esp);
             } else {
                 self.set_sp(new_esp as u16);
+            }
+
+            // Bochs iret.cc iret_protected \u2014 install new SSP and clear busy on prev SSP.
+            let old_ssp = self.ssp();
+            let new_cpl_cet = self.cs_rpl();
+            if self.shadow_stack_enabled(new_cpl_cet) {
+                if (new_ssp_cet >> 32) != 0 {
+                    tracing::error!("iret_protected: 64-bit SSP in legacy mode");
+                    return self.exception(Exception::Gp, 0);
+                }
+                self.set_ssp(new_ssp_cet);
+            }
+            if self.shadow_stack_enabled(prev_cpl) {
+                self.shadow_stack_atomic_clear_busy(old_ssp, prev_cpl)?;
             }
 
             // validate_seg_regs(): null out DS/ES/FS/GS if no longer accessible
@@ -780,6 +825,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         if new_cpl == cpl {
             // Same privilege — 16-bit
+            // Bochs iret.cc iret_protected (16-bit) \u2014 same-priv shadow-stack restore.
+            if self.shadow_stack_enabled(cpl) {
+                let return_lip = (cs_descriptor.u.segment_base()
+                    .wrapping_add(new_ip as u64))
+                    & 0xFFFF_FFFF;
+                let prev_ssp = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
+                self.set_ssp(prev_ssp);
+            }
+
             self.branch_far(&mut cs_selector, &mut cs_descriptor, new_ip as u64, new_cpl)?;
 
             // write_flags for 16-bit (Bochs iret.cc)
@@ -843,6 +897,26 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return self.exception(Exception::Np, raw_ss_raw & 0xfffc);
             }
 
+            // Bochs iret.cc iret_protected (16-bit) \u2014 outer-priv shadow-stack restore.
+            let prev_cpl = cpl;
+            let mut new_ssp_cet = self.msr.ia32_pl_ssp[3];
+            if self.shadow_stack_enabled(cpl) {
+                if self.ssp() & 0x7 != 0 {
+                    tracing::error!("iret_protected_16: SSP not 8-byte aligned");
+                    self.exception(
+                        Exception::Cp,
+                        super::cet::BX_CP_FAR_RET_IRET,
+                    )?;
+                }
+                if cs_selector.rpl != 3 {
+                    let return_lip = (cs_descriptor.u.segment_base()
+                        .wrapping_add(new_ip as u64))
+                        & 0xFFFF_FFFF;
+                    new_ssp_cet =
+                        self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
+                }
+            }
+
             self.branch_far(&mut cs_selector, &mut cs_descriptor, new_ip as u64, new_cpl)?;
 
             // write_flags for 16-bit (Bochs iret.cc)
@@ -850,6 +924,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             self.load_ss(&mut ss_selector, &mut ss_descriptor, new_cpl)?;
             self.set_sp(new_sp as u16);
+
+            // Bochs iret.cc iret_protected (16-bit) \u2014 install new SSP and clear busy on prev SSP.
+            let old_ssp = self.ssp();
+            let new_cpl_cet = self.cs_rpl();
+            if self.shadow_stack_enabled(new_cpl_cet) {
+                if (new_ssp_cet >> 32) != 0 {
+                    tracing::error!("iret_protected_16: 64-bit SSP in legacy mode");
+                    return self.exception(Exception::Gp, 0);
+                }
+                self.set_ssp(new_ssp_cet);
+            }
+            if self.shadow_stack_enabled(prev_cpl) {
+                self.shadow_stack_atomic_clear_busy(old_ssp, prev_cpl)?;
+            }
 
             self.validate_seg_regs();
         }

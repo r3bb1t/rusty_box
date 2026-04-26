@@ -66,6 +66,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn jmp_ew_r(&mut self, instr: &Instruction) -> super::Result<()> { let dst = instr.dst() as usize;
     let new_ip = self.get_gpr16(dst);
     self.branch_near16(new_ip)?;
+    self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
     self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip()); Ok(()) }
 
     /// JMP m16 - Indirect jump through memory (memory form)
@@ -74,6 +75,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     let seg = BxSegregs::from(instr.seg());
     let new_ip = self.v_read_word(seg, eaddr)?;
     self.branch_near16(new_ip)?;
+    self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
     self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip()); Ok(()) }
 
     /// JMP r/m16 - Unified dispatch (checks mod_c0)
@@ -92,10 +94,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// CALL rel16 - Near call with 16-bit displacement
     pub fn call_jw(&mut self, instr: &Instruction) -> super::Result<()> { let disp = instr.iw() as i16;
     let ip = self.get_ip();
-    
+
     // Push return address
     self.push_16(ip)?;
-    
+    // Bochs ctrl_xfer16.cc CALL_Jw \u2014 shadow stack push only when displacement is non-zero.
+    let cpl = self.cs_rpl();
+    if disp != 0 && self.shadow_stack_enabled(cpl) {
+        self.shadow_stack_push_32(ip as u32)?;
+    }
+
     let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
     self.branch_near16(new_ip)?;
     self.on_ucnear_branch(super::instrumentation::BranchType::Call, self.rip()); Ok(()) }
@@ -105,9 +112,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn call_ew_r(&mut self, instr: &Instruction) -> super::Result<()> { let dst = instr.dst() as usize;
     let new_ip = self.get_gpr16(dst);
     let ip = self.get_ip();
-    
+
     self.push_16(ip)?;
+    let cpl = self.cs_rpl();
+    if self.shadow_stack_enabled(cpl) {
+        self.shadow_stack_push_32(ip as u32)?;
+    }
     self.branch_near16(new_ip)?;
+    self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
     self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip()); Ok(()) }
 
     /// CALL m16 - Indirect call through memory (memory form)
@@ -116,9 +128,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     let seg = BxSegregs::from(instr.seg());
     let new_ip = self.v_read_word(seg, eaddr)?;
     let ip = self.get_ip();
-    
+
     self.push_16(ip)?;
+    let cpl = self.cs_rpl();
+    if self.shadow_stack_enabled(cpl) {
+        self.shadow_stack_push_32(ip as u32)?;
+    }
     self.branch_near16(new_ip)?;
+    self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
     self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip()); Ok(()) }
 
     /// CALL r/m16 - Unified dispatch (checks mod_c0)

@@ -5,8 +5,8 @@
 //!
 //! These are STUB implementations that zero the destination and clear the
 //! opmask register (safe behavior matching post-gather opmask semantics).
-//! Full VSIB decoding is not yet implemented in the decoder, so these
-//! handlers cannot compute correct per-element addresses.
+//! These handlers cannot compute correct per-element addresses because
+//! rusty_box's decoder does not parse the VSIB addressing form.
 //!
 //! Mirrors Bochs `cpu/avx/gather.cc`.
 

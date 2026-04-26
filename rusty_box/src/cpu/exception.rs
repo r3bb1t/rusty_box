@@ -437,6 +437,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             )?;
         }
 
+        // Bochs exception.cc — SVM FERR_FREEZE intercept for #MF.
+        if vector == Exception::Mf
+            && self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_FERR_FREEZE)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::FerrFreeze as i32, 0, 0);
+        }
+
         // Call interrupt handler based on CPU mode
         let vector_u8 = vector as u8;
 

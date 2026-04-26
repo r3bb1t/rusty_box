@@ -356,6 +356,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 }
             }
 
+            // Bochs exception.cc protected_mode_int \u2014 same-priv shadow-stack push.
+            if self.shadow_stack_enabled(cpl) {
+                let return_lip =
+                    self.get_laddr32(BxSegregs::Cs as usize, old_eip) as u64;
+                self.call_far_shadow_stack_push(old_cs, return_lip, self.ssp())?;
+            }
+            self.track_indirect(cpl);
+
             // Load CS segment register
             // Set the RPL field of CS to CPL (matches original line 711: load_cs(&cs_selector, &cs_descriptor, CPL))
             let mut new_cs_selector = cs_selector;
@@ -434,6 +442,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         error_code: u16,
     ) -> Result<()> {
         tracing::trace!("handle_interrupt_to_inner_privilege(): INTERRUPT TO INNER PRIVILEGE");
+
+        // Bochs exception.cc protected_mode_int \u2014 capture pre-transition
+        // CET state for the inner-priv shadow-stack switch.
+        let old_cpl_cet = self.cs_rpl();
+        let old_ss_dpl_cet = self.sregs[BxSegregs::Ss as usize].cache.dpl;
+        let return_lip_cet =
+            self.get_laddr32(BxSegregs::Cs as usize, old_eip) as u64;
+        let new_ssp_cet = self.msr.ia32_pl_ssp[cs_descriptor.dpl as usize];
 
         // Get SS and ESP from TSS for the new privilege level (matches line 446)
         let (ss_for_cpl_x, esp_for_cpl_x) = self.get_ss_esp_from_tss(cs_descriptor.dpl)?;
@@ -866,6 +882,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             cs_descriptor.dpl,
         )?;
 
+        // Bochs exception.cc protected_mode_int \u2014 inner-priv shadow-stack epilogue.
+        if self.shadow_stack_enabled(old_cpl_cet) && old_cpl_cet == 3 {
+            self.msr.ia32_pl_ssp[3] = self.ssp();
+        }
+        let new_cpl_cet = self.cs_rpl();
+        if self.shadow_stack_enabled(new_cpl_cet) {
+            let old_ssp = self.ssp();
+            self.shadow_stack_switch(new_ssp_cet)?;
+            if old_ss_dpl_cet != 3 {
+                self.call_far_shadow_stack_push(old_cs, return_lip_cet, old_ssp)?;
+            }
+        }
+        self.track_indirect(new_cpl_cet);
+
         // Clear segment registers in v8086 mode (matches lines 655-665)
         if is_v8086_mode {
             self.sregs[BxSegregs::Gs as usize].cache.valid = 0;
@@ -1044,6 +1074,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let old_ss = self.sregs[BxSegregs::Ss as usize].selector.value as u64;
         let old_rsp = self.rsp();
 
+        // Bochs exception.cc long_mode_int \u2014 capture pre-transition CET state.
+        let old_cpl_cet = cpl;
+        let old_ss_dpl_cet = self.sregs[BxSegregs::Ss as usize].cache.dpl;
+        let return_lip_cet = self.get_laddr64(BxSegregs::Cs as usize, old_rip);
+        let mut new_ssp_cet: u64 = 0;
+        let mut check_ss_token = true;
+
         let rsp_for_cpl_x;
 
         if super::descriptor::is_code_segment_non_conforming(cs_descriptor.r#type)
@@ -1057,6 +1094,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rsp_for_cpl_x = self.get_rsp_from_tss(ist + 3)?;
             } else {
                 rsp_for_cpl_x = self.get_rsp_from_tss(cs_descriptor.dpl)?;
+            }
+
+            // Bochs exception.cc long_mode_int \u2014 inner-priv shadow-stack source.
+            if ist > 0 {
+                if self.shadow_stack_enabled(0) {
+                    let new_ssp_addr =
+                        self.msr.ia32_interrupt_ssp_table.wrapping_add((ist as u64) << 3);
+                    new_ssp_cet = self.system_read_qword(new_ssp_addr)?;
+                }
+            } else {
+                new_ssp_cet = self.msr.ia32_pl_ssp[cs_descriptor.dpl as usize];
             }
 
             // Align stack to 16 bytes
@@ -1097,6 +1145,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rsp_for_cpl_x = old_rsp;
             }
 
+            // Bochs exception.cc long_mode_int \u2014 same-priv shadow-stack source.
+            if ist > 0 {
+                if self.shadow_stack_enabled(cpl) {
+                    let new_ssp_addr =
+                        self.msr.ia32_interrupt_ssp_table.wrapping_add((ist as u64) << 3);
+                    new_ssp_cet = self.system_read_qword(new_ssp_addr)?;
+                }
+            } else {
+                new_ssp_cet = self.ssp();
+                check_ss_token = false;
+            }
+
             // Align stack to 16 bytes
             let mut rsp = rsp_for_cpl_x & !0xF;
 
@@ -1131,6 +1191,26 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 error_code: cs_err_code,
             });
         }
+
+        // Bochs exception.cc long_mode_int \u2014 unified CET epilogue (both same/inner priv).
+        if self.shadow_stack_enabled(old_cpl_cet) && old_cpl_cet == 3 {
+            self.msr.ia32_pl_ssp[3] = self.ssp();
+        }
+        let new_cpl_cet = self.cs_rpl();
+        if self.shadow_stack_enabled(new_cpl_cet) {
+            let old_ssp = self.ssp();
+            if check_ss_token {
+                self.shadow_stack_switch(new_ssp_cet)?;
+            }
+            if old_ss_dpl_cet != 3 {
+                self.call_far_shadow_stack_push(
+                    old_cs as u16,
+                    return_lip_cet,
+                    old_ssp,
+                )?;
+            }
+        }
+        self.track_indirect(new_cpl_cet);
 
         // if interrupt gate then set IF to 0
         if (gate_descriptor.r#type & 1) == 0 {

@@ -267,9 +267,9 @@ impl BxCpuIdTrait for AmdRyzen {
                 _ => (0, 0, 0, 0),
             },
 
-            // ── Leaf 0xD XSAVE — defer to generic reserved leaf for now;
-            //    full XSAVE area sizes live in the CPUID-leaf handler in
-            //    soft_int.rs / proc_ctrl.rs when XSAVE is exercised.
+            // ── Leaf 0xD XSAVE — generic reserved leaf; full XSAVE area sizes
+            //    live in the CPUID-leaf handler in soft_int.rs / proc_ctrl.rs
+            //    when XSAVE is exercised.
             0x0000000D => (0, 0, 0, 0),
 
             // ── Extended leaves ──────────────────────────────────────────

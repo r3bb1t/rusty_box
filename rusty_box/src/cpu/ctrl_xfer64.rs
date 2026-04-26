@@ -55,6 +55,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Push BEFORE canonical check (matching C++ line 115)
         self.push_64(self.rip())?;
+        // Bochs ctrl_xfer64.cc CALL_Jq \u2014 shadow stack push only when displacement is non-zero.
+        let cpl = self.cs_rpl();
+        if instr.id() != 0 && self.shadow_stack_enabled(cpl) {
+            let rip = self.rip();
+            self.shadow_stack_push_64(rip)?;
+        }
 
         if !self.is_canonical(new_rip) {
             self.set_rsp(self.prev_rsp);
@@ -82,6 +88,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Push BEFORE canonical check (matching C++ line 146)
         self.push_64(self.rip())?;
+        let cpl = self.cs_rpl();
+        if self.shadow_stack_enabled(cpl) {
+            let rip = self.rip();
+            self.shadow_stack_push_64(rip)?;
+        }
 
         if !self.is_canonical(new_rip) {
             self.set_rsp(self.prev_rsp);
@@ -94,6 +105,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // RSP_COMMIT (matching C++ line 160)
         self.speculative_rsp = false;
+        self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
         self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, new_rip);
         Ok(())
     }
@@ -176,8 +188,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_rip(new_rip);
 
-        // BX_NEXT_TRACE(i) — matching C++ ctrl_xfer64.cc
+        // BX_NEXT_TRACE(i) \u2014 matching C++ ctrl_xfer64.cc
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
         self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, new_rip);
         Ok(())
     }
@@ -228,12 +241,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let seg = BxSegregs::from(instr.seg());
         let new_rip = self.read_virtual_qword_64(seg, eaddr)?;
 
-        // RSP_SPECULATIVE — matching CALL_EqR pattern (C++ ctrl_xfer64.cc)
+        // RSP_SPECULATIVE \u2014 matching CALL_EqR pattern (C++ ctrl_xfer64.cc)
         self.speculative_rsp = true;
         self.prev_rsp = self.rsp();
 
-        // Push BEFORE canonical check — matching CALL_EqR (C++ ctrl_xfer64.cc)
+        // Push BEFORE canonical check \u2014 matching CALL_EqR (C++ ctrl_xfer64.cc)
         self.push_64(self.rip())?;
+        let cpl = self.cs_rpl();
+        if self.shadow_stack_enabled(cpl) {
+            let rip = self.rip();
+            self.shadow_stack_push_64(rip)?;
+        }
 
         if !self.is_canonical(new_rip) {
             self.set_rsp(self.prev_rsp);
@@ -244,8 +262,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_rip(new_rip);
 
-        // RSP_COMMIT — matching CALL_EqR (C++ ctrl_xfer64.cc)
+        // RSP_COMMIT \u2014 matching CALL_EqR (C++ ctrl_xfer64.cc)
         self.speculative_rsp = false;
+        self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
         self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, new_rip);
         Ok(())
     }
@@ -273,8 +292,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_rip(new_rip);
 
-        // BX_NEXT_TRACE(i) — matching JMP_EqR pattern (C++ ctrl_xfer64.cc)
+        // BX_NEXT_TRACE(i) \u2014 matching JMP_EqR pattern (C++ ctrl_xfer64.cc)
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
         self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, new_rip);
         Ok(())
     }

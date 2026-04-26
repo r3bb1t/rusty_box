@@ -3,6 +3,7 @@
 use tracing::info;
 
 use super::Result;
+#[cfg(feature = "alloc")]
 use crate::cpu::avx::AMX;
 
 use crate::{
@@ -18,7 +19,7 @@ use crate::{
         i387::BxPackedRegister,
         segment_ctrl_pro::parse_selector,
         svm::VmcbCache,
-        vmcs::BX_INVALID_VMCSPTR,
+        vmx::BX_INVALID_VMCSPTR,
         xmm::MXCSR_RESET,
         BxCpuC,
     },
@@ -61,6 +62,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.xsave_xrestor_init();
 
+        #[cfg(feature = "alloc")]
         {
             self.amx = if self.bx_cpuid_support_isa_extension(X86Feature::IsaAmx) {
                 Some(alloc::boxed::Box::new(AMX::default()))
@@ -68,6 +70,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 None
             };
         }
+        // No-alloc builds carry an `Option<Infallible>` placeholder \u2014 it is
+        // permanently `None` by construction, so AMX is unsupported and no init is
+        // required.
 
         self.vmcb = if self.bx_cpuid_support_isa_extension(X86Feature::IsaSvm) {
             Some(VmcbCache::default())
@@ -78,9 +83,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.init_msrs();
 
         self.smram_map = Self::init_smram()?;
-
-        // Skip msrs stuff for now
-        self.init_vmcs();
 
         self.init_statistics();
 
@@ -619,15 +621,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Mirrors the C++ BX_CPU_C::set_VMCSPTR behavior
     fn set_VMCSPTR(&mut self, vmxptr: u64) {
         self.vmcsptr = vmxptr;
-        // Note: In a full implementation, this would also set up vmcshostptr
-        // via getHostMemAddr() and configure memory type (vmcs_memtype).
-        // For now, a simple assignment suffices.
+        // Bochs set_VMCSPTR additionally derives a host-side vmcshostptr via
+        // getHostMemAddr() and a vmcs_memtype; rusty_box accesses the VMCS by
+        // guest-physical address, so the host mapping is not maintained here.
     }
 
     /// Sets the VMCB pointer for SVM mode
     /// Mirrors the C++ BX_CPU_C::set_VMCBPTR behavior
     fn set_VMCBPTR(&mut self, _vmcb_ptr: u64) {
-        // Note: In a full implementation, this would set up the VMCB host
-        // pointer and memory mapping. For now, this is a placeholder.
+        // Bochs set_VMCBPTR additionally maintains a host-side VMCB pointer
+        // and SVM memory type; rusty_box accesses the VMCB by guest-physical
+        // address, so the host mapping is not maintained here.
     }
 }

@@ -100,6 +100,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let dst = instr.dst() as usize;
         let new_eip = self.get_gpr32(dst);
         self.branch_near32(new_eip)?;
+        self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
         self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip());
         Ok(())
     }
@@ -111,6 +112,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let seg = BxSegregs::from(instr.seg());
         let new_eip = self.v_read_dword(seg, eaddr)?;
         self.branch_near32(new_eip)?;
+        self.track_indirect_if_not_suppressed(instr.seg_override_cet(), self.cs_rpl());
         self.on_ucnear_branch(super::instrumentation::BranchType::JmpIndirect, self.rip());
         Ok(())
     }
@@ -135,6 +137,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Push return address
         self.push_32(eip)?;
+        // Bochs ctrl_xfer32.cc CALL_Jd \u2014 shadow stack push only when displacement is non-zero.
+        let cpl = self.cs_rpl();
+        if disp != 0 && self.shadow_stack_enabled(cpl) {
+            self.shadow_stack_push_32(eip)?;
+        }
 
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
 
@@ -151,7 +158,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eip = self.eip();
 
         self.push_32(eip)?;
+        let cpl = self.cs_rpl();
+        if self.shadow_stack_enabled(cpl) {
+            self.shadow_stack_push_32(eip)?;
+        }
         self.branch_near32(new_eip)?;
+        self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
         self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip());
         Ok(())
     }
@@ -168,7 +180,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             tracing::trace!("CALL m32: [{:?}:{:#010x}] -> EIP={:#010x} from RIP={:#010x}", seg, eaddr, new_eip, self.prev_rip);
         }
         self.push_32(eip)?;
+        let cpl = self.cs_rpl();
+        if self.shadow_stack_enabled(cpl) {
+            self.shadow_stack_push_32(eip)?;
+        }
         self.branch_near32(new_eip)?;
+        self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
         self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, self.rip());
         Ok(())
     }

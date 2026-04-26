@@ -142,7 +142,16 @@ const PAGING_LEGACY_PAE_RESERVED_BITS: u64 = PAGING_PAE_PHY_RESERVED_BITS | 0x7F
 // PAE PDE 2MB: bits 20:13 must be zero + PHY reserved
 const PAGING_PAE_PDE2M_RESERVED_BITS: u64 = PAGING_PAE_PHY_RESERVED_BITS | 0x001F_E000;
 
-// PAE PDPTE reserved: PHY + bits 63:52, 8:5, 2:1
+// PAE PDPTE reserved bits — matches Bochs `PAGING_PAE_PDPTE_RESERVED_BITS`
+// (cpu/paging.cc:953): PHY-reserved | bits 63:52 | bits 8:5 | bits 2:1.
+//
+// Bochs/Intel deviation: Intel SDM Vol 3A Table 4-8 marks bits 62:52 (and bit
+// 63) as `Ignored` for legacy PAE PDPTE — only bits 51:M are reserved up
+// top. Bochs treats bits 63:52 as reserved-must-be-zero. We match Bochs because
+// the project goal is Bochs 1:1 parity; both the legacy PAE walker and the
+// `CheckPDPTR` helper reject any present PDPTE with these bits set. If a guest
+// OS sets bits 63:52 in a PDPTE we will raise #GP(0) where Intel-strict
+// hardware would silently ignore.
 const PAGING_PAE_PDPTE_RESERVED_BITS: u64 = PAGING_PAE_PHY_RESERVED_BITS | 0xFFF0_0000_0000_01E6;
 
 // Long mode PDPTE 1GB: bits 29:13 + PHY reserved

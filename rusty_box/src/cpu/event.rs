@@ -125,6 +125,17 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.poll_vmx_preemption_timer();
         }
 
+        // Bochs vapic.cc / event.cc — process posted interrupts at the
+        // start of the Priority-5 external-event check so a pending
+        // notification clears PID.ON and raises
+        // BX_EVENT_PENDING_VMX_VIRTUAL_INTR before the interrupt-window
+        // VMEXIT path runs.
+        if self.in_vmx_guest && self.posted_interrupt_pending() {
+            if let Err(e) = self.process_posted_interrupts() {
+                tracing::warn!("posted-interrupt processing failed: {:?}", e);
+            }
+        }
+
         if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
             // STI/MOV SS shadow — skip all external interrupts this boundary
             // (Bochs event.cc)

@@ -712,6 +712,12 @@ impl BxLocalApic {
 
         match apic_reg {
             // TPR (apic.cc)
+            //
+            // The TPR-threshold VMEXIT (Bochs vapic.cc) is currently only
+            // re-evaluated from the CR8 write path in crregs.rs because the
+            // Apic struct does not own a back-reference to BxCpuC. xAPIC
+            // MMIO TPR writes therefore won't trigger the threshold VMEXIT
+            // until that hook is wired in via the CPU memory-write site.
             0x080 => {
                 self.set_tpr((value & 0xFF) as u8);
             }

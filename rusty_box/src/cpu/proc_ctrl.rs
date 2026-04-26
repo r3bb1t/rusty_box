@@ -339,6 +339,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return Ok(());
             }
         }
+        // Bochs crregs.cc CLTS: SVM CR0 write intercept after the VMX gate,
+        // before clearing TS. Bochs passes no EXITINFO1 (no source value for
+        // CLTS); we mirror that and pass 0.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(0) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Write as i32, 0, 0);
+        }
         let cr0_val = self.cr0.get32();
         self.cr0.set32(cr0_val & !(1u32 << 3));
         Ok(())
@@ -541,8 +547,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        // Bochs mwait.cc: VMX intercept. If guest without UMWAIT_TPAUSE_VMEXIT
-        // control bit → #UD. (Intercept plumbing ships in Session 6; #UD-only for now.)
+        // Bochs mwait.cc: VMX intercept. UMONITOR in a guest without the
+        // UMWAIT_TPAUSE_VMEXIT control bit is #UD; the full intercept-driven
+        // VMEXIT path is not wired here — #UD-only for now.
         if self.in_vmx_guest {
             tracing::trace!("UMONITOR: VMX guest without UMWAIT_TPAUSE_VMEXIT control, #UD");
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -626,8 +633,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        // Bochs mwait.cc: VMX intercept check (UMWAIT_TPAUSE_VMEXIT).
-        // Full intercept plumbing ships in Session 6.
+        // Bochs mwait.cc: VMX intercept check (UMWAIT_TPAUSE_VMEXIT). The
+        // intercept-driven VMEXIT path is not wired here — #UD-only for now.
         if self.in_vmx_guest {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
@@ -1366,6 +1373,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         {
             return Ok(());
         }
+        // Bochs crregs.cc MOV_RdDd: SVM DR read intercept after VMX, before read.
+        if self.in_svm_guest && self.svm_dr_read_intercepted(dr_idx) {
+            return self.svm_vmexit(
+                super::svm::SvmVmexit::Dr0Read as i32 + dr_idx as i32,
+                0,
+                0,
+            );
+        }
 
         let dr_idx = usize::from(dr_idx);
         let dst_gpr = usize::from(dst_gpr);
@@ -1406,6 +1421,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             && self.vmexit_check_dr_access(false, dr_idx, src_gpr)?
         {
             return Ok(());
+        }
+        // Bochs crregs.cc MOV_DdRd: SVM DR write intercept after VMX, before write.
+        if self.in_svm_guest && self.svm_dr_write_intercepted(dr_idx) {
+            return self.svm_vmexit(
+                super::svm::SvmVmexit::Dr0Write as i32 + dr_idx as i32,
+                0,
+                0,
+            );
         }
 
         let dr_idx = usize::from(dr_idx);
@@ -3123,7 +3146,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn xsave_xtilecfg_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
         let mut buf = [0u8; 64];
-        if let Some(amx) = self.amx.as_ref() {
+        if let Some(amx) = self.amx_ref() {
             if amx.tiles_configured() {
                 buf[0] = amx.palette_id as u8;
                 buf[1] = amx.start_row as u8;
@@ -3158,7 +3181,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let valid = buf[2..16].iter().all(|&b| b == 0)
             && buf[56..64].iter().all(|&b| b == 0)
             && palette_id <= 1;
-        if let Some(amx) = self.amx.as_mut() {
+        if let Some(amx) = self.amx_mut() {
             if !valid {
                 amx.clear();
                 return Ok(());
@@ -3176,7 +3199,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     fn xrstor_init_xtilecfg_state(&mut self) {
-        if let Some(amx) = self.amx.as_mut() {
+        if let Some(amx) = self.amx_mut() {
             amx.clear();
         }
     }
@@ -3184,7 +3207,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn xsave_xtiledata_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
         // Snapshot the 8×16×64 = 8192 byte tile buffer up front so the
         // &mut self write loop doesn't alias the AMX struct.
-        let tile_bytes: Option<[[u8; 1024]; 8]> = self.amx.as_ref().map(|amx| amx.tile);
+        let tile_bytes: Option<[[u8; 1024]; 8]> = self.amx_ref().map(|amx| amx.tile);
         let Some(tiles) = tile_bytes else { return Ok(()); };
         for (tile_idx, tile) in tiles.iter().enumerate() {
             for (row_idx, row) in tile.chunks_exact(super::avx::BX_TILE_ROW_BYTES).enumerate() {
@@ -3218,7 +3241,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 }
             }
         }
-        if let Some(amx) = self.amx.as_mut() {
+        if let Some(amx) = self.amx_mut() {
             amx.tile = fresh_tiles;
             // Bochs xrstor_tiledata_state marks every tile as used after restore.
             for tile_idx in 0..super::avx::BX_TILE_REGISTERS {
@@ -3229,7 +3252,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     fn xrstor_init_xtiledata_state(&mut self) {
-        if let Some(amx) = self.amx.as_mut() {
+        if let Some(amx) = self.amx_mut() {
             for tile_idx in 0..super::avx::BX_TILE_REGISTERS {
                 amx.clear_tile_used(tile_idx);
             }
@@ -3527,7 +3550,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // XTILECFG (bit 17) — Bochs xsave.cc xsave_tilecfg_state_xinuse.
         if (rfbm & (1 << 17)) != 0 {
-            if let Some(amx) = self.amx.as_ref() {
+            if let Some(amx) = self.amx_ref() {
                 if amx.tiles_configured() {
                     xinuse |= 1 << 17;
                 }
@@ -3536,7 +3559,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // XTILEDATA (bit 18) — Bochs xsave.cc xsave_tiledata_state_xinuse.
         if (rfbm & (1 << 18)) != 0 {
-            if let Some(amx) = self.amx.as_ref() {
+            if let Some(amx) = self.amx_ref() {
                 if amx.tile_use_tracker != 0 {
                     xinuse |= 1 << 18;
                 }

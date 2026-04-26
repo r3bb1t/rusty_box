@@ -1425,9 +1425,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::Hlt => self.hlt(instr),
             Opcode::Wbinvd => self.wbinvd(instr),
             Opcode::Invd => self.invd(instr),
-            // VMX stubs — #GP(0) in VMX root, #UD outside VMX
-            // VMX — operation mode, VMCS pointer management, and minimal
-            // VMREAD/VMWRITE. VMLAUNCH/VMRESUME still #UD pending Session 5.
+            // VMX — operation mode, VMCS pointer management, VMREAD/VMWRITE,
+            // and the VMLAUNCH/VMRESUME entry path. Bochs cpu/vmx.cc.
             Opcode::VmxonMq => self.vmxon(instr),
             Opcode::Vmxoff => self.vmxoff(instr),
             Opcode::VmclearMq => self.vmclear(instr),
@@ -1439,6 +1438,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::VmptrstMq => self.vmptrst(instr),
             Opcode::Vmlaunch => self.vmlaunch(instr),
             Opcode::Vmresume => self.vmresume(instr),
+            Opcode::Vmcall => self.vmcall(instr),
+            Opcode::Vmfunc => self.vmfunc(instr),
             Opcode::Invlpg => self.invlpg(instr),
             Opcode::Invpcid => self.invpcid(instr),
             Opcode::Invept => self.invept(instr),
@@ -1518,7 +1519,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // 64-bit MOV CRn, Rq — proper 64-bit handlers (CR2 is full 64-bit, CR0/CR4 check upper bits)
             Opcode::MovCr0rq => { self.mov_cr0_rq(instr)?; Ok(()) },
             Opcode::MovCr2rq => { self.mov_cr2_rq(instr)?; Ok(()) },
-            Opcode::MovCr3rq => { self.mov_cr3_rd(instr)?; Ok(()) }, // CR3 already handles 64-bit
+            Opcode::MovCr3rq => { self.mov_cr3_rq(instr)?; Ok(()) },
             Opcode::MovCr4rq => { self.mov_cr4_rq(instr)?; Ok(()) },
             Opcode::MovRqDq => self.mov_rq_dq(instr),
             Opcode::MovDqRq => self.mov_dq_rq(instr),

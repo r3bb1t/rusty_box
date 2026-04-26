@@ -133,9 +133,7 @@ pub(super) mod tasking;
 pub(super) mod tlb;
 pub(super) mod uintr;
 pub(super) mod vm8086;
-pub(super) mod vmcs;
 pub(super) mod vmx;
-pub(super) mod vmx_ctrls;
 pub(super) mod xmm;
 
 pub use cpu::BxCpuC;

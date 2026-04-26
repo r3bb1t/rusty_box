@@ -24,6 +24,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
+        // Bochs protect_ctrl.cc LGDT_Ms — SVM_INTERCEPT0_GDTR_WRITE.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_GDTR_WRITE)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::GdtrWrite as i32, 0, 0);
+        }
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         // Bochs protect_ctrl.cc LGDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
@@ -63,6 +69,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
         }
+        // Bochs protect_ctrl.cc SGDT_Ms — SVM_INTERCEPT0_GDTR_READ.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_GDTR_READ)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::GdtrRead as i32, 0, 0);
+        }
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         // Bochs protect_ctrl.cc SGDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
@@ -95,6 +107,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
+        // Bochs protect_ctrl.cc LIDT_Ms — SVM_INTERCEPT0_IDTR_WRITE.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IDTR_WRITE)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::IdtrWrite as i32, 0, 0);
+        }
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         // Bochs protect_ctrl.cc LIDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
@@ -133,6 +151,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
         }
+        // Bochs protect_ctrl.cc SIDT_Ms — SVM_INTERCEPT0_IDTR_READ.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IDTR_READ)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::IdtrRead as i32, 0, 0);
+        }
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         // Bochs protect_ctrl.cc SIDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
@@ -167,6 +191,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if cpl != 0 {
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
+        }
+        // Bochs protect_ctrl.cc SLDT_Ew — SVM_INTERCEPT0_LDTR_READ.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_LDTR_READ)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::LdtrRead as i32, 0, 0);
         }
         // Bochs protect_ctrl.cc SLDT_Ew — DESCRIPTOR_TABLE_VMEXIT gate. Qualification
         // carries the resolved address when the operand is memory; zero for register.
@@ -236,6 +266,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if cpl != 0 {
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
+        }
+        // Bochs protect_ctrl.cc STR_Ew — SVM_INTERCEPT0_TR_READ.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_TR_READ)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::TrRead as i32, 0, 0);
         }
         // Bochs protect_ctrl.cc STR_Ew — DESCRIPTOR_TABLE_VMEXIT gate.
         if self.in_vmx_guest {
@@ -700,6 +736,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if cpl != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
+        // Bochs protect_ctrl.cc LGDT64_Ms — SVM_INTERCEPT0_GDTR_WRITE.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_GDTR_WRITE)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::GdtrWrite as i32, 0, 0);
+        }
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
         let laddr = self.get_laddr64(seg as usize, eaddr);
@@ -723,6 +765,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         if cpl != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        // Bochs protect_ctrl.cc LIDT64_Ms — SVM_INTERCEPT0_IDTR_WRITE.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IDTR_WRITE)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::IdtrWrite as i32, 0, 0);
         }
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -751,6 +799,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
         }
+        // Bochs protect_ctrl.cc SGDT64_Ms — SVM_INTERCEPT0_GDTR_READ.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_GDTR_READ)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::GdtrRead as i32, 0, 0);
+        }
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
         let laddr = self.get_laddr64(seg as usize, eaddr);
@@ -771,6 +825,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if cpl != 0 {
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
+        }
+        // Bochs protect_ctrl.cc SIDT64_Ms — SVM_INTERCEPT0_IDTR_READ.
+        if self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IDTR_READ)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::IdtrRead as i32, 0, 0);
         }
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());

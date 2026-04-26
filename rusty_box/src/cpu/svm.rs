@@ -1164,6 +1164,50 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             None => false,
         }
     }
+    /// Check if a CR-read intercept is set for register `idx`.
+    /// Bochs svm.h SVM_CR_READ_INTERCEPTED.
+    #[inline]
+    pub(super) fn svm_cr_read_intercepted(&self, idx: u8) -> bool {
+        debug_assert!(idx < 16);
+        match &self.vmcb {
+            Some(vmcb) => (vmcb.ctrls.cr_rd_ctrl & (1u16 << idx)) != 0,
+            None => false,
+        }
+    }
+
+    /// Check if a CR-write intercept is set for register `idx`.
+    /// Bochs svm.h SVM_CR_WRITE_INTERCEPTED.
+    #[inline]
+    pub(super) fn svm_cr_write_intercepted(&self, idx: u8) -> bool {
+        debug_assert!(idx < 16);
+        match &self.vmcb {
+            Some(vmcb) => (vmcb.ctrls.cr_wr_ctrl & (1u16 << idx)) != 0,
+            None => false,
+        }
+    }
+
+    /// Check if a DR-read intercept is set for register `idx`.
+    /// Bochs svm.h SVM_DR_READ_INTERCEPTED.
+    #[inline]
+    pub(super) fn svm_dr_read_intercepted(&self, idx: u8) -> bool {
+        debug_assert!(idx < 16);
+        match &self.vmcb {
+            Some(vmcb) => (vmcb.ctrls.dr_rd_ctrl & (1u16 << idx)) != 0,
+            None => false,
+        }
+    }
+
+    /// Check if a DR-write intercept is set for register `idx`.
+    /// Bochs svm.h SVM_DR_WRITE_INTERCEPTED.
+    #[inline]
+    pub(super) fn svm_dr_write_intercepted(&self, idx: u8) -> bool {
+        debug_assert!(idx < 16);
+        match &self.vmcb {
+            Some(vmcb) => (vmcb.ctrls.dr_wr_ctrl & (1u16 << idx)) != 0,
+            None => false,
+        }
+    }
+
 
     /// Check if an exception is intercepted by SVM.
     #[inline]
@@ -1277,6 +1321,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         port: u16,
         len: u32,
         direction_in: bool,
+        string: bool,
+        rep: bool,
+        asize_bits: u8, // 0 for non-string, 16/32/64 for string
     ) -> super::Result<()> {
         if !self.in_svm_guest {
             return Ok(());
@@ -1305,6 +1352,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             1 => qualification |= 1 << 4, // SVM_VMEXIT_IO_INSTR_LEN8
             2 => qualification |= 1 << 5, // SVM_VMEXIT_IO_INSTR_LEN16
             4 => qualification |= 1 << 6, // SVM_VMEXIT_IO_INSTR_LEN32
+            _ => {}
+        }
+        if string {
+            qualification |= 1 << 2; // SVM_VMEXIT_IO_INSTR_STR
+        }
+        if rep {
+            qualification |= 1 << 3; // SVM_VMEXIT_IO_INSTR_REP
+        }
+        match asize_bits {
+            16 => qualification |= 1 << 7, // SVM_VMEXIT_IO_INSTR_ASIZE16
+            32 => qualification |= 1 << 8, // SVM_VMEXIT_IO_INSTR_ASIZE32
+            64 => qualification |= 1 << 9, // SVM_VMEXIT_IO_INSTR_ASIZE64
             _ => {}
         }
         // EXITINFO2 is the next-instruction RIP. Bochs passes RIP as-is.
@@ -1649,8 +1708,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
-        // SKINIT requires TPM hardware — raise #UD
-        tracing::warn!("SKINIT: not implemented (requires TPM)");
+        // Bochs svm.cc::SKINIT — Bochs implements the SVM intercept (handled above)
+        // but panics on the post-intercept TPM trust-anchor work; rusty_box raises
+        // #UD instead of trying to emulate the TPM. The intercept itself is honest.
         self.exception(Exception::Ud, 0)
     }
 

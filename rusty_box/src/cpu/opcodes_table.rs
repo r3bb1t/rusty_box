@@ -169,7 +169,7 @@ pub(super) struct BxOpcodeEntry<I: BxCpuIdTrait, T: crate::cpu::instrumentation:
 ///
 /// # Returns
 /// - `Some(entry)` if the opcode has an entry in the table
-/// - `None` if the opcode is not yet implemented in the table
+/// - `None` if the opcode has no entry in the table
 ///
 /// # Note
 /// Since the table is not yet fully populated, this uses a match statement
@@ -1040,8 +1040,8 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait, T: crate::cpu::instrumentation::
         Ok(())
     }
 
-    // Match on opcode and return appropriate entry
-    // This is a placeholder - will be extended with all opcodes
+    // Match on opcode and return appropriate entry. The table is populated
+    // incrementally; opcodes without a match here fall through to `None`.
     match opcode {
         // Data transfer instructions - 32-bit
         Opcode::MovOp32GdEd => Some(BxOpcodeEntry {
