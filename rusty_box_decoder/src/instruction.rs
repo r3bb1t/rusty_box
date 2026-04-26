@@ -666,6 +666,14 @@ impl Instruction {
         self.displacement as u16
     }
 
+    /// Set the 32-bit displacement field. Mirrors `displ32u()` on the read
+    /// side; tests and synthetic-instruction builders use this when they
+    /// need to emit a memory operand without going through the byte decoder.
+    #[inline]
+    pub const fn set_displ32(&mut self, val: u32) {
+        self.displacement = val;
+    }
+
     // ============================================================
     // AVX/EVEX attribute accessors
     //
@@ -756,6 +764,22 @@ impl Instruction {
     pub const fn set_evex_b(&mut self, bit: u8) {
         let mut ib = self.imm_bytes();
         ib[2] = (ib[2] & !0x8) | ((bit & 1) << 3);
+        self.set_imm_bytes(ib);
+    }
+
+    /// Get EVEX.V' bit (5th bit of vvvv, repurposed as 5th bit of SIB index
+    /// for VSIB-form opcodes — VPGATHER*, VPSCATTER*, VGATHER*, VSCATTER*).
+    /// Returns 0 or 1.  Stored in `imm_bytes()[2]` bit 6.
+    #[inline]
+    pub const fn get_evex_v_prime(&self) -> u8 {
+        (self.imm_bytes()[2] >> 6) & 1
+    }
+
+    /// Set EVEX.V' bit
+    #[inline]
+    pub const fn set_evex_v_prime(&mut self, bit: u8) {
+        let mut ib = self.imm_bytes();
+        ib[2] = (ib[2] & !0x40) | ((bit & 1) << 6);
         self.set_imm_bytes(ib);
     }
 

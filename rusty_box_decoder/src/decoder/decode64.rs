@@ -217,6 +217,12 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     let mut evex_z: u8 = 0; // EVEX zeroing-masking
     let mut evex_b_flag: u8 = 0; // EVEX broadcast/RC/SAE
     let mut evex_aaa: u8 = 0; // EVEX opmask register
+    // EVEX-only extensions (5th bit) for the 32-vector register file:
+    //   R' extends ModRM.reg (`nnn`) to 5 bits.
+    //   V' extends `vvvv` to 5 bits for non-VSIB ops, OR extends the SIB
+    //   index field to 5 bits for VSIB ops (gather/scatter family).
+    let mut evex_r_prime: u8 = 0;
+    let mut evex_v_prime: u8 = 0;
 
     if b1 == 0xC4 || b1 == 0xC5 {
         // VEX prefix — in 64-bit mode, C4/C5 are always VEX (never LES/LDS)
@@ -334,7 +340,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         let rex_x_bit = if (p0 & 0x40) == 0 { 2u8 } else { 0u8 }; // ~X → REX.X (bit 1)
         let rex_b_bit = if (p0 & 0x20) == 0 { 1u8 } else { 0u8 }; // ~B → REX.B (bit 0)
         // R' from P0 bit 4 — extends R to 5 bits for EVEX register encoding
-        let _evex_r_prime = if (p0 & 0x10) == 0 { 1u8 } else { 0u8 }; // inverted
+        evex_r_prime = if (p0 & 0x10) == 0 { 1u8 } else { 0u8 }; // ~R' inverted, extends nnn to 5 bits
 
         // P1: W(7) ~vvvv(6:3) 1(2) pp(1:0)
         // Bit 2 must be 1
@@ -355,7 +361,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         evex_b_flag = (p2 >> 4) & 1;
         evex_aaa = p2 & 0x07;
         // V' extends vvvv to 5 bits (inverted)
-        let _evex_v_prime = if (p2 & 0x08) == 0 { 1u8 } else { 0u8 };
+        evex_v_prime = if (p2 & 0x08) == 0 { 1u8 } else { 0u8 }; // ~V' inverted, extends vvvv (or VSIB index) to 5 bits
 
         rex_prefix = rex_b_bit | rex_x_bit | rex_r_bit;
 
@@ -521,6 +527,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         if (rex_prefix & 0x04) != 0 {
             nnn |= 8;
         } // REX.R
+        // EVEX.R' extends nnn to 5 bits for the 32-vector register file.
+        // For non-EVEX paths `evex_r_prime` is zero so this is a no-op.
+        nnn |= (evex_r_prime as u32) << 4;
         if (rex_prefix & 0x01) != 0 {
             rm |= 8;
         } // REX.B
@@ -766,6 +775,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     if is_evex {
         instr.set_opmask(evex_aaa);
         instr.set_evex_b(evex_b_flag);
+        instr.set_evex_v_prime(evex_v_prime);
         instr.set_zero_masking(evex_z);
         // EVEX.b in register form implies 512-bit vector length
         if evex_b_flag != 0 && (metainfo1_bits & MetaInfoFlags::ModC0.bits()) != 0 {
