@@ -32,10 +32,7 @@ impl PagePermissions {
         let mut bitmap = [0u8; MAX_PERM_PAGES];
         let bits = MemPerms::ALL.bits();
         bitmap[..page_count].fill(bits);
-        Self {
-            bitmap,
-            page_count,
-        }
+        Self { bitmap, page_count }
     }
 
     /// Set permissions for a range of physical addresses.

@@ -36,9 +36,8 @@ use super::hooks::{
     InvalidInsnHook, IoHook, MemHook, MemUnmappedHook,
 };
 use super::types::{
-    BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, IoHookEvent,
-    LinAccess, MemPermViolation, MemUnmapped,
-    MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType, TlbCntrl,
+    BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, IoHookEvent, LinAccess, MemPermViolation,
+    MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType, TlbCntrl,
 };
 #[cfg(feature = "instrumentation")]
 use super::types::{HookHandle, IoHookType, MemAccessRW, MemHookEvent, MemHookType};
@@ -99,7 +98,6 @@ pub struct InstrumentationRegistry<T: Instrumentation = ()> {
     /// returned" so future sentinel use is possible.
     #[cfg(feature = "instrumentation")]
     next_handle: u64,
-
 }
 
 impl<T: Instrumentation + Default> Default for InstrumentationRegistry<T> {
@@ -149,7 +147,10 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     /// occupancy. Call after any mutation that changes what's installed.
     pub fn refresh_active(&mut self) {
         #[allow(unused_mut)]
-        let mut m = self.tracer.as_ref().map_or(HookMask::empty(), |t| t.active_hooks());
+        let mut m = self
+            .tracer
+            .as_ref()
+            .map_or(HookMask::empty(), |t| t.active_hooks());
 
         #[cfg(feature = "instrumentation")]
         {
@@ -256,10 +257,7 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     }
 
     #[cfg(feature = "instrumentation")]
-    pub fn add_hw_interrupt(
-        &mut self,
-        cb: Box<dyn FnMut(&HwInterruptEvent) + Send>,
-    ) -> HookHandle {
+    pub fn add_hw_interrupt(&mut self, cb: Box<dyn FnMut(&HwInterruptEvent) + Send>) -> HookHandle {
         let handle = self.mint_handle();
         self.hw_intr_hooks.push(HwIntrHook { handle, cb });
         self.active |= HookMask::HW_INTERRUPT;
@@ -325,10 +323,7 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     }
 
     #[cfg(feature = "instrumentation")]
-    pub fn add_invalid_insn(
-        &mut self,
-        cb: Box<dyn FnMut(u64) -> bool + Send>,
-    ) -> HookHandle {
+    pub fn add_invalid_insn(&mut self, cb: Box<dyn FnMut(u64) -> bool + Send>) -> HookHandle {
         let handle = self.mint_handle();
         self.invalid_insn_hooks.push(InvalidInsnHook { handle, cb });
         self.active |= HookMask::INVALID_INSN;
@@ -386,12 +381,16 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
 
     #[inline]
     pub fn fire_reset(&mut self, reset_type: ResetType) {
-        if let Some(t) = self.tracer.as_mut() { t.reset(reset_type); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.reset(reset_type);
+        }
     }
 
     #[inline]
     pub fn fire_before_execution(&mut self, rip: u64, instr: &Instruction) {
-        if let Some(t) = self.tracer.as_mut() { t.before_execution(rip, instr); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.before_execution(rip, instr);
+        }
         #[cfg(feature = "instrumentation")]
         for h in &mut self.code_hooks {
             if h.range.contains(rip) {
@@ -402,7 +401,9 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
 
     #[inline]
     pub fn fire_after_execution(&mut self, rip: u64, instr: &Instruction) {
-        if let Some(t) = self.tracer.as_mut() { t.after_execution(rip, instr); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.after_execution(rip, instr);
+        }
         #[cfg(feature = "instrumentation")]
         for h in &mut self.code_after_hooks {
             if h.range.contains(rip) {
@@ -413,22 +414,30 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
 
     #[inline]
     pub fn fire_repeat_iteration(&mut self, rip: u64, instr: &Instruction) {
-        if let Some(t) = self.tracer.as_mut() { t.repeat_iteration(rip, instr); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.repeat_iteration(rip, instr);
+        }
     }
 
     #[inline]
     pub fn fire_opcode(&mut self, ev: &OpcodeEvent) {
-        if let Some(t) = self.tracer.as_mut() { t.opcode(ev); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.opcode(ev);
+        }
     }
 
     #[inline]
     pub fn fire_hlt(&mut self) {
-        if let Some(t) = self.tracer.as_mut() { t.hlt(); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.hlt();
+        }
     }
 
     #[inline]
     pub fn fire_mwait(&mut self, ev: &MwaitEvent) {
-        if let Some(t) = self.tracer.as_mut() { t.mwait(ev); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.mwait(ev);
+        }
     }
 
     /// Unified branch-event fire. Replaces the 4 Bochs-style callbacks
@@ -436,7 +445,9 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     /// appropriate `BranchEvent` variant at the callsite.
     #[inline]
     pub fn fire_branch(&mut self, ev: &BranchEvent) {
-        if let Some(t) = self.tracer.as_mut() { t.branch(ev); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.branch(ev);
+        }
         #[cfg(feature = "instrumentation")]
         if !self.branch_hooks.is_empty() {
             let src_rip = ev.src_rip();
@@ -450,7 +461,9 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
 
     #[inline]
     pub fn fire_interrupt(&mut self, vector: u8) {
-        if let Some(t) = self.tracer.as_mut() { t.interrupt(vector); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.interrupt(vector);
+        }
         #[cfg(feature = "instrumentation")]
         for h in &mut self.intr_hooks {
             (h.cb)(vector);
@@ -459,7 +472,9 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
 
     #[inline]
     pub fn fire_exception(&mut self, vector: u8, error_code: u32) {
-        if let Some(t) = self.tracer.as_mut() { t.exception(vector, error_code); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.exception(vector, error_code);
+        }
         #[cfg(feature = "instrumentation")]
         for h in &mut self.exception_hooks {
             (h.cb)(vector, error_code);
@@ -468,7 +483,9 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
 
     #[inline]
     pub fn fire_hwinterrupt(&mut self, ev: &HwInterruptEvent) {
-        if let Some(t) = self.tracer.as_mut() { t.hwinterrupt(ev); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.hwinterrupt(ev);
+        }
         #[cfg(feature = "instrumentation")]
         for h in &mut self.hw_intr_hooks {
             (h.cb)(ev);
@@ -477,7 +494,9 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
 
     #[inline]
     pub fn fire_lin_access(&mut self, ev: &LinAccess) {
-        if let Some(t) = self.tracer.as_mut() { t.lin_access(ev); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.lin_access(ev);
+        }
         #[cfg(feature = "instrumentation")]
         if !self.mem_hooks.is_empty() {
             // Map small accesses (≤8 bytes) to an integer value for closure hooks.
@@ -514,17 +533,23 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
 
     #[inline]
     pub fn fire_phy_access(&mut self, ev: &PhyAccess) {
-        if let Some(t) = self.tracer.as_mut() { t.phy_access(ev); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.phy_access(ev);
+        }
     }
 
     #[inline]
     pub fn fire_inp(&mut self, port: u16, size: u8) {
-        if let Some(t) = self.tracer.as_mut() { t.inp(port, size); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.inp(port, size);
+        }
     }
 
     #[inline]
     pub fn fire_inp2(&mut self, ev: &IoHookEvent) {
-        if let Some(t) = self.tracer.as_mut() { t.inp2(ev); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.inp2(ev);
+        }
         #[cfg(feature = "instrumentation")]
         for h in &mut self.io_hooks {
             if h.kind.matches(ev.access) && h.range.contains(ev.port) {
@@ -535,7 +560,9 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
 
     #[inline]
     pub fn fire_outp(&mut self, ev: &IoHookEvent) {
-        if let Some(t) = self.tracer.as_mut() { t.outp(ev); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.outp(ev);
+        }
         #[cfg(feature = "instrumentation")]
         for h in &mut self.io_hooks {
             if h.kind.matches(ev.access) && h.range.contains(ev.port) {
@@ -546,42 +573,58 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
 
     #[inline]
     pub fn fire_tlb_cntrl(&mut self, what: TlbCntrl) {
-        if let Some(t) = self.tracer.as_mut() { t.tlb_cntrl(what); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.tlb_cntrl(what);
+        }
     }
 
     #[inline]
     pub fn fire_cache_cntrl(&mut self, what: CacheCntrl) {
-        if let Some(t) = self.tracer.as_mut() { t.cache_cntrl(what); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.cache_cntrl(what);
+        }
     }
 
     #[inline]
     pub fn fire_clflush(&mut self, laddr: u64, paddr: u64) {
-        if let Some(t) = self.tracer.as_mut() { t.clflush(laddr, paddr); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.clflush(laddr, paddr);
+        }
     }
 
     #[inline]
     pub fn fire_prefetch_hint(&mut self, ev: &PrefetchEvent) {
-        if let Some(t) = self.tracer.as_mut() { t.prefetch_hint(ev); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.prefetch_hint(ev);
+        }
     }
 
     #[inline]
     pub fn fire_cpuid(&mut self) {
-        if let Some(t) = self.tracer.as_mut() { t.cpuid(); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.cpuid();
+        }
     }
 
     #[inline]
     pub fn fire_wrmsr(&mut self, msr: u32, value: u64) {
-        if let Some(t) = self.tracer.as_mut() { t.wrmsr(msr, value); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.wrmsr(msr, value);
+        }
     }
 
     #[inline]
     pub fn fire_vmexit(&mut self, reason: u32, qualification: u64) {
-        if let Some(t) = self.tracer.as_mut() { t.vmexit(reason, qualification); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.vmexit(reason, qualification);
+        }
     }
 
     #[inline]
     pub fn fire_block_start(&mut self, rip: u64, block_size: u16) {
-        if let Some(t) = self.tracer.as_mut() { t.block_start(rip, block_size); }
+        if let Some(t) = self.tracer.as_mut() {
+            t.block_start(rip, block_size);
+        }
         #[cfg(feature = "instrumentation")]
         for hook in &mut self.block_hooks {
             if hook.range.contains(rip) {
@@ -592,7 +635,11 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
 
     #[inline]
     pub fn fire_invalid_instruction(&mut self, rip: u64) -> bool {
-        if self.tracer.as_mut().map_or(false, |t| t.invalid_instruction(rip)) {
+        if self
+            .tracer
+            .as_mut()
+            .map_or(false, |t| t.invalid_instruction(rip))
+        {
             return true;
         }
         #[cfg(feature = "instrumentation")]
@@ -620,7 +667,9 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
 
     #[inline]
     pub fn fire_mem_perm_violation(&mut self, ev: &MemPermViolation) -> bool {
-        self.tracer.as_mut().map_or(false, |t| t.mem_perm_violation(ev))
+        self.tracer
+            .as_mut()
+            .map_or(false, |t| t.mem_perm_violation(ev))
     }
 }
 

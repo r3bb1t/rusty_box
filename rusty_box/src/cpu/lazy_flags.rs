@@ -16,11 +16,11 @@
 use crate::config::BxAddress;
 
 // Bit positions in auxbits (Bochs lazy_flags.h)
-const LF_BIT_SD: u32 = 0;   // Sign Flag Delta
-const LF_BIT_AF: u32 = 3;   // Adjust Flag
-const LF_BIT_PDB: u32 = 8;  // Parity Delta Byte (8 bits wide)
-const LF_BIT_PO: u32 = 30;  // Partial Overflow = CF ^ OF
-const LF_BIT_CF: u32 = 31;  // Carry Flag
+const LF_BIT_SD: u32 = 0; // Sign Flag Delta
+const LF_BIT_AF: u32 = 3; // Adjust Flag
+const LF_BIT_PDB: u32 = 8; // Parity Delta Byte (8 bits wide)
+const LF_BIT_PO: u32 = 30; // Partial Overflow = CF ^ OF
+const LF_BIT_CF: u32 = 31; // Carry Flag
 
 const LF_MASK_SD: u32 = 1 << LF_BIT_SD;
 const LF_MASK_AF: u32 = 1 << LF_BIT_AF;
@@ -142,15 +142,27 @@ impl BxLazyflagsEntry {
     /// `SET_FLAGS_OSZAPC_ADD_8(op1, op2, sum)`
     #[inline]
     pub(super) fn set_oszapc_add_8(&mut self, op1: u8, op2: u8, sum: u8) {
-        self.set_oszapc(8, add_cout_vec(op1 as u64, op2 as u64, sum as u64), sum as u64);
+        self.set_oszapc(
+            8,
+            add_cout_vec(op1 as u64, op2 as u64, sum as u64),
+            sum as u64,
+        );
     }
     #[inline]
     pub(super) fn set_oszapc_add_16(&mut self, op1: u16, op2: u16, sum: u16) {
-        self.set_oszapc(16, add_cout_vec(op1 as u64, op2 as u64, sum as u64), sum as u64);
+        self.set_oszapc(
+            16,
+            add_cout_vec(op1 as u64, op2 as u64, sum as u64),
+            sum as u64,
+        );
     }
     #[inline]
     pub(super) fn set_oszapc_add_32(&mut self, op1: u32, op2: u32, sum: u32) {
-        self.set_oszapc(32, add_cout_vec(op1 as u64, op2 as u64, sum as u64), sum as u64);
+        self.set_oszapc(
+            32,
+            add_cout_vec(op1 as u64, op2 as u64, sum as u64),
+            sum as u64,
+        );
     }
     #[inline]
     pub(super) fn set_oszapc_add_64(&mut self, op1: u64, op2: u64, sum: u64) {
@@ -160,15 +172,27 @@ impl BxLazyflagsEntry {
     /// `SET_FLAGS_OSZAPC_SUB_8(op1, op2, diff)`
     #[inline]
     pub(super) fn set_oszapc_sub_8(&mut self, op1: u8, op2: u8, diff: u8) {
-        self.set_oszapc(8, sub_cout_vec(op1 as u64, op2 as u64, diff as u64), diff as u64);
+        self.set_oszapc(
+            8,
+            sub_cout_vec(op1 as u64, op2 as u64, diff as u64),
+            diff as u64,
+        );
     }
     #[inline]
     pub(super) fn set_oszapc_sub_16(&mut self, op1: u16, op2: u16, diff: u16) {
-        self.set_oszapc(16, sub_cout_vec(op1 as u64, op2 as u64, diff as u64), diff as u64);
+        self.set_oszapc(
+            16,
+            sub_cout_vec(op1 as u64, op2 as u64, diff as u64),
+            diff as u64,
+        );
     }
     #[inline]
     pub(super) fn set_oszapc_sub_32(&mut self, op1: u32, op2: u32, diff: u32) {
-        self.set_oszapc(32, sub_cout_vec(op1 as u64, op2 as u64, diff as u64), diff as u64);
+        self.set_oszapc(
+            32,
+            sub_cout_vec(op1 as u64, op2 as u64, diff as u64),
+            diff as u64,
+        );
     }
     #[inline]
     pub(super) fn set_oszapc_sub_64(&mut self, op1: u64, op2: u64, diff: u64) {
@@ -178,27 +202,51 @@ impl BxLazyflagsEntry {
     /// `SET_FLAGS_OSZAP_ADD_*` — INC (preserves CF)
     #[inline]
     pub(super) fn set_oszap_add_16(&mut self, op1: u16, op2: u16, sum: u16) {
-        self.set_oszap(16, add_cout_vec(op1 as u64, op2 as u64, sum as u64), sum as u64);
+        self.set_oszap(
+            16,
+            add_cout_vec(op1 as u64, op2 as u64, sum as u64),
+            sum as u64,
+        );
     }
     #[inline]
     pub(super) fn set_oszap_add_8(&mut self, op1: u8, op2: u8, sum: u8) {
-        self.set_oszap(8, add_cout_vec(op1 as u64, op2 as u64, sum as u64), sum as u64);
+        self.set_oszap(
+            8,
+            add_cout_vec(op1 as u64, op2 as u64, sum as u64),
+            sum as u64,
+        );
     }
     #[inline]
     pub(super) fn set_oszap_sub_8(&mut self, op1: u8, op2: u8, diff: u8) {
-        self.set_oszap(8, sub_cout_vec(op1 as u64, op2 as u64, diff as u64), diff as u64);
+        self.set_oszap(
+            8,
+            sub_cout_vec(op1 as u64, op2 as u64, diff as u64),
+            diff as u64,
+        );
     }
     #[inline]
     pub(super) fn set_oszap_add_32(&mut self, op1: u32, op2: u32, sum: u32) {
-        self.set_oszap(32, add_cout_vec(op1 as u64, op2 as u64, sum as u64), sum as u64);
+        self.set_oszap(
+            32,
+            add_cout_vec(op1 as u64, op2 as u64, sum as u64),
+            sum as u64,
+        );
     }
     #[inline]
     pub(super) fn set_oszap_sub_32(&mut self, op1: u32, op2: u32, diff: u32) {
-        self.set_oszap(32, sub_cout_vec(op1 as u64, op2 as u64, diff as u64), diff as u64);
+        self.set_oszap(
+            32,
+            sub_cout_vec(op1 as u64, op2 as u64, diff as u64),
+            diff as u64,
+        );
     }
     #[inline]
     pub(super) fn set_oszap_sub_16(&mut self, op1: u16, op2: u16, diff: u16) {
-        self.set_oszap(16, sub_cout_vec(op1 as u64, op2 as u64, diff as u64), diff as u64);
+        self.set_oszap(
+            16,
+            sub_cout_vec(op1 as u64, op2 as u64, diff as u64),
+            diff as u64,
+        );
     }
     #[inline]
     pub(super) fn set_oszap_add_64(&mut self, op1: u64, op2: u64, sum: u64) {
@@ -288,7 +336,8 @@ impl BxLazyflagsEntry {
     pub(super) fn set_zf(&mut self, val: bool) {
         if val {
             // assert ZF: merge sign into SD, merge parity into PDB, then zero result
-            self.auxbits ^= (((self.result >> BX_LF_SIGN_BIT) as u32 & 1) << LF_BIT_SD) as BxAddress;
+            self.auxbits ^=
+                (((self.result >> BX_LF_SIGN_BIT) as u32 & 1) << LF_BIT_SD) as BxAddress;
             let temp_pdb = self.result as u32 & 0xFF;
             self.auxbits ^= ((temp_pdb) << LF_BIT_PDB) as BxAddress;
             self.result = 0;
@@ -300,12 +349,14 @@ impl BxLazyflagsEntry {
 
     #[inline]
     pub(super) fn set_af(&mut self, val: bool) {
-        self.auxbits = ((self.auxbits as u32 & !LF_MASK_AF) | ((val as u32) << LF_BIT_AF)) as BxAddress;
+        self.auxbits =
+            ((self.auxbits as u32 & !LF_MASK_AF) | ((val as u32) << LF_BIT_AF)) as BxAddress;
     }
 
     #[inline]
     pub(super) fn set_pf(&mut self, val: bool) {
         let temp_pdb = (self.result as u32 & 0xFF) ^ (!val as u32);
-        self.auxbits = ((self.auxbits as u32 & !LF_MASK_PDB) | (temp_pdb << LF_BIT_PDB)) as BxAddress;
+        self.auxbits =
+            ((self.auxbits as u32 & !LF_MASK_PDB) | (temp_pdb << LF_BIT_PDB)) as BxAddress;
     }
 }

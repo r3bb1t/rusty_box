@@ -54,8 +54,7 @@ use super::BxSegregs;
 /// The same index works for 8/16/32/64-bit access — the operand size
 /// determines which portion of the register is used.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum GprIndex {
     #[default]
     Rax = 0,
@@ -83,7 +82,6 @@ pub enum GprIndex {
     /// Nil register — reads as 0, writes discarded
     Nil = 19,
 }
-
 
 impl GprIndex {
     /// Number of architectural general-purpose registers (RAX-R15).
@@ -257,12 +255,33 @@ pub struct Instruction {
     pub(crate) displacement: u32,
 }
 
-
 // ============================================================================
 // Instruction accessor methods
 // ============================================================================
 
-const BX_LOCK_PREFIX_USED: u8 = 1;
+pub(crate) const LOCK_REP_SHIFT: u8 = 6;
+pub(crate) const LOCK_REP_VALUE_MASK: u8 = 0x03;
+pub(crate) const LOCK_REP_FIELD_MASK: u8 = LOCK_REP_VALUE_MASK << LOCK_REP_SHIFT;
+#[allow(dead_code)]
+pub(crate) const LOCK_REP_NONE: u8 = 0;
+pub(crate) const LOCK_REP_LOCK: u8 = 1;
+pub(crate) const LOCK_REP_REPNE: u8 = 2;
+pub(crate) const LOCK_REP_REP: u8 = 3;
+
+#[inline]
+pub(crate) const fn lock_rep_value_from_bits(bits: u8) -> u8 {
+    (bits >> LOCK_REP_SHIFT) & LOCK_REP_VALUE_MASK
+}
+
+#[inline]
+pub(crate) const fn set_lock_rep_value_bits(bits: u8, value: u8) -> u8 {
+    (bits & !LOCK_REP_FIELD_MASK) | ((value & LOCK_REP_VALUE_MASK) << LOCK_REP_SHIFT)
+}
+
+#[inline]
+pub(crate) const fn has_lock_prefix_bits(bits: u8) -> bool {
+    lock_rep_value_from_bits(bits) == LOCK_REP_LOCK
+}
 
 impl Instruction {
     // ============================================================
@@ -418,27 +437,26 @@ impl Instruction {
     /// Get lockRepUsedValue (0=none, 1=0xF0, 2=0xF2, 3=0xF3)
     #[inline]
     pub const fn lock_rep_used_value(&self) -> u8 {
-        (self.flags.bits() >> 6) & 0x3
+        lock_rep_value_from_bits(self.flags.bits())
     }
 
     /// Set lockRepUsed
     #[inline]
     pub fn set_lock_rep_used(&mut self, value: u8) {
-        let bits = self.flags.bits();
-        let new_bits = (bits & 0x3f) | (value << 6);
-        self.flags = InstructionFlags::from_bits_truncate(new_bits);
+        self.flags =
+            InstructionFlags::from_bits_retain(set_lock_rep_value_bits(self.flags.bits(), value));
     }
 
     /// Set lock prefix
     #[inline]
     pub fn set_lock(&mut self) {
-        self.set_lock_rep_used(BX_LOCK_PREFIX_USED);
+        self.set_lock_rep_used(LOCK_REP_LOCK);
     }
 
     /// Get lock prefix
     #[inline]
     pub const fn get_lock(&self) -> bool {
-        self.lock_rep_used_value() == BX_LOCK_PREFIX_USED
+        has_lock_prefix_bits(self.flags.bits())
     }
 
     /// Get modC0 (mod==0xC0 in ModRM — register form, no memory access)

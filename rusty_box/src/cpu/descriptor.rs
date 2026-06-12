@@ -40,7 +40,6 @@ struct Taskgate {
     tss_selector: u16, /* TSS segment selector */
 }
 
-
 #[derive(Clone, Copy)]
 pub(crate) enum Descriptor {
     Segment(DescriptorSegment),
@@ -107,7 +106,9 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_segment_base(&mut self, val: BxAddress) {
-        if let Self::Segment(s) = self { s.base = val }
+        if let Self::Segment(s) = self {
+            s.base = val
+        }
     }
 
     #[inline(always)]
@@ -119,7 +120,9 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_segment_limit_scaled(&mut self, val: u32) {
-        if let Self::Segment(s) = self { s.limit_scaled = val }
+        if let Self::Segment(s) = self {
+            s.limit_scaled = val
+        }
     }
 
     #[inline(always)]
@@ -131,7 +134,9 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_segment_g(&mut self, val: bool) {
-        if let Self::Segment(s) = self { s.g = val }
+        if let Self::Segment(s) = self {
+            s.g = val
+        }
     }
 
     #[inline(always)]
@@ -143,7 +148,9 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_segment_d_b(&mut self, val: bool) {
-        if let Self::Segment(s) = self { s.d_b = val }
+        if let Self::Segment(s) = self {
+            s.d_b = val
+        }
     }
 
     #[inline(always)]
@@ -155,7 +162,9 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_segment_l(&mut self, val: bool) {
-        if let Self::Segment(s) = self { s.l = val }
+        if let Self::Segment(s) = self {
+            s.l = val
+        }
     }
 
     #[inline(always)]
@@ -167,7 +176,9 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_segment_avl(&mut self, val: bool) {
-        if let Self::Segment(s) = self { s.avl = val }
+        if let Self::Segment(s) = self {
+            s.avl = val
+        }
     }
 
     // -- Gate accessors --
@@ -182,7 +193,9 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_gate_dest_offset(&mut self, val: u32) {
-        if let Self::Gate(g) = self { g.dest_offset = val }
+        if let Self::Gate(g) = self {
+            g.dest_offset = val
+        }
     }
 
     #[inline(always)]
@@ -194,7 +207,9 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_gate_dest_selector(&mut self, val: u16) {
-        if let Self::Gate(g) = self { g.dest_selector = val }
+        if let Self::Gate(g) = self {
+            g.dest_selector = val
+        }
     }
 
     #[inline(always)]
@@ -241,9 +256,9 @@ bitflags::bitflags! {
 }
 
 // ---- Backward-compat aliases (prefer SegAccess::<NAME> in new code) ----
-pub(super) const SEG_VALID_CACHE: u32   = SegAccess::VALID.bits();
-pub(super) const SEG_ACCESS_ROK: u32    = SegAccess::ROK.bits();
-pub(super) const SEG_ACCESS_WOK: u32    = SegAccess::WOK.bits();
+pub(super) const SEG_VALID_CACHE: u32 = SegAccess::VALID.bits();
+pub(super) const SEG_ACCESS_ROK: u32 = SegAccess::ROK.bits();
+pub(super) const SEG_ACCESS_WOK: u32 = SegAccess::WOK.bits();
 pub(super) const SEG_ACCESS_ROK4_G: u32 = SegAccess::ROK4G.bits();
 pub(super) const SEG_ACCESS_WOK4_G: u32 = SegAccess::WOK4G.bits();
 
@@ -322,8 +337,17 @@ impl BxDescriptor {
     /// Based on get_ar_byte in segment_ctrl_pro.cc
     pub(super) fn get_ar_byte(&self) -> u8 {
         let mut ar = AccessRights::empty();
-        if self.p { ar |= AccessRights::PRESENT; }
-        ar |= AccessRights::from_bits_retain(((self.dpl & 0x03) << 5) | if self.segment { AccessRights::SEGMENT.bits() } else { 0 });
+        if self.p {
+            ar |= AccessRights::PRESENT;
+        }
+        ar |= AccessRights::from_bits_retain(
+            ((self.dpl & 0x03) << 5)
+                | if self.segment {
+                    AccessRights::SEGMENT.bits()
+                } else {
+                    0
+                },
+        );
         ar |= AccessRights::from_bits_retain(self.r#type & 0x0F);
         ar.bits()
     }
@@ -376,14 +400,38 @@ impl SegTypeBits {
 }
 
 // Convenience free functions (matching original Bochs BX_SEGMENT_* macros)
-#[inline] pub fn is_code_segment(ty: u8) -> bool              { SegTypeBits::from_raw(ty).contains(SegTypeBits::CODE) }
-#[inline] pub fn is_data_segment(ty: u8) -> bool              { !is_code_segment(ty) }
-#[inline] pub fn is_code_segment_conforming(ty: u8) -> bool   { SegTypeBits::from_raw(ty).contains(SegTypeBits::CONFORMING) }
-#[inline] pub fn is_code_segment_non_conforming(ty: u8) -> bool { !is_code_segment_conforming(ty) }
-#[inline] pub fn is_data_segment_expand_down(ty: u8) -> bool  { SegTypeBits::from_raw(ty).contains(SegTypeBits::EXPAND_DOWN) }
-#[inline] pub fn is_code_segment_readable(ty: u8) -> bool     { SegTypeBits::from_raw(ty).contains(SegTypeBits::READABLE) }
-#[inline] pub fn is_data_segment_writable(ty: u8) -> bool     { SegTypeBits::from_raw(ty).contains(SegTypeBits::WRITABLE) }
-#[inline] pub fn is_segment_accessed(ty: u8) -> bool          { SegTypeBits::from_raw(ty).contains(SegTypeBits::ACCESSED) }
+#[inline]
+pub fn is_code_segment(ty: u8) -> bool {
+    SegTypeBits::from_raw(ty).contains(SegTypeBits::CODE)
+}
+#[inline]
+pub fn is_data_segment(ty: u8) -> bool {
+    !is_code_segment(ty)
+}
+#[inline]
+pub fn is_code_segment_conforming(ty: u8) -> bool {
+    SegTypeBits::from_raw(ty).contains(SegTypeBits::CONFORMING)
+}
+#[inline]
+pub fn is_code_segment_non_conforming(ty: u8) -> bool {
+    !is_code_segment_conforming(ty)
+}
+#[inline]
+pub fn is_data_segment_expand_down(ty: u8) -> bool {
+    SegTypeBits::from_raw(ty).contains(SegTypeBits::EXPAND_DOWN)
+}
+#[inline]
+pub fn is_code_segment_readable(ty: u8) -> bool {
+    SegTypeBits::from_raw(ty).contains(SegTypeBits::READABLE)
+}
+#[inline]
+pub fn is_data_segment_writable(ty: u8) -> bool {
+    SegTypeBits::from_raw(ty).contains(SegTypeBits::WRITABLE)
+}
+#[inline]
+pub fn is_segment_accessed(ty: u8) -> bool {
+    SegTypeBits::from_raw(ty).contains(SegTypeBits::ACCESSED)
+}
 
 // Keep the SegmentType enum for backward compat with existing match-based code
 #[derive(Debug)]
@@ -410,14 +458,30 @@ impl From<SegmentType> for u8 {
 }
 
 impl SegmentType {
-    pub fn is_code_segment(ty: u8) -> bool { is_code_segment(ty) }
-    pub fn is_code_segment_conforming(ty: u8) -> bool { is_code_segment_conforming(ty) }
-    pub fn is_data_segment_expand_down(ty: u8) -> bool { is_data_segment_expand_down(ty) }
-    pub fn is_code_segment_readable(ty: u8) -> bool { is_code_segment_readable(ty) }
-    pub fn is_data_segment_writable(ty: u8) -> bool { is_data_segment_writable(ty) }
-    pub fn is_segment_accessed(ty: u8) -> bool { is_segment_accessed(ty) }
-    pub fn is_data_segment(ty: u8) -> bool { is_data_segment(ty) }
-    pub fn is_code_segment_non_conforming(ty: u8) -> bool { is_code_segment_non_conforming(ty) }
+    pub fn is_code_segment(ty: u8) -> bool {
+        is_code_segment(ty)
+    }
+    pub fn is_code_segment_conforming(ty: u8) -> bool {
+        is_code_segment_conforming(ty)
+    }
+    pub fn is_data_segment_expand_down(ty: u8) -> bool {
+        is_data_segment_expand_down(ty)
+    }
+    pub fn is_code_segment_readable(ty: u8) -> bool {
+        is_code_segment_readable(ty)
+    }
+    pub fn is_data_segment_writable(ty: u8) -> bool {
+        is_data_segment_writable(ty)
+    }
+    pub fn is_segment_accessed(ty: u8) -> bool {
+        is_segment_accessed(ty)
+    }
+    pub fn is_data_segment(ty: u8) -> bool {
+        is_data_segment(ty)
+    }
+    pub fn is_code_segment_non_conforming(ty: u8) -> bool {
+        is_code_segment_non_conforming(ty)
+    }
 }
 
 #[derive(Debug, Clone, Default)]

@@ -1,5 +1,3 @@
-
-
 //! AVX-512F/DQ extract and insert instruction handlers for all lane sizes.
 //!
 //! Implements VEXTRACTI/F64x2, VEXTRACTI/F32x8, VEXTRACTI/F64x4,
@@ -17,16 +15,20 @@ use super::{
 /// Byte size for vector length
 #[inline]
 fn vl_bytes(vl: u8) -> usize {
-    match vl { 0 => 16, 1 => 32, _ => 64 }
+    match vl {
+        0 => 16,
+        1 => 32,
+        _ => 64,
+    }
 }
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
 fn dword_elements(vl: u8) -> usize {
     match vl {
-        0 => 4,   // 128-bit
-        1 => 8,   // 256-bit
-        _ => 16,  // 512-bit
+        0 => 4,  // 128-bit
+        1 => 8,  // 256-bit
+        _ => 16, // 512-bit
     }
 }
 
@@ -42,7 +44,10 @@ fn qword_elements(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, instr: &Instruction) -> u64 {
+fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    instr: &Instruction,
+) -> u64 {
     let k = instr.opmask();
     if k == 0 {
         u64::MAX // k0 = all elements active
@@ -54,7 +59,10 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, reg: u8) -> BxPackedZmmRegister {
+fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    reg: u8,
+) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 

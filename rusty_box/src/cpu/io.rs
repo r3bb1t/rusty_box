@@ -504,8 +504,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -525,8 +529,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -546,8 +554,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -573,7 +585,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_rcx(self.ecx() as u64);
                 return Ok(());
             }
-            if self.async_event != 0 { break; }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -592,81 +606,35 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Fast path: direct host memory write, matching Bochs FastRepINSW
         // (io.cc). DF=0 only, no pending async events.
-        if !self.get_df() && self.async_event == 0
-            && self.allow_io(port, 2)? {
-                while ecx != 0 {
-                    let edi = self.edi();
-                    // Pre-fault the destination word via RMW to populate TLB
-                    // and ensure the page is writable (Bochs io.cc).
-                    let _prefault = self.read_rmw_virtual_word(BxSegregs::Es, edi)?;
+        if !self.get_df() && self.async_event == 0 && self.allow_io(port, 2)? {
+            while ecx != 0 {
+                let edi = self.edi();
+                // Pre-fault the destination word via RMW to populate TLB
+                // and ensure the page is writable (Bochs io.cc).
+                let _prefault = self.read_rmw_virtual_word(BxSegregs::Es, edi)?;
 
-                    let laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+                let laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
 
-                    // Try to get a direct host pointer via TLB (Bochs v2h_write_byte)
-                    if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr) {
-                        // How many words fit in the remaining page space
-                        let words_fit_page = page_remaining / 2;
-                        if words_fit_page == 0 {
-                            break;
-                        }
-                        let chunk_words = (ecx as usize).min(words_fit_page);
+                // Try to get a direct host pointer via TLB (Bochs v2h_write_byte)
+                if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr) {
+                    // How many words fit in the remaining page space
+                    let words_fit_page = page_remaining / 2;
+                    if words_fit_page == 0 {
+                        break;
+                    }
+                    let chunk_words = (ecx as usize).min(words_fit_page);
 
-                        // Bulk path: try to read all chunk_words at once via inp_bulk.
-                        // This copies directly from the ATA buffer into guest RAM,
-                        // avoiding per-word port_in() dispatch overhead.
-                        let bulk_bytes = chunk_words * 2;
-                        // SAFETY: pointer and length validated by caller; memory region is valid
-                        let bulk_slice = unsafe {
-                            core::slice::from_raw_parts_mut(host_ptr, bulk_bytes)
-                        };
-                        let bytes_read = self.bulk_port_in(port, bulk_slice);
-                        if bytes_read >= 2 {
-                            let words_read = bytes_read / 2;
-                            let transferred = words_read as u32;
-                            let new_edi = edi.wrapping_add(transferred * 2);
-                            self.set_rdi(new_edi as u64);
-                            ecx -= transferred;
-                            self.set_ecx(ecx);
-                            self.icount += transferred as u64;
-                            if transferred > 1 {
-                                self.tickn_fastrep(transferred as usize - 1);
-                            }
-                            if self.async_event != 0 {
-                                break;
-                            }
-                            continue;
-                        }
-
-                        // Bulk returned 0 — per-word fallback within this chunk.
-                        // Matches Bochs FastRepINSW io.cc.
-                        for i in 0..chunk_words {
-                            let val = self.port_in(port, 2) as u16;
-                            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                            unsafe {
-                                let dst = host_ptr.add(i * 2) as *mut u16;
-                                dst.write_unaligned(val.to_le());
-                            }
-                            // Check for async events after each word (Bochs io.cc)
-                            if self.async_event != 0 {
-                                let transferred = (i + 1) as u32;
-                                let new_edi = edi.wrapping_add(transferred * 2);
-                                self.set_rdi(new_edi as u64);
-                                ecx -= transferred;
-                                self.set_ecx(ecx);
-                                self.icount += transferred as u64;
-                                if transferred > 1 {
-                                    self.tickn_fastrep(transferred as usize - 1);
-                                }
-                                // Bochs tail: assert_RF + RIP=prev_rip before stop (cpu.cc:462).
-                                self.assert_rf();
-                                self.set_rip(self.prev_rip);
-                                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                                return Ok(());
-                            }
-                        }
-
-                        // All chunk_words transferred successfully
-                        let transferred = chunk_words as u32;
+                    // Bulk path: try to read all chunk_words at once via inp_bulk.
+                    // This copies directly from the ATA buffer into guest RAM,
+                    // avoiding per-word port_in() dispatch overhead.
+                    let bulk_bytes = chunk_words * 2;
+                    // SAFETY: pointer and length validated by caller; memory region is valid
+                    let bulk_slice =
+                        unsafe { core::slice::from_raw_parts_mut(host_ptr, bulk_bytes) };
+                    let bytes_read = self.bulk_port_in(port, bulk_slice);
+                    if bytes_read >= 2 {
+                        let words_read = bytes_read / 2;
+                        let transferred = words_read as u32;
                         let new_edi = edi.wrapping_add(transferred * 2);
                         self.set_rdi(new_edi as u64);
                         ecx -= transferred;
@@ -675,17 +643,61 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                         if transferred > 1 {
                             self.tickn_fastrep(transferred as usize - 1);
                         }
-
                         if self.async_event != 0 {
                             break;
                         }
                         continue;
                     }
 
-                    // get_host_write_ptr returned None — fall to per-word path
-                    break;
+                    // Bulk returned 0 — per-word fallback within this chunk.
+                    // Matches Bochs FastRepINSW io.cc.
+                    for i in 0..chunk_words {
+                        let val = self.port_in(port, 2) as u16;
+                        // SAFETY: host pointer validated during TLB fill; offset within page bounds
+                        unsafe {
+                            let dst = host_ptr.add(i * 2) as *mut u16;
+                            dst.write_unaligned(val.to_le());
+                        }
+                        // Check for async events after each word (Bochs io.cc)
+                        if self.async_event != 0 {
+                            let transferred = (i + 1) as u32;
+                            let new_edi = edi.wrapping_add(transferred * 2);
+                            self.set_rdi(new_edi as u64);
+                            ecx -= transferred;
+                            self.set_ecx(ecx);
+                            self.icount += transferred as u64;
+                            if transferred > 1 {
+                                self.tickn_fastrep(transferred as usize - 1);
+                            }
+                            // Bochs tail: assert_RF + RIP=prev_rip before stop (cpu.cc:462).
+                            self.assert_rf();
+                            self.set_rip(self.prev_rip);
+                            self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                            return Ok(());
+                        }
+                    }
+
+                    // All chunk_words transferred successfully
+                    let transferred = chunk_words as u32;
+                    let new_edi = edi.wrapping_add(transferred * 2);
+                    self.set_rdi(new_edi as u64);
+                    ecx -= transferred;
+                    self.set_ecx(ecx);
+                    self.icount += transferred as u64;
+                    if transferred > 1 {
+                        self.tickn_fastrep(transferred as usize - 1);
+                    }
+
+                    if self.async_event != 0 {
+                        break;
+                    }
+                    continue;
                 }
+
+                // get_host_write_ptr returned None — fall to per-word path
+                break;
             }
+        }
 
         // Per-word fallback (handles DF=1, non-TLB-resolvable pages, or remainder)
         // Per-word fallback Bochs cpu.cc:395-467 repeat(): natural exit returns;
@@ -701,7 +713,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_rcx(self.ecx() as u64);
                 return Ok(());
             }
-            if self.async_event != 0 { break; }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -721,82 +735,36 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Fast path for IDE data ports: direct host memory write.
         // Matches Bochs FastRepINSW pattern (io.cc) adapted for dwords.
         // Only DF=0 (forward), no pending async events, I/O permission OK.
-        if !self.get_df() && self.async_event == 0
-            && self.allow_io(port, 4)? {
-                while ecx != 0 {
-                    let edi = self.edi();
-                    // Pre-fault the destination dword via RMW to populate TLB
-                    // and ensure the page is writable (Bochs io.cc).
-                    let _prefault = self.read_rmw_virtual_dword(BxSegregs::Es, edi)?;
+        if !self.get_df() && self.async_event == 0 && self.allow_io(port, 4)? {
+            while ecx != 0 {
+                let edi = self.edi();
+                // Pre-fault the destination dword via RMW to populate TLB
+                // and ensure the page is writable (Bochs io.cc).
+                let _prefault = self.read_rmw_virtual_dword(BxSegregs::Es, edi)?;
 
-                    let laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+                let laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
 
-                    // Try to get a direct host pointer via TLB (Bochs v2h_write_byte)
-                    if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr) {
-                        // How many dwords fit in the remaining page space
-                        let dwords_fit_page = page_remaining / 4;
-                        if dwords_fit_page == 0 {
-                            // Less than 4 bytes left on page — do one dword via slow path
-                            break;
-                        }
-                        let chunk_dwords = (ecx as usize).min(dwords_fit_page);
+                // Try to get a direct host pointer via TLB (Bochs v2h_write_byte)
+                if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr) {
+                    // How many dwords fit in the remaining page space
+                    let dwords_fit_page = page_remaining / 4;
+                    if dwords_fit_page == 0 {
+                        // Less than 4 bytes left on page — do one dword via slow path
+                        break;
+                    }
+                    let chunk_dwords = (ecx as usize).min(dwords_fit_page);
 
-                        // Bulk path: try to read all chunk_dwords at once via inp_bulk.
-                        // This copies directly from the ATA buffer into guest RAM,
-                        // avoiding per-dword port_in() dispatch overhead (~20x speedup).
-                        let bulk_bytes = chunk_dwords * 4;
-                        // SAFETY: pointer and length validated by caller; memory region is valid
-                        let bulk_slice = unsafe {
-                            core::slice::from_raw_parts_mut(host_ptr, bulk_bytes)
-                        };
-                        let bytes_read = self.bulk_port_in(port, bulk_slice);
-                        if bytes_read >= 4 {
-                            let dwords_read = bytes_read / 4;
-                            let transferred = dwords_read as u32;
-                            let new_edi = edi.wrapping_add(transferred * 4);
-                            self.set_rdi(new_edi as u64);
-                            ecx -= transferred;
-                            self.set_ecx(ecx);
-                            self.icount += transferred as u64;
-                            if transferred > 1 {
-                                self.tickn_fastrep(transferred as usize - 1);
-                            }
-                            if self.async_event != 0 {
-                                break;
-                            }
-                            continue;
-                        }
-
-                        // Bulk returned 0 — per-dword fallback within this chunk.
-                        for i in 0..chunk_dwords {
-                            let val = self.port_in(port, 4);
-                            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                            unsafe {
-                                let dst = host_ptr.add(i * 4) as *mut u32;
-                                dst.write_unaligned(val.to_le());
-                            }
-                            // Check for async events after each dword (Bochs io.cc)
-                            if self.async_event != 0 {
-                                // Commit partial progress: i+1 dwords transferred
-                                let transferred = (i + 1) as u32;
-                                let new_edi = edi.wrapping_add(transferred * 4);
-                                self.set_rdi(new_edi as u64);
-                                ecx -= transferred;
-                                self.set_ecx(ecx);
-                                self.icount += transferred as u64;
-                                if transferred > 1 {
-                                    self.tickn_fastrep(transferred as usize - 1);
-                                }
-                                // Bochs tail: assert_RF + RIP=prev_rip before stop (cpu.cc:462).
-                                self.assert_rf();
-                                self.set_rip(self.prev_rip);
-                                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                                return Ok(());
-                            }
-                        }
-
-                        // All chunk_dwords transferred successfully
-                        let transferred = chunk_dwords as u32;
+                    // Bulk path: try to read all chunk_dwords at once via inp_bulk.
+                    // This copies directly from the ATA buffer into guest RAM,
+                    // avoiding per-dword port_in() dispatch overhead (~20x speedup).
+                    let bulk_bytes = chunk_dwords * 4;
+                    // SAFETY: pointer and length validated by caller; memory region is valid
+                    let bulk_slice =
+                        unsafe { core::slice::from_raw_parts_mut(host_ptr, bulk_bytes) };
+                    let bytes_read = self.bulk_port_in(port, bulk_slice);
+                    if bytes_read >= 4 {
+                        let dwords_read = bytes_read / 4;
+                        let transferred = dwords_read as u32;
                         let new_edi = edi.wrapping_add(transferred * 4);
                         self.set_rdi(new_edi as u64);
                         ecx -= transferred;
@@ -805,19 +773,63 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                         if transferred > 1 {
                             self.tickn_fastrep(transferred as usize - 1);
                         }
-
-                        // If async_event was set by tickn_fastrep, break
                         if self.async_event != 0 {
                             break;
                         }
                         continue;
                     }
 
-                    // get_host_write_ptr returned None (VGA/MMIO or TLB miss after
-                    // pre-fault). Fall through to per-dword slow path.
-                    break;
+                    // Bulk returned 0 — per-dword fallback within this chunk.
+                    for i in 0..chunk_dwords {
+                        let val = self.port_in(port, 4);
+                        // SAFETY: host pointer validated during TLB fill; offset within page bounds
+                        unsafe {
+                            let dst = host_ptr.add(i * 4) as *mut u32;
+                            dst.write_unaligned(val.to_le());
+                        }
+                        // Check for async events after each dword (Bochs io.cc)
+                        if self.async_event != 0 {
+                            // Commit partial progress: i+1 dwords transferred
+                            let transferred = (i + 1) as u32;
+                            let new_edi = edi.wrapping_add(transferred * 4);
+                            self.set_rdi(new_edi as u64);
+                            ecx -= transferred;
+                            self.set_ecx(ecx);
+                            self.icount += transferred as u64;
+                            if transferred > 1 {
+                                self.tickn_fastrep(transferred as usize - 1);
+                            }
+                            // Bochs tail: assert_RF + RIP=prev_rip before stop (cpu.cc:462).
+                            self.assert_rf();
+                            self.set_rip(self.prev_rip);
+                            self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                            return Ok(());
+                        }
+                    }
+
+                    // All chunk_dwords transferred successfully
+                    let transferred = chunk_dwords as u32;
+                    let new_edi = edi.wrapping_add(transferred * 4);
+                    self.set_rdi(new_edi as u64);
+                    ecx -= transferred;
+                    self.set_ecx(ecx);
+                    self.icount += transferred as u64;
+                    if transferred > 1 {
+                        self.tickn_fastrep(transferred as usize - 1);
+                    }
+
+                    // If async_event was set by tickn_fastrep, break
+                    if self.async_event != 0 {
+                        break;
+                    }
+                    continue;
                 }
+
+                // get_host_write_ptr returned None (VGA/MMIO or TLB miss after
+                // pre-fault). Fall through to per-dword slow path.
+                break;
             }
+        }
 
         // Per-dword fallback (handles DF=1, non-TLB-resolvable pages, or remainder)
         // Per-dword fallback Bochs cpu.cc:395-467 repeat(): natural exit returns;
@@ -833,7 +845,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_rcx(self.ecx() as u64);
                 return Ok(());
             }
-            if self.async_event != 0 { break; }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -856,8 +870,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -877,8 +895,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -898,8 +920,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -925,7 +951,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_rcx(self.ecx() as u64);
                 return Ok(());
             }
-            if self.async_event != 0 { break; }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -950,7 +978,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_rcx(self.ecx() as u64);
                 return Ok(());
             }
-            if self.async_event != 0 { break; }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -975,7 +1005,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_rcx(self.ecx() as u64);
                 return Ok(());
             }
-            if self.async_event != 0 { break; }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1118,8 +1150,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1137,75 +1173,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Fast path: direct host memory write, matching Bochs FastRepINSW
         // (io.cc) adapted for 64-bit address mode. DF=0 only.
-        if !self.get_df() && self.async_event == 0
-            && self.allow_io(port, 2)? {
-                while rcx != 0 {
-                    let rdi = self.rdi();
-                    // Pre-fault the destination word via RMW to populate TLB
-                    // and ensure the page is writable (Bochs io.cc).
-                    let _prefault = self.read_rmw_virtual_word_64(BxSegregs::Es, rdi)?;
+        if !self.get_df() && self.async_event == 0 && self.allow_io(port, 2)? {
+            while rcx != 0 {
+                let rdi = self.rdi();
+                // Pre-fault the destination word via RMW to populate TLB
+                // and ensure the page is writable (Bochs io.cc).
+                let _prefault = self.read_rmw_virtual_word_64(BxSegregs::Es, rdi)?;
 
-                    let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+                let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
 
-                    // Try to get a direct host pointer via TLB (Bochs v2h_write_byte)
-                    if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr) {
-                        let words_fit_page = page_remaining / 2;
-                        if words_fit_page == 0 {
-                            break;
-                        }
-                        let chunk_words = (rcx as usize).min(words_fit_page);
+                // Try to get a direct host pointer via TLB (Bochs v2h_write_byte)
+                if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr) {
+                    let words_fit_page = page_remaining / 2;
+                    if words_fit_page == 0 {
+                        break;
+                    }
+                    let chunk_words = (rcx as usize).min(words_fit_page);
 
-                        // Bulk path: try to read all chunk_words at once via inp_bulk.
-                        let bulk_bytes = chunk_words * 2;
-                        // SAFETY: pointer and length validated by caller; memory region is valid
-                        let bulk_slice = unsafe {
-                            core::slice::from_raw_parts_mut(host_ptr, bulk_bytes)
-                        };
-                        let bytes_read = self.bulk_port_in(port, bulk_slice);
-                        if bytes_read >= 2 {
-                            let words_read = bytes_read / 2;
-                            let transferred = words_read as u64;
-                            let new_rdi = rdi.wrapping_add(transferred * 2);
-                            self.set_rdi(new_rdi);
-                            rcx -= transferred;
-                            self.set_rcx(rcx);
-                            self.icount += transferred;
-                            if transferred > 1 {
-                                self.tickn_fastrep(transferred as usize - 1);
-                            }
-                            if self.async_event != 0 {
-                                break;
-                            }
-                            continue;
-                        }
-
-                        // Bulk returned 0 — per-word fallback within this chunk.
-                        for i in 0..chunk_words {
-                            let val = self.port_in(port, 2) as u16;
-                            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                            unsafe {
-                                let dst = host_ptr.add(i * 2) as *mut u16;
-                                dst.write_unaligned(val.to_le());
-                            }
-                            if self.async_event != 0 {
-                                let transferred = (i + 1) as u64;
-                                let new_rdi = rdi.wrapping_add(transferred * 2);
-                                self.set_rdi(new_rdi);
-                                rcx -= transferred;
-                                self.set_rcx(rcx);
-                                self.icount += transferred;
-                                if transferred > 1 {
-                                    self.tickn_fastrep(transferred as usize - 1);
-                                }
-                                // Bochs tail: assert_RF + RIP=prev_rip before stop (cpu.cc:462).
-                                self.assert_rf();
-                                self.set_rip(self.prev_rip);
-                                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                                return Ok(());
-                            }
-                        }
-
-                        let transferred = chunk_words as u64;
+                    // Bulk path: try to read all chunk_words at once via inp_bulk.
+                    let bulk_bytes = chunk_words * 2;
+                    // SAFETY: pointer and length validated by caller; memory region is valid
+                    let bulk_slice =
+                        unsafe { core::slice::from_raw_parts_mut(host_ptr, bulk_bytes) };
+                    let bytes_read = self.bulk_port_in(port, bulk_slice);
+                    if bytes_read >= 2 {
+                        let words_read = bytes_read / 2;
+                        let transferred = words_read as u64;
                         let new_rdi = rdi.wrapping_add(transferred * 2);
                         self.set_rdi(new_rdi);
                         rcx -= transferred;
@@ -1214,17 +1207,58 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                         if transferred > 1 {
                             self.tickn_fastrep(transferred as usize - 1);
                         }
-
                         if self.async_event != 0 {
                             break;
                         }
                         continue;
                     }
 
-                    // get_host_write_ptr returned None — fall to per-word path
-                    break;
+                    // Bulk returned 0 — per-word fallback within this chunk.
+                    for i in 0..chunk_words {
+                        let val = self.port_in(port, 2) as u16;
+                        // SAFETY: host pointer validated during TLB fill; offset within page bounds
+                        unsafe {
+                            let dst = host_ptr.add(i * 2) as *mut u16;
+                            dst.write_unaligned(val.to_le());
+                        }
+                        if self.async_event != 0 {
+                            let transferred = (i + 1) as u64;
+                            let new_rdi = rdi.wrapping_add(transferred * 2);
+                            self.set_rdi(new_rdi);
+                            rcx -= transferred;
+                            self.set_rcx(rcx);
+                            self.icount += transferred;
+                            if transferred > 1 {
+                                self.tickn_fastrep(transferred as usize - 1);
+                            }
+                            // Bochs tail: assert_RF + RIP=prev_rip before stop (cpu.cc:462).
+                            self.assert_rf();
+                            self.set_rip(self.prev_rip);
+                            self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                            return Ok(());
+                        }
+                    }
+
+                    let transferred = chunk_words as u64;
+                    let new_rdi = rdi.wrapping_add(transferred * 2);
+                    self.set_rdi(new_rdi);
+                    rcx -= transferred;
+                    self.set_rcx(rcx);
+                    self.icount += transferred;
+                    if transferred > 1 {
+                        self.tickn_fastrep(transferred as usize - 1);
+                    }
+
+                    if self.async_event != 0 {
+                        break;
+                    }
+                    continue;
                 }
+
+                // get_host_write_ptr returned None — fall to per-word path
+                break;
             }
+        }
 
         // Per-word fallback
         // Per-word fallback Bochs cpu.cc:395-467 repeat(): natural exit returns;
@@ -1236,8 +1270,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1255,77 +1293,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Fast path: direct host memory write, matching Bochs FastRepINSW
         // pattern adapted for dwords in 64-bit address mode. DF=0 only.
-        if !self.get_df() && self.async_event == 0
-            && self.allow_io(port, 4)? {
-                while rcx != 0 {
-                    let rdi = self.rdi();
-                    // Pre-fault the destination dword via RMW to populate TLB
-                    // and ensure the page is writable (Bochs io.cc).
-                    let _prefault = self.read_rmw_virtual_dword_64(BxSegregs::Es, rdi)?;
+        if !self.get_df() && self.async_event == 0 && self.allow_io(port, 4)? {
+            while rcx != 0 {
+                let rdi = self.rdi();
+                // Pre-fault the destination dword via RMW to populate TLB
+                // and ensure the page is writable (Bochs io.cc).
+                let _prefault = self.read_rmw_virtual_dword_64(BxSegregs::Es, rdi)?;
 
-                    let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+                let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
 
-                    // Try to get a direct host pointer via TLB (Bochs v2h_write_byte)
-                    if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr) {
-                        // How many dwords fit in the remaining page space
-                        let dwords_fit_page = page_remaining / 4;
-                        if dwords_fit_page == 0 {
-                            break;
-                        }
-                        let chunk_dwords = (rcx as usize).min(dwords_fit_page);
+                // Try to get a direct host pointer via TLB (Bochs v2h_write_byte)
+                if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr) {
+                    // How many dwords fit in the remaining page space
+                    let dwords_fit_page = page_remaining / 4;
+                    if dwords_fit_page == 0 {
+                        break;
+                    }
+                    let chunk_dwords = (rcx as usize).min(dwords_fit_page);
 
-                        // Bulk path: try to read all chunk_dwords at once via inp_bulk.
-                        let bulk_bytes = chunk_dwords * 4;
-                        // SAFETY: pointer and length validated by caller; memory region is valid
-                        let bulk_slice = unsafe {
-                            core::slice::from_raw_parts_mut(host_ptr, bulk_bytes)
-                        };
-                        let bytes_read = self.bulk_port_in(port, bulk_slice);
-                        if bytes_read >= 4 {
-                            let dwords_read = bytes_read / 4;
-                            let transferred = dwords_read as u64;
-                            let new_rdi = rdi.wrapping_add(transferred * 4);
-                            self.set_rdi(new_rdi);
-                            rcx -= transferred;
-                            self.set_rcx(rcx);
-                            self.icount += transferred;
-                            if transferred > 1 {
-                                self.tickn_fastrep(transferred as usize - 1);
-                            }
-                            if self.async_event != 0 {
-                                break;
-                            }
-                            continue;
-                        }
-
-                        // Bulk returned 0 — per-dword fallback within this chunk.
-                        for i in 0..chunk_dwords {
-                            let val = self.port_in(port, 4);
-                            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                            unsafe {
-                                let dst = host_ptr.add(i * 4) as *mut u32;
-                                dst.write_unaligned(val.to_le());
-                            }
-                            if self.async_event != 0 {
-                                let transferred = (i + 1) as u64;
-                                let new_rdi = rdi.wrapping_add(transferred * 4);
-                                self.set_rdi(new_rdi);
-                                rcx -= transferred;
-                                self.set_rcx(rcx);
-                                self.icount += transferred;
-                                if transferred > 1 {
-                                    self.tickn_fastrep(transferred as usize - 1);
-                                }
-                                // Bochs tail: assert_RF + RIP=prev_rip before stop (cpu.cc:462).
-                                self.assert_rf();
-                                self.set_rip(self.prev_rip);
-                                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                                return Ok(());
-                            }
-                        }
-
-                        // All chunk_dwords transferred successfully
-                        let transferred = chunk_dwords as u64;
+                    // Bulk path: try to read all chunk_dwords at once via inp_bulk.
+                    let bulk_bytes = chunk_dwords * 4;
+                    // SAFETY: pointer and length validated by caller; memory region is valid
+                    let bulk_slice =
+                        unsafe { core::slice::from_raw_parts_mut(host_ptr, bulk_bytes) };
+                    let bytes_read = self.bulk_port_in(port, bulk_slice);
+                    if bytes_read >= 4 {
+                        let dwords_read = bytes_read / 4;
+                        let transferred = dwords_read as u64;
                         let new_rdi = rdi.wrapping_add(transferred * 4);
                         self.set_rdi(new_rdi);
                         rcx -= transferred;
@@ -1334,17 +1328,59 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                         if transferred > 1 {
                             self.tickn_fastrep(transferred as usize - 1);
                         }
-
                         if self.async_event != 0 {
                             break;
                         }
                         continue;
                     }
 
-                    // get_host_write_ptr returned None — fall to per-dword path
-                    break;
+                    // Bulk returned 0 — per-dword fallback within this chunk.
+                    for i in 0..chunk_dwords {
+                        let val = self.port_in(port, 4);
+                        // SAFETY: host pointer validated during TLB fill; offset within page bounds
+                        unsafe {
+                            let dst = host_ptr.add(i * 4) as *mut u32;
+                            dst.write_unaligned(val.to_le());
+                        }
+                        if self.async_event != 0 {
+                            let transferred = (i + 1) as u64;
+                            let new_rdi = rdi.wrapping_add(transferred * 4);
+                            self.set_rdi(new_rdi);
+                            rcx -= transferred;
+                            self.set_rcx(rcx);
+                            self.icount += transferred;
+                            if transferred > 1 {
+                                self.tickn_fastrep(transferred as usize - 1);
+                            }
+                            // Bochs tail: assert_RF + RIP=prev_rip before stop (cpu.cc:462).
+                            self.assert_rf();
+                            self.set_rip(self.prev_rip);
+                            self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                            return Ok(());
+                        }
+                    }
+
+                    // All chunk_dwords transferred successfully
+                    let transferred = chunk_dwords as u64;
+                    let new_rdi = rdi.wrapping_add(transferred * 4);
+                    self.set_rdi(new_rdi);
+                    rcx -= transferred;
+                    self.set_rcx(rcx);
+                    self.icount += transferred;
+                    if transferred > 1 {
+                        self.tickn_fastrep(transferred as usize - 1);
+                    }
+
+                    if self.async_event != 0 {
+                        break;
+                    }
+                    continue;
                 }
+
+                // get_host_write_ptr returned None — fall to per-dword path
+                break;
             }
+        }
 
         // Per-dword fallback
         // Per-dword fallback Bochs cpu.cc:395-467 repeat(): natural exit returns;
@@ -1356,8 +1392,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1379,8 +1419,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1400,8 +1444,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1421,8 +1469,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1449,7 +1501,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let as64 = instr.as64_l() != 0;
         let as32 = instr.as32_l() != 0;
         let rep = instr.lock_rep_used_value() != 0;
-        let asize_bits: u8 = if as64 { 64 } else if as32 { 32 } else { 16 };
+        let asize_bits: u8 = if as64 {
+            64
+        } else if as32 {
+            32
+        } else {
+            16
+        };
         self.svm_intercept_io(port, size, direction_in, true, rep, asize_bits)?;
         if !self.in_vmx_guest {
             return Ok(false);
@@ -1478,9 +1536,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
-            if rep { self.rep_insb64(instr)?; } else { self.insb64(instr)?; }
+            if rep {
+                self.rep_insb64(instr)?;
+            } else {
+                self.insb64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_insb32(instr)?; } else { self.insb32(instr)?; }
+            if rep {
+                self.rep_insb32(instr)?;
+            } else {
+                self.insb32(instr)?;
+            }
         } else if rep {
             self.rep_insb16(instr)?;
         } else {
@@ -1496,9 +1562,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
-            if rep { self.rep_insw64(instr)?; } else { self.insw64(instr)?; }
+            if rep {
+                self.rep_insw64(instr)?;
+            } else {
+                self.insw64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_insw32(instr)?; } else { self.insw32(instr)?; }
+            if rep {
+                self.rep_insw32(instr)?;
+            } else {
+                self.insw32(instr)?;
+            }
         } else if rep {
             self.rep_insw16(instr)?;
         } else {
@@ -1514,9 +1588,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
-            if rep { self.rep_insd64(instr)?; } else { self.insd64(instr)?; }
+            if rep {
+                self.rep_insd64(instr)?;
+            } else {
+                self.insd64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_insd32(instr)?; } else { self.insd32(instr)?; }
+            if rep {
+                self.rep_insd32(instr)?;
+            } else {
+                self.insd32(instr)?;
+            }
         } else if rep {
             self.rep_insd16(instr)?;
         } else {
@@ -1532,9 +1614,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
-            if rep { self.rep_outsb64(instr)?; } else { self.outsb64(instr)?; }
+            if rep {
+                self.rep_outsb64(instr)?;
+            } else {
+                self.outsb64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_outsb32(instr)?; } else { self.outsb32(instr)?; }
+            if rep {
+                self.rep_outsb32(instr)?;
+            } else {
+                self.outsb32(instr)?;
+            }
         } else if rep {
             self.rep_outsb16(instr)?;
         } else {
@@ -1550,9 +1640,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
-            if rep { self.rep_outsw64(instr)?; } else { self.outsw64(instr)?; }
+            if rep {
+                self.rep_outsw64(instr)?;
+            } else {
+                self.outsw64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_outsw32(instr)?; } else { self.outsw32(instr)?; }
+            if rep {
+                self.rep_outsw32(instr)?;
+            } else {
+                self.outsw32(instr)?;
+            }
         } else if rep {
             self.rep_outsw16(instr)?;
         } else {
@@ -1568,9 +1666,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
-            if rep { self.rep_outsd64(instr)?; } else { self.outsd64(instr)?; }
+            if rep {
+                self.rep_outsd64(instr)?;
+            } else {
+                self.outsd64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_outsd32(instr)?; } else { self.outsd32(instr)?; }
+            if rep {
+                self.rep_outsd32(instr)?;
+            } else {
+                self.outsd32(instr)?;
+            }
         } else if rep {
             self.rep_outsd16(instr)?;
         } else {
@@ -1601,7 +1707,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// that don't wire devices and never execute real firmware).
     fn port_in(&mut self, port: u16, len: u8) -> u32 {
         let _ = &port; // used by alloc/instrumentation paths
-        // BOCHS BX_INSTR_INP(addr, len) — fires before the port read.
+                       // BOCHS BX_INSTR_INP(addr, len) — fires before the port read.
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_io() {
             self.instrumentation.fire_inp(port, len);
@@ -1634,7 +1740,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_io() {
             let ev = super::instrumentation::IoHookEvent {
-                port, size: len, value, access: super::instrumentation::MemAccessRW::Read,
+                port,
+                size: len,
+                value,
+                access: super::instrumentation::MemAccessRW::Read,
             };
             self.instrumentation.fire_inp2(&ev);
         }
@@ -1651,7 +1760,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_io() {
             let ev = super::instrumentation::IoHookEvent {
-                port, size: len, value, access: super::instrumentation::MemAccessRW::Write,
+                port,
+                size: len,
+                value,
+                access: super::instrumentation::MemAccessRW::Write,
             };
             self.instrumentation.fire_outp(&ev);
         }

@@ -30,9 +30,7 @@ use crate::{
 const MXCSR_DAZ: u32 = 1 << 6;
 const MXCSR_MISALIGNED_EXCEPTION_MASK: u32 = 1 << 13;
 
-use super::{
-    cpudb::intel::core_i7_skylake::Corei7SkylakeX, cpuid::BxCpuIdTrait,
-};
+use super::{cpudb::intel::core_i7_skylake::Corei7SkylakeX, cpuid::BxCpuIdTrait};
 
 pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
     // Note: hardcode this for now
@@ -45,7 +43,6 @@ use super::ResetReason;
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     pub fn initialize(&mut self, _config: BxParams) -> Result<()> {
         tracing::debug!("Initialized cpu model {}", self.cpuid.get_name());
-
 
         // Populate ISA extensions bitmask from CPUID model — matches Bochs init.cc
         self.ia_extensions_bitmask = self.cpuid.get_isa_extensions_bitmask();
@@ -105,7 +102,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // (includes ESP — BIOS sets SS:SP before any stack operations)
 
         self.eflags = EFlags::from_bits_retain(0x2); // Bit1 is always set
-        // Bochs init.cc: clearEFlagsOSZAPC() = SET_FLAGS_OSZAPC_LOGIC_32(1).
+                                                     // Bochs init.cc: clearEFlagsOSZAPC() = SET_FLAGS_OSZAPC_LOGIC_32(1).
         self.oszapc.set_oszapc_logic_32(1);
         if source == ResetReason::Hardware {
             self.icount = 0;
@@ -142,7 +139,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.sregs[cs_index].cache.r#type = BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as _;
 
         self.sregs[cs_index].cache.u.set_segment_base(0xFFFF0000);
-        self.sregs[cs_index].cache.u.set_segment_limit_scaled(0xFFFF);
+        self.sregs[cs_index]
+            .cache
+            .u
+            .set_segment_limit_scaled(0xFFFF);
 
         self.sregs[cs_index].cache.u.set_segment_g(false); /* byte granular */
         self.sregs[cs_index].cache.u.set_segment_d_b(false); /* 16bit default size */
@@ -161,7 +161,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.sregs[ds_index].cache.r#type = BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as _;
 
         self.sregs[ds_index].cache.u.set_segment_base(0x00000000);
-        self.sregs[ds_index].cache.u.set_segment_limit_scaled(0xFFFF);
+        self.sregs[ds_index]
+            .cache
+            .u
+            .set_segment_limit_scaled(0xFFFF);
 
         self.sregs[ds_index].cache.u.set_segment_avl(false); /* 16bit default size */
         self.sregs[ds_index].cache.u.set_segment_g(false); /* byte granular */
@@ -327,7 +330,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             self.msr.mtrrfix4k = [BxPackedRegister { bytes: [0; 8] }; 8];
 
-            self.msr.pat = BxPackedRegister { bytes: 0x0007040600070406u64.to_le_bytes() };
+            self.msr.pat = BxPackedRegister {
+                bytes: 0x0007040600070406u64.to_le_bytes(),
+            };
             self.msr.mtrr_deftype = 0;
         }
 
@@ -350,7 +355,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.esp_page_bias = 0;
         self.esp_page_window_size = 0;
         self.esp_host_ptr = None;
-
 
         #[cfg(feature = "bx_debugger")]
         {
@@ -419,7 +423,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             };
             self.instrumentation.fire_reset(reset_type);
         }
-
     }
 
     fn write_32bit_regz(&mut self, index: usize, val: u64) {
@@ -478,15 +481,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.eflags.contains(super::eflags::EFlags::IF_) {
             // EFLAGS.IF was set — unmask external interrupt events
             // Bochs flag_ctrl_pro.cc: unmask both PIC and LAPIC events
-            self.unmask_event(
-                Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
-            );
+            self.unmask_event(Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR);
         } else {
             // EFLAGS.IF was cleared — mask external interrupt events
             // Bochs flag_ctrl_pro.cc: mask both PIC and LAPIC events
-            self.mask_event(
-                Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
-            );
+            self.mask_event(Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR);
         }
     }
 
@@ -526,7 +525,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Interrupts disabled, direction flag clear
         self.eflags = EFlags::from_bits_retain(0x2); // Bit 1 always set
-        // Bochs-equivalent clearEFlagsOSZAPC(): SET_FLAGS_OSZAPC_LOGIC_32(1).
+                                                     // Bochs-equivalent clearEFlagsOSZAPC(): SET_FLAGS_OSZAPC_LOGIC_32(1).
         self.oszapc.set_oszapc_logic_32(1);
 
         // Set up GDTR to point to GDT in memory
@@ -546,13 +545,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.sregs[cs].cache.p = true;
         self.sregs[cs].cache.dpl = 0;
         self.sregs[cs].cache.segment = true;
-        self.sregs[cs].cache.r#type =
-            BxDataAndCodeDescriptorEnum::CodeExecReadAccessed as u8;
+        self.sregs[cs].cache.r#type = BxDataAndCodeDescriptorEnum::CodeExecReadAccessed as u8;
         self.sregs[cs].cache.u.set_segment_base(0);
         self.sregs[cs].cache.u.set_segment_limit_scaled(0xFFFFFFFF);
-        self.sregs[cs].cache.u.set_segment_g(true);  // page granular
+        self.sregs[cs].cache.u.set_segment_g(true); // page granular
         self.sregs[cs].cache.u.set_segment_d_b(true); // 32-bit
-        self.sregs[cs].cache.u.set_segment_l(false);  // not 64-bit
+        self.sregs[cs].cache.u.set_segment_l(false); // not 64-bit
         self.sregs[cs].cache.u.set_segment_avl(false);
 
         // DS/ES/FS/GS/SS: selector 0x18 = GDT entry 3 (flat 32-bit data)
@@ -572,7 +570,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.sregs[seg_idx].cache.r#type =
                 BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as u8;
             self.sregs[seg_idx].cache.u.set_segment_base(0);
-            self.sregs[seg_idx].cache.u.set_segment_limit_scaled(0xFFFFFFFF);
+            self.sregs[seg_idx]
+                .cache
+                .u
+                .set_segment_limit_scaled(0xFFFFFFFF);
             self.sregs[seg_idx].cache.u.set_segment_g(true);
             self.sregs[seg_idx].cache.u.set_segment_d_b(true);
             self.sregs[seg_idx].cache.u.set_segment_l(false);
@@ -589,9 +590,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             .remove(super::opcodes_table::FetchModeMask::LONG64);
 
         // Mask external interrupts (IF=0)
-        self.mask_event(
-            Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
-        );
+        self.mask_event(Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR);
 
         info!("CPU configured for direct Linux boot (32-bit protected mode)");
     }

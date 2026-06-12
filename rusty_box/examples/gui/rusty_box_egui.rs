@@ -121,34 +121,32 @@ fn main() {
     let emu_thread = std::thread::Builder::new()
         .stack_size(1500 * 1024 * 1024)
         .name("Emulator".to_string())
-        .spawn(move || {
-            loop {
-                {
-                    let mut d = shared_for_emu.lock().unwrap();
-                    d.stop_flag.store(false, Ordering::Relaxed);
-                    d.emu_running = true;
-                    d.reset_requested = false;
-                }
-
-                if let Err(e) = run_emulator(
-                    &profile,
-                    &bios_data,
-                    vga_bios.as_deref(),
-                    Arc::clone(&shared_for_emu),
-                    max_instructions,
-                ) {
-                    eprintln!("Emulator error: {:?}", e);
-                }
-
-                let restart = {
-                    let d = shared_for_emu.lock().unwrap();
-                    d.reset_requested
-                };
-                if !restart {
-                    break;
-                }
-                println!("Restarting emulator (Reset requested)...");
+        .spawn(move || loop {
+            {
+                let mut d = shared_for_emu.lock().unwrap();
+                d.stop_flag.store(false, Ordering::Relaxed);
+                d.emu_running = true;
+                d.reset_requested = false;
             }
+
+            if let Err(e) = run_emulator(
+                &profile,
+                &bios_data,
+                vga_bios.as_deref(),
+                Arc::clone(&shared_for_emu),
+                max_instructions,
+            ) {
+                eprintln!("Emulator error: {:?}", e);
+            }
+
+            let restart = {
+                let d = shared_for_emu.lock().unwrap();
+                d.reset_requested
+            };
+            if !restart {
+                break;
+            }
+            println!("Restarting emulator (Reset requested)...");
         })
         .expect("Failed to spawn emulator thread");
 
@@ -370,7 +368,10 @@ fn detect_boot_profile(workspace_root: &std::path::Path) -> BootProfile {
     // Use RUSTY_BOX_BOOT=alpine-direct to bypass BIOS/ISOLINUX
     let iso_found = try_find_alpine_iso(workspace_root);
     println!("Workspace root: {}", workspace_root.display());
-    println!("Alpine ISO auto-detect: {:?}", iso_found.as_ref().map(|p| p.display().to_string()));
+    println!(
+        "Alpine ISO auto-detect: {:?}",
+        iso_found.as_ref().map(|p| p.display().to_string())
+    );
     let boot_env = std::env::var("RUSTY_BOX_BOOT")
         .unwrap_or_else(|_| {
             if iso_found.is_some() {
@@ -424,11 +425,15 @@ fn detect_boot_profile(workspace_root: &std::path::Path) -> BootProfile {
 fn try_find_alpine_iso(workspace_root: &std::path::Path) -> Option<std::path::PathBuf> {
     if let Ok(path) = std::env::var("ALPINE_ISO") {
         let p = std::path::PathBuf::from(&path);
-        if p.exists() { return Some(p); }
+        if p.exists() {
+            return Some(p);
+        }
     }
     if let Ok(path) = std::env::var("ALPINE_DISK") {
         let p = std::path::PathBuf::from(&path);
-        if p.exists() { return Some(p); }
+        if p.exists() {
+            return Some(p);
+        }
     }
     // Search workspace root, its parent, and current dir for alpine*.iso
     let mut search_dirs = vec![workspace_root.to_path_buf()];
@@ -449,20 +454,15 @@ fn try_find_alpine_iso(workspace_root: &std::path::Path) -> Option<std::path::Pa
 }
 
 fn find_iso_in_dir(dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    std::fs::read_dir(dir)
-        .ok()
-        .and_then(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .find(|p| {
-                    p.extension().map(|ext| ext == "iso").unwrap_or(false)
-                        && p.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|s| s.to_lowercase().contains("alpine"))
-                            .unwrap_or(false)
-                })
+    std::fs::read_dir(dir).ok().and_then(|entries| {
+        entries.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+            p.extension().map(|ext| ext == "iso").unwrap_or(false)
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_lowercase().contains("alpine"))
+                    .unwrap_or(false)
         })
+    })
 }
 
 fn find_alpine_iso(workspace_root: &std::path::Path) -> std::path::PathBuf {
@@ -483,20 +483,15 @@ fn find_alpine_iso(workspace_root: &std::path::Path) -> std::path::PathBuf {
         return p;
     }
     // Auto-detect alpine*.iso in workspace root
-    let iso = std::fs::read_dir(workspace_root)
-        .ok()
-        .and_then(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .find(|p| {
-                    p.extension().map(|ext| ext == "iso").unwrap_or(false)
-                        && p.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|s| s.to_lowercase().contains("alpine"))
-                            .unwrap_or(false)
-                })
-        });
+    let iso = std::fs::read_dir(workspace_root).ok().and_then(|entries| {
+        entries.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+            p.extension().map(|ext| ext == "iso").unwrap_or(false)
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_lowercase().contains("alpine"))
+                    .unwrap_or(false)
+        })
+    });
     match iso {
         Some(p) => p,
         None => {
@@ -581,39 +576,61 @@ fn extract_from_iso(iso_data: &[u8], target_path: &[&str]) -> Option<Vec<u8>> {
         return None;
     }
     let root_lba = u32::from_le_bytes([
-        iso_data[pvd_offset + 158], iso_data[pvd_offset + 159],
-        iso_data[pvd_offset + 160], iso_data[pvd_offset + 161],
+        iso_data[pvd_offset + 158],
+        iso_data[pvd_offset + 159],
+        iso_data[pvd_offset + 160],
+        iso_data[pvd_offset + 161],
     ]) as usize;
     let root_size = u32::from_le_bytes([
-        iso_data[pvd_offset + 166], iso_data[pvd_offset + 167],
-        iso_data[pvd_offset + 168], iso_data[pvd_offset + 169],
+        iso_data[pvd_offset + 166],
+        iso_data[pvd_offset + 167],
+        iso_data[pvd_offset + 168],
+        iso_data[pvd_offset + 169],
     ]) as usize;
 
-    fn find_entry(iso: &[u8], dir_lba: usize, dir_size: usize, name: &str) -> Option<(usize, usize, bool)> {
+    fn find_entry(
+        iso: &[u8],
+        dir_lba: usize,
+        dir_size: usize,
+        name: &str,
+    ) -> Option<(usize, usize, bool)> {
         let dir_data_start = dir_lba * 2048;
         let dir_data_end = dir_data_start + dir_size;
-        if dir_data_end > iso.len() { return None; }
+        if dir_data_end > iso.len() {
+            return None;
+        }
         let dir_data = &iso[dir_data_start..dir_data_end];
         let mut offset = 0;
         while offset < dir_data.len() {
             let rec_len = dir_data[offset] as usize;
             if rec_len == 0 {
                 let next_sect = ((offset / 2048) + 1) * 2048;
-                if next_sect >= dir_data.len() { break; }
+                if next_sect >= dir_data.len() {
+                    break;
+                }
                 offset = next_sect;
                 continue;
             }
-            if offset + 33 > dir_data.len() { break; }
+            if offset + 33 > dir_data.len() {
+                break;
+            }
             let name_len = dir_data[offset + 32] as usize;
-            if offset + 33 + name_len > dir_data.len() { break; }
-            let entry_name = std::str::from_utf8(&dir_data[offset + 33..offset + 33 + name_len]).unwrap_or("");
+            if offset + 33 + name_len > dir_data.len() {
+                break;
+            }
+            let entry_name =
+                std::str::from_utf8(&dir_data[offset + 33..offset + 33 + name_len]).unwrap_or("");
             let entry_lba = u32::from_le_bytes([
-                dir_data[offset + 2], dir_data[offset + 3],
-                dir_data[offset + 4], dir_data[offset + 5],
+                dir_data[offset + 2],
+                dir_data[offset + 3],
+                dir_data[offset + 4],
+                dir_data[offset + 5],
             ]) as usize;
             let entry_size = u32::from_le_bytes([
-                dir_data[offset + 10], dir_data[offset + 11],
-                dir_data[offset + 12], dir_data[offset + 13],
+                dir_data[offset + 10],
+                dir_data[offset + 11],
+                dir_data[offset + 12],
+                dir_data[offset + 13],
             ]) as usize;
             let is_dir = (dir_data[offset + 25] & 2) != 0;
             let clean_name = entry_name.split(';').next().unwrap_or(entry_name);
@@ -639,7 +656,9 @@ fn extract_from_iso(iso_data: &[u8], target_path: &[&str]) -> Option<Vec<u8>> {
                     }
                     return None;
                 }
-                if !is_dir { return None; }
+                if !is_dir {
+                    return None;
+                }
                 cur_lba = lba;
                 cur_size = size;
             }

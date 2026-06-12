@@ -22,9 +22,9 @@ use super::{
 #[inline]
 fn dword_elements(vl: u8) -> usize {
     match vl {
-        0 => 4,   // 128-bit
-        1 => 8,   // 256-bit
-        _ => 16,  // 512-bit
+        0 => 4,  // 128-bit
+        1 => 8,  // 256-bit
+        _ => 16, // 512-bit
     }
 }
 
@@ -50,7 +50,10 @@ fn vl_bytes(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, instr: &Instruction) -> u64 {
+fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    instr: &Instruction,
+) -> u64 {
     let k = instr.opmask();
     if k == 0 {
         u64::MAX // k0 = all elements active
@@ -62,7 +65,10 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, reg: u8) -> BxPackedZmmRegister {
+fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    reg: u8,
+) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
@@ -166,7 +172,9 @@ const I32_INDEFINITE: i32 = i32::MIN; // 0x80000000
 const U32_INDEFINITE: u32 = u32::MAX; // 0xFFFFFFFF
 
 fn round_f32_to_i32(val: f32, rc: u8) -> i32 {
-    if val.is_nan() { return I32_INDEFINITE; }
+    if val.is_nan() {
+        return I32_INDEFINITE;
+    }
     let rounded = match rc {
         0 => val.round_ties_even(),
         1 => val.floor(),
@@ -183,7 +191,9 @@ fn round_f32_to_i32(val: f32, rc: u8) -> i32 {
 
 #[inline]
 fn round_f64_to_i32(val: f64, rc: u8) -> i32 {
-    if val.is_nan() { return I32_INDEFINITE; }
+    if val.is_nan() {
+        return I32_INDEFINITE;
+    }
     let rounded = match rc {
         0 => val.round_ties_even(),
         1 => val.floor(),
@@ -200,7 +210,9 @@ fn round_f64_to_i32(val: f64, rc: u8) -> i32 {
 /// Intel: ALL invalid unsigned conversions (NaN, negative, overflow) return 0xFFFFFFFF.
 #[inline]
 fn round_f32_to_u32(val: f32, rc: u8) -> u32 {
-    if val.is_nan() { return U32_INDEFINITE; }
+    if val.is_nan() {
+        return U32_INDEFINITE;
+    }
     let rounded = match rc {
         0 => val.round_ties_even(),
         1 => val.floor(),
@@ -269,11 +281,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             let v = src.zmm32f(i);
-            result.set_zmm32s(i, if v.is_nan() || v >= (i32::MAX as f32 + 1.0) || v < (i32::MIN as f32) {
-                I32_INDEFINITE
-            } else {
-                v as i32
-            });
+            result.set_zmm32s(
+                i,
+                if v.is_nan() || v >= (i32::MAX as f32 + 1.0) || v < (i32::MIN as f32) {
+                    I32_INDEFINITE
+                } else {
+                    v as i32
+                },
+            );
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -293,7 +308,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vcvtdq2pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl); // number of output qword elements
-        // Source is half the width: nelements dwords
+                                            // Source is half the width: nelements dwords
         let src = read_src_dword(self, instr, nelements)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -353,11 +368,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             let v = src.zmm64f(i);
-            result.set_zmm32s(i, if v.is_nan() || v >= (i32::MAX as f64 + 1.0) || v < (i32::MIN as f64) {
-                I32_INDEFINITE
-            } else {
-                v as i32
-            });
+            result.set_zmm32s(
+                i,
+                if v.is_nan() || v >= (i32::MAX as f64 + 1.0) || v < (i32::MIN as f64) {
+                    I32_INDEFINITE
+                } else {
+                    v as i32
+                },
+            );
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -380,7 +398,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vcvtps2pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl); // output qword count
-        // Source is half width: nelements dwords (float32)
+                                            // Source is half width: nelements dwords (float32)
         let src = read_src_dword(self, instr, nelements)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -472,11 +490,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             let val = src.zmm32f(i);
-            result.set_zmm32u(i, if val.is_nan() || val < 0.0 || val >= (u32::MAX as f32 + 1.0) {
-                U32_INDEFINITE
-            } else {
-                val as u32
-            });
+            result.set_zmm32u(
+                i,
+                if val.is_nan() || val < 0.0 || val >= (u32::MAX as f32 + 1.0) {
+                    U32_INDEFINITE
+                } else {
+                    val as u32
+                },
+            );
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;

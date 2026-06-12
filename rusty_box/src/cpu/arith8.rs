@@ -762,7 +762,10 @@ pub fn SUB_AL_Ib<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
 
 /// CMPXCHG r/m8, r8 — register form
 /// Bochs arith8.cc (CMPXCHG_EbGbR)
-pub fn CMPXCHG_EbGb_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<'c, I, T>, instr: &Instruction) {
+pub fn CMPXCHG_EbGb_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'c, I, T>,
+    instr: &Instruction,
+) {
     let ext = instr.extend8bit_l();
     let op1_8 = cpu.read_8bit_regx(instr.dst() as usize, ext) as u32;
     let al = cpu.al() as u32;
@@ -807,7 +810,10 @@ pub fn CMPXCHG_EbGb_M<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instr
 
 /// XADD r/m8, r8 — register form
 /// Bochs arith8.cc
-pub fn XADD_EbGb_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<'c, I, T>, instr: &Instruction) {
+pub fn XADD_EbGb_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'c, I, T>,
+    instr: &Instruction,
+) {
     let ext = instr.extend8bit_l();
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, ext) as u32;
     let op2 = cpu.read_8bit_regx(instr.src() as usize, ext) as u32;

@@ -262,7 +262,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 self.clear_event(Self::BX_EVENT_PENDING_LAPIC_INTR);
                 let vector = self.lapic.acknowledge_int();
                 if vector > 0 {
-                    #[cfg(debug_assertions)] {
+                    #[cfg(debug_assertions)]
+                    {
                         self.diag_hae_intr_delivered += 1;
                         self.diag_iac_vectors[vector as usize] += 1;
                     }
@@ -289,7 +290,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                             }
                         }
                     }
-                    let result = self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, false, 0);
+                    let result = self.interrupt(
+                        vector,
+                        super::exception::InterruptType::ExternalInterrupt,
+                        false,
+                        false,
+                        0,
+                    );
                     self.ext = false;
                     delivered = true;
                     match result {
@@ -312,62 +319,74 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
             // Then check PIC (legacy 8259 path) — only if LAPIC didn't deliver
             if !delivered {
-              if let Some(pic) = pic {
-                if pic.has_interrupt() {
-                    let vector = pic.iac();
-                    tracing::trace!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
+                if let Some(pic) = pic {
+                    if pic.has_interrupt() {
+                        let vector = pic.iac();
+                        tracing::trace!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
                         vector, self.rip(), self.sregs[0].selector.value,
                         self.cpu_mode, self.eflags.contains(super::eflags::EFlags::IF_));
-                    // Wake from halt if needed
-                    self.activity_state = CpuActivityState::Active;
-                    // Mark as external interrupt (EXT=1)
-                    self.ext = true;
-                    // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
-                    // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set.
-                    if self.in_vmx_guest {
-                        match self.vmexit_check_event_intr(vector) {
-                            Ok(true) => {
-                                self.ext = false;
-                                self.prev_rip = self.rip();
-                                return false;
+                        // Wake from halt if needed
+                        self.activity_state = CpuActivityState::Active;
+                        // Mark as external interrupt (EXT=1)
+                        self.ext = true;
+                        // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
+                        // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set.
+                        if self.in_vmx_guest {
+                            match self.vmexit_check_event_intr(vector) {
+                                Ok(true) => {
+                                    self.ext = false;
+                                    self.prev_rip = self.rip();
+                                    return false;
+                                }
+                                Ok(false) => {}
+                                Err(super::error::CpuError::CpuLoopRestart) => {
+                                    self.ext = false;
+                                    self.prev_rip = self.rip();
+                                    return false;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
+                                }
                             }
-                            Ok(false) => {}
+                        }
+                        // Deliver interrupt (matches Bochs interrupt() call in event.cc)
+                        let result = self.interrupt(
+                            vector,
+                            super::exception::InterruptType::ExternalInterrupt,
+                            false,
+                            false,
+                            0,
+                        );
+                        self.ext = false;
+                        match result {
+                            Ok(()) => {
+                                self.prev_rip = self.rip();
+                            }
                             Err(super::error::CpuError::CpuLoopRestart) => {
-                                self.ext = false;
                                 self.prev_rip = self.rip();
                                 return false;
                             }
                             Err(e) => {
-                                tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
+                                tracing::warn!("PIC interrupt delivery failed: {:?}", e);
                             }
                         }
-                    }
-                    // Deliver interrupt (matches Bochs interrupt() call in event.cc)
-                    let result = self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, false, 0);
-                    self.ext = false;
-                    match result {
-                        Ok(()) => {
-                            self.prev_rip = self.rip();
-                        }
-                        Err(super::error::CpuError::CpuLoopRestart) => {
-                            self.prev_rip = self.rip();
-                            return false;
-                        }
-                        Err(e) => {
-                            tracing::warn!("PIC interrupt delivery failed: {:?}", e);
+                    } else {
+                        #[cfg(debug_assertions)]
+                        {
+                            self.diag_hae_intr_pic_empty += 1;
                         }
                     }
-                } else {
-                    #[cfg(debug_assertions)] { self.diag_hae_intr_pic_empty += 1; }
                 }
-            }
             }
         } else if self.pending_event
             & (Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR)
             != 0
         {
             // Event is pending but masked (IF=0) — don't clear it, just count
-            #[cfg(debug_assertions)] { self.diag_hae_intr_if_blocked += 1; }
+            #[cfg(debug_assertions)]
+            {
+                self.diag_hae_intr_if_blocked += 1;
+            }
         }
 
         // DMA HRQ handling (Bochs event.cc)
@@ -420,7 +439,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // MWAIT_IF (ECX[0]=1 at MWAIT): wake on interrupt even when IF=0
         // (Bochs event.cc)
         let mwait_if = matches!(self.activity_state, CpuActivityState::MwaitIf);
-        let in_mwait = matches!(self.activity_state, CpuActivityState::Mwait | CpuActivityState::MwaitIf);
+        let in_mwait = matches!(
+            self.activity_state,
+            CpuActivityState::Mwait | CpuActivityState::MwaitIf
+        );
 
         // NMI can always wake from HLT (Bochs event.cc)
         if self.pending_event & Self::BX_EVENT_NMI != 0 {
@@ -435,27 +457,29 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         // PIC interrupt can wake from HLT/MWAIT if IF=1
         if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0
-            && (self.eflags.contains(EFlags::IF_) || mwait_if) {
-                // Bochs event.cc: reset monitor when waking from MWAIT
-                if in_mwait {
-                    self.monitor.reset_monitor();
-                }
-                self.activity_state = CpuActivityState::Active;
-                self.inhibit_mask = 0;
-                return false; // Continue to interrupt delivery
+            && (self.eflags.contains(EFlags::IF_) || mwait_if)
+        {
+            // Bochs event.cc: reset monitor when waking from MWAIT
+            if in_mwait {
+                self.monitor.reset_monitor();
             }
+            self.activity_state = CpuActivityState::Active;
+            self.inhibit_mask = 0;
+            return false; // Continue to interrupt delivery
+        }
 
         // LAPIC interrupt can also wake from HLT/MWAIT if IF=1
         if (self.pending_event & Self::BX_EVENT_PENDING_LAPIC_INTR != 0 || self.lapic.intr)
-            && (self.eflags.contains(EFlags::IF_) || mwait_if) {
-                // Bochs event.cc: reset monitor when waking from MWAIT
-                if in_mwait {
-                    self.monitor.reset_monitor();
-                }
-                self.activity_state = CpuActivityState::Active;
-                self.inhibit_mask = 0;
-                return false; // Continue to LAPIC interrupt delivery
+            && (self.eflags.contains(EFlags::IF_) || mwait_if)
+        {
+            // Bochs event.cc: reset monitor when waking from MWAIT
+            if in_mwait {
+                self.monitor.reset_monitor();
             }
+            self.activity_state = CpuActivityState::Active;
+            self.inhibit_mask = 0;
+            return false; // Continue to LAPIC interrupt delivery
+        }
 
         // Monitor triggered by a write (wakeup_monitor set activity_state to Active)
         if matches!(self.activity_state, CpuActivityState::Active) {

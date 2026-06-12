@@ -25,9 +25,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Bochs protect_ctrl.cc LGDT_Ms — SVM_INTERCEPT0_GDTR_WRITE.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_GDTR_WRITE)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_GDTR_WRITE) {
             return self.svm_vmexit(super::svm::SvmVmexit::GdtrWrite as i32, 0, 0);
         }
         let seg = BxSegregs::from(instr.seg());
@@ -70,9 +68,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
         // Bochs protect_ctrl.cc SGDT_Ms — SVM_INTERCEPT0_GDTR_READ.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_GDTR_READ)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_GDTR_READ) {
             return self.svm_vmexit(super::svm::SvmVmexit::GdtrRead as i32, 0, 0);
         }
         let seg = BxSegregs::from(instr.seg());
@@ -108,9 +104,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Bochs protect_ctrl.cc LIDT_Ms — SVM_INTERCEPT0_IDTR_WRITE.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IDTR_WRITE)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IDTR_WRITE) {
             return self.svm_vmexit(super::svm::SvmVmexit::IdtrWrite as i32, 0, 0);
         }
         let seg = BxSegregs::from(instr.seg());
@@ -152,9 +146,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
         // Bochs protect_ctrl.cc SIDT_Ms — SVM_INTERCEPT0_IDTR_READ.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IDTR_READ)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IDTR_READ) {
             return self.svm_vmexit(super::svm::SvmVmexit::IdtrRead as i32, 0, 0);
         }
         let seg = BxSegregs::from(instr.seg());
@@ -193,15 +185,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
         // Bochs protect_ctrl.cc SLDT_Ew — SVM_INTERCEPT0_LDTR_READ.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_LDTR_READ)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_LDTR_READ) {
             return self.svm_vmexit(super::svm::SvmVmexit::LdtrRead as i32, 0, 0);
         }
         // Bochs protect_ctrl.cc SLDT_Ew — DESCRIPTOR_TABLE_VMEXIT gate. Qualification
         // carries the resolved address when the operand is memory; zero for register.
         if self.in_vmx_guest {
-            let qual = if instr.mod_c0() { 0 } else { self.resolve_addr(instr) };
+            let qual = if instr.mod_c0() {
+                0
+            } else {
+                self.resolve_addr(instr)
+            };
             if self.vmexit_check_ldtr_tr_access(qual)? {
                 return Ok(());
             }
@@ -268,14 +262,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
         // Bochs protect_ctrl.cc STR_Ew — SVM_INTERCEPT0_TR_READ.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_TR_READ)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_TR_READ) {
             return self.svm_vmexit(super::svm::SvmVmexit::TrRead as i32, 0, 0);
         }
         // Bochs protect_ctrl.cc STR_Ew — DESCRIPTOR_TABLE_VMEXIT gate.
         if self.in_vmx_guest {
-            let qual = if instr.mod_c0() { 0 } else { self.resolve_addr(instr) };
+            let qual = if instr.mod_c0() {
+                0
+            } else {
+                self.resolve_addr(instr)
+            };
             if self.vmexit_check_ldtr_tr_access(qual)? {
                 return Ok(());
             }
@@ -427,12 +423,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Normal code/data segment
             // Conforming code segments ignore DPL
             let is_code = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CODE);
-            let is_conforming = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CONFORMING);
+            let is_conforming =
+                SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CONFORMING);
             if !(is_code && is_conforming)
-                && (descriptor.dpl < cpl || descriptor.dpl < selector.rpl) {
-                    self.set_zf(false);
-                    return Ok(());
-                }
+                && (descriptor.dpl < cpl || descriptor.dpl < selector.rpl)
+            {
+                self.set_zf(false);
+                return Ok(());
+            }
         } else {
             // System/gate segment — only certain types accepted
             // Based on Bochs protect_ctrl.cc
@@ -541,10 +539,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Non-conforming code segments need privilege check
             // (dword2 & 0x00000c00) == 0x00000c00 means conforming code (bits 10+11 both set)
             if (dword2 & 0x00000c00) != 0x00000c00
-                && (descriptor_dpl < cpl || descriptor_dpl < selector.rpl) {
-                    self.set_zf(false);
-                    return Ok(());
-                }
+                && (descriptor_dpl < cpl || descriptor_dpl < selector.rpl)
+            {
+                self.set_zf(false);
+                return Ok(());
+            }
         }
 
         // All checks passed
@@ -618,8 +617,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         if is_code {
             // Code segment: readable conforming segments ignore DPL
-            let is_conforming = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CONFORMING);
-            let is_readable = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::READABLE);
+            let is_conforming =
+                SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CONFORMING);
+            let is_readable =
+                SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::READABLE);
             if is_conforming && is_readable {
                 tracing::trace!("VERR: conforming readable code, OK");
                 self.set_zf(true);
@@ -737,9 +738,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // Bochs protect_ctrl.cc LGDT64_Ms — SVM_INTERCEPT0_GDTR_WRITE.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_GDTR_WRITE)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_GDTR_WRITE) {
             return self.svm_vmexit(super::svm::SvmVmexit::GdtrWrite as i32, 0, 0);
         }
         let eaddr = self.resolve_addr64(instr);
@@ -767,9 +766,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // Bochs protect_ctrl.cc LIDT64_Ms — SVM_INTERCEPT0_IDTR_WRITE.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IDTR_WRITE)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IDTR_WRITE) {
             return self.svm_vmexit(super::svm::SvmVmexit::IdtrWrite as i32, 0, 0);
         }
         let eaddr = self.resolve_addr64(instr);
@@ -800,9 +797,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
         // Bochs protect_ctrl.cc SGDT64_Ms — SVM_INTERCEPT0_GDTR_READ.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_GDTR_READ)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_GDTR_READ) {
             return self.svm_vmexit(super::svm::SvmVmexit::GdtrRead as i32, 0, 0);
         }
         let eaddr = self.resolve_addr64(instr);
@@ -827,9 +822,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
         // Bochs protect_ctrl.cc SIDT64_Ms — SVM_INTERCEPT0_IDTR_READ.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IDTR_READ)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IDTR_READ) {
             return self.svm_vmexit(super::svm::SvmVmexit::IdtrRead as i32, 0, 0);
         }
         let eaddr = self.resolve_addr64(instr);
@@ -861,11 +854,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.load_far_pointer64(instr, BxSegregs::Gs)
     }
 
-    fn load_far_pointer64(
-        &mut self,
-        instr: &Instruction,
-        target_seg: BxSegregs,
-    ) -> Result<()> {
+    fn load_far_pointer64(&mut self, instr: &Instruction, target_seg: BxSegregs) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
         let laddr = self.get_laddr64(seg as usize, eaddr);

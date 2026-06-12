@@ -4397,4 +4397,3 @@ impl Default for Opcode {
         Self::IaError
     }
 }
-

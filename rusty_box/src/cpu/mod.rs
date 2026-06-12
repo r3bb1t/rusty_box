@@ -1,14 +1,13 @@
 // Always available (no alloc needed)
-pub mod instrumentation;
 pub mod decoder;
+pub mod instrumentation;
 
 pub use instrumentation::{
     BranchEvent, BranchType, CacheCntrl, CodeSize, CpuSetupMode, CpuSnapshot, EmuStopReason,
-    ExitSet, HookMask, HwInterruptEvent, Instrumentation,
-    InvEptType, InvPcidType, IoHookEvent, MemAccessRW, MemHookEvent,
-    HookCtx, InstrAction, MemPerms, MemType, MwaitFlags, PrefetchHint, ResetType,
-    LinAccess, MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess,
-    PrefetchEvent, TlbCntrl, X86Reg,
+    ExitSet, HookCtx, HookMask, HwInterruptEvent, InstrAction, Instrumentation, InvEptType,
+    InvPcidType, IoHookEvent, LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemPerms,
+    MemType, MemUnmapped, MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent,
+    PrefetchHint, ResetType, TlbCntrl, X86Reg,
 };
 #[cfg(feature = "instrumentation")]
 pub use instrumentation::{HookHandle, InstrumentationError, IoHookType, MemHookType};
@@ -56,15 +55,15 @@ pub(super) mod bit64;
 pub(super) mod bmi32;
 pub(super) mod bmi64;
 pub mod builder;
+pub(super) mod cet;
 #[allow(clippy::module_inception)]
 pub mod cpu;
 mod cpu_getters_and_setters;
 pub(super) mod cpu_macros;
-pub(super) mod crc32;
-pub(super) mod cet;
 pub(super) mod cpudb;
 pub(super) mod cpuid;
 pub(super) mod cpustats;
+pub(super) mod crc32;
 pub(super) mod crregs;
 pub(super) mod ctrl_xfer16;
 pub(super) mod ctrl_xfer32;
@@ -81,8 +80,8 @@ pub(super) mod event;
 pub(super) mod exception;
 pub(super) mod flag_ctrl;
 pub(super) mod flag_ctrl_pro;
-pub(super) mod fred;
 pub(super) mod fpu;
+pub(super) mod fred;
 pub(super) mod gf2;
 pub(super) mod i387;
 pub(super) mod icache;
@@ -109,13 +108,13 @@ pub(super) mod rdrand;
 pub(super) mod rusty_box;
 pub(super) mod segment_ctrl_pro;
 pub(super) mod sha;
-#[cfg(feature = "std")]
-pub mod snapshot;
 pub(super) mod shift16;
 pub(super) mod shift32;
 pub(super) mod shift64;
 pub(super) mod shift8;
 pub(super) mod smm;
+#[cfg(feature = "std")]
+pub mod snapshot;
 pub(super) mod soft_int;
 pub(super) mod softfloat3e;
 pub(super) mod sse;

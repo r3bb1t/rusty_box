@@ -287,8 +287,8 @@ mod tests {
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::decoder::{BxSegregs, Instruction};
-    use rusty_box_decoder::opcode::Opcode;
     use rusty_box_decoder::fetch_decode64;
+    use rusty_box_decoder::opcode::Opcode;
 
     /// Build an EVEX.512 instruction with default sizes; tests fill in
     /// the VSIB pieces afterwards via public setters.
@@ -333,15 +333,7 @@ mod tests {
             );
         }
         for n in 0..16u8 {
-            let i = make_vsib_instr(
-                Opcode::EvexVgatherddVdqVsib,
-                0,
-                n + 16,
-                0,
-                0,
-                0,
-                1,
-            );
+            let i = make_vsib_instr(Opcode::EvexVgatherddVdqVsib, 0, n + 16, 0, 0, 0, 1);
             assert_eq!(
                 super::BxCpuC::<AmdRyzen>::vsib_index_reg(&i),
                 n + 16,
@@ -353,7 +345,10 @@ mod tests {
     #[test]
     fn resolve_gather_d_signed_index_as64() {
         let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
-        cpu.set_gpr64(rusty_box_decoder::instruction::GprIndex::Rbx as usize, 0x4000);
+        cpu.set_gpr64(
+            rusty_box_decoder::instruction::GprIndex::Rbx as usize,
+            0x4000,
+        );
         cpu.vmm[5].set_zmm32s(0, -1);
         let i = make_vsib_instr(
             Opcode::EvexVgatherddVdqVsib,
@@ -372,7 +367,10 @@ mod tests {
     #[test]
     fn resolve_gather_q_uses_qword_index() {
         let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
-        cpu.set_gpr64(rusty_box_decoder::instruction::GprIndex::Rax as usize, 0x10000);
+        cpu.set_gpr64(
+            rusty_box_decoder::instruction::GprIndex::Rax as usize,
+            0x10000,
+        );
         cpu.vmm[7].set_zmm64s(0, -2);
         let i = make_vsib_instr(
             Opcode::EvexVgatherqqVdqVsib,
@@ -442,7 +440,9 @@ mod tests {
         // P2=0x49: z=0 L'L=10 b=0 ~V'=1 aaa=001 (VL=512, V'=0, k1)
         // op=0x90, ModRM=0x94 (mod=10 reg=010 rm=100=SIB),
         // SIB=0xAB (scale=10 idx=101=zmm5 base=011=rbx), disp32=0x40.
-        let bytes = [0x62, 0x72, 0x7D, 0x49, 0x90, 0x94, 0xAB, 0x40, 0x00, 0x00, 0x00];
+        let bytes = [
+            0x62, 0x72, 0x7D, 0x49, 0x90, 0x94, 0xAB, 0x40, 0x00, 0x00, 0x00,
+        ];
         let i = fetch_decode64(&bytes).expect("fetch_decode64 should succeed");
         assert_eq!(i.get_ia_opcode(), Opcode::EvexVgatherddVdqVsib);
         assert_eq!(i.dst(), 10, "REX.R extends nnn=010 to dst=10");
@@ -460,7 +460,9 @@ mod tests {
         // Same encoding as above but with ~V'=0 → V'=1, naming zmm21 as
         // the VSIB index. Only decodable correctly when the decoder
         // captures V' and the gather handler combines it with sib_index.
-        let bytes = [0x62, 0x72, 0x7D, 0x41, 0x90, 0x94, 0xAB, 0x40, 0x00, 0x00, 0x00];
+        let bytes = [
+            0x62, 0x72, 0x7D, 0x41, 0x90, 0x94, 0xAB, 0x40, 0x00, 0x00, 0x00,
+        ];
         let i = fetch_decode64(&bytes).expect("fetch_decode64 should succeed");
         assert_eq!(i.get_evex_v_prime(), 1, "~V'=0 → V'=1");
         assert_eq!(i.sib_index(), 5);

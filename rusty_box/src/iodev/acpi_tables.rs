@@ -149,38 +149,61 @@ impl AcpiTableGenerator {
         loader.allocate(RSDP_FILE, 16, ALLOC_FSEG);
 
         // Patch FADT pointers to FACS and DSDT
-        loader.add_pointer(TABLES_FILE, TABLES_FILE,
-            (fadt_offset + FADT_OFF_FIRMWARE_CTRL) as u32, 4);
-        loader.add_pointer(TABLES_FILE, TABLES_FILE,
-            (fadt_offset + FADT_OFF_DSDT) as u32, 4);
-        loader.add_pointer(TABLES_FILE, TABLES_FILE,
-            (fadt_offset + FADT_OFF_X_FIRMWARE_CTRL) as u32, 8);
-        loader.add_pointer(TABLES_FILE, TABLES_FILE,
-            (fadt_offset + FADT_OFF_X_DSDT) as u32, 8);
+        loader.add_pointer(
+            TABLES_FILE,
+            TABLES_FILE,
+            (fadt_offset + FADT_OFF_FIRMWARE_CTRL) as u32,
+            4,
+        );
+        loader.add_pointer(
+            TABLES_FILE,
+            TABLES_FILE,
+            (fadt_offset + FADT_OFF_DSDT) as u32,
+            4,
+        );
+        loader.add_pointer(
+            TABLES_FILE,
+            TABLES_FILE,
+            (fadt_offset + FADT_OFF_X_FIRMWARE_CTRL) as u32,
+            8,
+        );
+        loader.add_pointer(
+            TABLES_FILE,
+            TABLES_FILE,
+            (fadt_offset + FADT_OFF_X_DSDT) as u32,
+            8,
+        );
 
         // Patch XSDT entries (64-bit pointers to each table)
         let xsdt_entries_base = xsdt_offset + HEADER_SIZE;
         for i in 0..xsdt_entries.len() {
-            loader.add_pointer(TABLES_FILE, TABLES_FILE,
-                (xsdt_entries_base + i * 8) as u32, 8);
+            loader.add_pointer(
+                TABLES_FILE,
+                TABLES_FILE,
+                (xsdt_entries_base + i * 8) as u32,
+                8,
+            );
         }
 
         // Patch RSDP.xsdt_address to point into tables blob
-        loader.add_pointer(RSDP_FILE, TABLES_FILE,
-            RSDP_OFF_XSDT_ADDRESS as u32, 8);
+        loader.add_pointer(RSDP_FILE, TABLES_FILE, RSDP_OFF_XSDT_ADDRESS as u32, 8);
 
         // Checksums (must be last — computed after pointer patching)
-        loader.add_checksum(TABLES_FILE,
+        loader.add_checksum(
+            TABLES_FILE,
             (fadt_offset + HEADER_OFF_CHECKSUM) as u32,
-            fadt_offset as u32, fadt_size as u32);
-        loader.add_checksum(TABLES_FILE,
+            fadt_offset as u32,
+            fadt_size as u32,
+        );
+        loader.add_checksum(
+            TABLES_FILE,
             (xsdt_offset + HEADER_OFF_CHECKSUM) as u32,
-            xsdt_offset as u32, xsdt_size as u32);
+            xsdt_offset as u32,
+            xsdt_size as u32,
+        );
         // RSDP has two checksums: legacy (first 20 bytes) and extended (all 36 bytes)
-        loader.add_checksum(RSDP_FILE,
-            RSDP_OFF_CHECKSUM as u32, 0, 20);
-        loader.add_checksum(RSDP_FILE,
-            RSDP_OFF_EXT_CHECKSUM as u32, 0, 36);
+        loader.add_checksum(RSDP_FILE, RSDP_OFF_CHECKSUM as u32, 0, 20);
+        loader.add_checksum(RSDP_FILE, RSDP_OFF_EXT_CHECKSUM as u32, 0, 36);
 
         Self {
             tables_blob: tables,
@@ -211,10 +234,10 @@ fn build_facs(buf: &mut Vec<u8>) {
 
     facs[0..4].copy_from_slice(b"FACS");
     write_u32(facs, 4, 64); // length
-    // hardware_signature, firmware_waking_vector, global_lock, flags: all 0
-    // x_firmware_waking_vector: 0
+                            // hardware_signature, firmware_waking_vector, global_lock, flags: all 0
+                            // x_firmware_waking_vector: 0
     facs[32] = 2; // version (ACPI 2.0)
-    // ospm_flags, reserved: all 0
+                  // ospm_flags, reserved: all 0
 }
 
 fn build_fadt(buf: &mut Vec<u8>, facs_offset: u32, dsdt_offset: u32) -> usize {
@@ -239,26 +262,26 @@ fn build_fadt(buf: &mut Vec<u8>, facs_offset: u32, dsdt_offset: u32) -> usize {
     write_u32(fadt, 48, 0xB2); // smi_cmd
     fadt[52] = 0xF1; // acpi_enable
     fadt[53] = 0xF0; // acpi_disable
-    // s4bios_req, pstate_cnt: 0
+                     // s4bios_req, pstate_cnt: 0
 
     // PM register blocks (PIIX4 at base 0xB000)
     write_u32(fadt, 56, 0xB000); // pm1a_evt_blk
-    // pm1b_evt_blk: 0
+                                 // pm1b_evt_blk: 0
     write_u32(fadt, 64, 0xB004); // pm1a_cnt_blk
-    // pm1b_cnt_blk, pm2_cnt_blk: 0
+                                 // pm1b_cnt_blk, pm2_cnt_blk: 0
     write_u32(fadt, 76, 0xB008); // pm_tmr_blk
     write_u32(fadt, 80, 0xB020); // gpe0_blk
-    // gpe1_blk: 0
+                                 // gpe1_blk: 0
     fadt[88] = 4; // pm1_evt_len
     fadt[89] = 2; // pm1_cnt_len
-    // pm2_cnt_len: 0
+                  // pm2_cnt_len: 0
     fadt[91] = 4; // pm_tmr_len
     fadt[92] = 8; // gpe0_blk_len (8 bytes = 64 bits)
-    // gpe1_blk_len, gpe1_base, cst_cnt: 0
+                  // gpe1_blk_len, gpe1_base, cst_cnt: 0
     write_u16(fadt, 96, 0xFFFF); // p_lvl2_lat (not supported)
     write_u16(fadt, 98, 0xFFFF); // p_lvl3_lat (not supported)
-    // flush_size, flush_stride, duty_offset, duty_width: 0
-    // day_alrm, mon_alrm, century: 0
+                                 // flush_size, flush_stride, duty_offset, duty_width: 0
+                                 // day_alrm, mon_alrm, century: 0
 
     // IA-PC boot architecture flags
     write_u16(fadt, 109, (1 << 0) | (1 << 1)); // Legacy devices + 8042
@@ -283,13 +306,13 @@ fn build_fadt(buf: &mut Vec<u8>, facs_offset: u32, dsdt_offset: u32) -> usize {
     // Extended PM register addresses (Generic Address Structures)
     // PM1a Event Block
     write_gas(fadt, 148, 1, 32, 0, 2, 0xB000); // SystemIO, 32-bit, word access
-    // x_pm1b_evt_blk (160): 0 (not used)
-    // PM1a Control Block
+                                               // x_pm1b_evt_blk (160): 0 (not used)
+                                               // PM1a Control Block
     write_gas(fadt, 172, 1, 16, 0, 2, 0xB004); // SystemIO, 16-bit, word access
-    // x_pm1b_cnt_blk (184), x_pm2_cnt_blk (196): 0 (not used)
-    // PM Timer Block
+                                               // x_pm1b_cnt_blk (184), x_pm2_cnt_blk (196): 0 (not used)
+                                               // PM Timer Block
     write_gas(fadt, 208, 1, 32, 0, 3, 0xB008); // SystemIO, 32-bit, dword access
-    // GPE0 Block
+                                               // GPE0 Block
     write_gas(fadt, 220, 1, 64, 0, 1, 0xB020); // SystemIO, 64-bit, byte access
 
     // Checksum placeholder — loader will recompute after pointer patching
@@ -323,7 +346,7 @@ fn build_madt(buf: &mut Vec<u8>, num_cpus: u32) {
 
     // Local APIC entries (one per CPU)
     for i in 0..num_cpus {
-        madt[off] = 0;     // type: Local APIC
+        madt[off] = 0; // type: Local APIC
         madt[off + 1] = 8; // length
         madt[off + 2] = i as u8; // processor_id
         madt[off + 3] = i as u8; // apic_id
@@ -332,38 +355,38 @@ fn build_madt(buf: &mut Vec<u8>, num_cpus: u32) {
     }
 
     // I/O APIC
-    madt[off] = 1;      // type: I/O APIC
+    madt[off] = 1; // type: I/O APIC
     madt[off + 1] = 12; // length
     madt[off + 2] = num_cpus as u8; // io_apic_id (after CPUs)
-    // reserved: 0
+                                    // reserved: 0
     write_u32(madt, off + 4, 0xFEC0_0000); // address
-    write_u32(madt, off + 8, 0);           // global_irq_base
+    write_u32(madt, off + 8, 0); // global_irq_base
     off += MADT_IOAPIC_SIZE;
 
     // Interrupt Source Override: IRQ0 → GSI 2 (timer)
-    madt[off] = 2;      // type: Interrupt Override
+    madt[off] = 2; // type: Interrupt Override
     madt[off + 1] = 10; // length
-    madt[off + 2] = 0;  // bus: ISA
-    madt[off + 3] = 0;  // source: IRQ0
+    madt[off + 2] = 0; // bus: ISA
+    madt[off + 3] = 0; // source: IRQ0
     write_u32(madt, off + 4, 2); // global_irq: GSI 2
     write_u16(madt, off + 8, 0); // flags: conforms to bus spec
     off += MADT_ISO_SIZE;
 
     // Interrupt Source Override: IRQ9 (SCI) — level triggered, active low
-    madt[off] = 2;      // type: Interrupt Override
+    madt[off] = 2; // type: Interrupt Override
     madt[off + 1] = 10; // length
-    madt[off + 2] = 0;  // bus: ISA
-    madt[off + 3] = 9;  // source: IRQ9
-    write_u32(madt, off + 4, 9);      // global_irq: 9
+    madt[off + 2] = 0; // bus: ISA
+    madt[off + 3] = 9; // source: IRQ9
+    write_u32(madt, off + 4, 9); // global_irq: 9
     write_u16(madt, off + 8, 0x000D); // flags: level triggered, active low
     off += MADT_ISO_SIZE;
 
     // Local APIC NMI (LINT1, all processors)
-    madt[off] = 4;      // type: Local APIC NMI
-    madt[off + 1] = 6;  // length
+    madt[off] = 4; // type: Local APIC NMI
+    madt[off + 1] = 6; // length
     madt[off + 2] = 0xFF; // processor_id: all
     write_u16(madt, off + 3, 0); // flags: conforms
-    madt[off + 5] = 1;  // lint: LINT1
+    madt[off + 5] = 1; // lint: LINT1
 
     // Compute checksum (MADT is not patched by loader, so we do it here)
     let madt = &mut buf[start..start + total_size];
@@ -383,15 +406,15 @@ fn build_hpet(buf: &mut Vec<u8>) {
 
     // Base address (Generic Address Structure)
     // address_space=0 (memory), bit_width=64, bit_offset=0, access_size=0
-    hpet[40] = 0;  // Memory space
+    hpet[40] = 0; // Memory space
     hpet[41] = 64; // Register bit width
-    hpet[42] = 0;  // Bit offset
-    hpet[43] = 0;  // Access size
+    hpet[42] = 0; // Bit offset
+    hpet[43] = 0; // Access size
     write_u64(hpet, 44, 0xFED0_0000); // 64-bit base address
 
-    hpet[52] = 0;  // hpet_number (sequence)
+    hpet[52] = 0; // hpet_number (sequence)
     write_u16(hpet, 53, 100); // min_tick
-    hpet[55] = 0;  // page_prot
+    hpet[55] = 0; // page_prot
 
     // Checksum (HPET is not patched by loader)
     let hpet = &mut buf[start..start + HPET_SIZE];
@@ -426,11 +449,11 @@ fn build_rsdp(xsdt_offset: u32) -> Vec<u8> {
     // checksum: placeholder (byte 8)
     rsdp[9..15].copy_from_slice(OEM_ID); // oem_id
     rsdp[15] = 2; // revision: ACPI 2.0+
-    // rsdt_address (bytes 16-19): 0 (not provided, XSDT only)
+                  // rsdt_address (bytes 16-19): 0 (not provided, XSDT only)
     write_u32(&mut rsdp, 20, 36); // length: 36 bytes (ACPI 2.0 RSDP)
     write_u64(&mut rsdp, 24, xsdt_offset as u64); // xsdt_address (patched by loader)
-    // extended_checksum (byte 32): placeholder
-    // reserved (bytes 33-35): 0
+                                                  // extended_checksum (byte 32): placeholder
+                                                  // reserved (bytes 33-35): 0
 
     rsdp
 }
@@ -457,8 +480,13 @@ impl LoaderBuilder {
         self.entries.extend_from_slice(&entry);
     }
 
-    fn add_pointer(&mut self, pointer_file: &str, pointee_file: &str,
-                   pointer_offset: u32, pointer_size: u8) {
+    fn add_pointer(
+        &mut self,
+        pointer_file: &str,
+        pointee_file: &str,
+        pointer_offset: u32,
+        pointer_size: u8,
+    ) {
         let mut entry = [0u8; LOADER_ENTRY_SIZE];
         write_u32(&mut entry, 0, LOADER_CMD_ADD_POINTER);
         write_fname(&mut entry, 4, pointer_file);
@@ -499,8 +527,15 @@ fn write_header(buf: &mut [u8], signature: &[u8; 4], length: u32, revision: u8) 
 }
 
 /// Write a Generic Address Structure (12 bytes) at the given offset.
-fn write_gas(buf: &mut [u8], off: usize, addr_space: u8, bit_width: u8,
-             bit_offset: u8, access_size: u8, address: u64) {
+fn write_gas(
+    buf: &mut [u8],
+    off: usize,
+    addr_space: u8,
+    bit_width: u8,
+    bit_offset: u8,
+    access_size: u8,
+    address: u64,
+) {
     buf[off] = addr_space;
     buf[off + 1] = bit_width;
     buf[off + 2] = bit_offset;

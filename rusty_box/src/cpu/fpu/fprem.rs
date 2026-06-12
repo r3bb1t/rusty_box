@@ -177,13 +177,7 @@ pub(crate) fn do_fprem(
             a_sig0 >>= 1;
             // exp_diff is now effectively 0 for the algorithm
         } else if exp_diff > 0 {
-            *q = remainder_kernel(
-                a_sig0,
-                b_sig,
-                exp_diff as u8,
-                &mut a_sig0,
-                &mut a_sig1,
-            );
+            *q = remainder_kernel(a_sig0, b_sig, exp_diff as u8, &mut a_sig0, &mut a_sig1);
         } else {
             // exp_diff == 0
             if b_sig <= a_sig0 {

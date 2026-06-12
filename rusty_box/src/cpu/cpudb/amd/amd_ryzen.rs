@@ -14,7 +14,7 @@ use bitflags::bitflags;
 // we import and reuse, since the flag definitions come from Intel SDM /
 // AMD APM and are identical across vendors.
 use super::super::intel::core_i7_skylake::{
-    CpuIdStd1Ecx, CpuIdStd1Edx, CpuIdStd7Ebx, CpuIdExt1Ecx, CpuIdExt1Edx,
+    CpuIdExt1Ecx, CpuIdExt1Edx, CpuIdStd1Ecx, CpuIdStd1Edx, CpuIdStd7Ebx,
 };
 
 // ─── Leaf-1 ECX feature base for Ryzen ────────────────────────────────────
@@ -99,12 +99,11 @@ const LEAF8_0000_0001_EDX_BASE: CpuIdExt1Edx = CpuIdExt1Edx::SYSCALL_SYSRET
 // FXSR, PSE36, MCA, CMOV, PAT, SYSCALL, NX, FFXSR, 1GB, RDTSCP, LongMode,
 // 3DNOW_EXT, 3DNOW). Bochs' get_ext_cpuid_leaf_1_edx returns roughly the
 // STD leaf-1 EDX low bits ORed with these. Construct the raw u32 here.
-const LEAF8_0000_0001_EDX_RAW_EXTRA: u32 =
-    (1 << 11) |  // SYSCALL (also in CpuIdExt1Edx::SYSCALL_SYSRET)
+const LEAF8_0000_0001_EDX_RAW_EXTRA: u32 = (1 << 11) |  // SYSCALL (also in CpuIdExt1Edx::SYSCALL_SYSRET)
     (1 << 19) |  // MMX_EXT (AMD-specific)
     (1 << 22) |  // MMX_EXT_AMD
     (1 << 25) |  // FFXSR
-    (1 << 31);   // 3DNOW (legacy, still reported on AMD)
+    (1 << 31); // 3DNOW (legacy, still reported on AMD)
 
 // Helper mirroring Bochs bx_cpuid_t::enable_cpu_extension.
 fn enable_extension(bitmask: &mut [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE], feature: X86Feature) {
@@ -303,8 +302,7 @@ impl BxCpuIdTrait for AmdRyzen {
             0x80000008 => (
                 0x00003028, // 48-bit phys, 48-bit linear
                 0x00001007, // CLZERO/IBPB/IBRS flags per Bochs ryzen
-                0x00000000,
-                0x00000000,
+                0x00000000, 0x00000000,
             ),
             // Leaf 0x8000000A SVM feature identification.
             0x8000000A => {

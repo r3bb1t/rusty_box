@@ -72,7 +72,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let displacement = (op2 as i64 >> 6) * 8;
             let mut addr = eaddr.wrapping_add(displacement as u64);
             // Bochs bit64.cc: truncate to 32 bits when 67h prefix (as64L=0)
-            if instr.as64_l() == 0 { addr &= 0xFFFF_FFFF; }
+            if instr.as64_l() == 0 {
+                addr &= 0xFFFF_FFFF;
+            }
             let op1 = self.read_virtual_qword_64(seg, addr)?;
             let bit_index = op2 & 0x3F;
             self.set_cf((op1 >> bit_index) & 1 != 0);
@@ -95,7 +97,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let seg = BxSegregs::from(instr.seg());
             let displacement = (op2 as i64 >> 6) * 8;
             let mut addr = eaddr.wrapping_add(displacement as u64);
-            if instr.as64_l() == 0 { addr &= 0xFFFF_FFFF; }
+            if instr.as64_l() == 0 {
+                addr &= 0xFFFF_FFFF;
+            }
             let op1 = self.read_rmw_virtual_qword_64(seg, addr)?;
             let bit_index = op2 & 0x3F;
             self.set_cf((op1 >> bit_index) & 1 != 0);
@@ -119,7 +123,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let seg = BxSegregs::from(instr.seg());
             let displacement = (op2 as i64 >> 6) * 8;
             let mut addr = eaddr.wrapping_add(displacement as u64);
-            if instr.as64_l() == 0 { addr &= 0xFFFF_FFFF; }
+            if instr.as64_l() == 0 {
+                addr &= 0xFFFF_FFFF;
+            }
             let op1 = self.read_rmw_virtual_qword_64(seg, addr)?;
             let bit_index = op2 & 0x3F;
             self.set_cf((op1 >> bit_index) & 1 != 0);
@@ -143,7 +149,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let seg = BxSegregs::from(instr.seg());
             let displacement = (op2 as i64 >> 6) * 8;
             let mut addr = eaddr.wrapping_add(displacement as u64);
-            if instr.as64_l() == 0 { addr &= 0xFFFF_FFFF; }
+            if instr.as64_l() == 0 {
+                addr &= 0xFFFF_FFFF;
+            }
             let op1 = self.read_rmw_virtual_qword_64(seg, addr)?;
             let bit_index = op2 & 0x3F;
             self.set_cf((op1 >> bit_index) & 1 != 0);
@@ -242,7 +250,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let result = op2.count_ones() as u64;
         // Bochs: clearEFlagsOSZAPC(); if (!op_32) assert_ZF();
         self.oszapc.set_oszapc_logic_32(1);
-        if result == 0 { self.oszapc.set_zf(true); }
+        if result == 0 {
+            self.oszapc.set_zf(true);
+        }
         self.set_gpr64(instr.dst() as usize, result);
         Ok(())
     }

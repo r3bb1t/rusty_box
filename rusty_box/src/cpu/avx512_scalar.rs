@@ -1,5 +1,3 @@
-
-
 //! AVX-512F scalar floating-point instruction handlers
 //!
 //! Implements EVEX-encoded scalar FP operations (VADDSS/SD, VSUBSS/SD,
@@ -20,7 +18,10 @@ use super::{
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, instr: &Instruction) -> u64 {
+fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    instr: &Instruction,
+) -> u64 {
     let k = instr.opmask();
     if k == 0 {
         u64::MAX
@@ -32,7 +33,10 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value.
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, reg: u8) -> BxPackedZmmRegister {
+fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    reg: u8,
+) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
@@ -148,7 +152,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vaddss(&mut self, instr: &Instruction) -> super::Result<()> {
         let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
         let src2_val = self.evex_read_rm_ss(instr)?;
-        let result = src1.zmm32f(0) + src2_val ;
+        let result = src1.zmm32f(0) + src2_val;
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
@@ -159,7 +163,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vaddsd(&mut self, instr: &Instruction) -> super::Result<()> {
         let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
         let src2_val = self.evex_read_rm_sd(instr)?;
-        let result = src1.zmm64f(0) + src2_val ;
+        let result = src1.zmm64f(0) + src2_val;
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
@@ -175,7 +179,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vsubss(&mut self, instr: &Instruction) -> super::Result<()> {
         let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
         let src2_val = self.evex_read_rm_ss(instr)?;
-        let result = src1.zmm32f(0) - src2_val ;
+        let result = src1.zmm32f(0) - src2_val;
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
@@ -186,7 +190,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vsubsd(&mut self, instr: &Instruction) -> super::Result<()> {
         let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
         let src2_val = self.evex_read_rm_sd(instr)?;
-        let result = src1.zmm64f(0) - src2_val ;
+        let result = src1.zmm64f(0) - src2_val;
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
@@ -202,7 +206,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vmulss(&mut self, instr: &Instruction) -> super::Result<()> {
         let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
         let src2_val = self.evex_read_rm_ss(instr)?;
-        let result = src1.zmm32f(0) * src2_val ;
+        let result = src1.zmm32f(0) * src2_val;
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
@@ -213,7 +217,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vmulsd(&mut self, instr: &Instruction) -> super::Result<()> {
         let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
         let src2_val = self.evex_read_rm_sd(instr)?;
-        let result = src1.zmm64f(0) * src2_val ;
+        let result = src1.zmm64f(0) * src2_val;
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
@@ -229,7 +233,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vdivss(&mut self, instr: &Instruction) -> super::Result<()> {
         let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
         let src2_val = self.evex_read_rm_ss(instr)?;
-        let result = src1.zmm32f(0) / src2_val ;
+        let result = src1.zmm32f(0) / src2_val;
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
@@ -240,7 +244,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vdivsd(&mut self, instr: &Instruction) -> super::Result<()> {
         let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
         let src2_val = self.evex_read_rm_sd(instr)?;
-        let result = src1.zmm64f(0) / src2_val ;
+        let result = src1.zmm64f(0) / src2_val;
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);

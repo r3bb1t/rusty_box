@@ -8,23 +8,23 @@
 
 #[cfg(feature = "alloc")]
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::sync::atomic::Ordering;
 #[cfg(feature = "alloc")]
 use core::sync::atomic::AtomicBool;
+use core::sync::atomic::Ordering;
 
 #[cfg(feature = "instrumentation")]
 use core::ops::RangeBounds;
 
 #[cfg(feature = "instrumentation")]
 use crate::cpu::decoder::Instruction;
+#[cfg(feature = "alloc")]
+use crate::cpu::instrumentation::EmuStopReason;
 #[cfg(feature = "instrumentation")]
 use crate::cpu::instrumentation::{
     BranchEvent, HookHandle, HwInterruptEvent, InstrumentationError, IoHookEvent, IoHookType,
     MemHookEvent, MemHookType,
 };
 use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, X86Reg};
-#[cfg(feature = "alloc")]
-use crate::cpu::instrumentation::EmuStopReason;
 use crate::cpu::BxCpuIdTrait;
 #[cfg(feature = "alloc")]
 use crate::cpu::ResetReason;
@@ -32,7 +32,6 @@ use crate::emulator::Emulator;
 #[cfg(feature = "alloc")]
 use crate::emulator::EmulatorConfig;
 use crate::{Error, Result};
-
 
 // ─────────────────────────── StopHandle ───────────────────────────
 
@@ -98,12 +97,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 
     /// Register a memory access hook.
-    pub fn hook_add_mem<R, F>(
-        &mut self,
-        hook_type: MemHookType,
-        range: R,
-        cb: F,
-    ) -> HookHandle
+    pub fn hook_add_mem<R, F>(&mut self, hook_type: MemHookType, range: R, cb: F) -> HookHandle
     where
         R: RangeBounds<u64>,
         F: FnMut(&MemHookEvent) + Send + 'static,
@@ -140,12 +134,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 
     /// Register an I/O port hook (IN/OUT instructions).
-    pub fn hook_add_io<R, F>(
-        &mut self,
-        hook_type: IoHookType,
-        range: R,
-        cb: F,
-    ) -> HookHandle
+    pub fn hook_add_io<R, F>(&mut self, hook_type: IoHookType, range: R, cb: F) -> HookHandle
     where
         R: RangeBounds<u16>,
         F: FnMut(&IoHookEvent) + Send + 'static,
@@ -197,7 +186,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Remove a previously registered hook.
     /// Returns `Err(InvalidHandle)` if the handle was already removed or
     /// never valid.
-    pub fn hook_del(&mut self, handle: HookHandle) -> core::result::Result<(), InstrumentationError> {
+    pub fn hook_del(
+        &mut self,
+        handle: HookHandle,
+    ) -> core::result::Result<(), InstrumentationError> {
         self.cpu.instrumentation.remove(handle)
     }
 
@@ -205,16 +197,21 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Panics only if called while a hook is mid-dispatch (the tracer is
     /// temporarily taken for borrow-splitting) — user code can't observe this.
     pub fn instrumentation(&self) -> &T {
-        self.cpu.instrumentation.tracer.as_ref()
+        self.cpu
+            .instrumentation
+            .tracer
+            .as_ref()
             .expect("tracer absent only during hook dispatch")
     }
 
     /// Mutable reference to the installed tracer.
     pub fn instrumentation_mut(&mut self) -> &mut T {
-        self.cpu.instrumentation.tracer.as_mut()
+        self.cpu
+            .instrumentation
+            .tracer
+            .as_mut()
             .expect("tracer absent only during hook dispatch")
     }
-
 
     /// Recompute the active hook mask from the tracer's `active_hooks()`.
     /// Call this after mutating tracer state that changes which categories are active.
@@ -342,8 +339,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// `reg` must be Fpr0..Fpr7.
     pub fn reg_read_fp80(&self, reg: X86Reg) -> [u8; 10] {
         let index = match reg {
-            X86Reg::Fpr0 => 0, X86Reg::Fpr1 => 1, X86Reg::Fpr2 => 2, X86Reg::Fpr3 => 3,
-            X86Reg::Fpr4 => 4, X86Reg::Fpr5 => 5, X86Reg::Fpr6 => 6, X86Reg::Fpr7 => 7,
+            X86Reg::Fpr0 => 0,
+            X86Reg::Fpr1 => 1,
+            X86Reg::Fpr2 => 2,
+            X86Reg::Fpr3 => 3,
+            X86Reg::Fpr4 => 4,
+            X86Reg::Fpr5 => 5,
+            X86Reg::Fpr6 => 6,
+            X86Reg::Fpr7 => 7,
             _ => return [0u8; 10],
         };
         self.cpu.fpu_read_st(index)
@@ -351,8 +354,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     pub fn reg_write_fp80(&mut self, reg: X86Reg, val: [u8; 10]) {
         let index = match reg {
-            X86Reg::Fpr0 => 0, X86Reg::Fpr1 => 1, X86Reg::Fpr2 => 2, X86Reg::Fpr3 => 3,
-            X86Reg::Fpr4 => 4, X86Reg::Fpr5 => 5, X86Reg::Fpr6 => 6, X86Reg::Fpr7 => 7,
+            X86Reg::Fpr0 => 0,
+            X86Reg::Fpr1 => 1,
+            X86Reg::Fpr2 => 2,
+            X86Reg::Fpr3 => 3,
+            X86Reg::Fpr4 => 4,
+            X86Reg::Fpr5 => 5,
+            X86Reg::Fpr6 => 6,
+            X86Reg::Fpr7 => 7,
             _ => return,
         };
         self.cpu.fpu_write_st(index, val);
@@ -360,10 +369,22 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     pub fn reg_read_xmm(&self, reg: X86Reg) -> [u8; 16] {
         let index = match reg {
-            X86Reg::Xmm0 => 0, X86Reg::Xmm1 => 1, X86Reg::Xmm2 => 2, X86Reg::Xmm3 => 3,
-            X86Reg::Xmm4 => 4, X86Reg::Xmm5 => 5, X86Reg::Xmm6 => 6, X86Reg::Xmm7 => 7,
-            X86Reg::Xmm8 => 8, X86Reg::Xmm9 => 9, X86Reg::Xmm10 => 10, X86Reg::Xmm11 => 11,
-            X86Reg::Xmm12 => 12, X86Reg::Xmm13 => 13, X86Reg::Xmm14 => 14, X86Reg::Xmm15 => 15,
+            X86Reg::Xmm0 => 0,
+            X86Reg::Xmm1 => 1,
+            X86Reg::Xmm2 => 2,
+            X86Reg::Xmm3 => 3,
+            X86Reg::Xmm4 => 4,
+            X86Reg::Xmm5 => 5,
+            X86Reg::Xmm6 => 6,
+            X86Reg::Xmm7 => 7,
+            X86Reg::Xmm8 => 8,
+            X86Reg::Xmm9 => 9,
+            X86Reg::Xmm10 => 10,
+            X86Reg::Xmm11 => 11,
+            X86Reg::Xmm12 => 12,
+            X86Reg::Xmm13 => 13,
+            X86Reg::Xmm14 => 14,
+            X86Reg::Xmm15 => 15,
             _ => return [0u8; 16],
         };
         self.cpu.xmm_read_for_api(index)
@@ -371,10 +392,22 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     pub fn reg_write_xmm(&mut self, reg: X86Reg, val: [u8; 16]) {
         let index = match reg {
-            X86Reg::Xmm0 => 0, X86Reg::Xmm1 => 1, X86Reg::Xmm2 => 2, X86Reg::Xmm3 => 3,
-            X86Reg::Xmm4 => 4, X86Reg::Xmm5 => 5, X86Reg::Xmm6 => 6, X86Reg::Xmm7 => 7,
-            X86Reg::Xmm8 => 8, X86Reg::Xmm9 => 9, X86Reg::Xmm10 => 10, X86Reg::Xmm11 => 11,
-            X86Reg::Xmm12 => 12, X86Reg::Xmm13 => 13, X86Reg::Xmm14 => 14, X86Reg::Xmm15 => 15,
+            X86Reg::Xmm0 => 0,
+            X86Reg::Xmm1 => 1,
+            X86Reg::Xmm2 => 2,
+            X86Reg::Xmm3 => 3,
+            X86Reg::Xmm4 => 4,
+            X86Reg::Xmm5 => 5,
+            X86Reg::Xmm6 => 6,
+            X86Reg::Xmm7 => 7,
+            X86Reg::Xmm8 => 8,
+            X86Reg::Xmm9 => 9,
+            X86Reg::Xmm10 => 10,
+            X86Reg::Xmm11 => 11,
+            X86Reg::Xmm12 => 12,
+            X86Reg::Xmm13 => 13,
+            X86Reg::Xmm14 => 14,
+            X86Reg::Xmm15 => 15,
             _ => return,
         };
         self.cpu.xmm_write_for_api(index, val);
@@ -382,10 +415,22 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     pub fn reg_read_ymm(&self, reg: X86Reg) -> [u8; 32] {
         let index = match reg {
-            X86Reg::Ymm0 => 0, X86Reg::Ymm1 => 1, X86Reg::Ymm2 => 2, X86Reg::Ymm3 => 3,
-            X86Reg::Ymm4 => 4, X86Reg::Ymm5 => 5, X86Reg::Ymm6 => 6, X86Reg::Ymm7 => 7,
-            X86Reg::Ymm8 => 8, X86Reg::Ymm9 => 9, X86Reg::Ymm10 => 10, X86Reg::Ymm11 => 11,
-            X86Reg::Ymm12 => 12, X86Reg::Ymm13 => 13, X86Reg::Ymm14 => 14, X86Reg::Ymm15 => 15,
+            X86Reg::Ymm0 => 0,
+            X86Reg::Ymm1 => 1,
+            X86Reg::Ymm2 => 2,
+            X86Reg::Ymm3 => 3,
+            X86Reg::Ymm4 => 4,
+            X86Reg::Ymm5 => 5,
+            X86Reg::Ymm6 => 6,
+            X86Reg::Ymm7 => 7,
+            X86Reg::Ymm8 => 8,
+            X86Reg::Ymm9 => 9,
+            X86Reg::Ymm10 => 10,
+            X86Reg::Ymm11 => 11,
+            X86Reg::Ymm12 => 12,
+            X86Reg::Ymm13 => 13,
+            X86Reg::Ymm14 => 14,
+            X86Reg::Ymm15 => 15,
             _ => return [0u8; 32],
         };
         self.cpu.ymm_read_for_api(index)
@@ -393,10 +438,22 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     pub fn reg_write_ymm(&mut self, reg: X86Reg, val: [u8; 32]) {
         let index = match reg {
-            X86Reg::Ymm0 => 0, X86Reg::Ymm1 => 1, X86Reg::Ymm2 => 2, X86Reg::Ymm3 => 3,
-            X86Reg::Ymm4 => 4, X86Reg::Ymm5 => 5, X86Reg::Ymm6 => 6, X86Reg::Ymm7 => 7,
-            X86Reg::Ymm8 => 8, X86Reg::Ymm9 => 9, X86Reg::Ymm10 => 10, X86Reg::Ymm11 => 11,
-            X86Reg::Ymm12 => 12, X86Reg::Ymm13 => 13, X86Reg::Ymm14 => 14, X86Reg::Ymm15 => 15,
+            X86Reg::Ymm0 => 0,
+            X86Reg::Ymm1 => 1,
+            X86Reg::Ymm2 => 2,
+            X86Reg::Ymm3 => 3,
+            X86Reg::Ymm4 => 4,
+            X86Reg::Ymm5 => 5,
+            X86Reg::Ymm6 => 6,
+            X86Reg::Ymm7 => 7,
+            X86Reg::Ymm8 => 8,
+            X86Reg::Ymm9 => 9,
+            X86Reg::Ymm10 => 10,
+            X86Reg::Ymm11 => 11,
+            X86Reg::Ymm12 => 12,
+            X86Reg::Ymm13 => 13,
+            X86Reg::Ymm14 => 14,
+            X86Reg::Ymm15 => 15,
             _ => return,
         };
         self.cpu.ymm_write_for_api(index, val);
@@ -404,14 +461,38 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     pub fn reg_read_zmm(&self, reg: X86Reg) -> [u8; 64] {
         let index = match reg {
-            X86Reg::Zmm0 => 0, X86Reg::Zmm1 => 1, X86Reg::Zmm2 => 2, X86Reg::Zmm3 => 3,
-            X86Reg::Zmm4 => 4, X86Reg::Zmm5 => 5, X86Reg::Zmm6 => 6, X86Reg::Zmm7 => 7,
-            X86Reg::Zmm8 => 8, X86Reg::Zmm9 => 9, X86Reg::Zmm10 => 10, X86Reg::Zmm11 => 11,
-            X86Reg::Zmm12 => 12, X86Reg::Zmm13 => 13, X86Reg::Zmm14 => 14, X86Reg::Zmm15 => 15,
-            X86Reg::Zmm16 => 16, X86Reg::Zmm17 => 17, X86Reg::Zmm18 => 18, X86Reg::Zmm19 => 19,
-            X86Reg::Zmm20 => 20, X86Reg::Zmm21 => 21, X86Reg::Zmm22 => 22, X86Reg::Zmm23 => 23,
-            X86Reg::Zmm24 => 24, X86Reg::Zmm25 => 25, X86Reg::Zmm26 => 26, X86Reg::Zmm27 => 27,
-            X86Reg::Zmm28 => 28, X86Reg::Zmm29 => 29, X86Reg::Zmm30 => 30, X86Reg::Zmm31 => 31,
+            X86Reg::Zmm0 => 0,
+            X86Reg::Zmm1 => 1,
+            X86Reg::Zmm2 => 2,
+            X86Reg::Zmm3 => 3,
+            X86Reg::Zmm4 => 4,
+            X86Reg::Zmm5 => 5,
+            X86Reg::Zmm6 => 6,
+            X86Reg::Zmm7 => 7,
+            X86Reg::Zmm8 => 8,
+            X86Reg::Zmm9 => 9,
+            X86Reg::Zmm10 => 10,
+            X86Reg::Zmm11 => 11,
+            X86Reg::Zmm12 => 12,
+            X86Reg::Zmm13 => 13,
+            X86Reg::Zmm14 => 14,
+            X86Reg::Zmm15 => 15,
+            X86Reg::Zmm16 => 16,
+            X86Reg::Zmm17 => 17,
+            X86Reg::Zmm18 => 18,
+            X86Reg::Zmm19 => 19,
+            X86Reg::Zmm20 => 20,
+            X86Reg::Zmm21 => 21,
+            X86Reg::Zmm22 => 22,
+            X86Reg::Zmm23 => 23,
+            X86Reg::Zmm24 => 24,
+            X86Reg::Zmm25 => 25,
+            X86Reg::Zmm26 => 26,
+            X86Reg::Zmm27 => 27,
+            X86Reg::Zmm28 => 28,
+            X86Reg::Zmm29 => 29,
+            X86Reg::Zmm30 => 30,
+            X86Reg::Zmm31 => 31,
             _ => return [0u8; 64],
         };
         self.cpu.zmm_read_for_api(index)
@@ -419,14 +500,38 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     pub fn reg_write_zmm(&mut self, reg: X86Reg, val: [u8; 64]) {
         let index = match reg {
-            X86Reg::Zmm0 => 0, X86Reg::Zmm1 => 1, X86Reg::Zmm2 => 2, X86Reg::Zmm3 => 3,
-            X86Reg::Zmm4 => 4, X86Reg::Zmm5 => 5, X86Reg::Zmm6 => 6, X86Reg::Zmm7 => 7,
-            X86Reg::Zmm8 => 8, X86Reg::Zmm9 => 9, X86Reg::Zmm10 => 10, X86Reg::Zmm11 => 11,
-            X86Reg::Zmm12 => 12, X86Reg::Zmm13 => 13, X86Reg::Zmm14 => 14, X86Reg::Zmm15 => 15,
-            X86Reg::Zmm16 => 16, X86Reg::Zmm17 => 17, X86Reg::Zmm18 => 18, X86Reg::Zmm19 => 19,
-            X86Reg::Zmm20 => 20, X86Reg::Zmm21 => 21, X86Reg::Zmm22 => 22, X86Reg::Zmm23 => 23,
-            X86Reg::Zmm24 => 24, X86Reg::Zmm25 => 25, X86Reg::Zmm26 => 26, X86Reg::Zmm27 => 27,
-            X86Reg::Zmm28 => 28, X86Reg::Zmm29 => 29, X86Reg::Zmm30 => 30, X86Reg::Zmm31 => 31,
+            X86Reg::Zmm0 => 0,
+            X86Reg::Zmm1 => 1,
+            X86Reg::Zmm2 => 2,
+            X86Reg::Zmm3 => 3,
+            X86Reg::Zmm4 => 4,
+            X86Reg::Zmm5 => 5,
+            X86Reg::Zmm6 => 6,
+            X86Reg::Zmm7 => 7,
+            X86Reg::Zmm8 => 8,
+            X86Reg::Zmm9 => 9,
+            X86Reg::Zmm10 => 10,
+            X86Reg::Zmm11 => 11,
+            X86Reg::Zmm12 => 12,
+            X86Reg::Zmm13 => 13,
+            X86Reg::Zmm14 => 14,
+            X86Reg::Zmm15 => 15,
+            X86Reg::Zmm16 => 16,
+            X86Reg::Zmm17 => 17,
+            X86Reg::Zmm18 => 18,
+            X86Reg::Zmm19 => 19,
+            X86Reg::Zmm20 => 20,
+            X86Reg::Zmm21 => 21,
+            X86Reg::Zmm22 => 22,
+            X86Reg::Zmm23 => 23,
+            X86Reg::Zmm24 => 24,
+            X86Reg::Zmm25 => 25,
+            X86Reg::Zmm26 => 26,
+            X86Reg::Zmm27 => 27,
+            X86Reg::Zmm28 => 28,
+            X86Reg::Zmm29 => 29,
+            X86Reg::Zmm30 => 30,
+            X86Reg::Zmm31 => 31,
             _ => return,
         };
         self.cpu.zmm_write_for_api(index, val);
@@ -434,10 +539,18 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     // ── Exit set API ─────────────────────────────────────────────────────
 
-    pub fn set_exits(&mut self, addrs: &[u64]) { self.exit_set.set(addrs); }
-    pub fn clear_exits(&mut self) { self.exit_set.clear(); }
-    pub fn add_exit(&mut self, addr: u64) -> bool { self.exit_set.add(addr) }
-    pub fn remove_exit(&mut self, addr: u64) -> bool { self.exit_set.remove(addr) }
+    pub fn set_exits(&mut self, addrs: &[u64]) {
+        self.exit_set.set(addrs);
+    }
+    pub fn clear_exits(&mut self) {
+        self.exit_set.clear();
+    }
+    pub fn add_exit(&mut self, addr: u64) -> bool {
+        self.exit_set.add(addr)
+    }
+    pub fn remove_exit(&mut self, addr: u64) -> bool {
+        self.exit_set.remove(addr)
+    }
 
     // ── MMIO API ─────────────────────────────────────────────────────────
 
@@ -470,17 +583,19 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     pub fn mem_read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
         let ram = self.memory.ram_slice();
         let start = addr as usize;
-        let end = start
-            .checked_add(buf.len())
-            .ok_or_else(|| Error::Memory(crate::memory::MemoryError::ReadPhysicalPage {
+        let end = start.checked_add(buf.len()).ok_or_else(|| {
+            Error::Memory(crate::memory::MemoryError::ReadPhysicalPage {
                 addr: addr as u64,
                 len: buf.len(),
-            }))?;
+            })
+        })?;
         if end > ram.len() {
-            return Err(Error::Memory(crate::memory::MemoryError::ReadPhysicalPage {
-                addr: addr as u64,
-                len: buf.len(),
-            }));
+            return Err(Error::Memory(
+                crate::memory::MemoryError::ReadPhysicalPage {
+                    addr: addr as u64,
+                    len: buf.len(),
+                },
+            ));
         }
         buf.copy_from_slice(&ram[start..end]);
         Ok(())
@@ -506,10 +621,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             })
         })?;
         if end > cap {
-            return Err(Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
-                addr: addr as u64,
-                len: data.len(),
-            }));
+            return Err(Error::Memory(
+                crate::memory::MemoryError::WritePhysicalPage {
+                    addr: addr as u64,
+                    len: data.len(),
+                },
+            ));
         }
         // SAFETY: bounds-checked above; write to owned guest RAM.
         unsafe {
@@ -529,10 +646,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             })
         })?;
         if end > cap {
-            return Err(Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
-                addr: addr as u64,
-                len: size,
-            }));
+            return Err(Error::Memory(
+                crate::memory::MemoryError::WritePhysicalPage {
+                    addr: addr as u64,
+                    len: size,
+                },
+            ));
         }
         // SAFETY: bounds-checked above; write to owned guest RAM.
         unsafe { core::ptr::write_bytes(ptr.add(start), byte, size) };
@@ -547,7 +666,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Set memory permissions for a physical address range.
     /// Creates the permissions bitmap on first call, sizing it to physical memory.
     #[cfg(feature = "instrumentation")]
-    pub fn mem_protect(&mut self, addr: u64, size: usize, perms: crate::cpu::instrumentation::MemPerms) {
+    pub fn mem_protect(
+        &mut self,
+        addr: u64,
+        size: usize,
+        perms: crate::cpu::instrumentation::MemPerms,
+    ) {
         let mem_len = self.memory.get_memory_len();
         let pp = self.cpu.page_permissions.get_or_insert_with(|| {
             crate::memory::permissions::PagePermissions::new(mem_len as u64)
@@ -632,7 +756,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             let va = vaddr + offset as u64;
             let page_offset = (va & 0xFFF) as usize;
             let chunk = (0x1000 - page_offset).min(buf.len() - offset);
-            let pa = self.cpu.translate_linear_with_cr3_for_api(va, cr3)
+            let pa = self
+                .cpu
+                .translate_linear_with_cr3_for_api(va, cr3)
                 .ok_or_else(|| Error::Memory(crate::memory::MemoryError::PageNotPresent))?;
             self.mem_read(pa, &mut buf[offset..offset + chunk])?;
             offset += chunk;
@@ -876,7 +1002,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 }
 
 impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
-
     /// Reconfigure an existing emulator for the given CPU mode, skipping BIOS.
     /// Must be called after `initialize()` (or from `new_with_mode`).
     pub fn setup_cpu_mode(&mut self, mode: CpuSetupMode) -> Result<()> {
@@ -910,9 +1035,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             /*long*/ false,
         );
         // Data selectors, 16-bit
-        for reg in [
-            X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs,
-        ] {
+        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
             self.cpu.set_seg_for_api(reg, 0x10, 0, 0xFFFF, false, false);
         }
         self.cpu.enter_protected_mode_for_api();
@@ -934,9 +1057,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             /*code16*/ false,
             /*long*/ false,
         );
-        for reg in [
-            X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs,
-        ] {
+        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
             self.cpu
                 .set_seg_for_api(reg, 0x10, 0, 0xFFFFFFFF, false, false);
         }
@@ -983,9 +1104,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             /*code16*/ false,
             /*long*/ true,
         );
-        for reg in [
-            X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs,
-        ] {
+        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
             self.cpu
                 .set_seg_for_api(reg, 0x10, 0, 0xFFFFFFFF, false, false);
         }
@@ -1024,7 +1143,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 }
 
-
 // ─────────────────────────── Tests ───────────────────────────
 
 #[cfg(all(test, feature = "std"))]
@@ -1041,14 +1159,8 @@ mod tests {
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
                 emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF_CAFE_BABE);
-                assert_eq!(
-                    emu.reg_read(X86Reg::Rax),
-                    0xDEAD_BEEF_CAFE_BABE
-                );
-                assert_eq!(
-                    emu.reg_read(X86Reg::Eax),
-                    0xCAFE_BABE
-                );
+                assert_eq!(emu.reg_read(X86Reg::Rax), 0xDEAD_BEEF_CAFE_BABE);
+                assert_eq!(emu.reg_read(X86Reg::Eax), 0xCAFE_BABE);
                 assert_eq!(emu.reg_read(X86Reg::Ax), 0xBABE);
                 assert_eq!(emu.reg_read(X86Reg::Al), 0xBE);
                 assert_eq!(emu.reg_read(X86Reg::Ah), 0xBA);
@@ -1070,8 +1182,8 @@ mod tests {
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
                 emu.initialize().unwrap();
                 let data: [u8; 16] = [
-                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-                    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+                    0x0E, 0x0F, 0x10,
                 ];
                 emu.mem_write(0x20_000, &data).unwrap();
                 let mut buf = [0u8; 16];
@@ -1079,7 +1191,8 @@ mod tests {
                 assert_eq!(buf, data);
 
                 // Typed helpers
-                emu.mem_write_u64_le(0x20_000, 0xCAFE_BABE_DEAD_BEEF).unwrap();
+                emu.mem_write_u64_le(0x20_000, 0xCAFE_BABE_DEAD_BEEF)
+                    .unwrap();
                 assert_eq!(
                     emu.mem_read_u64_le(0x20_000).unwrap(),
                     0xCAFE_BABE_DEAD_BEEF
@@ -1124,14 +1237,16 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let emu = Emulator::<Corei7SkylakeX>::new_with_mode(
-                    cfg,
-                    CpuSetupMode::FlatProtected32,
-                )
-                .unwrap();
+                let emu =
+                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
+                        .unwrap();
                 // CR0.PE should be set
                 let cr0 = emu.reg_read(X86Reg::Cr0);
-                assert!(cr0 & 0x1 != 0, "CR0.PE not set after FlatProtected32 setup: {:#x}", cr0);
+                assert!(
+                    cr0 & 0x1 != 0,
+                    "CR0.PE not set after FlatProtected32 setup: {:#x}",
+                    cr0
+                );
                 // CS should be 0x08, DS 0x10
                 assert_eq!(emu.reg_read(X86Reg::Cs), 0x08);
                 assert_eq!(emu.reg_read(X86Reg::Ds), 0x10);
@@ -1148,11 +1263,8 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let emu = Emulator::<Corei7SkylakeX>::new_with_mode(
-                    cfg,
-                    CpuSetupMode::FlatLong64,
-                )
-                .unwrap();
+                let emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                    .unwrap();
                 let cr0 = emu.reg_read(X86Reg::Cr0);
                 assert!(cr0 & 0x1 != 0, "CR0.PE not set");
                 assert!(cr0 & 0x8000_0000 != 0, "CR0.PG not set: {:#x}", cr0);
@@ -1211,10 +1323,16 @@ mod tests {
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
-                let val: [u8; 16] = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
-                                      0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+                let val: [u8; 16] = [
+                    0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x02, 0x03, 0x04, 0x05,
+                    0x06, 0x07, 0x08,
+                ];
                 emu.reg_write_xmm(X86Reg::Xmm5, val);
-                assert_eq!(emu.reg_read_xmm(X86Reg::Xmm5), val, "XMM5 round-trip failed");
+                assert_eq!(
+                    emu.reg_read_xmm(X86Reg::Xmm5),
+                    val,
+                    "XMM5 round-trip failed"
+                );
             })
             .unwrap()
             .join()
@@ -1230,9 +1348,15 @@ mod tests {
                 let cfg = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
                 let mut val = [0u8; 32];
-                for (i, b) in val.iter_mut().enumerate() { *b = i as u8; }
+                for (i, b) in val.iter_mut().enumerate() {
+                    *b = i as u8;
+                }
                 emu.reg_write_ymm(X86Reg::Ymm3, val);
-                assert_eq!(emu.reg_read_ymm(X86Reg::Ymm3), val, "YMM3 round-trip failed");
+                assert_eq!(
+                    emu.reg_read_ymm(X86Reg::Ymm3),
+                    val,
+                    "YMM3 round-trip failed"
+                );
             })
             .unwrap()
             .join()
@@ -1313,10 +1437,10 @@ mod tests {
     #[cfg(feature = "instrumentation")]
     #[test]
     fn mem_permissions_basic() {
-        use crate::memory::permissions::PagePermissions;
         use crate::cpu::instrumentation::MemPerms;
+        use crate::memory::permissions::PagePermissions;
         let mut pp = PagePermissions::new(0x10_0000); // 1MB
-        // Default: all permissions
+                                                      // Default: all permissions
         assert!(pp.check(0x1000, MemPerms::READ));
         assert!(pp.check(0x1000, MemPerms::WRITE));
         assert!(pp.check(0x1000, MemPerms::EXEC));
@@ -1333,7 +1457,9 @@ mod tests {
         use crate::memory::mmio::MmioRegistry;
         let mut reg = MmioRegistry::new();
         assert!(reg.is_empty());
-        reg.map(0xFEC0_0000, 0x1000,
+        reg.map(
+            0xFEC0_0000,
+            0x1000,
             Box::new(|_addr, _size| 0),
             Box::new(|_addr, _size, _val| {}),
         );

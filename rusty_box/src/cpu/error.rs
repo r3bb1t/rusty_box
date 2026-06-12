@@ -1,6 +1,5 @@
 use thiserror::Error;
 
-
 use crate::{config::BxPhyAddress, cpu::cpu::Exception};
 
 pub type Result<T> = core::result::Result<T, CpuError>;
@@ -69,5 +68,7 @@ pub enum CpuError {
     /// Distinct from `VmxAbort` because these signal a host-side
     /// implementation bug, not a guest-induced architectural fault.
     #[error("VMX internal error: {reason:?}")]
-    VmxInternalError { reason: super::vmx::VmxInternalReason },
+    VmxInternalError {
+        reason: super::vmx::VmxInternalReason,
+    },
 }

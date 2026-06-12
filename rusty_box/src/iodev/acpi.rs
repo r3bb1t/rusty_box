@@ -102,8 +102,7 @@ const ACPI_SM_IOMASK: [u8; 16] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 2, 0, 0, 0
 // ─── SMBus state ─────────────────────────────────────────────────────────────
 
 /// SMBus host controller state (Bochs acpi.h)
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SmBusState {
     pub stat: u8,
     pub ctl: u8,
@@ -114,7 +113,6 @@ pub struct SmBusState {
     pub index: u8,
     pub data: [u8; 32],
 }
-
 
 // ─── PCI Configuration Space ─────────────────────────────────────────────────
 
@@ -239,8 +237,10 @@ impl BxAcpiCtrl {
             self.pci_conf[0x43] = 0x00;
         } else {
             let pmbar = u32::from_le_bytes([
-                self.pci_conf[0x40], self.pci_conf[0x41],
-                self.pci_conf[0x42], self.pci_conf[0x43],
+                self.pci_conf[0x40],
+                self.pci_conf[0x41],
+                self.pci_conf[0x42],
+                self.pci_conf[0x43],
             ]);
             if (pmbar & 0xFFC0) == 0 {
                 // Default to 0xB000 (I/O BAR => bit0 set).
@@ -274,8 +274,10 @@ impl BxAcpiCtrl {
             self.pci_conf[0x93] = 0x00;
         } else {
             let smbar = u32::from_le_bytes([
-                self.pci_conf[0x90], self.pci_conf[0x91],
-                self.pci_conf[0x92], self.pci_conf[0x93],
+                self.pci_conf[0x90],
+                self.pci_conf[0x91],
+                self.pci_conf[0x92],
+                self.pci_conf[0x93],
             ]);
             if (smbar & 0xFFF0) == 0 {
                 // Default to 0xB100 (I/O BAR => bit0 set).
@@ -303,15 +305,19 @@ impl BxAcpiCtrl {
 
         // Map PM/SM I/O windows when the BAR is configured (e.g. UEFI defaults).
         let pmbar = u32::from_le_bytes([
-            self.pci_conf[0x40], self.pci_conf[0x41],
-            self.pci_conf[0x42], self.pci_conf[0x43],
+            self.pci_conf[0x40],
+            self.pci_conf[0x41],
+            self.pci_conf[0x42],
+            self.pci_conf[0x43],
         ]);
         if (pmbar & 0xFFC0) != 0 {
             self.pm_base = pmbar & 0xFFC0;
         }
         let smbar = u32::from_le_bytes([
-            self.pci_conf[0x90], self.pci_conf[0x91],
-            self.pci_conf[0x92], self.pci_conf[0x93],
+            self.pci_conf[0x90],
+            self.pci_conf[0x91],
+            self.pci_conf[0x92],
+            self.pci_conf[0x93],
         ]);
         if (smbar & 0xFFF0) != 0 {
             self.sm_base = smbar & 0xFFF0;

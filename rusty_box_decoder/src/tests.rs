@@ -2,8 +2,10 @@
 extern crate std;
 
 use crate::{
-    decoder::decode32::fetch_decode32, decoder::decode64::fetch_decode64, opcode::Opcode,
+    decoder::{decode32::fetch_decode32, decode64::fetch_decode64, tables::BxDecodeError},
+    error::DecodeError,
     instruction::Instruction,
+    opcode::Opcode,
 };
 
 /// Initialize tracing for tests (similar to examples/init_and_run.rs)
@@ -28,11 +30,7 @@ fn format_instruction(address: u64, instr: &Instruction) -> std::string::String 
 /// Disassemble a sequence of instructions from a byte buffer
 ///
 /// Similar to Zydis example: loops over instructions in buffer and prints them
-fn disassemble_sequence(
-    data: &[u8],
-    runtime_address: u64,
-    is_32: bool,
-) -> Vec<(u64, Instruction)> {
+fn disassemble_sequence(data: &[u8], runtime_address: u64, is_32: bool) -> Vec<(u64, Instruction)> {
     let mut offset = 0;
     let mut current_address = runtime_address;
     let mut instructions = Vec::new();
@@ -571,6 +569,111 @@ fn test_movq_f3_0f_7e_load_direction_64bit() {
     assert_eq!(i.src1(), 1, "64-bit F3 0F 7E src1 should be rm=1");
 }
 
+#[test]
+fn test_final_entry_one_byte_os16_32bit_add() {
+    let i = fetch_decode32(&[0x66, 0x01, 0xD8], true).unwrap();
+    assert_eq!(i.ilen(), 3);
+    assert_eq!(i.get_ia_opcode(), Opcode::AddEwGw);
+}
+
+#[test]
+fn test_final_entry_one_byte_os16_64bit_add() {
+    let i = fetch_decode64(&[0x66, 0x01, 0xD8]).unwrap();
+    assert_eq!(i.ilen(), 3);
+    assert_eq!(i.get_ia_opcode(), Opcode::AddEwGw);
+}
+
+#[test]
+fn test_final_entry_0f_sse_f2_lookup() {
+    let i32 = fetch_decode32(&[0xF2, 0x0F, 0xE6, 0xC1], true).unwrap();
+    assert_eq!(i32.ilen(), 4);
+    assert_eq!(i32.get_ia_opcode(), Opcode::Cvtpd2dqVqWpd);
+
+    let i64 = fetch_decode64(&[0xF2, 0x0F, 0xE6, 0xC1]).unwrap();
+    assert_eq!(i64.ilen(), 4);
+    assert_eq!(i64.get_ia_opcode(), Opcode::Cvtpd2dqVqWpd);
+}
+
+#[test]
+fn test_final_entry_0f38_sse66_lookup() {
+    let i32 = fetch_decode32(&[0x66, 0x0F, 0x38, 0x00, 0xC1], true).unwrap();
+    assert_eq!(i32.ilen(), 5);
+    assert_eq!(i32.get_ia_opcode(), Opcode::PshufbVdqWdq);
+
+    let i64 = fetch_decode64(&[0x66, 0x0F, 0x38, 0x00, 0xC1]).unwrap();
+    assert_eq!(i64.ilen(), 5);
+    assert_eq!(i64.get_ia_opcode(), Opcode::PshufbVdqWdq);
+}
+
+#[test]
+fn test_final_entry_0f3a_sse66_lookup() {
+    let i32 = fetch_decode32(&[0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x05], true).unwrap();
+    assert_eq!(i32.ilen(), 6);
+    assert_eq!(i32.get_ia_opcode(), Opcode::PalignrVdqWdqIb);
+    assert_eq!(i32.ib(), 0x05);
+
+    let i64 = fetch_decode64(&[0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x05]).unwrap();
+    assert_eq!(i64.ilen(), 6);
+    assert_eq!(i64.get_ia_opcode(), Opcode::PalignrVdqWdqIb);
+    assert_eq!(i64.ib(), 0x05);
+}
+
+#[test]
+fn test_group_error_table_entry_is_illegal_opcode() {
+    let result32 = fetch_decode32(&[0x0F, 0x3A, 0x00, 0xC0, 0x00], true);
+    assert!(
+        matches!(
+            result32,
+            Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode))
+        ),
+        "32-bit group-error table should produce BxIllegalOpcode, got {result32:?}"
+    );
+
+    let result64 = fetch_decode64(&[0x0F, 0x3A, 0x00, 0xC0, 0x00]);
+    assert!(
+        matches!(
+            result64,
+            Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode))
+        ),
+        "64-bit group-error table should produce BxIllegalOpcode, got {result64:?}"
+    );
+}
+
+#[test]
+fn test_lock_prefix_memory_allowed_register_rejected_32bit() {
+    let allowed = fetch_decode32(&[0xF0, 0x01, 0x18], true).unwrap();
+    assert_eq!(allowed.ilen(), 3);
+    assert_eq!(allowed.get_ia_opcode(), Opcode::AddEdGd);
+    assert!(allowed.get_lock());
+    assert!(!allowed.mod_c0());
+
+    let rejected = fetch_decode32(&[0xF0, 0x01, 0xD8], true);
+    assert!(
+        matches!(
+            rejected,
+            Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode))
+        ),
+        "LOCK register form should be rejected, got {rejected:?}"
+    );
+}
+
+#[test]
+fn test_lock_prefix_memory_allowed_register_rejected_64bit_exact_error() {
+    let allowed = fetch_decode64(&[0xF0, 0x01, 0x18]).unwrap();
+    assert_eq!(allowed.ilen(), 3);
+    assert_eq!(allowed.get_ia_opcode(), Opcode::AddEdGd);
+    assert!(allowed.get_lock());
+    assert!(!allowed.mod_c0());
+
+    let rejected = fetch_decode64(&[0xF0, 0x01, 0xD8]);
+    assert!(
+        matches!(
+            rejected,
+            Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode))
+        ),
+        "LOCK register form should be rejected, got {rejected:?}"
+    );
+}
 // -- PUSH imm8 sign-extension (session 10 fix) --
 // Opcode 0x6A (PUSH imm8): the byte immediate must be SIGN-extended.
 // Bug: was zero-extended, so PUSH 0xFF pushed 255 instead of -1,
@@ -582,7 +685,8 @@ fn test_push_imm8_sign_extension() {
     let i = fetch_decode32(&[0x6A, 0xFF], true).unwrap();
     assert_eq!(i.ilen(), 2);
     assert_eq!(
-        i.id() as i32, -1,
+        i.id() as i32,
+        -1,
         "PUSH imm8 0xFF should sign-extend to 0xFFFFFFFF (-1)"
     );
 }
@@ -601,7 +705,8 @@ fn test_push_imm8_0x80() {
     let i = fetch_decode32(&[0x6A, 0x80], true).unwrap();
     assert_eq!(i.ilen(), 2);
     assert_eq!(
-        i.id() as i32, -128,
+        i.id() as i32,
+        -128,
         "PUSH imm8 0x80 should sign-extend to 0xFFFFFF80 (-128)"
     );
 }
@@ -700,10 +805,7 @@ fn test_short_jump_negative_displacement() {
     // EB FE = JMP -2 (infinite loop)
     let i = fetch_decode32(&[0xEB, 0xFE], true).unwrap();
     assert_eq!(i.ilen(), 2);
-    assert_eq!(
-        i.id() as i32, -2,
-        "JMP short 0xFE should sign-extend to -2"
-    );
+    assert_eq!(i.id() as i32, -2, "JMP short 0xFE should sign-extend to -2");
 }
 
 #[test]
@@ -712,7 +814,8 @@ fn test_conditional_jump_negative_displacement() {
     let i = fetch_decode32(&[0x75, 0xF0], true).unwrap();
     assert_eq!(i.ilen(), 2);
     assert_eq!(
-        i.id() as i32, -16,
+        i.id() as i32,
+        -16,
         "JNZ short 0xF0 should sign-extend to -16"
     );
 }

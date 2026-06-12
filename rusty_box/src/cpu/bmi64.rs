@@ -246,11 +246,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn adcx_gq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = self.get_gpr64(instr.dst() as usize);
         let op2 = self.read_eq64(instr, instr.src())?;
-        let cf_in = if self.getb_cf() != 0 {
-            1u64
-        } else {
-            0u64
-        };
+        let cf_in = if self.getb_cf() != 0 { 1u64 } else { 0u64 };
         let sum = op1.wrapping_add(op2).wrapping_add(cf_in);
         self.set_gpr64(instr.dst() as usize, sum);
 
@@ -264,11 +260,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn adox_gq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = self.get_gpr64(instr.dst() as usize);
         let op2 = self.read_eq64(instr, instr.src())?;
-        let of_in = if self.getb_of() != 0 {
-            1u64
-        } else {
-            0u64
-        };
+        let of_in = if self.getb_of() != 0 { 1u64 } else { 0u64 };
         let sum = op1.wrapping_add(op2).wrapping_add(of_in);
         self.set_gpr64(instr.dst() as usize, sum);
 

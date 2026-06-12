@@ -301,12 +301,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.sregs[sreg].cache.segment = true;
             self.sregs[sreg].cache.r#type = 3; // BX_DATA_READ_WRITE_ACCESSED
 
-                self.sregs[sreg].cache.u.set_segment_base(
-                    (self.sregs[sreg].selector.value as u64) << 4);
-                self.sregs[sreg].cache.u.set_segment_limit_scaled(0xFFFF);
-                self.sregs[sreg].cache.u.set_segment_g(false);
-                self.sregs[sreg].cache.u.set_segment_d_b(false);
-                self.sregs[sreg].cache.u.set_segment_avl(false);
+            self.sregs[sreg]
+                .cache
+                .u
+                .set_segment_base((self.sregs[sreg].selector.value as u64) << 4);
+            self.sregs[sreg].cache.u.set_segment_limit_scaled(0xFFFF);
+            self.sregs[sreg].cache.u.set_segment_g(false);
+            self.sregs[sreg].cache.u.set_segment_d_b(false);
+            self.sregs[sreg].cache.u.set_segment_avl(false);
             self.sregs[sreg].selector.rpl = 3;
         }
 

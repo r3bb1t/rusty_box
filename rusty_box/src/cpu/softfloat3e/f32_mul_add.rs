@@ -48,20 +48,30 @@ pub(crate) fn f32_mul_add(
 
     // Denormals-are-zeros
     if softfloat_denormalsAreZeros(status) {
-        if exp_a == 0 { sig_a = 0; }
-        if exp_b == 0 { sig_b = 0; }
-        if exp_c == 0 { sig_c = 0; }
+        if exp_a == 0 {
+            sig_a = 0;
+        }
+        if exp_b == 0 {
+            sig_b = 0;
+        }
+        if exp_c == 0 {
+            sig_c = 0;
+        }
     }
 
     // Infinity handling for A
     if exp_a == 0xFF {
         let mag_bits = (exp_b as u32) | sig_b;
-        return inf_prod_arg_f32(sign_prod, sign_c, exp_a, sig_a, exp_b, sig_b, exp_c, sig_c, mag_bits, ui_c, status);
+        return inf_prod_arg_f32(
+            sign_prod, sign_c, exp_a, sig_a, exp_b, sig_b, exp_c, sig_c, mag_bits, ui_c, status,
+        );
     }
     // Infinity handling for B
     if exp_b == 0xFF {
         let mag_bits = (exp_a as u32) | sig_a;
-        return inf_prod_arg_f32(sign_prod, sign_c, exp_a, sig_a, exp_b, sig_b, exp_c, sig_c, mag_bits, ui_c, status);
+        return inf_prod_arg_f32(
+            sign_prod, sign_c, exp_a, sig_a, exp_b, sig_b, exp_c, sig_c, mag_bits, ui_c, status,
+        );
     }
     // Infinity handling for C
     if exp_c == 0xFF {
@@ -131,7 +141,8 @@ pub(crate) fn f32_mul_add(
             sig_z = sig_c.wrapping_add(shift_right_jam64(sig_prod, (32 - exp_diff) as u32) as u32);
         } else {
             exp_z = exp_prod;
-            let sig64z = sig_prod.wrapping_add(shift_right_jam64((sig_c as u64) << 32, exp_diff as u32));
+            let sig64z =
+                sig_prod.wrapping_add(shift_right_jam64((sig_c as u64) << 32, exp_diff as u32));
             sig_z = short_shift_right_jam64(sig64z, 32) as u32;
         }
         if sig_z < 0x40000000 {
@@ -212,7 +223,10 @@ fn inf_prod_arg_f32(
     if mag_bits != 0 {
         let ui_z = pack_to_f32(sign_prod, 0xFF, 0);
         if sign_prod == sign_c || exp_c != 0xFF {
-            if (sig_a != 0 && exp_a == 0) || (sig_b != 0 && exp_b == 0) || (sig_c != 0 && exp_c == 0) {
+            if (sig_a != 0 && exp_a == 0)
+                || (sig_b != 0 && exp_b == 0)
+                || (sig_c != 0 && exp_c == 0)
+            {
                 softfloat_raiseFlags(status, FLAG_DENORMAL);
             }
             return ui_z;

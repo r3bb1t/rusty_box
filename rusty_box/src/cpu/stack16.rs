@@ -207,28 +207,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Based on Bochs flag_ctrl.cc PUSHF_Fw
     pub fn pushf_fw(&mut self, _instr: &Instruction) -> super::Result<()> {
         // Bochs svm.cc SVM_INTERCEPT0_PUSHF.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_PUSHF)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_PUSHF) {
             return self.svm_vmexit(super::svm::SvmVmexit::Pushf as i32, 0, 0);
         }
         let mut flags = (self.read_eflags() & 0xFFFF) as u16;
 
-        if self.v8086_mode()
-            && self.eflags.iopl() < 3 {
-                if self.cr4.vme() {
-                    // VME: push IOPL=3, replace IF with VIF
-                    flags |= EFlags::IOPL_MASK.bits() as u16;
-                    if self.eflags.contains(EFlags::VIF) {
-                        flags |= EFlags::IF_.bits() as u16;
-                    } else {
-                        flags &= !(EFlags::IF_.bits() as u16);
-                    }
+        if self.v8086_mode() && self.eflags.iopl() < 3 {
+            if self.cr4.vme() {
+                // VME: push IOPL=3, replace IF with VIF
+                flags |= EFlags::IOPL_MASK.bits() as u16;
+                if self.eflags.contains(EFlags::VIF) {
+                    flags |= EFlags::IF_.bits() as u16;
                 } else {
-                    tracing::trace!("PUSHFW: #GP(0) in v8086 (no VME) mode");
-                    self.exception(super::cpu::Exception::Gp, 0)?;
+                    flags &= !(EFlags::IF_.bits() as u16);
                 }
+            } else {
+                tracing::trace!("PUSHFW: #GP(0) in v8086 (no VME) mode");
+                self.exception(super::cpu::Exception::Gp, 0)?;
             }
+        }
 
         self.push_16(flags)?;
         Ok(())
@@ -240,9 +237,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         use super::decoder::BxSegregs;
 
         // Bochs svm.cc SVM_INTERCEPT0_POPF.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_POPF)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_POPF) {
             return self.svm_vmexit(super::svm::SvmVmexit::Popf as i32, 0, 0);
         }
 

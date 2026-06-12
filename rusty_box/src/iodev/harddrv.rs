@@ -90,13 +90,13 @@
 //!   (sector count, sector number, cylinder low/high) update HOB (High Order Byte)
 //!   registers on BOTH drives on the channel, supporting LBA48 addressing.
 
+use crate::ring_buffer::RingBuffer;
 #[cfg(feature = "alloc")]
 use alloc::format;
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-use crate::ring_buffer::RingBuffer;
 use bitflags::bitflags;
 
 #[cfg(feature = "std")]
@@ -381,7 +381,6 @@ impl core::fmt::Debug for AtaController {
     }
 }
 
-
 /// High Order Byte (HOB) registers for LBA48 addressing.
 /// Each field stores the previous value of the corresponding task file register.
 #[derive(Debug, Default, Clone)]
@@ -437,8 +436,7 @@ pub struct AtapiState {
 }
 
 /// CD-ROM state (Bochs harddrv.h)
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CdromState {
     pub ready: bool,
     pub locked: bool,
@@ -447,7 +445,6 @@ pub struct CdromState {
     pub next_lba: u32,
     pub remaining_blocks: i32,
 }
-
 
 impl Default for AtaController {
     fn default() -> Self {
@@ -1116,7 +1113,6 @@ impl AtaDrive {
         false
     }
 
-
     /// Write buffer_size/512 sectors from controller buffer to disk at current register position.
     /// Matches Bochs ide_write_sector() (harddrv.cc).
     ///
@@ -1195,7 +1191,6 @@ impl AtaDrive {
         #[cfg(not(feature = "std"))]
         false
     }
-
 
     /// Fill identify buffer
     fn fill_identify_buffer(&mut self) {
@@ -1635,12 +1630,7 @@ impl BxHardDriveC {
 
     /// Attach CD-ROM ISO data to a drive (alloc path).
     #[cfg(feature = "alloc")]
-    pub fn attach_cdrom_data(
-        &mut self,
-        channel: usize,
-        drive: usize,
-        data: Vec<u8>,
-    ) {
+    pub fn attach_cdrom_data(&mut self, channel: usize, drive: usize, data: Vec<u8>) {
         self.channels[channel].drives[drive] = AtaDrive::create_cdrom();
         self.channels[channel].drives[drive].device_num = drive as u8;
         self.channels[channel].drives[drive].attach_cdrom_data(data);
@@ -1654,12 +1644,7 @@ impl BxHardDriveC {
     }
 
     /// Attach CD-ROM ISO data to a drive (no-alloc ref path).
-    pub fn attach_cdrom_data_ref(
-        &mut self,
-        channel: usize,
-        drive: usize,
-        data: &'static [u8],
-    ) {
+    pub fn attach_cdrom_data_ref(&mut self, channel: usize, drive: usize, data: &'static [u8]) {
         self.channels[channel].drives[drive] = AtaDrive::create_cdrom();
         self.channels[channel].drives[drive].device_num = drive as u8;
         self.channels[channel].drives[drive].attach_cdrom_data_ref(data);
@@ -1693,7 +1678,12 @@ impl BxHardDriveC {
     ///
     /// If nIEN=1 (interrupts disabled), this is a no-op. The BSY/DRQ/status bits
     /// are still updated by the caller — the host can poll Alternate Status instead.
-    fn raise_interrupt(&mut self, channel_num: usize, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
+    fn raise_interrupt(
+        &mut self,
+        channel_num: usize,
+        pic: &mut super::pic::BxPicC,
+        pci_ide: &mut super::pci_ide::BxPciIde,
+    ) {
         let drive = self.channels[channel_num].selected_drive_mut();
         // Always record that the drive wants an interrupt (the drive asserts
         // its interrupt line regardless of nIEN). Bochs doesn't have this field
@@ -1748,7 +1738,9 @@ impl BxHardDriveC {
             return false;
         }
         let selected = self.channels[ch].drive_select;
-        let current_command = self.channels[ch].drives[selected as usize].controller.current_command;
+        let current_command = self.channels[ch].drives[selected as usize]
+            .controller
+            .current_command;
 
         if current_command == 0xC8 || current_command == 0x25 {
             // ATA READ DMA / READ DMA EXT
@@ -1807,31 +1799,46 @@ impl BxHardDriveC {
                     } else {
                         *sector_size as usize
                     };
-                    let copy_size = copy_size.min(buffer.len()).min(drive.controller.buffer_size);
-                    buffer[..copy_size]
-                        .copy_from_slice(&drive.controller.buffer[..copy_size]);
+                    let copy_size = copy_size
+                        .min(buffer.len())
+                        .min(drive.controller.buffer_size);
+                    buffer[..copy_size].copy_from_slice(&drive.controller.buffer[..copy_size]);
                     return true;
                 }
             }
         }
 
-        tracing::warn!("BM-DMA read: command {:#04x} not a DMA command", current_command);
+        tracing::warn!(
+            "BM-DMA read: command {:#04x} not a DMA command",
+            current_command
+        );
         self.command_aborted(channel as usize, current_command, pic, pci_ide);
         false
     }
 
     /// Write a sector for BM-DMA transfer.
     /// Bochs: bx_hard_drive_c::bmdma_write_sector() (harddrv.cc)
-    pub fn bmdma_write_sector(&mut self, channel: u8, buffer: &[u8], pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) -> bool {
+    pub fn bmdma_write_sector(
+        &mut self,
+        channel: u8,
+        buffer: &[u8],
+        pic: &mut super::pic::BxPicC,
+        pci_ide: &mut super::pci_ide::BxPciIde,
+    ) -> bool {
         let ch = channel as usize;
         if ch >= 2 {
             return false;
         }
         let selected = self.channels[ch].drive_select;
-        let current_command = self.channels[ch].drives[selected as usize].controller.current_command;
+        let current_command = self.channels[ch].drives[selected as usize]
+            .controller
+            .current_command;
 
         if current_command != 0xCA && current_command != 0x35 {
-            tracing::warn!("BM-DMA write: command {:#04x} not a DMA write", current_command);
+            tracing::warn!(
+                "BM-DMA write: command {:#04x} not a DMA write",
+                current_command
+            );
             self.command_aborted(ch, current_command, pic, pci_ide);
             return false;
         }
@@ -1851,7 +1858,12 @@ impl BxHardDriveC {
 
     /// Complete a BM-DMA transfer — set final status and raise interrupt.
     /// Bochs: bx_hard_drive_c::bmdma_complete() (harddrv.cc)
-    pub fn bmdma_complete(&mut self, channel: u8, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
+    pub fn bmdma_complete(
+        &mut self,
+        channel: u8,
+        pic: &mut super::pic::BxPicC,
+        pci_ide: &mut super::pci_ide::BxPciIde,
+    ) {
         let ch = channel as usize;
         if ch >= 2 {
             return;
@@ -1861,7 +1873,10 @@ impl BxHardDriveC {
         let drive = &mut self.channels[ch].drives[selected as usize];
 
         // Bochs harddrv.cc
-        drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
+        drive
+            .controller
+            .status
+            .remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
         drive.controller.status.insert(AtaStatus::DRDY);
         if is_cdrom {
             // Bochs harddrv.cc: set interrupt_reason I/O=1, C/D=1
@@ -1900,7 +1915,13 @@ impl BxHardDriveC {
     ///
     /// For READ MULTIPLE (0xC4), multiple sectors are buffered at once.
     /// The buffer_size is set to `min(multiple_sectors, num_sectors) * sect_size`.
-    pub fn read(&mut self, port: u16, io_len: u8, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) -> u32 {
+    pub fn read(
+        &mut self,
+        port: u16,
+        io_len: u8,
+        pic: &mut super::pic::BxPicC,
+        pci_ide: &mut super::pci_ide::BxPciIde,
+    ) -> u32 {
         let channel_num = match self.port_to_channel(port) {
             Some(c) => c,
             None => return 0xFF,
@@ -1965,8 +1986,7 @@ impl BxHardDriveC {
                                 tracing::warn!("ATAPI: read block {} failed", next_lba);
                                 return 0;
                             }
-                            drive.controller.buffer[..CDROM_SECTOR_SIZE]
-                                .copy_from_slice(&temp);
+                            drive.controller.buffer[..CDROM_SECTOR_SIZE].copy_from_slice(&temp);
                             drive.cdrom.next_lba += 1;
                             drive.cdrom.remaining_blocks -= 1;
                             if drive.cdrom.remaining_blocks <= 0 {
@@ -2066,20 +2086,26 @@ impl BxHardDriveC {
                     if drive.atapi.total_bytes_remaining > 0 {
                         drive.controller.sector_count =
                             (drive.controller.sector_count & 0xF8) | 0x02;
-                        drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DRQ);
-                        drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
-                        if drive.atapi.total_bytes_remaining
-                            < drive.controller.cylinder_no as i32
-                        {
-                            drive.controller.cylinder_no =
-                                drive.atapi.total_bytes_remaining as u16;
+                        drive
+                            .controller
+                            .status
+                            .insert(AtaStatus::DRDY | AtaStatus::DRQ);
+                        drive
+                            .controller
+                            .status
+                            .remove(AtaStatus::BSY | AtaStatus::ERR);
+                        if drive.atapi.total_bytes_remaining < drive.controller.cylinder_no as i32 {
+                            drive.controller.cylinder_no = drive.atapi.total_bytes_remaining as u16;
                         }
                         drive.atapi.drq_bytes = drive.controller.cylinder_no as i32;
                     } else {
                         drive.atapi.total_bytes_remaining = 0;
                         drive.controller.sector_count =
                             (drive.controller.sector_count & 0xF8) | 0x03;
-                        drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
+                        drive
+                            .controller
+                            .status
+                            .remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
                         drive.controller.status.insert(AtaStatus::DRDY);
                     }
                     need_raise_irq = true;
@@ -2177,7 +2203,13 @@ impl BxHardDriveC {
     /// Equivalent to calling `read(port, 2)` in a loop but avoids per-word
     /// handler dispatch overhead. Returns the number of bytes actually copied.
     /// Handles ATAPI lazy-load, sector transitions, and DRQ completion.
-    pub fn bulk_read_data(&mut self, port: u16, buf: &mut [u8], pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) -> usize {
+    pub fn bulk_read_data(
+        &mut self,
+        port: u16,
+        buf: &mut [u8],
+        pic: &mut super::pic::BxPicC,
+        pci_ide: &mut super::pci_ide::BxPciIde,
+    ) -> usize {
         let channel_num = match self.port_to_channel(port) {
             Some(c) => c,
             None => return 0,
@@ -2224,8 +2256,7 @@ impl BxHardDriveC {
                             if !drive.read_cdrom_block(next_lba, &mut temp) {
                                 break;
                             }
-                            drive.controller.buffer[..CDROM_SECTOR_SIZE]
-                                .copy_from_slice(&temp);
+                            drive.controller.buffer[..CDROM_SECTOR_SIZE].copy_from_slice(&temp);
                             drive.controller.buffer_size = CDROM_SECTOR_SIZE;
                             drive.cdrom.next_lba += 1;
                             drive.cdrom.remaining_blocks -= 1;
@@ -2242,7 +2273,10 @@ impl BxHardDriveC {
             }
 
             // Copy available bytes from buffer
-            let available = drive.controller.buffer_size.saturating_sub(drive.controller.buffer_index);
+            let available = drive
+                .controller
+                .buffer_size
+                .saturating_sub(drive.controller.buffer_index);
             if available == 0 {
                 break;
             }
@@ -2259,7 +2293,10 @@ impl BxHardDriveC {
             // Handle buffer drain
             if drive.controller.buffer_index >= drive.controller.buffer_size {
                 match current_command {
-                    ATA_CMD_READ_SECTORS | 0x21 | ATA_CMD_READ_SECTORS_EXT | ATA_CMD_READ_MULTIPLE => {
+                    ATA_CMD_READ_SECTORS
+                    | 0x21
+                    | ATA_CMD_READ_SECTORS_EXT
+                    | ATA_CMD_READ_MULTIPLE => {
                         if current_command == ATA_CMD_READ_MULTIPLE {
                             let ms = drive.controller.multiple_sectors as u32;
                             if drive.controller.num_sectors > ms {
@@ -2311,19 +2348,25 @@ impl BxHardDriveC {
                 drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
                 // Bochs harddrv.cc
                 if drive.atapi.total_bytes_remaining > 0 {
-                    drive.controller.sector_count =
-                        (drive.controller.sector_count & 0xF8) | 0x02;
-                    drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DRQ);
-                    drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
+                    drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x02;
+                    drive
+                        .controller
+                        .status
+                        .insert(AtaStatus::DRDY | AtaStatus::DRQ);
+                    drive
+                        .controller
+                        .status
+                        .remove(AtaStatus::BSY | AtaStatus::ERR);
                     if drive.atapi.total_bytes_remaining < drive.controller.cylinder_no as i32 {
-                        drive.controller.cylinder_no =
-                            drive.atapi.total_bytes_remaining as u16;
+                        drive.controller.cylinder_no = drive.atapi.total_bytes_remaining as u16;
                     }
                     drive.atapi.drq_bytes = drive.controller.cylinder_no as i32;
                 } else {
-                    drive.controller.sector_count =
-                        (drive.controller.sector_count & 0xF8) | 0x03;
-                    drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
+                    drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x03;
+                    drive
+                        .controller
+                        .status
+                        .remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
                     drive.controller.status.insert(AtaStatus::DRDY);
                 }
                 need_raise_irq = true;
@@ -2335,9 +2378,7 @@ impl BxHardDriveC {
         // Post-loop DRQ completion check: handles the case where the while loop
         // breaks early but drq_index has reached drq_bytes.
         // Matches Bochs harddrv.cc.
-        if !need_raise_irq && need_abort_cmd.is_none()
-            && current_command == ATA_CMD_PACKET
-        {
+        if !need_raise_irq && need_abort_cmd.is_none() && current_command == ATA_CMD_PACKET {
             let drive = &mut self.channels[channel_num].drives[selected as usize];
             if drive.controller.drq_index >= drive.atapi.drq_bytes as u32
                 && drive.atapi.drq_bytes > 0
@@ -2347,20 +2388,26 @@ impl BxHardDriveC {
                 drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
                 if drive.atapi.total_bytes_remaining > 0 {
                     // Bochs harddrv.cc
-                    drive.controller.sector_count =
-                        (drive.controller.sector_count & 0xF8) | 0x02;
-                    drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DRQ);
-                    drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
+                    drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x02;
+                    drive
+                        .controller
+                        .status
+                        .insert(AtaStatus::DRDY | AtaStatus::DRQ);
+                    drive
+                        .controller
+                        .status
+                        .remove(AtaStatus::BSY | AtaStatus::ERR);
                     if drive.atapi.total_bytes_remaining < drive.controller.cylinder_no as i32 {
-                        drive.controller.cylinder_no =
-                            drive.atapi.total_bytes_remaining as u16;
+                        drive.controller.cylinder_no = drive.atapi.total_bytes_remaining as u16;
                     }
                     drive.atapi.drq_bytes = drive.controller.cylinder_no as i32;
                 } else {
                     // Bochs harddrv.cc
-                    drive.controller.sector_count =
-                        (drive.controller.sector_count & 0xF8) | 0x03;
-                    drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
+                    drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x03;
+                    drive
+                        .controller
+                        .status
+                        .remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
                     drive.controller.status.insert(AtaStatus::DRDY);
                 }
                 need_raise_irq = true;
@@ -2417,7 +2464,14 @@ impl BxHardDriveC {
     /// - Decrements `num_sectors` via `increment_address()`
     /// - If `num_sectors > 0`: keeps DRQ=1, raises IRQ for next sector
     /// - If `num_sectors == 0`: clears DRQ, raises final completion IRQ
-    pub fn write(&mut self, port: u16, value: u32, io_len: u8, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
+    pub fn write(
+        &mut self,
+        port: u16,
+        value: u32,
+        io_len: u8,
+        pic: &mut super::pic::BxPicC,
+        pci_ide: &mut super::pci_ide::BxPciIde,
+    ) {
         let channel_num = match self.port_to_channel(port) {
             Some(c) => c,
             None => return,
@@ -2707,7 +2761,13 @@ impl BxHardDriveC {
     ///
     /// Sets error register to ABRT, clears BSY/DRQ/CORR, sets DRDY/ERR.
     /// Preserves DSC (seek_complete) — matches Bochs harddrv.cc.
-    fn command_aborted(&mut self, channel_num: usize, _value: u8, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
+    fn command_aborted(
+        &mut self,
+        channel_num: usize,
+        _value: u8,
+        pic: &mut super::pic::BxPicC,
+        pci_ide: &mut super::pci_ide::BxPciIde,
+    ) {
         {
             let drive = self.channels[channel_num].selected_drive_mut();
             drive.controller.current_command = 0;
@@ -2749,8 +2809,14 @@ impl BxHardDriveC {
 
         // Bochs sets individual fields: busy=1, drive_ready=1, drq=0, err=0
         // preserving other bits like seek_complete (DSC).
-        drive.controller.status.remove(AtaStatus::DRQ | AtaStatus::ERR);
-        drive.controller.status.insert(AtaStatus::BSY | AtaStatus::DRDY);
+        drive
+            .controller
+            .status
+            .remove(AtaStatus::DRQ | AtaStatus::ERR);
+        drive
+            .controller
+            .status
+            .insert(AtaStatus::BSY | AtaStatus::DRDY);
 
         if lazy {
             drive.controller.buffer_index = drive.controller.buffer_size;
@@ -2784,8 +2850,14 @@ impl BxHardDriveC {
         let drive = self.channels[channel_num].selected_drive_mut();
         drive.controller.error = AtaError::from_bits_retain((sense_key as u8) << 4);
         drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x03; // i_o=1, c_d=1
-        drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DWF | AtaStatus::DRQ);
-        drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::ERR);
+        drive
+            .controller
+            .status
+            .remove(AtaStatus::BSY | AtaStatus::DWF | AtaStatus::DRQ);
+        drive
+            .controller
+            .status
+            .insert(AtaStatus::DRDY | AtaStatus::ERR);
 
         drive.sense.sense_key = sense_key as u8;
         drive.sense.asc = asc as u8;
@@ -2799,7 +2871,10 @@ impl BxHardDriveC {
     fn atapi_cmd_nop(&mut self, channel_num: usize) {
         let drive = self.channels[channel_num].selected_drive_mut();
         drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x03; // i_o=1, c_d=1
-        drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
+        drive
+            .controller
+            .status
+            .remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
         drive.controller.status.insert(AtaStatus::DRDY);
     }
 
@@ -2811,10 +2886,18 @@ impl BxHardDriveC {
     /// If packet_dma is set (features bit 0 was 1 on PACKET command),
     /// signals DMA engine instead of raising interrupt for PIO.
     /// Bochs harddrv.cc
-    pub(crate) fn ready_to_send_atapi(&mut self, channel_num: usize, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
+    pub(crate) fn ready_to_send_atapi(
+        &mut self,
+        channel_num: usize,
+        pic: &mut super::pic::BxPicC,
+        pci_ide: &mut super::pci_ide::BxPciIde,
+    ) {
         let drive = self.channels[channel_num].selected_drive_mut();
         drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x02; // i_o=1, c_d=0
-        drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
+        drive
+            .controller
+            .status
+            .remove(AtaStatus::BSY | AtaStatus::ERR);
         drive.controller.status.insert(AtaStatus::DRQ);
 
         // Bochs harddrv.cc: DMA vs PIO branch
@@ -2827,13 +2910,22 @@ impl BxHardDriveC {
     }
 
     /// Handle an ATAPI command (Bochs harddrv.cc)
-    fn handle_atapi_command(&mut self, channel_num: usize, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
+    fn handle_atapi_command(
+        &mut self,
+        channel_num: usize,
+        pic: &mut super::pic::BxPicC,
+        pci_ide: &mut super::pci_ide::BxPciIde,
+    ) {
         let drive = self.channels[channel_num].selected_drive_mut();
         let atapi_command = drive.controller.buffer[0];
         drive.controller.buffer_size = CDROM_SECTOR_SIZE;
 
-
-        tracing::trace!("ATAPI: cmd={:#04x} ch={} sc={}", atapi_command, channel_num, drive.status_changed);
+        tracing::trace!(
+            "ATAPI: cmd={:#04x} ch={} sc={}",
+            atapi_command,
+            channel_num,
+            drive.status_changed
+        );
 
         // Clear sense unless REQUEST SENSE
         if atapi_command != 0x03 {
@@ -2851,10 +2943,16 @@ impl BxHardDriveC {
                 if sc == 1 {
                     // Simulate tray open
                     self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
-                    self.channels[channel_num].selected_drive_mut().status_changed = -1;
+                    self.channels[channel_num]
+                        .selected_drive_mut()
+                        .status_changed = -1;
                 } else if sc == -1 {
                     // Simulate tray close — report UNIT_ATTENTION
-                    self.atapi_cmd_error(channel_num, SenseKey::UnitAttention, Asc::MediumMayHaveChanged);
+                    self.atapi_cmd_error(
+                        channel_num,
+                        SenseKey::UnitAttention,
+                        Asc::MediumMayHaveChanged,
+                    );
                     // Set ascq=1 (Bochs harddrv.cc)
                     let d = self.channels[channel_num].selected_drive_mut();
                     d.sense.ascq = 1;
@@ -2942,11 +3040,7 @@ impl BxHardDriveC {
                     drive.cdrom.locked = prevent;
                     self.atapi_cmd_nop(channel_num);
                 } else {
-                    self.atapi_cmd_error(
-                        channel_num,
-                        SenseKey::NotReady,
-                        Asc::MediumNotPresent,
-                    );
+                    self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
                 }
                 self.raise_interrupt(channel_num, pic, pci_ide);
             }
@@ -2968,11 +3062,7 @@ impl BxHardDriveC {
                     drive.controller.buffer[7] = (CDROM_SECTOR_SIZE & 0xff) as u8;
                     self.ready_to_send_atapi(channel_num, pic, pci_ide);
                 } else {
-                    self.atapi_cmd_error(
-                        channel_num,
-                        SenseKey::NotReady,
-                        Asc::MediumNotPresent,
-                    );
+                    self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
                     self.raise_interrupt(channel_num, pic, pci_ide);
                 }
             }
@@ -2997,11 +3087,7 @@ impl BxHardDriveC {
                 let max_lba = drive.cdrom.max_lba;
 
                 if !ready {
-                    self.atapi_cmd_error(
-                        channel_num,
-                        SenseKey::NotReady,
-                        Asc::MediumNotPresent,
-                    );
+                    self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
                     self.raise_interrupt(channel_num, pic, pci_ide);
                     return;
                 }
@@ -3053,16 +3139,12 @@ impl BxHardDriveC {
                 let ready = drive.cdrom.ready;
                 let msf = (drive.controller.buffer[1] >> 1) & 1;
                 let format = drive.controller.buffer[9] >> 6;
-                let alloc_length = ((drive.controller.buffer[7] as i32) << 8)
-                    | drive.controller.buffer[8] as i32;
+                let alloc_length =
+                    ((drive.controller.buffer[7] as i32) << 8) | drive.controller.buffer[8] as i32;
                 let max_lba = drive.cdrom.max_lba;
 
                 if !ready {
-                    self.atapi_cmd_error(
-                        channel_num,
-                        SenseKey::NotReady,
-                        Asc::MediumNotPresent,
-                    );
+                    self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
                     self.raise_interrupt(channel_num, pic, pci_ide);
                     return;
                 }
@@ -3084,7 +3166,7 @@ impl BxHardDriveC {
                         drive.controller.buffer[1] = 18; // TOC length LSB
                         drive.controller.buffer[2] = 1; // first track
                         drive.controller.buffer[3] = 1; // last track
-                        // Track 1 descriptor (Bochs cdrom.cc)
+                                                        // Track 1 descriptor (Bochs cdrom.cc)
                         drive.controller.buffer[4] = 0; // reserved
                         drive.controller.buffer[5] = 0x15; // ADR=1, CONTROL=5 (data, incremental)
                         drive.controller.buffer[6] = 1; // track number
@@ -3298,13 +3380,7 @@ impl BxHardDriveC {
                     // Bochs comment: "I think the last parameter needs to be 'alloc_length',
                     // but ReactOS won't boot unless it is this:"
                     let total = (return_length + 4) as i32;
-                    self.init_send_atapi_command(
-                        channel_num,
-                        atapi_command,
-                        total,
-                        total,
-                        false,
-                    );
+                    self.init_send_atapi_command(channel_num, atapi_command, total, total, false);
                     self.ready_to_send_atapi(channel_num, pic, pci_ide);
                 } else {
                     self.atapi_cmd_error(
@@ -3333,7 +3409,7 @@ impl BxHardDriveC {
                         drive.controller.buffer[1] = 4; // MEDIA event is 4 bytes long
                         drive.controller.buffer[2] = 4; // 4 = MEDIA event
                         drive.controller.buffer[3] = 1 << 4; // we only support MEDIA event (bit 4)
-                        // Event code based on status_changed (Bochs harddrv.cc)
+                                                             // Event code based on status_changed (Bochs harddrv.cc)
                         drive.controller.buffer[4] = if drive.status_changed == 0 {
                             0 // No change
                         } else if inserted {
@@ -3388,15 +3464,9 @@ impl BxHardDriveC {
             0xbd => {
                 // MECHANISM STATUS
                 let drive = self.channels[channel_num].selected_drive_mut();
-                let alloc_length = ((drive.controller.buffer[8] as i32) << 8)
-                    | drive.controller.buffer[9] as i32;
-                self.init_send_atapi_command(
-                    channel_num,
-                    atapi_command,
-                    8,
-                    alloc_length,
-                    false,
-                );
+                let alloc_length =
+                    ((drive.controller.buffer[8] as i32) << 8) | drive.controller.buffer[9] as i32;
+                self.init_send_atapi_command(channel_num, atapi_command, 8, alloc_length, false);
                 let drive = self.channels[channel_num].selected_drive_mut();
                 for i in 0..8 {
                     drive.controller.buffer[i] = 0;
@@ -3414,13 +3484,19 @@ impl BxHardDriveC {
                 match page_code {
                     0x01 => {
                         // Error recovery page (Bochs harddrv.cc)
-                        self.init_send_atapi_command(channel_num, atapi_command, 16, mode_alloc_length, false);
+                        self.init_send_atapi_command(
+                            channel_num,
+                            atapi_command,
+                            16,
+                            mode_alloc_length,
+                            false,
+                        );
                         let drive = self.channels[channel_num].selected_drive_mut();
                         drive.controller.buffer[0] = 14; // mode data length
                         drive.controller.buffer[1] = if ready { 0x12 } else { 0x70 }; // medium type
                         drive.controller.buffer[2] = 0; // device-specific
                         drive.controller.buffer[3] = 0; // block descriptor length
-                        // error recovery page
+                                                        // error recovery page
                         drive.controller.buffer[4] = 0x01;
                         drive.controller.buffer[5] = 0x06;
                         drive.controller.buffer[6] = 0x00; // error recovery params
@@ -3433,7 +3509,13 @@ impl BxHardDriveC {
                     }
                     0x2a => {
                         // CD-ROM capabilities page (same as MODE SENSE 10)
-                        self.init_send_atapi_command(channel_num, atapi_command, 24, mode_alloc_length, false);
+                        self.init_send_atapi_command(
+                            channel_num,
+                            atapi_command,
+                            24,
+                            mode_alloc_length,
+                            false,
+                        );
                         let drive = self.channels[channel_num].selected_drive_mut();
                         drive.controller.buffer[0] = 22; // mode data length
                         drive.controller.buffer[1] = if ready { 0x12 } else { 0x70 };
@@ -3456,24 +3538,40 @@ impl BxHardDriveC {
                         drive.controller.buffer[17] = (512 & 0xff) as u8;
                         drive.controller.buffer[18] = ((16 * 176) >> 8) as u8;
                         drive.controller.buffer[19] = ((16 * 176) & 0xff) as u8;
-                        for i in 20..24 { drive.controller.buffer[i] = 0; }
+                        for i in 20..24 {
+                            drive.controller.buffer[i] = 0;
+                        }
                         self.ready_to_send_atapi(channel_num, pic, pci_ide);
                     }
                     0x0e => {
                         // CD-ROM audio control page (Bochs harddrv.cc)
-                        self.init_send_atapi_command(channel_num, atapi_command, 16, mode_alloc_length, false);
+                        self.init_send_atapi_command(
+                            channel_num,
+                            atapi_command,
+                            16,
+                            mode_alloc_length,
+                            false,
+                        );
                         let drive = self.channels[channel_num].selected_drive_mut();
                         drive.controller.buffer[0] = 0;
                         drive.controller.buffer[1] = 14;
                         drive.controller.buffer[2] = (1 << 2) | (0 << 1);
-                        for i in 3..8 { drive.controller.buffer[i] = 0; } // reserved
-                        drive.controller.buffer[8] = 3;    // connect channels 0 and 1
+                        for i in 3..8 {
+                            drive.controller.buffer[i] = 0;
+                        } // reserved
+                        drive.controller.buffer[8] = 3; // connect channels 0 and 1
                         drive.controller.buffer[9] = 0xFF; // volume
-                        for i in 10..16 { drive.controller.buffer[i] = 0; } // ports muted
+                        for i in 10..16 {
+                            drive.controller.buffer[i] = 0;
+                        } // ports muted
                         self.ready_to_send_atapi(channel_num, pic, pci_ide);
                     }
                     _ => {
-                        self.atapi_cmd_error(channel_num, SenseKey::IllegalRequest, Asc::InvFieldInCmdPacket);
+                        self.atapi_cmd_error(
+                            channel_num,
+                            SenseKey::IllegalRequest,
+                            Asc::InvFieldInCmdPacket,
+                        );
                         self.raise_interrupt(channel_num, pic, pci_ide);
                     }
                 }
@@ -3481,20 +3579,28 @@ impl BxHardDriveC {
             0x5a => {
                 // MODE SENSE (10) — Bochs harddrv.cc
                 let drive = self.channels[channel_num].selected_drive_mut();
-                let mode_alloc_length = ((drive.controller.buffer[7] as i32) << 8)
-                    | drive.controller.buffer[8] as i32;
+                let mode_alloc_length =
+                    ((drive.controller.buffer[7] as i32) << 8) | drive.controller.buffer[8] as i32;
                 let page_code = drive.controller.buffer[2] & 0x3f;
                 let ready = drive.cdrom.ready;
                 let locked = drive.cdrom.locked;
                 match page_code {
                     0x01 => {
                         // Error recovery page (Bochs harddrv.cc)
-                        self.init_send_atapi_command(channel_num, atapi_command, 20, mode_alloc_length, false);
+                        self.init_send_atapi_command(
+                            channel_num,
+                            atapi_command,
+                            20,
+                            mode_alloc_length,
+                            false,
+                        );
                         let drive = self.channels[channel_num].selected_drive_mut();
                         drive.controller.buffer[0] = 0;
                         drive.controller.buffer[1] = 18; // mode data length
                         drive.controller.buffer[2] = if ready { 0x12 } else { 0x70 };
-                        for i in 3..8 { drive.controller.buffer[i] = 0; }
+                        for i in 3..8 {
+                            drive.controller.buffer[i] = 0;
+                        }
                         // error recovery page
                         drive.controller.buffer[8] = 0x01;
                         drive.controller.buffer[9] = 0x06;
@@ -3504,7 +3610,9 @@ impl BxHardDriveC {
                         drive.controller.buffer[13] = 0x00;
                         drive.controller.buffer[14] = 0x00;
                         drive.controller.buffer[15] = 0x00;
-                        for i in 16..20 { drive.controller.buffer[i] = 0; }
+                        for i in 16..20 {
+                            drive.controller.buffer[i] = 0;
+                        }
                         self.ready_to_send_atapi(channel_num, pic, pci_ide);
                     }
                     0x2a => {
@@ -3548,15 +3656,25 @@ impl BxHardDriveC {
                     }
                     0x0e => {
                         // CD-ROM audio control page (Bochs harddrv.cc)
-                        self.init_send_atapi_command(channel_num, atapi_command, 16, mode_alloc_length, false);
+                        self.init_send_atapi_command(
+                            channel_num,
+                            atapi_command,
+                            16,
+                            mode_alloc_length,
+                            false,
+                        );
                         let drive = self.channels[channel_num].selected_drive_mut();
                         drive.controller.buffer[0] = 0;
                         drive.controller.buffer[1] = 14;
                         drive.controller.buffer[2] = (1 << 2) | (0 << 1);
-                        for i in 3..8 { drive.controller.buffer[i] = 0; } // reserved
-                        drive.controller.buffer[8] = 3;    // connect channels 0 and 1
+                        for i in 3..8 {
+                            drive.controller.buffer[i] = 0;
+                        } // reserved
+                        drive.controller.buffer[8] = 3; // connect channels 0 and 1
                         drive.controller.buffer[9] = 0xFF; // volume
-                        for i in 10..16 { drive.controller.buffer[i] = 0; } // ports muted
+                        for i in 10..16 {
+                            drive.controller.buffer[i] = 0;
+                        } // ports muted
                         self.ready_to_send_atapi(channel_num, pic, pci_ide);
                     }
                     _ => {
@@ -3583,11 +3701,7 @@ impl BxHardDriveC {
                 let ready = drive.cdrom.ready;
 
                 if !ready {
-                    self.atapi_cmd_error(
-                        channel_num,
-                        SenseKey::NotReady,
-                        Asc::MediumNotPresent,
-                    );
+                    self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
                     self.raise_interrupt(channel_num, pic, pci_ide);
                     return;
                 }
@@ -3624,11 +3738,7 @@ impl BxHardDriveC {
                     | ((drive.controller.buffer[4] as u32) << 8)
                     | drive.controller.buffer[5] as u32;
                 if !drive.cdrom.ready {
-                    self.atapi_cmd_error(
-                        channel_num,
-                        SenseKey::NotReady,
-                        Asc::MediumNotPresent,
-                    );
+                    self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
                     self.raise_interrupt(channel_num, pic, pci_ide);
                 } else if lba > drive.cdrom.max_lba {
                     self.atapi_cmd_error(
@@ -3645,11 +3755,7 @@ impl BxHardDriveC {
             }
             _ => {
                 tracing::warn!("ATAPI: unknown command {:#04x}", atapi_command);
-                self.atapi_cmd_error(
-                    channel_num,
-                    SenseKey::IllegalRequest,
-                    Asc::IllegalOpcode,
-                );
+                self.atapi_cmd_error(channel_num, SenseKey::IllegalRequest, Asc::IllegalOpcode);
                 self.raise_interrupt(channel_num, pic, pci_ide);
             }
         }
@@ -3671,7 +3777,13 @@ impl BxHardDriveC {
     /// 3. Host writes 256 words to data port
     /// 4. When buffer full: ide_write_sector writes to disk
     /// 5. If num_sectors > 0: keep DRQ for next sector; else clear DRQ
-    fn execute_command(&mut self, channel_num: usize, command: u8, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
+    fn execute_command(
+        &mut self,
+        channel_num: usize,
+        command: u8,
+        pic: &mut super::pic::BxPicC,
+        pci_ide: &mut super::pci_ide::BxPciIde,
+    ) {
         // Bochs harddrv.cc: RECALIBRATE range masking
         // Commands 0x10-0x1F all map to RECALIBRATE (only top nibble matters)
         let command = if (command & 0xF0) == 0x10 {
@@ -3686,10 +3798,15 @@ impl BxHardDriveC {
 
         // Record command in history (ring buffer auto-drops oldest when full).
         let lba = drive.get_lba();
-        self.cmd_history.push_back((channel_num as u8, command, lba));
+        self.cmd_history
+            .push_back((channel_num as u8, command, lba));
 
         if drive.device_type == DeviceType::None {
-            tracing::trace!("[ATA-DIAG] cmd {:#04x} to ch{} (empty) — dropped", command, channel_num);
+            tracing::trace!(
+                "[ATA-DIAG] cmd {:#04x} to ch{} (empty) — dropped",
+                command,
+                channel_num
+            );
             return;
         }
 
@@ -3927,13 +4044,21 @@ impl BxHardDriveC {
                             }
                             0x04 => {
                                 // MDMA mode
-                                tracing::trace!("ATA: SET FEATURES: set transfer mode to MDMA{} ch={}", xfer_mode, channel_num);
+                                tracing::trace!(
+                                    "ATA: SET FEATURES: set transfer mode to MDMA{} ch={}",
+                                    xfer_mode,
+                                    channel_num
+                                );
                                 drive.controller.mdma_mode = 1 << xfer_mode;
                                 drive.controller.udma_mode = 0x00;
                             }
                             0x08 => {
                                 // UDMA mode
-                                tracing::trace!("ATA: SET FEATURES: set transfer mode to UDMA{} ch={}", xfer_mode, channel_num);
+                                tracing::trace!(
+                                    "ATA: SET FEATURES: set transfer mode to UDMA{} ch={}",
+                                    xfer_mode,
+                                    channel_num
+                                );
                                 drive.controller.mdma_mode = 0x00;
                                 drive.controller.udma_mode = 1 << xfer_mode;
                             }
@@ -4052,7 +4177,8 @@ impl BxHardDriveC {
                     drive.controller.cylinder_no = 0xEB14;
                     // Bochs harddrv.cc: clear all status bits
                     drive.controller.status = AtaStatus::empty();
-                    drive.controller.error = AtaError::from_bits_retain(drive.controller.error.bits() & !(1 << 7));
+                    drive.controller.error =
+                        AtaError::from_bits_retain(drive.controller.error.bits() & !(1 << 7));
                 } else {
                     self.command_aborted(channel_num, command, pic, pci_ide);
                     return;
@@ -4065,7 +4191,10 @@ impl BxHardDriveC {
                     let features = drive.controller.features;
                     drive.controller.packet_dma = (features & 1) != 0;
                     if drive.controller.packet_dma {
-                        tracing::trace!("ATAPI: PACKET cmd with DMA flag (features={:#04x})", features);
+                        tracing::trace!(
+                            "ATAPI: PACKET cmd with DMA flag (features={:#04x})",
+                            features
+                        );
                     }
                     if (features & (1 << 1)) != 0 {
                         tracing::trace!("ATA: PACKET-overlapped not supported");
@@ -4073,9 +4202,12 @@ impl BxHardDriveC {
                         return;
                     }
                     drive.controller.sector_count = 1; // c_d=1 (command)
-                    // Bochs sets individual fields: busy=0, write_fault=0, drq=1
-                    // preserving other bits like drive_ready (DRDY) and seek_complete (DSC).
-                    drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DWF);
+                                                       // Bochs sets individual fields: busy=0, write_fault=0, drq=1
+                                                       // preserving other bits like drive_ready (DRDY) and seek_complete (DSC).
+                    drive
+                        .controller
+                        .status
+                        .remove(AtaStatus::BSY | AtaStatus::DWF);
                     drive.controller.status.insert(AtaStatus::DRQ);
                     drive.controller.current_command = command;
                     drive.controller.buffer_index = 0;
@@ -4127,7 +4259,8 @@ impl BxHardDriveC {
         }
         s.push_str(&format!(
             "  irq14_level={} irq15_level={}\n",
-            self.get_irq_level(0), self.get_irq_level(1),
+            self.get_irq_level(0),
+            self.get_irq_level(1),
         ));
         s.push_str(&format!("  cmd_history ({} cmds):", self.cmd_history.len()));
         for (i, (ch, cmd, lba)) in self.cmd_history.iter().enumerate() {
@@ -4139,7 +4272,6 @@ impl BxHardDriveC {
         }
         s
     }
-
 }
 
 #[cfg(test)]

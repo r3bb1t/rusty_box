@@ -48,7 +48,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.instrumentation.fire_interrupt(vector);
         }
 
-
         // Discard any traps and inhibits for new context (matches Bochs line 800-801)
         self.debug_trap = 0;
         self.inhibit_mask = 0;
@@ -68,14 +67,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             // V8086 mode software interrupt: try VME redirect first
             // Bochs exception.cc: v86_redirect_interrupt checked before protected_mode_int
-            if self.v8086_mode() && soft_int
-                && self.v86_redirect_interrupt(vector)? {
-                    // Interrupt was redirected through virtual IVT
-                    self.speculative_rsp = false;
-                    self.ext = false;
-                    self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
-                    return Err(super::error::CpuError::CpuLoopRestart);
-                }
+            if self.v8086_mode() && soft_int && self.v86_redirect_interrupt(vector)? {
+                // Interrupt was redirected through virtual IVT
+                self.speculative_rsp = false;
+                self.ext = false;
+                self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+                return Err(super::error::CpuError::CpuLoopRestart);
+            }
 
             // Long mode: dispatch through 16-byte IDT entries
             // Protected mode (or V86 non-redirected): dispatch through 8-byte IDT entries
@@ -127,20 +125,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Based on Bochs INT_Ib in soft_int.cc
     pub fn int_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         // Bochs svm.cc SVM_INTERCEPT0_SOFTINT — EXITINFO1 carries the vector.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_SOFTINT)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_SOFTINT) {
             let vec = instr.ib() as u64;
-            return self.svm_vmexit(
-                super::svm::SvmVmexit::SoftwareInterrupt as i32,
-                vec,
-                0,
-            );
+            return self.svm_vmexit(super::svm::SvmVmexit::SoftwareInterrupt as i32, vec, 0);
         }
         let vector = instr.ib();
         tracing::trace!("INT {:#04x}", vector);
         // BX_SOFTWARE_INTERRUPT → soft_int=true, no error code
-        self.interrupt(vector, super::exception::InterruptType::SoftwareInterrupt, true, false, 0)
+        self.interrupt(
+            vector,
+            super::exception::InterruptType::SoftwareInterrupt,
+            true,
+            false,
+            0,
+        )
     }
 
     /// INT3 - Breakpoint interrupt (vector 3)
@@ -148,7 +146,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn int3(&mut self, _instr: &Instruction) -> super::Result<()> {
         tracing::trace!("INT3 (breakpoint)");
         // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code
-        self.interrupt(3, super::exception::InterruptType::SoftwareException, true, false, 0)
+        self.interrupt(
+            3,
+            super::exception::InterruptType::SoftwareException,
+            true,
+            false,
+            0,
+        )
     }
 
     /// INTO - Interrupt on overflow (vector 4, only if OF=1)
@@ -157,7 +161,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.get_of() {
             tracing::trace!("INTO: overflow detected, calling INT 4");
             // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code
-            return self.interrupt(4, super::exception::InterruptType::SoftwareException, true, false, 0);
+            return self.interrupt(
+                4,
+                super::exception::InterruptType::SoftwareException,
+                true,
+                false,
+                0,
+            );
         }
         Ok(())
     }
@@ -175,7 +185,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // BX_PRIVILEGED_SOFTWARE_INTERRUPT → soft_int=false (privileged bypass DPL check)
         // Bochs sets EXT=1 before calling interrupt() for INT1
         self.ext = true;
-        self.interrupt(1, super::exception::InterruptType::PrivilegedSoftwareInterrupt, false, false, 0)
+        self.interrupt(
+            1,
+            super::exception::InterruptType::PrivilegedSoftwareInterrupt,
+            false,
+            false,
+            0,
+        )
     }
 
     // =========================================================================
@@ -207,7 +223,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Read lower and upper bounds from memory (2 words)
         let bound_min = self.v_read_word(seg, eaddr)? as i16;
         let bound_max = self.v_read_word(seg, eaddr.wrapping_add(2) & asize_mask)? as i16;
-
 
         // Check if value is outside bounds
         if op1_16 < bound_min || op1_16 > bound_max {
@@ -249,7 +264,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let bound_min = self.v_read_dword(seg, eaddr)? as i32;
         let bound_max = self.v_read_dword(seg, eaddr.wrapping_add(4) & asize_mask)? as i32;
 
-
         // Check if value is outside bounds
         if op1_32 < bound_min || op1_32 > bound_max {
             tracing::trace!(
@@ -273,9 +287,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Based on Bochs ctrl_xfer16.cc IRET16
     pub fn iret16(&mut self, _instr: &Instruction) -> super::Result<()> {
         // Bochs svm.cc SVM_INTERCEPT0_IRET.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IRET)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IRET) {
             return self.svm_vmexit(super::svm::SvmVmexit::Iret as i32, 0, 0);
         }
         // Invalidate prefetch queue at entry (Bochs ctrl_xfer16.cc)
@@ -309,7 +321,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Trace IRET from BIOS INT 13h handler during ISOLINUX window
         // The INT 13h wrapper at 0x7F0D calls INT 13h; IRET returns to 0x7F0F
         if self.icount > 1_768_000 && self.icount < 1_772_000 {
-            let cs_val = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
+            let cs_val = self.sregs[super::decoder::BxSegregs::Cs as usize]
+                .selector
+                .value;
             if cs_val == 0xF000 {
                 let cf = new_flags & 1;
                 tracing::trace!(
@@ -355,9 +369,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Based on Bochs ctrl_xfer32.cc IRET32
     pub fn iret32(&mut self, _instr: &Instruction) -> super::Result<()> {
         // Bochs svm.cc SVM_INTERCEPT0_IRET.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IRET)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_IRET) {
             return self.svm_vmexit(super::svm::SvmVmexit::Iret as i32, 0, 0);
         }
         // Invalidate prefetch queue at entry (Bochs ctrl_xfer32.cc)
@@ -583,9 +595,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             // Bochs iret.cc iret_protected \u2014 same-priv shadow-stack restore.
             if self.shadow_stack_enabled(cpl) {
-                let return_lip = (cs_descriptor.u.segment_base()
-                    .wrapping_add(new_eip as u64))
-                    & 0xFFFF_FFFF;
+                let return_lip =
+                    (cs_descriptor.u.segment_base().wrapping_add(new_eip as u64)) & 0xFFFF_FFFF;
                 let prev_ssp = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
                 self.set_ssp(prev_ssp);
             }
@@ -671,17 +682,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if self.shadow_stack_enabled(cpl) {
                 if self.ssp() & 0x7 != 0 {
                     tracing::error!("iret_protected: SSP not 8-byte aligned");
-                    self.exception(
-                        Exception::Cp,
-                        super::cet::BX_CP_FAR_RET_IRET,
-                    )?;
+                    self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
                 }
                 if cs_selector.rpl != 3 {
-                    let return_lip = (cs_descriptor.u.segment_base()
-                        .wrapping_add(new_eip as u64))
-                        & 0xFFFF_FFFF;
-                    new_ssp_cet =
-                        self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
+                    let return_lip =
+                        (cs_descriptor.u.segment_base().wrapping_add(new_eip as u64)) & 0xFFFF_FFFF;
+                    new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
                 }
             }
 
@@ -827,9 +833,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Same privilege — 16-bit
             // Bochs iret.cc iret_protected (16-bit) \u2014 same-priv shadow-stack restore.
             if self.shadow_stack_enabled(cpl) {
-                let return_lip = (cs_descriptor.u.segment_base()
-                    .wrapping_add(new_ip as u64))
-                    & 0xFFFF_FFFF;
+                let return_lip =
+                    (cs_descriptor.u.segment_base().wrapping_add(new_ip as u64)) & 0xFFFF_FFFF;
                 let prev_ssp = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
                 self.set_ssp(prev_ssp);
             }
@@ -903,17 +908,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if self.shadow_stack_enabled(cpl) {
                 if self.ssp() & 0x7 != 0 {
                     tracing::error!("iret_protected_16: SSP not 8-byte aligned");
-                    self.exception(
-                        Exception::Cp,
-                        super::cet::BX_CP_FAR_RET_IRET,
-                    )?;
+                    self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
                 }
                 if cs_selector.rpl != 3 {
-                    let return_lip = (cs_descriptor.u.segment_base()
-                        .wrapping_add(new_ip as u64))
-                        & 0xFFFF_FFFF;
-                    new_ssp_cet =
-                        self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
+                    let return_lip =
+                        (cs_descriptor.u.segment_base().wrapping_add(new_ip as u64)) & 0xFFFF_FFFF;
+                    new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
                 }
             }
 
@@ -996,7 +996,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs exception.cc: load CS:IP from IVT
         let cs_index = BxSegregs::Cs as usize;
         parse_selector(new_cs, &mut self.sregs[cs_index].selector);
-            self.sregs[cs_index].cache.u.set_segment_base((new_cs as u64) << 4);
+        self.sregs[cs_index]
+            .cache
+            .u
+            .set_segment_base((new_cs as u64) << 4);
         self.set_ip(new_ip);
 
         // Bochs exception.cc:724-729 — clear IF, TF, AC, RF
@@ -1041,9 +1044,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // Bochs svm.cc SVM_INTERCEPT0_HLT.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_HLT)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_HLT) {
             return self.svm_vmexit(super::svm::SvmVmexit::Hlt as i32, 0, 0);
         }
         // Bochs vmx.cc VMexit_HLT.
@@ -1056,14 +1057,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             tracing::trace!("HLT: CPU halted with IF=0 (interrupts disabled) - CPU will be stuck!");
         }
 
-        #[cfg(debug_assertions)] {
+        #[cfg(debug_assertions)]
+        {
             if !self.diag_first_pm_hlt_captured && self.protected_mode() {
                 self.diag_first_pm_hlt_captured = true;
                 self.diag_first_pm_hlt_icount = self.icount;
                 self.diag_first_pm_hlt_rip = self.eip();
                 self.diag_first_pm_hlt_regs = [
-                    self.eax(), self.ecx(), self.edx(), self.ebx(),
-                    self.esp(), self.ebp(), self.esi(), self.edi(),
+                    self.eax(),
+                    self.ecx(),
+                    self.edx(),
+                    self.ebx(),
+                    self.esp(),
+                    self.ebp(),
+                    self.esi(),
+                    self.edi(),
                 ];
                 self.diag_first_pm_hlt_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
                 self.diag_first_pm_hlt_ss = self.sregs[BxSegregs::Ss as usize].selector.value;
@@ -1100,16 +1108,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// XSAVE state component sizes and offsets (Bochs crregs.h)
     /// Index: XCR0 bit number. (len, offset) for each component.
     const XSAVE_COMPONENTS: [(u32, u32); 10] = [
-        (160, 0),      // 0: FPU (x87)
-        (256, 160),    // 1: SSE (XMM)
-        (256, 576),    // 2: YMM (AVX)
-        (0, 0),        // 3: BNDREGS (deprecated MPX)
-        (0, 0),        // 4: BNDCFG (deprecated MPX)
-        (64, 1088),    // 5: OPMASK (AVX-512)
-        (512, 1152),   // 6: ZMM_HI256 (AVX-512)
-        (1024, 1664),  // 7: HI_ZMM (AVX-512)
-        (0, 0),        // 8: PT (Processor Trace, not implemented)
-        (8, 2688),     // 9: PKRU
+        (160, 0),     // 0: FPU (x87)
+        (256, 160),   // 1: SSE (XMM)
+        (256, 576),   // 2: YMM (AVX)
+        (0, 0),       // 3: BNDREGS (deprecated MPX)
+        (0, 0),       // 4: BNDCFG (deprecated MPX)
+        (64, 1088),   // 5: OPMASK (AVX-512)
+        (512, 1152),  // 6: ZMM_HI256 (AVX-512)
+        (1024, 1664), // 7: HI_ZMM (AVX-512)
+        (0, 0),       // 8: PT (Processor Trace, not implemented)
+        (8, 2688),    // 9: PKRU
     ];
 
     /// Compute max XSAVE area size for given feature bitmap (standard layout).
@@ -1158,9 +1166,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Bochs svm.cc SVM_INTERCEPT0_CPUID — delivered before reading any
         // registers so the guest sees the original RAX/RCX on re-entry.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_CPUID)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_CPUID) {
             let _ = self.svm_vmexit(super::svm::SvmVmexit::Cpuid as i32, 0, 0);
             return;
         }
@@ -1251,6 +1257,5 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_rbx(ebx as u64);
         self.set_rcx(ecx as u64);
         self.set_rdx(edx as u64);
-
     }
 }

@@ -127,9 +127,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// PUSHFQ - Push flags (64-bit)
     pub fn pushf_fq(&mut self, _instr: &Instruction) -> super::Result<()> {
         // Bochs svm.cc SVM_INTERCEPT0_PUSHF.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_PUSHF)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_PUSHF) {
             return self.svm_vmexit(super::svm::SvmVmexit::Pushf as i32, 0, 0);
         }
         // VM & RF flags cleared in image stored on the stack
@@ -142,9 +140,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Based on Bochs flag_ctrl.cc POPF_Fq
     pub fn popf_fq(&mut self, _instr: &Instruction) -> super::Result<()> {
         // Bochs svm.cc SVM_INTERCEPT0_POPF.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_POPF)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_POPF) {
             return self.svm_vmexit(super::svm::SvmVmexit::Popf as i32, 0, 0);
         }
         // Base changeMask: OSZAPC + TF + DF + NT + RF + AC + ID
@@ -194,7 +190,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if level > 0 {
             let mut lvl = level;
             // do level-1 times
-            while { lvl -= 1; lvl } != 0 {
+            while {
+                lvl -= 1;
+                lvl
+            } != 0
+            {
                 temp_rbp = temp_rbp.wrapping_sub(8);
                 let temp64 = self.stack_read_qword_64(temp_rbp)?;
                 temp_rsp = temp_rsp.wrapping_sub(8);
@@ -215,7 +215,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Our RMW path sets up address_xlation but we don't call write_back.
 
         self.set_gpr64(5, frame_ptr64); // RBP = frame_ptr64
-        self.set_rsp(temp_rsp);         // RSP = temp_rsp
+        self.set_rsp(temp_rsp); // RSP = temp_rsp
         Ok(())
     }
 

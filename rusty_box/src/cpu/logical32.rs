@@ -351,7 +351,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.mem_write_byte(self.address_xlation.paddress1 + i as u64, byte);
             }
             let len2 = self.address_xlation.len2 as usize;
-            for (i, &byte) in bytes[len1..len1+len2].iter().enumerate() {
+            for (i, &byte) in bytes[len1..len1 + len2].iter().enumerate() {
                 self.mem_write_byte(self.address_xlation.paddress2 + i as u64, byte);
             }
         }

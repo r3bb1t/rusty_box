@@ -244,7 +244,6 @@ pub fn approx_recip_sqrt32_1(odd_exp: u32, a: u32) -> u32 {
     let r0 = (APPROX_RECIP_SQRT_1K0S[index] as u32)
         .wrapping_sub(((APPROX_RECIP_SQRT_1K1S[index] as u32).wrapping_mul(eps as u32)) >> 20);
     let sigma0 = !(r0.wrapping_mul(r0) as u64).wrapping_mul(a as u64);
-    
-    (r0 << 16)
-        .wrapping_add(((r0 as u64).wrapping_mul(sigma0 >> 25) >> 25) as u32)
+
+    (r0 << 16).wrapping_add(((r0 as u64).wrapping_mul(sigma0 >> 25) >> 25) as u32)
 }

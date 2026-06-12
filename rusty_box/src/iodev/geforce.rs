@@ -1,4 +1,10 @@
-#![allow(dead_code, clippy::needless_range_loop, clippy::too_many_arguments, clippy::comparison_chain, clippy::float_cmp)]
+#![allow(
+    dead_code,
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::comparison_chain,
+    clippy::float_cmp
+)]
 //! GeForce GPU Emulation Module
 //!
 //! Implements NVIDIA GeForce 2/3/FX 5900/6800 GPU emulation.
@@ -6,7 +12,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec;
-use alloc::{vec::Vec, boxed::Box};
+use alloc::{boxed::Box, vec::Vec};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -20,7 +26,9 @@ const GEFORCE_CACHE1_SIZE: usize = 64;
 const GEFORCE_PNPMMIO_SIZE: u32 = 0x0100_0000;
 const BX_ROP_PATTERN: u8 = 0x01;
 
-fn align_up(x: u32, a: u32) -> u32 { (x + a - 1) & !(a - 1) }
+fn align_up(x: u32, a: u32) -> u32 {
+    (x + a - 1) & !(a - 1)
+}
 
 /// GeForce model identifiers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,14 +96,32 @@ pub struct GfTexture {
 impl Default for GfTexture {
     fn default() -> Self {
         Self {
-            offset: 0, dma_obj: 0, format: 0, cubemap: false,
-            linear: false, unnormalized: false, compressed: false,
-            dxt_alpha_data: false, dxt_alpha_explicit: false,
-            color_bytes: 1, levels: 0, base_size: [0; 3], size: [0; 3],
-            face_bytes: 0, wrap: [0; 3], control0: 0, enabled: false,
-            control1: 0, signed_any: false, signed_comp: [false; 4],
-            image_rect: 0, pal_dma_obj: 0, pal_ofs: 0,
-            control3: 0, key_color: 0, offset_matrix: [0.0; 4],
+            offset: 0,
+            dma_obj: 0,
+            format: 0,
+            cubemap: false,
+            linear: false,
+            unnormalized: false,
+            compressed: false,
+            dxt_alpha_data: false,
+            dxt_alpha_explicit: false,
+            color_bytes: 1,
+            levels: 0,
+            base_size: [0; 3],
+            size: [0; 3],
+            face_bytes: 0,
+            wrap: [0; 3],
+            control0: 0,
+            enabled: false,
+            control1: 0,
+            signed_any: false,
+            signed_comp: [false; 4],
+            image_rect: 0,
+            pal_dma_obj: 0,
+            pal_ofs: 0,
+            control3: 0,
+            key_color: 0,
+            offset_matrix: [0.0; 4],
         }
     }
 }
@@ -481,93 +507,212 @@ pub struct GfChannel {
 impl GfChannel {
     pub fn new() -> Self {
         Self {
-            subr_return: 0, subr_active: false,
+            subr_return: 0,
+            subr_active: false,
             dma_state: GfDmaState::default(),
             schs: core::array::from_fn(|_| GfSubchannel::default()),
-            notify_pending: false, notify_type: 0,
-            s2d_locked: false, s2d_img_src: 0, s2d_img_dst: 0,
-            s2d_color_fmt: 0, s2d_color_bytes: 1, s2d_pitch_src: 0,
-            s2d_pitch_dst: 0, s2d_ofs_src: 0, s2d_ofs_dst: 0,
-            swzs_img_obj: 0, swzs_fmt: 0, swzs_color_bytes: 1,
-            swzs_width: 0, swzs_height: 0, swzs_ofs: 0,
-            ifc_color_key_enable: false, ifc_clip_enable: false,
-            ifc_operation: 0, ifc_color_fmt: 0, ifc_color_bytes: 4,
-            ifc_pixels_per_word: 1, ifc_x: 0, ifc_y: 0,
-            ifc_ofs_x: 0, ifc_ofs_y: 0, ifc_draw_offset: 0,
-            ifc_redraw_offset: 0, ifc_dst_width: 0, ifc_dst_height: 0,
-            ifc_src_width: 0, ifc_src_height: 0,
-            ifc_clip_x0: 0, ifc_clip_y0: 0, ifc_clip_x1: 0, ifc_clip_y1: 0,
-            iifc_palette: 0, iifc_palette_ofs: 0, iifc_operation: 0,
-            iifc_color_fmt: 0, iifc_color_bytes: 4, iifc_bpp4: 0,
-            iifc_yx: 0, iifc_dhw: 0, iifc_shw: 0,
-            iifc_words_ptr: 0, iifc_words_left: 0, iifc_words: None,
-            sifc_operation: 0, sifc_color_fmt: 0, sifc_color_bytes: 4,
-            sifc_shw: 0, sifc_dxds: 0, sifc_dydt: 0,
-            sifc_clip_yx: 0, sifc_clip_hw: 0, sifc_syx: 0,
-            sifc_words_ptr: 0, sifc_words_left: 0, sifc_words: None,
-            blit_color_key_enable: false, blit_operation: 0,
-            blit_syx: 0, blit_dyx: 0, blit_hw: 0,
-            tfc_swizzled: false, tfc_color_fmt: 0, tfc_color_bytes: 4,
-            tfc_yx: 0, tfc_hw: 0, tfc_clip_wx: 0, tfc_clip_hy: 0,
-            tfc_words_ptr: 0, tfc_words_left: 0, tfc_words: None,
-            tfc_upload: false, tfc_upload_offset: 0,
-            sifm_src: 0, sifm_swizzled: false, sifm_swizzled_0389: false,
-            sifm_operation: 0, sifm_color_fmt: 0, sifm_color_bytes: 4,
-            sifm_syx: 0, sifm_dyx: 0, sifm_shw: 0, sifm_dhw: 0,
-            sifm_dudx: 0, sifm_dvdy: 0, sifm_sfmt: 0, sifm_sofs: 0,
-            m2mf_src: 0, m2mf_dst: 0, m2mf_src_offset: 0,
-            m2mf_dst_offset: 0, m2mf_src_pitch: 0, m2mf_dst_pitch: 0,
-            m2mf_line_length: 0, m2mf_line_count: 0, m2mf_format: 0,
+            notify_pending: false,
+            notify_type: 0,
+            s2d_locked: false,
+            s2d_img_src: 0,
+            s2d_img_dst: 0,
+            s2d_color_fmt: 0,
+            s2d_color_bytes: 1,
+            s2d_pitch_src: 0,
+            s2d_pitch_dst: 0,
+            s2d_ofs_src: 0,
+            s2d_ofs_dst: 0,
+            swzs_img_obj: 0,
+            swzs_fmt: 0,
+            swzs_color_bytes: 1,
+            swzs_width: 0,
+            swzs_height: 0,
+            swzs_ofs: 0,
+            ifc_color_key_enable: false,
+            ifc_clip_enable: false,
+            ifc_operation: 0,
+            ifc_color_fmt: 0,
+            ifc_color_bytes: 4,
+            ifc_pixels_per_word: 1,
+            ifc_x: 0,
+            ifc_y: 0,
+            ifc_ofs_x: 0,
+            ifc_ofs_y: 0,
+            ifc_draw_offset: 0,
+            ifc_redraw_offset: 0,
+            ifc_dst_width: 0,
+            ifc_dst_height: 0,
+            ifc_src_width: 0,
+            ifc_src_height: 0,
+            ifc_clip_x0: 0,
+            ifc_clip_y0: 0,
+            ifc_clip_x1: 0,
+            ifc_clip_y1: 0,
+            iifc_palette: 0,
+            iifc_palette_ofs: 0,
+            iifc_operation: 0,
+            iifc_color_fmt: 0,
+            iifc_color_bytes: 4,
+            iifc_bpp4: 0,
+            iifc_yx: 0,
+            iifc_dhw: 0,
+            iifc_shw: 0,
+            iifc_words_ptr: 0,
+            iifc_words_left: 0,
+            iifc_words: None,
+            sifc_operation: 0,
+            sifc_color_fmt: 0,
+            sifc_color_bytes: 4,
+            sifc_shw: 0,
+            sifc_dxds: 0,
+            sifc_dydt: 0,
+            sifc_clip_yx: 0,
+            sifc_clip_hw: 0,
+            sifc_syx: 0,
+            sifc_words_ptr: 0,
+            sifc_words_left: 0,
+            sifc_words: None,
+            blit_color_key_enable: false,
+            blit_operation: 0,
+            blit_syx: 0,
+            blit_dyx: 0,
+            blit_hw: 0,
+            tfc_swizzled: false,
+            tfc_color_fmt: 0,
+            tfc_color_bytes: 4,
+            tfc_yx: 0,
+            tfc_hw: 0,
+            tfc_clip_wx: 0,
+            tfc_clip_hy: 0,
+            tfc_words_ptr: 0,
+            tfc_words_left: 0,
+            tfc_words: None,
+            tfc_upload: false,
+            tfc_upload_offset: 0,
+            sifm_src: 0,
+            sifm_swizzled: false,
+            sifm_swizzled_0389: false,
+            sifm_operation: 0,
+            sifm_color_fmt: 0,
+            sifm_color_bytes: 4,
+            sifm_syx: 0,
+            sifm_dyx: 0,
+            sifm_shw: 0,
+            sifm_dhw: 0,
+            sifm_dudx: 0,
+            sifm_dvdy: 0,
+            sifm_sfmt: 0,
+            sifm_sofs: 0,
+            m2mf_src: 0,
+            m2mf_dst: 0,
+            m2mf_src_offset: 0,
+            m2mf_dst_offset: 0,
+            m2mf_src_pitch: 0,
+            m2mf_dst_pitch: 0,
+            m2mf_line_length: 0,
+            m2mf_line_count: 0,
+            m2mf_format: 0,
             m2mf_buffer_notify: 0,
-            d3d_a_obj: 0, d3d_b_obj: 0, d3d_color_obj: 0, d3d_zeta_obj: 0,
-            d3d_vertex_a_obj: 0, d3d_vertex_b_obj: 0, d3d_report_obj: 0,
-            d3d_clip_horizontal: 0, d3d_clip_vertical: 0,
-            d3d_surface_format: 0, d3d_color_bytes: 1, d3d_depth_bytes: 1,
-            d3d_surface_pitch_a: 0, d3d_surface_pitch_z: 0,
-            d3d_surface_color_offset: 0, d3d_surface_zeta_offset: 0,
-            d3d_local_viewer: false, d3d_color_material_emission: 0,
-            d3d_color_material_ambient: 0, d3d_color_material_diffuse: 0,
-            d3d_color_material_specular: 0, d3d_lighting_enable: 0,
-            d3d_normalize_enable: 0, d3d_material_factor: [0.0; 4],
-            d3d_separate_specular: 0, d3d_light_enable_mask: 0,
-            d3d_specular_params: [0.0; 6], d3d_specular_power: 0.0,
-            d3d_scene_ambient_color: [0.0; 4], d3d_eye_position: [0.0; 4],
+            d3d_a_obj: 0,
+            d3d_b_obj: 0,
+            d3d_color_obj: 0,
+            d3d_zeta_obj: 0,
+            d3d_vertex_a_obj: 0,
+            d3d_vertex_b_obj: 0,
+            d3d_report_obj: 0,
+            d3d_clip_horizontal: 0,
+            d3d_clip_vertical: 0,
+            d3d_surface_format: 0,
+            d3d_color_bytes: 1,
+            d3d_depth_bytes: 1,
+            d3d_surface_pitch_a: 0,
+            d3d_surface_pitch_z: 0,
+            d3d_surface_color_offset: 0,
+            d3d_surface_zeta_offset: 0,
+            d3d_local_viewer: false,
+            d3d_color_material_emission: 0,
+            d3d_color_material_ambient: 0,
+            d3d_color_material_diffuse: 0,
+            d3d_color_material_specular: 0,
+            d3d_lighting_enable: 0,
+            d3d_normalize_enable: 0,
+            d3d_material_factor: [0.0; 4],
+            d3d_separate_specular: 0,
+            d3d_light_enable_mask: 0,
+            d3d_specular_params: [0.0; 6],
+            d3d_specular_power: 0.0,
+            d3d_scene_ambient_color: [0.0; 4],
+            d3d_eye_position: [0.0; 4],
             d3d_light: core::array::from_fn(|_| GfLight::default()),
-            d3d_fog_mode: 0, d3d_fog_gen_mode: 0, d3d_fog_params: [0.0; 3],
-            d3d_fog_enable: 0, d3d_fog_color: [0.0; 4],
-            d3d_window_offset_x: 0, d3d_window_offset_y: 0,
-            d3d_window_clip_x1: [0; 8], d3d_window_clip_x2: [0; 8],
-            d3d_window_clip_y1: [0; 8], d3d_window_clip_y2: [0; 8],
-            d3d_viewport_x: 0, d3d_viewport_width: 0,
-            d3d_viewport_y: 0, d3d_viewport_height: 0,
-            d3d_viewport_offset: [0.0; 4], d3d_viewport_scale: [0.0; 4],
-            d3d_scissor_x: 0, d3d_scissor_width: 0,
-            d3d_scissor_y: 0, d3d_scissor_height: 0,
-            d3d_alpha_test_enable: 0, d3d_alpha_func: 0, d3d_alpha_ref: 0,
-            d3d_blend_enable: 0, d3d_blend_sfactor_rgb: 0,
-            d3d_blend_sfactor_alpha: 0, d3d_blend_dfactor_rgb: 0,
-            d3d_blend_dfactor_alpha: 0, d3d_blend_equation_rgb: 0,
-            d3d_blend_equation_alpha: 0, d3d_blend_color: [0.0; 4],
-            d3d_depth_test_enable: 0, d3d_depth_write_enable: 0,
-            d3d_depth_func: 0, d3d_stencil_test_enable: 0,
-            d3d_stencil_mask: 0, d3d_stencil_func: 0,
-            d3d_stencil_func_ref: 0, d3d_stencil_func_mask: 0,
-            d3d_stencil_op_sfail: 0, d3d_stencil_op_dpfail: 0,
+            d3d_fog_mode: 0,
+            d3d_fog_gen_mode: 0,
+            d3d_fog_params: [0.0; 3],
+            d3d_fog_enable: 0,
+            d3d_fog_color: [0.0; 4],
+            d3d_window_offset_x: 0,
+            d3d_window_offset_y: 0,
+            d3d_window_clip_x1: [0; 8],
+            d3d_window_clip_x2: [0; 8],
+            d3d_window_clip_y1: [0; 8],
+            d3d_window_clip_y2: [0; 8],
+            d3d_viewport_x: 0,
+            d3d_viewport_width: 0,
+            d3d_viewport_y: 0,
+            d3d_viewport_height: 0,
+            d3d_viewport_offset: [0.0; 4],
+            d3d_viewport_scale: [0.0; 4],
+            d3d_scissor_x: 0,
+            d3d_scissor_width: 0,
+            d3d_scissor_y: 0,
+            d3d_scissor_height: 0,
+            d3d_alpha_test_enable: 0,
+            d3d_alpha_func: 0,
+            d3d_alpha_ref: 0,
+            d3d_blend_enable: 0,
+            d3d_blend_sfactor_rgb: 0,
+            d3d_blend_sfactor_alpha: 0,
+            d3d_blend_dfactor_rgb: 0,
+            d3d_blend_dfactor_alpha: 0,
+            d3d_blend_equation_rgb: 0,
+            d3d_blend_equation_alpha: 0,
+            d3d_blend_color: [0.0; 4],
+            d3d_depth_test_enable: 0,
+            d3d_depth_write_enable: 0,
+            d3d_depth_func: 0,
+            d3d_stencil_test_enable: 0,
+            d3d_stencil_mask: 0,
+            d3d_stencil_func: 0,
+            d3d_stencil_func_ref: 0,
+            d3d_stencil_func_mask: 0,
+            d3d_stencil_op_sfail: 0,
+            d3d_stencil_op_dpfail: 0,
             d3d_stencil_op_dppass: 0,
-            d3d_cull_face_enable: 0, d3d_cull_face: 0, d3d_front_face: 0,
-            d3d_color_mask: 0, d3d_shade_mode: 0,
-            d3d_clip_min: 0.0, d3d_clip_max: 0.0,
-            d3d_combiner_alpha_icw: [0; 8], d3d_combiner_final: [0; 2],
+            d3d_cull_face_enable: 0,
+            d3d_cull_face: 0,
+            d3d_front_face: 0,
+            d3d_color_mask: 0,
+            d3d_shade_mode: 0,
+            d3d_clip_min: 0.0,
+            d3d_clip_max: 0.0,
+            d3d_combiner_alpha_icw: [0; 8],
+            d3d_combiner_final: [0; 2],
             d3d_combiner_const_color: [[[0.0; 4]; 2]; 8],
-            d3d_combiner_alpha_ocw: [0; 8], d3d_combiner_color_icw: [0; 8],
-            d3d_combiner_color_ocw: [0; 8], d3d_combiner_control: 0,
+            d3d_combiner_alpha_ocw: [0; 8],
+            d3d_combiner_color_icw: [0; 8],
+            d3d_combiner_color_ocw: [0; 8],
+            d3d_combiner_control: 0,
             d3d_combiner_control_num_stages: 0,
             d3d_texture: core::array::from_fn(|_| GfTexture::default()),
-            d3d_tex_shader_op: [0; 4], d3d_tex_shader_previous: [0; 4],
-            d3d_shader_program: 0, d3d_shader_obj: 0,
-            d3d_shader_offset: 0, d3d_shader_control: 0,
-            d3d_transform_execution_mode: 0, d3d_transform_program_load: 0,
-            d3d_transform_program_start: 0, d3d_transform_constant_load: 0,
+            d3d_tex_shader_op: [0; 4],
+            d3d_tex_shader_previous: [0; 4],
+            d3d_shader_program: 0,
+            d3d_shader_obj: 0,
+            d3d_shader_offset: 0,
+            d3d_shader_control: 0,
+            d3d_transform_execution_mode: 0,
+            d3d_transform_program_load: 0,
+            d3d_transform_program_start: 0,
+            d3d_transform_constant_load: 0,
             d3d_view_matrix_enable: 0,
             d3d_model_view_matrix: [[0.0; 16]; 2],
             d3d_inverse_model_view_matrix: [0.0; 12],
@@ -578,42 +723,75 @@ impl GfChannel {
             d3d_texgen_plane: [[[0.0; 4]; 4]; 8],
             d3d_transform_program: Box::new([[0u32; 4]; 544]),
             d3d_transform_constant: Box::new([[0.0f32; 4]; 512]),
-            d3d_attrib_count: 0, d3d_vertex_data_base_index: 0,
+            d3d_attrib_count: 0,
+            d3d_vertex_data_base_index: 0,
             d3d_vertex_data_array_offset: [0; 16],
             d3d_vertex_data_array_format_type: [0; 16],
             d3d_vertex_data_array_format_size: [0; 16],
             d3d_vertex_data_array_format_stride: [0; 16],
             d3d_vertex_data_array_format_dx: [false; 16],
             d3d_vertex_data_array_format_homogeneous: [false; 16],
-            d3d_begin_end: 0, d3d_primitive_done: false,
-            d3d_triangle_flip: false, d3d_vertex_index: 0,
-            d3d_attrib_index: 0, d3d_comp_index: 0,
+            d3d_begin_end: 0,
+            d3d_primitive_done: false,
+            d3d_triangle_flip: false,
+            d3d_vertex_index: 0,
+            d3d_attrib_index: 0,
+            d3d_comp_index: 0,
             d3d_vertex_data: [[[0.0; 4]; 16]; 4],
             d3d_vertex_data_imm: [[0.0; 4]; 16],
-            d3d_index_array_offset: 0, d3d_index_array_dma: 0,
-            d3d_attrib_in_normal: 0, d3d_attrib_in_color: [0; 2],
-            d3d_attrib_out_color: [0; 2], d3d_attrib_out_fogc: 0,
+            d3d_index_array_offset: 0,
+            d3d_index_array_dma: 0,
+            d3d_attrib_in_normal: 0,
+            d3d_attrib_in_color: [0; 2],
+            d3d_attrib_out_color: [0; 2],
+            d3d_attrib_out_fogc: 0,
             d3d_attrib_in_tex_coord: [0; 16],
             d3d_attrib_out_tex_coord: [0; 16],
             d3d_attrib_out_enable: [false; 32],
-            d3d_vs_temp_regs_count: 0, d3d_tex_coord_count: 0,
-            d3d_semaphore_obj: 0, d3d_semaphore_offset: 0,
-            d3d_zstencil_clear_value: 0, d3d_color_clear_value: 0,
+            d3d_vs_temp_regs_count: 0,
+            d3d_tex_coord_count: 0,
+            d3d_semaphore_obj: 0,
+            d3d_semaphore_offset: 0,
+            d3d_zstencil_clear_value: 0,
+            d3d_color_clear_value: 0,
             d3d_clear_surface: 0,
-            rop: 0, beta: 0, clip_x: 0, clip_y: 0,
-            clip_width: 0, clip_height: 0,
-            chroma_color_fmt: 0, chroma_color: 0,
-            patt_shape: 0, patt_type_color: false,
-            patt_bg_color: 0, patt_fg_color: 0,
-            patt_data_mono: [false; 64], patt_data_color: [0; 64],
-            gdi_operation: 0, gdi_color_fmt: 0, gdi_mono_fmt: 0,
-            gdi_clip_yx0: 0, gdi_clip_yx1: 0, gdi_rect_color: 0,
-            gdi_rect_xy: 0, gdi_rect_yx0: 0, gdi_rect_yx1: 0,
-            gdi_rect_wh: 0, gdi_bg_color: 0, gdi_fg_color: 0,
-            gdi_image_swh: 0, gdi_image_dwh: 0, gdi_image_xy: 0,
-            gdi_words_ptr: 0, gdi_words_left: 0, gdi_words: None,
-            rect_operation: 0, rect_color_fmt: 0, rect_color: 0,
-            rect_yx: 0, rect_hw: 0,
+            rop: 0,
+            beta: 0,
+            clip_x: 0,
+            clip_y: 0,
+            clip_width: 0,
+            clip_height: 0,
+            chroma_color_fmt: 0,
+            chroma_color: 0,
+            patt_shape: 0,
+            patt_type_color: false,
+            patt_bg_color: 0,
+            patt_fg_color: 0,
+            patt_data_mono: [false; 64],
+            patt_data_color: [0; 64],
+            gdi_operation: 0,
+            gdi_color_fmt: 0,
+            gdi_mono_fmt: 0,
+            gdi_clip_yx0: 0,
+            gdi_clip_yx1: 0,
+            gdi_rect_color: 0,
+            gdi_rect_xy: 0,
+            gdi_rect_yx0: 0,
+            gdi_rect_yx1: 0,
+            gdi_rect_wh: 0,
+            gdi_bg_color: 0,
+            gdi_fg_color: 0,
+            gdi_image_swh: 0,
+            gdi_image_dwh: 0,
+            gdi_image_xy: 0,
+            gdi_words_ptr: 0,
+            gdi_words_left: 0,
+            gdi_words: None,
+            rect_operation: 0,
+            rect_color_fmt: 0,
+            rect_color: 0,
+            rect_yx: 0,
+            rect_hw: 0,
         }
     }
 }
@@ -677,60 +855,88 @@ fn rop_src(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
 
 /// Clear ROP: destination = 0
 fn rop_0(dst: &mut [u8], _src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for b in &mut dst[..cb as usize] { *b = 0; }
+    for b in &mut dst[..cb as usize] {
+        *b = 0;
+    }
 }
 
 /// Set ROP: destination = 0xFF
 fn rop_1(dst: &mut [u8], _src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for b in &mut dst[..cb as usize] { *b = 0xFF; }
+    for b in &mut dst[..cb as usize] {
+        *b = 0xFF;
+    }
 }
 
 fn rop_notdst(dst: &mut [u8], _src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for b in &mut dst[..cb as usize] { *b = !*b; }
+    for b in &mut dst[..cb as usize] {
+        *b = !*b;
+    }
 }
 
 fn rop_src_and_dst(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for i in 0..cb as usize { dst[i] &= src[i]; }
+    for i in 0..cb as usize {
+        dst[i] &= src[i];
+    }
 }
 
 fn rop_notsrc_and_dst(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for i in 0..cb as usize { dst[i] &= !src[i]; }
+    for i in 0..cb as usize {
+        dst[i] &= !src[i];
+    }
 }
 
 fn rop_src_and_notdst(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for i in 0..cb as usize { dst[i] = src[i] & !dst[i]; }
+    for i in 0..cb as usize {
+        dst[i] = src[i] & !dst[i];
+    }
 }
 
 fn rop_notsrc(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for i in 0..cb as usize { dst[i] = !src[i]; }
+    for i in 0..cb as usize {
+        dst[i] = !src[i];
+    }
 }
 
 fn rop_src_xor_dst(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for i in 0..cb as usize { dst[i] ^= src[i]; }
+    for i in 0..cb as usize {
+        dst[i] ^= src[i];
+    }
 }
 
 fn rop_notsrc_or_notdst(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for i in 0..cb as usize { dst[i] = !src[i] | !dst[i]; }
+    for i in 0..cb as usize {
+        dst[i] = !src[i] | !dst[i];
+    }
 }
 
 fn rop_src_or_dst(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for i in 0..cb as usize { dst[i] |= src[i]; }
+    for i in 0..cb as usize {
+        dst[i] |= src[i];
+    }
 }
 
 fn rop_notsrc_or_dst(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for i in 0..cb as usize { dst[i] = !src[i] | dst[i]; }
+    for i in 0..cb as usize {
+        dst[i] = !src[i] | dst[i];
+    }
 }
 
 fn rop_src_notxor_dst(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for i in 0..cb as usize { dst[i] = !(src[i] ^ dst[i]); }
+    for i in 0..cb as usize {
+        dst[i] = !(src[i] ^ dst[i]);
+    }
 }
 
 fn rop_notsrc_and_notdst(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for i in 0..cb as usize { dst[i] = !src[i] & !dst[i]; }
+    for i in 0..cb as usize {
+        dst[i] = !src[i] & !dst[i];
+    }
 }
 
 fn rop_src_or_notdst(dst: &mut [u8], src: &[u8], _: usize, _: usize, cb: u32, _pc: u32) {
-    for i in 0..cb as usize { dst[i] = src[i] | !dst[i]; }
+    for i in 0..cb as usize {
+        dst[i] = src[i] | !dst[i];
+    }
 }
 
 /// Ternary ROP: applies pattern-based operation
@@ -820,46 +1026,54 @@ fn edge_function(v0: &[f32; 4], v1: &[f32; 4], v2: &[f32]) -> f64 {
 
 fn compare(func: u32, val1: u32, val2: u32) -> bool {
     match func {
-        1 | 0x200 => false,             // NEVER
-        2 | 0x201 => val1 < val2,        // LESS
-        3 | 0x202 => val1 == val2,       // EQUAL
-        4 | 0x203 => val1 <= val2,       // LEQUAL
-        5 | 0x204 => val1 > val2,        // GREATER
-        6 | 0x205 => val1 != val2,       // NOTEQUAL
-        7 | 0x206 => val1 >= val2,       // GEQUAL
-        8 | 0x207 => true,              // ALWAYS
-        _ => val1 < val2,               // default LESS
+        1 | 0x200 => false,        // NEVER
+        2 | 0x201 => val1 < val2,  // LESS
+        3 | 0x202 => val1 == val2, // EQUAL
+        4 | 0x203 => val1 <= val2, // LEQUAL
+        5 | 0x204 => val1 > val2,  // GREATER
+        6 | 0x205 => val1 != val2, // NOTEQUAL
+        7 | 0x206 => val1 >= val2, // GEQUAL
+        8 | 0x207 => true,         // ALWAYS
+        _ => val1 < val2,          // default LESS
     }
 }
 
-fn blend_factor(factor: u16, src_rgb: f32, src_a: f32, dst_rgb: f32, dst_a: f32, const_rgb: f32, const_a: f32) -> f32 {
+fn blend_factor(
+    factor: u16,
+    src_rgb: f32,
+    src_a: f32,
+    dst_rgb: f32,
+    dst_a: f32,
+    const_rgb: f32,
+    const_a: f32,
+) -> f32 {
     match factor {
-        0x0000 | 0x1001 => 0.0,                          // ZERO
-        0x0001 | 0x1002 => 1.0,                          // ONE
-        0x0300 | 0x1003 => src_rgb,                       // SRC_COLOR
-        0x0301 | 0x1004 => 1.0 - src_rgb,                 // INV_SRC_COLOR
-        0x0302 | 0x1005 => src_a,                         // SRC_ALPHA
-        0x0303 | 0x1006 => 1.0 - src_a,                   // INV_SRC_ALPHA
-        0x0304 | 0x1007 => dst_a,                         // DEST_ALPHA
-        0x0305 | 0x1008 => 1.0 - dst_a,                   // INV_DEST_ALPHA
-        0x0306 | 0x1009 => dst_rgb,                       // DEST_COLOR
-        0x0307 | 0x100a => 1.0 - dst_rgb,                 // INV_DEST_COLOR
-        0x0308 | 0x100b => src_a.min(1.0 - dst_a),        // SRC_ALPHA_SAT
-        0x8001 | 0x100e => const_rgb,                     // CONSTANT_COLOR
-        0x8002 | 0x100f => 1.0 - const_rgb,               // INV_CONSTANT
-        0x8003 => const_a,                               // CONSTANT_ALPHA
-        0x8004 => 1.0 - const_a,                         // INV_CONSTANT_ALPHA
+        0x0000 | 0x1001 => 0.0,                    // ZERO
+        0x0001 | 0x1002 => 1.0,                    // ONE
+        0x0300 | 0x1003 => src_rgb,                // SRC_COLOR
+        0x0301 | 0x1004 => 1.0 - src_rgb,          // INV_SRC_COLOR
+        0x0302 | 0x1005 => src_a,                  // SRC_ALPHA
+        0x0303 | 0x1006 => 1.0 - src_a,            // INV_SRC_ALPHA
+        0x0304 | 0x1007 => dst_a,                  // DEST_ALPHA
+        0x0305 | 0x1008 => 1.0 - dst_a,            // INV_DEST_ALPHA
+        0x0306 | 0x1009 => dst_rgb,                // DEST_COLOR
+        0x0307 | 0x100a => 1.0 - dst_rgb,          // INV_DEST_COLOR
+        0x0308 | 0x100b => src_a.min(1.0 - dst_a), // SRC_ALPHA_SAT
+        0x8001 | 0x100e => const_rgb,              // CONSTANT_COLOR
+        0x8002 | 0x100f => 1.0 - const_rgb,        // INV_CONSTANT
+        0x8003 => const_a,                         // CONSTANT_ALPHA
+        0x8004 => 1.0 - const_a,                   // INV_CONSTANT_ALPHA
         _ => 0.5,
     }
 }
 
 fn blend_equation(equation: u16, src: f32, src_factor: f32, dst: f32, dst_factor: f32) -> f32 {
     match equation {
-        0x0002 | 0x800a => src * src_factor - dst * dst_factor,     // SUBTRACT
-        0x0003 | 0x800b => dst * dst_factor - src * src_factor,     // REV_SUBTRACT
-        0x0004 | 0x8007 => src.min(dst),                           // MIN
-        0x0005 | 0x8008 => src.max(dst),                           // MAX
-        _ => src * src_factor + dst * dst_factor,                   // ADD (default)
+        0x0002 | 0x800a => src * src_factor - dst * dst_factor, // SUBTRACT
+        0x0003 | 0x800b => dst * dst_factor - src * src_factor, // REV_SUBTRACT
+        0x0004 | 0x8007 => src.min(dst),                        // MIN
+        0x0005 | 0x8008 => src.max(dst),                        // MAX
+        _ => src * src_factor + dst * dst_factor,               // ADD (default)
     }
 }
 
@@ -872,18 +1086,24 @@ fn swizzle_addr(x: u32, y: u32, width: u32, height: u32) -> u32 {
     let mut r = 0u32;
     loop {
         if xleft {
-            if (x & xbit) != 0 { r |= rbit; }
+            if (x & xbit) != 0 {
+                r |= rbit;
+            }
             rbit <<= 1;
             xbit <<= 1;
             xleft = xbit < width;
         }
         if yleft {
-            if (y & ybit) != 0 { r |= rbit; }
+            if (y & ybit) != 0 {
+                r |= rbit;
+            }
             rbit <<= 1;
             ybit <<= 1;
             yleft = ybit < height;
         }
-        if !xleft && !yleft { break; }
+        if !xleft && !yleft {
+            break;
+        }
     }
     r
 }
@@ -910,14 +1130,14 @@ fn rc_get_var(cw: u32, shift: u32, regs: &[[f32; 4]; 16], civ: u32) -> f32 {
     let cir = if pir != 0 { 3 } else { civ } as usize;
     let value = regs[reg][cir];
     match map {
-        0 => value.max(0.0),                              // UNSIGNED_IDENTITY
-        1 => 1.0 - value.clamp(0.0, 1.0),                  // UNSIGNED_INVERT
-        2 => 2.0 * value.max(0.0) - 1.0,                   // EXPAND_NORMAL
-        3 => -2.0 * value.max(0.0) + 1.0,                  // EXPAND_NEGATE
-        4 => value.max(0.0) - 0.5,                          // HALF_BIAS_NORMAL
-        5 => -value.max(0.0) + 0.5,                         // HALF_BIAS_NEGATE
-        6 => value,                                        // SIGNED_IDENTITY
-        7 => -value,                                       // SIGNED_NEGATE
+        0 => value.max(0.0),              // UNSIGNED_IDENTITY
+        1 => 1.0 - value.clamp(0.0, 1.0), // UNSIGNED_INVERT
+        2 => 2.0 * value.max(0.0) - 1.0,  // EXPAND_NORMAL
+        3 => -2.0 * value.max(0.0) + 1.0, // EXPAND_NEGATE
+        4 => value.max(0.0) - 0.5,        // HALF_BIAS_NORMAL
+        5 => -value.max(0.0) + 0.5,       // HALF_BIAS_NEGATE
+        6 => value,                       // SIGNED_IDENTITY
+        7 => -value,                      // SIGNED_NEGATE
         _ => value,
     }
 }
@@ -929,8 +1149,12 @@ fn texture_process_format(tex: &mut GfTexture) {
     tex.dxt_alpha_data = false;
     tex.dxt_alpha_explicit = false;
     if (tex.format & 0x80) != 0 {
-        if (tex.format & 0x20) != 0 { tex.linear = true; }
-        if (tex.format & 0x40) != 0 { tex.unnormalized = true; }
+        if (tex.format & 0x20) != 0 {
+            tex.linear = true;
+        }
+        if (tex.format & 0x40) != 0 {
+            tex.unnormalized = true;
+        }
         tex.format &= 0x9f;
     } else if tex.format == 0x12 || tex.format == 0x1b || tex.format == 0x1e {
         tex.linear = true;
@@ -968,7 +1192,9 @@ fn texture_update_size(tex: &mut GfTexture, cls: u32) {
     tex.face_bytes = 0;
     for _ in 0..tex.levels {
         let mut level_bytes = lw * lh * tex.color_bytes;
-        if tex.compressed { level_bytes /= 16; }
+        if tex.compressed {
+            level_bytes /= 16;
+        }
         tex.face_bytes += level_bytes;
         lw = (lw / 2).max(1);
         lh = (lh / 2).max(1);
@@ -1152,7 +1378,11 @@ impl BxGeForceC {
 
         let ramin_flip = memsize - 64;
         let memsize_mask = memsize - 1;
-        let class_mask = if card_type < 0x40 { 0x0000_0FFF } else { 0x0000_FFFF };
+        let class_mask = if card_type < 0x40 {
+            0x0000_0FFF
+        } else {
+            0x0000_FFFF
+        };
 
         let mut rop_handler = [rop_nop as RopHandler; 256];
         let mut rop_flags = [BX_ROP_PATTERN; 256];
@@ -1167,55 +1397,114 @@ impl BxGeForceC {
         let memory = vec![0u8; memsize as usize];
         let unk_regs = vec![0u32; 4 * 1024 * 1024];
 
-        tracing::debug!("{} initialized, VRAM {}MB", model.name(), memsize / (1024 * 1024));
+        tracing::debug!(
+            "{} initialized, VRAM {}MB",
+            model.name(),
+            memsize / (1024 * 1024)
+        );
 
         Self {
             crtc: CrtcRegs::default(),
-            mc_soft_intr: false, mc_intr_en: 0, mc_enable: 0,
-            bus_intr: 0, bus_intr_en: 0,
-            fifo_wait: false, fifo_wait_soft: false,
-            fifo_wait_notify: false, fifo_wait_flip: false,
+            mc_soft_intr: false,
+            mc_intr_en: 0,
+            mc_enable: 0,
+            bus_intr: 0,
+            bus_intr_en: 0,
+            fifo_wait: false,
+            fifo_wait_soft: false,
+            fifo_wait_notify: false,
+            fifo_wait_flip: false,
             fifo_wait_acquire: false,
-            fifo_intr: 0, fifo_intr_en: 0,
-            fifo_ramht: 0, fifo_ramfc: 0, fifo_ramro: 0, fifo_mode: 0,
-            fifo_cache1_push0: 0, fifo_cache1_push1: 0, fifo_cache1_put: 0,
-            fifo_cache1_dma_push: 0, fifo_cache1_dma_instance: 0,
-            fifo_cache1_dma_put: 0, fifo_cache1_dma_get: 0,
-            fifo_cache1_ref_cnt: 0, fifo_cache1_pull0: 0,
-            fifo_cache1_semaphore: 0, fifo_cache1_get: 0,
+            fifo_intr: 0,
+            fifo_intr_en: 0,
+            fifo_ramht: 0,
+            fifo_ramfc: 0,
+            fifo_ramro: 0,
+            fifo_mode: 0,
+            fifo_cache1_push0: 0,
+            fifo_cache1_push1: 0,
+            fifo_cache1_put: 0,
+            fifo_cache1_dma_push: 0,
+            fifo_cache1_dma_instance: 0,
+            fifo_cache1_dma_put: 0,
+            fifo_cache1_dma_get: 0,
+            fifo_cache1_ref_cnt: 0,
+            fifo_cache1_pull0: 0,
+            fifo_cache1_semaphore: 0,
+            fifo_cache1_get: 0,
             fifo_grctx_instance: 0,
             fifo_cache1_method: [0; GEFORCE_CACHE1_SIZE],
             fifo_cache1_data: [0; GEFORCE_CACHE1_SIZE],
             rma_addr: 0,
-            timer_intr: 0, timer_intr_en: 0,
-            timer_num: 0, timer_den: 0,
-            timer_inittime1: 0, timer_inittime2: 0, timer_alarm: 0,
+            timer_intr: 0,
+            timer_intr_en: 0,
+            timer_num: 0,
+            timer_den: 0,
+            timer_inittime1: 0,
+            timer_inittime2: 0,
+            timer_alarm: 0,
             straps0_primary: straps0_primary_original,
             straps0_primary_original,
-            graph_intr: 0, graph_nsource: 0, graph_intr_en: 0,
-            graph_ctx_switch1: 0, graph_ctx_switch2: 0,
-            graph_ctx_switch4: 0, graph_ctxctl_cur: 0,
-            graph_status: 0, graph_trapped_addr: 0, graph_trapped_data: 0,
-            graph_flip_read: 0, graph_flip_write: 0, graph_flip_modulo: 0,
-            graph_notify: 0, graph_fifo: 0, graph_bpixel: 0,
-            graph_channel_ctx_table: 0, graph_offset0: 0, graph_pitch0: 0,
-            crtc_intr: 0, crtc_intr_en: 0, crtc_start: 0, crtc_config: 0,
-            crtc_raster_pos: 0, crtc_cursor_offset: 0,
-            crtc_cursor_config: 0, crtc_gpio_ext: 0,
-            ramdac_cu_start_pos: 0, ramdac_vpll: 0, ramdac_vpll_b: 0,
-            ramdac_pll_select: 0, ramdac_general_control: 0,
-            rop_handler, rop_flags,
-            chs, unk_regs,
-            svga_unlock_special: false, svga_needs_update_tile: true,
-            svga_needs_update_dispentire: true, svga_needs_update_mode: false,
+            graph_intr: 0,
+            graph_nsource: 0,
+            graph_intr_en: 0,
+            graph_ctx_switch1: 0,
+            graph_ctx_switch2: 0,
+            graph_ctx_switch4: 0,
+            graph_ctxctl_cur: 0,
+            graph_status: 0,
+            graph_trapped_addr: 0,
+            graph_trapped_data: 0,
+            graph_flip_read: 0,
+            graph_flip_write: 0,
+            graph_flip_modulo: 0,
+            graph_notify: 0,
+            graph_fifo: 0,
+            graph_bpixel: 0,
+            graph_channel_ctx_table: 0,
+            graph_offset0: 0,
+            graph_pitch0: 0,
+            crtc_intr: 0,
+            crtc_intr_en: 0,
+            crtc_start: 0,
+            crtc_config: 0,
+            crtc_raster_pos: 0,
+            crtc_cursor_offset: 0,
+            crtc_cursor_config: 0,
+            crtc_gpio_ext: 0,
+            ramdac_cu_start_pos: 0,
+            ramdac_vpll: 0,
+            ramdac_vpll_b: 0,
+            ramdac_pll_select: 0,
+            ramdac_general_control: 0,
+            rop_handler,
+            rop_flags,
+            chs,
+            unk_regs,
+            svga_unlock_special: false,
+            svga_needs_update_tile: true,
+            svga_needs_update_dispentire: true,
+            svga_needs_update_mode: false,
             svga_double_width: false,
-            svga_xres: 640, svga_yres: 480, svga_pitch: 640,
-            svga_bpp: 8, svga_dispbpp: 0,
-            card_type, memsize, memsize_mask, bar2_size,
-            ramin_flip, class_mask,
-            memory, disp_offset: 0, disp_end_offset: 0,
+            svga_xres: 640,
+            svga_yres: 480,
+            svga_pitch: 640,
+            svga_bpp: 8,
+            svga_dispbpp: 0,
+            card_type,
+            memsize,
+            memsize_mask,
+            bar2_size,
+            ramin_flip,
+            class_mask,
+            memory,
+            disp_offset: 0,
+            disp_end_offset: 0,
             bank_base: [0; 2],
-            hw_cursor: HwCursor { size: 32, ..HwCursor::default() },
+            hw_cursor: HwCursor {
+                size: 32,
+                ..HwCursor::default()
+            },
             pci_conf: [0u8; 256],
             pci_rom: Vec::new(),
             time_nsec: 0,
@@ -1367,7 +1656,10 @@ impl BxGeForceC {
         self.svga_bpp = 8;
         self.svga_pitch = 640;
         self.bank_base = [0; 2];
-        self.hw_cursor = HwCursor { size: 32, ..HwCursor::default() };
+        self.hw_cursor = HwCursor {
+            size: 32,
+            ..HwCursor::default()
+        };
         self.disp_offset = 0;
         self.disp_end_offset = 0;
         self.memory.fill(0);
@@ -1389,18 +1681,24 @@ impl BxGeForceC {
     pub fn vram_read32(&self, address: u32) -> u32 {
         let a = address as usize;
         u32::from_le_bytes([
-            self.memory[a], self.memory[a + 1],
-            self.memory[a + 2], self.memory[a + 3],
+            self.memory[a],
+            self.memory[a + 1],
+            self.memory[a + 2],
+            self.memory[a + 3],
         ])
     }
 
     pub fn vram_read64(&self, address: u32) -> u64 {
         let a = address as usize;
         u64::from_le_bytes([
-            self.memory[a], self.memory[a + 1],
-            self.memory[a + 2], self.memory[a + 3],
-            self.memory[a + 4], self.memory[a + 5],
-            self.memory[a + 6], self.memory[a + 7],
+            self.memory[a],
+            self.memory[a + 1],
+            self.memory[a + 2],
+            self.memory[a + 3],
+            self.memory[a + 4],
+            self.memory[a + 5],
+            self.memory[a + 6],
+            self.memory[a + 7],
         ])
     }
 
@@ -1557,7 +1855,14 @@ impl BxGeForceC {
         }
     }
 
-    pub fn dma_copy(&mut self, dst_obj: u32, dst_addr: u32, src_obj: u32, src_addr: u32, byte_count: u32) {
+    pub fn dma_copy(
+        &mut self,
+        dst_obj: u32,
+        dst_addr: u32,
+        src_obj: u32,
+        src_addr: u32,
+        byte_count: u32,
+    ) {
         // Simplified: copy via VRAM only (no physical memory support)
         let mut src_off = src_addr;
         let mut dst_off = dst_addr;
@@ -1645,8 +1950,12 @@ impl BxGeForceC {
                 }
             }
             it += 8;
-            if it >= ramht_size { it = 0; }
-            if it == hash { break; }
+            if it >= ramht_size {
+                it = 0;
+            }
+            if it == hash {
+                break;
+            }
         }
 
         tracing::error!("ramht_lookup failed for {:#010x}", handle);
@@ -1654,9 +1963,10 @@ impl BxGeForceC {
     }
 
     fn get_current_time(&self) -> u64 {
-        (self.timer_inittime1.wrapping_add(
-            self.time_nsec.wrapping_sub(self.timer_inittime2)
-        )) & !0x1Fu64
+        (self
+            .timer_inittime1
+            .wrapping_add(self.time_nsec.wrapping_sub(self.timer_inittime2)))
+            & !0x1Fu64
     }
 
     // -----------------------------------------------------------------------
@@ -1665,10 +1975,18 @@ impl BxGeForceC {
 
     fn get_mc_intr(&self) -> u32 {
         let mut value = 0u32;
-        if self.bus_intr & self.bus_intr_en != 0 { value |= 0x1000_0000; }
-        if self.fifo_intr & self.fifo_intr_en != 0 { value |= 0x0000_0100; }
-        if self.graph_intr & self.graph_intr_en != 0 { value |= 0x0000_1000; }
-        if self.crtc_intr & self.crtc_intr_en != 0 { value |= 0x0100_0000; }
+        if self.bus_intr & self.bus_intr_en != 0 {
+            value |= 0x1000_0000;
+        }
+        if self.fifo_intr & self.fifo_intr_en != 0 {
+            value |= 0x0000_0100;
+        }
+        if self.graph_intr & self.graph_intr_en != 0 {
+            value |= 0x0000_1000;
+        }
+        if self.crtc_intr & self.crtc_intr_en != 0 {
+            value |= 0x0100_0000;
+        }
         value
     }
 
@@ -1700,18 +2018,36 @@ impl BxGeForceC {
         }
     }
 
-    fn put_pixel(&mut self, ch_s2d_img_dst: u32, ch_s2d_color_bytes: u32, ch_s2d_color_fmt: u32, ofs: u32, x: u32, value: u32) {
+    fn put_pixel(
+        &mut self,
+        ch_s2d_img_dst: u32,
+        ch_s2d_color_bytes: u32,
+        ch_s2d_color_fmt: u32,
+        ofs: u32,
+        x: u32,
+        value: u32,
+    ) {
         match ch_s2d_color_bytes {
             1 => self.dma_write8(ch_s2d_img_dst, ofs + x, value as u8),
             2 => self.dma_write16(ch_s2d_img_dst, ofs + x * 2, value as u16),
             _ => {
-                let v = if ch_s2d_color_fmt == 6 { value & 0x00FF_FFFF } else { value };
+                let v = if ch_s2d_color_fmt == 6 {
+                    value & 0x00FF_FFFF
+                } else {
+                    value
+                };
                 self.dma_write32(ch_s2d_img_dst, ofs + x * 4, v);
             }
         }
     }
 
-    fn put_pixel_swzs(&mut self, ch_swzs_img_obj: u32, ch_swzs_color_bytes: u32, ofs: u32, value: u32) {
+    fn put_pixel_swzs(
+        &mut self,
+        ch_swzs_img_obj: u32,
+        ch_swzs_color_bytes: u32,
+        ofs: u32,
+        value: u32,
+    ) {
         match ch_swzs_color_bytes {
             1 => self.dma_write8(ch_swzs_img_obj, ofs, value as u8),
             2 => self.dma_write16(ch_swzs_img_obj, ofs, value as u16),
@@ -1719,7 +2055,16 @@ impl BxGeForceC {
         }
     }
 
-    fn pixel_operation(&self, ch: &GfChannel, op: u32, dstcolor: &mut u32, srccolor: &u32, cb: u32, _px: u32, _py: u32) {
+    fn pixel_operation(
+        &self,
+        ch: &GfChannel,
+        op: u32,
+        dstcolor: &mut u32,
+        srccolor: &u32,
+        cb: u32,
+        _px: u32,
+        _py: u32,
+    ) {
         if op == 1 {
             // ROP operation
             let rop = ch.rop;
@@ -1735,12 +2080,25 @@ impl BxGeForceC {
                 let mut dst_bytes = dstcolor.to_le_bytes();
                 let src_bytes = srccolor.to_le_bytes();
                 let pat_bytes = patt_color.to_le_bytes();
-                bx_ternary_rop(rop, &mut dst_bytes[..cb as usize], &src_bytes[..cb as usize], &pat_bytes[..cb as usize], cb);
+                bx_ternary_rop(
+                    rop,
+                    &mut dst_bytes[..cb as usize],
+                    &src_bytes[..cb as usize],
+                    &pat_bytes[..cb as usize],
+                    cb,
+                );
                 *dstcolor = u32::from_le_bytes(dst_bytes);
             } else {
                 let mut dst_bytes = dstcolor.to_le_bytes();
                 let src_bytes = srccolor.to_le_bytes();
-                (self.rop_handler[rop as usize])(&mut dst_bytes[..cb as usize], &src_bytes[..cb as usize], 0, 0, cb, 1);
+                (self.rop_handler[rop as usize])(
+                    &mut dst_bytes[..cb as usize],
+                    &src_bytes[..cb as usize],
+                    0,
+                    0,
+                    cb,
+                    1,
+                );
                 *dstcolor = u32::from_le_bytes(dst_bytes);
             }
         } else if op == 5 {
@@ -1760,7 +2118,8 @@ impl BxGeForceC {
                     let g = alpha_wrap((dg as i32 * isa as i32 / 0xFF) + sg as i32);
                     let r = alpha_wrap((dr as i32 * isa as i32 / 0xFF) + sr as i32);
                     let a = alpha_wrap((da as i32 * isa as i32 / 0xFF) + sa as i32);
-                    *dstcolor = (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | ((a as u32) << 24);
+                    *dstcolor =
+                        (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | ((a as u32) << 24);
                 }
             } else {
                 *dstcolor = *srccolor;
@@ -1777,12 +2136,17 @@ impl BxGeForceC {
     pub fn register_read32(&self, address: u32) -> u32 {
         match address {
             0x0 => {
-                if self.card_type == 0x20 { 0x0202_00A5 }
-                else { self.card_type << 20 }
+                if self.card_type == 0x20 {
+                    0x0202_00A5
+                } else {
+                    self.card_type << 20
+                }
             }
             0x100 => {
                 let mut v = self.get_mc_intr();
-                if self.mc_soft_intr { v |= 0x8000_0000; }
+                if self.mc_soft_intr {
+                    v |= 0x8000_0000;
+                }
                 v
             }
             0x140 => self.mc_intr_en,
@@ -1792,8 +2156,10 @@ impl BxGeForceC {
             a if a >= 0x1800 && a < 0x1900 => {
                 let o = (a - 0x1800) as usize;
                 u32::from_le_bytes([
-                    self.pci_conf[o], self.pci_conf[o+1],
-                    self.pci_conf[o+2], self.pci_conf[o+3],
+                    self.pci_conf[o],
+                    self.pci_conf[o + 1],
+                    self.pci_conf[o + 2],
+                    self.pci_conf[o + 3],
                 ])
             }
             0x2100 => self.fifo_intr,
@@ -1803,14 +2169,22 @@ impl BxGeForceC {
             0x2218 => self.fifo_ramro,
             0x2220 if self.card_type >= 0x40 => self.fifo_ramfc,
             0x2400 => {
-                if self.fifo_cache1_get != self.fifo_cache1_put { 0 } else { 0x10 }
+                if self.fifo_cache1_get != self.fifo_cache1_put {
+                    0
+                } else {
+                    0x10
+                }
             }
             0x2504 => self.fifo_mode,
             0x3200 => self.fifo_cache1_push0,
             0x3204 => self.fifo_cache1_push1,
             0x3210 => self.fifo_cache1_put,
             0x3214 => {
-                if self.fifo_cache1_get != self.fifo_cache1_put { 0 } else { 0x10 }
+                if self.fifo_cache1_get != self.fifo_cache1_put {
+                    0
+                } else {
+                    0x10
+                }
             }
             0x3220 => self.fifo_cache1_dma_push,
             0x322c => self.fifo_cache1_dma_instance,
@@ -1830,18 +2204,19 @@ impl BxGeForceC {
             0x9410 => (self.get_current_time() >> 32) as u32,
             0x9420 => self.timer_alarm,
             0x10020c => self.memsize,
-            0x100320 => {
-                match self.card_type {
-                    0x20 => 0x0000_7fff,
-                    0x35 => 0x0005_c7ff,
-                    _ => 0x0002_e3ff,
-                }
-            }
+            0x100320 => match self.card_type {
+                0x20 => 0x0000_7fff,
+                0x35 => 0x0005_c7ff,
+                _ => 0x0002_e3ff,
+            },
             0x101000 => self.straps0_primary,
             0x400100 => self.graph_intr,
             0x400108 => self.graph_nsource,
-            a if (a == 0x40013C && self.card_type >= 0x40) ||
-                 (a == 0x400140 && self.card_type < 0x40) => self.graph_intr_en,
+            a if (a == 0x40013C && self.card_type >= 0x40)
+                || (a == 0x400140 && self.card_type < 0x40) =>
+            {
+                self.graph_intr_en
+            }
             0x40014C => self.graph_ctx_switch1,
             0x400150 => self.graph_ctx_switch2,
             0x400158 => self.graph_ctx_switch4,
@@ -1853,10 +2228,16 @@ impl BxGeForceC {
             0x400720 => self.graph_fifo,
             0x400724 => self.graph_bpixel,
             0x400780 => self.graph_channel_ctx_table,
-            a if (a == 0x400640 && self.card_type == 0x15) ||
-                 (a == 0x400820 && self.card_type == 0x20) => self.graph_offset0,
-            a if (a == 0x400670 && self.card_type == 0x15) ||
-                 (a == 0x400850 && self.card_type == 0x20) => self.graph_pitch0,
+            a if (a == 0x400640 && self.card_type == 0x15)
+                || (a == 0x400820 && self.card_type == 0x20) =>
+            {
+                self.graph_offset0
+            }
+            a if (a == 0x400670 && self.card_type == 0x15)
+                || (a == 0x400850 && self.card_type == 0x20) =>
+            {
+                self.graph_pitch0
+            }
             0x600100 => self.crtc_intr,
             0x600140 => self.crtc_intr_en,
             0x600800 => self.crtc_start,
@@ -1901,7 +2282,9 @@ impl BxGeForceC {
                 self.mc_intr_en = value;
                 self.update_irq_level();
             }
-            0x200 => { self.mc_enable = value; }
+            0x200 => {
+                self.mc_enable = value;
+            }
             a if a >= 0x1800 && a < 0x1900 => {
                 // PCI config space write
                 let offset = (a - 0x1800) as usize;
@@ -1928,14 +2311,24 @@ impl BxGeForceC {
                 self.fifo_intr_en = value;
                 self.update_irq_level();
             }
-            0x2210 => { self.fifo_ramht = value; }
-            0x2214 if self.card_type < 0x40 => { self.fifo_ramfc = value; }
-            0x2218 => { self.fifo_ramro = value; }
-            0x2220 if self.card_type >= 0x40 => { self.fifo_ramfc = value; }
+            0x2210 => {
+                self.fifo_ramht = value;
+            }
+            0x2214 if self.card_type < 0x40 => {
+                self.fifo_ramfc = value;
+            }
+            0x2218 => {
+                self.fifo_ramro = value;
+            }
+            0x2220 if self.card_type >= 0x40 => {
+                self.fifo_ramfc = value;
+            }
             0x2504 => {
                 let process = (self.fifo_mode | value) != self.fifo_mode;
                 self.fifo_mode = value;
-                if process { self.fifo_process_all(); }
+                if process {
+                    self.fifo_process_all();
+                }
             }
             0x3200 => {
                 self.fifo_cache1_push0 = value;
@@ -1943,13 +2336,27 @@ impl BxGeForceC {
                     self.fifo_process_all();
                 }
             }
-            0x3204 => { self.fifo_cache1_push1 = value; }
-            0x3210 => { self.fifo_cache1_put = value; }
-            0x3220 => { self.fifo_cache1_dma_push = value; }
-            0x322c => { self.fifo_cache1_dma_instance = value; }
-            0x3240 => { self.fifo_cache1_dma_put = value; }
-            0x3244 => { self.fifo_cache1_dma_get = value; }
-            0x3248 => { self.fifo_cache1_ref_cnt = value; }
+            0x3204 => {
+                self.fifo_cache1_push1 = value;
+            }
+            0x3210 => {
+                self.fifo_cache1_put = value;
+            }
+            0x3220 => {
+                self.fifo_cache1_dma_push = value;
+            }
+            0x322c => {
+                self.fifo_cache1_dma_instance = value;
+            }
+            0x3240 => {
+                self.fifo_cache1_dma_put = value;
+            }
+            0x3244 => {
+                self.fifo_cache1_dma_get = value;
+            }
+            0x3248 => {
+                self.fifo_cache1_ref_cnt = value;
+            }
             0x3250 => {
                 self.fifo_cache1_pull0 = value;
                 if self.fifo_cache1_pull0 & 1 != 0 {
@@ -1971,20 +2378,34 @@ impl BxGeForceC {
                 }
                 self.update_irq_level();
             }
-            0x32e0 => { self.fifo_grctx_instance = value; }
-            0x9100 => { self.timer_intr &= !value; }
-            0x9140 => { self.timer_intr_en = value; }
-            0x9200 => { self.timer_num = value; }
-            0x9210 => { self.timer_den = value; }
+            0x32e0 => {
+                self.fifo_grctx_instance = value;
+            }
+            0x9100 => {
+                self.timer_intr &= !value;
+            }
+            0x9140 => {
+                self.timer_intr_en = value;
+            }
+            0x9200 => {
+                self.timer_num = value;
+            }
+            0x9210 => {
+                self.timer_den = value;
+            }
             0x9400 | 0x9410 => {
                 self.timer_inittime2 = self.time_nsec;
                 if address == 0x9400 {
-                    self.timer_inittime1 = (self.timer_inittime1 & 0xFFFF_FFFF_0000_0000) | value as u64;
+                    self.timer_inittime1 =
+                        (self.timer_inittime1 & 0xFFFF_FFFF_0000_0000) | value as u64;
                 } else {
-                    self.timer_inittime1 = (self.timer_inittime1 & 0x0000_0000_FFFF_FFFF) | ((value as u64) << 32);
+                    self.timer_inittime1 =
+                        (self.timer_inittime1 & 0x0000_0000_FFFF_FFFF) | ((value as u64) << 32);
                 }
             }
-            0x9420 => { self.timer_alarm = value; }
+            0x9420 => {
+                self.timer_alarm = value;
+            }
             0x101000 => {
                 if value >> 31 != 0 {
                     self.straps0_primary = value;
@@ -2001,20 +2422,39 @@ impl BxGeForceC {
                     self.fifo_process_all();
                 }
             }
-            0x400108 => { self.graph_nsource = value; }
-            a if (a == 0x40013C && self.card_type >= 0x40) ||
-                 (a == 0x400140 && self.card_type < 0x40) => {
+            0x400108 => {
+                self.graph_nsource = value;
+            }
+            a if (a == 0x40013C && self.card_type >= 0x40)
+                || (a == 0x400140 && self.card_type < 0x40) =>
+            {
                 self.graph_intr_en = value;
                 self.update_irq_level();
             }
-            0x40014C => { self.graph_ctx_switch1 = value; }
-            0x400150 => { self.graph_ctx_switch2 = value; }
-            0x400158 => { self.graph_ctx_switch4 = value; }
-            0x40032c => { self.graph_ctxctl_cur = value; }
-            0x400700 => { self.graph_status = value; }
-            0x400704 => { self.graph_trapped_addr = value; }
-            0x400708 => { self.graph_trapped_data = value; }
-            0x400718 => { self.graph_notify = value; }
+            0x40014C => {
+                self.graph_ctx_switch1 = value;
+            }
+            0x400150 => {
+                self.graph_ctx_switch2 = value;
+            }
+            0x400158 => {
+                self.graph_ctx_switch4 = value;
+            }
+            0x40032c => {
+                self.graph_ctxctl_cur = value;
+            }
+            0x400700 => {
+                self.graph_status = value;
+            }
+            0x400704 => {
+                self.graph_trapped_addr = value;
+            }
+            0x400708 => {
+                self.graph_trapped_data = value;
+            }
+            0x400718 => {
+                self.graph_notify = value;
+            }
             0x40071c => {
                 if value & 2 != 0 {
                     self.graph_flip_read += 1;
@@ -2028,13 +2468,25 @@ impl BxGeForceC {
                     }
                 }
             }
-            0x400720 => { self.graph_fifo = value; }
-            0x400724 => { self.graph_bpixel = value; }
-            0x400780 => { self.graph_channel_ctx_table = value; }
-            a if (a == 0x400640 && self.card_type == 0x15) ||
-                 (a == 0x400820 && self.card_type == 0x20) => { self.graph_offset0 = value; }
-            a if (a == 0x400670 && self.card_type == 0x15) ||
-                 (a == 0x400850 && self.card_type == 0x20) => { self.graph_pitch0 = value; }
+            0x400720 => {
+                self.graph_fifo = value;
+            }
+            0x400724 => {
+                self.graph_bpixel = value;
+            }
+            0x400780 => {
+                self.graph_channel_ctx_table = value;
+            }
+            a if (a == 0x400640 && self.card_type == 0x15)
+                || (a == 0x400820 && self.card_type == 0x20) =>
+            {
+                self.graph_offset0 = value;
+            }
+            a if (a == 0x400670 && self.card_type == 0x15)
+                || (a == 0x400850 && self.card_type == 0x20) =>
+            {
+                self.graph_pitch0 = value;
+            }
             0x600100 => {
                 self.crtc_intr &= !value;
                 self.update_irq_level();
@@ -2047,7 +2499,9 @@ impl BxGeForceC {
                 self.crtc_start = value;
                 self.svga_needs_update_mode = true;
             }
-            0x600804 => { self.crtc_config = value; }
+            0x600804 => {
+                self.crtc_config = value;
+            }
             0x60080c => {
                 self.crtc_cursor_offset = value;
                 self.hw_cursor.offset = self.crtc_cursor_offset;
@@ -2061,16 +2515,26 @@ impl BxGeForceC {
                 self.hw_cursor.size = if value & 0x0001_0000 != 0 { 64 } else { 32 };
                 self.hw_cursor.bpp32 = value & 0x0000_1000 != 0;
             }
-            0x60081c => { self.crtc_gpio_ext = value; }
+            0x60081c => {
+                self.crtc_gpio_ext = value;
+            }
             0x680300 => {
                 self.ramdac_cu_start_pos = value;
                 self.hw_cursor.x = ((value as i32) << 20 >> 20) as i16;
                 self.hw_cursor.y = ((value as i32) << 4 >> 20) as i16;
             }
-            0x680508 => { self.ramdac_vpll = value; }
-            0x68050c => { self.ramdac_pll_select = value; }
-            0x680578 => { self.ramdac_vpll_b = value; }
-            0x680600 => { self.ramdac_general_control = value; }
+            0x680508 => {
+                self.ramdac_vpll = value;
+            }
+            0x68050c => {
+                self.ramdac_pll_select = value;
+            }
+            0x680578 => {
+                self.ramdac_vpll_b = value;
+            }
+            0x680600 => {
+                self.ramdac_general_control = value;
+            }
             a if a >= 0x700000 && a < 0x800000 => {
                 self.ramin_write32(a - 0x700000, value);
             }
@@ -2117,16 +2581,28 @@ impl BxGeForceC {
     }
 
     pub fn fifo_process_channel(&mut self, chid: u32) {
-        if self.fifo_wait { return; }
-        if self.fifo_mode & (1 << chid) == 0 { return; }
-        if self.fifo_cache1_push0 & 1 == 0 { return; }
-        if self.fifo_cache1_pull0 & 1 == 0 { return; }
+        if self.fifo_wait {
+            return;
+        }
+        if self.fifo_mode & (1 << chid) == 0 {
+            return;
+        }
+        if self.fifo_cache1_push0 & 1 == 0 {
+            return;
+        }
+        if self.fifo_cache1_pull0 & 1 == 0 {
+            return;
+        }
 
         let oldchid = self.fifo_cache1_push1 & 0x1F;
         if oldchid == chid {
-            if self.fifo_cache1_dma_put == self.fifo_cache1_dma_get { return; }
+            if self.fifo_cache1_dma_put == self.fifo_cache1_dma_get {
+                return;
+            }
         } else {
-            if self.ramfc_read32(chid, 0x0) == self.ramfc_read32(chid, 0x4) { return; }
+            if self.ramfc_read32(chid, 0x0) == self.ramfc_read32(chid, 0x4) {
+                return;
+            }
         }
 
         // Channel context switch
@@ -2165,10 +2641,8 @@ impl BxGeForceC {
         }
 
         while self.fifo_cache1_dma_get != self.fifo_cache1_dma_put {
-            let word = self.dma_read32(
-                self.fifo_cache1_dma_instance << 4,
-                self.fifo_cache1_dma_get,
-            );
+            let word =
+                self.dma_read32(self.fifo_cache1_dma_instance << 4, self.fifo_cache1_dma_get);
             self.fifo_cache1_dma_get += 4;
 
             let mcnt = self.chs[chid as usize].dma_state.mcnt;
@@ -2185,7 +2659,9 @@ impl BxGeForceC {
                 } else {
                     self.fifo_cache1_dma_get -= 4;
                 }
-                if cmd_result != 0 { break; }
+                if cmd_result != 0 {
+                    break;
+                }
             } else {
                 if (word & 0xe000_0003) == 0x2000_0000 {
                     // old jump
@@ -2284,7 +2760,9 @@ impl BxGeForceC {
                     0x89 => self.execute_sifm(chi, cls, method, adjusted_param),
                     0x96 | 0x97 => {
                         self.execute_d3d(chi, cls, method, adjusted_param);
-                        if self.fifo_wait_flip { result = 1; }
+                        if self.fifo_wait_flip {
+                            result = 1;
+                        }
                     }
                     _ => {
                         tracing::debug!("Unknown object class {:#04x}", cls8);
@@ -2457,7 +2935,13 @@ impl BxGeForceC {
                     1 => 1,
                     2 | 4 => 2,
                     6 | 0xA | 0xB => 4,
-                    _ => { tracing::error!("unknown swizzled surface color format: {:#04x}", color_fmt); 1 }
+                    _ => {
+                        tracing::error!(
+                            "unknown swizzled surface color format: {:#04x}",
+                            color_fmt
+                        );
+                        1
+                    }
                 };
             }
             0x0c1 => ch.swzs_ofs = param,
@@ -2467,8 +2951,11 @@ impl BxGeForceC {
 
     fn execute_chroma(&mut self, chi: usize, method: u32, param: u32) {
         let ch = &mut self.chs[chi];
-        if method == 0x0c0 { ch.chroma_color_fmt = param; }
-        else if method == 0x0c1 { ch.chroma_color = param; }
+        if method == 0x0c0 {
+            ch.chroma_color_fmt = param;
+        } else if method == 0x0c1 {
+            ch.chroma_color = param;
+        }
     }
 
     fn execute_rect(&mut self, chi: usize, method: u32, param: u32) {
@@ -2527,7 +3014,11 @@ impl BxGeForceC {
             0x0bf => ch.ifc_operation = param,
             0x0c0 => {
                 ch.ifc_color_fmt = param;
-                Self::update_color_bytes(ch.s2d_color_fmt, ch.ifc_color_fmt, &mut ch.ifc_color_bytes);
+                Self::update_color_bytes(
+                    ch.s2d_color_fmt,
+                    ch.ifc_color_fmt,
+                    &mut ch.ifc_color_bytes,
+                );
                 ch.ifc_pixels_per_word = 4 / ch.ifc_color_bytes;
             }
             0x0c1 => {
@@ -2623,7 +3114,11 @@ impl BxGeForceC {
             0x0bf => ch.sifc_operation = param,
             0x0c0 => {
                 ch.sifc_color_fmt = param;
-                Self::update_color_bytes(ch.s2d_color_fmt, ch.sifc_color_fmt, &mut ch.sifc_color_bytes);
+                Self::update_color_bytes(
+                    ch.s2d_color_fmt,
+                    ch.sifc_color_fmt,
+                    &mut ch.sifc_color_bytes,
+                );
             }
             0x0c1 => ch.sifc_shw = param,
             0x0c2 => ch.sifc_dxds = param,
@@ -2675,14 +3170,21 @@ impl BxGeForceC {
         match method {
             0x0c0 => {
                 ch.tfc_color_fmt = param;
-                Self::update_color_bytes(ch.s2d_color_fmt, ch.tfc_color_fmt, &mut ch.tfc_color_bytes);
+                Self::update_color_bytes(
+                    ch.s2d_color_fmt,
+                    ch.tfc_color_fmt,
+                    &mut ch.tfc_color_bytes,
+                );
             }
             0x0c1 => ch.tfc_yx = param,
             0x0c2 => {
                 ch.tfc_hw = param;
-                ch.tfc_upload = param == 0x0100_0100 && ch.tfc_yx == 0
-                    && ch.tfc_color_fmt == 4 && ch.s2d_color_fmt == 0xA
-                    && ch.s2d_pitch_src == 0x0400 && ch.s2d_pitch_dst == 0x0400;
+                ch.tfc_upload = param == 0x0100_0100
+                    && ch.tfc_yx == 0
+                    && ch.tfc_color_fmt == 4
+                    && ch.s2d_color_fmt == 0xA
+                    && ch.s2d_pitch_src == 0x0400
+                    && ch.s2d_pitch_dst == 0x0400;
                 if ch.tfc_upload {
                     ch.tfc_upload_offset = ch.s2d_ofs_dst;
                 } else {
@@ -2740,7 +3242,10 @@ impl BxGeForceC {
                     8 => 1,
                     1 | 2 | 7 => 2,
                     3 | 4 => 4,
-                    _ => { tracing::error!("unknown sifm color format: {:#04x}", param); 4 }
+                    _ => {
+                        tracing::error!("unknown sifm color format: {:#04x}", param);
+                        4
+                    }
                 };
             }
             0x0c1 => ch.sifm_operation = param,
@@ -2765,8 +3270,8 @@ impl BxGeForceC {
 
     fn update_color_bytes_s2d(ch: &mut GfChannel) {
         ch.s2d_color_bytes = match ch.s2d_color_fmt {
-            0x1 => 1,           // Y8
-            0x2 | 0x4 | 0x5 => 2, // X1R5G5B5/R5G6B5/Y16
+            0x1 => 1,                   // Y8
+            0x2 | 0x4 | 0x5 => 2,       // X1R5G5B5/R5G6B5/Y16
             0x6 | 0x7 | 0xA | 0xB => 4, // X8R8G8B8/A8R8G8B8/Y32
             _ => {
                 tracing::error!("unknown 2d surface color format: {:#04x}", ch.s2d_color_fmt);
@@ -2858,9 +3363,18 @@ impl BxGeForceC {
 
         // Object bindings
         match method {
-            0x048 => { self.graph_flip_read = param; return; }
-            0x049 => { self.graph_flip_write = param; return; }
-            0x04a => { self.graph_flip_modulo = param; return; }
+            0x048 => {
+                self.graph_flip_read = param;
+                return;
+            }
+            0x049 => {
+                self.graph_flip_write = param;
+                return;
+            }
+            0x04a => {
+                self.graph_flip_modulo = param;
+                return;
+            }
             0x04b => {
                 self.graph_flip_write += 1;
                 if self.graph_flip_modulo > 0 {
@@ -2907,16 +3421,26 @@ impl BxGeForceC {
                     0x9 => 1,
                     0x3 => 2,
                     0x4 | 0x5 | 0x8 => 4,
-                    _ => { tracing::error!("unknown D3D color format: {:#03x}", format_color); 4 }
+                    _ => {
+                        tracing::error!("unknown D3D color format: {:#03x}", format_color);
+                        4
+                    }
                 };
                 ch.d3d_depth_bytes = match format_depth {
                     0 => ch.d3d_color_bytes,
                     1 => 2, // Z16
                     2 => 4, // Z24S8
-                    _ => { tracing::error!("unknown D3D depth format: {:#03x}", format_depth); 4 }
+                    _ => {
+                        tracing::error!("unknown D3D depth format: {:#03x}", format_depth);
+                        4
+                    }
                 };
                 if cls == 0x0096 {
-                    ch.d3d_viewport_scale[2] = if ch.d3d_depth_bytes == 2 { 32767.0 } else { 8388607.0 };
+                    ch.d3d_viewport_scale[2] = if ch.d3d_depth_bytes == 2 {
+                        32767.0
+                    } else {
+                        8388607.0
+                    };
                 }
             }
             0x083 => ch.d3d_surface_pitch_a = param,
@@ -3002,8 +3526,11 @@ impl BxGeForceC {
             0x7a8 => ch.d3d_transform_program_start = param,
 
             // Begin/end primitive
-            m if (m == 0x37f && cls == 0x0096) || (m == 0x4ff && cls == 0x0096)
-                || (m == 0x5ff && cls <= 0x0097) || (m == 0x602 && cls >= 0x0497) => {
+            m if (m == 0x37f && cls == 0x0096)
+                || (m == 0x4ff && cls == 0x0096)
+                || (m == 0x5ff && cls <= 0x0097)
+                || (m == 0x602 && cls >= 0x0497) =>
+            {
                 if param != 0 {
                     ch.d3d_primitive_done = false;
                     ch.d3d_triangle_flip = false;
@@ -3069,7 +3596,8 @@ impl BxGeForceC {
 
             // Combiner final
             m if (m >= 0x0a2 && m <= 0x0a3 && cls <= 0x0097)
-                || (m >= 0x23d && m <= 0x23e && cls == 0x0497) => {
+                || (m >= 0x23d && m <= 0x23e && cls == 0x0497) =>
+            {
                 let i = if cls <= 0x0097 { m - 0x0a2 } else { m - 0x23d } as usize;
                 ch.d3d_combiner_final[i] = param;
             }
@@ -3110,23 +3638,30 @@ impl BxGeForceC {
 
             // Transform program data
             m if (m >= 0x2c0 && m <= 0x2c3 && cls == 0x0097)
-                || (m >= 0x2e0 && m <= 0x2e3 && cls >= 0x0497) => {
+                || (m >= 0x2e0 && m <= 0x2e3 && cls >= 0x0497) =>
+            {
                 let i = (m & 3) as usize;
                 ch.d3d_transform_program[ch.d3d_transform_program_load as usize][i] = param;
-                if i == 3 { ch.d3d_transform_program_load += 1; }
+                if i == 3 {
+                    ch.d3d_transform_program_load += 1;
+                }
             }
 
             // Transform constants
             m if (m >= 0x2e0 && m <= 0x2e3 && cls == 0x0097)
-                || (m >= 0x7c0 && m <= 0x7cf && cls >= 0x0497) => {
+                || (m >= 0x7c0 && m <= 0x7cf && cls >= 0x0497) =>
+            {
                 let i = (m & 3) as usize;
                 ch.d3d_transform_constant[ch.d3d_transform_constant_load as usize][i] = param_float;
-                if i == 3 { ch.d3d_transform_constant_load += 1; }
+                if i == 3 {
+                    ch.d3d_transform_constant_load += 1;
+                }
             }
 
             // Model-view matrix
             m if (m >= 0x100 && m <= 0x11f && cls == 0x0096)
-                || (m >= 0x120 && m <= 0x13f && cls >= 0x0097 && cls <= 0x0497) => {
+                || (m >= 0x120 && m <= 0x13f && cls >= 0x0097 && cls <= 0x0497) =>
+            {
                 let i = (m & 0xF) as usize;
                 let mat = ((m >> 4) & 1) as usize;
                 ch.d3d_model_view_matrix[mat][i] = param_float;
@@ -3134,21 +3669,24 @@ impl BxGeForceC {
 
             // Composite matrix
             m if (m >= 0x140 && m <= 0x14f && cls == 0x0096)
-                || (m >= 0x1a0 && m <= 0x1af && cls >= 0x0097 && cls <= 0x0497) => {
+                || (m >= 0x1a0 && m <= 0x1af && cls >= 0x0097 && cls <= 0x0497) =>
+            {
                 let i = (m & 0xF) as usize;
                 ch.d3d_composite_matrix[i] = param_float;
             }
 
             // Viewport offset
             m if (m >= 0x1ba && m <= 0x1bd && cls == 0x0096)
-                || (m >= 0x288 && m <= 0x28b && cls >= 0x0097) => {
+                || (m >= 0x288 && m <= 0x28b && cls >= 0x0097) =>
+            {
                 let i = if cls == 0x0096 { m - 0x1ba } else { m - 0x288 } as usize;
                 ch.d3d_viewport_offset[i] = param_float;
             }
 
             // Viewport scale
             m if (m >= 0x2bc && m <= 0x2bf && cls == 0x0097)
-                || (m >= 0x28c && m <= 0x28f && cls >= 0x0497) => {
+                || (m >= 0x28c && m <= 0x28f && cls >= 0x0497) =>
+            {
                 let i = (m & 3) as usize;
                 ch.d3d_viewport_scale[i] = param_float;
             }
@@ -3163,7 +3701,12 @@ impl BxGeForceC {
 
             // Unhandled D3D methods - silently accept for now
             _ => {
-                tracing::debug!("D3D method {:#05x} cls {:#06x} param {:#010x}", method, cls, param);
+                tracing::debug!(
+                    "D3D method {:#05x} cls {:#06x} param {:#010x}",
+                    method,
+                    cls,
+                    param
+                );
             }
         }
     }
@@ -3202,12 +3745,8 @@ impl BxGeForceC {
 
     fn register_read8(&self, address: u32) -> u8 {
         match address {
-            a if a >= 0x1800 && a < 0x1900 => {
-                self.pci_conf[(a - 0x1800) as usize]
-            }
-            a if a >= 0x700000 && a < 0x800000 => {
-                self.vram_read8((a - 0x700000) ^ self.ramin_flip)
-            }
+            a if a >= 0x1800 && a < 0x1900 => self.pci_conf[(a - 0x1800) as usize],
+            a if a >= 0x700000 && a < 0x800000 => self.vram_read8((a - 0x700000) ^ self.ramin_flip),
             _ => self.register_read32(address) as u8,
         }
     }

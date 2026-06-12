@@ -26,7 +26,6 @@
 //! Ported from `cpp_orig/bochs/iodev/ioapic.cc` (370 lines) and
 //! `cpp_orig/bochs/iodev/ioapic.h` (117 lines).
 
-
 use crate::config::BxPhyAddress;
 use crate::memory::BxMemC;
 
@@ -372,7 +371,6 @@ impl BxIoApic {
         Ok(())
     }
 
-
     /// Reset all I/O APIC state.
     /// All redirection entries are masked, IRR and input state are cleared.
     ///
@@ -394,7 +392,12 @@ impl BxIoApic {
     /// Get redirect entry state for diagnostics.
     pub fn redirect_entry_diag(&self, pin: usize) -> (u8, bool, u8, u8) {
         let e = &self.ioredtbl[pin];
-        (e.vector(), e.is_masked(), e.trigger_mode(), e.delivery_mode())
+        (
+            e.vector(),
+            e.is_masked(),
+            e.trigger_mode(),
+            e.delivery_mode(),
+        )
     }
 
     /// Get the intin and irr state for a pin.
@@ -556,10 +559,7 @@ impl BxIoApic {
                         entry.vector(),
                     );
                     // Bochs: service_ioapic(); (ioapic.cc)
-                    self.service_ioapic(
-                        pic,
-                        lapic,
-                    );
+                    self.service_ioapic(pic, lapic);
                 } else {
                     tracing::error!(
                         "IOAPIC: IOREGSEL points to undefined register {:#04x}",
@@ -672,10 +672,7 @@ impl BxIoApic {
                 if level {
                     self.intin |= bit;
                     self.irr |= bit;
-                    self.service_ioapic(
-                        pic,
-                        lapic,
-                    );
+                    self.service_ioapic(pic, lapic);
                 } else {
                     self.intin &= !bit;
                     self.irr &= !bit;
@@ -687,10 +684,7 @@ impl BxIoApic {
                     self.intin |= bit;
                     if !entry.is_masked() {
                         self.irr |= bit;
-                        self.service_ioapic(
-                            pic,
-                            lapic,
-                        );
+                        self.service_ioapic(pic, lapic);
                     }
                 } else {
                     self.intin &= !bit;
@@ -815,7 +809,8 @@ impl BxIoApic {
     /// Enqueue an interrupt delivery for later drain by the emulator.
     fn enqueue_delivery(&mut self, vector: u8, delivery_mode: u8, trigger_mode: u8) {
         if self.num_pending_deliveries < self.pending_deliveries.len() {
-            self.pending_deliveries[self.num_pending_deliveries] = (vector, delivery_mode, trigger_mode);
+            self.pending_deliveries[self.num_pending_deliveries] =
+                (vector, delivery_mode, trigger_mode);
             self.num_pending_deliveries += 1;
         }
     }
@@ -829,7 +824,11 @@ impl BxIoApic {
 
     /// Dump IOAPIC state for HLT diagnostics.
     pub fn dump_hlt_state(&self) {
-        tracing::trace!("[HLT-STATE] IOAPIC: irr={:#010x} intin={:#010x}", self.irr, self.intin);
+        tracing::trace!(
+            "[HLT-STATE] IOAPIC: irr={:#010x} intin={:#010x}",
+            self.irr,
+            self.intin
+        );
         for pin in 0..IOAPIC_NUM_PINS {
             let entry = &self.ioredtbl[pin];
             // Only show non-default entries (unmasked or configured)
@@ -934,12 +933,12 @@ impl BxIoApic {
         // Bochs: (ioapic.cc)
         if len == 4 {
             let value = u32::from_ne_bytes(
-                data[..4].try_into().expect("IOAPIC write: data too short for 4-byte access"),
+                data[..4]
+                    .try_into()
+                    .expect("IOAPIC write: data too short for 4-byte access"),
             );
             self.write_aligned(
-                addr,
-                value,
-                None, // no PIC available in MMIO callback
+                addr, value, None, // no PIC available in MMIO callback
                 None, // no LAPIC available in MMIO callback
             );
         } else {
@@ -956,7 +955,9 @@ impl BxIoApic {
 
             let value = match len {
                 2 => u16::from_ne_bytes(
-                    data[..2].try_into().expect("IOAPIC write: data too short for 2-byte access"),
+                    data[..2]
+                        .try_into()
+                        .expect("IOAPIC write: data too short for 2-byte access"),
                 ) as u32,
                 1 => data[0] as u32,
                 _ => {
@@ -965,9 +966,7 @@ impl BxIoApic {
                 }
             };
             self.write_aligned(
-                addr,
-                value,
-                None, // no PIC available in MMIO callback
+                addr, value, None, // no PIC available in MMIO callback
                 None, // no LAPIC available in MMIO callback
             );
         }

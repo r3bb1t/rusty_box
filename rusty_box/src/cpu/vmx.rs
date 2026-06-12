@@ -35,7 +35,6 @@ pub const VMCS_LAUNCH_STATE_OFFSET: u64 = 4;
 /// editing this constant.
 pub(super) const BX_PHY_ADDRESS_WIDTH: u32 = 40;
 
-
 pub const VMCS_STATE_CLEAR: u32 = 0;
 pub const VMCS_STATE_LAUNCHED: u32 = 1;
 
@@ -656,9 +655,16 @@ fn is_valid_pat_msr(value: u64) -> bool {
 /// RRSBA_DIS_U/S (5..=6), PSFD (1<<7), DDPD_U (1<<8), BHI_DIS_S (1<<10).
 /// Other bits are reserved.
 fn is_valid_spec_ctrl(value: u64) -> bool {
-    const ALLOWED: u64 =
-        (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4)
-            | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 10);
+    const ALLOWED: u64 = (1 << 0)
+        | (1 << 1)
+        | (1 << 2)
+        | (1 << 3)
+        | (1 << 4)
+        | (1 << 5)
+        | (1 << 6)
+        | (1 << 7)
+        | (1 << 8)
+        | (1 << 10);
     (value & !ALLOWED) == 0
 }
 
@@ -730,7 +736,7 @@ fn is_limit_access_rights_consistent(limit: u32, ar: SegAr) -> bool {
 // Bochs descriptor type constants used by VMENTRY guest-state checks.
 // Matches the four-bit type encoding for code/data segments and the
 // pair of TSS types we care about.
-const BX_SEG_TYPE_DATA_RW_ACCESSED: u32 = 0x3;        // R/W data, accessed
+const BX_SEG_TYPE_DATA_RW_ACCESSED: u32 = 0x3; // R/W data, accessed
 const BX_SEG_TYPE_DATA_RW_EXP_DOWN_ACCESSED: u32 = 0x7; // R/W expand-down, accessed
 const BX_SEG_TYPE_CODE_EXEC_ONLY_ACCESSED: u32 = 0x9;
 const BX_SEG_TYPE_CODE_EXEC_READ_ACCESSED: u32 = 0xB;
@@ -756,9 +762,7 @@ pub(super) const VMX_ENTRY_CTLS_ALLOWED_0: u32 = 0x0000_0011;
 pub(super) const VMX_ENTRY_CTLS_ALLOWED_1: u32 = 0x0000_FFFF;
 pub(super) const VMX_PROCBASED_CTLS2_ALLOWED_0: u32 = 0;
 pub(super) const VMX_PROCBASED_CTLS2_ALLOWED_1: u32 =
-    VMX_VM_EXEC_CTRL2_EPT_ENABLE
-        | VMX_VM_EXEC_CTRL2_VPID_ENABLE
-        | VMX_VM_EXEC_CTRL2_INVPCID;
+    VMX_VM_EXEC_CTRL2_EPT_ENABLE | VMX_VM_EXEC_CTRL2_VPID_ENABLE | VMX_VM_EXEC_CTRL2_INVPCID;
 
 /// INVEPT type field — Bochs vmx.cc INVEPT decodes this from the GPR
 /// dereferenced by `i->dst()`. Numeric values are part of the SDM ABI.
@@ -1184,10 +1188,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
             // Must be 4 KiB-aligned and within the physical-address width
             // (see module-level [`BX_PHY_ADDRESS_WIDTH`]).
-            if paddr == 0
-                || (paddr & 0xFFF) != 0
-                || (paddr >> BX_PHY_ADDRESS_WIDTH) != 0
-            {
+            if paddr == 0 || (paddr & 0xFFF) != 0 || (paddr >> BX_PHY_ADDRESS_WIDTH) != 0 {
                 tracing::trace!("VMXON: invalid or misaligned paddr {:#x}", paddr);
                 self.vmfail_invalid();
                 return Ok(());
@@ -1198,7 +1199,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             if rev != BX_VMCS_REVISION_ID {
                 tracing::trace!(
                     "VMXON: VMCS revision mismatch at {:#x}: have {:#x} want {:#x}",
-                    paddr, rev, BX_VMCS_REVISION_ID
+                    paddr,
+                    rev,
+                    BX_VMCS_REVISION_ID
                 );
                 self.vmfail_invalid();
                 return Ok(());
@@ -1286,10 +1289,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             self.read_virtual_qword(seg, eaddr as u32)?
         };
 
-        if paddr == 0
-            || (paddr & 0xFFF) != 0
-            || (paddr >> BX_PHY_ADDRESS_WIDTH) != 0
-        {
+        if paddr == 0 || (paddr & 0xFFF) != 0 || (paddr >> BX_PHY_ADDRESS_WIDTH) != 0 {
             self.vmfail(VmxErr::VmclearWithInvalidAddr);
             return Ok(());
         }
@@ -1335,10 +1335,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             self.read_virtual_qword(seg, eaddr as u32)?
         };
 
-        if paddr == 0
-            || (paddr & 0xFFF) != 0
-            || (paddr >> BX_PHY_ADDRESS_WIDTH) != 0
-        {
+        if paddr == 0 || (paddr & 0xFFF) != 0 || (paddr >> BX_PHY_ADDRESS_WIDTH) != 0 {
             self.vmfail(VmxErr::VmptrldInvalidPhysicalAddress);
             return Ok(());
         }
@@ -1352,7 +1349,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if revision != BX_VMCS_REVISION_ID {
             tracing::trace!(
                 "VMPTRLD: revision mismatch at {:#x}: {:#x} vs {:#x}",
-                paddr, revision, BX_VMCS_REVISION_ID
+                paddr,
+                revision,
+                BX_VMCS_REVISION_ID
             );
             self.vmfail(VmxErr::VmptrldIncorrectVmcsRevisionId);
             return Ok(());
@@ -1632,7 +1631,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     fn write_phys_word(&mut self, paddr: u64, val: u16) {
-        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else { return; };
+        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else {
+            return;
+        };
         let mut data = val.to_le_bytes();
         let mut dummy_mapping: [u32; 0] = [];
         let mut stamp = super::icache::BxPageWriteStampTable {
@@ -1644,7 +1645,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     fn write_phys_dword(&mut self, paddr: u64, val: u32) {
-        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else { return; };
+        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else {
+            return;
+        };
         let mut data = val.to_le_bytes();
         let mut dummy_mapping: [u32; 0] = [];
         let mut stamp = super::icache::BxPageWriteStampTable {
@@ -1656,7 +1659,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     fn write_phys_qword(&mut self, paddr: u64, val: u64) {
-        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else { return; };
+        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else {
+            return;
+        };
         let mut data = val.to_le_bytes();
         let mut dummy_mapping: [u32; 0] = [];
         let mut stamp = super::icache::BxPageWriteStampTable {
@@ -1888,13 +1893,19 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_CR3_TARGET1 => v.vm_cr3_target_value[1] = value,
             VMCS_CR3_TARGET2 => v.vm_cr3_target_value[2] = value,
             VMCS_CR3_TARGET3 => v.vm_cr3_target_value[3] = value,
-            VMCS_32BIT_CONTROL_SECONDARY_VMEXEC_CONTROLS => v.secondary_proc_based_ctls = value as u32,
+            VMCS_32BIT_CONTROL_SECONDARY_VMEXEC_CONTROLS => {
+                v.secondary_proc_based_ctls = value as u32
+            }
             VMCS_32BIT_CONTROL_VMEXIT_CONTROLS => v.vm_exit_ctls = value as u32,
             VMCS_32BIT_CONTROL_VMENTRY_CONTROLS => v.vm_entry_ctls = value as u32,
             VMCS_32BIT_CONTROL_VMENTRY_INTERRUPTION_INFO => v.vm_entry_intr_info = value as u32,
             VMCS_32BIT_CONTROL_TPR_THRESHOLD => v.tpr_threshold = value as u32,
-            VMCS_32BIT_CONTROL_VMENTRY_EXCEPTION_ERR_CODE => v.vm_entry_exception_error_code = value as u32,
-            VMCS_32BIT_CONTROL_VMENTRY_INSTRUCTION_LENGTH => v.vm_entry_instruction_length = value as u32,
+            VMCS_32BIT_CONTROL_VMENTRY_EXCEPTION_ERR_CODE => {
+                v.vm_entry_exception_error_code = value as u32
+            }
+            VMCS_32BIT_CONTROL_VMENTRY_INSTRUCTION_LENGTH => {
+                v.vm_entry_instruction_length = value as u32
+            }
             // Read-only VMCS exit-data fields: Bochs VMwriteReadOnlyVmcsComponent
             // returns false. Being lenient would let VMMs that pre-zero these
             // keep going, but Bochs is strict.
@@ -1927,7 +1938,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             VMCS_32BIT_GUEST_GS_ACCESS_RIGHTS => v.guest_gs_ar = value as u32,
             VMCS_32BIT_GUEST_LDTR_ACCESS_RIGHTS => v.guest_ldtr_ar = value as u32,
             VMCS_32BIT_GUEST_TR_ACCESS_RIGHTS => v.guest_tr_ar = value as u32,
-            VMCS_32BIT_GUEST_INTERRUPTIBILITY_STATE => v.guest_interruptibility_state = value as u32,
+            VMCS_32BIT_GUEST_INTERRUPTIBILITY_STATE => {
+                v.guest_interruptibility_state = value as u32
+            }
             VMCS_32BIT_GUEST_ACTIVITY_STATE => v.guest_activity_state = value as u32,
             VMCS_32BIT_GUEST_IA32_SYSENTER_CS_MSR => v.guest_ia32_sysenter_cs = value as u32,
             VMCS_32BIT_HOST_IA32_SYSENTER_CS_MSR => v.host_sysenter_cs = value as u32,
@@ -2102,8 +2115,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // wiring per-check qualifications (Bochs writes a non-zero VMENTER_ERR_*
         // code at each failure site) is tracked separately.
         if let Some(_err) = self.vmenter_load_check_guest_state() {
-            return self
-                .vmx_vmexit_vmentry_failure(VmxVmexitReason::VmentryFailureGuestState, 0);
+            return self.vmx_vmexit_vmentry_failure(VmxVmexitReason::VmentryFailureGuestState, 0);
         }
 
         // Save host state from the running CPU. RIP is "the instruction after
@@ -2361,11 +2373,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     // symmetric counterpart to vmlaunch_vmresume above.
     // =========================================================================
 
-    pub(super) fn vmx_vmexit(
-        &mut self,
-        reason: VmxVmexitReason,
-        qualification: u64,
-    ) -> Result<()> {
+    pub(super) fn vmx_vmexit(&mut self, reason: VmxVmexitReason, qualification: u64) -> Result<()> {
         // Bochs vmx.cc `BX_CPU_C::VMexit` head-guard: a VMEXIT outside
         // VMX-guest mode without the bit-31 vmentry-failure flag is a
         // host-side CPU implementation bug — Bochs `BX_PANIC`s. Our
@@ -2389,8 +2397,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.vmexit_disarm_preemption_timer();
         self.vmcs.exit_reason = reason as u32;
         self.vmcs.exit_qualification = qualification;
-        self.vmcs.exit_instruction_length =
-            ((self.rip().wrapping_sub(self.prev_rip)) & 0xF) as u32;
+        self.vmcs.exit_instruction_length = ((self.rip().wrapping_sub(self.prev_rip)) & 0xF) as u32;
 
         // Bochs vmx.cc VMexit: when the reason is EXCEPTION_NMI the
         // vector is the low byte of VMCS_32BIT_VMEXIT_INTERRUPTION_INFO;
@@ -2400,9 +2407,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         } else {
             0
         };
-        if reason != VmxVmexitReason::ExceptionNmi
-            && reason != VmxVmexitReason::ExternalInterrupt
-        {
+        if reason != VmxVmexitReason::ExceptionNmi && reason != VmxVmexitReason::ExternalInterrupt {
             self.vmcs.exit_intr_info = 0;
         }
 
@@ -2519,7 +2524,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 ar |= (self.ldtr.cache.u.segment_l() as u32) << 13;
                 ar |= (self.ldtr.cache.u.segment_d_b() as u32) << 14;
                 ar |= (self.ldtr.cache.u.segment_g() as u32) << 15;
-                if self.ldtr.cache.valid == 0 { ar |= 1 << 16; }
+                if self.ldtr.cache.valid == 0 {
+                    ar |= 1 << 16;
+                }
                 ar
             };
 
@@ -2534,7 +2541,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 ar |= (self.tr.cache.u.segment_l() as u32) << 13;
                 ar |= (self.tr.cache.u.segment_d_b() as u32) << 14;
                 ar |= (self.tr.cache.u.segment_g() as u32) << 15;
-                if self.tr.cache.valid == 0 { ar |= 1 << 16; }
+                if self.tr.cache.valid == 0 {
+                    ar |= 1 << 16;
+                }
                 ar
             };
 
@@ -2589,9 +2598,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 && !trap_like
                 && !matches!(
                     reason,
-                    VmxVmexitReason::Init
-                        | VmxVmexitReason::Smi
-                        | VmxVmexitReason::MonitorTrapFlag
+                    VmxVmexitReason::Init | VmxVmexitReason::Smi | VmxVmexitReason::MonitorTrapFlag
                 );
             self.vmcs.guest_pending_dbg_exceptions = if clear_dbg {
                 0
@@ -2609,9 +2616,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 match self.vmx_store_msrs(store_cnt, store_addr) {
                     Ok(0) => {}
                     Ok(failing) => {
-                        tracing::error!(
-                            "VMABORT: error saving guest MSR number {failing}"
-                        );
+                        tracing::error!("VMABORT: error saving guest MSR number {failing}");
                         return Err(self.vmx_abort(VmxAbortCode::SavingGuestMsrsFailure));
                     }
                     Err(e) => return Err(e),
@@ -2652,9 +2657,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             match self.vmx_load_msrs(load_cnt, load_addr) {
                 Ok(0) => {}
                 Ok(failing) => {
-                    tracing::error!(
-                        "VMABORT: error loading host MSR number {failing}"
-                    );
+                    tracing::error!("VMABORT: error loading host MSR number {failing}");
                     return Err(self.vmx_abort(VmxAbortCode::LoadingHostMsrs));
                 }
                 Err(e) => return Err(e),
@@ -2717,8 +2720,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.vmexit_disarm_preemption_timer();
         self.vmcs.exit_reason = (reason as u32) | 0x8000_0000;
         self.vmcs.exit_qualification = qualification;
-        self.vmcs.exit_instruction_length =
-            ((self.rip().wrapping_sub(self.prev_rip)) & 0xF) as u32;
+        self.vmcs.exit_instruction_length = ((self.rip().wrapping_sub(self.prev_rip)) & 0xF) as u32;
         self.nmi_unblocking_iret = false;
 
         // Bochs vmx.cc VMexit ordering (lines 3144-3154): in_vmx_guest
@@ -2796,11 +2798,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// `[addr, addr + count*16 - 1]` must lie inside the host physical
     /// address space. Returns `Some(VmentryInvalidVmControlField)` to
     /// be propagated by `?`.
-    fn check_msr_list_addr(
-        count: u32,
-        addr: u64,
-        what: &'static str,
-    ) -> Option<VmxErr> {
+    fn check_msr_list_addr(count: u32, addr: u64, what: &'static str) -> Option<VmxErr> {
         if count == 0 {
             return None;
         }
@@ -2808,7 +2806,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             tracing::warn!("VMENTRY check: {what} addr {:#018x} malformed", addr);
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
-        let last = addr.wrapping_add(u64::from(count).saturating_mul(16)).wrapping_sub(1);
+        let last = addr
+            .wrapping_add(u64::from(count).saturating_mul(16))
+            .wrapping_sub(1);
         if !is_valid_phy_addr(last) {
             tracing::warn!(
                 "VMENTRY check: {what} count {count} pushes last byte beyond phys range"
@@ -2839,7 +2839,11 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // the value that are required by allowed-0 fail; bits set in
         // the value that aren't permitted by allowed-1 fail.
         let pin = self.vmcs.pin_based_ctls;
-        if Self::ctls_out_of_bounds(pin, VMX_PINBASED_CTLS_ALLOWED_0, VMX_PINBASED_CTLS_ALLOWED_1) {
+        if Self::ctls_out_of_bounds(
+            pin,
+            VMX_PINBASED_CTLS_ALLOWED_0,
+            VMX_PINBASED_CTLS_ALLOWED_1,
+        ) {
             tracing::warn!("VMENTRY check_vm_controls: pin-based controls out of bounds");
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
@@ -2873,8 +2877,11 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
         let entry_ctls = self.vmcs.vm_entry_ctls;
-        if Self::ctls_out_of_bounds(entry_ctls, VMX_ENTRY_CTLS_ALLOWED_0, VMX_ENTRY_CTLS_ALLOWED_1)
-        {
+        if Self::ctls_out_of_bounds(
+            entry_ctls,
+            VMX_ENTRY_CTLS_ALLOWED_0,
+            VMX_ENTRY_CTLS_ALLOWED_1,
+        ) {
             tracing::warn!("VMENTRY check_vm_controls: VM-entry controls out of bounds");
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
@@ -2919,9 +2926,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // checks below are no-ops.
         let ept_enabled = ctls2 & VMX_VM_EXEC_CTRL2_EPT_ENABLE != 0;
         if ctls2 & VMX_VM_EXEC_CTRL2_UNRESTRICTED_GUEST != 0 && !ept_enabled {
-            tracing::warn!(
-                "VMENTRY check_vm_controls: UNRESTRICTED_GUEST without EPT"
-            );
+            tracing::warn!("VMENTRY check_vm_controls: UNRESTRICTED_GUEST without EPT");
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
         if ctls2 & VMX_VM_EXEC_CTRL2_VPID_ENABLE != 0 && self.vmcs.vpid == 0 {
@@ -2948,9 +2953,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // Bochs vmx.cc:923-926: STORE_VMX_PREEMPTION_TIMER VMEXIT control
         // requires the pin-based VMX_PREEMPTION_TIMER_VMEXIT.
         if exit_ctls & VMX_VMEXIT_CTRL1_STORE_VMX_PREEMPTION_TIMER != 0
-            && self.vmcs.pin_based_ctls
-                & VMX_PIN_BASED_VMEXEC_CTRL_VMX_PREEMPTION_TIMER_VMEXIT
-                == 0
+            && self.vmcs.pin_based_ctls & VMX_PIN_BASED_VMEXEC_CTRL_VMX_PREEMPTION_TIMER_VMEXIT == 0
         {
             tracing::warn!(
                 "VMENTRY check_vm_controls: STORE_VMX_PREEMPTION_TIMER without pin-based timer"
@@ -3008,9 +3011,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if ctls1 & VMX_VM_EXEC_CTRL1_NMI_WINDOW_EXITING != 0
             && pin & VMX_PIN_BASED_VMEXEC_CTRL_VIRTUAL_NMI == 0
         {
-            tracing::warn!(
-                "VMENTRY check_vm_controls: NMI_WINDOW_EXITING without VIRTUAL_NMI"
-            );
+            tracing::warn!("VMENTRY check_vm_controls: NMI_WINDOW_EXITING without VIRTUAL_NMI");
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
 
@@ -3071,9 +3072,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             }
             // NMI vector must be 2.
             if bochs_type == 2 && vector != 2 {
-                tracing::warn!(
-                    "VMENTRY check_vm_controls: NMI injection vector {vector} != 2"
-                );
+                tracing::warn!("VMENTRY check_vm_controls: NMI injection vector {vector} != 2");
                 return Some(VmxErr::VmentryInvalidVmControlField);
             }
             // Bochs vmx.cc VMenterInjectEvents: type 7 (BX_EVENT_OTHER) is
@@ -3103,9 +3102,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // Bochs vmx.cc:1156-1169 address-space-size consistency.
         if self.long_mode() {
             if !x86_64_host {
-                tracing::warn!(
-                    "VMENTRY check_host_state: long-mode host without X86_64_HOST"
-                );
+                tracing::warn!("VMENTRY check_host_state: long-mode host without X86_64_HOST");
                 return Some(VmxErr::VmentryInvalidVmHostStateField);
             }
         } else if x86_64_host || x86_64_guest {
@@ -3156,9 +3153,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
         if !x86_64_host && self.vmcs.host_ss_selector == 0 {
-            tracing::warn!(
-                "VMENTRY check_host_state: 32-bit host with SS selector 0"
-            );
+            tracing::warn!("VMENTRY check_host_state: 32-bit host with SS selector 0");
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
         if self.vmcs.host_tr_selector == 0 || self.vmcs.host_tr_selector & 7 != 0 {
@@ -3218,13 +3213,12 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             use super::crregs::BxEfer;
             let efer = self.vmcs.host_ia32_efer;
             // Reserved bits must be clear.
-            const EFER_RESERVED: u64 =
-                !(BxEfer::SCE.bits() as u64
-                    | BxEfer::LME.bits() as u64
-                    | BxEfer::LMA.bits() as u64
-                    | BxEfer::NXE.bits() as u64
-                    | BxEfer::SVME.bits() as u64
-                    | BxEfer::FFXSR.bits() as u64);
+            const EFER_RESERVED: u64 = !(BxEfer::SCE.bits() as u64
+                | BxEfer::LME.bits() as u64
+                | BxEfer::LMA.bits() as u64
+                | BxEfer::NXE.bits() as u64
+                | BxEfer::SVME.bits() as u64
+                | BxEfer::FFXSR.bits() as u64);
             if efer & EFER_RESERVED != 0 {
                 tracing::warn!(
                     "VMENTRY check_host_state: host EFER {:#018x} has reserved bits",
@@ -3271,9 +3265,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         const EFLAGS_VM_MASK: u64 = 1 << 17;
         let v8086_guest = rflags & EFLAGS_VM_MASK != 0;
         if x86_64_guest && v8086_guest {
-            tracing::warn!(
-                "VMENTRY check_guest_state: x86-64 guest with RFLAGS.VM=1"
-            );
+            tracing::warn!("VMENTRY check_guest_state: x86-64 guest with RFLAGS.VM=1");
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
@@ -3314,24 +3306,18 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         let cr4 = BxCr4::from_bits_truncate(self.vmcs.guest_cr4);
         if x86_64_guest {
             if !cr4.contains(BxCr4::PAE) {
-                tracing::warn!(
-                    "VMENTRY check_guest_state: x86-64 guest with CR4.PAE=0"
-                );
+                tracing::warn!("VMENTRY check_guest_state: x86-64 guest with CR4.PAE=0");
                 return Some(VmxErr::VmentryInvalidVmHostStateField);
             }
         } else if cr4.contains(BxCr4::PCIDE) {
-            tracing::warn!(
-                "VMENTRY check_guest_state: 32-bit guest with CR4.PCIDE=1"
-            );
+            tracing::warn!("VMENTRY check_guest_state: 32-bit guest with CR4.PCIDE=1");
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
         // DR7 — when LOAD_DBG_CTRLS is set the upper 32 bits must be zero
         // (Bochs vmx.cc:1550-1556).
         const VMX_VMENTRY_CTRL_LOAD_DBG_CTRLS: u32 = 1 << 2;
-        if entry_ctls & VMX_VMENTRY_CTRL_LOAD_DBG_CTRLS != 0
-            && (self.vmcs.guest_dr7 >> 32) != 0
-        {
+        if entry_ctls & VMX_VMENTRY_CTRL_LOAD_DBG_CTRLS != 0 && (self.vmcs.guest_dr7 >> 32) != 0 {
             tracing::warn!(
                 "VMENTRY check_guest_state: bad guest DR7={:#018x}",
                 self.vmcs.guest_dr7
@@ -3343,9 +3329,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         use super::crregs::BxCr0;
         let cr0_bits = BxCr0::from_bits_truncate(self.vmcs.guest_cr0 as u32);
         if cr4.contains(BxCr4::CET) && !cr0_bits.contains(BxCr0::WP) {
-            tracing::warn!(
-                "VMENTRY check_guest_state: CR4.CET=1 with CR0.WP=0"
-            );
+            tracing::warn!("VMENTRY check_guest_state: CR4.CET=1 with CR0.WP=0");
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
@@ -3393,13 +3377,12 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if entry_ctls & VMX_VMENTRY_CTRL_LOAD_GUEST_EFER_MSR != 0 {
             use super::crregs::BxEfer;
             let efer = self.vmcs.guest_ia32_efer;
-            const EFER_RESERVED: u64 =
-                !(BxEfer::SCE.bits() as u64
-                    | BxEfer::LME.bits() as u64
-                    | BxEfer::LMA.bits() as u64
-                    | BxEfer::NXE.bits() as u64
-                    | BxEfer::SVME.bits() as u64
-                    | BxEfer::FFXSR.bits() as u64);
+            const EFER_RESERVED: u64 = !(BxEfer::SCE.bits() as u64
+                | BxEfer::LME.bits() as u64
+                | BxEfer::LMA.bits() as u64
+                | BxEfer::NXE.bits() as u64
+                | BxEfer::SVME.bits() as u64
+                | BxEfer::FFXSR.bits() as u64);
             if efer & EFER_RESERVED != 0 {
                 tracing::warn!(
                     "VMENTRY check_guest_state: guest EFER {:#018x} reserved bits set",
@@ -3417,9 +3400,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             }
             // CR0.PG=1 + LME=1 demands LMA=1 (long mode active).
             if cr0_bits.contains(BxCr0::PG) && lme && !lma {
-                tracing::warn!(
-                    "VMENTRY check_guest_state: CR0.PG && EFER.LME without LMA"
-                );
+                tracing::warn!("VMENTRY check_guest_state: CR0.PG && EFER.LME without LMA");
                 return Some(VmxErr::VmentryInvalidVmHostStateField);
             }
         }
@@ -3481,9 +3462,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if !self.is_canonical(self.vmcs.guest_gdtr_base)
             || !self.is_canonical(self.vmcs.guest_idtr_base)
         {
-            tracing::warn!(
-                "VMENTRY check_guest_state: GDTR/IDTR base non-canonical"
-            );
+            tracing::warn!("VMENTRY check_guest_state: GDTR/IDTR base non-canonical");
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
@@ -3492,9 +3471,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if !ldtr_ar.contains(SegAr::UNUSABLE) {
             // TI bit (bit 2 of selector) must be clear (must be in GDT).
             if self.vmcs.guest_ldtr_selector & 4 != 0 {
-                tracing::warn!(
-                    "VMENTRY check_guest_state: LDTR selector TI=1"
-                );
+                tracing::warn!("VMENTRY check_guest_state: LDTR selector TI=1");
                 return Some(VmxErr::VmentryInvalidVmHostStateField);
             }
             if ldtr_ar.type_field() != BX_SEG_TYPE_LDT {
@@ -3506,26 +3483,19 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             }
             // S=0 (system descriptor) required.
             if ldtr_ar.contains(SegAr::S_BIT) {
-                tracing::warn!(
-                    "VMENTRY check_guest_state: LDTR is not a system segment"
-                );
+                tracing::warn!("VMENTRY check_guest_state: LDTR is not a system segment");
                 return Some(VmxErr::VmentryInvalidVmHostStateField);
             }
             if !ldtr_ar.contains(SegAr::P_BIT) {
                 tracing::warn!("VMENTRY check_guest_state: LDTR not present");
                 return Some(VmxErr::VmentryInvalidVmHostStateField);
             }
-            if !is_limit_access_rights_consistent(self.vmcs.guest_ldtr_limit, ldtr_ar)
-            {
-                tracing::warn!(
-                    "VMENTRY check_guest_state: LDTR AR/limit malformed"
-                );
+            if !is_limit_access_rights_consistent(self.vmcs.guest_ldtr_limit, ldtr_ar) {
+                tracing::warn!("VMENTRY check_guest_state: LDTR AR/limit malformed");
                 return Some(VmxErr::VmentryInvalidVmHostStateField);
             }
             if !self.is_canonical(self.vmcs.guest_ldtr_base) {
-                tracing::warn!(
-                    "VMENTRY check_guest_state: LDTR base non-canonical"
-                );
+                tracing::warn!("VMENTRY check_guest_state: LDTR base non-canonical");
                 return Some(VmxErr::VmentryInvalidVmHostStateField);
             }
         }
@@ -3545,9 +3515,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
         if tr_ar.contains(SegAr::S_BIT) {
-            tracing::warn!(
-                "VMENTRY check_guest_state: TR is not a system segment"
-            );
+            tracing::warn!("VMENTRY check_guest_state: TR is not a system segment");
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
         if !tr_ar.contains(SegAr::P_BIT) {
@@ -3601,9 +3569,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             // Bochs also checks the ID matches `vmcs_map->get_vmcs_revision_id()`;
             // our model uses 1 (Skylake-X-style fixed revision).
             if revision != 1 {
-                tracing::warn!(
-                    "VMENTRY check_guest_state: linked VMCS revision {revision} != 1"
-                );
+                tracing::warn!("VMENTRY check_guest_state: linked VMCS revision {revision} != 1");
                 return Some(VmxErr::VmentryInvalidVmHostStateField);
             }
         }
@@ -3623,12 +3589,54 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // Snapshot per-segment fields so we don't borrow self mutably
         // while comparing CS/SS later.
         let segs: [(&'static str, u16, u64, u32, u32, BxSegregs); 6] = [
-            ("ES", self.vmcs.guest_es_selector, self.vmcs.guest_es_base, self.vmcs.guest_es_limit, self.vmcs.guest_es_ar, BxSegregs::Es),
-            ("CS", self.vmcs.guest_cs_selector, self.vmcs.guest_cs_base, self.vmcs.guest_cs_limit, self.vmcs.guest_cs_ar, BxSegregs::Cs),
-            ("SS", self.vmcs.guest_ss_selector, self.vmcs.guest_ss_base, self.vmcs.guest_ss_limit, self.vmcs.guest_ss_ar, BxSegregs::Ss),
-            ("DS", self.vmcs.guest_ds_selector, self.vmcs.guest_ds_base, self.vmcs.guest_ds_limit, self.vmcs.guest_ds_ar, BxSegregs::Ds),
-            ("FS", self.vmcs.guest_fs_selector, self.vmcs.guest_fs_base, self.vmcs.guest_fs_limit, self.vmcs.guest_fs_ar, BxSegregs::Fs),
-            ("GS", self.vmcs.guest_gs_selector, self.vmcs.guest_gs_base, self.vmcs.guest_gs_limit, self.vmcs.guest_gs_ar, BxSegregs::Gs),
+            (
+                "ES",
+                self.vmcs.guest_es_selector,
+                self.vmcs.guest_es_base,
+                self.vmcs.guest_es_limit,
+                self.vmcs.guest_es_ar,
+                BxSegregs::Es,
+            ),
+            (
+                "CS",
+                self.vmcs.guest_cs_selector,
+                self.vmcs.guest_cs_base,
+                self.vmcs.guest_cs_limit,
+                self.vmcs.guest_cs_ar,
+                BxSegregs::Cs,
+            ),
+            (
+                "SS",
+                self.vmcs.guest_ss_selector,
+                self.vmcs.guest_ss_base,
+                self.vmcs.guest_ss_limit,
+                self.vmcs.guest_ss_ar,
+                BxSegregs::Ss,
+            ),
+            (
+                "DS",
+                self.vmcs.guest_ds_selector,
+                self.vmcs.guest_ds_base,
+                self.vmcs.guest_ds_limit,
+                self.vmcs.guest_ds_ar,
+                BxSegregs::Ds,
+            ),
+            (
+                "FS",
+                self.vmcs.guest_fs_selector,
+                self.vmcs.guest_fs_base,
+                self.vmcs.guest_fs_limit,
+                self.vmcs.guest_fs_ar,
+                BxSegregs::Fs,
+            ),
+            (
+                "GS",
+                self.vmcs.guest_gs_selector,
+                self.vmcs.guest_gs_base,
+                self.vmcs.guest_gs_limit,
+                self.vmcs.guest_gs_ar,
+                BxSegregs::Gs,
+            ),
         ];
 
         let cs_ar = SegAr::from_bits_truncate(self.vmcs.guest_cs_ar);
@@ -3643,15 +3651,11 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             // have base = (selector << 4), limit = 0xFFFF, AR = 0xF3.
             if v8086_guest {
                 if base != (u64::from(selector) << 4) {
-                    tracing::warn!(
-                        "VMENTRY check_guest_state: v8086 {name}.base != selector<<4"
-                    );
+                    tracing::warn!("VMENTRY check_guest_state: v8086 {name}.base != selector<<4");
                     return Some(VmxErr::VmentryInvalidVmHostStateField);
                 }
                 if limit != 0xFFFF {
-                    tracing::warn!(
-                        "VMENTRY check_guest_state: v8086 {name}.limit != 0xFFFF"
-                    );
+                    tracing::warn!("VMENTRY check_guest_state: v8086 {name}.limit != 0xFFFF");
                     return Some(VmxErr::VmentryInvalidVmHostStateField);
                 }
                 if ar_raw != 0xF3 {
@@ -3681,17 +3685,15 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
             // SS=NULL allowed in 64-bit guest mode when CS.L=1 (long-
             // mode kernel transition trick).
-            if matches!(seg, BxSegregs::Ss)
-                && (selector & 3) == 0
-                && x86_64_guest
-                && cs_l
-            {
+            if matches!(seg, BxSegregs::Ss) && (selector & 3) == 0 && x86_64_guest && cs_l {
                 continue;
             }
 
             // ES/CS/SS/DS bases must fit in 32 bits (Bochs vmx.cc:1685-1690).
-            if matches!(seg, BxSegregs::Es | BxSegregs::Cs | BxSegregs::Ss | BxSegregs::Ds)
-                && (base >> 32) != 0
+            if matches!(
+                seg,
+                BxSegregs::Es | BxSegregs::Cs | BxSegregs::Ss | BxSegregs::Ds
+            ) && (base >> 32) != 0
             {
                 tracing::warn!(
                     "VMENTRY check_guest_state: {name}.base {:#018x} > 32 bits",
@@ -3710,9 +3712,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 return Some(VmxErr::VmentryInvalidVmHostStateField);
             }
             if !is_limit_access_rights_consistent(limit, ar) {
-                tracing::warn!(
-                    "VMENTRY check_guest_state: {name} AR/limit malformed"
-                );
+                tracing::warn!("VMENTRY check_guest_state: {name} AR/limit malformed");
                 return Some(VmxErr::VmentryInvalidVmHostStateField);
             }
 
@@ -3737,10 +3737,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                                 return Some(VmxErr::VmentryInvalidVmHostStateField);
                             }
                         } else {
-                            tracing::warn!(
-                                "VMENTRY check_guest_state: CS.type {} invalid",
-                                ty
-                            );
+                            tracing::warn!("VMENTRY check_guest_state: CS.type {} invalid", ty);
                             return Some(VmxErr::VmentryInvalidVmHostStateField);
                         }
                     }
@@ -3765,15 +3762,11 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                     // bit of type), and code segments must be readable
                     // (bit 1 of type).
                     if ty & 0x1 == 0 {
-                        tracing::warn!(
-                            "VMENTRY check_guest_state: {name} not ACCESSED"
-                        );
+                        tracing::warn!("VMENTRY check_guest_state: {name} not ACCESSED");
                         return Some(VmxErr::VmentryInvalidVmHostStateField);
                     }
                     if ty & 0x8 != 0 && ty & 0x2 == 0 {
-                        tracing::warn!(
-                            "VMENTRY check_guest_state: {name} CODE not READABLE"
-                        );
+                        tracing::warn!("VMENTRY check_guest_state: {name} CODE not READABLE");
                         return Some(VmxErr::VmentryInvalidVmHostStateField);
                     }
                     // Conforming-vs-non-conforming RPL/DPL relation,
@@ -3801,9 +3794,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             {
                 // Non-conforming code: CS.DPL must equal SS.DPL.
                 if cs_dpl != ss_dpl {
-                    tracing::warn!(
-                        "VMENTRY check_guest_state: non-conforming CS.DPL != SS.DPL"
-                    );
+                    tracing::warn!("VMENTRY check_guest_state: non-conforming CS.DPL != SS.DPL");
                     return Some(VmxErr::VmentryInvalidVmHostStateField);
                 }
             }
@@ -3812,9 +3803,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             {
                 // Conforming code: CS.DPL ≤ SS.DPL.
                 if cs_dpl > ss_dpl {
-                    tracing::warn!(
-                        "VMENTRY check_guest_state: conforming CS.DPL > SS.DPL"
-                    );
+                    tracing::warn!("VMENTRY check_guest_state: conforming CS.DPL > SS.DPL");
                     return Some(VmxErr::VmentryInvalidVmHostStateField);
                 }
             }
@@ -3827,15 +3816,11 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             let ss_rpl = (self.vmcs.guest_ss_selector & 3) as u8;
             if !unrestricted {
                 if ss_rpl != cs_rpl {
-                    tracing::warn!(
-                        "VMENTRY check_guest_state: SS.RPL != CS.RPL"
-                    );
+                    tracing::warn!("VMENTRY check_guest_state: SS.RPL != CS.RPL");
                     return Some(VmxErr::VmentryInvalidVmHostStateField);
                 }
                 if ss_rpl != ss_dpl {
-                    tracing::warn!(
-                        "VMENTRY check_guest_state: SS.RPL != SS.DPL"
-                    );
+                    tracing::warn!("VMENTRY check_guest_state: SS.RPL != SS.DPL");
                     return Some(VmxErr::VmentryInvalidVmHostStateField);
                 }
             } else {
@@ -3844,12 +3829,8 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 use super::crregs::BxCr0;
                 let cr0 = BxCr0::from_bits_truncate(self.vmcs.guest_cr0 as u32);
                 let real_mode_guest = !cr0.contains(BxCr0::PE);
-                if (real_mode_guest || cs_ty == BX_SEG_TYPE_DATA_RW_ACCESSED)
-                    && ss_dpl != 0
-                {
-                    tracing::warn!(
-                        "VMENTRY check_guest_state: unrestricted SS.DPL != 0"
-                    );
+                if (real_mode_guest || cs_ty == BX_SEG_TYPE_DATA_RW_ACCESSED) && ss_dpl != 0 {
+                    tracing::warn!("VMENTRY check_guest_state: unrestricted SS.DPL != 0");
                     return Some(VmxErr::VmentryInvalidVmHostStateField);
                 }
             }
@@ -3921,9 +3902,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // exits to a host configured as 32-bit (the host can't continue
         // safely after coming out of long mode mid-flight).
         if self.long64_mode() && !x86_64_host {
-            tracing::error!(
-                "VMABORT: VMEXIT to 32-bit host from 64-bit guest"
-            );
+            tracing::error!("VMABORT: VMEXIT to 32-bit host from 64-bit guest");
             // Bochs panics with VMABORT_VMEXIT_TO_32BIT_HOST_FROM_64BIT_GUEST.
             // Without a panic-on-abort path we surface a #UD into the host
             // so the failure is visible.
@@ -4045,10 +4024,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
         // TR + LDTR. Bochs marks LDTR unusable (valid=0) and parses TR from
         // the host GDT, then overrides TR.base from the VMCS field.
-        super::segment_ctrl_pro::parse_selector(
-            self.vmcs.host_tr_selector,
-            &mut self.tr.selector,
-        );
+        super::segment_ctrl_pro::parse_selector(self.vmcs.host_tr_selector, &mut self.tr.selector);
         let (d1, d2) = self.fetch_raw_descriptor(&self.tr.selector.clone())?;
         self.tr.cache = self.parse_descriptor(d1, d2)?;
         self.tr.cache.u.set_segment_base(self.vmcs.host_tr_base);
@@ -4075,11 +4051,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// selector marks the cache unusable (Bochs `valid = 0`); a non-null
     /// selector goes through fetch_raw_descriptor + parse_descriptor and
     /// the cache is populated directly.
-    fn vmexit_load_host_seg(
-        &mut self,
-        seg: BxSegregs,
-        raw_selector: u16,
-    ) -> Result<()> {
+    fn vmexit_load_host_seg(&mut self, seg: BxSegregs, raw_selector: u16) -> Result<()> {
         super::segment_ctrl_pro::parse_selector(
             raw_selector,
             &mut self.sregs[seg as usize].selector,
@@ -4109,10 +4081,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         limit: u32,
         ar: u32,
     ) -> Result<()> {
-        super::segment_ctrl_pro::parse_selector(
-            selector,
-            &mut self.sregs[seg as usize].selector,
-        );
+        super::segment_ctrl_pro::parse_selector(selector, &mut self.sregs[seg as usize].selector);
         let unusable = (ar >> 16) & 1 != 0;
         let cache = &mut self.sregs[seg as usize].cache;
         cache.set_ar_byte((ar & 0xFF) as u8);
@@ -4258,23 +4227,29 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         let ldtr_unusable = (ldtr_ar >> 16) & 1 != 0;
         self.ldtr.cache.set_ar_byte((ldtr_ar & 0xFF) as u8);
         self.ldtr.cache.valid = if ldtr_unusable { 0 } else { 1 };
-        self.ldtr.cache.u.set_segment_base(self.vmcs.guest_ldtr_base);
-        self.ldtr.cache.u.set_segment_limit_scaled(self.vmcs.guest_ldtr_limit);
+        self.ldtr
+            .cache
+            .u
+            .set_segment_base(self.vmcs.guest_ldtr_base);
+        self.ldtr
+            .cache
+            .u
+            .set_segment_limit_scaled(self.vmcs.guest_ldtr_limit);
         self.ldtr.cache.u.set_segment_g((ldtr_ar >> 15) & 1 != 0);
         self.ldtr.cache.u.set_segment_d_b((ldtr_ar >> 14) & 1 != 0);
         self.ldtr.cache.u.set_segment_l((ldtr_ar >> 13) & 1 != 0);
         self.ldtr.cache.u.set_segment_avl((ldtr_ar >> 12) & 1 != 0);
 
         // TR — always usable per VMX rules.
-        super::segment_ctrl_pro::parse_selector(
-            self.vmcs.guest_tr_selector,
-            &mut self.tr.selector,
-        );
+        super::segment_ctrl_pro::parse_selector(self.vmcs.guest_tr_selector, &mut self.tr.selector);
         let tr_ar = self.vmcs.guest_tr_ar;
         self.tr.cache.set_ar_byte((tr_ar & 0xFF) as u8);
         self.tr.cache.valid = 1;
         self.tr.cache.u.set_segment_base(self.vmcs.guest_tr_base);
-        self.tr.cache.u.set_segment_limit_scaled(self.vmcs.guest_tr_limit);
+        self.tr
+            .cache
+            .u
+            .set_segment_limit_scaled(self.vmcs.guest_tr_limit);
         self.tr.cache.u.set_segment_g((tr_ar >> 15) & 1 != 0);
         self.tr.cache.u.set_segment_d_b((tr_ar >> 14) & 1 != 0);
         self.tr.cache.u.set_segment_l((tr_ar >> 13) & 1 != 0);
@@ -4376,7 +4351,6 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             BxSegregs::Null => unreachable!("vmexit_save_guest_seg called with Null seg"),
         }
     }
-
 
     // =========================================================================
     // Helpers used by VMXON.
@@ -4586,37 +4560,25 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// On a wrmsr that itself raises an exception (e.g. canonical-address
     /// check failure), the exception propagates to the caller; Bochs
     /// triggers a VMX abort in that case which the caller handles.
-    pub(super) fn vmx_load_msrs(
-        &mut self,
-        count: u32,
-        phys_addr: u64,
-    ) -> Result<u32> {
+    pub(super) fn vmx_load_msrs(&mut self, count: u32, phys_addr: u64) -> Result<u32> {
         let mut paddr = phys_addr;
         for msr in 1..=count {
             let lo = self.mem_read_qword(paddr);
             let value = self.mem_read_qword(paddr + 8);
             paddr = paddr.wrapping_add(16);
             if (lo >> 32) != 0 {
-                tracing::warn!(
-                    "VMX LoadMSRs[{msr}]: broken msr index {:#018x}",
-                    lo
-                );
+                tracing::warn!("VMX LoadMSRs[{msr}]: broken msr index {:#018x}", lo);
                 return Ok(msr);
             }
             let index = lo as u32;
             // Bochs rejects FSBASE (0xC0000100) / GSBASE (0xC0000101) loads
             // — host saves these via dedicated VMCS host segment-base fields.
             if index == 0xC000_0100 || index == 0xC000_0101 {
-                tracing::warn!(
-                    "VMX LoadMSRs[{msr}]: cannot restore FSBASE/GSBASE via list"
-                );
+                tracing::warn!("VMX LoadMSRs[{msr}]: cannot restore FSBASE/GSBASE via list");
                 return Ok(msr);
             }
             if (0x800..=0x8FF).contains(&index) {
-                tracing::warn!(
-                    "VMX LoadMSRs[{msr}]: X2APIC MSR {:#x} not allowed",
-                    index
-                );
+                tracing::warn!("VMX LoadMSRs[{msr}]: X2APIC MSR {:#x} not allowed", index);
                 return Ok(msr);
             }
             // wrmsr_value bypasses CPL / VMX-intercept gates that the
@@ -4631,27 +4593,17 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// list, calls `rdmsr_value` for each index, and writes the result into
     /// the high qword of each 16-byte entry. Returns the 1-based failing
     /// index or `0` on success. X2APIC MSRs are rejected per Bochs.
-    pub(super) fn vmx_store_msrs(
-        &mut self,
-        count: u32,
-        phys_addr: u64,
-    ) -> Result<u32> {
+    pub(super) fn vmx_store_msrs(&mut self, count: u32, phys_addr: u64) -> Result<u32> {
         let mut paddr = phys_addr;
         for msr in 1..=count {
             let lo = self.mem_read_qword(paddr);
             if (lo >> 32) != 0 {
-                tracing::warn!(
-                    "VMX StoreMSRs[{msr}]: broken msr index {:#018x}",
-                    lo
-                );
+                tracing::warn!("VMX StoreMSRs[{msr}]: broken msr index {:#018x}", lo);
                 return Ok(msr);
             }
             let index = lo as u32;
             if (0x800..=0x8FF).contains(&index) {
-                tracing::warn!(
-                    "VMX StoreMSRs[{msr}]: X2APIC MSR {:#x} not allowed",
-                    index
-                );
+                tracing::warn!("VMX StoreMSRs[{msr}]: X2APIC MSR {:#x} not allowed", index);
                 return Ok(msr);
             }
             let value = self.rdmsr_value(index)?;
@@ -4848,8 +4800,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     pub(super) fn vmexit_disarm_preemption_timer(&mut self) {
         if self.vmcs.vm_exit_ctls & VMX_VMEXIT_CTRL1_STORE_VMX_PREEMPTION_TIMER != 0 {
             let now = self.system_ticks();
-            self.vmcs.vmx_preemption_timer_value =
-                self.lapic.read_vmx_preemption_timer(now);
+            self.vmcs.vmx_preemption_timer_value = self.lapic.read_vmx_preemption_timer(now);
         }
         self.lapic.deactivate_vmx_preemption_timer();
         self.clear_event(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
@@ -5065,12 +5016,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
     pub(super) fn vmexit_check_invpcid(&mut self) -> Result<bool> {
         let ctls = self.proc_based_ctls2();
-        self.vmexit_if_ctls_set(
-            ctls,
-            VMX_VM_EXEC_CTRL2_INVPCID,
-            VmxVmexitReason::Invpcid,
-            0,
-        )
+        self.vmexit_if_ctls_set(ctls, VMX_VM_EXEC_CTRL2_INVPCID, VmxVmexitReason::Invpcid, 0)
     }
 
     /// INVEPT in non-root operation always exits — Bochs vmx.cc INVEPT
@@ -5097,8 +5043,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// `translate_guest_physical`.
     #[inline]
     pub(super) fn ept_active(&self) -> bool {
-        self.in_vmx_guest
-            && self.proc_based_ctls2() & VMX_VM_EXEC_CTRL2_EPT_ENABLE != 0
+        self.in_vmx_guest && self.proc_based_ctls2() & VMX_VM_EXEC_CTRL2_EPT_ENABLE != 0
     }
 
     /// EPT translation for a paging-structure access — Bochs uses
@@ -5176,9 +5121,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     ) -> Result<u64> {
         let eptptr = self.vmcs.eptptr;
         let mut ppf = eptptr & 0x000F_FFFF_FFFF_F000;
-        let mbe_ctrl = self.vmcs.secondary_proc_based_ctls
-            & VMX_VM_EXEC_CTRL2_MBE_CTRL
-            != 0;
+        let mbe_ctrl = self.vmcs.secondary_proc_based_ctls & VMX_VM_EXEC_CTRL2_MBE_CTRL != 0;
         // Bochs `BX_VMX_EPT_ACCESS_DIRTY_ENABLED` (paging.cc): EPTP bit 6.
         let ept_ad_enabled = (eptptr & 0x40) != 0;
 
@@ -5234,8 +5177,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
         loop {
             let level = leaf as u32;
-            entry_addr[leaf as usize] =
-                ppf + ((guest_paddr >> (9 + 9 * level)) & 0xFF8);
+            entry_addr[leaf as usize] = ppf + ((guest_paddr >> (9 + 9 * level)) & 0xFF8);
             entry[leaf as usize] = self.mem_read_qword(entry_addr[leaf as usize]);
             offset_mask >>= 9;
             let curr = entry[leaf as usize];
@@ -5243,9 +5185,8 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             // MBE-user-execute bit (only meaningful when MBE_CTRL set).
             let mut curr_access = EptPerm::from_bits_truncate((curr as u32) & 0x7);
             if mbe_ctrl {
-                curr_access |= EptPerm::from_bits_truncate(
-                    (curr as u32) & EptPerm::MBE_USER_EXEC.bits(),
-                );
+                curr_access |=
+                    EptPerm::from_bits_truncate((curr as u32) & EptPerm::MBE_USER_EXEC.bits());
             }
 
             // R=0/W=0/X=0 → entry not present (Bochs `BX_EPT_ENTRY_NOT_
@@ -5289,9 +5230,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 // unconditionally and at PDPTE level only when the CPU
                 // model advertises BX_ISA_1G_PAGES; PML4/PML5 large-page
                 // entries are reserved.
-                let max_large_page_leaf = if self
-                    .bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::Isa1gPages)
-                {
+                let max_large_page_leaf = if self.bx_cpuid_support_isa_extension(
+                    super::decoder::features::X86Feature::Isa1gPages,
+                ) {
                     2 // PDPTE
                 } else {
                     1 // PDE
@@ -5353,12 +5294,30 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 // the granted bits at [5:3]), forces bit 2 (instruction
                 // fetch), and copies user-execute up to bit 6.
                 let mut q = EptViolationQual::empty();
-                q.set(EptViolationQual::ACCESS_R, access_mask.contains(EptPerm::READ));
-                q.set(EptViolationQual::ACCESS_W, access_mask.contains(EptPerm::WRITE));
-                q.set(EptViolationQual::ACCESS_X, access_mask.contains(EptPerm::EXECUTE));
-                q.set(EptViolationQual::GRANTED_R, combined_access.contains(EptPerm::READ));
-                q.set(EptViolationQual::GRANTED_W, combined_access.contains(EptPerm::WRITE));
-                q.set(EptViolationQual::GRANTED_X, combined_access.contains(EptPerm::EXECUTE));
+                q.set(
+                    EptViolationQual::ACCESS_R,
+                    access_mask.contains(EptPerm::READ),
+                );
+                q.set(
+                    EptViolationQual::ACCESS_W,
+                    access_mask.contains(EptPerm::WRITE),
+                );
+                q.set(
+                    EptViolationQual::ACCESS_X,
+                    access_mask.contains(EptPerm::EXECUTE),
+                );
+                q.set(
+                    EptViolationQual::GRANTED_R,
+                    combined_access.contains(EptPerm::READ),
+                );
+                q.set(
+                    EptViolationQual::GRANTED_W,
+                    combined_access.contains(EptPerm::WRITE),
+                );
+                q.set(
+                    EptViolationQual::GRANTED_X,
+                    combined_access.contains(EptPerm::EXECUTE),
+                );
                 if mbe_ctrl && rw == BxRwAccess::Execute {
                     // Force bit 2 (instruction fetch) and lift the leaf's
                     // MBE_USER_EXECUTE permission into bit 6.
@@ -5374,12 +5333,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                         q |= EptViolationQual::DATA_ACCESS;
                         // Bochs paging.cc gates the advanced VM-exit
                         // information bits on BX_VMX_MBE_CONTROL.
-                        let mbe = self
-                            .vmx_extensions_bitmask
-                            .as_ref()
-                            .map_or(false, |m| {
-                                m.contains(super::cpuid::VMXExtensions::MbeControl)
-                            });
+                        let mbe = self.vmx_extensions_bitmask.as_ref().map_or(false, |m| {
+                            m.contains(super::cpuid::VMXExtensions::MbeControl)
+                        });
                         if mbe {
                             q.set(EptViolationQual::USER_PAGE, user_page);
                             q.set(EptViolationQual::WRITEABLE, writeable_page);
@@ -5396,8 +5352,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 // CET (otherwise `rw.is_shadow_stack()` cannot be
                 // observed in practice but the literal source check
                 // matters for forward-compat models).
-                if self
-                    .bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaCet)
+                if self.bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaCet)
                 {
                     q.set(EptViolationQual::SHADOW_STACK, rw.is_shadow_stack());
                     // Bochs paging.cc bit 14:
@@ -5488,12 +5443,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         // don't advertise EPT-A/D must reject this bit to match Bochs
         // is_eptptr_valid (vmx.cc).
         if eptptr & 0x40 != 0 {
-            let supported = self
-                .vmx_extensions_bitmask
-                .as_ref()
-                .map_or(false, |m| {
-                    m.contains(super::cpuid::VMXExtensions::EptAccessDirty)
-                });
+            let supported = self.vmx_extensions_bitmask.as_ref().map_or(false, |m| {
+                m.contains(super::cpuid::VMXExtensions::EptAccessDirty)
+            });
             if !supported {
                 tracing::trace!("is_eptptr_valid: EPTP A/D bit set but model lacks EptAccessDirty");
                 return false;
@@ -5542,10 +5494,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             if msr > HI_END {
                 return true;
             }
-            let paddr = bitmap
-                + u64::from((msr - HI_START) >> 3)
-                + 1024
-                + write_off;
+            let paddr = bitmap + u64::from((msr - HI_START) >> 3) + 1024 + write_off;
             let field = self.read_physical_byte(paddr);
             (field & (1 << (msr & 7))) != 0
         } else {
@@ -5590,10 +5539,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// the resolved displacement / effective address per Bochs vmexit.cc
     /// VMexit_Instruction; the INSTRUCTION_INFO field is left unpopulated until
     /// a VMM needs it.
-    pub(super) fn vmexit_check_gdtr_idtr_access(
-        &mut self,
-        qualification: u64,
-    ) -> Result<bool> {
+    pub(super) fn vmexit_check_gdtr_idtr_access(&mut self, qualification: u64) -> Result<bool> {
         let ctls = self.proc_based_ctls2();
         self.vmexit_if_ctls_set(
             ctls,
@@ -5605,10 +5551,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
     /// LLDT / SLDT / LTR / STR intercept — same gate as GDTR/IDTR above but
     /// reported as `LdtrTrAccess`.
-    pub(super) fn vmexit_check_ldtr_tr_access(
-        &mut self,
-        qualification: u64,
-    ) -> Result<bool> {
+    pub(super) fn vmexit_check_ldtr_tr_access(&mut self, qualification: u64) -> Result<bool> {
         let ctls = self.proc_based_ctls2();
         self.vmexit_if_ctls_set(
             ctls,
@@ -5686,11 +5629,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// Returns `(exited, effective_val)`. When `exited` is true the caller
     /// must return `Ok(())` immediately; otherwise it must write
     /// `effective_val` (not the raw `val`) to CR0.
-    pub(super) fn vmexit_check_cr0_write(
-        &mut self,
-        val: u64,
-        gpr: u8,
-    ) -> Result<(bool, u64)> {
+    pub(super) fn vmexit_check_cr0_write(&mut self, val: u64, gpr: u8) -> Result<(bool, u64)> {
         let mask = self.vmcs.cr0_guest_host_mask;
         let shadow = self.vmcs.cr0_read_shadow;
         if (mask & shadow) != (mask & val) {
@@ -5704,18 +5643,11 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
     /// MOV to CR4 intercept — Bochs vmexit.cc VMexit_CR4_Write. Same shape
     /// as CR0: VMEXIT when the masked shadow bits change, else merge.
-    pub(super) fn vmexit_check_cr4_write(
-        &mut self,
-        val: u64,
-        gpr: u8,
-    ) -> Result<(bool, u64)> {
+    pub(super) fn vmexit_check_cr4_write(&mut self, val: u64, gpr: u8) -> Result<(bool, u64)> {
         let mask = self.vmcs.cr4_guest_host_mask;
         let shadow = self.vmcs.cr4_read_shadow;
         if (mask & shadow) != (mask & val) {
-            self.vmx_vmexit(
-                VmxVmexitReason::CrAccess,
-                4 | ((u64::from(gpr) & 0xF) << 8),
-            )?;
+            self.vmx_vmexit(VmxVmexitReason::CrAccess, 4 | ((u64::from(gpr) & 0xF) << 8))?;
             return Ok((true, val));
         }
         let cur = self.cr4.get();
@@ -5789,12 +5721,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     ///   [3:0]   DR number
     ///   [4]     direction: 0 = MOV to DR, 1 = MOV from DR
     ///   [11:8]  source/destination GPR
-    pub(super) fn vmexit_check_dr_access(
-        &mut self,
-        read: bool,
-        dr: u8,
-        gpr: u8,
-    ) -> Result<bool> {
+    pub(super) fn vmexit_check_dr_access(&mut self, read: bool, dr: u8, gpr: u8) -> Result<bool> {
         if self.proc_based_ctls1() & VMX_VM_EXEC_CTRL1_DRX_ACCESS_VMEXIT == 0 {
             return Ok(false);
         }

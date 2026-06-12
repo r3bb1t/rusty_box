@@ -492,7 +492,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     }
     #[inline]
     pub fn set_msr_fsbase(&mut self, val: u64) {
-        self.sregs[BxSegregs::Fs as usize].cache.u.set_segment_base(val)
+        self.sregs[BxSegregs::Fs as usize]
+            .cache
+            .u
+            .set_segment_base(val)
     }
     #[inline]
     pub fn msr_gsbase(&self) -> u64 {
@@ -500,7 +503,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     }
     #[inline]
     pub fn set_msr_gsbase(&mut self, val: u64) {
-        self.sregs[BxSegregs::Gs as usize].cache.u.set_segment_base(val)
+        self.sregs[BxSegregs::Gs as usize]
+            .cache
+            .u
+            .set_segment_base(val)
     }
 
     // =========================================================================
@@ -649,7 +655,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     pub fn get_hae_intr_diag(&self) -> (u64, u64, u64, u64) {
         #[cfg(debug_assertions)]
         {
-            (self.diag_hae_intr_delivered, self.diag_hae_intr_if_blocked, self.diag_hae_intr_no_pic, self.diag_hae_intr_pic_empty)
+            (
+                self.diag_hae_intr_delivered,
+                self.diag_hae_intr_if_blocked,
+                self.diag_hae_intr_no_pic,
+                self.diag_hae_intr_pic_empty,
+            )
         }
         #[cfg(not(debug_assertions))]
         {
@@ -696,7 +707,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Get inject_external_interrupt diagnostics
     #[cfg(debug_assertions)]
     pub fn get_inject_ext_intr_diag(&self) -> (u64, &[u64; 256]) {
-        (self.diag_inject_ext_intr_count, &self.diag_inject_ext_intr_vectors)
+        (
+            self.diag_inject_ext_intr_count,
+            &self.diag_inject_ext_intr_vectors,
+        )
     }
 
     #[cfg(not(debug_assertions))]
@@ -866,5 +880,4 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     pub(crate) fn cs_rpl(&self) -> u8 {
         self.sregs[BxSegregs::Cs as usize].selector.rpl
     }
-
 }

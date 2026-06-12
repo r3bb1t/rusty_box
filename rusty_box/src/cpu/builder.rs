@@ -22,17 +22,26 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
     }
 
     #[cfg(feature = "alloc")]
-    pub fn build(self) -> Result<alloc::boxed::Box<BxCpuC<'static, I, ()>>> { self.build_with_tracer(()) }
+    pub fn build(self) -> Result<alloc::boxed::Box<BxCpuC<'static, I, ()>>> {
+        self.build_with_tracer(())
+    }
 
     #[cfg(feature = "alloc")]
-    pub fn build_with_tracer<T: super::instrumentation::Instrumentation>(self, tracer: T) -> Result<alloc::boxed::Box<BxCpuC<'static, I, T>>> {
+    pub fn build_with_tracer<T: super::instrumentation::Instrumentation>(
+        self,
+        tracer: T,
+    ) -> Result<alloc::boxed::Box<BxCpuC<'static, I, T>>> {
         let cpuid = I::new();
 
         // BxCpuC is ~50MB (BxICache alone is ~19MB of fixed arrays).
         // Cannot construct on the stack. Allocate zeroed heap memory and
         // initialize field-by-field via raw pointer.
         let layout = alloc::alloc::Layout::new::<BxCpuC<'static, I, T>>();
-        tracing::info!("CPU alloc: {} bytes (align={})", layout.size(), layout.align());
+        tracing::info!(
+            "CPU alloc: {} bytes (align={})",
+            layout.size(),
+            layout.align()
+        );
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut BxCpuC<'static, I, T>;
         if ptr.is_null() {
             alloc::alloc::handle_alloc_error(layout);
@@ -78,9 +87,8 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
         core::ptr::addr_of_mut!((*ptr).ignore_bad_msrs).write(true);
         core::ptr::addr_of_mut!((*ptr).a20_mask).write(0xFFFF_FFFF_FFFF_FFFF);
         core::ptr::addr_of_mut!((*ptr).last_exception_type).write(-1);
-        core::ptr::addr_of_mut!((*ptr).instrumentation).write(
-            super::instrumentation::InstrumentationRegistry::with_tracer(tracer),
-        );
+        core::ptr::addr_of_mut!((*ptr).instrumentation)
+            .write(super::instrumentation::InstrumentationRegistry::with_tracer(tracer));
         core::ptr::addr_of_mut!((*ptr).mmio).write(crate::memory::mmio::MmioRegistry::new());
         (*ptr).dtlb.flush();
         (*ptr).itlb.flush();

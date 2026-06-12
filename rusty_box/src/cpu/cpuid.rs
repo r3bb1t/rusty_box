@@ -192,7 +192,6 @@ bitflags! {
     }
 }
 
-
 bitflags! {
     /// CPUID Leaf 7 Subleaf 1 EAX — Structured Extended Feature Flags
     /// [0:0]   SHA-512 support

@@ -1,5 +1,4 @@
 #![allow(unused_variables)]
-
 #![allow(unused_unsafe)]
 
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
@@ -40,11 +39,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 tracing::error!("handle_cpu_mode_change: EFER.LMA is set when CR0.PE=0!");
             }
             // Bochs proc_ctrl.cc — check CS.L bit for 64-bit vs compat mode
-        // SAFETY: segment cache populated during segment load; union read matches descriptor type
-        let cs_l = self.sregs[super::decoder::BxSegregs::Cs as usize]
-            .cache
-            .u
-            .segment_l();
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            let cs_l = self.sregs[super::decoder::BxSegregs::Cs as usize]
+                .cache
+                .u
+                .segment_l();
             if cs_l {
                 self.cpu_mode = CpuMode::Long64;
             } else {
@@ -78,9 +77,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     seg.cache.p = true; // present (Bochs line 394)
                     seg.cache.segment = true; // data/code segment (Bochs line 395)
                     seg.cache.r#type = 3; // DATA_READ_WRITE_ACCESSED (Bochs line 396)
-                    // Note: Bochs does NOT set d_b here — the CS descriptor cache
-                    // retains its previous d_b setting. This is important for
-                    // "big real mode" / "unreal mode" where d_b=1 allows >64K access.
+                                          // Note: Bochs does NOT set d_b here — the CS descriptor cache
+                                          // retains its previous d_b setting. This is important for
+                                          // "big real mode" / "unreal mode" where d_b=1 allows >64K access.
                     seg.selector.rpl = 0; // CPL = 0 (Bochs line 398)
                 }
             }
@@ -212,9 +211,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // Bochs svm.cc SVM_INTERCEPT1_WBINVD.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT1_WBINVD)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT1_WBINVD) {
             return self.svm_vmexit(super::svm::SvmVmexit::Wbinvd as i32, 0, 0);
         }
         // Bochs vmx.cc VMexit_WBINVD.
@@ -243,9 +240,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // Bochs svm.cc SVM_INTERCEPT0_INVD.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_INVD)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_INVD) {
             return self.svm_vmexit(super::svm::SvmVmexit::Invd as i32, 0, 0);
         }
         // Bochs vmx.cc VMexit_INVD — unconditional VM-exit when in VMX guest.
@@ -277,19 +272,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eaddr = self.resolve_addr(instr);
         // Bochs svm.cc SVM_INTERCEPT0_INVLPG — VMEXIT carries the linear
         // address in EXITINFO1 (computed here before we actually flush).
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_INVLPG)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_INVLPG) {
             let laddr_for_exit: u64 = if self.long64_mode() {
                 self.get_laddr64(seg as usize, eaddr)
             } else {
                 self.get_laddr32(seg as usize, eaddr as u32) as u64
             };
-            return self.svm_vmexit(
-                super::svm::SvmVmexit::Invlpg as i32,
-                laddr_for_exit,
-                0,
-            );
+            return self.svm_vmexit(super::svm::SvmVmexit::Invlpg as i32, laddr_for_exit, 0);
         }
         let laddr: u64 = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
@@ -314,7 +303,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.instrumentation
                 .fire_tlb_cntrl(super::instrumentation::TlbCntrl::Invlpg { laddr });
         }
-
 
         Ok(())
     }
@@ -370,9 +358,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Ud, 0);
         }
         // Bochs svm.cc SVM_INTERCEPT1_MONITOR.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT1_MONITOR)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT1_MONITOR) {
             return self.svm_vmexit(super::svm::SvmVmexit::Monitor as i32, 0, 0);
         }
         // Bochs vmx.cc VMexit_MONITOR.
@@ -457,11 +443,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if self.monitor.armed()
                 && self.svm_intercept_check(super::svm::SVM_INTERCEPT1_MWAIT_ARMED)
             {
-                return self.svm_vmexit(
-                    super::svm::SvmVmexit::MwaitConditional as i32,
-                    0,
-                    0,
-                );
+                return self.svm_vmexit(super::svm::SvmVmexit::MwaitConditional as i32, 0, 0);
             }
             if self.svm_intercept_check(super::svm::SVM_INTERCEPT1_MWAIT) {
                 return self.svm_vmexit(super::svm::SvmVmexit::Mwait as i32, 0, 0);
@@ -499,10 +481,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.instrumentation.active.has_hlt_mwait() {
             let flags = super::instrumentation::MwaitFlags::from_bits_truncate(self.ecx());
             let addr = self.monitor.monitor_addr;
-            let ev = super::instrumentation::MwaitEvent { addr, len: 0, flags };
+            let ev = super::instrumentation::MwaitEvent {
+                addr,
+                len: 0,
+                flags,
+            };
             self.instrumentation.fire_mwait(&ev);
         }
-
 
         // Bochs mwait.cc: If monitor not armed, just return
         {
@@ -541,9 +526,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     ) -> crate::cpu::Result<()> {
         // Bochs relies on per-CPU decoder tables to suppress WAITPKG opcodes
         // when the CPU doesn't support them. Enforce the CPUID gate at exec.
-        if !self.bx_cpuid_support_isa_extension(
-            crate::cpu::decoder::X86Feature::IsaWaitpkg,
-        ) {
+        if !self.bx_cpuid_support_isa_extension(crate::cpu::decoder::X86Feature::IsaWaitpkg) {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
@@ -607,17 +590,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs: mwait.cc BX_CPU_C::UMWAIT_Ed / TPAUSE_Ed (shared handler)
     // =========================================================================
 
-    pub(super) fn umwait(
-        &mut self,
-        instr: &super::decoder::Instruction,
-    ) -> crate::cpu::Result<()> {
+    pub(super) fn umwait(&mut self, instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         self.umwait_tpause_impl(instr, /*is_tpause=*/ false)
     }
 
-    pub(super) fn tpause(
-        &mut self,
-        instr: &super::decoder::Instruction,
-    ) -> crate::cpu::Result<()> {
+    pub(super) fn tpause(&mut self, instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         self.umwait_tpause_impl(instr, /*is_tpause=*/ true)
     }
 
@@ -627,9 +604,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         is_tpause: bool,
     ) -> crate::cpu::Result<()> {
         // CPUID gate (see umonitor comment).
-        if !self.bx_cpuid_support_isa_extension(
-            crate::cpu::decoder::X86Feature::IsaWaitpkg,
-        ) {
+        if !self.bx_cpuid_support_isa_extension(crate::cpu::decoder::X86Feature::IsaWaitpkg) {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
@@ -744,16 +719,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs: proc_ctrl.cc BX_CPU_C::CLZERO
     // =========================================================================
 
-    pub(super) fn clzero(
-        &mut self,
-        instr: &super::decoder::Instruction,
-    ) -> crate::cpu::Result<()> {
+    pub(super) fn clzero(&mut self, instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         // Bochs relies on per-CPU decoder tables to suppress CLZERO when the
         // CPU doesn't support it. rusty_box has a single decoder table, so
         // enforce the CPUID gate at execute time.
-        if !self.bx_cpuid_support_isa_extension(
-            crate::cpu::decoder::X86Feature::IsaClzero,
-        ) {
+        if !self.bx_cpuid_support_isa_extension(crate::cpu::decoder::X86Feature::IsaClzero) {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
@@ -813,8 +783,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         let ticks = self.get_tsc(self.system_ticks());
-        self.set_rax(ticks & 0xFFFF_FFFF  );
-        self.set_rdx(ticks >> 32  );
+        self.set_rax(ticks & 0xFFFF_FFFF);
+        self.set_rdx(ticks >> 32);
         // ECX = IA32_TSC_AUX MSR (processor ID) — Bochs proc_ctrl.cc
         self.set_rcx(self.msr.tsc_aux as u64);
 
@@ -838,9 +808,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
         // Bochs svm.cc SVM_INTERCEPT0_RDTSC.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_RDTSC)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_RDTSC) {
             return self.svm_vmexit(super::svm::SvmVmexit::Rdtsc as i32, 0, 0);
         }
         // Bochs vmx.cc VMexit_Rdtsc.
@@ -852,9 +820,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // time_ticks advances during HLT via tickn(), matching Bochs behavior.
         let ticks = self.get_tsc(self.system_ticks());
 
-        self.set_rax(ticks & 0xFFFF_FFFF  );
-        self.set_rdx(ticks >> 32  );
-
+        self.set_rax(ticks & 0xFFFF_FFFF);
+        self.set_rdx(ticks >> 32);
 
         Ok(())
     }
@@ -878,18 +845,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return Ok(());
         }
         // Bochs svm.cc SVM_INTERCEPT0_RDPMC.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_RDPMC)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_RDPMC) {
             return self.svm_vmexit(super::svm::SvmVmexit::Rdpmc as i32, 0, 0);
         }
 
         // Bochs clips the counter index: P4 (SSE2) allows 0..17, earlier
         // families 0..1. Out-of-range → #GP.
         let ecx = self.ecx();
-        let limit = if self
-            .bx_cpuid_support_isa_extension(super::decoder::X86Feature::IsaSse2)
-        {
+        let limit = if self.bx_cpuid_support_isa_extension(super::decoder::X86Feature::IsaSse2) {
             18
         } else {
             2
@@ -1000,12 +963,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_LSTAR => self.msr.lstar,
             BX_MSR_CSTAR => self.msr.cstar,
             BX_MSR_FMASK => self.msr.fmask as u64,
-            BX_MSR_FSBASE => {
-                self.get_segment_base(super::decoder::BxSegregs::Fs)
-            }
-            BX_MSR_GSBASE => {
-                self.get_segment_base(super::decoder::BxSegregs::Gs)
-            }
+            BX_MSR_FSBASE => self.get_segment_base(super::decoder::BxSegregs::Fs),
+            BX_MSR_GSBASE => self.get_segment_base(super::decoder::BxSegregs::Gs),
             BX_MSR_KERNELGSBASE => self.msr.kernelgsbase,
             BX_MSR_TSC_AUX => self.msr.tsc_aux as u64,
             // VMX capability MSRs (Bochs msr.cc)
@@ -1042,10 +1001,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 // advertise EPT_ENABLE (1<<1), VPID_ENABLE (1<<5), and
                 // INVPCID (1<<12) — each backed by a real implementation
                 // (EPT walker, INVEPT/INVVPID handlers, INVPCID intercept).
-                const ALLOWED_1: u64 =
-                    super::vmx::VMX_VM_EXEC_CTRL2_EPT_ENABLE as u64
-                        | super::vmx::VMX_VM_EXEC_CTRL2_VPID_ENABLE as u64
-                        | super::vmx::VMX_VM_EXEC_CTRL2_INVPCID as u64;
+                const ALLOWED_1: u64 = super::vmx::VMX_VM_EXEC_CTRL2_EPT_ENABLE as u64
+                    | super::vmx::VMX_VM_EXEC_CTRL2_VPID_ENABLE as u64
+                    | super::vmx::VMX_VM_EXEC_CTRL2_INVPCID as u64;
                 ALLOWED_1 << 32
             }
             0x48C => 0x0000_003F_0000_003Fu64, // IA32_VMX_TRUE_PINBASED_CTLS
@@ -1124,13 +1082,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Bochs msr.cc — CET writes validate canonical address +
             // CET-control bit-pattern, then store. Returns false (#GP) on bad value.
             BX_MSR_IA32_U_CET | BX_MSR_IA32_S_CET => {
-                if !self.is_canonical(val)
-                    || super::cet::is_invalid_cet_control(val)
-                {
-                    tracing::trace!(
-                        "WRMSR: bad CET control value {:#x} for MSR {:#x}",
-                        val, msr
-                    );
+                if !self.is_canonical(val) || super::cet::is_invalid_cet_control(val) {
+                    tracing::trace!("WRMSR: bad CET control value {:#x} for MSR {:#x}", val, msr);
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.msr.ia32_cet_control[usize::from(msr == BX_MSR_IA32_U_CET)] = val;
@@ -1195,9 +1148,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // (LOCK + VMX_ENABLE_IN_SMX + VMX_ENABLE_OUTSIDE_SMX + senter
             // control bits) are writable.
             BX_MSR_IA32_FEATURE_CONTROL => {
-                if (self.msr.ia32_feature_ctrl
-                    & super::vmx::BX_IA32_FEATURE_CONTROL_LOCK_BIT)
-                    != 0
+                if (self.msr.ia32_feature_ctrl & super::vmx::BX_IA32_FEATURE_CONTROL_LOCK_BIT) != 0
                 {
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
@@ -1273,9 +1224,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 if (val32 & BxEfer::SVME.bits()) != 0
                     && (self.msr.svm_vm_cr & BX_VM_CR_MSR_SVMDIS_MASK) != 0
                 {
-                    tracing::trace!(
-                        "WRMSR EFER: attempt to set SVME with VM_CR.SVMDIS=1, #GP(0)"
-                    );
+                    tracing::trace!("WRMSR EFER: attempt to set SVME with VM_CR.SVMDIS=1, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 // Keep LMA untouched — it's controlled by CR0.PG + EFER.LME
@@ -1384,18 +1333,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Bochs vmexit.cc VMexit_DR_Access — gated on DRx_ACCESS_VMEXIT.
-        if self.in_vmx_guest
-            && self.vmexit_check_dr_access(true, dr_idx, dst_gpr)?
-        {
+        if self.in_vmx_guest && self.vmexit_check_dr_access(true, dr_idx, dst_gpr)? {
             return Ok(());
         }
         // Bochs crregs.cc MOV_RdDd: SVM DR read intercept after VMX, before read.
         if self.in_svm_guest && self.svm_dr_read_intercepted(dr_idx) {
-            return self.svm_vmexit(
-                super::svm::SvmVmexit::Dr0Read as i32 + dr_idx as i32,
-                0,
-                0,
-            );
+            return self.svm_vmexit(super::svm::SvmVmexit::Dr0Read as i32 + dr_idx as i32, 0, 0);
         }
 
         let dr_idx = usize::from(dr_idx);
@@ -1433,18 +1376,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Bochs vmexit.cc VMexit_DR_Access — gated on DRx_ACCESS_VMEXIT.
-        if self.in_vmx_guest
-            && self.vmexit_check_dr_access(false, dr_idx, src_gpr)?
-        {
+        if self.in_vmx_guest && self.vmexit_check_dr_access(false, dr_idx, src_gpr)? {
             return Ok(());
         }
         // Bochs crregs.cc MOV_DdRd: SVM DR write intercept after VMX, before write.
         if self.in_svm_guest && self.svm_dr_write_intercepted(dr_idx) {
-            return self.svm_vmexit(
-                super::svm::SvmVmexit::Dr0Write as i32 + dr_idx as i32,
-                0,
-                0,
-            );
+            return self.svm_vmexit(super::svm::SvmVmexit::Dr0Write as i32 + dr_idx as i32, 0, 0);
         }
 
         let dr_idx = usize::from(dr_idx);
@@ -1712,14 +1649,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
 
         let cs_idx = BxSegregs::Cs as usize;
-        self.sregs[cs_idx].cache.valid =
-            SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+        self.sregs[cs_idx].cache.valid = SEG_VALID_CACHE
+            | SEG_ACCESS_ROK
+            | SEG_ACCESS_WOK
+            | SEG_ACCESS_ROK4_G
+            | SEG_ACCESS_WOK4_G;
         self.sregs[cs_idx].cache.p = true;
         self.sregs[cs_idx].cache.dpl = dpl;
         self.sregs[cs_idx].cache.segment = true;
         self.sregs[cs_idx].cache.r#type = 0xb; // CODE_EXEC_READ_ACCESSED
         self.sregs[cs_idx].cache.u.set_segment_base(0);
-        self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+        self.sregs[cs_idx]
+            .cache
+            .u
+            .set_segment_limit_scaled(0xFFFF_FFFF);
         self.sregs[cs_idx].cache.u.set_segment_g(true);
         self.sregs[cs_idx].cache.u.set_segment_avl(false);
         self.sregs[cs_idx].cache.u.set_segment_d_b(!long_mode);
@@ -1738,14 +1681,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
 
         let ss_idx = BxSegregs::Ss as usize;
-        self.sregs[ss_idx].cache.valid =
-            SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+        self.sregs[ss_idx].cache.valid = SEG_VALID_CACHE
+            | SEG_ACCESS_ROK
+            | SEG_ACCESS_WOK
+            | SEG_ACCESS_ROK4_G
+            | SEG_ACCESS_WOK4_G;
         self.sregs[ss_idx].cache.p = true;
         self.sregs[ss_idx].cache.dpl = dpl;
         self.sregs[ss_idx].cache.segment = true;
         self.sregs[ss_idx].cache.r#type = 0x3; // DATA_READ_WRITE_ACCESSED
         self.sregs[ss_idx].cache.u.set_segment_base(0);
-        self.sregs[ss_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+        self.sregs[ss_idx]
+            .cache
+            .u
+            .set_segment_limit_scaled(0xFFFF_FFFF);
         self.sregs[ss_idx].cache.u.set_segment_g(true);
         self.sregs[ss_idx].cache.u.set_segment_d_b(true);
         self.sregs[ss_idx].cache.u.set_segment_avl(false);
@@ -1758,7 +1707,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     pub(super) fn sysenter(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-
         if self.real_mode() {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -1823,8 +1771,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Bochs: BX_INSTR_FAR_BRANCH(BX_CPU_ID, BX_INSTR_IS_SYSENTER, ...)
-        let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
-        self.on_far_branch(super::instrumentation::BranchType::Sysenter, 0, new_cs, self.rip());
+        let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .value;
+        self.on_far_branch(
+            super::instrumentation::BranchType::Sysenter,
+            0,
+            new_cs,
+            self.rip(),
+        );
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1837,12 +1792,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     pub(super) fn sysexit(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-
         if self.cr4.fred() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if self.real_mode() || cpl != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -1852,7 +1808,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.invalidate_prefetch_q();
         self.monitor.reset_umonitor();
-
 
         // 64-bit SYSEXIT (Bochs proc_ctrl.cc)
         if instr.os64_l() != 0 {
@@ -1893,8 +1848,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.setup_flat_ss(3);
 
         // Bochs: BX_INSTR_FAR_BRANCH(BX_CPU_ID, BX_INSTR_IS_SYSEXIT, ...)
-        let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
-        self.on_far_branch(super::instrumentation::BranchType::Sysexit, 0, new_cs, self.rip());
+        let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .value;
+        self.on_far_branch(
+            super::instrumentation::BranchType::Sysexit,
+            0,
+            new_cs,
+            self.rip(),
+        );
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -2051,7 +2013,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Record syscall in diagnostic ring buffer
-        #[cfg(debug_assertions)] {
+        #[cfg(debug_assertions)]
+        {
             let nr = self.rax();
             let arg0 = self.rdi();
             let arg1 = self.rsi();
@@ -2071,7 +2034,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         #[cfg(not(feature = "instrumentation"))]
         let action = crate::cpu::instrumentation::InstrAction::Continue;
 
-        
         if action.is_stop() {
             self.instrumentation.stop_request = true;
         }
@@ -2100,7 +2062,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
             return Ok(());
         }
-
 
         if self.long_mode() {
             // Long mode SYSCALL (Bochs proc_ctrl.cc)
@@ -2161,8 +2122,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Bochs: BX_INSTR_FAR_BRANCH(BX_CPU_ID, BX_INSTR_IS_SYSCALL, ...)
-        let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
-        self.on_far_branch(super::instrumentation::BranchType::Syscall, 0, new_cs, self.rip());
+        let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .value;
+        self.on_far_branch(
+            super::instrumentation::BranchType::Syscall,
+            0,
+            new_cs,
+            self.rip(),
+        );
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -2178,7 +2146,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         use super::eflags::EFlags;
 
         // Track SYSRET for diagnostics
-        #[cfg(debug_assertions)] { self.diag_sysret_count += 1; }
+        #[cfg(debug_assertions)]
+        {
+            self.diag_sysret_count += 1;
+        }
 
         if self.cr4.fred() {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -2187,14 +2158,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if !self.efer.sce() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if !self.protected_mode() || cpl != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
         self.invalidate_prefetch_q();
         self.monitor.reset_umonitor();
-
 
         // Bochs proc_ctrl.cc — temp_RIP stores the return address;
         // RIP is set AFTER all mode changes (line 1348).
@@ -2240,8 +2212,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     SEG_VALID_CACHE,
                 };
                 let ss_idx = super::decoder::BxSegregs::Ss as usize;
-                self.sregs[ss_idx].cache.valid =
-                    SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+                self.sregs[ss_idx].cache.valid = SEG_VALID_CACHE
+                    | SEG_ACCESS_ROK
+                    | SEG_ACCESS_WOK
+                    | SEG_ACCESS_ROK4_G
+                    | SEG_ACCESS_WOK4_G;
                 self.sregs[ss_idx].cache.p = true;
                 self.sregs[ss_idx].cache.dpl = 3;
                 self.sregs[ss_idx].cache.segment = true;
@@ -2269,8 +2244,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     SEG_VALID_CACHE,
                 };
                 let ss_idx = super::decoder::BxSegregs::Ss as usize;
-                self.sregs[ss_idx].cache.valid =
-                    SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+                self.sregs[ss_idx].cache.valid = SEG_VALID_CACHE
+                    | SEG_ACCESS_ROK
+                    | SEG_ACCESS_WOK
+                    | SEG_ACCESS_ROK4_G
+                    | SEG_ACCESS_WOK4_G;
                 self.sregs[ss_idx].cache.p = true;
                 self.sregs[ss_idx].cache.dpl = 3;
                 self.sregs[ss_idx].cache.segment = true;
@@ -2288,8 +2266,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_rip(temp_rip);
 
         // Bochs: BX_INSTR_FAR_BRANCH(BX_CPU_ID, BX_INSTR_IS_SYSRET, ...)
-        let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
-        self.on_far_branch(super::instrumentation::BranchType::Sysret, 0, new_cs, self.rip());
+        let new_cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .value;
+        self.on_far_branch(
+            super::instrumentation::BranchType::Sysret,
+            0,
+            new_cs,
+            self.rip(),
+        );
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -2351,9 +2336,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Bochs svm.cc SVM_INTERCEPT1_XSETBV.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT1_XSETBV)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT1_XSETBV) {
             return self.svm_vmexit(super::svm::SvmVmexit::Xsetbv as i32, 0, 0);
         }
         // Bochs vmx.cc VMexit_XSETBV — unconditional.
@@ -2510,7 +2493,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Save x87 FPU state to XSAVE area (offset 0-159)
     /// Same layout as FXSAVE bytes 0-159
-    fn xsave_x87_state(&mut self, seg: super::decoder::BxSegregs, eaddr: u64, os64: bool) -> super::Result<()> {
+    fn xsave_x87_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        eaddr: u64,
+        os64: bool,
+    ) -> super::Result<()> {
         // FCW
         self.v_write_word(seg, eaddr, self.the_i387.cwd)?;
         // FSW
@@ -2553,7 +2541,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Save MXCSR and MXCSR_MASK to XSAVE area at eaddr+24 and eaddr+28
     /// Bochs xsave.cc: xsave_mxcsr_state
-    fn xsave_mxcsr_state(&mut self, seg: super::decoder::BxSegregs, eaddr: u64) -> super::Result<()> {
+    fn xsave_mxcsr_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        eaddr: u64,
+    ) -> super::Result<()> {
         self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
         self.v_write_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
         Ok(())
@@ -2561,7 +2553,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Restore MXCSR from XSAVE area at eaddr+24, validating against mxcsr_mask
     /// Bochs xsave.cc: xrstor_mxcsr_state
-    fn xrstor_mxcsr_state(&mut self, seg: super::decoder::BxSegregs, eaddr: u64) -> super::Result<()> {
+    fn xrstor_mxcsr_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        eaddr: u64,
+    ) -> super::Result<()> {
         let new_mxcsr = self.v_read_dword(seg, eaddr.wrapping_add(24))?;
         if (new_mxcsr & !self.mxcsr_mask) != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -2695,14 +2691,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // CPL != 0: #GP(0)
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if cpl != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // Bochs svm.cc SVM_INTERCEPT2_INVPCID.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT2_INVPCID)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT2_INVPCID) {
             return self.svm_vmexit(super::svm::SvmVmexit::Invpcid as i32, 0, 0);
         }
         // Bochs vmx.cc VMexit_INVPCID.
@@ -2777,7 +2773,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.in_vmx_guest && self.vmexit_check_invept()? {
             return Ok(());
         }
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if cpl != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -2826,7 +2824,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.in_vmx_guest && self.vmexit_check_invvpid()? {
             return Ok(());
         }
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if cpl != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -2845,7 +2845,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // High bits of the VPID field are reserved.
         if desc_lo > 0xFFFF {
-            tracing::warn!("INVVPID: descriptor reserved bits set, lo={:#018x}", desc_lo);
+            tracing::warn!(
+                "INVVPID: descriptor reserved bits set, lo={:#018x}",
+                desc_lo
+            );
             self.vmfail(super::vmx::VmxErr::InvalidInveptInvvpid);
             return Ok(());
         }
@@ -2874,8 +2877,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 }
                 self.tlb_flush();
             }
-            super::vmx::InvvpidType::SingleContext
-            | super::vmx::InvvpidType::AllContext => {
+            super::vmx::InvvpidType::SingleContext | super::vmx::InvvpidType::AllContext => {
                 self.tlb_flush();
             }
             super::vmx::InvvpidType::SingleContextNonGlobal => {
@@ -2946,7 +2948,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// OPMASK state: k0-k7 (64 bytes)
-    fn xsave_opmask_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xsave_opmask_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         for i in 0..8u64 {
             let val = self.opmask[i as usize].rrx();
             self.v_write_qword(seg, base.wrapping_add(i * 8), val)?;
@@ -2954,7 +2960,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    fn xrstor_opmask_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xrstor_opmask_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         for i in 0..8u64 {
             let val = self.v_read_qword(seg, base.wrapping_add(i * 8))?;
             self.bx_write_opmask(i as usize, val);
@@ -2969,7 +2979,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// ZMM_HI256 state: upper 256 bits of ZMM0-ZMM15 (512 bytes max)
-    fn xsave_zmm_hi256_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xsave_zmm_hi256_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
             let offset = base.wrapping_add(i * 32);
@@ -2984,7 +2998,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    fn xrstor_zmm_hi256_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xrstor_zmm_hi256_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
             let offset = base.wrapping_add(i * 32);
@@ -3021,15 +3039,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// HI_ZMM state: full ZMM16-ZMM31 (1024 bytes, 64-bit mode only)
-    fn xsave_hi_zmm_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xsave_hi_zmm_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         if self.long64_mode() {
             for idx in 16..32u64 {
                 let offset = base.wrapping_add((idx - 16) * 64);
                 // SAFETY: zmm union access; index within register file bounds
                 unsafe {
                     for j in 0..8u64 {
-                        self.v_write_qword(seg, offset.wrapping_add(j * 8),
-                            self.vmm[idx as usize].zmm64u(j as usize))?;
+                        self.v_write_qword(
+                            seg,
+                            offset.wrapping_add(j * 8),
+                            self.vmm[idx as usize].zmm64u(j as usize),
+                        )?;
                     }
                 }
             }
@@ -3037,7 +3062,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    fn xrstor_hi_zmm_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xrstor_hi_zmm_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         if self.long64_mode() {
             for idx in 16..32u64 {
                 let offset = base.wrapping_add((idx - 16) * 64);
@@ -3080,10 +3109,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             .union(TlbAccess::USER_READ_OK)
             .union(TlbAccess::SYS_WRITE_OK)
             .union(TlbAccess::USER_WRITE_OK);
-        const USER_RW: TlbAccess =
-            TlbAccess::USER_READ_OK.union(TlbAccess::USER_WRITE_OK);
-        const SYS_RW: TlbAccess =
-            TlbAccess::SYS_READ_OK.union(TlbAccess::SYS_WRITE_OK);
+        const USER_RW: TlbAccess = TlbAccess::USER_READ_OK.union(TlbAccess::USER_WRITE_OK);
+        const SYS_RW: TlbAccess = TlbAccess::SYS_READ_OK.union(TlbAccess::SYS_WRITE_OK);
 
         for i in 0..16 {
             let mut rd_allow = ALL_RW;
@@ -3139,7 +3166,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// PKRU restore — Bochs xsave.cc xrstor_pkru_state. Bochs reads into TMP32
     /// and defers the set_PKeys side-effect to the end of XRSTOR; we have no
     /// equivalent staging register, so apply via set_pkeys immediately.
-    fn xrstor_pkru_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xrstor_pkru_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         let val = self.v_read_qword(seg, base)?;
         self.set_pkeys(val as u32, self.pkrs);
         Ok(())
@@ -3160,7 +3191,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // handlers behave as Bochs' clear-on-absent path (write zeros / no-op restore).
     // =========================================================================
 
-    fn xsave_xtilecfg_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xsave_xtilecfg_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         let mut buf = [0u8; 64];
         if let Some(amx) = self.amx_ref() {
             if amx.tiles_configured() {
@@ -3182,7 +3217,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    fn xrstor_xtilecfg_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xrstor_xtilecfg_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         let mut buf = [0u8; 64];
         for i in 0..8u64 {
             let val = self.v_read_qword(seg, base.wrapping_add(i * 8))?;
@@ -3206,8 +3245,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             amx.start_row = start_row;
             for n in 0..super::avx::BX_TILE_REGISTERS {
                 let row_off = 16 + n * 2;
-                amx.tilecfg[n].rows =
-                    u16::from_le_bytes([buf[row_off], buf[row_off + 1]]) as u32;
+                amx.tilecfg[n].rows = u16::from_le_bytes([buf[row_off], buf[row_off + 1]]) as u32;
                 amx.tilecfg[n].bytes_per_row = buf[48 + n] as u32;
             }
         }
@@ -3220,11 +3258,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
-    fn xsave_xtiledata_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xsave_xtiledata_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         // Snapshot the 8×16×64 = 8192 byte tile buffer up front so the
         // &mut self write loop doesn't alias the AMX struct.
         let tile_bytes: Option<[[u8; 1024]; 8]> = self.amx_ref().map(|amx| amx.tile);
-        let Some(tiles) = tile_bytes else { return Ok(()); };
+        let Some(tiles) = tile_bytes else {
+            return Ok(());
+        };
         for (tile_idx, tile) in tiles.iter().enumerate() {
             for (row_idx, row) in tile.chunks_exact(super::avx::BX_TILE_ROW_BYTES).enumerate() {
                 let off = base.wrapping_add(
@@ -3241,7 +3285,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    fn xrstor_xtiledata_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xrstor_xtiledata_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         // Preload all rows without holding an &mut on amx.
         let mut fresh_tiles: [[u8; 1024]; 8] = [[0u8; 1024]; 8];
         for tile_idx in 0..super::avx::BX_TILE_REGISTERS {
@@ -3277,7 +3325,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// CET U state — Bochs xsave.cc xsave_cet_u_state.
     /// Saves IA32_U_CET (control[1]) at offset+0 and IA32_PL3_SSP at offset+8 (16 bytes total).
-    fn xsave_cet_u_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xsave_cet_u_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         self.v_write_qword(seg, base, self.msr.ia32_cet_control[1])?;
         self.v_write_qword(seg, base.wrapping_add(8), self.msr.ia32_pl_ssp[3])?;
         Ok(())
@@ -3286,7 +3338,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// CET U state restore — Bochs xsave.cc xrstor_cet_u_state. Validates the
     /// loaded values via the same WRMSR path so canonical/CET-control checks
     /// raise #GP exactly as Bochs does (xrstor of CET state == wrmsr).
-    fn xrstor_cet_u_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xrstor_cet_u_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         let ctrl = self.v_read_qword(seg, base)?;
         let pl3_ssp = self.v_read_qword(seg, base.wrapping_add(8))?;
 
@@ -3311,14 +3367,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// CET S state — Bochs xsave.cc xsave_cet_s_state.
     /// Saves IA32_PL0/1/2_SSP at offsets 0/8/16 (24 bytes total).
-    fn xsave_cet_s_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xsave_cet_s_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         self.v_write_qword(seg, base, self.msr.ia32_pl_ssp[0])?;
         self.v_write_qword(seg, base.wrapping_add(8), self.msr.ia32_pl_ssp[1])?;
         self.v_write_qword(seg, base.wrapping_add(16), self.msr.ia32_pl_ssp[2])?;
         Ok(())
     }
 
-    fn xrstor_cet_s_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xrstor_cet_s_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+    ) -> super::Result<()> {
         let pl0_ssp = self.v_read_qword(seg, base)?;
         let pl1_ssp = self.v_read_qword(seg, base.wrapping_add(8))?;
         let pl2_ssp = self.v_read_qword(seg, base.wrapping_add(16))?;
@@ -3341,7 +3405,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Save an extended component at the given offset
     /// Used by both standard XSAVE and compacted XSAVEC
-    fn xsave_extended_component(&mut self, seg: super::decoder::BxSegregs, base: u64, feature: u32) -> super::Result<()> {
+    fn xsave_extended_component(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+        feature: u32,
+    ) -> super::Result<()> {
         use super::crregs::Xcr0Component;
         match Xcr0Component::from_bit(feature) {
             Some(Xcr0Component::Ymm) => self.xsave_ymm_state(seg, base),
@@ -3359,7 +3428,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Restore an extended component from the given offset
-    fn xrstor_extended_component(&mut self, seg: super::decoder::BxSegregs, base: u64, feature: u32) -> super::Result<()> {
+    fn xrstor_extended_component(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: u64,
+        feature: u32,
+    ) -> super::Result<()> {
         use super::crregs::Xcr0Component;
         match Xcr0Component::from_bit(feature) {
             Some(Xcr0Component::Ymm) => self.xrstor_ymm_state(seg, base),
@@ -3410,9 +3484,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Some(Xcr0Component::CetS) => 24,
             Some(Xcr0Component::Uintr) => 48,
             Some(Xcr0Component::Xtilecfg) => 64,
-            Some(Xcr0Component::Xtiledata) => (super::avx::BX_TILE_REGISTERS
-                * super::avx::BX_TILE_MAX_ROWS
-                * super::avx::BX_TILE_ROW_BYTES) as u64,
+            Some(Xcr0Component::Xtiledata) => {
+                (super::avx::BX_TILE_REGISTERS
+                    * super::avx::BX_TILE_MAX_ROWS
+                    * super::avx::BX_TILE_ROW_BYTES) as u64
+            }
             // Bochs crregs.h XSAVE_APX_STATE_LEN: reserves 128 bytes at the
             // APX offset even though no CPU yet registers a save/restore
             // handler for APX. The dispatch fall-through `Ok(())` mirrors
@@ -3444,7 +3520,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // FPU (bit 0) — Bochs xsave.cc
         if (rfbm & 1) != 0 {
-            if self.the_i387.cwd != 0x037F || self.the_i387.swd != 0
+            if self.the_i387.cwd != 0x037F
+                || self.the_i387.swd != 0
                 || self.the_i387.twd != 0xFFFF
                 || self.the_i387.foo != 0
                 || self.the_i387.fip != 0
@@ -3455,7 +3532,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 xinuse |= 1;
             } else {
                 for i in 0..8 {
-                    if self.the_i387.st_space[i].signif != 0 || self.the_i387.st_space[i].sign_exp != 0 {
+                    if self.the_i387.st_space[i].signif != 0
+                        || self.the_i387.st_space[i].sign_exp != 0
+                    {
                         xinuse |= 1;
                         break;
                     }
@@ -3511,8 +3590,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for i in 0..num {
                 // SAFETY: zmm union access; index within register file bounds
                 unsafe {
-                    if self.vmm[i].zmm64u(4) != 0 || self.vmm[i].zmm64u(5) != 0
-                        || self.vmm[i].zmm64u(6) != 0 || self.vmm[i].zmm64u(7) != 0
+                    if self.vmm[i].zmm64u(4) != 0
+                        || self.vmm[i].zmm64u(5) != 0
+                        || self.vmm[i].zmm64u(6) != 0
+                        || self.vmm[i].zmm64u(7) != 0
                     {
                         xinuse |= 1 << 6;
                         break;
@@ -3526,10 +3607,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for i in 16..32 {
                 // SAFETY: zmm union access; index within register file bounds
                 unsafe {
-                    if self.vmm[i].zmm64u(0) != 0 || self.vmm[i].zmm64u(1) != 0
-                        || self.vmm[i].zmm64u(2) != 0 || self.vmm[i].zmm64u(3) != 0
-                        || self.vmm[i].zmm64u(4) != 0 || self.vmm[i].zmm64u(5) != 0
-                        || self.vmm[i].zmm64u(6) != 0 || self.vmm[i].zmm64u(7) != 0
+                    if self.vmm[i].zmm64u(0) != 0
+                        || self.vmm[i].zmm64u(1) != 0
+                        || self.vmm[i].zmm64u(2) != 0
+                        || self.vmm[i].zmm64u(3) != 0
+                        || self.vmm[i].zmm64u(4) != 0
+                        || self.vmm[i].zmm64u(5) != 0
+                        || self.vmm[i].zmm64u(6) != 0
+                        || self.vmm[i].zmm64u(7) != 0
                     {
                         xinuse |= 1 << 7;
                         break;
@@ -3673,7 +3758,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs xsave.cc
     // ========================================================================
 
-    pub(super) fn xsavec(&mut self, instr: &super::decoder::Instruction, is_xsaves: bool) -> super::Result<()> {
+    pub(super) fn xsavec(
+        &mut self,
+        instr: &super::decoder::Instruction,
+        is_xsaves: bool,
+    ) -> super::Result<()> {
         use super::decoder::BxSegregs;
 
         if !self.cr4.osxsave() {
@@ -3759,7 +3848,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // XRSTORS is the same but requires CPL=0 and compaction, adds XSS
     // ========================================================================
 
-    pub(super) fn xrstor_unified(&mut self, instr: &super::decoder::Instruction, is_xrstors: bool) -> super::Result<()> {
+    pub(super) fn xrstor_unified(
+        &mut self,
+        instr: &super::decoder::Instruction,
+        is_xrstors: bool,
+    ) -> super::Result<()> {
         use super::decoder::BxSegregs;
 
         if !self.cr4.osxsave() {
@@ -3911,7 +4004,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 if (requested & mask) != 0 {
                     if (xstate_bv & mask) != 0 {
                         let comp_offset = Self::xsave_component_offset(feature);
-                        self.xrstor_extended_component(seg, eaddr.wrapping_add(comp_offset), feature)?;
+                        self.xrstor_extended_component(
+                            seg,
+                            eaddr.wrapping_add(comp_offset),
+                            feature,
+                        )?;
                     } else {
                         self.xrstor_init_extended_component(feature);
                     }
@@ -3922,7 +4019,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 }
-
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {

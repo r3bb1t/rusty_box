@@ -1,6 +1,5 @@
 #![allow(private_interfaces, unused_assignments, dead_code)]
 
-
 use crate::config::{BxAddress, BxPhyAddress, BxPtrEquiv};
 
 pub type BxMemType = u32;
@@ -132,7 +131,7 @@ impl<const SIZE: usize> Tlb<SIZE> {
     pub fn get_index_of(&self, lpf: u64, len: u32) -> usize {
         // Mirror: ((size-1)<<12) mask, then shift down by 12
         let tlb_mask = ((SIZE - 1) as u64) << 12;
-        
+
         ((lpf.wrapping_add(len as u64) & tlb_mask) >> 12) as usize
     }
 

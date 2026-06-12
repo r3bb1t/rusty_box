@@ -454,8 +454,6 @@ impl Default for BxLocalApic {
 // ─── Static helper functions (Bochs: apic.cc) ────────────────────────
 
 impl BxLocalApic {
-
-
     /// Get the live system tick count, accounting for instructions executed
     /// since the last batch boundary. This allows LAPIC timer current count
     /// reads to see progress within a CPU batch (critical for calibration loops).
@@ -664,8 +662,8 @@ impl BxLocalApic {
                     data = 0;
                 } else if self.timer_active && self.timer_divide_factor > 0 {
                     let ticks = self.live_ticks(icount);
-                    let delta64 = ticks.saturating_sub(self.ticks_initial)
-                        / self.timer_divide_factor as u64;
+                    let delta64 =
+                        ticks.saturating_sub(self.ticks_initial) / self.timer_divide_factor as u64;
                     let delta32 = delta64 as u32;
                     data = self.timer_initial.saturating_sub(delta32);
                 } else {
@@ -866,11 +864,18 @@ impl BxLocalApic {
             // Cannot enable TSC-Deadline when not supported (we don't support it)
             value &= !0x40000;
             // Trace timer LVT writes
-            let mode = match (value >> 17) & 3 { 0 => "one-shot", 1 => "periodic", 2 => "tsc-dl", _ => "??" };
+            let mode = match (value >> 17) & 3 {
+                0 => "one-shot",
+                1 => "periodic",
+                2 => "tsc-dl",
+                _ => "??",
+            };
             let vec = value & 0xFF;
             let masked = (value >> 16) & 1;
-            debug!("[LAPIC] LVT_TIMER write: vec={:#x} mode={} masked={} raw={:#010x}",
-                vec, mode, masked, value);
+            debug!(
+                "[LAPIC] LVT_TIMER write: vec={:#x} mode={} masked={} raw={:#010x}",
+                vec, mode, masked, value
+            );
         }
 
         // Apply LVT mask for this entry
@@ -894,13 +899,12 @@ impl BxLocalApic {
         let vector = (lo_cmd & 0xFF) as u8;
 
         // INIT Level Deassert — special no-op mode (apic.cc)
-        if delivery_mode == ApicDeliveryMode::Init as u8
-            && level == 0 && trig_mode == 1 {
-                // "INIT Level Deassert": causes all APICs to set their
-                // arbitration ID to their APIC ID. Not supported by P4/Xeon.
-                // We don't model APIC bus arbitration ID, so just return.
-                return;
-            }
+        if delivery_mode == ApicDeliveryMode::Init as u8 && level == 0 && trig_mode == 1 {
+            // "INIT Level Deassert": causes all APICs to set their
+            // arbitration ID to their APIC ID. Not supported by P4/Xeon.
+            // We don't model APIC bus arbitration ID, so just return.
+            return;
+        }
 
         match dest_shorthand {
             // 0: no shorthand — use real destination value (apic.cc)
@@ -976,8 +980,10 @@ impl BxLocalApic {
 
         // Trace enable/disable transitions
         if was_enabled != self.software_enabled {
-            debug!("[LAPIC] SVR write: sw_enabled {} -> {} (SVR={:#x})",
-                was_enabled, self.software_enabled, value);
+            debug!(
+                "[LAPIC] SVR write: sw_enabled {} -> {} (SVR={:#x})",
+                was_enabled, self.software_enabled, value
+            );
         }
 
         if !self.software_enabled {
@@ -1294,8 +1300,7 @@ impl BxLocalApic {
     /// zero once the timer has expired.
     pub(crate) fn read_vmx_preemption_timer(&self, current_ticks: u64) -> u32 {
         let rate = self.vmx_preemption_timer_rate;
-        let diff = (current_ticks >> rate)
-            .wrapping_sub(self.vmx_preemption_timer_initial >> rate);
+        let diff = (current_ticks >> rate).wrapping_sub(self.vmx_preemption_timer_initial >> rate);
         if u64::from(self.vmx_preemption_timer_value) <= diff {
             0
         } else {
@@ -1417,8 +1422,10 @@ impl BxLocalApic {
             self.trigger_irq(timervec.vector(), APIC_EDGE_TRIGGERED, false);
         } else {
             self.diag_timer_masked += 1;
-            debug!("[LAPIC] periodic: LVT MASKED (fire #{}), sw_enabled={}",
-                self.diag_timer_fires, self.software_enabled);
+            debug!(
+                "[LAPIC] periodic: LVT MASKED (fire #{}), sw_enabled={}",
+                self.diag_timer_fires, self.software_enabled
+            );
         }
 
         // Check timer mode (apic.cc)
@@ -1461,7 +1468,11 @@ impl BxLocalApic {
     pub(crate) fn set_initial_timer_count(&mut self, value: u32) {
         self.diag_set_initial_count += 1;
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
-        let mode = match timervec.timer_mode_field() { 0 => "one-shot", 1 => "periodic", _ => "other" };
+        let mode = match timervec.timer_mode_field() {
+            0 => "one-shot",
+            1 => "periodic",
+            _ => "other",
+        };
         debug!("[LAPIC] set_initial_count: value={} div_factor={} period={} mode={} vec={:#x} masked={} (call #{})",
             value, self.timer_divide_factor,
             value as u64 * self.timer_divide_factor as u64,
@@ -1484,10 +1495,13 @@ impl BxLocalApic {
 
         if self.timer_initial != 0 {
             // Start counting (apic.cc)
-            debug!("APIC: Initial Timer Count Register = {} div_factor={} period={} mode={}",
-                value, self.timer_divide_factor,
+            debug!(
+                "APIC: Initial Timer Count Register = {} div_factor={} period={} mode={}",
+                value,
+                self.timer_divide_factor,
                 value as u64 * self.timer_divide_factor as u64,
-                timervec.timer_mode_field());
+                timervec.timer_mode_field()
+            );
             self.timer_current = self.timer_initial;
             self.timer_active = true;
             // Bochs apic.cc: ticksInitial = bx_pc_system.time_ticks()
@@ -1563,8 +1577,14 @@ impl BxLocalApic {
     pub(crate) fn hlt_timer_diag(&self) -> (bool, u32, u64, u8, bool, bool) {
         let vec = self.lvt[LocalVectorTableEntry::Timer as usize].vector();
         let period = self.timer_initial as u64 * self.timer_divide_factor as u64;
-        (self.timer_active, self.timer_initial, period, vec,
-         self.timer_activate_request.is_some(), self.timer_deactivate_request)
+        (
+            self.timer_active,
+            self.timer_initial,
+            period,
+            vec,
+            self.timer_activate_request.is_some(),
+            self.timer_deactivate_request,
+        )
     }
 
     // ─── TSC-Deadline timer ──────────────────────────────────────────────
@@ -1715,7 +1735,6 @@ impl BxLocalApic {
         // In practice, illegal register reads are rare and the error
         // will be caught by the write_aligned path.
     }
-
 }
 
 // ─── APIC error status (preserved for API compatibility) ────────────────────
@@ -1782,28 +1801,61 @@ impl BxLocalApic {
         let timer_masked = timervec.contains(LvtBits::MASKED);
         let timer_vector = timervec.vector();
         tracing::trace!("--- LAPIC State ---");
-        tracing::trace!("  mode={:?} sw_enabled={} base={:#x} id={}",
-            self.mode, self.software_enabled, self.base_addr, self.apic_id);
-        tracing::trace!("  TPR={:#x} PPR={:#x} spurious_vec={:#x}",
-            self.task_priority, self.get_ppr(), self.spurious_vector);
-        tracing::trace!("  LVT[Timer]={:#010x} (vec={:#x} mode={} masked={})",
-            timervec.bits(), timer_vector, timer_mode, timer_masked);
-        tracing::trace!("  LVT[LINT0]={:#010x} LVT[LINT1]={:#010x}",
-            self.lvt[3].bits(), self.lvt[4].bits());
-        tracing::trace!("  timer: initial={} current={} active={} div_factor={} period={}",
-            self.timer_initial, self.timer_current, self.timer_active,
+        tracing::trace!(
+            "  mode={:?} sw_enabled={} base={:#x} id={}",
+            self.mode,
+            self.software_enabled,
+            self.base_addr,
+            self.apic_id
+        );
+        tracing::trace!(
+            "  TPR={:#x} PPR={:#x} spurious_vec={:#x}",
+            self.task_priority,
+            self.get_ppr(),
+            self.spurious_vector
+        );
+        tracing::trace!(
+            "  LVT[Timer]={:#010x} (vec={:#x} mode={} masked={})",
+            timervec.bits(),
+            timer_vector,
+            timer_mode,
+            timer_masked
+        );
+        tracing::trace!(
+            "  LVT[LINT0]={:#010x} LVT[LINT1]={:#010x}",
+            self.lvt[3].bits(),
+            self.lvt[4].bits()
+        );
+        tracing::trace!(
+            "  timer: initial={} current={} active={} div_factor={} period={}",
+            self.timer_initial,
+            self.timer_current,
+            self.timer_active,
             self.timer_divide_factor,
-            self.timer_initial as u64 * self.timer_divide_factor as u64);
-        tracing::trace!("  ticks_initial={} current_ticks={}", self.ticks_initial, self.current_ticks);
-        tracing::trace!("  intr={} timer_fired={} timer_activate_req={} timer_deact_req={}",
-            self.intr, self.timer_fired,
-            self.timer_activate_request.is_some(), self.timer_deactivate_request);
+            self.timer_initial as u64 * self.timer_divide_factor as u64
+        );
+        tracing::trace!(
+            "  ticks_initial={} current_ticks={}",
+            self.ticks_initial,
+            self.current_ticks
+        );
+        tracing::trace!(
+            "  intr={} timer_fired={} timer_activate_req={} timer_deact_req={}",
+            self.intr,
+            self.timer_fired,
+            self.timer_activate_request.is_some(),
+            self.timer_deactivate_request
+        );
         // Show IRR/ISR summary - which vectors are pending/in-service
         let mut irr_vecs = Vec::new();
         let mut isr_vecs = Vec::new();
         for i in 0..256u32 {
-            if Self::get_vector(&self.irr, i) { irr_vecs.push(i); }
-            if Self::get_vector(&self.isr, i) { isr_vecs.push(i); }
+            if Self::get_vector(&self.irr, i) {
+                irr_vecs.push(i);
+            }
+            if Self::get_vector(&self.isr, i) {
+                isr_vecs.push(i);
+            }
         }
         tracing::trace!("  IRR vectors: {:?}", irr_vecs);
         tracing::trace!("  ISR vectors: {:?}", isr_vecs);

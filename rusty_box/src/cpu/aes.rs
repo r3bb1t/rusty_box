@@ -122,22 +122,22 @@ macro_rules! aes_state_set {
 /// Byte permutation: [0,5,A,F,4,9,E,3,8,D,2,7,C,1,6,B]
 fn aes_shift_rows(state: &mut BxPackedXmmRegister) {
     let tmp = *state;
-        state.set_xmmubyte(0x0, tmp.xmmubyte(0x0)); // A => A
-        state.set_xmmubyte(0x1, tmp.xmmubyte(0x5));
-        state.set_xmmubyte(0x2, tmp.xmmubyte(0xA));
-        state.set_xmmubyte(0x3, tmp.xmmubyte(0xF));
-        state.set_xmmubyte(0x4, tmp.xmmubyte(0x4)); // E => E
-        state.set_xmmubyte(0x5, tmp.xmmubyte(0x9));
-        state.set_xmmubyte(0x6, tmp.xmmubyte(0xE));
-        state.set_xmmubyte(0x7, tmp.xmmubyte(0x3));
-        state.set_xmmubyte(0x8, tmp.xmmubyte(0x8)); // I => I
-        state.set_xmmubyte(0x9, tmp.xmmubyte(0xD));
-        state.set_xmmubyte(0xA, tmp.xmmubyte(0x2));
-        state.set_xmmubyte(0xB, tmp.xmmubyte(0x7));
-        state.set_xmmubyte(0xC, tmp.xmmubyte(0xC)); // M => M
-        state.set_xmmubyte(0xD, tmp.xmmubyte(0x1));
-        state.set_xmmubyte(0xE, tmp.xmmubyte(0x6));
-        state.set_xmmubyte(0xF, tmp.xmmubyte(0xB));
+    state.set_xmmubyte(0x0, tmp.xmmubyte(0x0)); // A => A
+    state.set_xmmubyte(0x1, tmp.xmmubyte(0x5));
+    state.set_xmmubyte(0x2, tmp.xmmubyte(0xA));
+    state.set_xmmubyte(0x3, tmp.xmmubyte(0xF));
+    state.set_xmmubyte(0x4, tmp.xmmubyte(0x4)); // E => E
+    state.set_xmmubyte(0x5, tmp.xmmubyte(0x9));
+    state.set_xmmubyte(0x6, tmp.xmmubyte(0xE));
+    state.set_xmmubyte(0x7, tmp.xmmubyte(0x3));
+    state.set_xmmubyte(0x8, tmp.xmmubyte(0x8)); // I => I
+    state.set_xmmubyte(0x9, tmp.xmmubyte(0xD));
+    state.set_xmmubyte(0xA, tmp.xmmubyte(0x2));
+    state.set_xmmubyte(0xB, tmp.xmmubyte(0x7));
+    state.set_xmmubyte(0xC, tmp.xmmubyte(0xC)); // M => M
+    state.set_xmmubyte(0xD, tmp.xmmubyte(0x1));
+    state.set_xmmubyte(0xE, tmp.xmmubyte(0x6));
+    state.set_xmmubyte(0xF, tmp.xmmubyte(0xB));
 }
 
 /// AES InverseShiftRows transformation (Bochs AES_InverseShiftRows)
@@ -145,36 +145,36 @@ fn aes_shift_rows(state: &mut BxPackedXmmRegister) {
 /// Byte permutation: [0,D,A,7,4,1,E,B,8,5,2,F,C,9,6,3]
 fn aes_inverse_shift_rows(state: &mut BxPackedXmmRegister) {
     let tmp = *state;
-        state.set_xmmubyte(0x0, tmp.xmmubyte(0x0)); // A => A
-        state.set_xmmubyte(0x1, tmp.xmmubyte(0xD));
-        state.set_xmmubyte(0x2, tmp.xmmubyte(0xA));
-        state.set_xmmubyte(0x3, tmp.xmmubyte(0x7));
-        state.set_xmmubyte(0x4, tmp.xmmubyte(0x4)); // E => E
-        state.set_xmmubyte(0x5, tmp.xmmubyte(0x1));
-        state.set_xmmubyte(0x6, tmp.xmmubyte(0xE));
-        state.set_xmmubyte(0x7, tmp.xmmubyte(0xB));
-        state.set_xmmubyte(0x8, tmp.xmmubyte(0x8)); // I => I
-        state.set_xmmubyte(0x9, tmp.xmmubyte(0x5));
-        state.set_xmmubyte(0xA, tmp.xmmubyte(0x2));
-        state.set_xmmubyte(0xB, tmp.xmmubyte(0xF));
-        state.set_xmmubyte(0xC, tmp.xmmubyte(0xC)); // M => M
-        state.set_xmmubyte(0xD, tmp.xmmubyte(0x9));
-        state.set_xmmubyte(0xE, tmp.xmmubyte(0x6));
-        state.set_xmmubyte(0xF, tmp.xmmubyte(0x3));
+    state.set_xmmubyte(0x0, tmp.xmmubyte(0x0)); // A => A
+    state.set_xmmubyte(0x1, tmp.xmmubyte(0xD));
+    state.set_xmmubyte(0x2, tmp.xmmubyte(0xA));
+    state.set_xmmubyte(0x3, tmp.xmmubyte(0x7));
+    state.set_xmmubyte(0x4, tmp.xmmubyte(0x4)); // E => E
+    state.set_xmmubyte(0x5, tmp.xmmubyte(0x1));
+    state.set_xmmubyte(0x6, tmp.xmmubyte(0xE));
+    state.set_xmmubyte(0x7, tmp.xmmubyte(0xB));
+    state.set_xmmubyte(0x8, tmp.xmmubyte(0x8)); // I => I
+    state.set_xmmubyte(0x9, tmp.xmmubyte(0x5));
+    state.set_xmmubyte(0xA, tmp.xmmubyte(0x2));
+    state.set_xmmubyte(0xB, tmp.xmmubyte(0xF));
+    state.set_xmmubyte(0xC, tmp.xmmubyte(0xC)); // M => M
+    state.set_xmmubyte(0xD, tmp.xmmubyte(0x9));
+    state.set_xmmubyte(0xE, tmp.xmmubyte(0x6));
+    state.set_xmmubyte(0xF, tmp.xmmubyte(0x3));
 }
 
 /// Apply AES S-box substitution to each byte of state (Bochs AES_SubstituteBytes)
 fn aes_substitute_bytes(state: &mut BxPackedXmmRegister) {
-        for i in 0..16 {
-            state.set_xmmubyte(i, SBOX_TRANSFORMATION[state.xmmubyte(i) as usize]);
-        }
+    for i in 0..16 {
+        state.set_xmmubyte(i, SBOX_TRANSFORMATION[state.xmmubyte(i) as usize]);
+    }
 }
 
 /// Apply inverse AES S-box substitution to each byte of state (Bochs AES_InverseSubstituteBytes)
 fn aes_inverse_substitute_bytes(state: &mut BxPackedXmmRegister) {
-        for i in 0..16 {
-            state.set_xmmubyte(i, INVERSE_SBOX_TRANSFORMATION[state.xmmubyte(i) as usize]);
-        }
+    for i in 0..16 {
+        state.set_xmmubyte(i, INVERSE_SBOX_TRANSFORMATION[state.xmmubyte(i) as usize]);
+    }
 }
 
 /// Galois Field multiplication of a by b, modulo 0x11b (Bochs gf_mul)
@@ -213,25 +213,45 @@ fn aes_mix_columns(state: &mut BxPackedXmmRegister) {
     let tmp = *state;
 
     for j in 0..4usize {
-            aes_state_set!(state, 0, j, (gf_mul(0x2, aes_state!(tmp, 0, j) as u32)
+        aes_state_set!(
+            state,
+            0,
+            j,
+            (gf_mul(0x2, aes_state!(tmp, 0, j) as u32)
                 ^ gf_mul(0x3, aes_state!(tmp, 1, j) as u32)
                 ^ aes_state!(tmp, 2, j) as u32
-                ^ aes_state!(tmp, 3, j) as u32) as u8);
+                ^ aes_state!(tmp, 3, j) as u32) as u8
+        );
 
-            aes_state_set!(state, 1, j, (aes_state!(tmp, 0, j) as u32
+        aes_state_set!(
+            state,
+            1,
+            j,
+            (aes_state!(tmp, 0, j) as u32
                 ^ gf_mul(0x2, aes_state!(tmp, 1, j) as u32)
                 ^ gf_mul(0x3, aes_state!(tmp, 2, j) as u32)
-                ^ aes_state!(tmp, 3, j) as u32) as u8);
+                ^ aes_state!(tmp, 3, j) as u32) as u8
+        );
 
-            aes_state_set!(state, 2, j, (aes_state!(tmp, 0, j) as u32
+        aes_state_set!(
+            state,
+            2,
+            j,
+            (aes_state!(tmp, 0, j) as u32
                 ^ aes_state!(tmp, 1, j) as u32
                 ^ gf_mul(0x2, aes_state!(tmp, 2, j) as u32)
-                ^ gf_mul(0x3, aes_state!(tmp, 3, j) as u32)) as u8);
+                ^ gf_mul(0x3, aes_state!(tmp, 3, j) as u32)) as u8
+        );
 
-            aes_state_set!(state, 3, j, (gf_mul(0x3, aes_state!(tmp, 0, j) as u32)
+        aes_state_set!(
+            state,
+            3,
+            j,
+            (gf_mul(0x3, aes_state!(tmp, 0, j) as u32)
                 ^ aes_state!(tmp, 1, j) as u32
                 ^ aes_state!(tmp, 2, j) as u32
-                ^ gf_mul(0x2, aes_state!(tmp, 3, j) as u32)) as u8);
+                ^ gf_mul(0x2, aes_state!(tmp, 3, j) as u32)) as u8
+        );
     }
 }
 
@@ -242,25 +262,45 @@ fn aes_inverse_mix_columns(state: &mut BxPackedXmmRegister) {
     let tmp = *state;
 
     for j in 0..4usize {
-            aes_state_set!(state, 0, j, (gf_mul(0xE, aes_state!(tmp, 0, j) as u32)
+        aes_state_set!(
+            state,
+            0,
+            j,
+            (gf_mul(0xE, aes_state!(tmp, 0, j) as u32)
                 ^ gf_mul(0xB, aes_state!(tmp, 1, j) as u32)
                 ^ gf_mul(0xD, aes_state!(tmp, 2, j) as u32)
-                ^ gf_mul(0x9, aes_state!(tmp, 3, j) as u32)) as u8);
+                ^ gf_mul(0x9, aes_state!(tmp, 3, j) as u32)) as u8
+        );
 
-            aes_state_set!(state, 1, j, (gf_mul(0x9, aes_state!(tmp, 0, j) as u32)
+        aes_state_set!(
+            state,
+            1,
+            j,
+            (gf_mul(0x9, aes_state!(tmp, 0, j) as u32)
                 ^ gf_mul(0xE, aes_state!(tmp, 1, j) as u32)
                 ^ gf_mul(0xB, aes_state!(tmp, 2, j) as u32)
-                ^ gf_mul(0xD, aes_state!(tmp, 3, j) as u32)) as u8);
+                ^ gf_mul(0xD, aes_state!(tmp, 3, j) as u32)) as u8
+        );
 
-            aes_state_set!(state, 2, j, (gf_mul(0xD, aes_state!(tmp, 0, j) as u32)
+        aes_state_set!(
+            state,
+            2,
+            j,
+            (gf_mul(0xD, aes_state!(tmp, 0, j) as u32)
                 ^ gf_mul(0x9, aes_state!(tmp, 1, j) as u32)
                 ^ gf_mul(0xE, aes_state!(tmp, 2, j) as u32)
-                ^ gf_mul(0xB, aes_state!(tmp, 3, j) as u32)) as u8);
+                ^ gf_mul(0xB, aes_state!(tmp, 3, j) as u32)) as u8
+        );
 
-            aes_state_set!(state, 3, j, (gf_mul(0xB, aes_state!(tmp, 0, j) as u32)
+        aes_state_set!(
+            state,
+            3,
+            j,
+            (gf_mul(0xB, aes_state!(tmp, 0, j) as u32)
                 ^ gf_mul(0xD, aes_state!(tmp, 1, j) as u32)
                 ^ gf_mul(0x9, aes_state!(tmp, 2, j) as u32)
-                ^ gf_mul(0xE, aes_state!(tmp, 3, j) as u32)) as u8);
+                ^ gf_mul(0xE, aes_state!(tmp, 3, j) as u32)) as u8
+        );
     }
 }
 
@@ -284,8 +324,8 @@ fn aes_rot_word(x: u32) -> u32 {
 /// XOR two XMM registers (Bochs xmm_xorps)
 #[inline]
 fn xmm_xorps(dst: &mut BxPackedXmmRegister, src: &BxPackedXmmRegister) {
-        dst.set_xmm64u(0, dst.xmm64u(0) ^ src.xmm64u(0));
-        dst.set_xmm64u(1, dst.xmm64u(1) ^ src.xmm64u(1));
+    dst.set_xmm64u(0, dst.xmm64u(0) ^ src.xmm64u(0));
+    dst.set_xmm64u(1, dst.xmm64u(1) ^ src.xmm64u(1));
 }
 
 /// Carry-less multiplication of two 64-bit values (Bochs xmm_pclmulqdq)
@@ -312,8 +352,8 @@ fn xmm_pclmulqdq(a: u64, b: u64) -> BxPackedXmmRegister {
         b >>= 1;
     }
 
-        result.set_xmm64u(0, r_lo);
-        result.set_xmm64u(1, r_hi);
+    result.set_xmm64u(0, r_lo);
+    result.set_xmm64u(1, r_hi);
     result
 }
 
@@ -326,10 +366,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Matches Bochs LOAD_Wdq pattern: if mod==11b read register, else read 128-bit
     /// from memory via paging-aware access.
     #[inline]
-    fn read_xmm_src(
-        &mut self,
-        instr: &Instruction,
-    ) -> super::Result<BxPackedXmmRegister> {
+    fn read_xmm_src(&mut self, instr: &Instruction) -> super::Result<BxPackedXmmRegister> {
         if instr.mod_c0() {
             Ok(self.read_xmm_reg(instr.src()))
         } else {
@@ -443,18 +480,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// AESKEYGENASSIST VdqWdqIb — 66 0F 3A DF
     ///
     /// Assist in AES round key generation using the RCON immediate.
-    pub(super) fn aeskeygenassist_vdq_wdq_ib(
-        &mut self,
-        instr: &Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn aeskeygenassist_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let op = self.read_xmm_src(instr)?;
         let rcon32 = instr.ib() as u32;
         let mut result = BxPackedXmmRegister::default();
 
-            result.set_xmm32u(0, aes_sub_word(op.xmm32u(1)));
-            result.set_xmm32u(1, aes_rot_word(result.xmm32u(0)) ^ rcon32);
-            result.set_xmm32u(2, aes_sub_word(op.xmm32u(3)));
-            result.set_xmm32u(3, aes_rot_word(result.xmm32u(2)) ^ rcon32);
+        result.set_xmm32u(0, aes_sub_word(op.xmm32u(1)));
+        result.set_xmm32u(1, aes_rot_word(result.xmm32u(0)) ^ rcon32);
+        result.set_xmm32u(2, aes_sub_word(op.xmm32u(3)));
+        result.set_xmm32u(3, aes_rot_word(result.xmm32u(2)) ^ rcon32);
 
         self.write_xmm_result(instr, instr.dst(), result);
         Ok(())

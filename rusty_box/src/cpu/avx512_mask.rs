@@ -1,5 +1,3 @@
-
-
 //! AVX-512 Opmask (k-register) instruction handlers
 //!
 //! Implements KMOV, KAND, KOR, KXOR, KXNOR, KNOT, KADD, KUNPCK,
@@ -15,13 +13,21 @@ use super::{
 
 /// Helper: read opmask register value (full 64-bit)
 #[inline]
-fn read_opmask<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, idx: u8) -> u64 {
+fn read_opmask<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    idx: u8,
+) -> u64 {
     cpu.opmask_rrx(idx as usize)
 }
 
 /// Helper: write opmask register with width mask
 #[inline]
-fn write_opmask_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<'_, I, T>, idx: u8, val: u64, mask: u64) {
+fn write_opmask_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
+    idx: u8,
+    val: u64,
+    mask: u64,
+) {
     cpu.bx_write_opmask(idx as usize, val & mask);
 }
 
@@ -421,32 +427,44 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn kortestb_kgb_keb_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let tmp = (read_opmask(self, instr.dst()) | read_opmask(self, instr.src())) & MASK_B;
         self.oszapc.set_oszapc_logic_32(1); // clearEFlagsOSZAPC
-        if tmp == 0 { self.oszapc.set_zf(true); }
-        else if tmp == MASK_B { self.oszapc.set_cf(true); }
+        if tmp == 0 {
+            self.oszapc.set_zf(true);
+        } else if tmp == MASK_B {
+            self.oszapc.set_cf(true);
+        }
         Ok(())
     }
     /// KORTESTW KGw, KEw — Bochs KORTESTW_KGwKEwR
     pub fn kortestw_kgw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let tmp = (read_opmask(self, instr.dst()) | read_opmask(self, instr.src())) & MASK_W;
         self.oszapc.set_oszapc_logic_32(1);
-        if tmp == 0 { self.oszapc.set_zf(true); }
-        else if tmp == MASK_W { self.oszapc.set_cf(true); }
+        if tmp == 0 {
+            self.oszapc.set_zf(true);
+        } else if tmp == MASK_W {
+            self.oszapc.set_cf(true);
+        }
         Ok(())
     }
     /// KORTESTD KGd, KEd — Bochs KORTESTD_KGdKEdR
     pub fn kortestd_kgd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let tmp = (read_opmask(self, instr.dst()) | read_opmask(self, instr.src())) & MASK_D;
         self.oszapc.set_oszapc_logic_32(1);
-        if tmp == 0 { self.oszapc.set_zf(true); }
-        else if tmp == MASK_D { self.oszapc.set_cf(true); }
+        if tmp == 0 {
+            self.oszapc.set_zf(true);
+        } else if tmp == MASK_D {
+            self.oszapc.set_cf(true);
+        }
         Ok(())
     }
     /// KORTESTQ KGq, KEq — Bochs KORTESTQ_KGqKEqR
     pub fn kortestq_kgq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let tmp = read_opmask(self, instr.dst()) | read_opmask(self, instr.src());
         self.oszapc.set_oszapc_logic_32(1);
-        if tmp == 0 { self.oszapc.set_zf(true); }
-        else if tmp == MASK_Q { self.oszapc.set_cf(true); }
+        if tmp == 0 {
+            self.oszapc.set_zf(true);
+        } else if tmp == MASK_Q {
+            self.oszapc.set_cf(true);
+        }
         Ok(())
     }
 
@@ -459,8 +477,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = read_opmask(self, instr.dst()) & MASK_B;
         let op2 = read_opmask(self, instr.src()) & MASK_B;
         self.oszapc.set_oszapc_logic_32(1); // clearEFlagsOSZAPC
-        if (op1 & op2) == 0 { self.oszapc.set_zf(true); }
-        if ((!op1) & op2 & MASK_B) == 0 { self.oszapc.set_cf(true); }
+        if (op1 & op2) == 0 {
+            self.oszapc.set_zf(true);
+        }
+        if ((!op1) & op2 & MASK_B) == 0 {
+            self.oszapc.set_cf(true);
+        }
         Ok(())
     }
     /// KTESTW KGw, KEw — Bochs KTESTW_KGwKEwR
@@ -468,8 +490,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = read_opmask(self, instr.dst()) & MASK_W;
         let op2 = read_opmask(self, instr.src()) & MASK_W;
         self.oszapc.set_oszapc_logic_32(1);
-        if (op1 & op2) == 0 { self.oszapc.set_zf(true); }
-        if ((!op1) & op2 & MASK_W) == 0 { self.oszapc.set_cf(true); }
+        if (op1 & op2) == 0 {
+            self.oszapc.set_zf(true);
+        }
+        if ((!op1) & op2 & MASK_W) == 0 {
+            self.oszapc.set_cf(true);
+        }
         Ok(())
     }
     /// KTESTD KGd, KEd — Bochs KTESTD_KGdKEdR
@@ -477,8 +503,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = read_opmask(self, instr.dst()) & MASK_D;
         let op2 = read_opmask(self, instr.src()) & MASK_D;
         self.oszapc.set_oszapc_logic_32(1);
-        if (op1 & op2) == 0 { self.oszapc.set_zf(true); }
-        if ((!op1) & op2 & MASK_D) == 0 { self.oszapc.set_cf(true); }
+        if (op1 & op2) == 0 {
+            self.oszapc.set_zf(true);
+        }
+        if ((!op1) & op2 & MASK_D) == 0 {
+            self.oszapc.set_cf(true);
+        }
         Ok(())
     }
     /// KTESTQ KGq, KEq — Bochs KTESTQ_KGqKEqR
@@ -486,8 +516,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = read_opmask(self, instr.dst());
         let op2 = read_opmask(self, instr.src());
         self.oszapc.set_oszapc_logic_32(1);
-        if (op1 & op2) == 0 { self.oszapc.set_zf(true); }
-        if ((!op1) & op2) == 0 { self.oszapc.set_cf(true); }
+        if (op1 & op2) == 0 {
+            self.oszapc.set_zf(true);
+        }
+        if ((!op1) & op2) == 0 {
+            self.oszapc.set_cf(true);
+        }
         Ok(())
     }
 
@@ -499,7 +533,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn kshiftlb_kgb_keb_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src()) & MASK_B;
         let count = instr.ib() as u32;
-        let result = if count >= 8 { 0 } else { (src as u8).wrapping_shl(count) as u64 };
+        let result = if count >= 8 {
+            0
+        } else {
+            (src as u8).wrapping_shl(count) as u64
+        };
         write_opmask_masked(self, instr.dst(), result, MASK_B);
         Ok(())
     }
@@ -507,7 +545,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn kshiftlw_kgw_kew_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src()) & MASK_W;
         let count = instr.ib() as u32;
-        let result = if count >= 16 { 0 } else { (src as u16).wrapping_shl(count) as u64 };
+        let result = if count >= 16 {
+            0
+        } else {
+            (src as u16).wrapping_shl(count) as u64
+        };
         write_opmask_masked(self, instr.dst(), result, MASK_W);
         Ok(())
     }
@@ -515,7 +557,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn kshiftld_kgd_ked_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src()) & MASK_D;
         let count = instr.ib() as u32;
-        let result = if count >= 32 { 0 } else { (src as u32).wrapping_shl(count) as u64 };
+        let result = if count >= 32 {
+            0
+        } else {
+            (src as u32).wrapping_shl(count) as u64
+        };
         write_opmask_masked(self, instr.dst(), result, MASK_D);
         Ok(())
     }
@@ -523,7 +569,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn kshiftlq_kgq_keq_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src());
         let count = instr.ib() as u32;
-        let result = if count >= 64 { 0 } else { src.wrapping_shl(count) };
+        let result = if count >= 64 {
+            0
+        } else {
+            src.wrapping_shl(count)
+        };
         self.bx_write_opmask(instr.dst() as usize, result);
         Ok(())
     }
@@ -532,7 +582,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn kshiftrb_kgb_keb_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src()) & MASK_B;
         let count = instr.ib() as u32;
-        let result = if count >= 8 { 0 } else { (src as u8).wrapping_shr(count) as u64 };
+        let result = if count >= 8 {
+            0
+        } else {
+            (src as u8).wrapping_shr(count) as u64
+        };
         write_opmask_masked(self, instr.dst(), result, MASK_B);
         Ok(())
     }
@@ -540,7 +594,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn kshiftrw_kgw_kew_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src()) & MASK_W;
         let count = instr.ib() as u32;
-        let result = if count >= 16 { 0 } else { (src as u16).wrapping_shr(count) as u64 };
+        let result = if count >= 16 {
+            0
+        } else {
+            (src as u16).wrapping_shr(count) as u64
+        };
         write_opmask_masked(self, instr.dst(), result, MASK_W);
         Ok(())
     }
@@ -548,7 +606,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn kshiftrd_kgd_ked_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src()) & MASK_D;
         let count = instr.ib() as u32;
-        let result = if count >= 32 { 0 } else { (src as u32).wrapping_shr(count) as u64 };
+        let result = if count >= 32 {
+            0
+        } else {
+            (src as u32).wrapping_shr(count) as u64
+        };
         write_opmask_masked(self, instr.dst(), result, MASK_D);
         Ok(())
     }
@@ -556,7 +618,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn kshiftrq_kgq_keq_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src());
         let count = instr.ib() as u32;
-        let result = if count >= 64 { 0 } else { src.wrapping_shr(count) };
+        let result = if count >= 64 {
+            0
+        } else {
+            src.wrapping_shr(count)
+        };
         self.bx_write_opmask(instr.dst() as usize, result);
         Ok(())
     }

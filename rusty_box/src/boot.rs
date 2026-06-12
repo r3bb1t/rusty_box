@@ -50,7 +50,10 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
         return Err(BootError::InvalidBootSignature);
     }
     let header_magic = u32::from_le_bytes([
-        bzimage[0x202], bzimage[0x203], bzimage[0x204], bzimage[0x205],
+        bzimage[0x202],
+        bzimage[0x203],
+        bzimage[0x204],
+        bzimage[0x205],
     ]);
     if header_magic != 0x53726448 {
         return Err(BootError::InvalidHeaderMagic);
@@ -61,12 +64,19 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
     }
 
     // Parse bzImage header
-    let setup_sects = if bzimage[0x1F1] == 0 { 4 } else { bzimage[0x1F1] as usize };
+    let setup_sects = if bzimage[0x1F1] == 0 {
+        4
+    } else {
+        bzimage[0x1F1] as usize
+    };
     let setup_size = (setup_sects + 1) * 512;
     let pm_kernel = &bzimage[setup_size..];
 
     let code32_start = u32::from_le_bytes([
-        bzimage[0x214], bzimage[0x215], bzimage[0x216], bzimage[0x217],
+        bzimage[0x214],
+        bzimage[0x215],
+        bzimage[0x216],
+        bzimage[0x217],
     ]);
 
     // Write GDT at 0x1000
@@ -81,7 +91,9 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
     for (i, &entry) in gdt.iter().enumerate() {
         gdt_bytes[i * 8..(i + 1) * 8].copy_from_slice(&entry.to_le_bytes());
     }
-    memory.load_RAM(&gdt_bytes, GDT_ADDR).map_err(|_| BootError::MemoryLoadFailed)?;
+    memory
+        .load_RAM(&gdt_bytes, GDT_ADDR)
+        .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // Write boot_params (zero page)
     let boot_params_addr: u64 = 0x10000;
@@ -113,7 +125,10 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
     if let Some(initrd_data) = initramfs {
         let initrd_addr_max = if boot_version >= 0x0203 {
             u32::from_le_bytes([
-                bzimage[0x22C], bzimage[0x22D], bzimage[0x22E], bzimage[0x22F],
+                bzimage[0x22C],
+                bzimage[0x22D],
+                bzimage[0x22E],
+                bzimage[0x22F],
             ]) as u64
         } else {
             0x37FFFFFF
@@ -121,7 +136,9 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
         let max_addr = core::cmp::min(ram_size, initrd_addr_max + 1);
         let initrd_load_addr = (max_addr - initrd_data.len() as u64) & !0xFFF;
 
-        memory.load_RAM(initrd_data, initrd_load_addr).map_err(|_| BootError::MemoryLoadFailed)?;
+        memory
+            .load_RAM(initrd_data, initrd_load_addr)
+            .map_err(|_| BootError::MemoryLoadFailed)?;
 
         boot_params[0x218..0x21C].copy_from_slice(&(initrd_load_addr as u32).to_le_bytes());
         boot_params[0x21C..0x220].copy_from_slice(&(initrd_data.len() as u32).to_le_bytes());
@@ -145,20 +162,25 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
     }
     boot_params[0x1E8] = e820_idx as u8;
 
-    memory.load_RAM(&boot_params, boot_params_addr).map_err(|_| BootError::MemoryLoadFailed)?;
+    memory
+        .load_RAM(&boot_params, boot_params_addr)
+        .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // Write command line (stack buffer, max 2048 bytes)
     let mut cmdline_buf = [0u8; 2048];
     let cmdline_len = core::cmp::min(cmdline.len(), 2047);
     cmdline_buf[..cmdline_len].copy_from_slice(&cmdline[..cmdline_len]);
-    memory.load_RAM(&cmdline_buf[..cmdline_len + 1], cmdline_addr)
+    memory
+        .load_RAM(&cmdline_buf[..cmdline_len + 1], cmdline_addr)
         .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // ACPI tables (all stack-allocated)
     write_acpi_tables(memory)?;
 
     // Load protected-mode kernel
-    memory.load_RAM(pm_kernel, code32_start as u64).map_err(|_| BootError::MemoryLoadFailed)?;
+    memory
+        .load_RAM(pm_kernel, code32_start as u64)
+        .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // Configure CPU for protected mode
     cpu.setup_for_direct_boot(GDT_ADDR);
@@ -192,24 +214,35 @@ fn write_acpi_tables(memory: &mut BxMemC<'_>) -> Result<(), BootError> {
 
     // Local APIC entry
     let e = 44;
-    madt[e] = 0; madt[e + 1] = 8; madt[e + 2] = 0; madt[e + 3] = 0;
+    madt[e] = 0;
+    madt[e + 1] = 8;
+    madt[e + 2] = 0;
+    madt[e + 3] = 0;
     madt[e + 4..e + 8].copy_from_slice(&1u32.to_le_bytes());
 
     // I/O APIC entry
     let e = 52;
-    madt[e] = 1; madt[e + 1] = 12; madt[e + 2] = 1; madt[e + 3] = 0;
+    madt[e] = 1;
+    madt[e + 1] = 12;
+    madt[e + 2] = 1;
+    madt[e + 3] = 0;
     madt[e + 4..e + 8].copy_from_slice(&0xFEC00000u32.to_le_bytes());
     madt[e + 8..e + 12].copy_from_slice(&0u32.to_le_bytes());
 
     // Interrupt Source Override
     let e = 64;
-    madt[e] = 2; madt[e + 1] = 10; madt[e + 2] = 0; madt[e + 3] = 0;
+    madt[e] = 2;
+    madt[e + 1] = 10;
+    madt[e + 2] = 0;
+    madt[e + 3] = 0;
     madt[e + 4..e + 8].copy_from_slice(&2u32.to_le_bytes());
     madt[e + 8..e + 10].copy_from_slice(&0u16.to_le_bytes());
 
     let sum: u8 = madt.iter().fold(0u8, |a, &b| a.wrapping_add(b));
     madt[9] = 0u8.wrapping_sub(sum);
-    memory.load_RAM(&madt, MADT_ADDR).map_err(|_| BootError::MemoryLoadFailed)?;
+    memory
+        .load_RAM(&madt, MADT_ADDR)
+        .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // XSDT: 36 header + 8 pointer = 44
     let mut xsdt = [0u8; 44];
@@ -224,7 +257,9 @@ fn write_acpi_tables(memory: &mut BxMemC<'_>) -> Result<(), BootError> {
     xsdt[36..44].copy_from_slice(&MADT_ADDR.to_le_bytes());
     let sum: u8 = xsdt.iter().fold(0u8, |a, &b| a.wrapping_add(b));
     xsdt[9] = 0u8.wrapping_sub(sum);
-    memory.load_RAM(&xsdt, XSDT_ADDR).map_err(|_| BootError::MemoryLoadFailed)?;
+    memory
+        .load_RAM(&xsdt, XSDT_ADDR)
+        .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // RSDP v2.0 = 36 bytes
     let mut rsdp = [0u8; 36];
@@ -238,7 +273,9 @@ fn write_acpi_tables(memory: &mut BxMemC<'_>) -> Result<(), BootError> {
     rsdp[8] = 0u8.wrapping_sub(v1_sum);
     let v2_sum: u8 = rsdp.iter().fold(0u8, |a, &b| a.wrapping_add(b));
     rsdp[32] = 0u8.wrapping_sub(v2_sum);
-    memory.load_RAM(&rsdp, RSDP_ADDR).map_err(|_| BootError::MemoryLoadFailed)?;
+    memory
+        .load_RAM(&rsdp, RSDP_ADDR)
+        .map_err(|_| BootError::MemoryLoadFailed)?;
 
     Ok(())
 }
@@ -265,10 +302,16 @@ pub fn iso9660_find(iso_data: &[u8], path: &[&str]) -> Option<(usize, usize)> {
 
     let root_record = &pvd[156..156 + 34];
     let mut current_lba = u32::from_le_bytes([
-        root_record[2], root_record[3], root_record[4], root_record[5],
+        root_record[2],
+        root_record[3],
+        root_record[4],
+        root_record[5],
     ]);
     let mut current_len = u32::from_le_bytes([
-        root_record[10], root_record[11], root_record[12], root_record[13],
+        root_record[10],
+        root_record[11],
+        root_record[12],
+        root_record[13],
     ]);
 
     for (depth, &name) in path.iter().enumerate() {
@@ -287,11 +330,15 @@ pub fn iso9660_find(iso_data: &[u8], path: &[&str]) -> Option<(usize, usize)> {
             let record_len = dir_data[pos] as usize;
             if record_len == 0 {
                 let next_sector = ((pos / 2048) + 1) * 2048;
-                if next_sector >= dir_data.len() { break; }
+                if next_sector >= dir_data.len() {
+                    break;
+                }
                 pos = next_sector;
                 continue;
             }
-            if pos + record_len > dir_data.len() { break; }
+            if pos + record_len > dir_data.len() {
+                break;
+            }
 
             let name_len = dir_data[pos + 32] as usize;
             if name_len > 0 && pos + 33 + name_len <= dir_data.len() {
@@ -299,12 +346,16 @@ pub fn iso9660_find(iso_data: &[u8], path: &[&str]) -> Option<(usize, usize)> {
                 // Case-insensitive prefix match (ISO 9660 uses uppercase + version suffix)
                 if entry_name_matches(entry_name, name_upper) {
                     let entry_lba = u32::from_le_bytes([
-                        dir_data[pos + 2], dir_data[pos + 3],
-                        dir_data[pos + 4], dir_data[pos + 5],
+                        dir_data[pos + 2],
+                        dir_data[pos + 3],
+                        dir_data[pos + 4],
+                        dir_data[pos + 5],
                     ]);
                     let entry_len = u32::from_le_bytes([
-                        dir_data[pos + 10], dir_data[pos + 11],
-                        dir_data[pos + 12], dir_data[pos + 13],
+                        dir_data[pos + 10],
+                        dir_data[pos + 11],
+                        dir_data[pos + 12],
+                        dir_data[pos + 13],
                     ]);
 
                     if is_file {

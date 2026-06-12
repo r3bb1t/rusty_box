@@ -68,9 +68,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn shadow_stack_enabled(&self, cpl: u8) -> bool {
         self.cr4.cet()
             && self.protected_mode()
-            && (self.msr.ia32_cet_control[usize::from(cpl == 3)]
-                & CET_SHADOW_STACK_ENABLED)
-                != 0
+            && (self.msr.ia32_cet_control[usize::from(cpl == 3)] & CET_SHADOW_STACK_ENABLED) != 0
     }
 
     /// Check if shadow stack writes are enabled for the given privilege level.
@@ -88,9 +86,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn endbranch_enabled(&self, cpl: u8) -> bool {
         self.cr4.cet()
             && self.protected_mode()
-            && (self.msr.ia32_cet_control[usize::from(cpl == 3)]
-                & CET_ENDBRANCH_ENABLED)
-                != 0
+            && (self.msr.ia32_cet_control[usize::from(cpl == 3)] & CET_ENDBRANCH_ENABLED) != 0
     }
 
     /// Check if endbranch is enabled and NOT suppressed.
@@ -129,11 +125,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Track indirect branch if not suppressed (with DS-prefix no-track check).
     /// Bochs cet.cc track_indirect_if_not_suppressed()
-    pub(super) fn track_indirect_if_not_suppressed(
-        &mut self,
-        seg_override_cet: u8,
-        cpl: u8,
-    ) {
+    pub(super) fn track_indirect_if_not_suppressed(&mut self, seg_override_cet: u8, cpl: u8) {
         if self.endbranch_enabled_and_not_suppressed(cpl) {
             // DS segment override acts as no-track prefix when enabled
             if seg_override_cet == BxSegregs::Ds as u8
@@ -153,9 +145,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let idx = usize::from(cpl == 3);
         self.msr.ia32_cet_control[idx] &=
             !(CET_WAIT_FOR_ENBRANCH | CET_SUPPRESS_INDIRECT_BRANCH_TRACKING);
-        if suppress
-            && (self.msr.ia32_cet_control[idx] & CET_SUPPRESS_DIS) == 0
-        {
+        if suppress && (self.msr.ia32_cet_control[idx] & CET_SUPPRESS_DIS) == 0 {
             self.msr.ia32_cet_control[idx] |= CET_SUPPRESS_INDIRECT_BRANCH_TRACKING;
         }
     }
@@ -203,13 +193,23 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Write a dword to the shadow stack.
     /// Bochs access2.cc shadow_stack_write_dword.
-    pub(super) fn shadow_stack_write_dword(&mut self, offset: u64, cpl: u8, data: u32) -> Result<()> {
+    pub(super) fn shadow_stack_write_dword(
+        &mut self,
+        offset: u64,
+        cpl: u8,
+        data: u32,
+    ) -> Result<()> {
         self.shadow_stack_write_linear_dword(offset, cpl, data)
     }
 
     /// Write a qword to the shadow stack.
     /// Bochs access2.cc shadow_stack_write_qword.
-    pub(super) fn shadow_stack_write_qword(&mut self, offset: u64, cpl: u8, data: u64) -> Result<()> {
+    pub(super) fn shadow_stack_write_qword(
+        &mut self,
+        offset: u64,
+        cpl: u8,
+        data: u64,
+    ) -> Result<()> {
         self.shadow_stack_write_linear_qword(offset, cpl, data)
     }
 
@@ -294,7 +294,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
- pub(super) fn shadow_stack_switch(&mut self, new_ssp: u64) -> Result<()> {
+    pub(super) fn shadow_stack_switch(&mut self, new_ssp: u64) -> Result<()> {
         // Bochs call_far.cc shadow_stack_switch — install the new SSP, then
         // validate alignment, 64-bit residency, and atomically set the busy
         // bit on the new shadow-stack token. On any failure, raise #GP(0).
@@ -345,10 +345,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let host_ptr: Option<*mut u64> = {
             let tlb = self.dtlb.get_entry_of(offset, 7);
             if tlb.lpf == lpf && tlb.host_page_addr != 0 {
-                let byte_ptr = super::access::host_at_page_offset_mut(
-                    tlb.host_page_addr as *mut u8,
-                    offset,
-                );
+                let byte_ptr =
+                    super::access::host_at_page_offset_mut(tlb.host_page_addr as *mut u8, offset);
                 // SSP is architecturally 8-byte aligned on every caller; the
                 // raw byte pointer thus aligns for u64/AtomicU64.
                 debug_assert_eq!(offset & 0x7, 0, "SS cmpxchg offset must be 8-byte aligned");
@@ -389,7 +387,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Atomically set the busy bit on a shadow stack token.
     /// Bochs access2.cc shadow_stack_atomic_set_busy.
     pub(super) fn shadow_stack_atomic_set_busy(&mut self, offset: u64, cpl: u8) -> Result<bool> {
-        let expected = if self.long64_mode() { offset } else { offset & 0xFFFF_FFFF };
+        let expected = if self.long64_mode() {
+            offset
+        } else {
+            offset & 0xFFFF_FFFF
+        };
         self.shadow_stack_lock_cmpxchg8b(offset, cpl, offset | 0x1, expected)
     }
 
@@ -405,7 +407,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     ///
     /// Pops three qwords (prevSSP, shadowLIP, shadowCS), validates them,
     /// and returns prevSSP.
-    pub(super) fn shadow_stack_restore_lip(&mut self, raw_cs_selector: u16, return_lip: u64) -> Result<u64> {
+    pub(super) fn shadow_stack_restore_lip(
+        &mut self,
+        raw_cs_selector: u16,
+        return_lip: u64,
+    ) -> Result<u64> {
         let ssp = self.ssp();
         if ssp & 0x7 != 0 {
             tracing::error!("shadow_stack_restore: SSP must be 8-byte aligned");
@@ -441,7 +447,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(prev_ssp)
     }
 
-
     // =========================================================================
     // ENDBR32 / ENDBR64 instruction handlers — Bochs cet.cc
     // =========================================================================
@@ -451,10 +456,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// (Bochs BX_NEXT_INSTR — instruction-level barrier).
     /// In 64-bit mode: NOP that continues in the current trace (BX_NEXT_TRACE).
     /// Bochs cet.cc ENDBRANCH32.
-    pub(super) fn endbranch32(
-        &mut self,
-        _instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn endbranch32(&mut self, _instr: &Instruction) -> Result<()> {
         if !self.long64_mode() {
             let cpl = self.cs_rpl();
             self.reset_endbranch_tracker(cpl, false);
@@ -468,10 +470,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// (Bochs BX_NEXT_INSTR).
     /// In non-64-bit mode: NOP that continues in the current trace.
     /// Bochs cet.cc ENDBRANCH64.
-    pub(super) fn endbranch64(
-        &mut self,
-        _instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn endbranch64(&mut self, _instr: &Instruction) -> Result<()> {
         if self.long64_mode() {
             let cpl = self.cs_rpl();
             self.reset_endbranch_tracker(cpl, false);
@@ -487,10 +486,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// SETSSBSY handler.
     /// Sets the shadow stack busy flag and loads SSP from IA32_PL0_SSP.
     /// Bochs cet.cc SETSSBSY()
-    pub(super) fn setssbsy(
-        &mut self,
-        _instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn setssbsy(&mut self, _instr: &Instruction) -> Result<()> {
         // FRED check: SETSSBSY is not supported when FRED is enabled in CR4.
         if self.cr4.fred() {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -525,10 +521,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// CLRSSBSY handler.
     /// Clears the shadow stack busy flag at the address given by the memory operand.
     /// Bochs cet.cc CLRSSBSY()
-    pub(super) fn clrssbsy(
-        &mut self,
-        instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn clrssbsy(&mut self, instr: &Instruction) -> Result<()> {
         // FRED check: CLRSSBSY is not supported when FRED is enabled in CR4.
         if self.cr4.fred() {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -574,10 +567,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// INCSSPD — Increment SSP by 32-bit register value (dword stride).
     /// Bochs cet.cc BX_CPU_C::INCSSPD.
-    pub(super) fn incsspd(
-        &mut self,
-        instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn incsspd(&mut self, instr: &Instruction) -> Result<()> {
         let cpl = self.cs_rpl();
         if !self.shadow_stack_enabled(cpl) {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -598,10 +588,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// INCSSPQ — Increment SSP by 32-bit register value (qword stride).
     /// Bochs cet.cc BX_CPU_C::INCSSPQ.
-    pub(super) fn incsspq(
-        &mut self,
-        instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn incsspq(&mut self, instr: &Instruction) -> Result<()> {
         let cpl = self.cs_rpl();
         if !self.shadow_stack_enabled(cpl) {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -621,10 +608,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// RDSSPD — Read SSP into 32-bit destination (zero-extended).
     /// Bochs cet.cc BX_CPU_C::RDSSPD. NOP when shadow stack disabled.
-    pub(super) fn rdsspd(
-        &mut self,
-        instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn rdsspd(&mut self, instr: &Instruction) -> Result<()> {
         if self.shadow_stack_enabled(self.cs_rpl()) {
             // Bochs writes BX_READ_32BIT_REG(BX_32BIT_REG_SSP) — low 32 bits of SSP.
             let val = self.ssp() as u32;
@@ -635,10 +619,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// RDSSPQ — Read SSP into 64-bit destination.
     /// Bochs cet.cc BX_CPU_C::RDSSPQ. NOP when shadow stack disabled.
-    pub(super) fn rdsspq(
-        &mut self,
-        instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn rdsspq(&mut self, instr: &Instruction) -> Result<()> {
         if self.shadow_stack_enabled(self.cs_rpl()) {
             let val = self.ssp();
             self.set_gpr64(instr.dst() as usize, val);
@@ -648,10 +629,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// SAVEPREVSSP — Save previous-SSP token to the previous shadow stack.
     /// Bochs cet.cc BX_CPU_C::SAVEPREVSSP.
-    pub(super) fn saveprevssp(
-        &mut self,
-        _instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn saveprevssp(&mut self, _instr: &Instruction) -> Result<()> {
         let cpl = self.cs_rpl();
         if !self.shadow_stack_enabled(cpl) {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -695,10 +673,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// RSTORSSP — Restore SSP from a shadow-stack restore token.
     /// Bochs cet.cc BX_CPU_C::RSTORSSP.
-    pub(super) fn rstorssp(
-        &mut self,
-        instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn rstorssp(&mut self, instr: &Instruction) -> Result<()> {
         let cpl = self.cs_rpl();
         if !self.shadow_stack_enabled(cpl) {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -746,10 +721,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// WRSSD — Write 32-bit register to shadow stack at memory operand.
     /// Bochs cet.cc BX_CPU_C::WRSSD.
-    pub(super) fn wrssd(
-        &mut self,
-        instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn wrssd(&mut self, instr: &Instruction) -> Result<()> {
         let cpl = self.cs_rpl();
         if !self.shadow_stack_write_enabled(cpl) {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -772,10 +744,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// WRSSQ — Write 64-bit register to shadow stack at memory operand.
     /// Bochs cet.cc BX_CPU_C::WRSSQ.
-    pub(super) fn wrssq(
-        &mut self,
-        instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn wrssq(&mut self, instr: &Instruction) -> Result<()> {
         let cpl = self.cs_rpl();
         if !self.shadow_stack_write_enabled(cpl) {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -798,10 +767,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// WRUSSD — Write 32-bit register to user shadow stack (CPL=0 only).
     /// Bochs cet.cc BX_CPU_C::WRUSSD.
-    pub(super) fn wrussd(
-        &mut self,
-        instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn wrussd(&mut self, instr: &Instruction) -> Result<()> {
         if !self.cr4.cet() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
@@ -827,10 +793,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// WRUSSQ — Write 64-bit register to user shadow stack (CPL=0 only).
     /// Bochs cet.cc BX_CPU_C::WRUSSQ.
-    pub(super) fn wrussq(
-        &mut self,
-        instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn wrussq(&mut self, instr: &Instruction) -> Result<()> {
         if !self.cr4.cet() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
@@ -859,10 +822,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// PAUSE handler. Checks VMX/SVM intercepts before executing as no-op hint.
     /// Bochs proc_ctrl.cc
-    pub(super) fn pause(
-        &mut self,
-        _instr: &Instruction,
-    ) -> Result<()> {
+    pub(super) fn pause(&mut self, _instr: &Instruction) -> Result<()> {
         // Bochs proc_ctrl.cc — VMX PAUSE exit
         if self.in_vmx_guest {
             self.vmexit_pause()?;
@@ -885,7 +845,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 }
-
 
 // ============================================================================
 // CET tests \u2014 exercise the helpers wired into CALL/JMP/exception handlers.
@@ -995,8 +954,7 @@ mod tests {
                 );
 
                 // Same instruction without the NO_TRACK feature: must track.
-                cpu.msr.ia32_cet_control[0] =
-                    CET_ENDBRANCH_ENABLED; // drop NO_TRACK feature
+                cpu.msr.ia32_cet_control[0] = CET_ENDBRANCH_ENABLED; // drop NO_TRACK feature
                 cpu.track_indirect_if_not_suppressed(BxSegregs::Ds as u8, 0);
                 assert_ne!(
                     cpu.msr.ia32_cet_control[0] & CET_WAIT_FOR_ENBRANCH,
@@ -1015,8 +973,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let mut cpu = make_cet_cpu();
-                cpu.msr.ia32_cet_control[0] =
-                    CET_ENDBRANCH_ENABLED | CET_WAIT_FOR_ENBRANCH;
+                cpu.msr.ia32_cet_control[0] = CET_ENDBRANCH_ENABLED | CET_WAIT_FOR_ENBRANCH;
 
                 // ENDBR matched: clear WAIT, do not suppress.
                 cpu.reset_endbranch_tracker(0, false);
@@ -1032,8 +989,7 @@ mod tests {
                 );
 
                 // ENDBR mismatched + SUPPRESS_DIS clear \u2192 set SUPPRESS bit.
-                cpu.msr.ia32_cet_control[0] =
-                    CET_ENDBRANCH_ENABLED | CET_WAIT_FOR_ENBRANCH;
+                cpu.msr.ia32_cet_control[0] = CET_ENDBRANCH_ENABLED | CET_WAIT_FOR_ENBRANCH;
                 cpu.reset_endbranch_tracker(0, true);
                 assert_ne!(
                     cpu.msr.ia32_cet_control[0] & CET_SUPPRESS_INDIRECT_BRANCH_TRACKING,
@@ -1059,8 +1015,7 @@ mod tests {
                 cpu.msr.ia32_cet_control[0] =
                     CET_SHADOW_STACK_ENABLED | CET_SHADOW_STACK_WRITE_ENABLED;
 
-                let mem_stub =
-                    BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+                let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
                 let mut mem = BxMemC::new(mem_stub, false);
 
                 // Wire the bus pointers cpu_loop normally sets up.
@@ -1084,7 +1039,11 @@ mod tests {
                 assert_eq!(cpu.ssp(), INITIAL_SSP - 8);
                 let popped = cpu.shadow_stack_pop_64().unwrap();
                 assert_eq!(popped, ret_addr);
-                assert_eq!(cpu.ssp(), INITIAL_SSP, "SSP must return to initial after pop");
+                assert_eq!(
+                    cpu.ssp(),
+                    INITIAL_SSP,
+                    "SSP must return to initial after pop"
+                );
 
                 // ---- 32-bit push variant.
                 cpu.set_ssp(INITIAL_SSP);
@@ -1097,7 +1056,8 @@ mod tests {
                 // ---- Far-CALL push triplet: alignment hole + cs + lip + old_ssp.
                 cpu.set_ssp(INITIAL_SSP);
                 let old_ssp = cpu.ssp();
-                cpu.call_far_shadow_stack_push(0x0008, 0x1234_5678, old_ssp).unwrap();
+                cpu.call_far_shadow_stack_push(0x0008, 0x1234_5678, old_ssp)
+                    .unwrap();
                 // After three pushes of 8 bytes each (no alignment hole because
                 // INITIAL_SSP is 8-byte aligned), SSP retreated by 24.
                 assert_eq!(cpu.ssp(), INITIAL_SSP - 24, "three qword pushes -> SSP-=24");

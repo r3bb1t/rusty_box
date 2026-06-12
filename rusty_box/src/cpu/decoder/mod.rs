@@ -2,11 +2,11 @@
 pub use rusty_box_decoder::*;
 
 // Flatten key types so callers can write `decoder::Instruction` etc.
+pub use rusty_box_decoder::features::X86Feature;
 pub use rusty_box_decoder::instruction::{
-    AddressSize, GprIndex, Instruction, InstructionFlags, Operands, OperandSize, RepPrefix,
+    AddressSize, GprIndex, Instruction, InstructionFlags, OperandSize, Operands, RepPrefix,
 };
 pub use rusty_box_decoder::opcode::Opcode;
-pub use rusty_box_decoder::features::X86Feature;
 
 // BxCpuC impl block requires alloc (BxCpuC lives behind alloc gate)
 #[cfg(feature = "alloc")]
@@ -42,7 +42,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         tracing::debug!(
             "CPU ISA features: SSE={} SSE2={} AVX={} AVX2={} BMI1={} BMI2={} AES={} LM={} LZCNT={}",
-            has_sse, has_sse2, has_avx, has_avx2, has_bmi1, has_bmi2, has_aes, has_long_mode, has_lzcnt
+            has_sse,
+            has_sse2,
+            has_avx,
+            has_avx2,
+            has_bmi1,
+            has_bmi2,
+            has_aes,
+            has_long_mode,
+            has_lzcnt
         );
 
         // LZCNT/TZCNT fallback (Bochs fetchdecode32.cc):

@@ -202,41 +202,89 @@ pub struct BxPackedRegister {
 
 #[allow(non_snake_case)]
 impl BxPackedRegister {
-    #[inline(always)] pub fn U64(&self) -> u64 { u64::from_le_bytes(self.bytes) }
-    #[inline(always)] pub fn set_U64(&mut self, v: u64) { self.bytes = v.to_le_bytes(); }
+    #[inline(always)]
+    pub fn U64(&self) -> u64 {
+        u64::from_le_bytes(self.bytes)
+    }
+    #[inline(always)]
+    pub fn set_U64(&mut self, v: u64) {
+        self.bytes = v.to_le_bytes();
+    }
 
-    #[inline(always)] pub fn U32(&self, i: usize) -> u32 {
+    #[inline(always)]
+    pub fn U32(&self, i: usize) -> u32 {
         let s = i * 4;
-        u32::from_le_bytes(self.bytes[s..s+4].try_into().expect("4-byte slice converts to [u8; 4]"))
+        u32::from_le_bytes(
+            self.bytes[s..s + 4]
+                .try_into()
+                .expect("4-byte slice converts to [u8; 4]"),
+        )
     }
-    #[inline(always)] pub fn set_U32(&mut self, i: usize, v: u32) {
+    #[inline(always)]
+    pub fn set_U32(&mut self, i: usize, v: u32) {
         let s = i * 4;
-        self.bytes[s..s+4].copy_from_slice(&v.to_le_bytes());
+        self.bytes[s..s + 4].copy_from_slice(&v.to_le_bytes());
     }
 
-    #[inline(always)] pub fn U16(&self, i: usize) -> u16 {
+    #[inline(always)]
+    pub fn U16(&self, i: usize) -> u16 {
         let s = i * 2;
-        u16::from_le_bytes(self.bytes[s..s+2].try_into().expect("2-byte slice converts to [u8; 2]"))
+        u16::from_le_bytes(
+            self.bytes[s..s + 2]
+                .try_into()
+                .expect("2-byte slice converts to [u8; 2]"),
+        )
     }
-    #[inline(always)] pub fn set_U16(&mut self, i: usize, v: u16) {
+    #[inline(always)]
+    pub fn set_U16(&mut self, i: usize, v: u16) {
         let s = i * 2;
-        self.bytes[s..s+2].copy_from_slice(&v.to_le_bytes());
+        self.bytes[s..s + 2].copy_from_slice(&v.to_le_bytes());
     }
 
-    #[inline(always)] pub fn Ubyte(&self, i: usize) -> u8 { self.bytes[i] }
-    #[inline(always)] pub fn set_Ubyte(&mut self, i: usize, v: u8) { self.bytes[i] = v; }
+    #[inline(always)]
+    pub fn Ubyte(&self, i: usize) -> u8 {
+        self.bytes[i]
+    }
+    #[inline(always)]
+    pub fn set_Ubyte(&mut self, i: usize, v: u8) {
+        self.bytes[i] = v;
+    }
 
-    #[inline(always)] pub fn S64(&self) -> i64 { self.U64() as i64 }
-    #[inline(always)] pub fn set_S64(&mut self, v: i64) { self.set_U64(v as u64); }
+    #[inline(always)]
+    pub fn S64(&self) -> i64 {
+        self.U64() as i64
+    }
+    #[inline(always)]
+    pub fn set_S64(&mut self, v: i64) {
+        self.set_U64(v as u64);
+    }
 
-    #[inline(always)] pub fn S32(&self, i: usize) -> i32 { self.U32(i) as i32 }
-    #[inline(always)] pub fn set_S32(&mut self, i: usize, v: i32) { self.set_U32(i, v as u32); }
+    #[inline(always)]
+    pub fn S32(&self, i: usize) -> i32 {
+        self.U32(i) as i32
+    }
+    #[inline(always)]
+    pub fn set_S32(&mut self, i: usize, v: i32) {
+        self.set_U32(i, v as u32);
+    }
 
-    #[inline(always)] pub fn S16(&self, i: usize) -> i16 { self.U16(i) as i16 }
-    #[inline(always)] pub fn set_S16(&mut self, i: usize, v: i16) { self.set_U16(i, v as u16); }
+    #[inline(always)]
+    pub fn S16(&self, i: usize) -> i16 {
+        self.U16(i) as i16
+    }
+    #[inline(always)]
+    pub fn set_S16(&mut self, i: usize, v: i16) {
+        self.set_U16(i, v as u16);
+    }
 
-    #[inline(always)] pub fn Sbyte(&self, i: usize) -> i8 { self.bytes[i] as i8 }
-    #[inline(always)] pub fn set_Sbyte(&mut self, i: usize, v: i8) { self.bytes[i] = v as u8; }
+    #[inline(always)]
+    pub fn Sbyte(&self, i: usize) -> i8 {
+        self.bytes[i] as i8
+    }
+    #[inline(always)]
+    pub fn set_Sbyte(&mut self, i: usize, v: i8) {
+        self.bytes[i] = v as u8;
+    }
 }
 
 impl Debug for BxPackedRegister {

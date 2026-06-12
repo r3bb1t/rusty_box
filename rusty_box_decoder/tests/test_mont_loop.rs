@@ -55,29 +55,48 @@ fn decode_montgomery_multiplication_loop() {
     for (idx, &(exp_off, exp_ilen, exp_name)) in expected.iter().enumerate() {
         assert_eq!(offset, exp_off, "offset mismatch at instruction #{}", idx);
         let instr = fetch_decode64(&bytes[offset..]).unwrap_or_else(|e| {
-            panic!("decode error at offset {} (#{} {}): {:?}", offset, idx, exp_name, e);
+            panic!(
+                "decode error at offset {} (#{} {}): {:?}",
+                offset, idx, exp_name, e
+            );
         });
         let ilen = instr.ilen() as usize;
-        assert_eq!(ilen, exp_ilen,
+        assert_eq!(
+            ilen,
+            exp_ilen,
             "ilen mismatch at #{}: got {} expected {} for {} (opcode={:?})",
-            idx, ilen, exp_ilen, exp_name, instr.get_ia_opcode());
+            idx,
+            ilen,
+            exp_ilen,
+            exp_name,
+            instr.get_ia_opcode()
+        );
 
         let opcode_name = format!("{:?}", instr.get_ia_opcode());
         // Basic sanity: opcode name should contain the instruction name
         let name_upper = exp_name.to_uppercase();
         assert!(
             opcode_name.to_uppercase().contains(&name_upper)
-            || (name_upper == "MOV" && (opcode_name.contains("Mov") || opcode_name.contains("mov")))
-            || (name_upper == "ADD" && opcode_name.contains("Add"))
-            || (name_upper == "ADC" && opcode_name.contains("Adc"))
-            || (name_upper == "XOR" && opcode_name.contains("Xor"))
-            || (name_upper == "LEA" && opcode_name.contains("Lea"))
-            || (name_upper == "IMUL" && opcode_name.contains("Imul")),
+                || (name_upper == "MOV"
+                    && (opcode_name.contains("Mov") || opcode_name.contains("mov")))
+                || (name_upper == "ADD" && opcode_name.contains("Add"))
+                || (name_upper == "ADC" && opcode_name.contains("Adc"))
+                || (name_upper == "XOR" && opcode_name.contains("Xor"))
+                || (name_upper == "LEA" && opcode_name.contains("Lea"))
+                || (name_upper == "IMUL" && opcode_name.contains("Imul")),
             "opcode mismatch at #{}: {:?} doesn't match expected {}",
-            idx, instr.get_ia_opcode(), exp_name
+            idx,
+            instr.get_ia_opcode(),
+            exp_name
         );
 
-        println!("OK #{:2}: offset={:3} ilen={} {:?}", idx, offset, ilen, instr.get_ia_opcode());
+        println!(
+            "OK #{:2}: offset={:3} ilen={} {:?}",
+            idx,
+            offset,
+            ilen,
+            instr.get_ia_opcode()
+        );
         offset += ilen;
     }
     println!("All {} instructions decoded correctly!", expected.len());

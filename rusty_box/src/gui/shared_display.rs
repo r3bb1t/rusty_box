@@ -222,7 +222,8 @@ impl SharedDisplay {
                     // Use CRTC start_address and line_offset, matching Bochs gui.cc
                     // Wrap within text buffer (VGA text memory is 32KB, kernel scrolls by
                     // advancing start_address and wraps around)
-                    let text_idx = ((start_address + row * line_offset + col * 2) as usize) % text_len;
+                    let text_idx =
+                        ((start_address + row * line_offset + col * 2) as usize) % text_len;
                     if text_idx + 1 >= text_len {
                         continue;
                     }

@@ -48,11 +48,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// Bochs xsave.cc xsave_uintr_state — serialises the UINTR state block
     /// (48 bytes: handler/stack-adjust/misc/PD/RR/TT). Note Bochs zeroes
     /// uintr.uinv after save, preserving the XRSTOR-should-reinit semantic.
-    pub(super) fn xsave_uintr_state(
-        &mut self,
-        seg: BxSegregs,
-        base: u64,
-    ) -> Result<()> {
+    pub(super) fn xsave_uintr_state(&mut self, seg: BxSegregs, base: u64) -> Result<()> {
         self.v_write_qword(seg, base, self.uintr.ui_handler)?;
         self.v_write_qword(seg, base.wrapping_add(8), self.uintr.stack_adjust)?;
         let uif_bit = if self.uintr.uif { 1u64 << 63 } else { 0 };
@@ -70,11 +66,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// Bochs xsave.cc xrstor_uintr_state — restores the UINTR state block,
     /// validating every field with the same canonical/reserved-bit checks
     /// that WRMSR on the corresponding IA32_UINTR_* MSR would perform.
-    pub(super) fn xrstor_uintr_state(
-        &mut self,
-        seg: BxSegregs,
-        base: u64,
-    ) -> Result<()> {
+    pub(super) fn xrstor_uintr_state(&mut self, seg: BxSegregs, base: u64) -> Result<()> {
         // Bochs uintr.uinv must be zero on restore; else #GP(0).
         if self.uintr.uinv != 0 {
             tracing::trace!("XRSTOR UINTR: uinv is set, #GP(0)");

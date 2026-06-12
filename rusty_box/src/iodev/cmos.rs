@@ -30,7 +30,6 @@
 //! - 0x70: CMOS address register (write-only on most machines; reads return 0xFF)
 //! - 0x71: CMOS data register
 
-
 /// CMOS I/O port addresses
 pub const CMOS_ADDR: u16 = 0x0070;
 pub const CMOS_DATA: u16 = 0x0071;
@@ -534,7 +533,11 @@ impl BxCmosC {
                     }
                     REG_SHUTDOWN => {
                         let val = self.ram[addr];
-                        tracing::debug!("CMOS: Read shutdown status [{:#04x}] = {:#04x}", addr, val);
+                        tracing::debug!(
+                            "CMOS: Read shutdown status [{:#04x}] = {:#04x}",
+                            addr,
+                            val
+                        );
                         val
                     }
                     _ => {
@@ -622,11 +625,10 @@ impl BxCmosC {
                         }
 
                         // Bochs cmos.cc: Exiting SET mode (bit 7: 1→0)
-                        if (old_val & 0x80) != 0 && (new_val & 0x80) == 0
-                            && self.timeval_change {
-                                self.update_timeval();
-                                self.timeval_change = false;
-                            }
+                        if (old_val & 0x80) != 0 && (new_val & 0x80) == 0 && self.timeval_change {
+                            self.update_timeval();
+                            self.timeval_change = false;
+                        }
                     }
                     REG_STAT_C | REG_STAT_D => {
                         // Read-only registers — writes ignored
@@ -921,7 +923,6 @@ impl BxCmosC {
         self.update_checksum();
     }
 }
-
 
 #[cfg(test)]
 mod tests {

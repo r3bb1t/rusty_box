@@ -21,14 +21,15 @@
 //!  └───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴─────┴─────┘
 //! ```
 //!
-//! Each ATTR_* constant packs a 24-bit **value** and a 24-bit **mask** into a
+//! Each `OpcodeAttrs` flag packs a 24-bit **value** and a 24-bit **mask** into
 //! single `u64`: `((value << offset) << 24) | (mask << offset)`.
 //! The table lookup ANDs the mask with the decmask and compares against the value.
-
-#![allow(dead_code)]             // ATTR_* / OP_* defined for completeness
+#![allow(dead_code)] // OpcodeAttrs / OP_* defined for completeness
 #![allow(non_upper_case_globals)] // OP_* names match Bochs (OP_Eb, OP_Gd, etc.)
 
-use super::last_opcode;
+use bitflags::bitflags;
+
+use super::form_opcode;
 
 // ============================================================================
 // Core formula matching Bochs fetchdecode.h
@@ -78,137 +79,90 @@ pub(crate) const RRR_OFFSET: u32 = 4;
 pub(crate) const NNN_OFFSET: u32 = 0;
 
 // ============================================================================
-// ATTR_* constants — computed from Bochs formulas (fetchdecode.h lines 415-486)
+// Opcode attribute bits — `OpcodeAttrs` typed flags for opcode table entries.
 // ============================================================================
 
-// Operand size attributes
-pub(crate) const ATTR_OS64: u64 = attr(3, 3, OS32_OFFSET);
-pub(crate) const ATTR_OS32: u64 = attr(1, 3, OS32_OFFSET);
-pub(crate) const ATTR_OS16: u64 = attr(0, 3, OS32_OFFSET);
-pub(crate) const ATTR_OS16_32: u64 = attr(0, 1, OS64_OFFSET);
-pub(crate) const ATTR_OS32_64: u64 = attr(1, 1, OS32_OFFSET);
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub(crate) struct OpcodeAttrs: u64 {
+        const OS64 = attr(3, 3, OS32_OFFSET);
+        const OS32 = attr(1, 3, OS32_OFFSET);
+        const OS16 = attr(0, 3, OS32_OFFSET);
+        const OS16_32 = attr(0, 1, OS64_OFFSET);
+        const OS32_64 = attr(1, 1, OS32_OFFSET);
 
-// Address size attributes
-pub(crate) const ATTR_AS64: u64 = attr(3, 3, AS32_OFFSET);
-pub(crate) const ATTR_AS32: u64 = attr(1, 3, AS32_OFFSET);
-pub(crate) const ATTR_AS16: u64 = attr(0, 3, AS32_OFFSET);
-pub(crate) const ATTR_AS16_32: u64 = attr(0, 1, AS64_OFFSET);
-pub(crate) const ATTR_AS32_64: u64 = attr(1, 1, AS32_OFFSET);
+        const AS64 = attr(3, 3, AS32_OFFSET);
+        const AS32 = attr(1, 3, AS32_OFFSET);
+        const AS16 = attr(0, 3, AS32_OFFSET);
+        const AS16_32 = attr(0, 1, AS64_OFFSET);
+        const AS32_64 = attr(1, 1, AS32_OFFSET);
 
-// Mode attributes
-pub(crate) const ATTR_IS32: u64 = attr(0, 1, IS64_OFFSET);
-pub(crate) const ATTR_IS64: u64 = attr(1, 1, IS64_OFFSET);
+        const IS32 = attr(0, 1, IS64_OFFSET);
+        const IS64 = attr(1, 1, IS64_OFFSET);
 
-// SSE prefix attributes
-pub(crate) const ATTR_SSE_NO_PREFIX: u64 = attr(0, 3, SSE_PREFIX_OFFSET);
-pub(crate) const ATTR_SSE_PREFIX_66: u64 = attr(1, 3, SSE_PREFIX_OFFSET);
-pub(crate) const ATTR_SSE_PREFIX_F3: u64 = attr(2, 3, SSE_PREFIX_OFFSET);
-pub(crate) const ATTR_SSE_PREFIX_F2: u64 = attr(3, 3, SSE_PREFIX_OFFSET);
-pub(crate) const ATTR_NO_SSE_PREFIX_F2_F3: u64 = attr(0, 1, SSE_PREFIX_F2_F3_OFFSET);
+        const SSE_NO_PREFIX = attr(0, 3, SSE_PREFIX_OFFSET);
+        const SSE_PREFIX_66 = attr(1, 3, SSE_PREFIX_OFFSET);
+        const SSE_PREFIX_F3 = attr(2, 3, SSE_PREFIX_OFFSET);
+        const SSE_PREFIX_F2 = attr(3, 3, SSE_PREFIX_OFFSET);
+        const NO_SSE_PREFIX_F2_F3 = attr(0, 1, SSE_PREFIX_F2_F3_OFFSET);
 
-// Lock/ModRM attributes
-pub(crate) const ATTR_LOCK_PREFIX_NOT_ALLOWED: u64 = attr(0, 1, LOCK_PREFIX_OFFSET);
-pub(crate) const ATTR_LOCK: u64 = attr(1, 1, LOCK_PREFIX_OFFSET);
-pub(crate) const ATTR_MODC0: u64 = attr(1, 1, MODC0_OFFSET);
-pub(crate) const ATTR_NO_MODC0: u64 = attr(0, 1, MODC0_OFFSET);
-pub(crate) const ATTR_MOD_REG: u64 = ATTR_MODC0;
-pub(crate) const ATTR_MOD_MEM: u64 = ATTR_NO_MODC0;
+        const LOCK_PREFIX_NOT_ALLOWED = attr(0, 1, LOCK_PREFIX_OFFSET);
+        const LOCK = attr(1, 1, LOCK_PREFIX_OFFSET);
+        const MOD_REG = attr(1, 1, MODC0_OFFSET);
+        const MOD_MEM = attr(0, 1, MODC0_OFFSET);
 
-// VEX/EVEX/XOP attributes
-pub(crate) const ATTR_VEX: u64 = attr(1, 1, VEX_OFFSET);
-pub(crate) const ATTR_EVEX: u64 = attr(1, 1, EVEX_OFFSET);
-pub(crate) const ATTR_XOP: u64 = attr(1, 1, XOP_OFFSET);
-pub(crate) const ATTR_VL128: u64 = attr(0, 3, VEX_VL_128_256_OFFSET);
-pub(crate) const ATTR_VL256: u64 = attr(1, 3, VEX_VL_128_256_OFFSET);
-pub(crate) const ATTR_VL512: u64 = attr(3, 3, VEX_VL_128_256_OFFSET);
-pub(crate) const ATTR_VL256_512: u64 = attr(1, 1, VEX_VL_128_256_OFFSET);
-pub(crate) const ATTR_VL128_256: u64 = attr(0, 1, VEX_VL_512_OFFSET);
-pub(crate) const ATTR_VEX_L0: u64 = ATTR_VL128;
-pub(crate) const ATTR_VEX_W0: u64 = attr(0, 1, VEX_W_OFFSET);
-pub(crate) const ATTR_VEX_W1: u64 = attr(1, 1, VEX_W_OFFSET);
-pub(crate) const ATTR_NO_VEX_EVEX_XOP: u64 = attr(0, 3, XOP_OFFSET);
-pub(crate) const ATTR_MASK_K0: u64 = attr(1, 1, MASK_K0_OFFSET);
-pub(crate) const ATTR_MASK_REQUIRED: u64 = attr(0, 1, MASK_K0_OFFSET);
+        const VEX = attr(1, 1, VEX_OFFSET);
+        const EVEX = attr(1, 1, EVEX_OFFSET);
+        const XOP = attr(1, 1, XOP_OFFSET);
+        const VL128 = attr(0, 3, VEX_VL_128_256_OFFSET);
+        const VL256 = attr(1, 3, VEX_VL_128_256_OFFSET);
+        const VL512 = attr(3, 3, VEX_VL_128_256_OFFSET);
+        const VL256_512 = attr(1, 1, VEX_VL_128_256_OFFSET);
+        const VL128_256 = attr(0, 1, VEX_VL_512_OFFSET);
+        const VEX_W0 = attr(0, 1, VEX_W_OFFSET);
+        const VEX_W1 = attr(1, 1, VEX_W_OFFSET);
+        const NO_VEX_EVEX_XOP = attr(0, 3, XOP_OFFSET);
+        const MASK_K0 = attr(1, 1, MASK_K0_OFFSET);
+        const MASK_REQUIRED = attr(0, 1, MASK_K0_OFFSET);
 
-// Source/register encoding attributes
-pub(crate) const ATTR_SRC_EQ_DST: u64 = ATTR_MOD_REG | attr(1, 1, SRC_EQ_DST_OFFSET);
-pub(crate) const ATTR_RRR0: u64 = attr(0, 7, RRR_OFFSET);
-pub(crate) const ATTR_RRR1: u64 = attr(1, 7, RRR_OFFSET);
-pub(crate) const ATTR_RRR2: u64 = attr(2, 7, RRR_OFFSET);
-pub(crate) const ATTR_RRR3: u64 = attr(3, 7, RRR_OFFSET);
-pub(crate) const ATTR_RRR4: u64 = attr(4, 7, RRR_OFFSET);
-pub(crate) const ATTR_RRR5: u64 = attr(5, 7, RRR_OFFSET);
-pub(crate) const ATTR_RRR6: u64 = attr(6, 7, RRR_OFFSET);
-pub(crate) const ATTR_RRR7: u64 = attr(7, 7, RRR_OFFSET);
-pub(crate) const ATTR_NNN0: u64 = attr(0, 7, NNN_OFFSET);
-pub(crate) const ATTR_NNN1: u64 = attr(1, 7, NNN_OFFSET);
-pub(crate) const ATTR_NNN2: u64 = attr(2, 7, NNN_OFFSET);
-pub(crate) const ATTR_NNN3: u64 = attr(3, 7, NNN_OFFSET);
-pub(crate) const ATTR_NNN4: u64 = attr(4, 7, NNN_OFFSET);
-pub(crate) const ATTR_NNN5: u64 = attr(5, 7, NNN_OFFSET);
-pub(crate) const ATTR_NNN6: u64 = attr(6, 7, NNN_OFFSET);
-pub(crate) const ATTR_NNN7: u64 = attr(7, 7, NNN_OFFSET);
+        const SRC_EQ_DST = OpcodeAttrs::MOD_REG.bits() | attr(1, 1, SRC_EQ_DST_OFFSET);
+        const RRR0 = attr(0, 7, RRR_OFFSET);
+        const RRR1 = attr(1, 7, RRR_OFFSET);
+        const RRR2 = attr(2, 7, RRR_OFFSET);
+        const RRR3 = attr(3, 7, RRR_OFFSET);
+        const RRR4 = attr(4, 7, RRR_OFFSET);
+        const RRR5 = attr(5, 7, RRR_OFFSET);
+        const RRR6 = attr(6, 7, RRR_OFFSET);
+        const RRR7 = attr(7, 7, RRR_OFFSET);
+        const NNN0 = attr(0, 7, NNN_OFFSET);
+        const NNN1 = attr(1, 7, NNN_OFFSET);
+        const NNN2 = attr(2, 7, NNN_OFFSET);
+        const NNN3 = attr(3, 7, NNN_OFFSET);
+        const NNN4 = attr(4, 7, NNN_OFFSET);
+        const NNN5 = attr(5, 7, NNN_OFFSET);
+        const NNN6 = attr(6, 7, NNN_OFFSET);
+        const NNN7 = attr(7, 7, NNN_OFFSET);
+    }
+}
+
+macro_rules! attrs {
+    () => {
+        $crate::decoder::tables::OpcodeAttrs::empty()
+    };
+    ($first:ident $(| $rest:ident)*) => {{
+        let attrs = $crate::decoder::tables::OpcodeAttrs::$first;
+        $(
+            let attrs = attrs.union($crate::decoder::tables::OpcodeAttrs::$rest);
+        )*
+        attrs
+    }};
+}
+
+pub(crate) use attrs;
 
 // ============================================================================
 // Compile-time verification: computed values match Bochs
 // ============================================================================
-
-const _: () = {
-    assert!(ATTR_OS64 == 211106245115904);
-    assert!(ATTR_OS32 == 70368756760576);
-    assert!(ATTR_OS16 == 12582912);
-    assert!(ATTR_OS16_32 == 8388608);
-    assert!(ATTR_OS32_64 == 70368748371968);
-    assert!(ATTR_AS64 == 52776561278976);
-    assert!(ATTR_AS32 == 17592189190144);
-    assert!(ATTR_AS16 == 3145728);
-    assert!(ATTR_AS16_32 == 2097152);
-    assert!(ATTR_AS32_64 == 17592187092992);
-    assert!(ATTR_IS32 == 32768);
-    assert!(ATTR_IS64 == 549755846656);
-    assert!(ATTR_SSE_NO_PREFIX == 786432);
-    assert!(ATTR_SSE_PREFIX_66 == 4398047297536);
-    assert!(ATTR_SSE_PREFIX_F3 == 8796093808640);
-    assert!(ATTR_SSE_PREFIX_F2 == 13194140319744);
-    assert!(ATTR_NO_SSE_PREFIX_F2_F3 == 524288);
-    assert!(ATTR_LOCK_PREFIX_NOT_ALLOWED == 131072);
-    assert!(ATTR_LOCK == 2199023386624);
-    assert!(ATTR_MODC0 == 1099511693312);
-    assert!(ATTR_NO_MODC0 == 65536);
-    assert!(ATTR_MOD_REG == 1099511693312);
-    assert!(ATTR_MOD_MEM == 65536);
-    assert!(ATTR_VEX == 274877923328);
-    assert!(ATTR_EVEX == 137438961664);
-    assert!(ATTR_XOP == 68719480832);
-    assert!(ATTR_VL128 == 3072);
-    assert!(ATTR_VL256 == 17179872256);
-    assert!(ATTR_VL512 == 51539610624);
-    assert!(ATTR_VL256_512 == 17179870208);
-    assert!(ATTR_VL128_256 == 2048);
-    assert!(ATTR_VEX_L0 == 3072);
-    assert!(ATTR_VEX_W0 == 512);
-    assert!(ATTR_VEX_W1 == 8589935104);
-    assert!(ATTR_NO_VEX_EVEX_XOP == 12288);
-    assert!(ATTR_MASK_K0 == 4294967552);
-    assert!(ATTR_MASK_REQUIRED == 256);
-    assert!(ATTR_SRC_EQ_DST == 1101659177088);
-    assert!(ATTR_RRR0 == 112);
-    assert!(ATTR_RRR1 == 268435568);
-    assert!(ATTR_RRR2 == 536871024);
-    assert!(ATTR_RRR3 == 805306480);
-    assert!(ATTR_RRR4 == 1073741936);
-    assert!(ATTR_RRR5 == 1342177392);
-    assert!(ATTR_RRR6 == 1610612848);
-    assert!(ATTR_RRR7 == 1879048304);
-    assert!(ATTR_NNN0 == 7);
-    assert!(ATTR_NNN1 == 16777223);
-    assert!(ATTR_NNN2 == 33554439);
-    assert!(ATTR_NNN3 == 50331655);
-    assert!(ATTR_NNN4 == 67108871);
-    assert!(ATTR_NNN5 == 83886087);
-    assert!(ATTR_NNN6 == 100663303);
-    assert!(ATTR_NNN7 == 117440519);
-};
 
 // ============================================================================
 // SSE prefix enum (Bochs fetchdecode.h lines 32-36)
@@ -234,8 +188,7 @@ pub enum SsePrefix {
 /// Decoder-specific error codes matching Bochs `bx_decode_error_t` exactly.
 ///
 /// 18 variants (0-17), no Rust-only extensions.
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, Default)]
 pub enum BxDecodeError {
     BxDecodeOk = 0,
     BxIllegalOpcode = 1,
@@ -257,7 +210,6 @@ pub enum BxDecodeError {
     BxEvexIllegalZeroMaskingMemoryDestination = 16,
     BxAmxIllegalTileRegister = 17,
 }
-
 
 // ============================================================================
 // Operand descriptor enums (Bochs fetchdecode.h lines 112-201)
@@ -461,14 +413,23 @@ pub(crate) const OP_IB2: u8 = form_src(ImmediateForm::ImmB2 as u8, OperandSource
 pub(crate) const OP_JW: u8 = form_src(ImmediateForm::ImmW as u8, OperandSource::BranchOffset as u8);
 pub(crate) const OP_JD: u8 = form_src(ImmediateForm::ImmD as u8, OperandSource::BranchOffset as u8);
 pub(crate) const OP_JQ: u8 = OP_JD; // Same encoding — Jq uses sign-extended dword
-pub(crate) const OP_JBW: u8 = form_src(ImmediateForm::ImmBwSe as u8, OperandSource::BranchOffset as u8);
-pub(crate) const OP_JBD: u8 = form_src(ImmediateForm::ImmBdSe as u8, OperandSource::BranchOffset as u8);
+pub(crate) const OP_JBW: u8 = form_src(
+    ImmediateForm::ImmBwSe as u8,
+    OperandSource::BranchOffset as u8,
+);
+pub(crate) const OP_JBD: u8 = form_src(
+    ImmediateForm::ImmBdSe as u8,
+    OperandSource::BranchOffset as u8,
+);
 pub(crate) const OP_JBQ: u8 = OP_JBD; // Same encoding — Jbq uses sign-extended byte→dword
 
 // --- Memory-only operands ---
 pub(crate) const OP_M: u8 = form_src(RegisterType::NoRegister as u8, OperandSource::Rm as u8);
 pub(crate) const OP_MT: u8 = form_src(RegisterType::FpuReg as u8, OperandSource::Rm as u8);
-pub(crate) const OP_MDQ: u8 = form_src(VectorRmType::FullVector as u8, OperandSource::VectorRm as u8);
+pub(crate) const OP_MDQ: u8 = form_src(
+    VectorRmType::FullVector as u8,
+    OperandSource::VectorRm as u8,
+);
 pub(crate) const OP_MB: u8 = OP_Eb; // Aliases: memory form = same encoding as register form
 pub(crate) const OP_MW: u8 = OP_Ew;
 pub(crate) const OP_MD: u8 = OP_Ed;
@@ -492,41 +453,118 @@ pub(crate) const OP_VQ: u8 = OP_VDQ;
 pub(crate) const OP_VD: u8 = OP_VDQ;
 
 // --- XMM/YMM/ZMM from modrm.rm (scalar/vector variants) ---
-pub(crate) const OP_WQ: u8 = form_src(VectorRmType::ScalarQword as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_WD: u8 = form_src(VectorRmType::ScalarDword as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_WW: u8 = form_src(VectorRmType::ScalarWord as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_WB: u8 = form_src(VectorRmType::ScalarByte as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_WDQ: u8 = form_src(VectorRmType::FullVector as u8, OperandSource::VectorRm as u8);
+pub(crate) const OP_WQ: u8 = form_src(
+    VectorRmType::ScalarQword as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_WD: u8 = form_src(
+    VectorRmType::ScalarDword as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_WW: u8 = form_src(
+    VectorRmType::ScalarWord as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_WB: u8 = form_src(
+    VectorRmType::ScalarByte as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_WDQ: u8 = form_src(
+    VectorRmType::FullVector as u8,
+    OperandSource::VectorRm as u8,
+);
 pub(crate) const OP_WPH: u8 = OP_WDQ;
 pub(crate) const OP_WPS: u8 = OP_WDQ;
 pub(crate) const OP_WPD: u8 = OP_WDQ;
-pub(crate) const OP_WSH: u8 = form_src(VectorRmType::ScalarWord as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_WSS: u8 = form_src(VectorRmType::ScalarDword as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_WSD: u8 = form_src(VectorRmType::ScalarQword as u8, OperandSource::VectorRm as u8);
+pub(crate) const OP_WSH: u8 = form_src(
+    VectorRmType::ScalarWord as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_WSS: u8 = form_src(
+    VectorRmType::ScalarDword as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_WSD: u8 = form_src(
+    VectorRmType::ScalarQword as u8,
+    OperandSource::VectorRm as u8,
+);
 
 // --- EVEX memory destination variants ---
-pub(crate) const OP_M_VPH: u8 = form_src(VectorRmType::FullVectorW as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VPS: u8 = form_src(VectorRmType::FullVector as u8, OperandSource::VectorRm as u8);
+pub(crate) const OP_M_VPH: u8 = form_src(
+    VectorRmType::FullVectorW as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VPS: u8 = form_src(
+    VectorRmType::FullVector as u8,
+    OperandSource::VectorRm as u8,
+);
 pub(crate) const OP_M_VPD: u8 = OP_M_VPS;
-pub(crate) const OP_M_VPH16: u8 = form_src(VectorRmType::ScalarWord as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VPS32: u8 = form_src(VectorRmType::ScalarDword as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VPD64: u8 = form_src(VectorRmType::ScalarQword as u8, OperandSource::VectorRm as u8);
+pub(crate) const OP_M_VPH16: u8 = form_src(
+    VectorRmType::ScalarWord as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VPS32: u8 = form_src(
+    VectorRmType::ScalarDword as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VPD64: u8 = form_src(
+    VectorRmType::ScalarQword as u8,
+    OperandSource::VectorRm as u8,
+);
 pub(crate) const OP_M_VDQ: u8 = OP_M_VPS;
 pub(crate) const OP_M_VQQ: u8 = OP_M_VPS;
-pub(crate) const OP_M_VSH: u8 = form_src(VectorRmType::ScalarWord as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VSS: u8 = form_src(VectorRmType::ScalarDword as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VSD: u8 = form_src(VectorRmType::ScalarQword as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VDQ8: u8 = form_src(VectorRmType::ScalarByte as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VDQ16: u8 = form_src(VectorRmType::ScalarWord as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VDQ32: u8 = form_src(VectorRmType::ScalarDword as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VDQ64: u8 = form_src(VectorRmType::ScalarQword as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VHV: u8 = form_src(VectorRmType::HalfVector as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VHVW: u8 = form_src(VectorRmType::HalfVectorW as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VQV: u8 = form_src(VectorRmType::QuarterVector as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VQVW: u8 = form_src(VectorRmType::QuarterVectorW as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VOV: u8 = form_src(VectorRmType::EighthVector as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VDQ128: u8 = form_src(VectorRmType::Vec128 as u8, OperandSource::VectorRm as u8);
-pub(crate) const OP_M_VDQ256: u8 = form_src(VectorRmType::Vec256 as u8, OperandSource::VectorRm as u8);
+pub(crate) const OP_M_VSH: u8 = form_src(
+    VectorRmType::ScalarWord as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VSS: u8 = form_src(
+    VectorRmType::ScalarDword as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VSD: u8 = form_src(
+    VectorRmType::ScalarQword as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VDQ8: u8 = form_src(
+    VectorRmType::ScalarByte as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VDQ16: u8 = form_src(
+    VectorRmType::ScalarWord as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VDQ32: u8 = form_src(
+    VectorRmType::ScalarDword as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VDQ64: u8 = form_src(
+    VectorRmType::ScalarQword as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VHV: u8 = form_src(
+    VectorRmType::HalfVector as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VHVW: u8 = form_src(
+    VectorRmType::HalfVectorW as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VQV: u8 = form_src(
+    VectorRmType::QuarterVector as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VQVW: u8 = form_src(
+    VectorRmType::QuarterVectorW as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VOV: u8 = form_src(
+    VectorRmType::EighthVector as u8,
+    OperandSource::VectorRm as u8,
+);
+pub(crate) const OP_M_VDQ128: u8 =
+    form_src(VectorRmType::Vec128 as u8, OperandSource::VectorRm as u8);
+pub(crate) const OP_M_VDQ256: u8 =
+    form_src(VectorRmType::Vec256 as u8, OperandSource::VectorRm as u8);
 
 // --- VSIB ---
 pub(crate) const OP_VSIB: u8 = form_src(VectorRmType::Scalar as u8, OperandSource::Vsib as u8);
@@ -600,12 +638,16 @@ pub(crate) const OP_YD: u8 = form_src(ImplicitRef::RdiRefD as u8, OperandSource:
 pub(crate) const OP_YQ: u8 = form_src(ImplicitRef::RdiRefQ as u8, OperandSource::Implicit as u8);
 
 // --- Implicit RDI MMX/vector (MASKMOVQ/MASKMOVDQU) ---
-pub(crate) const OP_S_YQ: u8 = form_src(ImplicitRef::MmxRdiRef as u8, OperandSource::Implicit as u8);
-pub(crate) const OP_S_YDQ: u8 = form_src(ImplicitRef::VecRdiRef as u8, OperandSource::Implicit as u8);
+pub(crate) const OP_S_YQ: u8 =
+    form_src(ImplicitRef::MmxRdiRef as u8, OperandSource::Implicit as u8);
+pub(crate) const OP_S_YDQ: u8 =
+    form_src(ImplicitRef::VecRdiRef as u8, OperandSource::Implicit as u8);
 
 // ============================================================================
 // Error group sentinel
 // ============================================================================
 
-pub(crate) const BX_OPCODE_GROUP_ERR: [u64; 1] =
-    [last_opcode(0, crate::opcode::Opcode::IaError)];
+pub(crate) const BX_OPCODE_GROUP_ERR: [u64; 1] = [form_opcode(
+    OpcodeAttrs::empty(),
+    crate::opcode::Opcode::IaError,
+)];

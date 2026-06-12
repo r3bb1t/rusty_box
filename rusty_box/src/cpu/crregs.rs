@@ -824,8 +824,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs MOV_CR0Rd (crregs.cc:412-415): VMexit_CR0_Write runs BEFORE
         // SetCR0; SetCR0 itself never re-runs the VMX intercept.
         let val = if self.in_vmx_guest {
-            let (exited, merged) =
-                self.vmexit_check_cr0_write(u64::from(raw_val_32), src)?;
+            let (exited, merged) = self.vmexit_check_cr0_write(u64::from(raw_val_32), src)?;
             if exited {
                 return Ok(());
             }
@@ -892,9 +891,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if !self.cr0.pg() && pg {
             if self.efer.lme() {
                 if !self.cr4.pae() {
-                    tracing::trace!(
-                        "MOV CR0: attempt to enter long mode without CR4.PAE, #GP(0)"
-                    );
+                    tracing::trace!("MOV CR0: attempt to enter long mode without CR4.PAE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -949,8 +946,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs SetCR0(): mask reserved bits, then OR in CR0.ET as sticky-1
         // whenever the CPU advertises x87. Both stages stay on the bitflags
         // type so the reserved-bit set remains declarative.
-        let cr0_allowed = BxCr0::PG | BxCr0::CD | BxCr0::NW | BxCr0::AM | BxCr0::WP
-            | BxCr0::NE | BxCr0::ET | BxCr0::TS | BxCr0::EM | BxCr0::MP | BxCr0::PE;
+        let cr0_allowed = BxCr0::PG
+            | BxCr0::CD
+            | BxCr0::NW
+            | BxCr0::AM
+            | BxCr0::WP
+            | BxCr0::NE
+            | BxCr0::ET
+            | BxCr0::TS
+            | BxCr0::EM
+            | BxCr0::MP
+            | BxCr0::PE;
         let mut val_flags = BxCr0::from_bits_truncate(val_32) & cr0_allowed;
         if self.bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaX87) {
             val_flags.insert(BxCr0::ET);
@@ -967,7 +973,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Track PM↔RM transitions for diagnostics
-        #[cfg(debug_assertions)] {
+        #[cfg(debug_assertions)]
+        {
             let old_pe = BxCr0::from_bits_retain(old_cr0).contains(BxCr0::PE);
             let new_pe = BxCr0::from_bits_retain(val_32).contains(BxCr0::PE);
             if old_pe && !new_pe {
@@ -1007,9 +1014,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // BOCHS BX_INSTR_TLB_CNTRL with MovCr0 kind
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
-            self.instrumentation.fire_tlb_cntrl(
-                super::instrumentation::TlbCntrl::MovCr0 { new_value: val_32 as u64 },
-            );
+            self.instrumentation
+                .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr0 {
+                    new_value: val_32 as u64,
+                });
         }
 
         tracing::trace!(
@@ -1073,9 +1081,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // CR transitions). The `cr0.pg()` gate matters during long-mode entry:
         // Linux loads CR3 with a long-mode PML4 (R/W=1, U/S=1) BEFORE CR0.PG=1
         // — those bits would fail legacy PAE PDPTE reserved-bit checks.
-        if self.cr0.pg() && self.cr4.pae() && !self.efer.lma()
-            && !self.check_pdptrs(val)?
-        {
+        if self.cr0.pg() && self.cr4.pae() && !self.efer.lma() && !self.check_pdptrs(val)? {
             tracing::trace!("MOV CR3: PDPTR check failed for cr3={:#x}, #GP(0)", val);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -1092,9 +1098,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // BOCHS BX_INSTR_TLB_CNTRL with MovCr3 kind
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
-            self.instrumentation.fire_tlb_cntrl(
-                super::instrumentation::TlbCntrl::MovCr3 { new_value: val },
-            );
+            self.instrumentation
+                .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr3 { new_value: val });
         }
 
         Ok(())
@@ -1138,9 +1143,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
-            self.instrumentation.fire_tlb_cntrl(
-                super::instrumentation::TlbCntrl::MovCr3 { new_value: val },
-            );
+            self.instrumentation
+                .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr3 { new_value: val });
         }
 
         Ok(())
@@ -1170,8 +1174,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn set_cr4(&mut self, raw_val: u64, src: u8) -> super::Result<()> {
         // Bochs vmexit.cc VMexit_CR4_Write — VMEXIT or merge per mask/shadow.
         let val_32 = if self.in_vmx_guest {
-            let (exited, merged) =
-                self.vmexit_check_cr4_write(raw_val, src)?;
+            let (exited, merged) = self.vmexit_check_cr4_write(raw_val, src)?;
             if exited {
                 return Ok(());
             }
@@ -1227,9 +1230,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // LA57 cannot change while in long mode (Bochs SetCR4 LA57 block).
-        if self.efer.lma()
-            && (new_cr4.contains(BxCr4::LA57) != self.cr4.contains(BxCr4::LA57))
-        {
+        if self.efer.lma() && (new_cr4.contains(BxCr4::LA57) != self.cr4.contains(BxCr4::LA57)) {
             tracing::trace!("MOV CR4: attempt to change LA57 while in long mode, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -1261,7 +1262,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     tracing::trace!("MOV CR4: PDPTR check failed, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
-            } else if !self.cr4.contains(BxCr4::PCIDE) && new_cr4.contains(BxCr4::PCIDE)
+            } else if !self.cr4.contains(BxCr4::PCIDE)
+                && new_cr4.contains(BxCr4::PCIDE)
                 && (self.cr3 & 0xFFF) != 0
             {
                 tracing::trace!(
@@ -1296,9 +1298,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // BOCHS BX_INSTR_TLB_CNTRL with MovCr4 kind
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
-            self.instrumentation.fire_tlb_cntrl(
-                super::instrumentation::TlbCntrl::MovCr4 { new_value: val_32 },
-            );
+            self.instrumentation
+                .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr4 { new_value: val_32 });
         }
 
         // Bochs: update linaddr_width based on LA57 (5-level paging support)
@@ -1363,8 +1364,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs MOV_CR0Rq (crregs.cc:643-646): VMexit_CR0_Write runs BEFORE
         // SetCR0; SetCR0 itself never re-runs the VMX intercept.
         let val = if self.in_vmx_guest {
-            let (exited, merged) =
-                self.vmexit_check_cr0_write(val_64, src_gpr)?;
+            let (exited, merged) = self.vmexit_check_cr0_write(val_64, src_gpr)?;
             if exited {
                 return Ok(());
             }
@@ -1527,12 +1527,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             & super::vmx::VMX_VM_EXEC_CTRL2_UNRESTRICTED_GUEST
             != 0;
         if !vmx_guest || !unrestricted {
-            if !cr0.contains(super::crregs::BxCr0::PE)
-                || !cr0.contains(super::crregs::BxCr0::PG)
-            {
+            if !cr0.contains(super::crregs::BxCr0::PE) || !cr0.contains(super::crregs::BxCr0::PG) {
                 tracing::trace!(
                     "check_cr0_vmx: CR0.PE/PG clear in VMX (guest={}, unrestricted={}), #GP(0)",
-                    vmx_guest, unrestricted
+                    vmx_guest,
+                    unrestricted
                 );
                 return false;
             }

@@ -129,10 +129,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // --- Invalid ---
         if exception & (FPU_SW_INVALID as u32) != 0 {
             self.the_i387.swd |= exception as u16;
-            if exception & (FPU_SW_STACK_FAULT as u32) != 0
-                && exception & (FPU_SW_C1 as u32) == 0 {
-                    self.the_i387.swd &= !(FPU_SW_C1);
-                }
+            if exception & (FPU_SW_STACK_FAULT as u32) != 0 && exception & (FPU_SW_C1 as u32) == 0 {
+                self.the_i387.swd &= !(FPU_SW_C1);
+            }
             return unmasked;
         }
 
@@ -153,10 +152,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // --- Remaining exceptions (Precision, Overflow, Underflow) ---
         self.the_i387.swd |= exception as u16;
 
-        if exception & (FPU_SW_PRECISION as u32) != 0
-            && exception & (FPU_SW_C1 as u32) == 0 {
-                self.the_i387.swd &= !(FPU_SW_C1);
-            }
+        if exception & (FPU_SW_PRECISION as u32) != 0 && exception & (FPU_SW_C1 as u32) == 0 {
+            self.the_i387.swd &= !(FPU_SW_C1);
+        }
 
         // For overflow/underflow, masking depends on whether this is a store.
         let mut unmasked = unmasked & !(FPU_SW_PRECISION as u32);

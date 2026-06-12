@@ -1,5 +1,4 @@
 #![allow(private_interfaces, dead_code)]
-
 #![allow(non_snake_case)]
 
 #[cfg(feature = "alloc")]
@@ -82,7 +81,10 @@ impl BxMemC<'_> {
 }
 
 impl<'c> BxMemC<'c> {
-    pub(crate) fn get_host_mem_addr<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    pub(crate) fn get_host_mem_addr<
+        I: BxCpuIdTrait,
+        T: crate::cpu::instrumentation::Instrumentation,
+    >(
         &mut self,
         // cpu_option: Option<&'c BxCpuC<I, T>>,
         addr: BxPhyAddress,
@@ -108,10 +110,12 @@ impl<'c> BxMemC<'c> {
         // allow direct access to SMRAM memory space for code and veto data
         if let Some(cpu) = cpus.first() {
             // reading from SMRAM memory space
-            if (0x000a0000..0x000c0000).contains(&a20_addr) && (self.smram_available)
-                && (self.smram_enable || cpu.smm_mode()) {
-                    return Ok(Some(self.get_vector(cpus, a20_addr)?));
-                }
+            if (0x000a0000..0x000c0000).contains(&a20_addr)
+                && (self.smram_available)
+                && (self.smram_enable || cpu.smm_mode())
+            {
+                return Ok(Some(self.get_vector(cpus, a20_addr)?));
+            }
         }
 
         if write && Self::is_monitor(cpus, a20_addr & !(0xfff as BxPhyAddress), 0xfff) {
@@ -132,7 +136,9 @@ impl<'c> BxMemC<'c> {
                         // The actual read/write goes through read/writePhysicalPage.
                         return Ok(None);
                     }
-                    current_handler = handler.next.and_then(|idx| self.handler_overflow[idx as usize].as_ref());
+                    current_handler = handler
+                        .next
+                        .and_then(|idx| self.handler_overflow[idx as usize].as_ref());
                 }
             }
         }
@@ -141,10 +147,7 @@ impl<'c> BxMemC<'c> {
             if (0x000a0000..0x000c0000).contains(&a20_addr) {
                 // VGA memory area - vetoed (no handler registered)
                 Ok(None)
-            } else if true
-                && self.pci_enabled
-                && (0x000c0000..0x00100000).contains(&a20_addr)
-            {
+            } else if true && self.pci_enabled && (0x000c0000..0x00100000).contains(&a20_addr) {
                 // PCI path for C0000-FFFFF: check memory_type to decide ROM vs ShadowRAM.
                 // Bochs: misc_mem.cc — this check MUST come before the unconditional
                 // E0000 ROM return, because PAM registers can redirect reads to shadow DRAM.
@@ -221,9 +224,7 @@ impl<'c> BxMemC<'c> {
                 Ok(None)
             } else if (0x000a0000..0x000c0000).contains(&a20_addr) {
                 Ok(None) // Vetoed!  Mem mapped IO (VGA)
-            } else if true
-                && (self.pci_enabled && (0x000c0000..0x00100000).contains(&a20_addr))
-            {
+            } else if true && (self.pci_enabled && (0x000c0000..0x00100000).contains(&a20_addr)) {
                 // Veto direct writes to this area. Otherwise, there is a chance
                 // for Guest2HostTLB and memory consistency problems, for example
                 // when some 16K block marked as write-only using PAM registers.
@@ -370,31 +371,30 @@ impl BxMemC<'_> {
         );
 
         // For option ROMs (type > 0), check signature and entry point
-        if rom_type > 0
-            && size >= 4 {
-                let signature = u16::from_le_bytes([rom[offset], rom[offset + 1]]);
-                if signature == 0xAA55 {
-                    tracing::debug!("✓ Option ROM signature valid (55 AA)");
+        if rom_type > 0 && size >= 4 {
+            let signature = u16::from_le_bytes([rom[offset], rom[offset + 1]]);
+            if signature == 0xAA55 {
+                tracing::debug!("✓ Option ROM signature valid (55 AA)");
 
-                    // ROM entry point is at offset +3
-                    let init_size_blocks = rom[offset + 2];
-                    let init_offset = init_size_blocks as usize * 512;
-                    tracing::debug!(
-                        "  ROM init size: {} blocks ({} bytes)",
-                        init_size_blocks,
-                        init_offset
-                    );
+                // ROM entry point is at offset +3
+                let init_size_blocks = rom[offset + 2];
+                let init_offset = init_size_blocks as usize * 512;
+                tracing::debug!(
+                    "  ROM init size: {} blocks ({} bytes)",
+                    init_size_blocks,
+                    init_offset
+                );
 
-                    // Calculate entry point address
-                    let entry_point = rom_address + 3;
-                    tracing::debug!("  ROM entry point: {:#x}", entry_point);
-                } else {
-                    tracing::warn!(
-                        "⚠ Invalid option ROM signature: {:#04x} (expected 0xAA55)",
-                        signature
-                    );
-                }
+                // Calculate entry point address
+                let entry_point = rom_address + 3;
+                tracing::debug!("  ROM entry point: {:#x}", entry_point);
+            } else {
+                tracing::warn!(
+                    "⚠ Invalid option ROM signature: {:#04x} (expected 0xAA55)",
+                    signature
+                );
             }
+        }
 
         // For system BIOS (type 0), verify reset vector
         if rom_type == 0 && offset + 0x1FFF0 + 5 <= rom.len() {
@@ -486,9 +486,7 @@ impl BxMemC<'_> {
         let cpu_opt = cpus.first();
 
         // Check SMRAM first (before memory handlers)
-        if cpu_opt.is_some()
-            && (0x000a0000..0x000c0000).contains(&a20_addr)
-            && self.smram_available
+        if cpu_opt.is_some() && (0x000a0000..0x000c0000).contains(&a20_addr) && self.smram_available
         {
             if let Some(cpu) = cpu_opt {
                 if self.smram_enable || (cpu.smm_mode() && !self.smram_restricted) {
@@ -522,7 +520,9 @@ impl BxMemC<'_> {
                             return Ok(());
                         }
                     }
-                    current_handler = handler.next.and_then(|idx| self.handler_overflow[idx as usize].as_ref());
+                    current_handler = handler
+                        .next
+                        .and_then(|idx| self.handler_overflow[idx as usize].as_ref());
                 }
             }
         }
@@ -657,9 +657,7 @@ impl BxMemC<'_> {
         let cpu_opt = cpus.first();
 
         // Check SMRAM first (before memory handlers)
-        if cpu_opt.is_some()
-            && (0x000a0000..0x000c0000).contains(&a20_addr)
-            && self.smram_available
+        if cpu_opt.is_some() && (0x000a0000..0x000c0000).contains(&a20_addr) && self.smram_available
         {
             if let Some(cpu) = cpu_opt {
                 if self.smram_enable || (cpu.smm_mode() && !self.smram_restricted) {
@@ -692,7 +690,9 @@ impl BxMemC<'_> {
                             return Ok(());
                         }
                     }
-                    current_handler = handler.next.and_then(|idx| self.handler_overflow[idx as usize].as_ref());
+                    current_handler = handler
+                        .next
+                        .and_then(|idx| self.handler_overflow[idx as usize].as_ref());
                 }
             }
         }
@@ -919,7 +919,11 @@ impl BxMemC<'_> {
             FLASH_INT_ID => {
                 // Manufacturer/device ID (Bochs misc_mem.cc)
                 if (addr & 1) != 0 {
-                    if self.flash_type == 2 { 0x7c } else { 0x94 }
+                    if self.flash_type == 2 {
+                        0x7c
+                    } else {
+                        0x94
+                    }
                 } else {
                     0x89 // Intel manufacturer ID
                 }
@@ -960,8 +964,8 @@ impl BxMemC<'_> {
         } else {
             // Command byte processing (Bochs misc_mem.cc)
             match data {
-                FLASH_INT_ID | FLASH_READ_ARRAY | FLASH_ERASE_SETUP
-                | FLASH_ERASE_SUSP | FLASH_PROG_SETUP => {
+                FLASH_INT_ID | FLASH_READ_ARRAY | FLASH_ERASE_SETUP | FLASH_ERASE_SUSP
+                | FLASH_PROG_SETUP => {
                     self.flash_wsm_state = data;
                 }
                 FLASH_READ_STATUS => {
@@ -981,8 +985,7 @@ impl BxMemC<'_> {
                         self.flash_wsm_state = FLASH_ERASE;
                         // Block erase — fill block with 0xFF
                         let rom = self.inherited_memory_stub.rom();
-                        if self.flash_type == 1
-                            && (flash_addr == 0x1c000 || flash_addr == 0x1d000)
+                        if self.flash_type == 1 && (flash_addr == 0x1c000 || flash_addr == 0x1d000)
                         {
                             for i in 0..0x1000u32 {
                                 if let Some(byte) = rom.get_mut((addr + i) as usize) {

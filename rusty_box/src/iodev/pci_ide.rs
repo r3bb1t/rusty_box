@@ -11,7 +11,6 @@
 //! - Physical Region Descriptor (PRD) table processing
 //! - Timer-driven DMA transfers (Bochs pci_ide.cc)
 
-
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
 
@@ -194,7 +193,6 @@ impl BxPciIde {
         }
     }
 
-
     /// BM-DMA timer function — processes PRD tables and transfers data.
     /// Bochs: bx_pci_ide_c::timer() (pci_ide.cc)
     ///
@@ -281,7 +279,11 @@ impl BxPciIde {
                         "BM-DMA start ch={}, DTPR={:#010x}, rwcon={}",
                         channel,
                         self.bmdma[channel].dtpr,
-                        if self.bmdma[channel].cmd_rwcon { "read" } else { "write" },
+                        if self.bmdma[channel].cmd_rwcon {
+                            "read"
+                        } else {
+                            "write"
+                        },
                     );
                     // TODO: activate DMA timer when DMA engine is connected.
                     // Bochs pci_ide.cc: bx_pc_system.activate_timer(period=1)

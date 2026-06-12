@@ -9,7 +9,6 @@ use super::crregs::{BxCr0, BxCr4, BxEfer};
 use super::descriptor::{BxGlobalSegmentReg, BxSegmentReg};
 use super::i387::BxPackedRegister;
 
-
 // =====================
 //  SVM intercept codes
 // =====================
@@ -173,7 +172,6 @@ pub const SVM_GUEST_IDTR_BASE: u32 = 0x488;
 
 pub const SVM_GUEST_TR_SELECTOR: u32 = 0x490;
 
-
 pub const SVM_GUEST_CPL: u32 = 0x4cb;
 pub const SVM_GUEST_EFER_MSR: u32 = 0x4d0;
 pub const SVM_GUEST_EFER_MSR_HI: u32 = 0x4d4;
@@ -202,8 +200,6 @@ pub const SVM_GUEST_SYSENTER_EIP_MSR: u32 = 0x638;
 pub const SVM_GUEST_CR2: u32 = 0x640;
 
 pub const SVM_GUEST_PAT: u32 = 0x668;
-
-
 
 // ========================
 //  SVM intercept controls
@@ -299,7 +295,6 @@ pub struct SvmHostState {
     pub pat_msr: BxPackedRegister,
 }
 
-
 #[derive(Debug, Default, Clone)]
 pub struct SvmControls {
     pub cr_rd_ctrl: u16,
@@ -353,28 +348,26 @@ pub fn svm_exception_intercepted(ctrls: &SvmControls, vector: u32) -> bool {
     (ctrls.exceptions_intercept & (1 << vector)) != 0
 }
 
-
 // ========================
 //  VM_CR MSR bitmasks
 // ========================
 
-pub const BX_VM_CR_MSR_LOCK_MASK: u32         = 1 << 3;
-pub const BX_VM_CR_MSR_SVMDIS_MASK: u32       = 1 << 4;
+pub const BX_VM_CR_MSR_LOCK_MASK: u32 = 1 << 3;
+pub const BX_VM_CR_MSR_SVMDIS_MASK: u32 = 1 << 4;
 
 // SVM MSR addresses
-pub const BX_SVM_VM_CR_MSR: u32      = 0xc001_0114;
-pub const BX_SVM_IGNNE_MSR: u32      = 0xc001_0115;
-pub const BX_SVM_SMM_CTL_MSR: u32    = 0xc001_0116;
+pub const BX_SVM_VM_CR_MSR: u32 = 0xc001_0114;
+pub const BX_SVM_IGNNE_MSR: u32 = 0xc001_0115;
+pub const BX_SVM_SMM_CTL_MSR: u32 = 0xc001_0116;
 pub const BX_SVM_VM_HSAVE_PA_MSR: u32 = 0xc001_0117;
 
 /// SVM VIRQ event pending — bit 8 to match Bochs convention.
 pub const BX_EVENT_SVM_VIRQ_PENDING: u32 = 1 << 8;
 
-
 use super::{
+    cet::canonicalize_address,
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
-    cet::canonicalize_address,
     decoder::{BxSegregs, Instruction},
     eflags::EFlags,
     exception::InterruptType,
@@ -382,7 +375,6 @@ use super::{
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
-
     // =====================================================================
     //  VMCB physical-memory access helpers
     // =====================================================================
@@ -455,11 +447,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.vmcbhostptr != 0 {
             let host = (self.vmcbhostptr | offset as u64) as *mut u8;
             // SAFETY: vmcbhostptr validated; single-threaded
-            unsafe { *host = val; }
+            unsafe {
+                *host = val;
+            }
         } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let mut data = [val];
             let mut dummy_mapping: [u32; 0] = [];
-            let mut stamp = super::icache::BxPageWriteStampTable { fine_granularity_mapping: &mut dummy_mapping };
+            let mut stamp = super::icache::BxPageWriteStampTable {
+                fine_granularity_mapping: &mut dummy_mapping,
+            };
             let _ = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 1, &mut data);
         }
     }
@@ -469,11 +465,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let paddr = self.vmcbptr + offset as u64;
         if self.vmcbhostptr != 0 {
             let host = (self.vmcbhostptr | offset as u64) as *mut [u8; 2];
-            unsafe { *host = val.to_le_bytes(); }
+            unsafe {
+                *host = val.to_le_bytes();
+            }
         } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let mut data = val.to_le_bytes();
             let mut dummy_mapping: [u32; 0] = [];
-            let mut stamp = super::icache::BxPageWriteStampTable { fine_granularity_mapping: &mut dummy_mapping };
+            let mut stamp = super::icache::BxPageWriteStampTable {
+                fine_granularity_mapping: &mut dummy_mapping,
+            };
             let _ = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 2, &mut data);
         }
     }
@@ -483,11 +483,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let paddr = self.vmcbptr + offset as u64;
         if self.vmcbhostptr != 0 {
             let host = (self.vmcbhostptr | offset as u64) as *mut [u8; 4];
-            unsafe { *host = val.to_le_bytes(); }
+            unsafe {
+                *host = val.to_le_bytes();
+            }
         } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let mut data = val.to_le_bytes();
             let mut dummy_mapping: [u32; 0] = [];
-            let mut stamp = super::icache::BxPageWriteStampTable { fine_granularity_mapping: &mut dummy_mapping };
+            let mut stamp = super::icache::BxPageWriteStampTable {
+                fine_granularity_mapping: &mut dummy_mapping,
+            };
             let _ = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 4, &mut data);
         }
     }
@@ -497,11 +501,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let paddr = self.vmcbptr + offset as u64;
         if self.vmcbhostptr != 0 {
             let host = (self.vmcbhostptr | offset as u64) as *mut [u8; 8];
-            unsafe { *host = val.to_le_bytes(); }
+            unsafe {
+                *host = val.to_le_bytes();
+            }
         } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let mut data = val.to_le_bytes();
             let mut dummy_mapping: [u32; 0] = [];
-            let mut stamp = super::icache::BxPageWriteStampTable { fine_granularity_mapping: &mut dummy_mapping };
+            let mut stamp = super::icache::BxPageWriteStampTable {
+                fine_granularity_mapping: &mut dummy_mapping,
+            };
             let _ = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 8, &mut data);
         }
     }
@@ -544,17 +552,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let limit = seg.cache.u.segment_limit_scaled();
         // Encode descriptor into SVM attribute format
         let ar_byte = seg.cache.get_ar_byte() as u16;
-        let g    = if seg.cache.u.segment_g()   { 1u16 } else { 0 };
-        let d_b  = if seg.cache.u.segment_d_b() { 1u16 } else { 0 };
-        let l    = if seg.cache.u.segment_l()    { 1u16 } else { 0 };
-        let avl  = if seg.cache.u.segment_avl()  { 1u16 } else { 0 };
+        let g = if seg.cache.u.segment_g() { 1u16 } else { 0 };
+        let d_b = if seg.cache.u.segment_d_b() { 1u16 } else { 0 };
+        let l = if seg.cache.u.segment_l() { 1u16 } else { 0 };
+        let avl = if seg.cache.u.segment_avl() { 1u16 } else { 0 };
         let valid = if seg.cache.valid != 0 { 1u16 } else { 0 };
-        let attr = ar_byte
-            | (valid << 7)
-            | (avl  << 8)
-            | (l    << 9)
-            | (d_b  << 10)
-            | (g    << 11);
+        let attr = ar_byte | (valid << 7) | (avl << 8) | (l << 9) | (d_b << 10) | (g << 11);
 
         self.vmcb_write16(offset, selector);
         self.vmcb_write16(offset + 2, attr);
@@ -575,7 +578,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
                 use super::rusty_box::MemoryAccessType;
                 match mem.get_host_mem_addr(vmcbptr, MemoryAccessType::RW, &[cpu_ref]) {
-                    Ok(Some(slice)) => self.vmcbhostptr = slice.as_ptr() as super::tlb::BxHostpageaddr,
+                    Ok(Some(slice)) => {
+                        self.vmcbhostptr = slice.as_ptr() as super::tlb::BxHostpageaddr
+                    }
                     _ => self.vmcbhostptr = 0,
                 }
             } else {
@@ -633,7 +638,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn svm_exit_load_host_state(&mut self) {
         self.tsc_offset = 0;
 
-        let host_state = self.vmcb.as_ref().expect("vmcb must exist during VMEXIT").host_state.clone();
+        let host_state = self
+            .vmcb
+            .as_ref()
+            .expect("vmcb must exist during VMEXIT")
+            .host_state
+            .clone();
 
         for n in 0..4 {
             self.sregs[n] = host_state.sregs[n].clone();
@@ -848,7 +858,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         guest_cr0.set32(cr0_lo);
 
         // EFER.LMA := EFER.LME & CR0.PG
-        guest_efer.set_lma(if guest_cr0.pg() && guest_efer.lme() { 1 } else { 0 });
+        guest_efer.set_lma(if guest_cr0.pg() && guest_efer.lme() {
+            1
+        } else {
+            0
+        });
 
         let guest_cr2 = self.vmcb_read64(SVM_GUEST_CR2);
         let guest_cr3 = self.vmcb_read64(SVM_GUEST_CR3);
@@ -1002,7 +1016,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     ) -> super::Result<()> {
         tracing::debug!(
             "SVM VMEXIT reason={} exitinfo1={:#x} exitinfo2={:#x}",
-            reason, exitinfo1, exitinfo2
+            reason,
+            exitinfo1,
+            exitinfo2
         );
 
         if !self.in_svm_guest && reason != SVM_VMEXIT_INVALID {
@@ -1105,7 +1121,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             5 => {
                 // Hardware exception
                 if vector == 2 || vector > 31 {
-                    tracing::error!("SvmInjectEvents: invalid vector {} for HW exception", vector);
+                    tracing::error!(
+                        "SvmInjectEvents: invalid vector {} for HW exception",
+                        vector
+                    );
                     return false;
                 }
                 // #BP and #OF are software exceptions
@@ -1127,7 +1146,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         };
 
-        tracing::debug!("SvmInjectEvents: vector={:#04x} error_code={:#06x}", vector, error_code);
+        tracing::debug!(
+            "SvmInjectEvents: vector={:#04x} error_code={:#06x}",
+            vector,
+            error_code
+        );
 
         // Record exit int info for nested event tracking
         {
@@ -1137,9 +1160,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Deliver the interrupt (this may unwind via CpuLoopRestart on exception)
-        let nmi_vector = if int_type as u8 == InterruptType::Nmi as u8 { 2 } else { vector };
+        let nmi_vector = if int_type as u8 == InterruptType::Nmi as u8 {
+            2
+        } else {
+            vector
+        };
         let soft_int = matches!(int_type, InterruptType::SoftwareInterrupt);
-        if self.interrupt(nmi_vector, int_type, soft_int, push_error, error_code).is_err() {
+        if self
+            .interrupt(nmi_vector, int_type, soft_int, push_error, error_code)
+            .is_err()
+        {
             // If interrupt delivery itself caused an exception, the CpuLoopRestart
             // will propagate up. The event is still recorded in exitintinfo.
         }
@@ -1208,7 +1238,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
-
     /// Check if an exception is intercepted by SVM.
     #[inline]
     fn svm_exception_intercept_check(&self, vector: u32) -> bool {
@@ -1247,7 +1276,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         tracing::debug!(
             "SVM VMEXIT: exception vector={:#04x} errcode={:#06x}",
-            vector, errcode
+            vector,
+            errcode
         );
 
         // #DF clears in_event
@@ -1271,7 +1301,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs svm.cc SvmInterceptMSR()
     pub(super) fn svm_intercept_msr(
         &mut self,
-        op: u32,  // 0 = read, 1 = write
+        op: u32, // 0 = read, 1 = write
         msr: u32,
     ) -> super::Result<()> {
         if !self.in_svm_guest {
@@ -1409,7 +1439,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             qualification |= 1u64 << 48;
         }
 
-        self.svm_vmexit(SvmVmexit::TaskSwitch as i32, tss_selector as u64, qualification)
+        self.svm_vmexit(
+            SvmVmexit::TaskSwitch as i32,
+            tss_selector as u64,
+            qualification,
+        )
     }
 
     /// SVM PAUSE intercept handler.
@@ -1424,7 +1458,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Pause filter logic — check if we should suppress the VMEXIT
         let should_suppress = if let Some(vmcb) = self.vmcb.as_mut() {
-            let has_filter = vmcb.ctrls.pause_filter_threshold > 0 || vmcb.ctrls.pause_filter_count > 0;
+            let has_filter =
+                vmcb.ctrls.pause_filter_threshold > 0 || vmcb.ctrls.pause_filter_count > 0;
             if has_filter {
                 let time_from_last = currtime.wrapping_sub(vmcb.ctrls.last_pause_time);
                 vmcb.ctrls.last_pause_time = currtime;
@@ -1456,7 +1491,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return Ok(());
             }
             Some(false) => return Ok(()), // suppressed
-            None => {} // fall through to VMEXIT
+            None => {}                    // fall through to VMEXIT
         }
 
         self.svm_vmexit(SvmVmexit::Pause as i32, 0, 0)
@@ -1538,7 +1573,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Get VMCB physical address from RAX
-        let asize_mask = if instr.as64_l() != 0 { u64::MAX } else if instr.as32_l() != 0 { 0xFFFF_FFFF } else { 0xFFFF };
+        let asize_mask = if instr.as64_l() != 0 {
+            u64::MAX
+        } else if instr.as32_l() != 0 {
+            0xFFFF_FFFF
+        } else {
+            0xFFFF
+        };
         let paddr = self.rax() & asize_mask;
         if (paddr & 0xFFF) != 0 {
             tracing::error!("VMRUN: VMCB address not page-aligned: {:#x}", paddr);
@@ -1604,7 +1645,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
-        let asize_mask = if instr.as64_l() != 0 { u64::MAX } else if instr.as32_l() != 0 { 0xFFFF_FFFF } else { 0xFFFF };
+        let asize_mask = if instr.as64_l() != 0 {
+            u64::MAX
+        } else if instr.as32_l() != 0 {
+            0xFFFF_FFFF
+        } else {
+            0xFFFF
+        };
         let paddr = self.rax() & asize_mask;
         if (paddr & 0xFFF) != 0 {
             return self.exception(Exception::Gp, 0);
@@ -1631,8 +1678,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.msr.cstar = canonicalize_address(self.vmcb_read64(SVM_GUEST_CSTAR_MSR));
         self.msr.fmask = self.vmcb_read64(SVM_GUEST_FMASK_MSR) as u32;
         self.msr.sysenter_cs_msr = self.vmcb_read64(SVM_GUEST_SYSENTER_CS_MSR) as u32;
-        self.msr.sysenter_eip_msr = canonicalize_address(self.vmcb_read64(SVM_GUEST_SYSENTER_EIP_MSR));
-        self.msr.sysenter_esp_msr = canonicalize_address(self.vmcb_read64(SVM_GUEST_SYSENTER_ESP_MSR));
+        self.msr.sysenter_eip_msr =
+            canonicalize_address(self.vmcb_read64(SVM_GUEST_SYSENTER_EIP_MSR));
+        self.msr.sysenter_esp_msr =
+            canonicalize_address(self.vmcb_read64(SVM_GUEST_SYSENTER_ESP_MSR));
 
         // Restore original VMCB pointer
         self.set_vmcbptr(saved_vmcbptr);
@@ -1656,7 +1705,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
-        let asize_mask = if instr.as64_l() != 0 { u64::MAX } else if instr.as32_l() != 0 { 0xFFFF_FFFF } else { 0xFFFF };
+        let asize_mask = if instr.as64_l() != 0 {
+            u64::MAX
+        } else if instr.as32_l() != 0 {
+            0xFFFF_FFFF
+        } else {
+            0xFFFF
+        };
         let paddr = self.rax() & asize_mask;
         if (paddr & 0xFFF) != 0 {
             return self.exception(Exception::Gp, 0);
@@ -1768,7 +1823,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(Exception::Gp, 0);
         }
 
-        let asize_mask = if instr.as64_l() != 0 { u64::MAX } else if instr.as32_l() != 0 { 0xFFFF_FFFF } else { 0xFFFF };
+        let asize_mask = if instr.as64_l() != 0 {
+            u64::MAX
+        } else if instr.as32_l() != 0 {
+            0xFFFF_FFFF
+        } else {
+            0xFFFF
+        };
         let laddr = self.rax() & asize_mask;
 
         if self.in_svm_guest {
@@ -1782,5 +1843,4 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.itlb.invlpg(laddr);
         Ok(())
     }
-
 }

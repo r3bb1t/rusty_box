@@ -220,9 +220,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.exception(super::cpu::Exception::Gp, 0)?;
         }
         // Bochs svm.cc SVM_INTERCEPT0_PUSHF.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_PUSHF)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_PUSHF) {
             return self.svm_vmexit(super::svm::SvmVmexit::Pushf as i32, 0, 0);
         }
 
@@ -238,9 +236,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         use super::decoder::BxSegregs;
 
         // Bochs svm.cc SVM_INTERCEPT0_POPF.
-        if self.in_svm_guest
-            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_POPF)
-        {
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_POPF) {
             return self.svm_vmexit(super::svm::SvmVmexit::Popf as i32, 0, 0);
         }
 

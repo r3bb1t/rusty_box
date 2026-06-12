@@ -4,18 +4,18 @@
 extern crate alloc;
 
 // Always available: core emulation modules (no alloc needed)
-pub mod cpu;
 pub mod config;
+pub mod cpu;
 mod crc;
 pub mod error;
 pub use error::{Error, Result};
+pub mod boot;
+pub mod dma;
 pub mod memory;
 mod misc;
 pub mod params;
 pub mod pc_system;
-pub mod boot;
 pub mod pic;
-pub mod dma;
 pub mod ring_buffer;
 
 // Emulator modules — core types always available,
@@ -31,6 +31,6 @@ pub mod iodev;
 pub mod snapshot;
 
 // Re-export commonly used types
-pub use emulator::EmulatorConfig;
 #[cfg(feature = "alloc")]
 pub use emulator::Emulator;
+pub use emulator::EmulatorConfig;
