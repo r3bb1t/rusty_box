@@ -1,5 +1,5 @@
 [workspace]
-members = ["rusty_box", "rusty_box_decoder", "examples/rusty_box_web", "examples/rusty_box_uefi"]
+members = ["rusty_box", "rusty_box_decoder", "rusty_box_gui", "examples/rusty_box_web", "examples/rusty_box_uefi"]
 default-members = ["rusty_box"]
 resolver = "2"
 
@@ -14,6 +14,9 @@ homepage = "https://github.com/r3bb1t/rusty_box"
 [workspace.dependencies]
 tracing = { version = "0.1", default-features = false, features = ["max_level_trace", "release_max_level_info"] }
 thiserror = { version = "2", default-features = false }
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 byteorder = { version = "1.5", default-features = false }
 bitflags = "2"
 paste = "1.0"
