@@ -259,6 +259,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
             core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
             core::ptr::addr_of_mut!((*ptr).config).write(config);
+            core::ptr::addr_of_mut!((*ptr).initialized).write(false);
+            core::ptr::addr_of_mut!((*ptr).gui).write(None);
+            #[cfg(feature = "std")]
+            core::ptr::addr_of_mut!((*ptr).bios_output_file).write(None);
             core::ptr::addr_of_mut!((*ptr).exit_set)
                 .write(crate::cpu::instrumentation::ExitSet::new());
             core::ptr::addr_of_mut!((*ptr).stop_flag).write(Arc::new(AtomicBool::new(false)));
@@ -3562,8 +3566,9 @@ mod tests {
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let emu = Emulator::<Corei7SkylakeX>::new(config);
-                assert!(emu.is_ok());
+                let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                #[cfg(feature = "std")]
+                assert!(emu.bios_output_file.is_none());
             })
             .unwrap()
             .join()
