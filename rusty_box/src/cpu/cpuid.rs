@@ -192,7 +192,6 @@ bitflags! {
     }
 }
 
-
 bitflags! {
     /// CPUID Leaf 7 Subleaf 1 EAX — Structured Extended Feature Flags
     /// [0:0]   SHA-512 support
@@ -241,6 +240,35 @@ bitflags! {
         const AVX_IFMA            = 1 << 23;
         const LAM                 = 1 << 26;
         const MSRLIST             = 1 << 27;
+    }
+}
+
+bitflags! {
+    /// CPUID Leaf 7 Subleaf 0 ECX — Structured Extended Feature Flags (Bochs cpuid.h).
+    /// Only the bits Bochs defines are listed; PKU/UMIP/etc. live in the Skylake-X
+    /// per-CPU file (`cpudb/intel/core_i7_skylake.rs`) until cross-CPU sharing is needed.
+    #[derive(Debug, Clone, Copy)]
+    pub struct CpuIdStd7Subleaf0Ecx: u32 {
+        /// CET Shadow Stack support — Bochs cpuid.h.
+        const CET_SS              = 1 <<  7;
+    }
+}
+
+bitflags! {
+    /// CPUID Leaf 7 Subleaf 0 EDX — Structured Extended Feature Flags (Bochs cpuid.h).
+    #[derive(Debug, Clone, Copy)]
+    pub struct CpuIdStd7Subleaf0Edx: u32 {
+        /// CET Indirect Branch Tracking support — Bochs cpuid.h.
+        const CET_IBT             = 1 << 20;
+    }
+}
+
+bitflags! {
+    /// CPUID Leaf 7 Subleaf 1 EDX — Structured Extended Feature Flags (Bochs cpuid.h).
+    #[derive(Debug, Clone, Copy)]
+    pub struct CpuIdStd7Subleaf1Edx: u32 {
+        /// CET Supervisor Shadow Stack support — Bochs cpuid.h.
+        const CET_SSS             = 1 << 18;
     }
 }
 

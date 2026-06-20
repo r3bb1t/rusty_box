@@ -3,12 +3,17 @@
 //! Provides `fetch_decode64` — a `const fn` decoder for x86-64 long mode
 //! that produces an [`Instruction`].
 
-use crate::instruction::{Instruction, InstructionFlags};
 use crate::error::{DecodeError, DecodeResult};
+use crate::instruction::{
+    has_lock_prefix_bits, lock_rep_value_from_bits, set_lock_rep_value_bits, Instruction,
+    InstructionFlags, LOCK_REP_LOCK, LOCK_REP_REP, LOCK_REP_REPNE,
+};
 use crate::opcode::Opcode;
 use crate::BxSegregs;
 
-use super::tables::{BxDecodeError, SsePrefix, VEX_W_OFFSET, VEX_VL_128_256_OFFSET, MASK_K0_OFFSET};
+use super::tables::{
+    BxDecodeError, SsePrefix, MASK_K0_OFFSET, VEX_VL_128_256_OFFSET, VEX_W_OFFSET,
+};
 
 // Import opcode tables
 use super::opmap::*;
@@ -21,18 +26,57 @@ use super::x87::{
     BX_OPCODE_INFO_FLOATING_POINT_DE, BX_OPCODE_INFO_FLOATING_POINT_DF,
 };
 
-// Backward-compatible alias
-use InstructionFlags as MetaInfoFlags;
+#[derive(Clone, Copy)]
+struct RexPrefix(u8);
 
-// Register constants for clarity
+impl RexPrefix {
+    const B_BIT: u8 = 0x01;
+    const X_BIT: u8 = 0x02;
+    const R_BIT: u8 = 0x04;
+    const W_BIT: u8 = 0x08;
+
+    #[inline]
+    const fn empty() -> Self {
+        Self(0)
+    }
+
+    #[inline]
+    const fn new(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    #[inline]
+    const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    #[inline]
+    const fn has_b(self) -> bool {
+        (self.0 & Self::B_BIT) != 0
+    }
+
+    #[inline]
+    const fn has_x(self) -> bool {
+        (self.0 & Self::X_BIT) != 0
+    }
+
+    #[inline]
+    const fn has_r(self) -> bool {
+        (self.0 & Self::R_BIT) != 0
+    }
+
+    #[inline]
+    const fn has_w(self) -> bool {
+        (self.0 & Self::W_BIT) != 0
+    }
+}
+
 const BX_NIL_REGISTER: u8 = 19;
 const BX_64BIT_REG_RIP: u8 = 16; // BX_GENERAL_REGISTERS = 16, matching Bochs
 const BX_NO_INDEX: u8 = 4;
-
 const DS: u8 = BxSegregs::Ds as u8;
 const SS: u8 = BxSegregs::Ss as u8;
 
-// Segment default tables for 64-bit mode (matching Bochs fetchdecode64.cc lines 45-81)
 // Index by base register (0-15). RSP(4)→SS, RBP(5)→SS in mod!=0; only RSP(4)→SS in mod==0
 const SREG_MOD0_BASE32_64: [u8; 16] = [
     DS, DS, DS, DS, SS, DS, DS, DS, // base 0-7
@@ -48,32 +92,7 @@ use super::tables::{
     AS32_OFFSET, AS64_OFFSET, IS64_OFFSET, LOCK_PREFIX_OFFSET, MODC0_OFFSET, NNN_OFFSET,
     OS32_OFFSET, OS64_OFFSET, RRR_OFFSET, SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET,
 };
-
-/// Search opcode table for matching opcode
-const fn find_opcode_in_table(table: &[u64], decmask: u32) -> Opcode {
-    let mut i = 0;
-    while i < table.len() {
-        let entry = table[i];
-        // Match C++ exactly: Bit32u(op) & 0xFFFFFF and Bit32u(op >> 24)
-        let ignmsk = (entry & 0xFFFFFF) as u32;
-        let opmsk = (entry >> 24) as u32;
-
-        if (opmsk & ignmsk) == (decmask & ignmsk) {
-            let opcode_raw = ((entry >> 48) & 0x7FFF) as u16;
-            return Opcode::from_u16_const(opcode_raw);
-        }
-
-        // Check if this is the last opcode (sign bit set) - matches C++ do-while condition
-        // C++: while(Bit64s(op) > 0) means continue while sign bit is NOT set
-        // So we break when sign bit IS set (entry < 0)
-        if (entry as i64) < 0 {
-            break;
-        }
-
-        i += 1;
-    }
-    Opcode::IaError
-}
+use super::{find_opcode_in_table, read_u16_le, read_u32_le};
 
 /// Decode one x86-64 instruction from `bytes`.
 ///
@@ -84,8 +103,14 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         length: 0,
         flags: InstructionFlags::empty(),
         operands: crate::instruction::Operands {
-            dst: 0, src1: 0, src2: 0, src3: 0,
-            segment: 0, base: 0, index: 0, scale: 0,
+            dst: 0,
+            src1: 0,
+            src2: 0,
+            src3: 0,
+            segment: 0,
+            base: 0,
+            index: 0,
+            scale: 0,
         },
         immediate: 0,
         displacement: 0,
@@ -99,11 +124,12 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     let mut pos = 0usize;
 
     // Initialize for 64-bit mode: os32=1, as32=1, os64=0, as64=1
-    let mut metainfo1_bits: u8 =
-        MetaInfoFlags::Os32.bits() | MetaInfoFlags::As32.bits() | MetaInfoFlags::As64.bits();
+    let mut metainfo1_bits: u8 = InstructionFlags::Os32.bits()
+        | InstructionFlags::As32.bits()
+        | InstructionFlags::As64.bits();
 
     // REX prefix tracking
-    let mut rex_prefix: u8 = 0;
+    let mut rex_prefix = RexPrefix::empty();
     let mut sse_prefix: u8 = SsePrefix::PrefixNone as u8;
     let mut seg_override: u8 = 7; // 7 = none
 
@@ -117,22 +143,22 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // Segment overrides (ES, CS, SS, DS ignored in 64-bit for most; FS/GS valid)
             // In 64-bit mode, CS:, DS:, ES:, SS: are ignored but reset REX
             0x26 | 0x2E | 0x36 | 0x3E => {
-                rex_prefix = 0; // Reset REX prefix
-                                // These segment overrides are ignored in 64-bit mode
+                rex_prefix = RexPrefix::empty();
+                // These segment overrides are ignored in 64-bit mode
             }
             0x64 => {
-                rex_prefix = 0;
+                rex_prefix = RexPrefix::empty();
                 seg_override = 4; // FS - valid in 64-bit
             }
             0x65 => {
-                rex_prefix = 0;
+                rex_prefix = RexPrefix::empty();
                 seg_override = 5; // GS - valid in 64-bit
             }
 
             // Operand size override
             0x66 => {
-                rex_prefix = 0;
-                metainfo1_bits &= !MetaInfoFlags::Os32.bits();
+                rex_prefix = RexPrefix::empty();
+                metainfo1_bits &= !InstructionFlags::Os32.bits();
                 if sse_prefix == SsePrefix::PrefixNone as u8 {
                     sse_prefix = SsePrefix::Prefix66 as u8;
                 }
@@ -142,27 +168,27 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // Default 64-bit: As32=1, As64=1. With 0x67: As32=1, As64=0 (32-bit addressing)
             // Clearing both would give asize()=0 (16-bit — invalid in 64-bit mode)
             0x67 => {
-                rex_prefix = 0;
-                metainfo1_bits &= !MetaInfoFlags::As64.bits();
+                rex_prefix = RexPrefix::empty();
+                metainfo1_bits &= !InstructionFlags::As64.bits();
             }
 
             // LOCK prefix
             0xF0 => {
-                rex_prefix = 0;
-                metainfo1_bits = (metainfo1_bits & 0x3F) | (1 << 6);
+                rex_prefix = RexPrefix::empty();
+                metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_LOCK);
             }
 
             // REPNE/REPNZ (also SSE prefix)
             0xF2 => {
-                rex_prefix = 0;
-                metainfo1_bits = (metainfo1_bits & 0x3F) | (2 << 6);
+                rex_prefix = RexPrefix::empty();
+                metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_REPNE);
                 sse_prefix = SsePrefix::PrefixF2 as u8;
             }
 
             // REP/REPE/REPZ (also SSE prefix)
             0xF3 => {
-                rex_prefix = 0;
-                metainfo1_bits = (metainfo1_bits & 0x3F) | (3 << 6);
+                rex_prefix = RexPrefix::empty();
+                metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_REP);
                 sse_prefix = SsePrefix::PrefixF3 as u8;
             }
 
@@ -172,7 +198,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // Store full byte (not b & 0x0F) so bare REX 0x40 is still non-zero.
             // Bochs: rex_prefix = b; — ensures REX.none (0x40) enables Extend8bit.
             0x40..=0x4F => {
-                rex_prefix = b;
+                rex_prefix = RexPrefix::new(b);
             }
 
             _ => break,
@@ -182,13 +208,13 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // Post-prefix REX processing (matches Bochs fetchDecode64:1476-1482)
     // Must happen AFTER prefix loop so REX.W overrides any prior 0x66 prefix
-    if rex_prefix != 0 {
+    if !rex_prefix.is_empty() {
         // assertExtend8bit: REX prefix enables extended 8-bit registers (SPL, BPL, SIL, DIL)
-        metainfo1_bits |= MetaInfoFlags::Extend8bit.bits();
-        if (rex_prefix & 0x08) != 0 {
+        metainfo1_bits |= InstructionFlags::Extend8bit.bits();
+        if rex_prefix.has_w() {
             // REX.W: assert BOTH Os64 AND Os32 (Bochs assertOs64 + assertOs32)
-            metainfo1_bits |= MetaInfoFlags::Os64.bits();
-            metainfo1_bits |= MetaInfoFlags::Os32.bits();
+            metainfo1_bits |= InstructionFlags::Os64.bits();
+            metainfo1_bits |= InstructionFlags::Os32.bits();
         }
     }
 
@@ -217,12 +243,20 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     let mut evex_z: u8 = 0; // EVEX zeroing-masking
     let mut evex_b_flag: u8 = 0; // EVEX broadcast/RC/SAE
     let mut evex_aaa: u8 = 0; // EVEX opmask register
+                              // EVEX-only extensions (5th bit) for the 32-vector register file:
+                              //   R' extends ModRM.reg (`nnn`) to 5 bits.
+                              //   V' extends `vvvv` to 5 bits for non-VSIB ops, OR extends the SIB
+                              //   index field to 5 bits for VSIB ops (gather/scatter family).
+    let mut evex_r_prime: u8 = 0;
+    let mut evex_v_prime: u8 = 0;
 
     if b1 == 0xC4 || b1 == 0xC5 {
         // VEX prefix — in 64-bit mode, C4/C5 are always VEX (never LES/LDS)
         // Bochs decoder_vex64 (fetchdecode64.cc)
-        if sse_prefix != SsePrefix::PrefixNone as u8 || rex_prefix != 0 {
-            return Err(DecodeError::Decoder(BxDecodeError::BxIllegalVexXopWithRexPrefix));
+        if sse_prefix != SsePrefix::PrefixNone as u8 || !rex_prefix.is_empty() {
+            return Err(DecodeError::Decoder(
+                BxDecodeError::BxIllegalVexXopWithRexPrefix,
+            ));
         }
 
         is_vex = true;
@@ -254,7 +288,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             if (vex_byte2 & 0x80) != 0 {
                 vex_w = 1;
                 // VEX.W=1 implies 64-bit operand size
-                metainfo1_bits |= MetaInfoFlags::Os64.bits() | MetaInfoFlags::Os32.bits();
+                metainfo1_bits |= InstructionFlags::Os64.bits() | InstructionFlags::Os32.bits();
             }
 
             vex_vvv = 15 - ((vex_byte2 >> 3) & 0xF);
@@ -269,7 +303,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
         // Build rex_prefix from VEX R/X/B bits (matching Bochs convention)
         // rex_prefix bit layout: 0=B, 1=X, 2=R, 3=W
-        rex_prefix = (rex_b >> 3) | ((rex_x >> 3) << 1) | ((rex_r >> 3) << 2);
+        rex_prefix = RexPrefix::new((rex_b >> 3) | ((rex_x >> 3) << 1) | ((rex_r >> 3) << 2));
 
         // Read opcode byte
         if pos >= max_len {
@@ -295,7 +329,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 opcode_map = 3;
             }
             _ => {
-                return Err(DecodeError::Decoder(BxDecodeError::BxIllegalVexXopOpcodeMap));
+                return Err(DecodeError::Decoder(
+                    BxDecodeError::BxIllegalVexXopOpcodeMap,
+                ));
             }
         }
 
@@ -309,7 +345,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         // P0: ~R ~X ~B ~R' 00 mm
         // P1: W ~vvvv 1 pp
         // P2: z L'L b ~V' aaa
-        if sse_prefix != SsePrefix::PrefixNone as u8 || rex_prefix != 0 {
+        if sse_prefix != SsePrefix::PrefixNone as u8 || !rex_prefix.is_empty() {
             return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
         }
         if pos + 3 >= max_len {
@@ -329,12 +365,24 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
         }
         let evex_map = p0 & 0x07; // 3-bit map (Bochs: evex & 0x7)
-        // R/X/B from P0 (inverted bits) — bit 3 extension for register encoding
-        let rex_r_bit = if (p0 & 0x80) == 0 { 4u8 } else { 0u8 }; // ~R → REX.R (bit 2 of rex_prefix)
-        let rex_x_bit = if (p0 & 0x40) == 0 { 2u8 } else { 0u8 }; // ~X → REX.X (bit 1)
-        let rex_b_bit = if (p0 & 0x20) == 0 { 1u8 } else { 0u8 }; // ~B → REX.B (bit 0)
-        // R' from P0 bit 4 — extends R to 5 bits for EVEX register encoding
-        let _evex_r_prime = if (p0 & 0x10) == 0 { 1u8 } else { 0u8 }; // inverted
+                                  // R/X/B from P0 (inverted bits) — bit 3 extension for register encoding
+        let rex_r_bit = if (p0 & 0x80) == 0 {
+            RexPrefix::R_BIT
+        } else {
+            0
+        }; // ~R → REX.R (bit 2 of rex_prefix)
+        let rex_x_bit = if (p0 & 0x40) == 0 {
+            RexPrefix::X_BIT
+        } else {
+            0
+        }; // ~X → REX.X (bit 1)
+        let rex_b_bit = if (p0 & 0x20) == 0 {
+            RexPrefix::B_BIT
+        } else {
+            0
+        }; // ~B → REX.B (bit 0)
+           // R' from P0 bit 4 — extends R to 5 bits for EVEX register encoding
+        evex_r_prime = if (p0 & 0x10) == 0 { 1u8 } else { 0u8 }; // ~R' inverted, extends nnn to 5 bits
 
         // P1: W(7) ~vvvv(6:3) 1(2) pp(1:0)
         // Bit 2 must be 1
@@ -346,7 +394,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         sse_prefix = p1 & 0x03;
 
         if vex_w != 0 {
-            metainfo1_bits |= MetaInfoFlags::Os64.bits() | MetaInfoFlags::Os32.bits();
+            metainfo1_bits |= InstructionFlags::Os64.bits() | InstructionFlags::Os32.bits();
         }
 
         // P2: z(7) L'L(6:5) b(4) ~V'(3) aaa(2:0)
@@ -355,9 +403,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         evex_b_flag = (p2 >> 4) & 1;
         evex_aaa = p2 & 0x07;
         // V' extends vvvv to 5 bits (inverted)
-        let _evex_v_prime = if (p2 & 0x08) == 0 { 1u8 } else { 0u8 };
+        evex_v_prime = if (p2 & 0x08) == 0 { 1u8 } else { 0u8 }; // ~V' inverted, extends vvvv (or VSIB index) to 5 bits
 
-        rex_prefix = rex_b_bit | rex_x_bit | rex_r_bit;
+        rex_prefix = RexPrefix::new(rex_r_bit | rex_x_bit | rex_b_bit);
 
         // Read opcode byte
         if pos >= max_len {
@@ -469,7 +517,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             | 0xCE            // INTO
             | 0xD4 | 0xD5     // AAM/AAD
             | 0xD6            // SALC/SETALC
-            | 0xEA            // JMP far ptr
+            | 0xEA // JMP far ptr
         );
         if is_ud64 {
             return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
@@ -478,13 +526,23 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         // Two-byte UD64 opcodes (0F xx)
         let is_ud64_2byte = matches!(
             b1 & 0xFF,
-            0x04 | 0x0A | 0x0C
-            | 0x24 | 0x25 | 0x26 | 0x27
-            | 0x36
-            | 0x39
-            | 0x3B | 0x3C | 0x3D | 0x3E | 0x3F
-            | 0x7A | 0x7B
-            | 0xA6 | 0xA7
+            0x04 | 0x0A
+                | 0x0C
+                | 0x24
+                | 0x25
+                | 0x26
+                | 0x27
+                | 0x36
+                | 0x39
+                | 0x3B
+                | 0x3C
+                | 0x3D
+                | 0x3E
+                | 0x3F
+                | 0x7A
+                | 0x7B
+                | 0xA6
+                | 0xA7
         );
         if is_ud64_2byte {
             return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
@@ -500,7 +558,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // REX.B extends register encoded in opcode low bits for non-ModRM opcodes
     // (PUSH r64, POP r64, MOV r64/imm, XCHG r64/RAX, BSWAP, INC/DEC)
-    if !needs_modrm && (rex_prefix & 0x01) != 0 {
+    if !needs_modrm && rex_prefix.has_b() {
         rm |= 8;
     }
 
@@ -518,10 +576,13 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         rm = (modrm & 0x7) as u32;
 
         // REX extensions
-        if (rex_prefix & 0x04) != 0 {
+        if rex_prefix.has_r() {
             nnn |= 8;
         } // REX.R
-        if (rex_prefix & 0x01) != 0 {
+          // EVEX.R' extends nnn to 5 bits for the 32-vector register file.
+          // For non-EVEX paths `evex_r_prime` is zero so this is a no-op.
+        nnn |= (evex_r_prime as u32) << 4;
+        if rex_prefix.has_b() {
             rm |= 8;
         } // REX.B
 
@@ -532,9 +593,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
         if mod_field == 3 || force_modc0 {
             // Register mode (or forced register for MOV CR/DR)
-            metainfo1_bits |= MetaInfoFlags::ModC0.bits();
+            metainfo1_bits |= InstructionFlags::ModC0.bits();
             // EVEX.X extends rm to 5 bits for vector register encoding (mod==3 only)
-            if is_evex && (rex_prefix & 0x02) != 0 {
+            if is_evex && rex_prefix.has_x() {
                 rm |= 16;
             }
         } else {
@@ -554,10 +615,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 let mut base = sib & 0x7;
 
                 // REX extensions
-                if (rex_prefix & 0x02) != 0 {
+                if rex_prefix.has_x() {
                     index |= 8;
                 } // REX.X
-                if (rex_prefix & 0x01) != 0 {
+                if rex_prefix.has_b() {
                     base |= 8;
                 } // REX.B
 
@@ -628,7 +689,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         }
     } else {
         // No ModRM - instruction uses register encoded in opcode (low 3 bits = rm)
-        metainfo1_bits |= MetaInfoFlags::ModC0.bits();
+        metainfo1_bits |= InstructionFlags::ModC0.bits();
     }
 
     // Store register fields
@@ -670,7 +731,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 // Matches Bochs convention where group opcodes always put rm in dst()
                 | 0x100  // Group 6: SLDT/STR/LLDT/LTR/VERR/VERW (0F 00)
                 | 0x1AE  // Group 15: FXSAVE/FXRSTOR/LDMXCSR/STMXCSR/CLFLUSH (0F AE)
-                | 0x1C7  // Group 9: CMPXCHG8B/CMPXCHG16B (0F C7)
+                | 0x1C7 // Group 9: CMPXCHG8B/CMPXCHG16B (0F C7)
         );
 
         // Segment register move instructions: 8C (MOV Ew,Sw) and 8E (MOV Sw,Ew)
@@ -755,20 +816,28 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // Store VEX/EVEX fields in instruction
     if is_vex {
-        instr.operands.src2 = vex_vvv;
+        // For EVEX paths, EVEX.V' extends `vvvv` to 5 bits (the second source
+        // vector register can address vmm0..31). For plain VEX paths,
+        // `evex_v_prime` is left at 0 so this is a no-op. VSIB-form EVEX
+        // ops encode `vvvv = 1111` ("reserved/unused") and reuse V' as the
+        // high bit of the SIB index instead — those handlers read
+        // `sib_index()` plus `get_evex_v_prime()`, never `src2()`, so the
+        // unconditional 5-bit extension here is harmless for them.
+        instr.operands.src2 = vex_vvv | (evex_v_prime << 4);
         instr.set_vl(vex_l);
         instr.set_vex_w(vex_w);
         instr.set_vex(true);
         instr.flags = crate::instruction::InstructionFlags::from_bits_truncate(
-            instr.flags.bits() | crate::instruction::InstructionFlags::VexPresent.bits()
+            instr.flags.bits() | crate::instruction::InstructionFlags::VexPresent.bits(),
         );
     }
     if is_evex {
         instr.set_opmask(evex_aaa);
         instr.set_evex_b(evex_b_flag);
+        instr.set_evex_v_prime(evex_v_prime);
         instr.set_zero_masking(evex_z);
         // EVEX.b in register form implies 512-bit vector length
-        if evex_b_flag != 0 && (metainfo1_bits & MetaInfoFlags::ModC0.bits()) != 0 {
+        if evex_b_flag != 0 && (metainfo1_bits & InstructionFlags::ModC0.bits()) != 0 {
             instr.set_vl(2); // VL512
         }
     }
@@ -842,24 +911,24 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // Finalize instruction
     instr.length = pos as u8;
-    instr.flags = MetaInfoFlags::from_bits_retain(metainfo1_bits);
+    instr.flags = InstructionFlags::from_bits_retain(metainfo1_bits);
 
     // Build decmask for opcode lookup
-    let mod_c0 = (metainfo1_bits & MetaInfoFlags::ModC0.bits()) != 0;
-    let os64 = (metainfo1_bits & MetaInfoFlags::Os64.bits()) != 0;
-    let os32 = (metainfo1_bits & MetaInfoFlags::Os32.bits()) != 0;
-    let as64 = (metainfo1_bits & MetaInfoFlags::As64.bits()) != 0;
-    let as32 = (metainfo1_bits & MetaInfoFlags::As32.bits()) != 0;
+    let mod_c0 = (metainfo1_bits & InstructionFlags::ModC0.bits()) != 0;
+    let os64 = (metainfo1_bits & InstructionFlags::Os64.bits()) != 0;
+    let os32 = (metainfo1_bits & InstructionFlags::Os32.bits()) != 0;
+    let as64 = (metainfo1_bits & InstructionFlags::As64.bits()) != 0;
+    let as32 = (metainfo1_bits & InstructionFlags::As32.bits()) != 0;
 
     // Bochs always includes nnn/rm in decmask, for both ModRM and non-ModRM opcodes.
     // For non-ModRM, nnn/rm come from opcode bits; for ModRM, from the ModRM byte.
-    let lock_rep_value = (metainfo1_bits >> 6) & 0x3;
+    let lock_rep_value = lock_rep_value_from_bits(metainfo1_bits);
     let mut decmask: u32 = (if os64 { 1 } else { 0 } << OS64_OFFSET)
         | (if os32 { 1 } else { 0 } << OS32_OFFSET)
         | (if as64 { 1 } else { 0 } << AS64_OFFSET)
         | (if as32 { 1 } else { 0 } << AS32_OFFSET)
         | ((sse_prefix as u32) << SSE_PREFIX_OFFSET)
-        | (if lock_rep_value == 1 { 1 } else { 0 } << LOCK_PREFIX_OFFSET)
+        | (if lock_rep_value == LOCK_REP_LOCK { 1 } else { 0 } << LOCK_PREFIX_OFFSET)
         | (if mod_c0 { 1 } else { 0 } << MODC0_OFFSET)
         | (1 << IS64_OFFSET) // 64-bit mode
         | ((nnn & 0x7) << NNN_OFFSET)
@@ -904,7 +973,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         instr.opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
     } else if opcode_map == 0 && b1 == 0x90 {
         // Special NOP/PAUSE/XCHG handling (Bochs decoder64_nop)
-        if (rex_prefix & 0x01) != 0 {
+        if rex_prefix.has_b() {
             // REX.B set: actual XCHG R8, RAX — use normal table
             instr.opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
         } else if sse_prefix == SsePrefix::PrefixF3 as u8 {
@@ -925,7 +994,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     // directly — no SSE→VEX remapping needed.
     if is_evex {
         let w_bit = vex_w;
-        if let Some(evex_op) = lookup_evex_opcode(opcode_map, (b1 & 0xFF) as u8, sse_prefix, w_bit) {
+        if let Some(evex_op) = lookup_evex_opcode(opcode_map, (b1 & 0xFF) as u8, sse_prefix, w_bit)
+        {
             instr.opcode = evex_op;
         }
     }
@@ -947,7 +1017,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // Post-decode LOCK validation (Bochs fetchdecode64.cc)
     // LOCK prefix on register operand (modC0) is always invalid → #UD
-    let has_lock = (metainfo1_bits >> 6) & 0x3 == 1;
+    let has_lock = has_lock_prefix_bits(metainfo1_bits);
     if has_lock && mod_c0 {
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
     }
@@ -1097,12 +1167,12 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 // VPUNPCKHQDQ — EVEX.66.0F.W1 6D
                 (0x6D, 1, 1) => Some(Opcode::EvexVpunpckhqdqVdqHdqWdq),
                 // Shift by XMM register
-                (0xF2, 1, 0) => Some(Opcode::EvexVpslldVdqHdqWdq),  // VPSLLD
-                (0xF3, 1, 1) => Some(Opcode::EvexVpsllqVdqHdqWdq),  // VPSLLQ
-                (0xD2, 1, 0) => Some(Opcode::EvexVpsrldVdqHdqWdq),  // VPSRLD
-                (0xD3, 1, 1) => Some(Opcode::EvexVpsrlqVdqHdqWdq),  // VPSRLQ
-                (0xE2, 1, 0) => Some(Opcode::EvexVpsradVdqHdqWdq),  // VPSRAD
-                (0xE2, 1, 1) => Some(Opcode::EvexVpsraqVdqHdqWdq),  // VPSRAQ
+                (0xF2, 1, 0) => Some(Opcode::EvexVpslldVdqHdqWdq), // VPSLLD
+                (0xF3, 1, 1) => Some(Opcode::EvexVpsllqVdqHdqWdq), // VPSLLQ
+                (0xD2, 1, 0) => Some(Opcode::EvexVpsrldVdqHdqWdq), // VPSRLD
+                (0xD3, 1, 1) => Some(Opcode::EvexVpsrlqVdqHdqWdq), // VPSRLQ
+                (0xE2, 1, 0) => Some(Opcode::EvexVpsradVdqHdqWdq), // VPSRAD
+                (0xE2, 1, 1) => Some(Opcode::EvexVpsraqVdqHdqWdq), // VPSRAQ
 
                 // --- FP scalar arithmetic (avx512_scalar.rs) ---
                 // VADDSS/SD — EVEX.0F 58
@@ -1553,171 +1623,813 @@ const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
     use Opcode::*;
     match op {
         // ===== Integer arithmetic =====
-        PadddVdqWdq   => if vl == 0 { V128VpadddVdqHdqWdq }   else { V256VpadddVdqHdqWdq },
-        PaddqVdqWdq   => if vl == 0 { V128VpaddqVdqHdqWdq }   else { V256VpaddqVdqHdqWdq },
-        PaddwVdqWdq   => if vl == 0 { V128VpaddwVdqHdqWdq }   else { V256VpaddwVdqHdqWdq },
-        PaddbVdqWdq   => if vl == 0 { V128VpaddbVdqHdqWdq }   else { V256VpaddbVdqHdqWdq },
-        PsubdVdqWdq   => if vl == 0 { V128VpsubdVdqHdqWdq }   else { V256VpsubdVdqHdqWdq },
-        PsubqVdqWdq   => if vl == 0 { V128VpsubqVdqHdqWdq }   else { V256VpsubqVdqHdqWdq },
-        PsubwVdqWdq   => if vl == 0 { V128VpsubwVdqHdqWdq }   else { V256VpsubwVdqHdqWdq },
-        PsubbVdqWdq   => if vl == 0 { V128VpsubbVdqHdqWdq }   else { V256VpsubbVdqHdqWdq },
+        PadddVdqWdq => {
+            if vl == 0 {
+                V128VpadddVdqHdqWdq
+            } else {
+                V256VpadddVdqHdqWdq
+            }
+        }
+        PaddqVdqWdq => {
+            if vl == 0 {
+                V128VpaddqVdqHdqWdq
+            } else {
+                V256VpaddqVdqHdqWdq
+            }
+        }
+        PaddwVdqWdq => {
+            if vl == 0 {
+                V128VpaddwVdqHdqWdq
+            } else {
+                V256VpaddwVdqHdqWdq
+            }
+        }
+        PaddbVdqWdq => {
+            if vl == 0 {
+                V128VpaddbVdqHdqWdq
+            } else {
+                V256VpaddbVdqHdqWdq
+            }
+        }
+        PsubdVdqWdq => {
+            if vl == 0 {
+                V128VpsubdVdqHdqWdq
+            } else {
+                V256VpsubdVdqHdqWdq
+            }
+        }
+        PsubqVdqWdq => {
+            if vl == 0 {
+                V128VpsubqVdqHdqWdq
+            } else {
+                V256VpsubqVdqHdqWdq
+            }
+        }
+        PsubwVdqWdq => {
+            if vl == 0 {
+                V128VpsubwVdqHdqWdq
+            } else {
+                V256VpsubwVdqHdqWdq
+            }
+        }
+        PsubbVdqWdq => {
+            if vl == 0 {
+                V128VpsubbVdqHdqWdq
+            } else {
+                V256VpsubbVdqHdqWdq
+            }
+        }
         // Saturating
-        PaddsbVdqWdq  => if vl == 0 { V128VpaddsbVdqHdqWdq }  else { V256VpaddsbVdqHdqWdq },
-        PaddswVdqWdq  => if vl == 0 { V128VpaddswVdqHdqWdq }  else { V256VpaddswVdqHdqWdq },
-        PsubsbVdqWdq  => if vl == 0 { V128VpsubsbVdqHdqWdq }  else { V256VpsubsbVdqHdqWdq },
-        PsubswVdqWdq  => if vl == 0 { V128VpsubswVdqHdqWdq }  else { V256VpsubswVdqHdqWdq },
-        PsubusbVdqWdq => if vl == 0 { V128VpsubusbVdqHdqWdq } else { V256VpsubusbVdqHdqWdq },
-        PsubuswVdqWdq => if vl == 0 { V128VpsubuswVdqHdqWdq } else { V256VpsubuswVdqHdqWdq },
-        PaddusbVdqWdq => if vl == 0 { V128VpaddusbVdqHdqWdq } else { V256VpaddusbVdqHdqWdq },
-        PadduswVdqWdq => if vl == 0 { V128VpadduswVdqHdqWdq } else { V256VpadduswVdqHdqWdq },
+        PaddsbVdqWdq => {
+            if vl == 0 {
+                V128VpaddsbVdqHdqWdq
+            } else {
+                V256VpaddsbVdqHdqWdq
+            }
+        }
+        PaddswVdqWdq => {
+            if vl == 0 {
+                V128VpaddswVdqHdqWdq
+            } else {
+                V256VpaddswVdqHdqWdq
+            }
+        }
+        PsubsbVdqWdq => {
+            if vl == 0 {
+                V128VpsubsbVdqHdqWdq
+            } else {
+                V256VpsubsbVdqHdqWdq
+            }
+        }
+        PsubswVdqWdq => {
+            if vl == 0 {
+                V128VpsubswVdqHdqWdq
+            } else {
+                V256VpsubswVdqHdqWdq
+            }
+        }
+        PsubusbVdqWdq => {
+            if vl == 0 {
+                V128VpsubusbVdqHdqWdq
+            } else {
+                V256VpsubusbVdqHdqWdq
+            }
+        }
+        PsubuswVdqWdq => {
+            if vl == 0 {
+                V128VpsubuswVdqHdqWdq
+            } else {
+                V256VpsubuswVdqHdqWdq
+            }
+        }
+        PaddusbVdqWdq => {
+            if vl == 0 {
+                V128VpaddusbVdqHdqWdq
+            } else {
+                V256VpaddusbVdqHdqWdq
+            }
+        }
+        PadduswVdqWdq => {
+            if vl == 0 {
+                V128VpadduswVdqHdqWdq
+            } else {
+                V256VpadduswVdqHdqWdq
+            }
+        }
 
         // ===== Logical =====
-        PxorVdqWdq  => if vl == 0 { V128VpxorVdqHdqWdq }  else { V256VpxorVdqHdqWdq },
-        PandVdqWdq  => if vl == 0 { V128VpandVdqHdqWdq }  else { V256VpandVdqHdqWdq },
-        PorVdqWdq   => if vl == 0 { V128VporVdqHdqWdq }   else { V256VporVdqHdqWdq },
-        PandnVdqWdq => if vl == 0 { V128VpandnVdqHdqWdq } else { V256VpandnVdqHdqWdq },
+        PxorVdqWdq => {
+            if vl == 0 {
+                V128VpxorVdqHdqWdq
+            } else {
+                V256VpxorVdqHdqWdq
+            }
+        }
+        PandVdqWdq => {
+            if vl == 0 {
+                V128VpandVdqHdqWdq
+            } else {
+                V256VpandVdqHdqWdq
+            }
+        }
+        PorVdqWdq => {
+            if vl == 0 {
+                V128VporVdqHdqWdq
+            } else {
+                V256VporVdqHdqWdq
+            }
+        }
+        PandnVdqWdq => {
+            if vl == 0 {
+                V128VpandnVdqHdqWdq
+            } else {
+                V256VpandnVdqHdqWdq
+            }
+        }
 
         // ===== Multiply =====
-        PmuludqVdqWdq => if vl == 0 { V128VpmuludqVdqHdqWdq } else { V256VpmuludqVdqHdqWdq },
-        PmuldqVdqWdq  => if vl == 0 { V128VpmuldqVdqHdqWdq }  else { V256VpmuldqVdqHdqWdq },
-        PmulldVdqWdq  => if vl == 0 { V128VpmulldVdqHdqWdq }  else { V256VpmulldVdqHdqWdq },
-        PmullwVdqWdq  => if vl == 0 { V128VpmullwVdqHdqWdq }  else { V256VpmullwVdqHdqWdq },
-        PmulhwVdqWdq  => if vl == 0 { V128VpmulhwVdqHdqWdq }  else { V256VpmulhwVdqHdqWdq },
-        PmulhuwVdqWdq => if vl == 0 { V128VpmulhuwVdqHdqWdq } else { V256VpmulhuwVdqHdqWdq },
-        PmulhrswVdqWdq=> if vl == 0 { V128VpmulhrswVdqHdqWdq }else { V256VpmulhrswVdqHdqWdq },
+        PmuludqVdqWdq => {
+            if vl == 0 {
+                V128VpmuludqVdqHdqWdq
+            } else {
+                V256VpmuludqVdqHdqWdq
+            }
+        }
+        PmuldqVdqWdq => {
+            if vl == 0 {
+                V128VpmuldqVdqHdqWdq
+            } else {
+                V256VpmuldqVdqHdqWdq
+            }
+        }
+        PmulldVdqWdq => {
+            if vl == 0 {
+                V128VpmulldVdqHdqWdq
+            } else {
+                V256VpmulldVdqHdqWdq
+            }
+        }
+        PmullwVdqWdq => {
+            if vl == 0 {
+                V128VpmullwVdqHdqWdq
+            } else {
+                V256VpmullwVdqHdqWdq
+            }
+        }
+        PmulhwVdqWdq => {
+            if vl == 0 {
+                V128VpmulhwVdqHdqWdq
+            } else {
+                V256VpmulhwVdqHdqWdq
+            }
+        }
+        PmulhuwVdqWdq => {
+            if vl == 0 {
+                V128VpmulhuwVdqHdqWdq
+            } else {
+                V256VpmulhuwVdqHdqWdq
+            }
+        }
+        PmulhrswVdqWdq => {
+            if vl == 0 {
+                V128VpmulhrswVdqHdqWdq
+            } else {
+                V256VpmulhrswVdqHdqWdq
+            }
+        }
 
         // ===== Compare =====
-        PcmpeqbVdqWdq => if vl == 0 { V128VpcmpeqbVdqHdqWdq } else { V256VpcmpeqbVdqHdqWdq },
-        PcmpeqwVdqWdq => if vl == 0 { V128VpcmpeqwVdqHdqWdq } else { V256VpcmpeqwVdqHdqWdq },
-        PcmpeqdVdqWdq => if vl == 0 { V128VpcmpeqdVdqHdqWdq } else { V256VpcmpeqdVdqHdqWdq },
-        PcmpeqqVdqWdq => if vl == 0 { V128VpcmpeqqVdqHdqWdq } else { V256VpcmpeqqVdqHdqWdq },
-        PcmpgtbVdqWdq => if vl == 0 { V128VpcmpgtbVdqHdqWdq } else { V256VpcmpgtbVdqHdqWdq },
-        PcmpgtwVdqWdq => if vl == 0 { V128VpcmpgtwVdqHdqWdq } else { V256VpcmpgtwVdqHdqWdq },
-        PcmpgtdVdqWdq => if vl == 0 { V128VpcmpgtdVdqHdqWdq } else { V256VpcmpgtdVdqHdqWdq },
-        PcmpgtqVdqWdq => if vl == 0 { V128VpcmpgtqVdqHdqWdq } else { V256VpcmpgtqVdqHdqWdq },
+        PcmpeqbVdqWdq => {
+            if vl == 0 {
+                V128VpcmpeqbVdqHdqWdq
+            } else {
+                V256VpcmpeqbVdqHdqWdq
+            }
+        }
+        PcmpeqwVdqWdq => {
+            if vl == 0 {
+                V128VpcmpeqwVdqHdqWdq
+            } else {
+                V256VpcmpeqwVdqHdqWdq
+            }
+        }
+        PcmpeqdVdqWdq => {
+            if vl == 0 {
+                V128VpcmpeqdVdqHdqWdq
+            } else {
+                V256VpcmpeqdVdqHdqWdq
+            }
+        }
+        PcmpeqqVdqWdq => {
+            if vl == 0 {
+                V128VpcmpeqqVdqHdqWdq
+            } else {
+                V256VpcmpeqqVdqHdqWdq
+            }
+        }
+        PcmpgtbVdqWdq => {
+            if vl == 0 {
+                V128VpcmpgtbVdqHdqWdq
+            } else {
+                V256VpcmpgtbVdqHdqWdq
+            }
+        }
+        PcmpgtwVdqWdq => {
+            if vl == 0 {
+                V128VpcmpgtwVdqHdqWdq
+            } else {
+                V256VpcmpgtwVdqHdqWdq
+            }
+        }
+        PcmpgtdVdqWdq => {
+            if vl == 0 {
+                V128VpcmpgtdVdqHdqWdq
+            } else {
+                V256VpcmpgtdVdqHdqWdq
+            }
+        }
+        PcmpgtqVdqWdq => {
+            if vl == 0 {
+                V128VpcmpgtqVdqHdqWdq
+            } else {
+                V256VpcmpgtqVdqHdqWdq
+            }
+        }
 
         // ===== Shift by register =====
-        PsrlwVdqWdq => if vl == 0 { V128VpsrlwVdqHdqWdq } else { V256VpsrlwVdqHdqWdq },
-        PsrldVdqWdq => if vl == 0 { V128VpsrldVdqHdqWdq } else { V256VpsrldVdqHdqWdq },
-        PsrlqVdqWdq => if vl == 0 { V128VpsrlqVdqHdqWdq } else { V256VpsrlqVdqHdqWdq },
-        PsrawVdqWdq => if vl == 0 { V128VpsrawVdqHdqWdq } else { V256VpsrawVdqHdqWdq },
-        PsradVdqWdq => if vl == 0 { V128VpsradVdqHdqWdq } else { V256VpsradVdqHdqWdq },
-        PsllwVdqWdq => if vl == 0 { V128VpsllwVdqHdqWdq } else { V256VpsllwVdqHdqWdq },
-        PslldVdqWdq => if vl == 0 { V128VpslldVdqHdqWdq } else { V256VpslldVdqHdqWdq },
-        PsllqVdqWdq => if vl == 0 { V128VpsllqVdqHdqWdq } else { V256VpsllqVdqHdqWdq },
+        PsrlwVdqWdq => {
+            if vl == 0 {
+                V128VpsrlwVdqHdqWdq
+            } else {
+                V256VpsrlwVdqHdqWdq
+            }
+        }
+        PsrldVdqWdq => {
+            if vl == 0 {
+                V128VpsrldVdqHdqWdq
+            } else {
+                V256VpsrldVdqHdqWdq
+            }
+        }
+        PsrlqVdqWdq => {
+            if vl == 0 {
+                V128VpsrlqVdqHdqWdq
+            } else {
+                V256VpsrlqVdqHdqWdq
+            }
+        }
+        PsrawVdqWdq => {
+            if vl == 0 {
+                V128VpsrawVdqHdqWdq
+            } else {
+                V256VpsrawVdqHdqWdq
+            }
+        }
+        PsradVdqWdq => {
+            if vl == 0 {
+                V128VpsradVdqHdqWdq
+            } else {
+                V256VpsradVdqHdqWdq
+            }
+        }
+        PsllwVdqWdq => {
+            if vl == 0 {
+                V128VpsllwVdqHdqWdq
+            } else {
+                V256VpsllwVdqHdqWdq
+            }
+        }
+        PslldVdqWdq => {
+            if vl == 0 {
+                V128VpslldVdqHdqWdq
+            } else {
+                V256VpslldVdqHdqWdq
+            }
+        }
+        PsllqVdqWdq => {
+            if vl == 0 {
+                V128VpsllqVdqHdqWdq
+            } else {
+                V256VpsllqVdqHdqWdq
+            }
+        }
 
         // ===== Shift by immediate (Group 12/13/14) =====
-        PsrlwUdqIb  => if vl == 0 { V128VpsrlwUdqIb }  else { V256VpsrlwUdqIb },
-        PsrldUdqIb  => if vl == 0 { V128VpsrldUdqIb }  else { V256VpsrldUdqIb },
-        PsrlqUdqIb  => if vl == 0 { V128VpsrlqUdqIb }  else { V256VpsrlqUdqIb },
-        PsrawUdqIb  => if vl == 0 { V128VpsrawUdqIb }  else { V256VpsrawUdqIb },
-        PsradUdqIb  => if vl == 0 { V128VpsradUdqIb }  else { V256VpsradUdqIb },
-        PsllwUdqIb  => if vl == 0 { V128VpsllwUdqIb }  else { V256VpsllwUdqIb },
-        PslldUdqIb  => if vl == 0 { V128VpslldUdqIb }  else { V256VpslldUdqIb },
-        PsllqUdqIb  => if vl == 0 { V128VpsllqUdqIb }  else { V256VpsllqUdqIb },
-        PsrldqUdqIb => if vl == 0 { V128VpsrldqUdqIb } else { V256VpsrldqUdqIb },
-        PslldqUdqIb => if vl == 0 { V128VpslldqUdqIb } else { V256VpslldqUdqIb },
+        PsrlwUdqIb => {
+            if vl == 0 {
+                V128VpsrlwUdqIb
+            } else {
+                V256VpsrlwUdqIb
+            }
+        }
+        PsrldUdqIb => {
+            if vl == 0 {
+                V128VpsrldUdqIb
+            } else {
+                V256VpsrldUdqIb
+            }
+        }
+        PsrlqUdqIb => {
+            if vl == 0 {
+                V128VpsrlqUdqIb
+            } else {
+                V256VpsrlqUdqIb
+            }
+        }
+        PsrawUdqIb => {
+            if vl == 0 {
+                V128VpsrawUdqIb
+            } else {
+                V256VpsrawUdqIb
+            }
+        }
+        PsradUdqIb => {
+            if vl == 0 {
+                V128VpsradUdqIb
+            } else {
+                V256VpsradUdqIb
+            }
+        }
+        PsllwUdqIb => {
+            if vl == 0 {
+                V128VpsllwUdqIb
+            } else {
+                V256VpsllwUdqIb
+            }
+        }
+        PslldUdqIb => {
+            if vl == 0 {
+                V128VpslldUdqIb
+            } else {
+                V256VpslldUdqIb
+            }
+        }
+        PsllqUdqIb => {
+            if vl == 0 {
+                V128VpsllqUdqIb
+            } else {
+                V256VpsllqUdqIb
+            }
+        }
+        PsrldqUdqIb => {
+            if vl == 0 {
+                V128VpsrldqUdqIb
+            } else {
+                V256VpsrldqUdqIb
+            }
+        }
+        PslldqUdqIb => {
+            if vl == 0 {
+                V128VpslldqUdqIb
+            } else {
+                V256VpslldqUdqIb
+            }
+        }
 
         // ===== Shuffle / Unpack =====
-        PshufbVdqWdq     => if vl == 0 { V128VpshufbVdqHdqWdq }     else { V256VpshufbVdqHdqWdq },
-        PshufdVdqWdqIb   => if vl == 0 { V128VpshufdVdqWdqIb }      else { V256VpshufdVdqWdqIb },
-        PshufhwVdqWdqIb  => if vl == 0 { V128VpshufhwVdqWdqIb }     else { V256VpshufhwVdqWdqIb },
-        PshuflwVdqWdqIb  => if vl == 0 { V128VpshuflwVdqWdqIb }     else { V256VpshuflwVdqWdqIb },
-        PunpckldqVdqWdq  => if vl == 0 { V128VpunpckldqVdqHdqWdq }  else { V256VpunpckldqVdqHdqWdq },
-        PunpckhdqVdqWdq  => if vl == 0 { V128VpunpckhdqVdqHdqWdq }  else { V256VpunpckhdqVdqHdqWdq },
-        PunpcklbwVdqWdq  => if vl == 0 { V128VpunpcklbwVdqHdqWdq }  else { V256VpunpcklbwVdqHdqWdq },
-        PunpckhbwVdqWdq  => if vl == 0 { V128VpunpckhbwVdqHdqWdq }  else { V256VpunpckhbwVdqHdqWdq },
-        PunpcklwdVdqWdq  => if vl == 0 { V128VpunpcklwdVdqHdqWdq }  else { V256VpunpcklwdVdqHdqWdq },
-        PunpckhwdVdqWdq  => if vl == 0 { V128VpunpckhwdVdqHdqWdq }  else { V256VpunpckhwdVdqHdqWdq },
-        PunpcklqdqVdqWdq => if vl == 0 { V128VpunpcklqdqVdqHdqWdq } else { V256VpunpcklqdqVdqHdqWdq },
-        PunpckhqdqVdqWdq => if vl == 0 { V128VpunpckhqdqVdqHdqWdq } else { V256VpunpckhqdqVdqHdqWdq },
+        PshufbVdqWdq => {
+            if vl == 0 {
+                V128VpshufbVdqHdqWdq
+            } else {
+                V256VpshufbVdqHdqWdq
+            }
+        }
+        PshufdVdqWdqIb => {
+            if vl == 0 {
+                V128VpshufdVdqWdqIb
+            } else {
+                V256VpshufdVdqWdqIb
+            }
+        }
+        PshufhwVdqWdqIb => {
+            if vl == 0 {
+                V128VpshufhwVdqWdqIb
+            } else {
+                V256VpshufhwVdqWdqIb
+            }
+        }
+        PshuflwVdqWdqIb => {
+            if vl == 0 {
+                V128VpshuflwVdqWdqIb
+            } else {
+                V256VpshuflwVdqWdqIb
+            }
+        }
+        PunpckldqVdqWdq => {
+            if vl == 0 {
+                V128VpunpckldqVdqHdqWdq
+            } else {
+                V256VpunpckldqVdqHdqWdq
+            }
+        }
+        PunpckhdqVdqWdq => {
+            if vl == 0 {
+                V128VpunpckhdqVdqHdqWdq
+            } else {
+                V256VpunpckhdqVdqHdqWdq
+            }
+        }
+        PunpcklbwVdqWdq => {
+            if vl == 0 {
+                V128VpunpcklbwVdqHdqWdq
+            } else {
+                V256VpunpcklbwVdqHdqWdq
+            }
+        }
+        PunpckhbwVdqWdq => {
+            if vl == 0 {
+                V128VpunpckhbwVdqHdqWdq
+            } else {
+                V256VpunpckhbwVdqHdqWdq
+            }
+        }
+        PunpcklwdVdqWdq => {
+            if vl == 0 {
+                V128VpunpcklwdVdqHdqWdq
+            } else {
+                V256VpunpcklwdVdqHdqWdq
+            }
+        }
+        PunpckhwdVdqWdq => {
+            if vl == 0 {
+                V128VpunpckhwdVdqHdqWdq
+            } else {
+                V256VpunpckhwdVdqHdqWdq
+            }
+        }
+        PunpcklqdqVdqWdq => {
+            if vl == 0 {
+                V128VpunpcklqdqVdqHdqWdq
+            } else {
+                V256VpunpcklqdqVdqHdqWdq
+            }
+        }
+        PunpckhqdqVdqWdq => {
+            if vl == 0 {
+                V128VpunpckhqdqVdqHdqWdq
+            } else {
+                V256VpunpckhqdqVdqHdqWdq
+            }
+        }
 
         // ===== PALIGNR =====
-        PalignrVdqWdqIb => if vl == 0 { V128VpalignrVdqHdqWdqIb } else { V256VpalignrVdqHdqWdqIb },
+        PalignrVdqWdqIb => {
+            if vl == 0 {
+                V128VpalignrVdqHdqWdqIb
+            } else {
+                V256VpalignrVdqHdqWdqIb
+            }
+        }
 
         // ===== Pack =====
-        PacksswbVdqWdq  => if vl == 0 { V128VpacksswbVdqHdqWdq }  else { V256VpacksswbVdqHdqWdq },
-        PackuswbVdqWdq  => if vl == 0 { V128VpackuswbVdqHdqWdq }  else { V256VpackuswbVdqHdqWdq },
-        PackssdwVdqWdq  => if vl == 0 { V128VpackssdwVdqHdqWdq }  else { V256VpackssdwVdqHdqWdq },
-        PackusdwVdqWdq  => if vl == 0 { V128VpackusdwVdqHdqWdq }  else { V256VpackusdwVdqHdqWdq },
+        PacksswbVdqWdq => {
+            if vl == 0 {
+                V128VpacksswbVdqHdqWdq
+            } else {
+                V256VpacksswbVdqHdqWdq
+            }
+        }
+        PackuswbVdqWdq => {
+            if vl == 0 {
+                V128VpackuswbVdqHdqWdq
+            } else {
+                V256VpackuswbVdqHdqWdq
+            }
+        }
+        PackssdwVdqWdq => {
+            if vl == 0 {
+                V128VpackssdwVdqHdqWdq
+            } else {
+                V256VpackssdwVdqHdqWdq
+            }
+        }
+        PackusdwVdqWdq => {
+            if vl == 0 {
+                V128VpackusdwVdqHdqWdq
+            } else {
+                V256VpackusdwVdqHdqWdq
+            }
+        }
 
         // ===== Min/Max (SSE2 + SSE4.1) =====
-        PminubVdqWdq  => if vl == 0 { V128VpminubVdqHdqWdq }  else { V256VpminubVdqHdqWdq },
-        PminswVdqWdq  => if vl == 0 { V128VpminswVdqHdqWdq }  else { V256VpminswVdqHdqWdq },
-        PmaxubVdqWdq  => if vl == 0 { V128VpmaxubVdqHdqWdq }  else { V256VpmaxubVdqHdqWdq },
-        PmaxswVdqWdq  => if vl == 0 { V128VpmaxswVdqHdqWdq }  else { V256VpmaxswVdqHdqWdq },
-        PminsbVdqWdq  => if vl == 0 { V128VpminsbVdqHdqWdq }  else { V256VpminsbVdqHdqWdq },
-        PminsdVdqWdq  => if vl == 0 { V128VpminsdVdqHdqWdq }  else { V256VpminsdVdqHdqWdq },
-        PminuwVdqWdq  => if vl == 0 { V128VpminuwVdqHdqWdq }  else { V256VpminuwVdqHdqWdq },
-        PminudVdqWdq  => if vl == 0 { V128VpminudVdqHdqWdq }  else { V256VpminudVdqHdqWdq },
-        PmaxsbVdqWdq  => if vl == 0 { V128VpmaxsbVdqHdqWdq }  else { V256VpmaxsbVdqHdqWdq },
-        PmaxsdVdqWdq  => if vl == 0 { V128VpmaxsdVdqHdqWdq }  else { V256VpmaxsdVdqHdqWdq },
-        PmaxuwVdqWdq  => if vl == 0 { V128VpmaxuwVdqHdqWdq }  else { V256VpmaxuwVdqHdqWdq },
-        PmaxudVdqWdq  => if vl == 0 { V128VpmaxudVdqHdqWdq }  else { V256VpmaxudVdqHdqWdq },
+        PminubVdqWdq => {
+            if vl == 0 {
+                V128VpminubVdqHdqWdq
+            } else {
+                V256VpminubVdqHdqWdq
+            }
+        }
+        PminswVdqWdq => {
+            if vl == 0 {
+                V128VpminswVdqHdqWdq
+            } else {
+                V256VpminswVdqHdqWdq
+            }
+        }
+        PmaxubVdqWdq => {
+            if vl == 0 {
+                V128VpmaxubVdqHdqWdq
+            } else {
+                V256VpmaxubVdqHdqWdq
+            }
+        }
+        PmaxswVdqWdq => {
+            if vl == 0 {
+                V128VpmaxswVdqHdqWdq
+            } else {
+                V256VpmaxswVdqHdqWdq
+            }
+        }
+        PminsbVdqWdq => {
+            if vl == 0 {
+                V128VpminsbVdqHdqWdq
+            } else {
+                V256VpminsbVdqHdqWdq
+            }
+        }
+        PminsdVdqWdq => {
+            if vl == 0 {
+                V128VpminsdVdqHdqWdq
+            } else {
+                V256VpminsdVdqHdqWdq
+            }
+        }
+        PminuwVdqWdq => {
+            if vl == 0 {
+                V128VpminuwVdqHdqWdq
+            } else {
+                V256VpminuwVdqHdqWdq
+            }
+        }
+        PminudVdqWdq => {
+            if vl == 0 {
+                V128VpminudVdqHdqWdq
+            } else {
+                V256VpminudVdqHdqWdq
+            }
+        }
+        PmaxsbVdqWdq => {
+            if vl == 0 {
+                V128VpmaxsbVdqHdqWdq
+            } else {
+                V256VpmaxsbVdqHdqWdq
+            }
+        }
+        PmaxsdVdqWdq => {
+            if vl == 0 {
+                V128VpmaxsdVdqHdqWdq
+            } else {
+                V256VpmaxsdVdqHdqWdq
+            }
+        }
+        PmaxuwVdqWdq => {
+            if vl == 0 {
+                V128VpmaxuwVdqHdqWdq
+            } else {
+                V256VpmaxuwVdqHdqWdq
+            }
+        }
+        PmaxudVdqWdq => {
+            if vl == 0 {
+                V128VpmaxudVdqHdqWdq
+            } else {
+                V256VpmaxudVdqHdqWdq
+            }
+        }
 
         // ===== Average / SAD =====
-        PavgbVdqWdq   => if vl == 0 { V128VpavgbVdqWdq }      else { V256VpavgbVdqWdq },
-        PavgwVdqWdq   => if vl == 0 { V128VpavgwVdqWdq }      else { V256VpavgwVdqWdq },
-        PsadbwVdqWdq  => if vl == 0 { V128VpsadbwVdqHdqWdq }  else { V256VpsadbwVdqHdqWdq },
+        PavgbVdqWdq => {
+            if vl == 0 {
+                V128VpavgbVdqWdq
+            } else {
+                V256VpavgbVdqWdq
+            }
+        }
+        PavgwVdqWdq => {
+            if vl == 0 {
+                V128VpavgwVdqWdq
+            } else {
+                V256VpavgwVdqWdq
+            }
+        }
+        PsadbwVdqWdq => {
+            if vl == 0 {
+                V128VpsadbwVdqHdqWdq
+            } else {
+                V256VpsadbwVdqHdqWdq
+            }
+        }
 
         // ===== PMADDWD / PMADDUBSW =====
-        PmaddwdVdqWdq   => if vl == 0 { V128VpmaddwdVdqHdqWdq }   else { V256VpmaddwdVdqHdqWdq },
-        PmaddubswVdqWdq => if vl == 0 { V128VpmaddubswVdqHdqWdq } else { V256VpmaddubswVdqHdqWdq },
+        PmaddwdVdqWdq => {
+            if vl == 0 {
+                V128VpmaddwdVdqHdqWdq
+            } else {
+                V256VpmaddwdVdqHdqWdq
+            }
+        }
+        PmaddubswVdqWdq => {
+            if vl == 0 {
+                V128VpmaddubswVdqHdqWdq
+            } else {
+                V256VpmaddubswVdqHdqWdq
+            }
+        }
 
         // ===== SSSE3: PHADD/PHSUB/PSIGN =====
-        PhaddwVdqWdq   => if vl == 0 { V128VphaddwVdqHdqWdq }   else { V256VphaddwVdqHdqWdq },
-        PhadddVdqWdq   => if vl == 0 { V128VphadddVdqHdqWdq }   else { V256VphadddVdqHdqWdq },
-        PhaddswVdqWdq  => if vl == 0 { V128VphaddswVdqHdqWdq }  else { V256VphaddswVdqHdqWdq },
-        PhsubwVdqWdq   => if vl == 0 { V128VphsubwVdqHdqWdq }   else { V256VphsubwVdqHdqWdq },
-        PhsubdVdqWdq   => if vl == 0 { V128VphsubdVdqHdqWdq }   else { V256VphsubdVdqHdqWdq },
-        PhsubswVdqWdq  => if vl == 0 { V128VphsubswVdqHdqWdq }  else { V256VphsubswVdqHdqWdq },
-        PsignbVdqWdq   => if vl == 0 { V128VpsignbVdqHdqWdq }   else { V256VpsignbVdqHdqWdq },
-        PsignwVdqWdq   => if vl == 0 { V128VpsignwVdqHdqWdq }   else { V256VpsignwVdqHdqWdq },
-        PsigndVdqWdq   => if vl == 0 { V128VpsigndVdqHdqWdq }   else { V256VpsigndVdqHdqWdq },
+        PhaddwVdqWdq => {
+            if vl == 0 {
+                V128VphaddwVdqHdqWdq
+            } else {
+                V256VphaddwVdqHdqWdq
+            }
+        }
+        PhadddVdqWdq => {
+            if vl == 0 {
+                V128VphadddVdqHdqWdq
+            } else {
+                V256VphadddVdqHdqWdq
+            }
+        }
+        PhaddswVdqWdq => {
+            if vl == 0 {
+                V128VphaddswVdqHdqWdq
+            } else {
+                V256VphaddswVdqHdqWdq
+            }
+        }
+        PhsubwVdqWdq => {
+            if vl == 0 {
+                V128VphsubwVdqHdqWdq
+            } else {
+                V256VphsubwVdqHdqWdq
+            }
+        }
+        PhsubdVdqWdq => {
+            if vl == 0 {
+                V128VphsubdVdqHdqWdq
+            } else {
+                V256VphsubdVdqHdqWdq
+            }
+        }
+        PhsubswVdqWdq => {
+            if vl == 0 {
+                V128VphsubswVdqHdqWdq
+            } else {
+                V256VphsubswVdqHdqWdq
+            }
+        }
+        PsignbVdqWdq => {
+            if vl == 0 {
+                V128VpsignbVdqHdqWdq
+            } else {
+                V256VpsignbVdqHdqWdq
+            }
+        }
+        PsignwVdqWdq => {
+            if vl == 0 {
+                V128VpsignwVdqHdqWdq
+            } else {
+                V256VpsignwVdqHdqWdq
+            }
+        }
+        PsigndVdqWdq => {
+            if vl == 0 {
+                V128VpsigndVdqHdqWdq
+            } else {
+                V256VpsigndVdqHdqWdq
+            }
+        }
 
         // ===== Floating-point bitwise (VEX handler checks get_vl()) =====
-        AndpsVpsWps   => VandpsVpsHpsWps,
-        AndnpsVpsWps  => VandnpsVpsHpsWps,
-        OrpsVpsWps    => VorpsVpsHpsWps,
-        XorpsVpsWps   => VxorpsVpsHpsWps,
-        AddpsVpsWps   => VaddpsVpsHpsWps,
-        MulpsVpsWps   => VmulpsVpsHpsWps,
-        SubpsVpsWps   => VsubpsVpsHpsWps,
-        DivpsVpsWps   => VdivpsVpsHpsWps,
-        AndpdVpdWpd   => VandpdVpdHpdWpd,
-        AndnpdVpdWpd  => VandnpdVpdHpdWpd,
-        OrpdVpdWpd    => VorpdVpdHpdWpd,
-        XorpdVpdWpd   => VxorpdVpdHpdWpd,
-        AddpdVpdWpd   => VaddpdVpdHpdWpd,
-        MulpdVpdWpd   => VmulpdVpdHpdWpd,
-        SubpdVpdWpd   => VsubpdVpdHpdWpd,
-        DivpdVpdWpd   => VdivpdVpdHpdWpd,
+        AndpsVpsWps => VandpsVpsHpsWps,
+        AndnpsVpsWps => VandnpsVpsHpsWps,
+        OrpsVpsWps => VorpsVpsHpsWps,
+        XorpsVpsWps => VxorpsVpsHpsWps,
+        AddpsVpsWps => VaddpsVpsHpsWps,
+        MulpsVpsWps => VmulpsVpsHpsWps,
+        SubpsVpsWps => VsubpsVpsHpsWps,
+        DivpsVpsWps => VdivpsVpsHpsWps,
+        AndpdVpdWpd => VandpdVpdHpdWpd,
+        AndnpdVpdWpd => VandnpdVpdHpdWpd,
+        OrpdVpdWpd => VorpdVpdHpdWpd,
+        XorpdVpdWpd => VxorpdVpdHpdWpd,
+        AddpdVpdWpd => VaddpdVpdHpdWpd,
+        MulpdVpdWpd => VmulpdVpdHpdWpd,
+        SubpdVpdWpd => VsubpdVpdHpdWpd,
+        DivpdVpdWpd => VdivpdVpdHpdWpd,
 
         // ===== Store-form moves (VEX handler does VL-aware stores + register form) =====
-        MovdquWdqVdq  => if vl == 0 { V128VmovdquWdqVdq }  else { V256VmovdquWdqVdq },
-        MovdqaWdqVdq  => if vl == 0 { V128VmovdqaWdqVdq }  else { V256VmovdqaWdqVdq },
-        MovupsWpsVps  => if vl == 0 { V128VmovupsWpsVps }   else { V256VmovupsWpsVps },
-        MovapsWpsVps  => if vl == 0 { V128VmovapsWpsVps }   else { V256VmovapsWpsVps },
-        MovupdWpdVpd  => if vl == 0 { V128VmovupdWpdVpd }   else { V256VmovupdWpdVpd },
-        MovapdWpdVpd  => if vl == 0 { V128VmovapdWpdVpd }   else { V256VmovapdWpdVpd },
-        MovntdqMdqVdq => if vl == 0 { V128VmovntdqMdqVdq }  else { V256VmovntdqMdqVdq },
-        MovntpsMpsVps => if vl == 0 { V128VmovntpsMpsVps }   else { V256VmovntpsMpsVps },
-        MovntpdMpdVpd => if vl == 0 { V128VmovntpdMpdVpd }   else { V256VmovntpdMpdVpd },
+        MovdquWdqVdq => {
+            if vl == 0 {
+                V128VmovdquWdqVdq
+            } else {
+                V256VmovdquWdqVdq
+            }
+        }
+        MovdqaWdqVdq => {
+            if vl == 0 {
+                V128VmovdqaWdqVdq
+            } else {
+                V256VmovdqaWdqVdq
+            }
+        }
+        MovupsWpsVps => {
+            if vl == 0 {
+                V128VmovupsWpsVps
+            } else {
+                V256VmovupsWpsVps
+            }
+        }
+        MovapsWpsVps => {
+            if vl == 0 {
+                V128VmovapsWpsVps
+            } else {
+                V256VmovapsWpsVps
+            }
+        }
+        MovupdWpdVpd => {
+            if vl == 0 {
+                V128VmovupdWpdVpd
+            } else {
+                V256VmovupdWpdVpd
+            }
+        }
+        MovapdWpdVpd => {
+            if vl == 0 {
+                V128VmovapdWpdVpd
+            } else {
+                V256VmovapdWpdVpd
+            }
+        }
+        MovntdqMdqVdq => {
+            if vl == 0 {
+                V128VmovntdqMdqVdq
+            } else {
+                V256VmovntdqMdqVdq
+            }
+        }
+        MovntpsMpsVps => {
+            if vl == 0 {
+                V128VmovntpsMpsVps
+            } else {
+                V256VmovntpsMpsVps
+            }
+        }
+        MovntpdMpdVpd => {
+            if vl == 0 {
+                V128VmovntpdMpdVpd
+            } else {
+                V256VmovntpdMpdVpd
+            }
+        }
 
         // ===== Load-form moves (SSE handler only reads 128-bit; VEX handler is VL-aware) =====
         // These use a single VEX opcode (no V128/V256 prefix) — handler checks get_vl()
-        MovdquVdqWdq  => VmovdquVdqWdq,
-        MovdqaVdqWdq  => VmovdqaVdqWdq,
-        MovupsVpsWps  => VmovupsVpsWps,
-        MovapsVpsWps  => VmovapsVpsWps,
-        MovupdVpdWpd  => VmovupdVpdWpd,
-        MovapdVpdWpd  => VmovapdVpdWpd,
+        MovdquVdqWdq => VmovdquVdqWdq,
+        MovdqaVdqWdq => VmovdqaVdqWdq,
+        MovupsVpsWps => VmovupsVpsWps,
+        MovapsVpsWps => VmovapsVpsWps,
+        MovupdVpdWpd => VmovupdVpdWpd,
+        MovapdVpdWpd => VmovapdVpdWpd,
 
         // ===== Misc =====
-        PmovmskbGdUdq => if vl == 0 { V128VpmovmskbGdUdq } else { V256VpmovmskbGdUdq },
+        PmovmskbGdUdq => {
+            if vl == 0 {
+                V128VpmovmskbGdUdq
+            } else {
+                V256VpmovmskbGdUdq
+            }
+        }
 
         // ===== EMMS → VZEROUPPER/VZEROALL (VEX.0F 77) =====
-        Emms => if vl == 0 { Vzeroupper } else { Vzeroall },
+        Emms => {
+            if vl == 0 {
+                Vzeroupper
+            } else {
+                Vzeroall
+            }
+        }
 
         // No remap — instruction either has no VEX form, is already VEX, or
         // works correctly as-is (e.g. 2-operand loads where VEX.vvvv must be 1111b)
@@ -2193,9 +2905,9 @@ const fn opcode_needs_modrm_64(b1: u32, map: u8) -> bool {
 
 /// Get immediate size for opcode (64-bit mode)
 const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8, nnn: u32) -> u8 {
-    let os32 = (metainfo1 & MetaInfoFlags::Os32.bits()) != 0;
-    let os64 = (metainfo1 & MetaInfoFlags::Os64.bits()) != 0;
-    let as64 = (metainfo1 & MetaInfoFlags::As64.bits()) != 0;
+    let os32 = (metainfo1 & InstructionFlags::Os32.bits()) != 0;
+    let os64 = (metainfo1 & InstructionFlags::Os64.bits()) != 0;
+    let as64 = (metainfo1 & InstructionFlags::As64.bits()) != 0;
 
     if map == 0 {
         let opcode = b1 as u8;
@@ -2307,28 +3019,15 @@ const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8,
     }
 }
 
-/// Read u16 little-endian
-const fn read_u16_le(bytes: &[u8], pos: usize) -> u16 {
-    (bytes[pos] as u16) | ((bytes[pos + 1] as u16) << 8)
-}
-
-/// Read u32 little-endian
-const fn read_u32_le(bytes: &[u8], pos: usize) -> u32 {
-    (bytes[pos] as u32)
-        | ((bytes[pos + 1] as u32) << 8)
-        | ((bytes[pos + 2] as u32) << 16)
-        | ((bytes[pos + 3] as u32) << 24)
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
 
     use super::*;
+    use std::{vec, vec::Vec};
 
     #[test]
     fn test_nop() {

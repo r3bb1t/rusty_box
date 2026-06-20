@@ -369,9 +369,7 @@ fn run_alpine() -> Result<()> {
         ram_mb
     );
     if is_iso {
-        println!(
-            "║  Boot   = CD-ROM (El Torito)                             ║"
-        );
+        println!("║  Boot   = CD-ROM (El Torito)                             ║");
     } else {
         println!(
             "║  Disk   = {} cyl x {} heads x {} spt                    ║",
@@ -413,7 +411,7 @@ fn run_alpine() -> Result<()> {
         0x5A, 0xF0, 0x5A, // Enter make + break
     ];
     const KEEP_ALIVE_SCANCODE: &[u8] = &[0x12, 0xF0, 0x12]; // Left Shift
-    // PS/2 Set 2 scancode for Enter key
+                                                            // PS/2 Set 2 scancode for Enter key
     const ENTER_SCANCODE: &[u8] = &[0x5A, 0xF0, 0x5A]; // Enter make + break
 
     let result = if headless {
@@ -465,7 +463,10 @@ fn run_alpine() -> Result<()> {
                     if phase_elapsed.as_secs() >= 5 || n == 0 {
                         eprintln!(
                             "[PHASE {}] returned {} instr in {:?}, total={}",
-                            phase_num, n, phase_elapsed, total_executed + n,
+                            phase_num,
+                            n,
+                            phase_elapsed,
+                            total_executed + n,
                         );
                     }
                     total_executed += n;
@@ -480,7 +481,10 @@ fn run_alpine() -> Result<()> {
 
             // Check if CPU entered shutdown (triple fault)
             if emu.cpu.is_in_shutdown() {
-                println!("CPU triple-fault shutdown at {}M instructions", total_executed / 1_000_000);
+                println!(
+                    "CPU triple-fault shutdown at {}M instructions",
+                    total_executed / 1_000_000
+                );
                 break 'phases;
             }
 
@@ -494,8 +498,12 @@ fn run_alpine() -> Result<()> {
             println!(
                 "[{:>4}M] RIP={:#010x} CS={:04x} mode={:<11} ATA_rd={} EAX={:08x} ECX={:08x}",
                 total_executed / 1_000_000,
-                rip, cs, mode, ata_reads,
-                emu.cpu.eax(), emu.cpu.ecx()
+                rip,
+                cs,
+                mode,
+                ata_reads,
+                emu.cpu.eax(),
+                emu.cpu.ecx()
             );
 
             // Verbose diagnostic dumps gated behind debug builds + env var
@@ -505,22 +513,46 @@ fn run_alpine() -> Result<()> {
                 if total_executed >= 2_800_000 && total_executed < 2_900_000 {
                     let (rp, rl) = emu.memory.get_ram_base_ptr();
                     let rd16 = |addr: usize| -> u16 {
-                        if addr + 1 < rl { unsafe { (rp.add(addr) as *const u16).read_unaligned() } } else { 0xDEAD }
+                        if addr + 1 < rl {
+                            unsafe { (rp.add(addr) as *const u16).read_unaligned() }
+                        } else {
+                            0xDEAD
+                        }
                     };
                     let rd32 = |addr: usize| -> u32 {
-                        if addr + 3 < rl { unsafe { (rp.add(addr) as *const u32).read_unaligned() } } else { 0xDEAD }
+                        if addr + 3 < rl {
+                            unsafe { (rp.add(addr) as *const u32).read_unaligned() }
+                        } else {
+                            0xDEAD
+                        }
                     };
                     println!("\n===== BDA / IVT CHECK =====");
-                    println!("  BDA[0x0413] conv_mem_kb = {} (0x{:04x})", rd16(0x0413), rd16(0x0413));
-                    println!("  BDA[0x0415] ext_mem_kb  = {} (0x{:04x})", rd16(0x0415), rd16(0x0415));
+                    println!(
+                        "  BDA[0x0413] conv_mem_kb = {} (0x{:04x})",
+                        rd16(0x0413),
+                        rd16(0x0413)
+                    );
+                    println!(
+                        "  BDA[0x0415] ext_mem_kb  = {} (0x{:04x})",
+                        rd16(0x0415),
+                        rd16(0x0415)
+                    );
                     println!("  IVT[0x12]  = {:04x}:{:04x}", rd16(0x004A), rd16(0x0048));
                     println!("  IVT[0x13]  = {:04x}:{:04x}", rd16(0x004E), rd16(0x004C));
                     println!("  IVT[0x10]  = {:04x}:{:04x}", rd16(0x0042), rd16(0x0040));
                     println!("  IVT[0x15]  = {:04x}:{:04x}", rd16(0x0056), rd16(0x0054));
                     println!("  IVT[0x16]  = {:04x}:{:04x}", rd16(0x005A), rd16(0x0058));
-                    println!("  [0x100135] code = {:08x} {:08x}", rd32(0x100135), rd32(0x100139));
+                    println!(
+                        "  [0x100135] code = {:08x} {:08x}",
+                        rd32(0x100135),
+                        rd32(0x100139)
+                    );
                     let ebda_seg = rd16(0x040E);
-                    println!("  BDA[0x040E] EBDA seg = {:04x} (phys {:05x})", ebda_seg, (ebda_seg as u32) << 4);
+                    println!(
+                        "  BDA[0x040E] EBDA seg = {:04x} (phys {:05x})",
+                        ebda_seg,
+                        (ebda_seg as u32) << 4
+                    );
                     println!();
                 }
 
@@ -528,16 +560,28 @@ fn run_alpine() -> Result<()> {
                 if total_executed >= 3_000_000 && total_executed < 3_100_000 {
                     let (rp, rl) = emu.memory.get_ram_base_ptr();
                     let rd = |addr: usize| -> u32 {
-                        if addr + 3 < rl { unsafe { (rp.add(addr) as *const u32).read_unaligned() } } else { 0xDEAD }
+                        if addr + 3 < rl {
+                            unsafe { (rp.add(addr) as *const u32).read_unaligned() }
+                        } else {
+                            0xDEAD
+                        }
                     };
 
                     println!("\n===== BOOT INFO TABLE (isolinux.bin @ 0x7C00) =====");
-                    println!("  bi_pvd    @ 0x7C08 = {:08x} (should be 0x10 = sector 16)", rd(0x7C08));
+                    println!(
+                        "  bi_pvd    @ 0x7C08 = {:08x} (should be 0x10 = sector 16)",
+                        rd(0x7C08)
+                    );
                     println!("  bi_file   @ 0x7C0C = {:08x} (boot file LBA)", rd(0x7C0C));
-                    println!("  bi_length @ 0x7C10 = {:08x} (boot file length)", rd(0x7C10));
+                    println!(
+                        "  bi_length @ 0x7C10 = {:08x} (boot file length)",
+                        rd(0x7C10)
+                    );
                     println!("  bi_csum   @ 0x7C14 = {:08x} (checksum)", rd(0x7C14));
                     print!("  0x7C00:");
-                    for j in 0..32usize { print!(" {:02x}", unsafe { *rp.add(0x7C00 + j) }); }
+                    for j in 0..32usize {
+                        print!(" {:02x}", unsafe { *rp.add(0x7C00 + j) });
+                    }
                     println!();
                     println!("  BootInfoTable ptr (from stub data):");
                     println!("  [0x3004] = {:08x}", rd(0x3004));
@@ -553,7 +597,10 @@ fn run_alpine() -> Result<()> {
                         let dw2 = rd(base + 8);
                         let dw3 = rd(base + 12);
                         if dw0 != 0 || dw1 != 0 || i < 3 {
-                            println!("  [{:2}] @{:#08x}: {:08x} {:08x} {:08x} {:08x}", i, base, dw0, dw1, dw2, dw3);
+                            println!(
+                                "  [{:2}] @{:#08x}: {:08x} {:08x} {:08x} {:08x}",
+                                i, base, dw0, dw1, dw2, dw3
+                            );
                         }
                     }
 
@@ -566,8 +613,14 @@ fn run_alpine() -> Result<()> {
                             let v2 = rd(addr + 8);
                             if v1 >= 0x100000 && v1 < 0x112000 && v2 >= 0x100000 && v2 < 0x112000 {
                                 if found < 10 {
-                                    println!("  Candidate @{:#08x}: {:08x} {:08x} {:08x} {:08x}",
-                                        addr, val, v1, v2, rd(addr + 12));
+                                    println!(
+                                        "  Candidate @{:#08x}: {:08x} {:08x} {:08x} {:08x}",
+                                        addr,
+                                        val,
+                                        v1,
+                                        v2,
+                                        rd(addr + 12)
+                                    );
                                 }
                                 found += 1;
                             }
@@ -580,21 +633,27 @@ fn run_alpine() -> Result<()> {
                     for row in 0..5usize {
                         let base = 0x10ECF0 + row * 16;
                         print!("  {:#08x}:", base);
-                        for j in 0..4usize { print!(" {:08x}", rd(base + j * 4)); }
+                        for j in 0..4usize {
+                            print!(" {:08x}", rd(base + j * 4));
+                        }
                         println!();
                     }
                     println!("  Free list area (0x10F2C0-0x10F31F):");
                     for row in 0..4usize {
                         let base = 0x10F2C0 + row * 16;
                         print!("  {:#08x}:", base);
-                        for j in 0..4usize { print!(" {:08x}", rd(base + j * 4)); }
+                        for j in 0..4usize {
+                            print!(" {:08x}", rd(base + j * 4));
+                        }
                         println!();
                     }
                     println!("  __com32 struct candidate at 0x10F180:");
                     for row in 0..4usize {
                         let base = 0x10F180 + row * 16;
                         print!("  {:#08x}:", base);
-                        for j in 0..4usize { print!(" {:08x}", rd(base + j * 4)); }
+                        for j in 0..4usize {
+                            print!(" {:08x}", rd(base + j * 4));
+                        }
                         println!();
                     }
 
@@ -677,10 +736,16 @@ fn run_alpine() -> Result<()> {
                                     if found < 5 {
                                         print!("  {} ref at {:#08x}: ", name, addr);
                                         let start = if addr >= 8 { addr - 8 } else { 0 };
-                                        for j in start..addr+8 {
-                                            if j < rl { print!("{:02x}", unsafe { *rp.add(j) }); }
-                                            if j == addr - 1 { print!("["); }
-                                            if j == addr + 3 { print!("]"); }
+                                        for j in start..addr + 8 {
+                                            if j < rl {
+                                                print!("{:02x}", unsafe { *rp.add(j) });
+                                            }
+                                            if j == addr - 1 {
+                                                print!("[");
+                                            }
+                                            if j == addr + 3 {
+                                                print!("]");
+                                            }
                                         }
                                         println!();
                                     }
@@ -709,17 +774,31 @@ fn run_alpine() -> Result<()> {
             if rip == last_rip {
                 same_rip_count += 1;
                 if same_rip_count >= 3 {
-                    println!("*** STUCK at RIP={:#010x} for {}x phases! ***", rip, same_rip_count);
-                    println!("    EBX={:08x} EDX={:08x} ESP={:08x} EBP={:08x} ESI={:08x} EDI={:08x}",
-                        emu.cpu.ebx(), emu.cpu.edx(), emu.cpu.esp(),
-                        emu.cpu.ebp(), emu.cpu.esi(), emu.cpu.edi());
+                    println!(
+                        "*** STUCK at RIP={:#010x} for {}x phases! ***",
+                        rip, same_rip_count
+                    );
+                    println!(
+                        "    EBX={:08x} EDX={:08x} ESP={:08x} EBP={:08x} ESI={:08x} EDI={:08x}",
+                        emu.cpu.ebx(),
+                        emu.cpu.edx(),
+                        emu.cpu.esp(),
+                        emu.cpu.ebp(),
+                        emu.cpu.esi(),
+                        emu.cpu.edi()
+                    );
                     // Read a few bytes at RIP to show instruction bytes
                     let (ptr, len) = emu.memory.get_raw_memory_ptr();
                     let rip_phys = rip as usize; // NOTE: approximate — works if paging identity-maps or we're in real/PM without paging offset
                     if rip_phys < len {
                         let end = (rip_phys + 16).min(len);
-                        let instr_bytes = unsafe { core::slice::from_raw_parts(ptr.add(rip_phys), end - rip_phys) };
-                        println!("    Instruction bytes at phys {:#x}: {:02x?}", rip_phys, instr_bytes);
+                        let instr_bytes = unsafe {
+                            core::slice::from_raw_parts(ptr.add(rip_phys), end - rip_phys)
+                        };
+                        println!(
+                            "    Instruction bytes at phys {:#x}: {:02x?}",
+                            rip_phys, instr_bytes
+                        );
                     }
                 }
             } else {
@@ -730,7 +809,10 @@ fn run_alpine() -> Result<()> {
             // Inject Enter at boot prompt to unblock ISOLINUX idle loop
             // ISOLINUX boot prompt appears at ~17M instructions; inject after that
             if total_executed >= 18_000_000 && !enter_injected {
-                println!("[{}M] Injecting Enter key to boot prompt", total_executed / 1_000_000);
+                println!(
+                    "[{}M] Injecting Enter key to boot prompt",
+                    total_executed / 1_000_000
+                );
                 for &sc in ENTER_SCANCODE {
                     emu.send_scancode(sc);
                 }
@@ -889,20 +971,30 @@ fn run_alpine() -> Result<()> {
             let (rp, rl) = emu.memory.get_ram_base_ptr();
             let timer_cnt = if 0x3ADC <= rl {
                 unsafe { (rp.add(0x3AD8) as *const u32).read_unaligned() }
-            } else { 0 };
+            } else {
+                0
+            };
             println!("\n===== TIMER_CNT [0x3AD8] = {} =====", timer_cnt);
             // Dump 64 bytes: 0x3AC0 - 0x3AFF
             print!("0x3AC0: ");
             for i in 0x3AC0usize..0x3B00 {
-                if i < rl { print!("{:02x} ", unsafe { *rp.add(i) }); }
-                if (i + 1) % 16 == 0 && i < 0x3AFF { print!("\n{:#06x}: ", i + 1); }
+                if i < rl {
+                    print!("{:02x} ", unsafe { *rp.add(i) });
+                }
+                if (i + 1) % 16 == 0 && i < 0x3AFF {
+                    print!("\n{:#06x}: ", i + 1);
+                }
             }
             println!();
             // Also check via get_raw_memory_ptr (different accessor)
             let (rp2, rl2) = emu.memory.get_raw_memory_ptr();
             if 0x3ADC <= rl2 {
                 let val2 = unsafe { (rp2.add(0x3AD8) as *const u32).read_unaligned() };
-                println!("get_raw_memory_ptr[0x3AD8] = {} (ptrs same={})", val2, rp == rp2);
+                println!(
+                    "get_raw_memory_ptr[0x3AD8] = {} (ptrs same={})",
+                    val2,
+                    rp == rp2
+                );
             }
         }
 
@@ -966,9 +1058,13 @@ fn run_alpine() -> Result<()> {
                 let addr = bios_phys + i;
                 let byte = if addr < rl_bios {
                     unsafe { *rp_bios.add(addr) }
-                } else { 0xFF };
+                } else {
+                    0xFF
+                };
                 print!("{:02x} ", byte);
-                if (i + 1) % 16 == 0 && i < 47 { print!("\n{:#08x}: ", bios_phys + i + 1); }
+                if (i + 1) % 16 == 0 && i < 47 {
+                    print!("\n{:#08x}: ", bios_phys + i + 1);
+                }
             }
             println!();
         }
@@ -977,25 +1073,35 @@ fn run_alpine() -> Result<()> {
         println!("\n===== SOFTWARE INT HISTOGRAM (late, after 2M icount) =====");
         let int_late = emu.cpu.get_soft_int_vectors_late();
         for (i, &c) in int_late.iter().enumerate() {
-            if c > 0 { println!("  INT {:02x}h: {} calls", i, c); }
+            if c > 0 {
+                println!("  INT {:02x}h: {} calls", i, c);
+            }
         }
         println!("\n===== SOFTWARE INT HISTOGRAM (all) =====");
         let int_all = emu.cpu.get_soft_int_vectors();
         for (i, &c) in int_all.iter().enumerate() {
-            if c > 0 { println!("  INT {:02x}h: {} calls", i, c); }
+            if c > 0 {
+                println!("  INT {:02x}h: {} calls", i, c);
+            }
         }
 
         // Exception counters
         let exc_counts = emu.cpu.get_exception_diag();
-        let exc_names = ["#DE","#DB","NMI","#BP","#OF","#BR","#UD","#NM",
-            "#DF","CSO","#TS","#NP","#SS","#GP","#PF","R15",
-            "#MF","#AC","#MC","#XM"];
+        let exc_names = [
+            "#DE", "#DB", "NMI", "#BP", "#OF", "#BR", "#UD", "#NM", "#DF", "CSO", "#TS", "#NP",
+            "#SS", "#GP", "#PF", "R15", "#MF", "#AC", "#MC", "#XM",
+        ];
         println!("\n===== EXCEPTIONS =====");
         let mut any_exc = false;
         for (i, &c) in exc_counts.iter().enumerate().take(20) {
-            if c > 0 { println!("  {}={}", exc_names[i], c); any_exc = true; }
+            if c > 0 {
+                println!("  {}={}", exc_names[i], c);
+                any_exc = true;
+            }
         }
-        if !any_exc { println!("  (none)"); }
+        if !any_exc {
+            println!("  (none)");
+        }
 
         println!("\n===== ATA DIAGNOSTIC =====");
         println!("ATA read_count={}, write_count={}", ata_reads, ata_writes);
@@ -1031,10 +1137,11 @@ fn run_alpine() -> Result<()> {
 
         // Exception counters
         let exc_counts = emu.cpu.get_exception_diag();
-        let exc_names = ["#DE","#DB","NMI","#BP","#OF","#BR","#UD","#NM",
-            "#DF","CSO","#TS","#NP","#SS","#GP","#PF","R15",
-            "#MF","#AC","#MC","#XM","#VE","#CP","R22","R23",
-            "R24","R25","R26","R27","R28","#SX","R30","R31"];
+        let exc_names = [
+            "#DE", "#DB", "NMI", "#BP", "#OF", "#BR", "#UD", "#NM", "#DF", "CSO", "#TS", "#NP",
+            "#SS", "#GP", "#PF", "R15", "#MF", "#AC", "#MC", "#XM", "#VE", "#CP", "R22", "R23",
+            "R24", "R25", "R26", "R27", "R28", "#SX", "R30", "R31",
+        ];
         print!("Exceptions:             ");
         let mut any_exc = false;
         for (i, &c) in exc_counts.iter().enumerate() {
@@ -1043,13 +1150,18 @@ fn run_alpine() -> Result<()> {
                 any_exc = true;
             }
         }
-        if !any_exc { print!("(none)"); }
+        if !any_exc {
+            print!("(none)");
+        }
         println!();
 
         // IaError (decoder/unimplemented opcode) diagnostics
         let (ia_err_count, ia_err_rip) = emu.cpu.get_ia_error_diag();
         if ia_err_count > 0 {
-            println!("IaError:                count={} last_rip={:#x}", ia_err_count, ia_err_rip);
+            println!(
+                "IaError:                count={} last_rip={:#x}",
+                ia_err_count, ia_err_rip
+            );
         } else {
             println!("IaError:                (none)");
         }
@@ -1065,7 +1177,8 @@ fn run_alpine() -> Result<()> {
         println!();
 
         // HAE (handleAsyncEvent) interrupt delivery diagnostics
-        let (hae_delivered, hae_if_blocked, hae_no_pic, hae_pic_empty) = emu.cpu.get_hae_intr_diag();
+        let (hae_delivered, hae_if_blocked, hae_no_pic, hae_pic_empty) =
+            emu.cpu.get_hae_intr_diag();
         println!("HAE intr delivered:     {}", hae_delivered);
         println!("HAE intr IF-blocked:    {}", hae_if_blocked);
         println!("HAE intr no-pic:        {}", hae_no_pic);
@@ -1088,13 +1201,24 @@ fn run_alpine() -> Result<()> {
         println!("Software INT total:     {}", soft_int_total);
         print!("Software INT vectors:   ");
         let int_names: &[(u8, &str)] = &[
-            (0x10, "vid"), (0x11, "equ"), (0x12, "mem"), (0x13, "dsk"),
-            (0x14, "ser"), (0x15, "sys"), (0x16, "kbd"), (0x19, "boot"),
-            (0x1A, "rtc"), (0x80, "lnx"),
+            (0x10, "vid"),
+            (0x11, "equ"),
+            (0x12, "mem"),
+            (0x13, "dsk"),
+            (0x14, "ser"),
+            (0x15, "sys"),
+            (0x16, "kbd"),
+            (0x19, "boot"),
+            (0x1A, "rtc"),
+            (0x80, "lnx"),
         ];
         for (v, &count) in soft_int_vecs.iter().enumerate() {
             if count > 0 {
-                let name = int_names.iter().find(|(n, _)| *n == v as u8).map(|(_, n)| *n).unwrap_or("");
+                let name = int_names
+                    .iter()
+                    .find(|(n, _)| *n == v as u8)
+                    .map(|(_, n)| *n)
+                    .unwrap_or("");
                 if !name.is_empty() {
                     print!("0x{:02x}({})={} ", v, name, count);
                 } else {
@@ -1107,36 +1231,64 @@ fn run_alpine() -> Result<()> {
         // INT 10h AH subfunction histogram (late calls only)
         let int10h_ah = emu.cpu.get_int10h_ah_hist();
         let int10h_names: &[(u8, &str)] = &[
-            (0x00, "SetMode"), (0x01, "SetCursor"), (0x02, "SetPos"),
-            (0x03, "GetPos"), (0x05, "SetPage"), (0x06, "ScrollUp"),
-            (0x07, "ScrollDn"), (0x08, "ReadCh"), (0x09, "WriteCh"),
-            (0x0A, "WriteChN"), (0x0E, "TTY"), (0x0F, "GetMode"),
-            (0x12, "AltFunc"), (0x13, "WriteStr"),
+            (0x00, "SetMode"),
+            (0x01, "SetCursor"),
+            (0x02, "SetPos"),
+            (0x03, "GetPos"),
+            (0x05, "SetPage"),
+            (0x06, "ScrollUp"),
+            (0x07, "ScrollDn"),
+            (0x08, "ReadCh"),
+            (0x09, "WriteCh"),
+            (0x0A, "WriteChN"),
+            (0x0E, "TTY"),
+            (0x0F, "GetMode"),
+            (0x12, "AltFunc"),
+            (0x13, "WriteStr"),
         ];
         print!("INT 10h AH (late):      ");
         let mut any_10h = false;
         for (ah, &count) in int10h_ah.iter().enumerate() {
             if count > 0 {
                 any_10h = true;
-                let name = int10h_names.iter().find(|(n, _)| *n == ah as u8).map(|(_, n)| *n).unwrap_or("?");
+                let name = int10h_names
+                    .iter()
+                    .find(|(n, _)| *n == ah as u8)
+                    .map(|(_, n)| *n)
+                    .unwrap_or("?");
                 print!("AH={:02x}({})={} ", ah, name, count);
             }
         }
-        if !any_10h { print!("(none)"); }
+        if !any_10h {
+            print!("(none)");
+        }
         println!();
 
         // INT 10h timing
         let (i10_first, i10_last, tty_first, tty_last) = emu.cpu.get_int10h_icount_range();
-        println!("INT10h icount range:    first={} last={} (TTY: first={} last={})",
-            i10_first, i10_last, tty_first, tty_last);
+        println!(
+            "INT10h icount range:    first={} last={} (TTY: first={} last={})",
+            i10_first, i10_last, tty_first, tty_last
+        );
 
         // TTY characters written via INT 10h AH=0Eh
         let tty_chars = emu.cpu.get_int10h_tty_chars();
         if !tty_chars.is_empty() {
-            let printable: String = tty_chars.iter().map(|&b| {
-                if b >= 0x20 && b < 0x7F { b as char } else { '.' }
-            }).collect();
-            let hex: Vec<String> = tty_chars.iter().take(64).map(|b| format!("{:02x}", b)).collect();
+            let printable: String = tty_chars
+                .iter()
+                .map(|&b| {
+                    if b >= 0x20 && b < 0x7F {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
+            let hex: Vec<String> = tty_chars
+                .iter()
+                .take(64)
+                .map(|b| format!("{:02x}", b))
+                .collect();
             println!("INT10h TTY chars:       \"{}\"", printable);
             println!("INT10h TTY hex:         {}", hex.join(" "));
         }
@@ -1148,7 +1300,11 @@ fn run_alpine() -> Result<()> {
         print!("Late soft INT vectors:  ");
         for (v, &count) in soft_int_late.iter().enumerate() {
             if count > 0 {
-                let name = int_names.iter().find(|(n, _)| *n == v as u8).map(|(_, n)| *n).unwrap_or("");
+                let name = int_names
+                    .iter()
+                    .find(|(n, _)| *n == v as u8)
+                    .map(|(_, n)| *n)
+                    .unwrap_or("");
                 if !name.is_empty() {
                     print!("0x{:02x}({})={} ", v, name, count);
                 } else {
@@ -1163,10 +1319,18 @@ fn run_alpine() -> Result<()> {
         {
             let (rp, rl) = emu.memory.get_ram_base_ptr();
             let rdw = |addr: usize| -> u32 {
-                if addr + 3 < rl { unsafe { (rp.add(addr) as *const u32).read_unaligned() } } else { 0xDEAD }
+                if addr + 3 < rl {
+                    unsafe { (rp.add(addr) as *const u32).read_unaligned() }
+                } else {
+                    0xDEAD
+                }
             };
             let rdw16 = |addr: usize| -> u16 {
-                if addr + 1 < rl { unsafe { (rp.add(addr) as *const u16).read_unaligned() } } else { 0xDEAD }
+                if addr + 1 < rl {
+                    unsafe { (rp.add(addr) as *const u16).read_unaligned() }
+                } else {
+                    0xDEAD
+                }
             };
             let timer_val = rdw(0x8EBC);
             let timer_start = rdw(0x0010F778);
@@ -1174,17 +1338,29 @@ fn run_alpine() -> Result<()> {
             let pending_flag = rdw(0x0010F774); // 16-bit: CMP WORD [0x10F774], 0
             let callback_ptr = rdw(0x00111064);
             println!("[0x8EBC] timer_val = {:#010x} ({})", timer_val, timer_val);
-            println!("[0x10F778] timer_start = {:#010x} ({})", timer_start, timer_start);
-            println!("timer diff = {} (need > 3 to exit)", timer_val.wrapping_sub(timer_start));
+            println!(
+                "[0x10F778] timer_start = {:#010x} ({})",
+                timer_start, timer_start
+            );
+            println!(
+                "timer diff = {} (need > 3 to exit)",
+                timer_val.wrapping_sub(timer_start)
+            );
             println!("[0x046C] BDA ticks = {:#010x} ({})", bda_ticks, bda_ticks);
-            println!("[0x10F774] pending_flag = {:#06x} (need != 0 to exit idle)", pending_flag & 0xFFFF);
+            println!(
+                "[0x10F774] pending_flag = {:#06x} (need != 0 to exit idle)",
+                pending_flag & 0xFFFF
+            );
             println!("[0x111064] callback_ptr = {:#010x}", callback_ptr);
 
             // BIOS keyboard buffer check
             let kbd_head = rdw16(0x041A) as usize;
             let kbd_tail = rdw16(0x041C) as usize;
             println!("\n===== BIOS KEYBOARD BUFFER =====");
-            println!("kbd_head={:#06x} kbd_tail={:#06x} (equal=empty)", kbd_head, kbd_tail);
+            println!(
+                "kbd_head={:#06x} kbd_tail={:#06x} (equal=empty)",
+                kbd_head, kbd_tail
+            );
             if kbd_head != kbd_tail {
                 // Buffer has data — dump it
                 let mut pos = kbd_head;
@@ -1192,10 +1368,17 @@ fn run_alpine() -> Result<()> {
                 let buf_end = 0x003E;
                 while pos != kbd_tail {
                     let scan = rdw16(0x0400 + pos);
-                    println!("  kbd[{:#06x}] = {:#06x} (char={:?} scan={:#04x})",
-                        pos, scan, (scan & 0xFF) as u8 as char, (scan >> 8) as u8);
+                    println!(
+                        "  kbd[{:#06x}] = {:#06x} (char={:?} scan={:#04x})",
+                        pos,
+                        scan,
+                        (scan & 0xFF) as u8 as char,
+                        (scan >> 8) as u8
+                    );
                     pos += 2;
-                    if pos >= buf_end { pos = buf_start; }
+                    if pos >= buf_end {
+                        pos = buf_start;
+                    }
                 }
             } else {
                 println!("  (empty — keyboard scancode may not have been processed by INT 9)");
@@ -1205,8 +1388,16 @@ fn run_alpine() -> Result<()> {
             println!("\n===== RM IRQ HANDLER at 0x8523 =====");
             print!("0x8523: ");
             for i in 0..64usize {
-                print!("{:02x} ", unsafe { if 0x8523 + i < rl { *rp.add(0x8523 + i) } else { 0xFF } });
-                if (i + 1) % 16 == 0 && i < 63 { print!("\n{:#08x}: ", 0x8523 + i + 1); }
+                print!("{:02x} ", unsafe {
+                    if 0x8523 + i < rl {
+                        *rp.add(0x8523 + i)
+                    } else {
+                        0xFF
+                    }
+                });
+                if (i + 1) % 16 == 0 && i < 63 {
+                    print!("\n{:#08x}: ", 0x8523 + i + 1);
+                }
             }
             println!();
 
@@ -1214,8 +1405,16 @@ fn run_alpine() -> Result<()> {
             println!("\n===== RM/PM TRANSITION CODE at 0x84EE =====");
             print!("0x84EE: ");
             for i in 0..82usize {
-                print!("{:02x} ", unsafe { if 0x84EE + i < rl { *rp.add(0x84EE + i) } else { 0xFF } });
-                if (i + 1) % 16 == 0 && i < 81 { print!("\n{:#08x}: ", 0x84EE + i + 1); }
+                print!("{:02x} ", unsafe {
+                    if 0x84EE + i < rl {
+                        *rp.add(0x84EE + i)
+                    } else {
+                        0xFF
+                    }
+                });
+                if (i + 1) % 16 == 0 && i < 81 {
+                    print!("\n{:#08x}: ", 0x84EE + i + 1);
+                }
             }
             println!();
 
@@ -1231,8 +1430,10 @@ fn run_alpine() -> Result<()> {
                 let w1 = rdw(entry + 4);
                 let offset = (w0 & 0xFFFF) | (w1 & 0xFFFF0000);
                 let sel = (w0 >> 16) & 0xFFFF;
-                println!("IDT[{:#04x}]: handler={:#010x} sel={:#06x} dw0={:#010x} dw1={:#010x}",
-                    vec, offset, sel, w0, w1);
+                println!(
+                    "IDT[{:#04x}]: handler={:#010x} sel={:#06x} dw0={:#010x} dw1={:#010x}",
+                    vec, offset, sel, w0, w1
+                );
                 if (offset as usize) + 16 < rl {
                     let mut bytes = Vec::new();
                     for i in 0..16 {
@@ -1244,17 +1445,29 @@ fn run_alpine() -> Result<()> {
             // Also dump IRQ0 vector for BIOS IVT (real-mode vector 8 and 9)
             let ivt8 = rdw(0x20);
             let ivt9 = rdw(0x24);
-            println!("IVT[8] = {:#010x} (seg:off = {:04x}:{:04x})", ivt8,
-                (ivt8 >> 16) & 0xFFFF, ivt8 & 0xFFFF);
-            println!("IVT[9] = {:#010x} (seg:off = {:04x}:{:04x})", ivt9,
-                (ivt9 >> 16) & 0xFFFF, ivt9 & 0xFFFF);
+            println!(
+                "IVT[8] = {:#010x} (seg:off = {:04x}:{:04x})",
+                ivt8,
+                (ivt8 >> 16) & 0xFFFF,
+                ivt8 & 0xFFFF
+            );
+            println!(
+                "IVT[9] = {:#010x} (seg:off = {:04x}:{:04x})",
+                ivt9,
+                (ivt9 >> 16) & 0xFFFF,
+                ivt9 & 0xFFFF
+            );
         }
 
         // Additional key addresses for ISOLINUX debugging
         {
             let (rp2, rl2) = emu.memory.get_ram_base_ptr();
             let rdw2 = |addr: usize| -> u32 {
-                if addr + 3 < rl2 { unsafe { (rp2.add(addr) as *const u32).read_unaligned() } } else { 0xDEAD }
+                if addr + 3 < rl2 {
+                    unsafe { (rp2.add(addr) as *const u32).read_unaligned() }
+                } else {
+                    0xDEAD
+                }
             };
 
             // [0x110D94] — polling loop flag (CMP WORD [0x110D94], 0)
@@ -1263,8 +1476,12 @@ fn run_alpine() -> Result<()> {
 
             // IVT entry for INT 22h (SYSLINUX API vector) — at 0x88
             let ivt22 = rdw2(0x88);
-            println!("IVT[22h] = {:#010x} (seg:off = {:04x}:{:04x})",
-                ivt22, (ivt22 >> 16) & 0xFFFF, ivt22 & 0xFFFF);
+            println!(
+                "IVT[22h] = {:#010x} (seg:off = {:04x}:{:04x})",
+                ivt22,
+                (ivt22 >> 16) & 0xFFFF,
+                ivt22 & 0xFFFF
+            );
 
             // PM IDT entry for INT 22h (SYSLINUX API) — at IDT_base + 0x22*8
             let idt_base2 = rdw2(0x8E7E) as usize;
@@ -1294,8 +1511,10 @@ fn run_alpine() -> Result<()> {
                     let w1 = rdw2(idt_base2 + (vec as usize) * 8 + 4);
                     let offset = (w0 & 0xFFFF) | (w1 & 0xFFFF0000);
                     let sel = (w0 >> 16) & 0xFFFF;
-                    println!("  IDT[{:#04x}]: handler={:#010x} sel={:#06x} dw0={:#010x} dw1={:#010x}",
-                        vec, offset, sel, w0, w1);
+                    println!(
+                        "  IDT[{:#04x}]: handler={:#010x} sel={:#06x} dw0={:#010x} dw1={:#010x}",
+                        vec, offset, sel, w0, w1
+                    );
                 }
             }
 
@@ -1315,7 +1534,14 @@ fn run_alpine() -> Result<()> {
                     print!(" |");
                     for i in 0..16usize {
                         let b = unsafe { *rp2.add(base + i) };
-                        print!("{}", if b >= 0x20 && b < 0x7F { b as char } else { '.' });
+                        print!(
+                            "{}",
+                            if b >= 0x20 && b < 0x7F {
+                                b as char
+                            } else {
+                                '.'
+                            }
+                        );
                     }
                     println!("|");
                 }
@@ -1346,10 +1572,18 @@ fn run_alpine() -> Result<()> {
                         // Show 80 bytes of context
                         let start = if addr >= 16 { addr - 16 } else { 0 };
                         let end = (addr + 64).min(search_len);
-                        let context: Vec<u8> = (start..end).map(|a| unsafe { *rp2.add(a) }).collect();
-                        let text: String = context.iter().map(|&b| {
-                            if b >= 0x20 && b < 0x7F { b as char } else { '.' }
-                        }).collect();
+                        let context: Vec<u8> =
+                            (start..end).map(|a| unsafe { *rp2.add(a) }).collect();
+                        let text: String = context
+                            .iter()
+                            .map(|&b| {
+                                if b >= 0x20 && b < 0x7F {
+                                    b as char
+                                } else {
+                                    '.'
+                                }
+                            })
+                            .collect();
                         println!("  [{:#010x}] {:?}", addr, text);
                         found += 1;
                     }
@@ -1389,8 +1623,12 @@ fn run_alpine() -> Result<()> {
                 if esp + 0x60 < rl2 {
                     let val_58 = unsafe { *rp2.add(esp + 0x58) };
                     let dw_58 = rdw2(esp + 0x58);
-                    println!("[ESP+0x58] = byte:{:#04x} dword:{:#010x} (TEST 0x40 = {})",
-                        val_58, dw_58, if val_58 & 0x40 != 0 { "SET" } else { "clear" });
+                    println!(
+                        "[ESP+0x58] = byte:{:#04x} dword:{:#010x} (TEST 0x40 = {})",
+                        val_58,
+                        dw_58,
+                        if val_58 & 0x40 != 0 { "SET" } else { "clear" }
+                    );
                 }
             }
 
@@ -1399,9 +1637,15 @@ fn run_alpine() -> Result<()> {
             print!("0x100c40: ");
             for i in 0..64usize {
                 let addr = 0x100c40 + i;
-                let b = if addr < rl2 { unsafe { *rp2.add(addr) } } else { 0xFF };
+                let b = if addr < rl2 {
+                    unsafe { *rp2.add(addr) }
+                } else {
+                    0xFF
+                };
                 print!("{:02x} ", b);
-                if (i + 1) % 16 == 0 && i < 63 { print!("\n{:#08x}: ", 0x100c40 + i + 1); }
+                if (i + 1) % 16 == 0 && i < 63 {
+                    print!("\n{:#08x}: ", 0x100c40 + i + 1);
+                }
             }
             println!();
 
@@ -1410,9 +1654,15 @@ fn run_alpine() -> Result<()> {
             print!("0x10415c: ");
             for i in 0..68usize {
                 let addr = 0x10415c + i;
-                let b = if addr < rl2 { unsafe { *rp2.add(addr) } } else { 0xFF };
+                let b = if addr < rl2 {
+                    unsafe { *rp2.add(addr) }
+                } else {
+                    0xFF
+                };
                 print!("{:02x} ", b);
-                if (i + 1) % 16 == 0 && i < 67 { print!("\n{:#08x}: ", 0x10415c + i + 1); }
+                if (i + 1) % 16 == 0 && i < 67 {
+                    print!("\n{:#08x}: ", 0x10415c + i + 1);
+                }
             }
             println!();
         }
@@ -1421,18 +1671,26 @@ fn run_alpine() -> Result<()> {
         println!("\n===== ISOLINUX TIMER FUNCTION DUMP =====");
         let (ram_ptr0, ram_len0) = emu.memory.get_ram_base_ptr();
         let rb = |addr: usize| -> u8 {
-            if addr < ram_len0 { unsafe { *ram_ptr0.add(addr) } } else { 0xFF }
+            if addr < ram_len0 {
+                unsafe { *ram_ptr0.add(addr) }
+            } else {
+                0xFF
+            }
         };
         let rd = |addr: usize| -> u32 {
             if addr + 3 < ram_len0 {
                 unsafe { (ram_ptr0.add(addr) as *const u32).read_unaligned() }
-            } else { 0xDEADDEAD }
+            } else {
+                0xDEADDEAD
+            }
         };
         // Dump 0x100c40 to 0x100c70
         print!("0x100c40: ");
         for i in 0..48usize {
             print!("{:02x} ", rb(0x100c40 + i));
-            if (i + 1) % 16 == 0 && i < 47 { print!("\n{:#08x}: ", 0x100c40 + i + 1); }
+            if (i + 1) % 16 == 0 && i < 47 {
+                print!("\n{:#08x}: ", 0x100c40 + i + 1);
+            }
         }
         println!();
         // Decode MOV EAX, [moffs32] at 0x100c40 (if A1 opcode)
@@ -1440,15 +1698,23 @@ fn run_alpine() -> Result<()> {
         if b0 == 0xA1 {
             let timer_addr = rd(0x100c41);
             let timer_val = rd(timer_addr as usize);
-            println!("Timer: MOV EAX, [{:#010x}] = {:#010x}", timer_addr, timer_val);
+            println!(
+                "Timer: MOV EAX, [{:#010x}] = {:#010x}",
+                timer_addr, timer_val
+            );
         } else {
-            println!("Function starts with opcode {:#04x} (not A1=MOV EAX,moffs)", b0);
+            println!(
+                "Function starts with opcode {:#04x} (not A1=MOV EAX,moffs)",
+                b0
+            );
         }
         // Dump the caller at 0x104160-0x104198
         print!("0x104160: ");
         for i in 0..56usize {
             print!("{:02x} ", rb(0x104160 + i));
-            if (i + 1) % 16 == 0 && i < 55 { print!("\n{:#08x}: ", 0x104160 + i + 1); }
+            if (i + 1) % 16 == 0 && i < 55 {
+                print!("\n{:#08x}: ", 0x104160 + i + 1);
+            }
         }
         println!();
 
@@ -1456,12 +1722,18 @@ fn run_alpine() -> Result<()> {
         println!("\n===== ISOLINUX PM CODE DUMP =====");
         let (ram_ptr, ram_len) = emu.memory.get_ram_base_ptr();
         let read_byte = |addr: usize| -> u8 {
-            if addr < ram_len { unsafe { *ram_ptr.add(addr) } } else { 0xFF }
+            if addr < ram_len {
+                unsafe { *ram_ptr.add(addr) }
+            } else {
+                0xFF
+            }
         };
         let read_dword = |addr: usize| -> u32 {
             if addr + 3 < ram_len {
                 unsafe { (ram_ptr.add(addr) as *const u32).read_unaligned() }
-            } else { 0xDEADDEAD }
+            } else {
+                0xDEADDEAD
+            }
         };
 
         // Dump unknown RM handler at 0x8662 (dominant PM→RM bounce target)
@@ -1475,7 +1747,14 @@ fn run_alpine() -> Result<()> {
             print!(" |");
             for i in 0..16usize {
                 let b = read_byte(base + i);
-                print!("{}", if b >= 0x20 && b < 0x7F { b as char } else { '.' });
+                print!(
+                    "{}",
+                    if b >= 0x20 && b < 0x7F {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                );
             }
             println!("|");
         }
@@ -1492,8 +1771,12 @@ fn run_alpine() -> Result<()> {
         // RM stack pointer for __intcall
         let rm_sp_val = read_byte(0x38B8) as u16 | ((read_byte(0x38B9) as u16) << 8);
         let rm_ss_val = read_byte(0x38BA) as u16 | ((read_byte(0x38BB) as u16) << 8);
-        println!("\nRM stack [0x38B8]: SS:SP = {:04x}:{:04x} (phys {:#x})",
-            rm_ss_val, rm_sp_val, (rm_ss_val as u32) * 16 + rm_sp_val as u32);
+        println!(
+            "\nRM stack [0x38B8]: SS:SP = {:04x}:{:04x} (phys {:#x})",
+            rm_ss_val,
+            rm_sp_val,
+            (rm_ss_val as u32) * 16 + rm_sp_val as u32
+        );
         let rm_stack_phys = (rm_ss_val as usize) * 16 + rm_sp_val as usize;
         if rm_stack_phys + 64 < ram_len {
             println!("RM stack contents:");
@@ -1511,14 +1794,18 @@ fn run_alpine() -> Result<()> {
         print!("0x84A0: ");
         for i in 0..80usize {
             print!("{:02x} ", read_byte(0x84A0 + i));
-            if (i + 1) % 16 == 0 && i < 79 { print!("\n{:#06x}: ", 0x84A0 + i + 1); }
+            if (i + 1) % 16 == 0 && i < 79 {
+                print!("\n{:#06x}: ", 0x84A0 + i + 1);
+            }
         }
         println!();
         // Dump PM entry at 0x89A0-0x89FF
         print!("0x89A0: ");
         for i in 0..96usize {
             print!("{:02x} ", read_byte(0x89A0 + i));
-            if (i + 1) % 16 == 0 && i < 95 { print!("\n{:#06x}: ", 0x89A0 + i + 1); }
+            if (i + 1) % 16 == 0 && i < 95 {
+                print!("\n{:#06x}: ", 0x89A0 + i + 1);
+            }
         }
         println!();
         // Key data locations
@@ -1532,7 +1819,9 @@ fn run_alpine() -> Result<()> {
         print!("GDT[0x8E00]: ");
         for i in 0..48usize {
             print!("{:02x} ", read_byte(0x8E00 + i));
-            if (i + 1) % 8 == 0 { print!("| "); }
+            if (i + 1) % 8 == 0 {
+                print!("| ");
+            }
         }
         println!();
         // Stack around saved_esp
@@ -1556,11 +1845,13 @@ fn run_alpine() -> Result<()> {
                 let entry_base = idt_base as usize + i as usize * 8;
                 let w0 = read_dword(entry_base);
                 let w1 = read_dword(entry_base + 4);
-                let offset = (w0 & 0xFFFF) | ((w1 & 0xFFFF0000));
+                let offset = (w0 & 0xFFFF) | (w1 & 0xFFFF0000);
                 let sel = (w0 >> 16) & 0xFFFF;
                 let typ = (w1 >> 8) & 0x1F;
-                println!("  IDT[{}]: offset={:#010x} sel={:#06x} type={:#04x} dw0={:#010x} dw1={:#010x}",
-                    i, offset, sel, typ, w0, w1);
+                println!(
+                    "  IDT[{}]: offset={:#010x} sel={:#06x} type={:#04x} dw0={:#010x} dw1={:#010x}",
+                    i, offset, sel, typ, w0, w1
+                );
             }
         }
 
@@ -1581,12 +1872,22 @@ fn run_alpine() -> Result<()> {
             println!("RIP:     {:#010x}", rip);
             println!("CS:      {:#06x}  SS: {:#06x}", cs, ss);
             println!("EFLAGS:  {:#010x}", eflags);
-            println!("EAX={:08x} ECX={:08x} EDX={:08x} EBX={:08x}", regs[0], regs[1], regs[2], regs[3]);
-            println!("ESP={:08x} EBP={:08x} ESI={:08x} EDI={:08x}", regs[4], regs[5], regs[6], regs[7]);
+            println!(
+                "EAX={:08x} ECX={:08x} EDX={:08x} EBX={:08x}",
+                regs[0], regs[1], regs[2], regs[3]
+            );
+            println!(
+                "ESP={:08x} EBP={:08x} ESI={:08x} EDI={:08x}",
+                regs[4], regs[5], regs[6], regs[7]
+            );
             println!("Stack (from ESP):");
             let esp = regs[4];
             for i in 0..16u32 {
-                println!("  [{:#010x}] = {:#010x}", esp.wrapping_add(i * 4), stack[i as usize]);
+                println!(
+                    "  [{:#010x}] = {:#010x}",
+                    esp.wrapping_add(i * 4),
+                    stack[i as usize]
+                );
             }
         }
 
@@ -1605,7 +1906,11 @@ fn run_alpine() -> Result<()> {
                     let end = (addr + 64).min(rl3);
                     let context: Vec<u8> = (start..end).map(|a| unsafe { *rp3.add(a) }).collect();
                     let text = String::from_utf8_lossy(&context);
-                    println!("  Found 'SERIAL' at {:#010x}: {:?}", addr, text.chars().take(80).collect::<String>());
+                    println!(
+                        "  Found 'SERIAL' at {:#010x}: {:?}",
+                        addr,
+                        text.chars().take(80).collect::<String>()
+                    );
                     found_count += 1;
                 }
             }
@@ -1617,13 +1922,18 @@ fn run_alpine() -> Result<()> {
             let needle2 = b"TIMEOUT";
             let mut found_count2 = 0;
             for addr in 0..rl3.saturating_sub(needle2.len()) {
-                let matches = (0..needle2.len()).all(|i| unsafe { *rp3.add(addr + i) } == needle2[i]);
+                let matches =
+                    (0..needle2.len()).all(|i| unsafe { *rp3.add(addr + i) } == needle2[i]);
                 if matches && found_count2 < 3 {
                     let start = if addr >= 16 { addr - 16 } else { 0 };
                     let end = (addr + 48).min(rl3);
                     let context: Vec<u8> = (start..end).map(|a| unsafe { *rp3.add(a) }).collect();
                     let text = String::from_utf8_lossy(&context);
-                    println!("  Found 'TIMEOUT' at {:#010x}: {:?}", addr, text.chars().take(60).collect::<String>());
+                    println!(
+                        "  Found 'TIMEOUT' at {:#010x}: {:?}",
+                        addr,
+                        text.chars().take(60).collect::<String>()
+                    );
                     found_count2 += 1;
                 }
             }
@@ -1635,7 +1945,8 @@ fn run_alpine() -> Result<()> {
             let needle3 = b"vmlinuz";
             let mut found_count3 = 0;
             for addr in 0..rl3.saturating_sub(needle3.len()) {
-                let matches = (0..needle3.len()).all(|i| unsafe { *rp3.add(addr + i) } == needle3[i]);
+                let matches =
+                    (0..needle3.len()).all(|i| unsafe { *rp3.add(addr + i) } == needle3[i]);
                 if matches && found_count3 < 3 {
                     println!("  Found 'vmlinuz' at {:#010x}", addr);
                     found_count3 += 1;
@@ -1656,12 +1967,17 @@ fn run_alpine() -> Result<()> {
             let (rp_t, rl_t) = emu.memory.get_ram_base_ptr();
             if 0x3AD8 + 3 < rl_t {
                 unsafe { (rp_t.add(0x3AD8) as *const u32).read_unaligned() }
-            } else { 0 }
+            } else {
+                0
+            }
         };
         println!("[0x3AD8] timer_cnt (hw IRQ bounces): {}", timer_cnt_val);
         let sw_bounces = pm_to_rm.saturating_sub(timer_cnt_val as u64);
         // Also subtract BIOS PM→RM transitions (initial rombios32 PM return)
-        println!("Estimated software INT bounces (__intcall): ~{}", sw_bounces);
+        println!(
+            "Estimated software INT bounces (__intcall): ~{}",
+            sw_bounces
+        );
         if sw_bounces == 0 {
             println!("*** WARNING: __intcall was NEVER called! ISOLINUX cannot make BIOS calls from PM! ***");
         }
@@ -1673,10 +1989,18 @@ fn run_alpine() -> Result<()> {
         {
             let (rp_ft, rl_ft) = emu.memory.get_ram_base_ptr();
             let rd_ft = |addr: usize| -> u32 {
-                if addr + 3 < rl_ft { unsafe { (rp_ft.add(addr) as *const u32).read_unaligned() } } else { 0xDEAD }
+                if addr + 3 < rl_ft {
+                    unsafe { (rp_ft.add(addr) as *const u32).read_unaligned() }
+                } else {
+                    0xDEAD
+                }
             };
             let rb_ft = |addr: usize| -> u8 {
-                if addr < rl_ft { unsafe { *rp_ft.add(addr) } } else { 0xFF }
+                if addr < rl_ft {
+                    unsafe { *rp_ft.add(addr) }
+                } else {
+                    0xFF
+                }
             };
             // Dump entries 0-31 (each 0x3B = 59 bytes)
             for i in 0..32u32 {
@@ -1687,7 +2011,10 @@ fn run_alpine() -> Result<()> {
                 let _b0 = rb_ft(base);
                 // Only show non-zero entries or a few zero ones for context
                 if dw0 != 0 || dw1 != 0 || i < 4 || i == 0x1C {
-                    print!("  [{}] @{:#08x}: {:08x} {:08x} {:08x}", i, base, dw0, dw1, dw2);
+                    print!(
+                        "  [{}] @{:#08x}: {:08x} {:08x} {:08x}",
+                        i, base, dw0, dw1, dw2
+                    );
                     // Show first 16 bytes as hex
                     print!("  bytes:");
                     for j in 0..16usize {
@@ -1713,7 +2040,11 @@ fn run_alpine() -> Result<()> {
         {
             let (rp_bi, rl_bi) = emu.memory.get_ram_base_ptr();
             let rd_bi = |addr: usize| -> u32 {
-                if addr + 3 < rl_bi { unsafe { (rp_bi.add(addr) as *const u32).read_unaligned() } } else { 0xDEAD }
+                if addr + 3 < rl_bi {
+                    unsafe { (rp_bi.add(addr) as *const u32).read_unaligned() }
+                } else {
+                    0xDEAD
+                }
             };
             // El Torito loads boot image at 0x7C00. Boot info table is at offset 8.
             let pvd_lba = rd_bi(0x7C08);
@@ -1732,7 +2063,10 @@ fn run_alpine() -> Result<()> {
             let pvd2 = rd_bi(0x8808);
             let file2 = rd_bi(0x880C);
             if pvd2 > 0 && pvd2 < 100 {
-                println!("  (Also found at 0x8808: PVD LBA={}, file LBA={})", pvd2, file2);
+                println!(
+                    "  (Also found at 0x8808: PVD LBA={}, file LBA={})",
+                    pvd2, file2
+                );
             }
 
             // Relocated image at 0x100000 — ISOLINUX relocates itself here.
@@ -1743,9 +2077,15 @@ fn run_alpine() -> Result<()> {
             print!("  0x100000: ");
             for i in 0..32usize {
                 let addr = 0x100000 + i;
-                let b = if addr < rl_bi { unsafe { *rp_bi.add(addr) } } else { 0xFF };
+                let b = if addr < rl_bi {
+                    unsafe { *rp_bi.add(addr) }
+                } else {
+                    0xFF
+                };
                 print!("{:02x} ", b);
-                if i == 15 { print!("\n  0x100010: "); }
+                if i == 15 {
+                    print!("\n  0x100010: ");
+                }
             }
             println!();
             let rel_pvd = rd_bi(0x100008);
@@ -1753,17 +2093,32 @@ fn run_alpine() -> Result<()> {
             let rel_len = rd_bi(0x100010);
             let rel_csum = rd_bi(0x100014);
             println!("  Relocated boot info table at 0x100008:");
-            println!("    PVD LBA:       {} ({:#x})  expected: 16 (0x10)", rel_pvd, rel_pvd);
-            println!("    Boot file LBA: {} ({:#x})  expected: 56 (0x38)", rel_file, rel_file);
-            println!("    Boot file len: {} ({:#x})  expected: 43008 (0xa800)", rel_len, rel_len);
-            println!("    Checksum:      {:#010x}  expected: 0x22818aeb", rel_csum);
-            let match_ok = rel_pvd == 16 && rel_file == 56 && rel_len == 43008 && rel_csum == 0x22818AEB;
+            println!(
+                "    PVD LBA:       {} ({:#x})  expected: 16 (0x10)",
+                rel_pvd, rel_pvd
+            );
+            println!(
+                "    Boot file LBA: {} ({:#x})  expected: 56 (0x38)",
+                rel_file, rel_file
+            );
+            println!(
+                "    Boot file len: {} ({:#x})  expected: 43008 (0xa800)",
+                rel_len, rel_len
+            );
+            println!(
+                "    Checksum:      {:#010x}  expected: 0x22818aeb",
+                rel_csum
+            );
+            let match_ok =
+                rel_pvd == 16 && rel_file == 56 && rel_len == 43008 && rel_csum == 0x22818AEB;
             if match_ok {
                 println!("    MATCH: YES — boot info table correctly relocated");
             } else if rel_pvd == 0 && rel_file == 0 && rel_len == 0 {
                 println!("    *** BOOT INFO TABLE ALL ZEROS at 0x100008! Relocation failed or wrong address! ***");
             } else {
-                println!("    *** MISMATCH — boot info table at 0x100008 has unexpected values! ***");
+                println!(
+                    "    *** MISMATCH — boot info table at 0x100008 has unexpected values! ***"
+                );
             }
 
             // Also dump 0x100000-0x100020 as dwords for easier reading
@@ -1780,15 +2135,24 @@ fn run_alpine() -> Result<()> {
         {
             let (rp_ivt, rl_ivt) = emu.memory.get_ram_base_ptr();
             let rd_ivt = |addr: usize| -> u32 {
-                if addr + 3 < rl_ivt { unsafe { (rp_ivt.add(addr) as *const u32).read_unaligned() } } else { 0xDEAD }
+                if addr + 3 < rl_ivt {
+                    unsafe { (rp_ivt.add(addr) as *const u32).read_unaligned() }
+                } else {
+                    0xDEAD
+                }
             };
             for vec_num in [0x08u8, 0x09, 0x10, 0x13, 0x15, 0x16, 0x19, 0x1A, 0x1C] {
                 let addr = vec_num as usize * 4;
                 let entry = rd_ivt(addr);
                 let seg = (entry >> 16) & 0xFFFF;
                 let off = entry & 0xFFFF;
-                println!("  IVT[{:#04x}] = {:04x}:{:04x} (phys {:#010x})",
-                    vec_num, seg, off, seg * 16 + off);
+                println!(
+                    "  IVT[{:#04x}] = {:04x}:{:04x} (phys {:#010x})",
+                    vec_num,
+                    seg,
+                    off,
+                    seg * 16 + off
+                );
             }
         }
 
@@ -1798,32 +2162,59 @@ fn run_alpine() -> Result<()> {
         {
             let (rp_gap, rl_gap) = emu.memory.get_ram_base_ptr();
             // Expected bytes from ISO at boot image offset 0x800
-            let expected: [u8; 16] = [0xe8, 0x0f, 0x02, 0x66, 0x68, 0x50, 0x89, 0x00,
-                                       0x00, 0xe8, 0x83, 0x00, 0x66, 0x3d, 0xf0, 0xf2];
+            let expected: [u8; 16] = [
+                0xe8, 0x0f, 0x02, 0x66, 0x68, 0x50, 0x89, 0x00, 0x00, 0xe8, 0x83, 0x00, 0x66, 0x3d,
+                0xf0, 0xf2,
+            ];
             let mut actual = [0u8; 16];
             for i in 0..16 {
-                actual[i] = if 0x8400 + i < rl_gap { unsafe { *rp_gap.add(0x8400 + i) } } else { 0xFF };
+                actual[i] = if 0x8400 + i < rl_gap {
+                    unsafe { *rp_gap.add(0x8400 + i) }
+                } else {
+                    0xFF
+                };
             }
             let match_ok = actual == expected;
             print!("  Expected: ");
-            for b in &expected { print!("{:02x} ", b); }
+            for b in &expected {
+                print!("{:02x} ", b);
+            }
             println!();
             print!("  Actual:   ");
-            for b in &actual { print!("{:02x} ", b); }
+            for b in &actual {
+                print!("{:02x} ", b);
+            }
             println!();
-            println!("  Match: {}", if match_ok { "YES — gap filled correctly" } else { "NO — GAP DATA MISMATCH!" });
+            println!(
+                "  Match: {}",
+                if match_ok {
+                    "YES — gap filled correctly"
+                } else {
+                    "NO — GAP DATA MISMATCH!"
+                }
+            );
 
             // Dump full 128 bytes for comparison
             print!("  0x8400: ");
             for i in 0..128usize {
-                let b = if 0x8400 + i < rl_gap { unsafe { *rp_gap.add(0x8400 + i) } } else { 0xFF };
+                let b = if 0x8400 + i < rl_gap {
+                    unsafe { *rp_gap.add(0x8400 + i) }
+                } else {
+                    0xFF
+                };
                 print!("{:02x} ", b);
-                if (i + 1) % 16 == 0 && i < 127 { print!("\n  {:#06x}: ", 0x8400 + i + 1); }
+                if (i + 1) % 16 == 0 && i < 127 {
+                    print!("\n  {:#06x}: ", 0x8400 + i + 1);
+                }
             }
             println!();
             // Check if gap is all zeros (uninitialized)
             let all_zero = (0..0x400usize).all(|i| {
-                if 0x8400 + i < rl_gap { unsafe { *rp_gap.add(0x8400 + i) == 0 } } else { false }
+                if 0x8400 + i < rl_gap {
+                    unsafe { *rp_gap.add(0x8400 + i) == 0 }
+                } else {
+                    false
+                }
             });
             if all_zero {
                 println!("  *** GAP IS ALL ZEROS — stub copy loop never filled 0x8400-0x87FF! ***");
@@ -1883,7 +2274,9 @@ fn run_alpine() -> Result<()> {
             let ret_ip_addr = rm_sp + 8 + 32 + 4; // GS+FS+ES+DS + POPAD + POPFD = 44 = 0x2C
             let ret_ip = if ret_ip_addr + 1 < rl_ic {
                 unsafe { (rp_ic.add(ret_ip_addr) as *const u16).read_unaligned() }
-            } else { 0xFFFF };
+            } else {
+                0xFFFF
+            };
             println!("\nRM stack ret IP @ {:#06x} = {:#06x}", ret_ip_addr, ret_ip);
             // Dump code at that return address
             if (ret_ip as usize) + 32 < rl_ic {
@@ -1938,7 +2331,9 @@ fn run_alpine() -> Result<()> {
             // The function pointer [0x8E58] should point to the actual __intcall impl
             let intcall_fn = if 0x8E5B < rl_ic {
                 unsafe { (rp_ic.add(0x8E58) as *const u32).read_unaligned() }
-            } else { 0 };
+            } else {
+                0
+            };
             println!("\n[0x8E58] __intcall func ptr = {:#010x}", intcall_fn);
             if (intcall_fn as usize) + 64 < rl_ic {
                 println!("Code at __intcall impl ({:#010x}):", intcall_fn);
@@ -1952,7 +2347,11 @@ fn run_alpine() -> Result<()> {
                 }
             }
             // Also dump CDROM drive number at [0x3017]
-            let drv_num = if 0x3017 < rl_ic { unsafe { *rp_ic.add(0x3017) } } else { 0xFF };
+            let drv_num = if 0x3017 < rl_ic {
+                unsafe { *rp_ic.add(0x3017) }
+            } else {
+                0xFF
+            };
             println!("\n[0x3017] CDROM drive number = {:#04x}", drv_num);
             // Spec packet at [0x3030]
             print!("[0x3030] Spec packet: ");
@@ -1986,7 +2385,9 @@ fn run_alpine() -> Result<()> {
                     bf_found += 1;
                 }
             }
-            if bf_found == 0 { println!("  NOT FOUND"); }
+            if bf_found == 0 {
+                println!("  NOT FOUND");
+            }
         }
 
         // Serial port TX output (COM1) — ISOLINUX uses SERIAL 0 115200

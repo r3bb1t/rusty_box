@@ -36,12 +36,16 @@ pub struct SharedDisplay {
     pub font_height: u32,
     /// Whether the emulator is still running
     pub emu_running: bool,
+    /// True after the GUI has requested launch but before the emulator reports running
+    pub start_pending: bool,
     /// Current instructions per second for status display
     pub ips: u32,
     /// Custom palette (index → [R, G, B]), initially standard VGA 16-color
     pub palette: [[u8; 3]; 16],
     /// Set by GUI to request emulator restart; cleared by emulator thread when restart begins
     pub reset_requested: bool,
+    /// Last emulator startup/runtime error reported by the worker thread
+    pub runtime_error: Option<String>,
     /// Atomic flag polled by run_interactive to stop early (e.g. on reset); shared with GUI
     pub stop_flag: Arc<AtomicBool>,
     /// Serial console output text (accumulated from serial port TX)
@@ -69,14 +73,28 @@ impl SharedDisplay {
             screen_rows: rows,
             font_width: fw,
             font_height: fh,
-            emu_running: true,
+            emu_running: false,
+            start_pending: false,
             ips: 0,
             palette: VGA_DEFAULT_PALETTE_16,
             reset_requested: false,
+            runtime_error: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
             serial_log: String::new(),
             pending_serial_input: Vec::new(),
         }
+    }
+
+    /// Queue a line of ASCII text for serial RX injection.
+    pub fn queue_serial_input_line(&mut self, input: &str) {
+        self.pending_serial_input
+            .extend_from_slice(input.as_bytes());
+        self.pending_serial_input.push(b'\n');
+    }
+
+    /// Drain pending serial RX bytes.
+    pub fn drain_serial_input(&mut self) -> Vec<u8> {
+        self.pending_serial_input.drain(..).collect()
     }
 
     /// Resize the framebuffer for new text mode dimensions.
@@ -222,7 +240,8 @@ impl SharedDisplay {
                     // Use CRTC start_address and line_offset, matching Bochs gui.cc
                     // Wrap within text buffer (VGA text memory is 32KB, kernel scrolls by
                     // advancing start_address and wraps around)
-                    let text_idx = ((start_address + row * line_offset + col * 2) as usize) % text_len;
+                    let text_idx =
+                        ((start_address + row * line_offset + col * 2) as usize) % text_len;
                     if text_idx + 1 >= text_len {
                         continue;
                     }
@@ -241,5 +260,32 @@ impl SharedDisplay {
 impl Default for SharedDisplay {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SharedDisplay;
+    use core::sync::atomic::Ordering;
+
+    #[test]
+    fn shared_display_starts_stopped() {
+        let shared = SharedDisplay::new();
+
+        assert!(!shared.emu_running);
+        assert!(!shared.reset_requested);
+        assert!(!shared.start_pending);
+        assert!(shared.runtime_error.is_none());
+        assert!(!shared.stop_flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn serial_input_queue_appends_newline_and_drains() {
+        let mut shared = SharedDisplay::new();
+
+        shared.queue_serial_input_line("boot");
+
+        assert_eq!(shared.drain_serial_input(), b"boot\n");
+        assert!(shared.drain_serial_input().is_empty());
     }
 }

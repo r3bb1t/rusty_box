@@ -30,12 +30,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // PVI: Protected Virtual Interrupts (CR4.PVI && CPL==3)
             if self.cr4.pvi() {
                 let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl as u32;
-                if cpl == 3
-                    && iopl < 3 {
-                        // Clear VIF instead of IF
-                        self.eflags.remove(EFlags::VIF);
-                        return Ok(());
-                    }
+                if cpl == 3 && iopl < 3 {
+                    // Clear VIF instead of IF
+                    self.eflags.remove(EFlags::VIF);
+                    return Ok(());
+                }
             }
             // Check IOPL >= CPL
             let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl as u32;
@@ -43,16 +42,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 tracing::trace!("CLI: IOPL < CPL in protected mode");
                 self.exception(super::cpu::Exception::Gp, 0)?;
             }
-        } else if self.v8086_mode()
-            && iopl != 3 {
-                if self.cr4.vme() {
-                    // Clear VIF instead of IF
-                    self.eflags.remove(EFlags::VIF);
-                    return Ok(());
-                }
-                tracing::trace!("CLI: IOPL != 3 in v8086 mode");
-                self.exception(super::cpu::Exception::Gp, 0)?;
+        } else if self.v8086_mode() && iopl != 3 {
+            if self.cr4.vme() {
+                // Clear VIF instead of IF
+                self.eflags.remove(EFlags::VIF);
+                return Ok(());
             }
+            tracing::trace!("CLI: IOPL != 3 in v8086 mode");
+            self.exception(super::cpu::Exception::Gp, 0)?;
+        }
 
         self.eflags.remove(EFlags::IF_);
         // Bochs flag_ctrl.cc: handleInterruptMaskChange() after clearing IF
@@ -85,16 +83,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 tracing::trace!("STI: CPL > IOPL in protected mode");
                 self.exception(super::cpu::Exception::Gp, 0)?;
             }
-        } else if self.v8086_mode()
-            && iopl != 3 {
-                if self.cr4.vme() && !self.eflags.contains(EFlags::VIP) {
-                    // Set VIF
-                    self.eflags.insert(EFlags::VIF);
-                    return Ok(());
-                }
-                tracing::trace!("STI: IOPL != 3 in v8086 mode");
-                self.exception(super::cpu::Exception::Gp, 0)?;
+        } else if self.v8086_mode() && iopl != 3 {
+            if self.cr4.vme() && !self.eflags.contains(EFlags::VIP) {
+                // Set VIF
+                self.eflags.insert(EFlags::VIF);
+                return Ok(());
             }
+            tracing::trace!("STI: IOPL != 3 in v8086 mode");
+            self.exception(super::cpu::Exception::Gp, 0)?;
+        }
 
         // Only inhibit if IF was previously clear
         if !self.eflags.contains(EFlags::IF_) {

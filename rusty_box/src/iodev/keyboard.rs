@@ -152,7 +152,6 @@
 //! 0xFF: Reset (returns ACK + 0xAA + device ID 0x00)
 //! ```
 
-
 // I/O Ports
 pub const KBD_DATA_PORT: u16 = 0x0060;
 pub const KBD_STATUS_PORT: u16 = 0x0064;
@@ -649,7 +648,6 @@ impl BxKeyboardC {
         }
     }
 
-
     /// Initialize the keyboard controller
     pub fn init(&mut self) {
         tracing::debug!("Keyboard: Initializing 8042 PS/2 Controller");
@@ -693,7 +691,13 @@ impl BxKeyboardC {
     ///   simulate PIT channel 2 output transitions for BIOS `delay_ms()` loops.
     /// - **Port 0x64**: Status register (assembled from boolean flags each read).
     ///   TIM bit is cleared on each read.
-    pub fn read(&mut self, port: u16, _io_len: u8, icount: u64, pit: Option<&mut super::pit::BxPitC>) -> u32 {
+    pub fn read(
+        &mut self,
+        port: u16,
+        _io_len: u8,
+        icount: u64,
+        pit: Option<&mut super::pit::BxPitC>,
+    ) -> u32 {
         match port {
             KBD_DATA_PORT => self.read_port_60(),
             KBD_STATUS_PORT => self.read_port_64(),
@@ -716,7 +720,11 @@ impl BxKeyboardC {
                 }
 
                 let value = self.system_control_b;
-                tracing::trace!("Keyboard: port 0x61 read val={:#04x} bit5={}", value, (value >> 5) & 1);
+                tracing::trace!(
+                    "Keyboard: port 0x61 read val={:#04x} bit5={}",
+                    value,
+                    (value >> 5) & 1
+                );
                 value as u32
             }
             _ => {
@@ -787,10 +795,7 @@ impl BxKeyboardC {
             // Nothing ready — return last value
             let val = self.kbd_controller.kbd_output_buffer;
             self.diag_port60_last_value = val;
-            tracing::trace!(
-                "Keyboard: Read port 0x60 (outb empty) = {:#04x}",
-                val
-            );
+            tracing::trace!("Keyboard: Read port 0x60 (outb empty) = {:#04x}", val);
             val as u32
         }
     }
@@ -828,13 +833,23 @@ impl BxKeyboardC {
     /// - **Port 0x64 (Command)**: Dispatches controller commands. Sets `c_d=1`
     ///   to indicate a command was written. Some commands set `expecting_port60h`
     ///   to capture the next port 0x60 write as a parameter.
-    pub fn write(&mut self, port: u16, value: u32, _io_len: u8, pit: Option<&mut super::pit::BxPitC>) {
+    pub fn write(
+        &mut self,
+        port: u16,
+        value: u32,
+        _io_len: u8,
+        pit: Option<&mut super::pit::BxPitC>,
+    ) {
         let value_u8 = value as u8;
         match port {
             KBD_DATA_PORT => self.write_port_60(value_u8),
             KBD_COMMAND_PORT => self.write_port_64(value_u8),
             SYSTEM_CONTROL_B => {
-                tracing::trace!("Keyboard: port 0x61 write val={:#04x} gate2={}", value_u8, value_u8 & 1);
+                tracing::trace!(
+                    "Keyboard: port 0x61 write val={:#04x} gate2={}",
+                    value_u8,
+                    value_u8 & 1
+                );
                 // Bit 0 controls PIT counter 2 GATE (Bochs keyboard.cc write handler)
                 if let Some(pit) = pit {
                     pit.set_gate2((value_u8 & 0x01) != 0);
@@ -1449,10 +1464,12 @@ impl BxKeyboardC {
 
         // Wrap mode handling
         if self.mouse.mode == MOUSE_MODE_WRAP
-            && value != MOUSE_CMD_RESET && value != MOUSE_CMD_RESET_WRAP_MODE {
-                self.controller_enq(value, 1);
-                return;
-            }
+            && value != MOUSE_CMD_RESET
+            && value != MOUSE_CMD_RESET_WRAP_MODE
+        {
+            self.controller_enq(value, 1);
+            return;
+        }
 
         match value {
             MOUSE_CMD_SET_SCALING_1_1 => {

@@ -1,5 +1,3 @@
-
-
 //! AVX-512F rounding, scale, exponent, and mantissa instruction handlers
 //!
 //! Implements VRNDSCALE, VSCALEF, VGETEXP, VGETMANT (packed and scalar).
@@ -11,6 +9,8 @@ use super::{
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedZmmRegister,
 };
+#[cfg(not(feature = "std"))]
+use crate::cpu::float::FloatExt;
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
@@ -34,7 +34,10 @@ fn qword_elements(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, instr: &Instruction) -> u64 {
+fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    instr: &Instruction,
+) -> u64 {
     let k = instr.opmask();
     if k == 0 {
         u64::MAX
@@ -46,7 +49,10 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, reg: u8) -> BxPackedZmmRegister {
+fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    reg: u8,
+) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
@@ -108,7 +114,9 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 /// `scale`: number of fraction bits to preserve (imm8[7:4]).
 /// Rounds to nearest multiple of 2^(-scale).
 fn round_f32(val: f32, mode: u8, scale: u8) -> f32 {
-    if val.is_nan() || val.is_infinite() { return val; }
+    if val.is_nan() || val.is_infinite() {
+        return val;
+    }
     // Scale factor: multiply by 2^scale, round to int, divide by 2^scale
     let factor = (2.0f32).powi(scale as i32);
     let scaled = val * factor;
@@ -125,7 +133,9 @@ fn round_f32(val: f32, mode: u8, scale: u8) -> f32 {
 /// 0 = nearest even, 1 = floor, 2 = ceil, 3 = truncate
 #[inline]
 fn round_f64(val: f64, mode: u8, scale: u8) -> f64 {
-    if val.is_nan() || val.is_infinite() { return val; }
+    if val.is_nan() || val.is_infinite() {
+        return val;
+    }
     let factor = (2.0f64).powi(scale as i32);
     let scaled = val * factor;
     let rounded = match mode & 0x3 {
@@ -273,7 +283,11 @@ fn scalef_f64(src1: f64, src2: f64) -> f64 {
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Read packed SP source: register or memory, dword-element granularity
     #[inline]
-    fn read_src_ps(&mut self, instr: &Instruction, nelements: usize) -> super::Result<BxPackedZmmRegister> {
+    fn read_src_ps(
+        &mut self,
+        instr: &Instruction,
+        nelements: usize,
+    ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src()))
         } else {
@@ -289,7 +303,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Read packed DP source: register or memory, qword-element granularity
     #[inline]
-    fn read_src_pd(&mut self, instr: &Instruction, nelements: usize) -> super::Result<BxPackedZmmRegister> {
+    fn read_src_pd(
+        &mut self,
+        instr: &Instruction,
+        nelements: usize,
+    ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src()))
         } else {
@@ -307,7 +325,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Read 2-operand packed SP source (src2 for 3-operand instructions)
     #[inline]
-    fn read_src2_ps(&mut self, instr: &Instruction, nelements: usize) -> super::Result<BxPackedZmmRegister> {
+    fn read_src2_ps(
+        &mut self,
+        instr: &Instruction,
+        nelements: usize,
+    ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src2()))
         } else {
@@ -323,7 +345,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Read 2-operand packed DP source (src2 for 3-operand instructions)
     #[inline]
-    fn read_src2_pd(&mut self, instr: &Instruction, nelements: usize) -> super::Result<BxPackedZmmRegister> {
+    fn read_src2_pd(
+        &mut self,
+        instr: &Instruction,
+        nelements: usize,
+    ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src2()))
         } else {
@@ -637,10 +663,14 @@ fn getmant_f32(val: f32, imm8: u8) -> f32 {
     let out_sign = if (sign_ctrl & 1) != 0 { 0u32 } else { sign_bit };
 
     // NaN
-    if exp_field == 0xFF && mantissa != 0 { return f32::NAN; }
+    if exp_field == 0xFF && mantissa != 0 {
+        return f32::NAN;
+    }
     // Infinity: negative inf with sign_ctrl bit 1 → NaN
     if exp_field == 0xFF && mantissa == 0 {
-        if is_negative && (sign_ctrl & 2) != 0 { return f32::NAN; }
+        if is_negative && (sign_ctrl & 2) != 0 {
+            return f32::NAN;
+        }
         return f32::from_bits(out_sign | 0x3F80_0000); // 1.0 with output sign
     }
     // Zero → 1.0 with output sign (Bochs: packToF32UI(~sign_ctrl & signA, 0x7F, 0))
@@ -648,7 +678,9 @@ fn getmant_f32(val: f32, imm8: u8) -> f32 {
         return f32::from_bits(out_sign | 0x3F80_0000);
     }
     // Negative input with sign_ctrl bit 1 → NaN
-    if is_negative && (sign_ctrl & 2) != 0 { return f32::NAN; }
+    if is_negative && (sign_ctrl & 2) != 0 {
+        return f32::NAN;
+    }
 
     // Get normalized exponent and mantissa
     let (norm_exp, norm_mant) = if exp_field == 0 {
@@ -672,7 +704,11 @@ fn getmant_f32(val: f32, imm8: u8) -> f32 {
         2 => 126, // [0.5, 1)
         _ => {
             // [3/4, 3/2): Bochs: expA = 0x7F - ((sigA >> 22) & 0x1)
-            if (norm_mant & 0x0040_0000) != 0 { 126 } else { 127 }
+            if (norm_mant & 0x0040_0000) != 0 {
+                126
+            } else {
+                127
+            }
         }
     };
 
@@ -692,15 +728,21 @@ fn getmant_f64(val: f64, imm8: u8) -> f64 {
 
     let out_sign = if (sign_ctrl & 1) != 0 { 0u64 } else { sign_bit };
 
-    if exp_field == 0x7FF && mantissa != 0 { return f64::NAN; }
+    if exp_field == 0x7FF && mantissa != 0 {
+        return f64::NAN;
+    }
     if exp_field == 0x7FF && mantissa == 0 {
-        if is_negative && (sign_ctrl & 2) != 0 { return f64::NAN; }
+        if is_negative && (sign_ctrl & 2) != 0 {
+            return f64::NAN;
+        }
         return f64::from_bits(out_sign | 0x3FF0_0000_0000_0000);
     }
     if exp_field == 0 && mantissa == 0 {
         return f64::from_bits(out_sign | 0x3FF0_0000_0000_0000);
     }
-    if is_negative && (sign_ctrl & 2) != 0 { return f64::NAN; }
+    if is_negative && (sign_ctrl & 2) != 0 {
+        return f64::NAN;
+    }
 
     let (norm_exp, norm_mant) = if exp_field == 0 {
         let shift = mantissa.leading_zeros() - 11;
@@ -719,7 +761,11 @@ fn getmant_f64(val: f64, imm8: u8) -> f64 {
         }
         2 => 1022,
         _ => {
-            if (norm_mant & 0x0008_0000_0000_0000) != 0 { 1022 } else { 1023 }
+            if (norm_mant & 0x0008_0000_0000_0000) != 0 {
+                1022
+            } else {
+                1023
+            }
         }
     };
 

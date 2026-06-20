@@ -105,6 +105,8 @@ rusty_box/
 |   +-- src/ring_buffer.rs     # Fixed-capacity ring buffer (replaces VecDeque)
 |   +-- examples/              # Desktop examples (DLX, Alpine, egui GUI)
 +-- rusty_box_decoder/         # x86 instruction decoder (separate crate)
++-- rusty_box_gui/             # User launcher with CLI/TOML config and egui disk creator
++-- rusty_box_bximage/         # bximage-compatible disk image creation helpers
 +-- examples/rusty_box_web/    # WASM web frontend
 +-- examples/rusty_box_uefi/   # UEFI bootable emulator (no allocator)
 ```
@@ -137,14 +139,7 @@ cd rusty_box_decoder && cargo +nightly fuzz run fuzz_target_1
 
 ## Performance
 
-Release build on modern hardware: ~22-40 MIPS depending on workload phase.
-
-| Phase | MIPS |
-|-------|------|
-| BIOS real-mode | ~22 |
-| Kernel decompressor | ~25-50 |
-| Kernel init | ~22-27 |
-| Alpine steady-state | ~40 |
+Release build on modern hardware: typically **50+ MIPS** on a recent laptop and **100+ MIPS** on newer desktops, depending on workload phase. Numbers vary with CPU model, clock, and the guest's instruction mix (BIOS real-mode is slower than long-mode kernel/userspace).
 
 ## References
 

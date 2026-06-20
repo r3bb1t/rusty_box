@@ -1,8 +1,4 @@
-use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
-    decoder::Instruction,
-};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction};
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Bit-mix hash of icount for pseudo-random values (splitmix64 variant).

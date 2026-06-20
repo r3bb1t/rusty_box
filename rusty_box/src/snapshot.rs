@@ -146,19 +146,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
                 SEC_CMOS => {
                     let reg_len = self.device_manager.cmos.ram.len();
                     if data.len() > reg_len {
-                        self.device_manager.cmos.ram.copy_from_slice(&data[..reg_len]);
+                        self.device_manager
+                            .cmos
+                            .ram
+                            .copy_from_slice(&data[..reg_len]);
                         self.device_manager.cmos.address = data[reg_len];
                     }
                 }
                 SEC_PC_SYSTEM => {
                     let mut off = 0;
                     let num_timers = u32_at(&data, &mut off) as usize;
-                    self.pc_system.enable_a20 = data[off] != 0; off += 1;
+                    self.pc_system.enable_a20 = data[off] != 0;
+                    off += 1;
                     self.pc_system.a20_mask = u64_at(&data, &mut off);
                     for i in 0..num_timers.min(self.pc_system.timers.len()) {
                         self.pc_system.timers[i].period = u64_at(&data, &mut off);
                         self.pc_system.timers[i].time_to_fire = u64_at(&data, &mut off);
-                        self.pc_system.timers[i].flags = crate::pc_system::TimerFlags::from_bits_truncate(data[off]); off += 1;
+                        self.pc_system.timers[i].flags =
+                            crate::pc_system::TimerFlags::from_bits_truncate(data[off]);
+                        off += 1;
                     }
                 }
                 _ => { /* skip unknown sections */ }
@@ -207,25 +213,44 @@ fn save_pic_state(pic: &crate::iodev::pic::BxPicC) -> Vec<u8> {
 fn restore_pic_state(pic: &mut crate::iodev::pic::BxPicC, d: &[u8]) {
     let mut off = 0;
     for p in [&mut pic.master, &mut pic.slave] {
-        p.interrupt_offset = d[off]; off += 1;
-        p.sfnm = d[off] != 0; off += 1;
-        p.buffered_mode = d[off] != 0; off += 1;
-        p.master_slave = d[off] != 0; off += 1;
-        p.auto_eoi = d[off] != 0; off += 1;
-        p.imr = d[off]; off += 1;
-        p.isr = d[off]; off += 1;
-        p.irr = d[off]; off += 1;
-        p.read_reg_select = d[off] != 0; off += 1;
-        p.irq = d[off]; off += 1;
-        p.lowest_priority = d[off]; off += 1;
-        p.int_pin = d[off] != 0; off += 1;
-        p.init.in_init = d[off] != 0; off += 1;
-        p.init.requires_4 = d[off] != 0; off += 1;
-        p.init.byte_expected = d[off]; off += 1;
-        p.special_mask = d[off] != 0; off += 1;
-        p.polled = d[off] != 0; off += 1;
-        p.rotate_on_autoeoi = d[off] != 0; off += 1;
-        p.edge_level = d[off]; off += 1;
+        p.interrupt_offset = d[off];
+        off += 1;
+        p.sfnm = d[off] != 0;
+        off += 1;
+        p.buffered_mode = d[off] != 0;
+        off += 1;
+        p.master_slave = d[off] != 0;
+        off += 1;
+        p.auto_eoi = d[off] != 0;
+        off += 1;
+        p.imr = d[off];
+        off += 1;
+        p.isr = d[off];
+        off += 1;
+        p.irr = d[off];
+        off += 1;
+        p.read_reg_select = d[off] != 0;
+        off += 1;
+        p.irq = d[off];
+        off += 1;
+        p.lowest_priority = d[off];
+        off += 1;
+        p.int_pin = d[off] != 0;
+        off += 1;
+        p.init.in_init = d[off] != 0;
+        off += 1;
+        p.init.requires_4 = d[off] != 0;
+        off += 1;
+        p.init.byte_expected = d[off];
+        off += 1;
+        p.special_mask = d[off] != 0;
+        off += 1;
+        p.polled = d[off] != 0;
+        off += 1;
+        p.rotate_on_autoeoi = d[off] != 0;
+        off += 1;
+        p.edge_level = d[off];
+        off += 1;
     }
 }
 
@@ -257,17 +282,24 @@ fn save_pit_state(pit: &crate::iodev::pit::BxPitC) -> Vec<u8> {
 fn restore_pit_state(pit: &mut crate::iodev::pit::BxPitC, d: &[u8]) {
     let mut off = 0;
     for c in pit.counters.iter_mut() {
-        c.mode = d[off]; off += 1;
+        c.mode = d[off];
+        off += 1;
         c.inlatch = u16_at(d, &mut off);
         c.count = u16_at(d, &mut off);
         c.count_binary = u16_at(d, &mut off);
         c.outlatch = u16_at(d, &mut off);
-        c.rw_mode = d[off]; off += 1;
-        c.null_count = d[off] != 0; off += 1;
-        c.gate = d[off] != 0; off += 1;
-        c.output = d[off] != 0; off += 1;
-        c.bcd_mode = d[off] != 0; off += 1;
-        c.count_written = d[off] != 0; off += 1;
+        c.rw_mode = d[off];
+        off += 1;
+        c.null_count = d[off] != 0;
+        off += 1;
+        c.gate = d[off] != 0;
+        off += 1;
+        c.output = d[off] != 0;
+        off += 1;
+        c.bcd_mode = d[off] != 0;
+        off += 1;
+        c.count_written = d[off] != 0;
+        off += 1;
     }
     pit.total_ticks = u64_at(d, &mut off);
 }
@@ -297,13 +329,21 @@ fn u16_at(d: &[u8], off: &mut usize) -> u16 {
 }
 
 fn u32_at(d: &[u8], off: &mut usize) -> u32 {
-    let v = u32::from_le_bytes(d[*off..*off + 4].try_into().expect("4-byte slice converts to [u8; 4]"));
+    let v = u32::from_le_bytes(
+        d[*off..*off + 4]
+            .try_into()
+            .expect("4-byte slice converts to [u8; 4]"),
+    );
     *off += 4;
     v
 }
 
 fn u64_at(d: &[u8], off: &mut usize) -> u64 {
-    let v = u64::from_le_bytes(d[*off..*off + 8].try_into().expect("8-byte slice converts to [u8; 8]"));
+    let v = u64::from_le_bytes(
+        d[*off..*off + 8]
+            .try_into()
+            .expect("8-byte slice converts to [u8; 8]"),
+    );
     *off += 8;
     v
 }

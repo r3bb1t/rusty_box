@@ -83,7 +83,10 @@ impl core::fmt::Display for DecodeError {
                 write!(f, "integer conversion failed: {e}")
             }
             Self::BufferUnderflow => {
-                write!(f, "buffer underflow: not enough bytes to decode instruction")
+                write!(
+                    f,
+                    "buffer underflow: not enough bytes to decode instruction"
+                )
             }
             Self::PrefixBufferUnderflow => write!(f, "buffer underflow parsing prefixes"),
             Self::OpcodeBufferUnderflow => write!(f, "buffer underflow parsing opcode"),

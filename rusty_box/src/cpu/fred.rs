@@ -156,7 +156,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
             old_ss |= 1 << 16;
         }
-        if matches!(int_type, InterruptType::EventOther | InterruptType::SoftwareInterrupt) {
+        if matches!(
+            int_type,
+            InterruptType::EventOther | InterruptType::SoftwareInterrupt
+        ) {
             old_ss |= 1 << 17;
         } else if matches!(int_type, InterruptType::Nmi) {
             old_ss |= 1 << 18;
@@ -183,9 +186,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             0u32
         } else {
             match int_type {
-                InterruptType::ExternalInterrupt => {
-                    ((self.msr.ia32_fred_cfg >> 9) & 0x3) as u32
-                }
+                InterruptType::ExternalInterrupt => ((self.msr.ia32_fred_cfg >> 9) & 0x3) as u32,
                 InterruptType::Nmi
                 | InterruptType::HardwareException
                 | InterruptType::SoftwareException
@@ -338,8 +339,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             || (temp_cs & 0xFFFF_FFFF_FFF8_FFFF)
                 != self.sregs[BxSegregs::Cs as usize].selector.value as u64
             || (new_rflags & 0xFFFF_FFFF_FFC2_802A) != 2
-            || (temp_ss & 0xFFF8_FFFF)
-                != self.sregs[BxSegregs::Ss as usize].selector.value as u64
+            || (temp_ss & 0xFFF8_FFFF) != self.sregs[BxSegregs::Ss as usize].selector.value as u64
         {
             tracing::error!("ERETS: corrupted old state #GP(0)");
             return self.exception(Exception::Gp, 0);

@@ -20,9 +20,9 @@ use super::{
 #[inline]
 fn dword_elements(vl: u8) -> usize {
     match vl {
-        0 => 4,   // 128-bit
-        1 => 8,   // 256-bit
-        _ => 16,  // 512-bit
+        0 => 4,  // 128-bit
+        1 => 8,  // 256-bit
+        _ => 16, // 512-bit
     }
 }
 
@@ -48,7 +48,10 @@ fn vl_bytes(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, instr: &Instruction) -> u64 {
+fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    instr: &Instruction,
+) -> u64 {
     let k = instr.opmask();
     if k == 0 {
         u64::MAX
@@ -60,7 +63,10 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, reg: u8) -> BxPackedZmmRegister {
+fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    reg: u8,
+) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
@@ -170,23 +176,23 @@ fn fp_compare_f32(a: f32, b: f32, imm: u8) -> bool {
     let unordered = a.is_nan() || b.is_nan();
     match imm & 0x1F {
         // Group A: ordered (0-7, 16-23)
-        0 | 16 => !unordered && a == b,         // EQ_OQ / EQ_OS
-        1 | 17 => !unordered && a < b,          // LT_OS / LT_OQ
-        2 | 18 => !unordered && a <= b,         // LE_OS / LE_OQ
-        3 | 19 => unordered,                     // UNORD_Q / UNORD_S
-        4 | 20 => unordered || a != b,           // NEQ_UQ / NEQ_US
-        5 | 21 => unordered || a >= b,           // NLT_US / NLT_UQ
-        6 | 22 => unordered || a > b,            // NLE_US / NLE_UQ
-        7 | 23 => !unordered,                    // ORD_Q / ORD_S
+        0 | 16 => !unordered && a == b, // EQ_OQ / EQ_OS
+        1 | 17 => !unordered && a < b,  // LT_OS / LT_OQ
+        2 | 18 => !unordered && a <= b, // LE_OS / LE_OQ
+        3 | 19 => unordered,            // UNORD_Q / UNORD_S
+        4 | 20 => unordered || a != b,  // NEQ_UQ / NEQ_US
+        5 | 21 => unordered || a >= b,  // NLT_US / NLT_UQ
+        6 | 22 => unordered || a > b,   // NLE_US / NLE_UQ
+        7 | 23 => !unordered,           // ORD_Q / ORD_S
         // Group B: swapped (8-15, 24-31)
-        8 | 24 => unordered || a == b,           // EQ_UQ / EQ_US
-        9 | 25 => unordered || a < b,            // NGE_US / NGE_UQ
-        10 | 26 => unordered || a <= b,          // NGT_US / NGT_UQ
-        11 | 27 => false,                         // FALSE_OQ / FALSE_OS
-        12 | 28 => !unordered && a != b,          // NEQ_OQ / NEQ_OS
-        13 | 29 => !unordered && a >= b,          // GE_OS / GE_OQ
-        14 | 30 => !unordered && a > b,           // GT_OS / GT_OQ
-        15 | 31 => true,                          // TRUE_UQ / TRUE_US
+        8 | 24 => unordered || a == b,   // EQ_UQ / EQ_US
+        9 | 25 => unordered || a < b,    // NGE_US / NGE_UQ
+        10 | 26 => unordered || a <= b,  // NGT_US / NGT_UQ
+        11 | 27 => false,                // FALSE_OQ / FALSE_OS
+        12 | 28 => !unordered && a != b, // NEQ_OQ / NEQ_OS
+        13 | 29 => !unordered && a >= b, // GE_OS / GE_OQ
+        14 | 30 => !unordered && a > b,  // GT_OS / GT_OQ
+        15 | 31 => true,                 // TRUE_UQ / TRUE_US
         _ => unreachable!("AVX compare predicate imm & 0x1F cannot exceed 31"),
     }
 }
@@ -231,9 +237,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if fp_compare_f32(src1.zmm32f(i), src2.zmm32f(i), imm)
-                && ((write_mask >> i) & 1 != 0)
-            {
+            if fp_compare_f32(src1.zmm32f(i), src2.zmm32f(i), imm) && ((write_mask >> i) & 1 != 0) {
                 result |= 1 << i;
             }
         }
@@ -256,9 +260,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if fp_compare_f32(src1.zmm32f(i), src2.zmm32f(i), imm)
-                && ((write_mask >> i) & 1 != 0)
-            {
+            if fp_compare_f32(src1.zmm32f(i), src2.zmm32f(i), imm) && ((write_mask >> i) & 1 != 0) {
                 result |= 1 << i;
             }
         }
@@ -281,9 +283,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if fp_compare_f64(src1.zmm64f(i), src2.zmm64f(i), imm)
-                && ((write_mask >> i) & 1 != 0)
-            {
+            if fp_compare_f64(src1.zmm64f(i), src2.zmm64f(i), imm) && ((write_mask >> i) & 1 != 0) {
                 result |= 1 << i;
             }
         }
@@ -308,9 +308,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if fp_compare_f64(src1.zmm64f(i), src2.zmm64f(i), imm)
-                && ((write_mask >> i) & 1 != 0)
-            {
+            if fp_compare_f64(src1.zmm64f(i), src2.zmm64f(i), imm) && ((write_mask >> i) & 1 != 0) {
                 result |= 1 << i;
             }
         }
@@ -332,9 +330,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if (src1.zmm32u(i) & src2.zmm32u(i)) != 0
-                && ((write_mask >> i) & 1 != 0)
-            {
+            if (src1.zmm32u(i) & src2.zmm32u(i)) != 0 && ((write_mask >> i) & 1 != 0) {
                 result |= 1 << i;
             }
         }
@@ -351,9 +347,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if (src1.zmm32u(i) & src2.zmm32u(i)) != 0
-                && ((write_mask >> i) & 1 != 0)
-            {
+            if (src1.zmm32u(i) & src2.zmm32u(i)) != 0 && ((write_mask >> i) & 1 != 0) {
                 result |= 1 << i;
             }
         }
@@ -375,9 +369,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if (src1.zmm64u(i) & src2.zmm64u(i)) != 0
-                && ((write_mask >> i) & 1 != 0)
-            {
+            if (src1.zmm64u(i) & src2.zmm64u(i)) != 0 && ((write_mask >> i) & 1 != 0) {
                 result |= 1 << i;
             }
         }
@@ -394,9 +386,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if (src1.zmm64u(i) & src2.zmm64u(i)) != 0
-                && ((write_mask >> i) & 1 != 0)
-            {
+            if (src1.zmm64u(i) & src2.zmm64u(i)) != 0 && ((write_mask >> i) & 1 != 0) {
                 result |= 1 << i;
             }
         }
@@ -418,9 +408,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if (src1.zmm32u(i) & src2.zmm32u(i)) == 0
-                && ((write_mask >> i) & 1 != 0)
-            {
+            if (src1.zmm32u(i) & src2.zmm32u(i)) == 0 && ((write_mask >> i) & 1 != 0) {
                 result |= 1 << i;
             }
         }
@@ -437,9 +425,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if (src1.zmm32u(i) & src2.zmm32u(i)) == 0
-                && ((write_mask >> i) & 1 != 0)
-            {
+            if (src1.zmm32u(i) & src2.zmm32u(i)) == 0 && ((write_mask >> i) & 1 != 0) {
                 result |= 1 << i;
             }
         }
@@ -461,9 +447,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if (src1.zmm64u(i) & src2.zmm64u(i)) == 0
-                && ((write_mask >> i) & 1 != 0)
-            {
+            if (src1.zmm64u(i) & src2.zmm64u(i)) == 0 && ((write_mask >> i) & 1 != 0) {
                 result |= 1 << i;
             }
         }
@@ -480,9 +464,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if (src1.zmm64u(i) & src2.zmm64u(i)) == 0
-                && ((write_mask >> i) & 1 != 0)
-            {
+            if (src1.zmm64u(i) & src2.zmm64u(i)) == 0 && ((write_mask >> i) & 1 != 0) {
                 result |= 1 << i;
             }
         }
@@ -503,11 +485,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mask = self.opmask_rrx(instr.src() as usize);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm32u(i, if (mask >> i) & 1 != 0 {
-                0xFFFF_FFFF
-            } else {
-                0
-            });
+            result.set_zmm32u(i, if (mask >> i) & 1 != 0 { 0xFFFF_FFFF } else { 0 });
         }
         // No write masking for this instruction; always full write, zero upper
         write_zmm_masked(self, instr.dst(), &result, u64::MAX, true, vl);
@@ -527,11 +505,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mask = self.opmask_rrx(instr.src() as usize);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm64u(i, if (mask >> i) & 1 != 0 {
-                u64::MAX
-            } else {
-                0
-            });
+            result.set_zmm64u(i, if (mask >> i) & 1 != 0 { u64::MAX } else { 0 });
         }
         write_zmm_masked_q(self, instr.dst(), &result, u64::MAX, true, vl);
         Ok(())

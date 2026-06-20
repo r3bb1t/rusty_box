@@ -148,79 +148,91 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
 
     /// STOSB - Store AL at ES:DI (16-bit address mode)
-    pub fn stosb16(&mut self, _instr: &Instruction) -> super::Result<()> { let di = self.di() as u32;
-    let al = self.al();
-    
-    self.write_virtual_byte(BxSegregs::Es, di, al)?;
-    
-    if self.get_df() {
-        self.set_di(self.di().wrapping_sub(1));
-    } else {
-        self.set_di(self.di().wrapping_add(1));
+    pub fn stosb16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let di = self.di() as u32;
+        let al = self.al();
+
+        self.write_virtual_byte(BxSegregs::Es, di, al)?;
+
+        if self.get_df() {
+            self.set_di(self.di().wrapping_sub(1));
+        } else {
+            self.set_di(self.di().wrapping_add(1));
+        }
+
+        Ok(())
     }
-    
-    Ok(()) }
 
     /// STOSB - Store AL at ES:EDI (32-bit address mode)
-    pub fn stosb32(&mut self, _instr: &Instruction) -> super::Result<()> { let edi = self.edi();
-    let al = self.al();
-    
-    self.write_virtual_byte(BxSegregs::Es, edi, al)?;
-    
-    let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
-    self.set_rdi(edi.wrapping_add(increment) as u64);
-    
-    Ok(()) }
+    pub fn stosb32(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let edi = self.edi();
+        let al = self.al();
+
+        self.write_virtual_byte(BxSegregs::Es, edi, al)?;
+
+        let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
+        self.set_rdi(edi.wrapping_add(increment) as u64);
+
+        Ok(())
+    }
 
     /// STOSW - Store AX at ES:DI (16-bit address mode)
-    pub fn stosw16(&mut self, _instr: &Instruction) -> super::Result<()> { let di = self.di() as u32;
-    let ax = self.ax();
-    
-    self.write_virtual_word(BxSegregs::Es, di, ax)?;
-    
-    if self.get_df() {
-        self.set_di(self.di().wrapping_sub(2));
-    } else {
-        self.set_di(self.di().wrapping_add(2));
+    pub fn stosw16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let di = self.di() as u32;
+        let ax = self.ax();
+
+        self.write_virtual_word(BxSegregs::Es, di, ax)?;
+
+        if self.get_df() {
+            self.set_di(self.di().wrapping_sub(2));
+        } else {
+            self.set_di(self.di().wrapping_add(2));
+        }
+
+        Ok(())
     }
-    
-    Ok(()) }
 
     /// STOSW - Store AX at ES:EDI (32-bit address mode)
-    pub fn stosw32(&mut self, _instr: &Instruction) -> super::Result<()> { let edi = self.edi();
-    let ax = self.ax();
-    
-    self.write_virtual_word(BxSegregs::Es, edi, ax)?;
-    
-    let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
-    self.set_rdi(edi.wrapping_add(increment) as u64);
-    
-    Ok(()) }
+    pub fn stosw32(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let edi = self.edi();
+        let ax = self.ax();
+
+        self.write_virtual_word(BxSegregs::Es, edi, ax)?;
+
+        let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
+        self.set_rdi(edi.wrapping_add(increment) as u64);
+
+        Ok(())
+    }
 
     /// STOSD - Store EAX at ES:DI (16-bit address mode)
-    pub fn stosd16(&mut self, _instr: &Instruction) -> super::Result<()> { let di = self.di() as u32;
-    let eax = self.eax();
-    
-    self.write_virtual_dword(BxSegregs::Es, di, eax)?;
-    
-    if self.get_df() {
-        self.set_di(self.di().wrapping_sub(4));
-    } else {
-        self.set_di(self.di().wrapping_add(4));
+    pub fn stosd16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let di = self.di() as u32;
+        let eax = self.eax();
+
+        self.write_virtual_dword(BxSegregs::Es, di, eax)?;
+
+        if self.get_df() {
+            self.set_di(self.di().wrapping_sub(4));
+        } else {
+            self.set_di(self.di().wrapping_add(4));
+        }
+
+        Ok(())
     }
-    
-    Ok(()) }
 
     /// STOSD - Store EAX at ES:EDI (32-bit address mode)
-    pub fn stosd32(&mut self, _instr: &Instruction) -> super::Result<()> { let edi = self.edi();
-    let eax = self.eax();
-    
-    self.write_virtual_dword(BxSegregs::Es, edi, eax)?;
-    
-    let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
-    self.set_rdi(edi.wrapping_add(increment) as u64);
-    
-    Ok(()) }
+    pub fn stosd32(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let edi = self.edi();
+        let eax = self.eax();
+
+        self.write_virtual_dword(BxSegregs::Es, edi, eax)?;
+
+        let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
+        self.set_rdi(edi.wrapping_add(increment) as u64);
+
+        Ok(())
+    }
 
     // =========================================================================
     // LODSB - Load String Byte
@@ -445,97 +457,109 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
 
     /// SCASB - Compare AL with byte at ES:DI (16-bit address mode)
-    pub fn scasb16(&mut self, _instr: &Instruction) -> super::Result<()> { let di = self.di() as u32;
-    let al = self.al();
-    
-    let op2 = self.read_virtual_byte(BxSegregs::Es, di)?;
-    
-    let result = al.wrapping_sub(op2);
-    self.update_flags_sub8(al, op2, result);
-    
-    if self.get_df() {
-        self.set_di(self.di().wrapping_sub(1));
-    } else {
-        self.set_di(self.di().wrapping_add(1));
+    pub fn scasb16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let di = self.di() as u32;
+        let al = self.al();
+
+        let op2 = self.read_virtual_byte(BxSegregs::Es, di)?;
+
+        let result = al.wrapping_sub(op2);
+        self.update_flags_sub8(al, op2, result);
+
+        if self.get_df() {
+            self.set_di(self.di().wrapping_sub(1));
+        } else {
+            self.set_di(self.di().wrapping_add(1));
+        }
+
+        Ok(())
     }
-    
-    Ok(()) }
 
     /// SCASB - Compare AL with byte at ES:EDI (32-bit address mode)
-    pub fn scasb32(&mut self, _instr: &Instruction) -> super::Result<()> { let edi = self.edi();
-    let al = self.al();
-    
-    let op2 = self.read_virtual_byte(BxSegregs::Es, edi)?;
-    
-    let result = al.wrapping_sub(op2);
-    self.update_flags_sub8(al, op2, result);
-    
-    let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
-    self.set_rdi(edi.wrapping_add(increment) as u64);
-    
-    Ok(()) }
+    pub fn scasb32(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let edi = self.edi();
+        let al = self.al();
+
+        let op2 = self.read_virtual_byte(BxSegregs::Es, edi)?;
+
+        let result = al.wrapping_sub(op2);
+        self.update_flags_sub8(al, op2, result);
+
+        let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
+        self.set_rdi(edi.wrapping_add(increment) as u64);
+
+        Ok(())
+    }
 
     /// SCASW - Compare AX with word at ES:DI (16-bit address mode)
-    pub fn scasw16(&mut self, _instr: &Instruction) -> super::Result<()> { let di = self.di() as u32;
-    let ax = self.ax();
-    
-    let op2 = self.read_virtual_word(BxSegregs::Es, di)?;
-    
-    let result = ax.wrapping_sub(op2);
-    self.update_flags_sub16(ax, op2, result);
-    
-    if self.get_df() {
-        self.set_di(self.di().wrapping_sub(2));
-    } else {
-        self.set_di(self.di().wrapping_add(2));
+    pub fn scasw16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let di = self.di() as u32;
+        let ax = self.ax();
+
+        let op2 = self.read_virtual_word(BxSegregs::Es, di)?;
+
+        let result = ax.wrapping_sub(op2);
+        self.update_flags_sub16(ax, op2, result);
+
+        if self.get_df() {
+            self.set_di(self.di().wrapping_sub(2));
+        } else {
+            self.set_di(self.di().wrapping_add(2));
+        }
+
+        Ok(())
     }
-    
-    Ok(()) }
 
     /// SCASW - Compare AX with word at ES:EDI (32-bit address mode)
-    pub fn scasw32(&mut self, _instr: &Instruction) -> super::Result<()> { let edi = self.edi();
-    let ax = self.ax();
-    
-    let op2 = self.read_virtual_word(BxSegregs::Es, edi)?;
-    
-    let result = ax.wrapping_sub(op2);
-    self.update_flags_sub16(ax, op2, result);
-    
-    let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
-    self.set_rdi(edi.wrapping_add(increment) as u64);
-    
-    Ok(()) }
+    pub fn scasw32(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let edi = self.edi();
+        let ax = self.ax();
+
+        let op2 = self.read_virtual_word(BxSegregs::Es, edi)?;
+
+        let result = ax.wrapping_sub(op2);
+        self.update_flags_sub16(ax, op2, result);
+
+        let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
+        self.set_rdi(edi.wrapping_add(increment) as u64);
+
+        Ok(())
+    }
 
     /// SCASD - Compare EAX with dword at ES:DI (16-bit address mode)
-    pub fn scasd16(&mut self, _instr: &Instruction) -> super::Result<()> { let di = self.di() as u32;
-    let eax = self.eax();
-    
-    let op2 = self.read_virtual_dword(BxSegregs::Es, di)?;
-    
-    let result = eax.wrapping_sub(op2);
-    self.update_flags_sub32(eax, op2, result);
-    
-    if self.get_df() {
-        self.set_di(self.di().wrapping_sub(4));
-    } else {
-        self.set_di(self.di().wrapping_add(4));
+    pub fn scasd16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let di = self.di() as u32;
+        let eax = self.eax();
+
+        let op2 = self.read_virtual_dword(BxSegregs::Es, di)?;
+
+        let result = eax.wrapping_sub(op2);
+        self.update_flags_sub32(eax, op2, result);
+
+        if self.get_df() {
+            self.set_di(self.di().wrapping_sub(4));
+        } else {
+            self.set_di(self.di().wrapping_add(4));
+        }
+
+        Ok(())
     }
-    
-    Ok(()) }
 
     /// SCASD - Compare EAX with dword at ES:EDI (32-bit address mode)
-    pub fn scasd32(&mut self, _instr: &Instruction) -> super::Result<()> { let edi = self.edi();
-    let eax = self.eax();
-    
-    let op2 = self.read_virtual_dword(BxSegregs::Es, edi)?;
-    
-    let result = eax.wrapping_sub(op2);
-    self.update_flags_sub32(eax, op2, result);
-    
-    let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
-    self.set_rdi(edi.wrapping_add(increment) as u64);
-    
-    Ok(()) }
+    pub fn scasd32(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let edi = self.edi();
+        let eax = self.eax();
+
+        let op2 = self.read_virtual_dword(BxSegregs::Es, edi)?;
+
+        let result = eax.wrapping_sub(op2);
+        self.update_flags_sub32(eax, op2, result);
+
+        let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
+        self.set_rdi(edi.wrapping_add(increment) as u64);
+
+        Ok(())
+    }
 
     // =========================================================================
     // REP prefix handling — 16-bit address mode
@@ -553,8 +577,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -575,8 +603,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -597,8 +629,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -619,8 +655,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -641,8 +681,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -663,8 +707,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -685,8 +733,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -707,8 +759,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -729,8 +785,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -750,8 +810,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if !self.get_zf() || cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -771,8 +835,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if self.get_zf() || cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -792,8 +860,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if !self.get_zf() || cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -813,8 +885,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if self.get_zf() || cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -834,8 +910,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if !self.get_zf() || cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -855,8 +935,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if self.get_zf() || cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -876,8 +960,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if !self.get_zf() || cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -897,8 +985,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if self.get_zf() || cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -918,8 +1010,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if !self.get_zf() || cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -939,8 +1035,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if self.get_zf() || cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -960,8 +1060,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if !self.get_zf() || cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -981,8 +1085,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 cx = cx.wrapping_sub(1);
                 self.set_cx(cx);
             }
-            if self.get_zf() || cx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || cx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1008,10 +1116,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src_laddr = self.get_laddr32(seg as usize, esi) as u64;
             let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
 
-            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
-                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
-            {
-                let count = (ecx as usize).min(src_rem).min(dst_rem)
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) = (
+                self.get_host_read_ptr(src_laddr),
+                self.get_host_write_ptr(dst_laddr),
+            ) {
+                let count = (ecx as usize)
+                    .min(src_rem)
+                    .min(dst_rem)
                     .min(self.ticks_left_next_event() as usize);
                 if count > 0 {
                     // Bochs faststring.cc — forward byte-by-byte loop.
@@ -1047,9 +1158,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1072,12 +1187,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src_laddr = self.get_laddr32(seg as usize, esi) as u64;
             let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
 
-            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
-                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
-            {
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) = (
+                self.get_host_read_ptr(src_laddr),
+                self.get_host_write_ptr(dst_laddr),
+            ) {
                 let max_bytes = (ecx as usize) * 2;
-                let count_bytes = max_bytes.min(src_rem).min(dst_rem)
-                    .min(self.ticks_left_next_event() as usize) & !1;
+                let count_bytes = max_bytes
+                    .min(src_rem)
+                    .min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize)
+                    & !1;
                 let count_words = count_bytes / 2;
                 if count_words > 0 {
                     forward_byte_copy(src_ptr, dst_ptr, count_bytes);
@@ -1110,9 +1229,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1135,12 +1258,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src_laddr = self.get_laddr32(seg as usize, esi) as u64;
             let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
 
-            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
-                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
-            {
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) = (
+                self.get_host_read_ptr(src_laddr),
+                self.get_host_write_ptr(dst_laddr),
+            ) {
                 let max_bytes = (ecx as usize) * 4;
-                let count_bytes = max_bytes.min(src_rem).min(dst_rem)
-                    .min(self.ticks_left_next_event() as usize) & !3;
+                let count_bytes = max_bytes
+                    .min(src_rem)
+                    .min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize)
+                    & !3;
                 let count_dwords = count_bytes / 4;
                 if count_dwords > 0 {
                     forward_byte_copy(src_ptr, dst_ptr, count_bytes);
@@ -1173,9 +1300,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1186,176 +1317,195 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// REP STOSB ECX times (32-bit)
-    pub fn rep_stosb32(&mut self, instr: &Instruction) -> super::Result<()> { let mut ecx = self.ecx();
-    let df = self.get_df();
-    let al = self.al();
-    
-    // FastRep: try bulk memset when DF=0 (Bochs faststring.cc)
-    while ecx != 0 && !df && self.async_event == 0 {
-        let edi = self.edi();
-        let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
-    
-        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-            let count = (ecx as usize).min(dst_rem)
-                .min(self.ticks_left_next_event() as usize);
-            if count > 0 {
-                host_fill_bytes(dst_ptr, al, count);
-                self.set_rdi(edi.wrapping_add(count as u32) as u64);
-                self.icount += count as u64 - 1;
-                self.tickn_fastrep(count);
-                ecx -= count as u32;
-                self.set_ecx(ecx);
-                if ecx != 0 && self.async_event != 0 {
-                    // Bochs tail: assert_RF before stop (cpu.cc:462).
-                    self.assert_rf();
-                    self.set_rip(self.prev_rip);
-                    self.set_rcx(self.ecx() as u64);
-                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                    return Ok(());
+    pub fn rep_stosb32(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut ecx = self.ecx();
+        let df = self.get_df();
+        let al = self.al();
+
+        // FastRep: try bulk memset when DF=0 (Bochs faststring.cc)
+        while ecx != 0 && !df && self.async_event == 0 {
+            let edi = self.edi();
+            let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let count = (ecx as usize)
+                    .min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize);
+                if count > 0 {
+                    host_fill_bytes(dst_ptr, al, count);
+                    self.set_rdi(edi.wrapping_add(count as u32) as u64);
+                    self.icount += count as u64 - 1;
+                    self.tickn_fastrep(count);
+                    ecx -= count as u32;
+                    self.set_ecx(ecx);
+                    if ecx != 0 && self.async_event != 0 {
+                        // Bochs tail: assert_RF before stop (cpu.cc:462).
+                        self.assert_rf();
+                        self.set_rip(self.prev_rip);
+                        self.set_rcx(self.ecx() as u64);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
                 }
-                continue;
             }
+            break;
         }
-        break;
-    }
-    
-    // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
-    // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
-    loop {
-        if ecx != 0 {
-            self.on_repeat_iteration(instr);
-            self.stosb32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
+
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if ecx != 0 {
+                self.on_repeat_iteration(instr);
+                self.stosb32(instr)?;
+                ecx = ecx.wrapping_sub(1);
+                self.set_ecx(ecx);
+            }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
+            self.icount += 1;
         }
-        if ecx == 0 { self.set_rcx(self.ecx() as u64);
-            return Ok(()); }
-        if self.async_event != 0 { break; }
-        self.icount += 1;
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
-    self.assert_rf();
-    self.set_rip(self.prev_rip);
-    self.set_rcx(self.ecx() as u64);
-    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-    Ok(()) }
 
     /// REP STOSW ECX times (32-bit)
-    pub fn rep_stosw32(&mut self, instr: &Instruction) -> super::Result<()> { let mut ecx = self.ecx();
-    let df = self.get_df();
-    let ax = self.ax();
-    
-    // FastRep: try bulk word fill when DF=0 (Bochs faststring.cc)
-    while ecx != 0 && !df && self.async_event == 0 {
-        let edi = self.edi();
-        let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
-    
-        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-            let max_bytes = (ecx as usize) * 2;
-            let count_bytes = max_bytes.min(dst_rem) & !1;
-            let count_words = (count_bytes / 2)
-                .min(self.ticks_left_next_event() as usize);
-            if count_words > 0 {
-                let dst_slice = unsafe { super::access::host_slice_mut_u16(dst_ptr, count_words) };
-                for w in dst_slice.iter_mut() {
-                    *w = ax;
+    pub fn rep_stosw32(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut ecx = self.ecx();
+        let df = self.get_df();
+        let ax = self.ax();
+
+        // FastRep: try bulk word fill when DF=0 (Bochs faststring.cc)
+        while ecx != 0 && !df && self.async_event == 0 {
+            let edi = self.edi();
+            let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let max_bytes = (ecx as usize) * 2;
+                let count_bytes = max_bytes.min(dst_rem) & !1;
+                let count_words = (count_bytes / 2).min(self.ticks_left_next_event() as usize);
+                if count_words > 0 {
+                    let dst_slice =
+                        unsafe { super::access::host_slice_mut_u16(dst_ptr, count_words) };
+                    for w in dst_slice.iter_mut() {
+                        *w = ax;
+                    }
+                    self.set_rdi(edi.wrapping_add((count_words * 2) as u32) as u64);
+                    self.icount += count_words as u64 - 1;
+                    self.tickn_fastrep(count_words);
+                    ecx -= count_words as u32;
+                    self.set_ecx(ecx);
+                    if ecx != 0 && self.async_event != 0 {
+                        // Bochs tail: assert_RF before stop (cpu.cc:462).
+                        self.assert_rf();
+                        self.set_rip(self.prev_rip);
+                        self.set_rcx(self.ecx() as u64);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
                 }
-                self.set_rdi(edi.wrapping_add((count_words * 2) as u32) as u64);
-                self.icount += count_words as u64 - 1;
-                self.tickn_fastrep(count_words);
-                ecx -= count_words as u32;
-                self.set_ecx(ecx);
-                if ecx != 0 && self.async_event != 0 {
-                    // Bochs tail: assert_RF before stop (cpu.cc:462).
-                    self.assert_rf();
-                    self.set_rip(self.prev_rip);
-                    self.set_rcx(self.ecx() as u64);
-                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                    return Ok(());
-                }
-                continue;
             }
+            break;
         }
-        break;
-    }
-    
-    // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
-    // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
-    loop {
-        if ecx != 0 {
-            self.on_repeat_iteration(instr);
-            self.stosw32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
+
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if ecx != 0 {
+                self.on_repeat_iteration(instr);
+                self.stosw32(instr)?;
+                ecx = ecx.wrapping_sub(1);
+                self.set_ecx(ecx);
+            }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
+            self.icount += 1;
         }
-        if ecx == 0 { self.set_rcx(self.ecx() as u64);
-            return Ok(()); }
-        if self.async_event != 0 { break; }
-        self.icount += 1;
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
-    self.assert_rf();
-    self.set_rip(self.prev_rip);
-    self.set_rcx(self.ecx() as u64);
-    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-    Ok(()) }
 
     /// REP STOSD ECX times (32-bit)
-    pub fn rep_stosd32(&mut self, instr: &Instruction) -> super::Result<()> { let mut ecx = self.ecx();
-    let df = self.get_df();
-    let eax = self.eax();
-    
-    // FastRep: try bulk dword fill when DF=0 (Bochs faststring.cc)
-    while ecx != 0 && !df && self.async_event == 0 {
-        let edi = self.edi();
-        let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
-    
-        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-            let max_bytes = (ecx as usize) * 4;
-            let count_bytes = max_bytes.min(dst_rem) & !3;
-            let count_dwords = (count_bytes / 4)
-                .min(self.ticks_left_next_event() as usize);
-            if count_dwords > 0 {
-                let dst_slice = unsafe { super::access::host_slice_mut_u32(dst_ptr, count_dwords) };
-                for d in dst_slice.iter_mut() {
-                    *d = eax;
+    pub fn rep_stosd32(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut ecx = self.ecx();
+        let df = self.get_df();
+        let eax = self.eax();
+
+        // FastRep: try bulk dword fill when DF=0 (Bochs faststring.cc)
+        while ecx != 0 && !df && self.async_event == 0 {
+            let edi = self.edi();
+            let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let max_bytes = (ecx as usize) * 4;
+                let count_bytes = max_bytes.min(dst_rem) & !3;
+                let count_dwords = (count_bytes / 4).min(self.ticks_left_next_event() as usize);
+                if count_dwords > 0 {
+                    let dst_slice =
+                        unsafe { super::access::host_slice_mut_u32(dst_ptr, count_dwords) };
+                    for d in dst_slice.iter_mut() {
+                        *d = eax;
+                    }
+                    self.set_rdi(edi.wrapping_add((count_dwords * 4) as u32) as u64);
+                    self.icount += count_dwords as u64 - 1;
+                    self.tickn_fastrep(count_dwords);
+                    ecx -= count_dwords as u32;
+                    self.set_ecx(ecx);
+                    if ecx != 0 && self.async_event != 0 {
+                        // Bochs tail: assert_RF before stop (cpu.cc:462).
+                        self.assert_rf();
+                        self.set_rip(self.prev_rip);
+                        self.set_rcx(self.ecx() as u64);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
                 }
-                self.set_rdi(edi.wrapping_add((count_dwords * 4) as u32) as u64);
-                self.icount += count_dwords as u64 - 1;
-                self.tickn_fastrep(count_dwords);
-                ecx -= count_dwords as u32;
-                self.set_ecx(ecx);
-                if ecx != 0 && self.async_event != 0 {
-                    // Bochs tail: assert_RF before stop (cpu.cc:462).
-                    self.assert_rf();
-                    self.set_rip(self.prev_rip);
-                    self.set_rcx(self.ecx() as u64);
-                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                    return Ok(());
-                }
-                continue;
             }
+            break;
         }
-        break;
-    }
-    
-    // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
-    // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
-    loop {
-        if ecx != 0 {
-            self.on_repeat_iteration(instr);
-            self.stosd32(instr)?;
-            ecx = ecx.wrapping_sub(1);
-            self.set_ecx(ecx);
+
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if ecx != 0 {
+                self.on_repeat_iteration(instr);
+                self.stosd32(instr)?;
+                ecx = ecx.wrapping_sub(1);
+                self.set_ecx(ecx);
+            }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
+            self.icount += 1;
         }
-        if ecx == 0 { self.set_rcx(self.ecx() as u64);
-            return Ok(()); }
-        if self.async_event != 0 { break; }
-        self.icount += 1;
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
-    self.assert_rf();
-    self.set_rip(self.prev_rip);
-    self.set_rcx(self.ecx() as u64);
-    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-    Ok(()) }
 
     /// REP LODSB ECX times (32-bit)
     pub fn rep_lodsb32(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -1369,9 +1519,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1393,9 +1547,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1417,9 +1575,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1440,9 +1602,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if !self.get_zf() || ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1463,9 +1629,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if self.get_zf() || ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1486,9 +1656,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if !self.get_zf() || ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1509,9 +1683,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if self.get_zf() || ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1532,9 +1710,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if !self.get_zf() || ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1555,9 +1737,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if self.get_zf() || ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1578,9 +1764,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if !self.get_zf() || ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1601,9 +1791,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if self.get_zf() || ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1624,9 +1818,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if !self.get_zf() || ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1647,9 +1845,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if self.get_zf() || ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1670,9 +1872,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if !self.get_zf() || ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1693,9 +1899,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ecx = ecx.wrapping_sub(1);
                 self.set_ecx(ecx);
             }
-            if self.get_zf() || ecx == 0 { self.set_rcx(self.ecx() as u64);
-                return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || ecx == 0 {
+                self.set_rcx(self.ecx() as u64);
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -1898,7 +2108,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let paddr: BxPhyAddress = addr as BxPhyAddress;
             let mut data = [0u8; 4];
-            if mem.read_physical_page(&[cpu_ref], paddr, 4, &mut data).is_ok() {
+            if mem
+                .read_physical_page(&[cpu_ref], paddr, 4, &mut data)
+                .is_ok()
+            {
                 return u32::from_le_bytes(data);
             }
         }
@@ -1932,7 +2145,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let mut dummy_mapping: [u32; 0] = [];
             let mut stamp = BxPageWriteStampTable::new(&mut dummy_mapping);
             let mut data = value.to_le_bytes();
-            if mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 4, &mut data).is_ok() {
+            if mem
+                .write_physical_page(&[cpu_ref], &mut stamp, paddr, 4, &mut data)
+                .is_ok()
+            {
                 self.i_cache.smc_write_check(paddr, 4);
                 return;
             }
@@ -1955,13 +2171,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch MOVSB: 16/32/64-bit address, with or without REP prefix.
     pub fn movsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
-                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
+        if rep {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
-            if rep { self.rep_movsb64(instr)?; } else { self.movsb64(instr)?; }
+            if rep {
+                self.rep_movsb64(instr)?;
+            } else {
+                self.movsb64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_movsb32(instr)?; } else { self.movsb32(instr)?; }
+            if rep {
+                self.rep_movsb32(instr)?;
+            } else {
+                self.movsb32(instr)?;
+            }
         } else {
-            if rep { self.rep_movsb16(instr)?; } else { self.movsb16(instr)?; }
+            if rep {
+                self.rep_movsb16(instr)?;
+            } else {
+                self.movsb16(instr)?;
+            }
         }
         Ok(())
     }
@@ -1969,13 +2199,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch MOVSW: 16/32/64-bit address, with or without REP prefix.
     pub fn movsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
-                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
+        if rep {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
-            if rep { self.rep_movsw64(instr)?; } else { self.movsw64(instr)?; }
+            if rep {
+                self.rep_movsw64(instr)?;
+            } else {
+                self.movsw64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_movsw32(instr)?; } else { self.movsw32(instr)?; }
+            if rep {
+                self.rep_movsw32(instr)?;
+            } else {
+                self.movsw32(instr)?;
+            }
         } else {
-            if rep { self.rep_movsw16(instr)?; } else { self.movsw16(instr)?; }
+            if rep {
+                self.rep_movsw16(instr)?;
+            } else {
+                self.movsw16(instr)?;
+            }
         }
         Ok(())
     }
@@ -1983,13 +2227,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch MOVSD: 16/32/64-bit address, with or without REP prefix.
     pub fn movsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
-                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
+        if rep {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
-            if rep { self.rep_movsd64(instr)?; } else { self.movsd64(instr)?; }
+            if rep {
+                self.rep_movsd64(instr)?;
+            } else {
+                self.movsd64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_movsd32(instr)?; } else { self.movsd32(instr)?; }
+            if rep {
+                self.rep_movsd32(instr)?;
+            } else {
+                self.movsd32(instr)?;
+            }
         } else {
-            if rep { self.rep_movsd16(instr)?; } else { self.movsd16(instr)?; }
+            if rep {
+                self.rep_movsd16(instr)?;
+            } else {
+                self.movsd16(instr)?;
+            }
         }
         Ok(())
     }
@@ -1999,13 +2257,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch STOSB: 16/32/64-bit address, with or without REP prefix.
     pub fn stosb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
-                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
+        if rep {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
-            if rep { self.rep_stosb64(instr)?; } else { self.stosb64(instr)?; }
+            if rep {
+                self.rep_stosb64(instr)?;
+            } else {
+                self.stosb64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_stosb32(instr)?; } else { self.stosb32(instr)?; }
+            if rep {
+                self.rep_stosb32(instr)?;
+            } else {
+                self.stosb32(instr)?;
+            }
         } else {
-            if rep { self.rep_stosb16(instr)?; } else { self.stosb16(instr)?; }
+            if rep {
+                self.rep_stosb16(instr)?;
+            } else {
+                self.stosb16(instr)?;
+            }
         }
         Ok(())
     }
@@ -2013,13 +2285,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch STOSW: 16/32/64-bit address, with or without REP prefix.
     pub fn stosw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
-                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
+        if rep {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
-            if rep { self.rep_stosw64(instr)?; } else { self.stosw64(instr)?; }
+            if rep {
+                self.rep_stosw64(instr)?;
+            } else {
+                self.stosw64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_stosw32(instr)?; } else { self.stosw32(instr)?; }
+            if rep {
+                self.rep_stosw32(instr)?;
+            } else {
+                self.stosw32(instr)?;
+            }
         } else {
-            if rep { self.rep_stosw16(instr)?; } else { self.stosw16(instr)?; }
+            if rep {
+                self.rep_stosw16(instr)?;
+            } else {
+                self.stosw16(instr)?;
+            }
         }
         Ok(())
     }
@@ -2027,13 +2313,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch STOSD: 16/32/64-bit address, with or without REP prefix.
     pub fn stosd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
-                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
+        if rep {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
-            if rep { self.rep_stosd64(instr)?; } else { self.stosd64(instr)?; }
+            if rep {
+                self.rep_stosd64(instr)?;
+            } else {
+                self.stosd64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_stosd32(instr)?; } else { self.stosd32(instr)?; }
+            if rep {
+                self.rep_stosd32(instr)?;
+            } else {
+                self.stosd32(instr)?;
+            }
         } else {
-            if rep { self.rep_stosd16(instr)?; } else { self.stosd16(instr)?; }
+            if rep {
+                self.rep_stosd16(instr)?;
+            } else {
+                self.stosd16(instr)?;
+            }
         }
         Ok(())
     }
@@ -2043,13 +2343,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch LODSB: 16/32/64-bit address, with or without REP prefix.
     pub fn lodsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
-                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
+        if rep {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
-            if rep { self.rep_lodsb64(instr)?; } else { self.lodsb64(instr)?; }
+            if rep {
+                self.rep_lodsb64(instr)?;
+            } else {
+                self.lodsb64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_lodsb32(instr)?; } else { self.lodsb32(instr)?; }
+            if rep {
+                self.rep_lodsb32(instr)?;
+            } else {
+                self.lodsb32(instr)?;
+            }
         } else {
-            if rep { self.rep_lodsb16(instr)?; } else { self.lodsb16(instr)?; }
+            if rep {
+                self.rep_lodsb16(instr)?;
+            } else {
+                self.lodsb16(instr)?;
+            }
         }
         Ok(())
     }
@@ -2057,13 +2371,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch LODSW: 16/32/64-bit address, with or without REP prefix.
     pub fn lodsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
-                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
+        if rep {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
-            if rep { self.rep_lodsw64(instr)?; } else { self.lodsw64(instr)?; }
+            if rep {
+                self.rep_lodsw64(instr)?;
+            } else {
+                self.lodsw64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_lodsw32(instr)?; } else { self.lodsw32(instr)?; }
+            if rep {
+                self.rep_lodsw32(instr)?;
+            } else {
+                self.lodsw32(instr)?;
+            }
         } else {
-            if rep { self.rep_lodsw16(instr)?; } else { self.lodsw16(instr)?; }
+            if rep {
+                self.rep_lodsw16(instr)?;
+            } else {
+                self.lodsw16(instr)?;
+            }
         }
         Ok(())
     }
@@ -2071,13 +2399,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch LODSD: 16/32/64-bit address, with or without REP prefix.
     pub fn lodsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value() != 0;
-                if rep { self.clear_rf(); } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
+        if rep {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat(): clear_RF() when REP prefix is used
         if instr.as64_l() != 0 {
-            if rep { self.rep_lodsd64(instr)?; } else { self.lodsd64(instr)?; }
+            if rep {
+                self.rep_lodsd64(instr)?;
+            } else {
+                self.lodsd64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep { self.rep_lodsd32(instr)?; } else { self.lodsd32(instr)?; }
+            if rep {
+                self.rep_lodsd32(instr)?;
+            } else {
+                self.lodsd32(instr)?;
+            }
         } else {
-            if rep { self.rep_lodsd16(instr)?; } else { self.lodsd16(instr)?; }
+            if rep {
+                self.rep_lodsd16(instr)?;
+            } else {
+                self.lodsd16(instr)?;
+            }
         }
         Ok(())
     }
@@ -2087,19 +2429,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch SCASB: 16/32/64-bit address, with REPE/REPNE/no-REP prefix.
     pub fn scasb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
-                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
+        if rep != 0 {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if instr.as64_l() != 0 {
-            if rep == 3 { self.repe_scasb64(instr)?; }
-            else if rep == 2 { self.repne_scasb64(instr)?; }
-            else { self.scasb64(instr)?; }
+            if rep == 3 {
+                self.repe_scasb64(instr)?;
+            } else if rep == 2 {
+                self.repne_scasb64(instr)?;
+            } else {
+                self.scasb64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep == 3 { self.repe_scasb32(instr)?; }
-            else if rep == 2 { self.repne_scasb32(instr)?; }
-            else { self.scasb32(instr)?; }
+            if rep == 3 {
+                self.repe_scasb32(instr)?;
+            } else if rep == 2 {
+                self.repne_scasb32(instr)?;
+            } else {
+                self.scasb32(instr)?;
+            }
         } else {
-            if rep == 3 { self.repe_scasb16(instr)?; }
-            else if rep == 2 { self.repne_scasb16(instr)?; }
-            else { self.scasb16(instr)?; }
+            if rep == 3 {
+                self.repe_scasb16(instr)?;
+            } else if rep == 2 {
+                self.repne_scasb16(instr)?;
+            } else {
+                self.scasb16(instr)?;
+            }
         }
         Ok(())
     }
@@ -2107,19 +2463,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch SCASW: 16/32/64-bit address, with REPE/REPNE/no-REP prefix.
     pub fn scasw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
-                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
+        if rep != 0 {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if instr.as64_l() != 0 {
-            if rep == 3 { self.repe_scasw64(instr)?; }
-            else if rep == 2 { self.repne_scasw64(instr)?; }
-            else { self.scasw64(instr)?; }
+            if rep == 3 {
+                self.repe_scasw64(instr)?;
+            } else if rep == 2 {
+                self.repne_scasw64(instr)?;
+            } else {
+                self.scasw64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep == 3 { self.repe_scasw32(instr)?; }
-            else if rep == 2 { self.repne_scasw32(instr)?; }
-            else { self.scasw32(instr)?; }
+            if rep == 3 {
+                self.repe_scasw32(instr)?;
+            } else if rep == 2 {
+                self.repne_scasw32(instr)?;
+            } else {
+                self.scasw32(instr)?;
+            }
         } else {
-            if rep == 3 { self.repe_scasw16(instr)?; }
-            else if rep == 2 { self.repne_scasw16(instr)?; }
-            else { self.scasw16(instr)?; }
+            if rep == 3 {
+                self.repe_scasw16(instr)?;
+            } else if rep == 2 {
+                self.repne_scasw16(instr)?;
+            } else {
+                self.scasw16(instr)?;
+            }
         }
         Ok(())
     }
@@ -2127,19 +2497,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch SCASD: 16/32/64-bit address, with REPE/REPNE/no-REP prefix.
     pub fn scasd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
-                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
+        if rep != 0 {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if instr.as64_l() != 0 {
-            if rep == 3 { self.repe_scasd64(instr)?; }
-            else if rep == 2 { self.repne_scasd64(instr)?; }
-            else { self.scasd64(instr)?; }
+            if rep == 3 {
+                self.repe_scasd64(instr)?;
+            } else if rep == 2 {
+                self.repne_scasd64(instr)?;
+            } else {
+                self.scasd64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep == 3 { self.repe_scasd32(instr)?; }
-            else if rep == 2 { self.repne_scasd32(instr)?; }
-            else { self.scasd32(instr)?; }
+            if rep == 3 {
+                self.repe_scasd32(instr)?;
+            } else if rep == 2 {
+                self.repne_scasd32(instr)?;
+            } else {
+                self.scasd32(instr)?;
+            }
         } else {
-            if rep == 3 { self.repe_scasd16(instr)?; }
-            else if rep == 2 { self.repne_scasd16(instr)?; }
-            else { self.scasd16(instr)?; }
+            if rep == 3 {
+                self.repe_scasd16(instr)?;
+            } else if rep == 2 {
+                self.repne_scasd16(instr)?;
+            } else {
+                self.scasd16(instr)?;
+            }
         }
         Ok(())
     }
@@ -2149,19 +2533,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch CMPSB: 16/32/64-bit address, with REPE/REPNE/no-REP prefix.
     pub fn cmpsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
-                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
+        if rep != 0 {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if instr.as64_l() != 0 {
-            if rep == 3 { self.repe_cmpsb64(instr)?; }
-            else if rep == 2 { self.repne_cmpsb64(instr)?; }
-            else { self.cmpsb64(instr)?; }
+            if rep == 3 {
+                self.repe_cmpsb64(instr)?;
+            } else if rep == 2 {
+                self.repne_cmpsb64(instr)?;
+            } else {
+                self.cmpsb64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep == 3 { self.repe_cmpsb32(instr)?; }
-            else if rep == 2 { self.repne_cmpsb32(instr)?; }
-            else { self.cmpsb32(instr)?; }
+            if rep == 3 {
+                self.repe_cmpsb32(instr)?;
+            } else if rep == 2 {
+                self.repne_cmpsb32(instr)?;
+            } else {
+                self.cmpsb32(instr)?;
+            }
         } else {
-            if rep == 3 { self.repe_cmpsb16(instr)?; }
-            else if rep == 2 { self.repne_cmpsb16(instr)?; }
-            else { self.cmpsb16(instr)?; }
+            if rep == 3 {
+                self.repe_cmpsb16(instr)?;
+            } else if rep == 2 {
+                self.repne_cmpsb16(instr)?;
+            } else {
+                self.cmpsb16(instr)?;
+            }
         }
         Ok(())
     }
@@ -2169,19 +2567,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch CMPSW: 16/32/64-bit address, with REPE/REPNE/no-REP prefix.
     pub fn cmpsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
-                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
+        if rep != 0 {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if instr.as64_l() != 0 {
-            if rep == 3 { self.repe_cmpsw64(instr)?; }
-            else if rep == 2 { self.repne_cmpsw64(instr)?; }
-            else { self.cmpsw64(instr)?; }
+            if rep == 3 {
+                self.repe_cmpsw64(instr)?;
+            } else if rep == 2 {
+                self.repne_cmpsw64(instr)?;
+            } else {
+                self.cmpsw64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep == 3 { self.repe_cmpsw32(instr)?; }
-            else if rep == 2 { self.repne_cmpsw32(instr)?; }
-            else { self.cmpsw32(instr)?; }
+            if rep == 3 {
+                self.repe_cmpsw32(instr)?;
+            } else if rep == 2 {
+                self.repne_cmpsw32(instr)?;
+            } else {
+                self.cmpsw32(instr)?;
+            }
         } else {
-            if rep == 3 { self.repe_cmpsw16(instr)?; }
-            else if rep == 2 { self.repne_cmpsw16(instr)?; }
-            else { self.cmpsw16(instr)?; }
+            if rep == 3 {
+                self.repe_cmpsw16(instr)?;
+            } else if rep == 2 {
+                self.repne_cmpsw16(instr)?;
+            } else {
+                self.cmpsw16(instr)?;
+            }
         }
         Ok(())
     }
@@ -2189,19 +2601,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch CMPSD: 16/32/64-bit address, with REPE/REPNE/no-REP prefix.
     pub fn cmpsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
-                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
+        if rep != 0 {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
         if instr.as64_l() != 0 {
-            if rep == 3 { self.repe_cmpsd64(instr)?; }
-            else if rep == 2 { self.repne_cmpsd64(instr)?; }
-            else { self.cmpsd64(instr)?; }
+            if rep == 3 {
+                self.repe_cmpsd64(instr)?;
+            } else if rep == 2 {
+                self.repne_cmpsd64(instr)?;
+            } else {
+                self.cmpsd64(instr)?;
+            }
         } else if instr.as32_l() != 0 {
-            if rep == 3 { self.repe_cmpsd32(instr)?; }
-            else if rep == 2 { self.repne_cmpsd32(instr)?; }
-            else { self.cmpsd32(instr)?; }
+            if rep == 3 {
+                self.repe_cmpsd32(instr)?;
+            } else if rep == 2 {
+                self.repne_cmpsd32(instr)?;
+            } else {
+                self.cmpsd32(instr)?;
+            }
         } else {
-            if rep == 3 { self.repe_cmpsd16(instr)?; }
-            else if rep == 2 { self.repne_cmpsd16(instr)?; }
-            else { self.cmpsd16(instr)?; }
+            if rep == 3 {
+                self.repe_cmpsd16(instr)?;
+            } else if rep == 2 {
+                self.repne_cmpsd16(instr)?;
+            } else {
+                self.cmpsd16(instr)?;
+            }
         }
         Ok(())
     }
@@ -2238,10 +2664,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src_laddr = self.get_laddr64(seg as usize, rsi);
             let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
 
-            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
-                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
-            {
-                let count = (rcx as usize).min(src_rem).min(dst_rem)
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) = (
+                self.get_host_read_ptr(src_laddr),
+                self.get_host_write_ptr(dst_laddr),
+            ) {
+                let count = (rcx as usize)
+                    .min(src_rem)
+                    .min(dst_rem)
                     .min(self.ticks_left_next_event() as usize);
                 if count > 0 {
                     // Bochs faststring.cc — forward byte-by-byte loop.
@@ -2276,8 +2705,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2310,12 +2743,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src_laddr = self.get_laddr64(seg as usize, rsi);
             let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
 
-            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
-                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
-            {
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) = (
+                self.get_host_read_ptr(src_laddr),
+                self.get_host_write_ptr(dst_laddr),
+            ) {
                 let max_bytes = (rcx as usize) * 2;
-                let count_bytes = max_bytes.min(src_rem).min(dst_rem)
-                    .min(self.ticks_left_next_event() as usize) & !1;
+                let count_bytes = max_bytes
+                    .min(src_rem)
+                    .min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize)
+                    & !1;
                 let count_words = count_bytes / 2;
                 if count_words > 0 {
                     forward_byte_copy(src_ptr, dst_ptr, count_bytes);
@@ -2347,8 +2784,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2381,12 +2822,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src_laddr = self.get_laddr64(seg as usize, rsi);
             let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
 
-            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
-                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
-            {
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) = (
+                self.get_host_read_ptr(src_laddr),
+                self.get_host_write_ptr(dst_laddr),
+            ) {
                 let max_bytes = (rcx as usize) * 4;
-                let count_bytes = max_bytes.min(src_rem).min(dst_rem)
-                    .min(self.ticks_left_next_event() as usize) & !3; // align to 4
+                let count_bytes = max_bytes
+                    .min(src_rem)
+                    .min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize)
+                    & !3; // align to 4
                 let count_dwords = count_bytes / 4;
                 if count_dwords > 0 {
                     forward_byte_copy(src_ptr, dst_ptr, count_bytes);
@@ -2418,8 +2863,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2431,188 +2880,213 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ---- STOSB/W/D 64-bit ----
 
     /// STOSB with 64-bit addressing
-    pub fn stosb64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
-    let al = self.al();
-    self.write_virtual_byte_64(BxSegregs::Es, rdi, al)?;
-    let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
-    self.set_rdi(rdi.wrapping_add(delta));
-    Ok(()) }
-
-    pub fn rep_stosb64(&mut self, instr: &Instruction) -> super::Result<()> { let mut rcx = self.rcx();
-    let df = self.get_df();
-    let al = self.al();
-    
-    // FastRep: try bulk memset when DF=0 (Bochs faststring.cc)
-    while rcx != 0 && !df && self.async_event == 0 {
+    pub fn stosb64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let rdi = self.rdi();
-        let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
-    
-        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-            let count = (rcx as usize).min(dst_rem)
-                .min(self.ticks_left_next_event() as usize);
-            if count > 0 {
-                host_fill_bytes(dst_ptr, al, count);
-                self.set_rdi(rdi.wrapping_add(count as u64));
-                self.icount += count as u64 - 1;
-                self.tickn_fastrep(count);
-                rcx -= count as u64;
-                self.set_rcx(rcx);
-                if rcx != 0 && self.async_event != 0 {
-                    // Bochs tail: assert_RF before stop (cpu.cc:462).
-                    self.assert_rf();
-                    self.set_rip(self.prev_rip);
-                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                    return Ok(());
+        let al = self.al();
+        self.write_virtual_byte_64(BxSegregs::Es, rdi, al)?;
+        let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
+        self.set_rdi(rdi.wrapping_add(delta));
+        Ok(())
+    }
+
+    pub fn rep_stosb64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut rcx = self.rcx();
+        let df = self.get_df();
+        let al = self.al();
+
+        // FastRep: try bulk memset when DF=0 (Bochs faststring.cc)
+        while rcx != 0 && !df && self.async_event == 0 {
+            let rdi = self.rdi();
+            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let count = (rcx as usize)
+                    .min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize);
+                if count > 0 {
+                    host_fill_bytes(dst_ptr, al, count);
+                    self.set_rdi(rdi.wrapping_add(count as u64));
+                    self.icount += count as u64 - 1;
+                    self.tickn_fastrep(count);
+                    rcx -= count as u64;
+                    self.set_rcx(rcx);
+                    if rcx != 0 && self.async_event != 0 {
+                        // Bochs tail: assert_RF before stop (cpu.cc:462).
+                        self.assert_rf();
+                        self.set_rip(self.prev_rip);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
                 }
-                continue;
             }
+            break;
         }
-        break;
-    }
-    
-    // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
-    // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
-    loop {
-        if rcx != 0 {
-            self.on_repeat_iteration(instr);
-            self.stosb64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
+
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if rcx != 0 {
+                self.on_repeat_iteration(instr);
+                self.stosb64(instr)?;
+                rcx = rcx.wrapping_sub(1);
+                self.set_rcx(rcx);
+            }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
+            self.icount += 1;
         }
-        if rcx == 0 { return Ok(()); }
-        if self.async_event != 0 { break; }
-        self.icount += 1;
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
-    self.assert_rf();
-    self.set_rip(self.prev_rip);
-    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-    Ok(()) }
 
     /// STOSW with 64-bit addressing
-    pub fn stosw64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
-    let ax = self.ax();
-    self.write_virtual_word_64(BxSegregs::Es, rdi, ax)?;
-    let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
-    self.set_rdi(rdi.wrapping_add(delta));
-    Ok(()) }
-
-    pub fn rep_stosw64(&mut self, instr: &Instruction) -> super::Result<()> { let mut rcx = self.rcx();
-    let df = self.get_df();
-    let ax = self.ax();
-    
-    // FastRep: try bulk word fill when DF=0 (Bochs faststring.cc)
-    while rcx != 0 && !df && self.async_event == 0 {
+    pub fn stosw64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let rdi = self.rdi();
-        let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
-    
-        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-            let max_bytes = (rcx as usize) * 2;
-            let count_bytes = max_bytes.min(dst_rem) & !1;
-            let count_words = (count_bytes / 2)
-                .min(self.ticks_left_next_event() as usize);
-            if count_words > 0 {
-                let dst_slice = unsafe { super::access::host_slice_mut_u16(dst_ptr, count_words) };
-                for w in dst_slice.iter_mut() {
-                    *w = ax;
+        let ax = self.ax();
+        self.write_virtual_word_64(BxSegregs::Es, rdi, ax)?;
+        let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
+        self.set_rdi(rdi.wrapping_add(delta));
+        Ok(())
+    }
+
+    pub fn rep_stosw64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut rcx = self.rcx();
+        let df = self.get_df();
+        let ax = self.ax();
+
+        // FastRep: try bulk word fill when DF=0 (Bochs faststring.cc)
+        while rcx != 0 && !df && self.async_event == 0 {
+            let rdi = self.rdi();
+            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let max_bytes = (rcx as usize) * 2;
+                let count_bytes = max_bytes.min(dst_rem) & !1;
+                let count_words = (count_bytes / 2).min(self.ticks_left_next_event() as usize);
+                if count_words > 0 {
+                    let dst_slice =
+                        unsafe { super::access::host_slice_mut_u16(dst_ptr, count_words) };
+                    for w in dst_slice.iter_mut() {
+                        *w = ax;
+                    }
+                    self.set_rdi(rdi.wrapping_add((count_words * 2) as u64));
+                    self.icount += count_words as u64 - 1;
+                    self.tickn_fastrep(count_words);
+                    rcx -= count_words as u64;
+                    self.set_rcx(rcx);
+                    if rcx != 0 && self.async_event != 0 {
+                        // Bochs tail: assert_RF before stop (cpu.cc:462).
+                        self.assert_rf();
+                        self.set_rip(self.prev_rip);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
                 }
-                self.set_rdi(rdi.wrapping_add((count_words * 2) as u64));
-                self.icount += count_words as u64 - 1;
-                self.tickn_fastrep(count_words);
-                rcx -= count_words as u64;
-                self.set_rcx(rcx);
-                if rcx != 0 && self.async_event != 0 {
-                    // Bochs tail: assert_RF before stop (cpu.cc:462).
-                    self.assert_rf();
-                    self.set_rip(self.prev_rip);
-                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                    return Ok(());
-                }
-                continue;
             }
+            break;
         }
-        break;
-    }
-    
-    // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
-    // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
-    loop {
-        if rcx != 0 {
-            self.on_repeat_iteration(instr);
-            self.stosw64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
+
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if rcx != 0 {
+                self.on_repeat_iteration(instr);
+                self.stosw64(instr)?;
+                rcx = rcx.wrapping_sub(1);
+                self.set_rcx(rcx);
+            }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
+            self.icount += 1;
         }
-        if rcx == 0 { return Ok(()); }
-        if self.async_event != 0 { break; }
-        self.icount += 1;
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
-    self.assert_rf();
-    self.set_rip(self.prev_rip);
-    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-    Ok(()) }
 
     /// STOSD with 64-bit addressing
-    pub fn stosd64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
-    let eax = self.eax();
-    self.write_virtual_dword_64(BxSegregs::Es, rdi, eax)?;
-    let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
-    self.set_rdi(rdi.wrapping_add(delta));
-    Ok(()) }
-
-    pub fn rep_stosd64(&mut self, instr: &Instruction) -> super::Result<()> { let mut rcx = self.rcx();
-    let df = self.get_df();
-    let eax = self.eax();
-    
-    // FastRep: try bulk dword fill when DF=0 (Bochs faststring.cc)
-    while rcx != 0 && !df && self.async_event == 0 {
+    pub fn stosd64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let rdi = self.rdi();
-        let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
-    
-        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-            let max_bytes = (rcx as usize) * 4;
-            let count_bytes = max_bytes.min(dst_rem) & !3;
-            let count_dwords = (count_bytes / 4)
-                .min(self.ticks_left_next_event() as usize);
-            if count_dwords > 0 {
-                let dst_slice = unsafe { super::access::host_slice_mut_u32(dst_ptr, count_dwords) };
-                for d in dst_slice.iter_mut() {
-                    *d = eax;
+        let eax = self.eax();
+        self.write_virtual_dword_64(BxSegregs::Es, rdi, eax)?;
+        let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
+        self.set_rdi(rdi.wrapping_add(delta));
+        Ok(())
+    }
+
+    pub fn rep_stosd64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut rcx = self.rcx();
+        let df = self.get_df();
+        let eax = self.eax();
+
+        // FastRep: try bulk dword fill when DF=0 (Bochs faststring.cc)
+        while rcx != 0 && !df && self.async_event == 0 {
+            let rdi = self.rdi();
+            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let max_bytes = (rcx as usize) * 4;
+                let count_bytes = max_bytes.min(dst_rem) & !3;
+                let count_dwords = (count_bytes / 4).min(self.ticks_left_next_event() as usize);
+                if count_dwords > 0 {
+                    let dst_slice =
+                        unsafe { super::access::host_slice_mut_u32(dst_ptr, count_dwords) };
+                    for d in dst_slice.iter_mut() {
+                        *d = eax;
+                    }
+                    self.set_rdi(rdi.wrapping_add((count_dwords * 4) as u64));
+                    self.icount += count_dwords as u64 - 1;
+                    self.tickn_fastrep(count_dwords);
+                    rcx -= count_dwords as u64;
+                    self.set_rcx(rcx);
+                    if rcx != 0 && self.async_event != 0 {
+                        // Bochs tail: assert_RF before stop (cpu.cc:462).
+                        self.assert_rf();
+                        self.set_rip(self.prev_rip);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
                 }
-                self.set_rdi(rdi.wrapping_add((count_dwords * 4) as u64));
-                self.icount += count_dwords as u64 - 1;
-                self.tickn_fastrep(count_dwords);
-                rcx -= count_dwords as u64;
-                self.set_rcx(rcx);
-                if rcx != 0 && self.async_event != 0 {
-                    // Bochs tail: assert_RF before stop (cpu.cc:462).
-                    self.assert_rf();
-                    self.set_rip(self.prev_rip);
-                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                    return Ok(());
-                }
-                continue;
             }
+            break;
         }
-        break;
-    }
-    
-    // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
-    // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
-    loop {
-        if rcx != 0 {
-            self.on_repeat_iteration(instr);
-            self.stosd64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
+
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if rcx != 0 {
+                self.on_repeat_iteration(instr);
+                self.stosd64(instr)?;
+                rcx = rcx.wrapping_sub(1);
+                self.set_rcx(rcx);
+            }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
+            self.icount += 1;
         }
-        if rcx == 0 { return Ok(()); }
-        if self.async_event != 0 { break; }
-        self.icount += 1;
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
-    self.assert_rf();
-    self.set_rip(self.prev_rip);
-    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-    Ok(()) }
 
     // ---- LODSB/W/D 64-bit ----
 
@@ -2637,8 +3111,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2668,8 +3146,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2700,8 +3182,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2736,8 +3222,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if !self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2756,8 +3246,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2790,8 +3284,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if !self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2810,8 +3308,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2844,8 +3346,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if !self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2864,8 +3370,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2877,14 +3387,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ---- SCASB/W/D 64-bit ----
 
     /// SCASB with 64-bit addressing
-    pub fn scasb64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
-    let al = self.al();
-    let op2 = self.read_virtual_byte_64(BxSegregs::Es, rdi)?;
-    let result = al.wrapping_sub(op2);
-    self.update_flags_sub8(al, op2, result);
-    let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
-    self.set_rdi(rdi.wrapping_add(delta));
-    Ok(()) }
+    pub fn scasb64(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let rdi = self.rdi();
+        let al = self.al();
+        let op2 = self.read_virtual_byte_64(BxSegregs::Es, rdi)?;
+        let result = al.wrapping_sub(op2);
+        self.update_flags_sub8(al, op2, result);
+        let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
+        self.set_rdi(rdi.wrapping_add(delta));
+        Ok(())
+    }
 
     pub fn repe_scasb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
@@ -2896,8 +3408,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if !self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2916,8 +3432,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2927,14 +3447,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// SCASW with 64-bit addressing
-    pub fn scasw64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
-    let ax = self.ax();
-    let op2 = self.read_virtual_word_64(BxSegregs::Es, rdi)?;
-    let result = ax.wrapping_sub(op2);
-    self.update_flags_sub16(ax, op2, result);
-    let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
-    self.set_rdi(rdi.wrapping_add(delta));
-    Ok(()) }
+    pub fn scasw64(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let rdi = self.rdi();
+        let ax = self.ax();
+        let op2 = self.read_virtual_word_64(BxSegregs::Es, rdi)?;
+        let result = ax.wrapping_sub(op2);
+        self.update_flags_sub16(ax, op2, result);
+        let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
+        self.set_rdi(rdi.wrapping_add(delta));
+        Ok(())
+    }
 
     pub fn repe_scasw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
@@ -2946,8 +3468,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if !self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2966,8 +3492,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -2977,14 +3507,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// SCASD with 64-bit addressing
-    pub fn scasd64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
-    let eax = self.eax();
-    let op2 = self.read_virtual_dword_64(BxSegregs::Es, rdi)?;
-    let result = eax.wrapping_sub(op2);
-    self.update_flags_sub32(eax, op2, result);
-    let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
-    self.set_rdi(rdi.wrapping_add(delta));
-    Ok(()) }
+    pub fn scasd64(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let rdi = self.rdi();
+        let eax = self.eax();
+        let op2 = self.read_virtual_dword_64(BxSegregs::Es, rdi)?;
+        let result = eax.wrapping_sub(op2);
+        self.update_flags_sub32(eax, op2, result);
+        let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
+        self.set_rdi(rdi.wrapping_add(delta));
+        Ok(())
+    }
 
     pub fn repe_scasd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
@@ -2996,8 +3528,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if !self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -3016,8 +3552,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -3056,12 +3596,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src_laddr = self.get_laddr64(seg as usize, rsi);
             let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
 
-            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
-                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
-            {
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) = (
+                self.get_host_read_ptr(src_laddr),
+                self.get_host_write_ptr(dst_laddr),
+            ) {
                 let max_bytes = (rcx as usize) * 8;
-                let count_bytes = max_bytes.min(src_rem).min(dst_rem)
-                    .min(self.ticks_left_next_event() as usize) & !7;
+                let count_bytes = max_bytes
+                    .min(src_rem)
+                    .min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize)
+                    & !7;
                 let count_qwords = count_bytes / 8;
                 if count_qwords > 0 {
                     forward_byte_copy(src_ptr, dst_ptr, count_bytes);
@@ -3093,8 +3637,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -3104,68 +3652,76 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// STOSQ -- Store RAX to [RDI] (64-bit addressing)
-    pub fn stosq64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
-    let rax = self.rax();
-    self.write_virtual_qword_64(BxSegregs::Es, rdi, rax)?;
-    let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
-    self.set_rdi(rdi.wrapping_add(delta));
-    Ok(()) }
+    pub fn stosq64(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let rdi = self.rdi();
+        let rax = self.rax();
+        self.write_virtual_qword_64(BxSegregs::Es, rdi, rax)?;
+        let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
+        self.set_rdi(rdi.wrapping_add(delta));
+        Ok(())
+    }
 
     /// REP STOSQ -- Store RAX to RCX qwords at [RDI]
-    pub fn rep_stosq64(&mut self, instr: &Instruction) -> super::Result<()> { let mut rcx = self.rcx();
-    let df = self.get_df();
-    let rax = self.rax();
-    
-    // FastRep: try bulk qword fill when DF=0 (Bochs faststring.cc granularity=8)
-    while rcx != 0 && !df && self.async_event == 0 {
-        let rdi = self.rdi();
-        let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
-    
-        if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
-            let max_bytes = (rcx as usize) * 8;
-            let count_bytes = max_bytes.min(dst_rem) & !7;
-            let count_qwords = (count_bytes / 8)
-                .min(self.ticks_left_next_event() as usize);
-            if count_qwords > 0 {
-                let dst_slice = unsafe { super::access::host_slice_mut_u64(dst_ptr, count_qwords) };
-                for q in dst_slice.iter_mut() {
-                    *q = rax;
+    pub fn rep_stosq64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut rcx = self.rcx();
+        let df = self.get_df();
+        let rax = self.rax();
+
+        // FastRep: try bulk qword fill when DF=0 (Bochs faststring.cc granularity=8)
+        while rcx != 0 && !df && self.async_event == 0 {
+            let rdi = self.rdi();
+            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let max_bytes = (rcx as usize) * 8;
+                let count_bytes = max_bytes.min(dst_rem) & !7;
+                let count_qwords = (count_bytes / 8).min(self.ticks_left_next_event() as usize);
+                if count_qwords > 0 {
+                    let dst_slice =
+                        unsafe { super::access::host_slice_mut_u64(dst_ptr, count_qwords) };
+                    for q in dst_slice.iter_mut() {
+                        *q = rax;
+                    }
+                    self.set_rdi(rdi.wrapping_add((count_qwords * 8) as u64));
+                    self.icount += count_qwords as u64 - 1;
+                    self.tickn_fastrep(count_qwords);
+                    rcx -= count_qwords as u64;
+                    self.set_rcx(rcx);
+                    if rcx != 0 && self.async_event != 0 {
+                        // Bochs tail: assert_RF before stop (cpu.cc:462).
+                        self.assert_rf();
+                        self.set_rip(self.prev_rip);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
                 }
-                self.set_rdi(rdi.wrapping_add((count_qwords * 8) as u64));
-                self.icount += count_qwords as u64 - 1;
-                self.tickn_fastrep(count_qwords);
-                rcx -= count_qwords as u64;
-                self.set_rcx(rcx);
-                if rcx != 0 && self.async_event != 0 {
-                    // Bochs tail: assert_RF before stop (cpu.cc:462).
-                    self.assert_rf();
-                    self.set_rip(self.prev_rip);
-                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                    return Ok(());
-                }
-                continue;
             }
+            break;
         }
-        break;
-    }
-    
-    // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
-    // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
-    loop {
-        if rcx != 0 {
-            self.on_repeat_iteration(instr);
-            self.stosq64(instr)?;
-            rcx = rcx.wrapping_sub(1);
-            self.set_rcx(rcx);
+
+        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
+        loop {
+            if rcx != 0 {
+                self.on_repeat_iteration(instr);
+                self.stosq64(instr)?;
+                rcx = rcx.wrapping_sub(1);
+                self.set_rcx(rcx);
+            }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
+            self.icount += 1;
         }
-        if rcx == 0 { return Ok(()); }
-        if self.async_event != 0 { break; }
-        self.icount += 1;
+        self.assert_rf();
+        self.set_rip(self.prev_rip);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
-    self.assert_rf();
-    self.set_rip(self.prev_rip);
-    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-    Ok(()) }
 
     /// LODSQ -- Load qword from [RSI] into RAX (64-bit addressing)
     pub fn lodsq64(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -3189,8 +3745,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -3224,8 +3784,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if !self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -3245,8 +3809,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -3256,14 +3824,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// SCASQ -- Compare RAX with qword at [RDI] (64-bit addressing)
-    pub fn scasq64(&mut self, _instr: &Instruction) -> super::Result<()> { let rdi = self.rdi();
-    let rax = self.rax();
-    let op2 = self.read_virtual_qword_64(BxSegregs::Es, rdi)?;
-    let result = rax.wrapping_sub(op2);
-    self.update_flags_sub64(rax, op2, result);
-    let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
-    self.set_rdi(rdi.wrapping_add(delta));
-    Ok(()) }
+    pub fn scasq64(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let rdi = self.rdi();
+        let rax = self.rax();
+        let op2 = self.read_virtual_qword_64(BxSegregs::Es, rdi)?;
+        let result = rax.wrapping_sub(op2);
+        self.update_flags_sub64(rax, op2, result);
+        let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
+        self.set_rdi(rdi.wrapping_add(delta));
+        Ok(())
+    }
 
     /// REPE SCASQ -- Scan RCX qwords, stop if not equal
     pub fn repe_scasq64(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -3276,8 +3846,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if !self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if !self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -3297,8 +3871,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 rcx = rcx.wrapping_sub(1);
                 self.set_rcx(rcx);
             }
-            if self.get_zf() || rcx == 0 { return Ok(()); }
-            if self.async_event != 0 { break; }
+            if self.get_zf() || rcx == 0 {
+                return Ok(());
+            }
+            if self.async_event != 0 {
+                break;
+            }
             self.icount += 1;
         }
         self.assert_rf();
@@ -3314,48 +3892,60 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Dispatch MOVSQ: 64-bit only, with or without REP prefix.
     pub fn movsq_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.lock_rep_used_value() != 0 {
-                    self.clear_rf(); // Bochs cpu.cc repeat(): clear_RF() when REP prefix used
-                    self.rep_movsq64(instr)
-                } else {
-                    self.movsq64(instr)
-                }
+            self.clear_rf(); // Bochs cpu.cc repeat(): clear_RF() when REP prefix used
+            self.rep_movsq64(instr)
+        } else {
+            self.movsq64(instr)
+        }
     }
 
     /// Dispatch STOSQ: 64-bit only, with or without REP prefix.
     pub fn stosq_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.lock_rep_used_value() != 0 {
-                    self.clear_rf(); // Bochs cpu.cc repeat(): clear_RF() when REP prefix used
-                    self.rep_stosq64(instr)
-                } else {
-                    self.stosq64(instr)
-                }
+            self.clear_rf(); // Bochs cpu.cc repeat(): clear_RF() when REP prefix used
+            self.rep_stosq64(instr)
+        } else {
+            self.stosq64(instr)
+        }
     }
 
     /// Dispatch LODSQ: 64-bit only, with or without REP prefix.
     pub fn lodsq_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.lock_rep_used_value() != 0 {
-                    self.clear_rf(); // Bochs cpu.cc repeat(): clear_RF() when REP prefix used
-                    self.rep_lodsq64(instr)
-                } else {
-                    self.lodsq64(instr)
-                }
+            self.clear_rf(); // Bochs cpu.cc repeat(): clear_RF() when REP prefix used
+            self.rep_lodsq64(instr)
+        } else {
+            self.lodsq64(instr)
+        }
     }
 
     /// Dispatch CMPSQ: 64-bit only, with REPE/REPNE/no-REP prefix.
     pub fn cmpsq_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
-                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
-        if rep == 3 { self.repe_cmpsq64(instr) }
-        else if rep == 2 { self.repne_cmpsq64(instr) }
-        else { self.cmpsq64(instr) }
+        if rep != 0 {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
+        if rep == 3 {
+            self.repe_cmpsq64(instr)
+        } else if rep == 2 {
+            self.repne_cmpsq64(instr)
+        } else {
+            self.cmpsq64(instr)
+        }
     }
 
     /// Dispatch SCASQ: 64-bit only, with REPE/REPNE/no-REP prefix.
     pub fn scasq_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
-                if rep != 0 { self.clear_rf(); } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
-        if rep == 3 { self.repe_scasq64(instr) }
-        else if rep == 2 { self.repne_scasq64(instr) }
-        else { self.scasq64(instr) }
+        if rep != 0 {
+            self.clear_rf();
+        } // Bochs cpu.cc repeat_ZF(): clear_RF() when REP/REPE/REPNE prefix used
+        if rep == 3 {
+            self.repe_scasq64(instr)
+        } else if rep == 2 {
+            self.repne_scasq64(instr)
+        } else {
+            self.scasq64(instr)
+        }
     }
 }

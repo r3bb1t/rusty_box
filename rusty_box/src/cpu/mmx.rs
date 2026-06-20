@@ -79,7 +79,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     #[inline]
     pub(super) fn read_mmx_reg(&self, index: u8) -> BxPackedRegister {
         let signif = self.the_i387.st_space[index as usize & 7].signif;
-        BxPackedRegister { bytes: (signif).to_le_bytes() }
+        BxPackedRegister {
+            bytes: (signif).to_le_bytes(),
+        }
     }
 
     /// Write MMX register by physical index.
@@ -102,7 +104,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
             let val = self.v_read_qword(seg, eaddr)?;
-            Ok(BxPackedRegister { bytes: (val).to_le_bytes() })
+            Ok(BxPackedRegister {
+                bytes: (val).to_le_bytes(),
+            })
         }
     }
 
@@ -115,7 +119,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
             let val = self.v_read_dword(seg, eaddr)? as u64;
-            Ok(BxPackedRegister { bytes: (val).to_le_bytes() })
+            Ok(BxPackedRegister {
+                bytes: (val).to_le_bytes(),
+            })
         }
     }
 
@@ -154,10 +160,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_U16(0, op1.U16(0).wrapping_add(op1.U16(1)));
-            r.set_U16(1, op1.U16(2).wrapping_add(op1.U16(3)));
-            r.set_U16(2, op2.U16(0).wrapping_add(op2.U16(1)));
-            r.set_U16(3, op2.U16(2).wrapping_add(op2.U16(3)));
+        r.set_U16(0, op1.U16(0).wrapping_add(op1.U16(1)));
+        r.set_U16(1, op1.U16(2).wrapping_add(op1.U16(3)));
+        r.set_U16(2, op2.U16(0).wrapping_add(op2.U16(1)));
+        r.set_U16(3, op2.U16(2).wrapping_add(op2.U16(3)));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -171,8 +177,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_U32(0, op1.U32(0).wrapping_add(op1.U32(1)));
-            r.set_U32(1, op2.U32(0).wrapping_add(op2.U32(1)));
+        r.set_U32(0, op1.U32(0).wrapping_add(op1.U32(1)));
+        r.set_U32(1, op2.U32(0).wrapping_add(op2.U32(1)));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -186,10 +192,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_S16(0, saturate_dword_s_to_word_s(op1.S16(0) as i32 + op1.S16(1) as i32));
-            r.set_S16(1, saturate_dword_s_to_word_s(op1.S16(2) as i32 + op1.S16(3) as i32));
-            r.set_S16(2, saturate_dword_s_to_word_s(op2.S16(0) as i32 + op2.S16(1) as i32));
-            r.set_S16(3, saturate_dword_s_to_word_s(op2.S16(2) as i32 + op2.S16(3) as i32));
+        r.set_S16(
+            0,
+            saturate_dword_s_to_word_s(op1.S16(0) as i32 + op1.S16(1) as i32),
+        );
+        r.set_S16(
+            1,
+            saturate_dword_s_to_word_s(op1.S16(2) as i32 + op1.S16(3) as i32),
+        );
+        r.set_S16(
+            2,
+            saturate_dword_s_to_word_s(op2.S16(0) as i32 + op2.S16(1) as i32),
+        );
+        r.set_S16(
+            3,
+            saturate_dword_s_to_word_s(op2.S16(2) as i32 + op2.S16(3) as i32),
+        );
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -203,11 +221,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                let t = (op1.Ubyte(j * 2) as i32) * (op2.Sbyte(j * 2) as i32)
-                    + (op1.Ubyte(j * 2 + 1) as i32) * (op2.Sbyte(j * 2 + 1) as i32);
-                r.set_S16(j, saturate_dword_s_to_word_s(t));
-            }
+        for j in 0..4usize {
+            let t = (op1.Ubyte(j * 2) as i32) * (op2.Sbyte(j * 2) as i32)
+                + (op1.Ubyte(j * 2 + 1) as i32) * (op2.Sbyte(j * 2 + 1) as i32);
+            r.set_S16(j, saturate_dword_s_to_word_s(t));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -221,10 +239,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_U16(0, op1.U16(0).wrapping_sub(op1.U16(1)));
-            r.set_U16(1, op1.U16(2).wrapping_sub(op1.U16(3)));
-            r.set_U16(2, op2.U16(0).wrapping_sub(op2.U16(1)));
-            r.set_U16(3, op2.U16(2).wrapping_sub(op2.U16(3)));
+        r.set_U16(0, op1.U16(0).wrapping_sub(op1.U16(1)));
+        r.set_U16(1, op1.U16(2).wrapping_sub(op1.U16(3)));
+        r.set_U16(2, op2.U16(0).wrapping_sub(op2.U16(1)));
+        r.set_U16(3, op2.U16(2).wrapping_sub(op2.U16(3)));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -238,8 +256,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_U32(0, op1.U32(0).wrapping_sub(op1.U32(1)));
-            r.set_U32(1, op2.U32(0).wrapping_sub(op2.U32(1)));
+        r.set_U32(0, op1.U32(0).wrapping_sub(op1.U32(1)));
+        r.set_U32(1, op2.U32(0).wrapping_sub(op2.U32(1)));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -253,10 +271,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_S16(0, saturate_dword_s_to_word_s(op1.S16(0) as i32 - op1.S16(1) as i32));
-            r.set_S16(1, saturate_dword_s_to_word_s(op1.S16(2) as i32 - op1.S16(3) as i32));
-            r.set_S16(2, saturate_dword_s_to_word_s(op2.S16(0) as i32 - op2.S16(1) as i32));
-            r.set_S16(3, saturate_dword_s_to_word_s(op2.S16(2) as i32 - op2.S16(3) as i32));
+        r.set_S16(
+            0,
+            saturate_dword_s_to_word_s(op1.S16(0) as i32 - op1.S16(1) as i32),
+        );
+        r.set_S16(
+            1,
+            saturate_dword_s_to_word_s(op1.S16(2) as i32 - op1.S16(3) as i32),
+        );
+        r.set_S16(
+            2,
+            saturate_dword_s_to_word_s(op2.S16(0) as i32 - op2.S16(1) as i32),
+        );
+        r.set_S16(
+            3,
+            saturate_dword_s_to_word_s(op2.S16(2) as i32 - op2.S16(3) as i32),
+        );
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -270,13 +300,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = op1;
-            for j in 0..8usize {
-                if op2.Sbyte(j) < 0 {
-                    r.set_Sbyte(j, -(op1.Sbyte(j) as i16) as i8);
-                } else if op2.Sbyte(j) == 0 {
-                    r.set_Ubyte(j, 0);
-                }
+        for j in 0..8usize {
+            if op2.Sbyte(j) < 0 {
+                r.set_Sbyte(j, -(op1.Sbyte(j) as i16) as i8);
+            } else if op2.Sbyte(j) == 0 {
+                r.set_Ubyte(j, 0);
             }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -290,13 +320,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = op1;
-            for j in 0..4usize {
-                if op2.S16(j) < 0 {
-                    r.set_S16(j, -(op1.S16(j) as i32) as i16);
-                } else if op2.S16(j) == 0 {
-                    r.set_U16(j, 0);
-                }
+        for j in 0..4usize {
+            if op2.S16(j) < 0 {
+                r.set_S16(j, -(op1.S16(j) as i32) as i16);
+            } else if op2.S16(j) == 0 {
+                r.set_U16(j, 0);
             }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -310,13 +340,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = op1;
-            for j in 0..2usize {
-                if op2.S32(j) < 0 {
-                    r.set_S32(j, -(op1.S32(j) as i64) as i32);
-                } else if op2.S32(j) == 0 {
-                    r.set_U32(j, 0);
-                }
+        for j in 0..2usize {
+            if op2.S32(j) < 0 {
+                r.set_S32(j, -(op1.S32(j) as i64) as i32);
+            } else if op2.S32(j) == 0 {
+                r.set_U32(j, 0);
             }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -330,10 +360,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                let t = (((op1.S16(j) as i32) * (op2.S16(j) as i32)) >> 14) + 1;
-                r.set_S16(j, (t >> 1) as i16);
-            }
+        for j in 0..4usize {
+            let t = (((op1.S16(j) as i32) * (op2.S16(j) as i32)) >> 14) + 1;
+            r.set_S16(j, (t >> 1) as i16);
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -346,13 +376,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..8usize {
-                r.set_Sbyte(j, if op2.Sbyte(j) < 0 {
+        for j in 0..8usize {
+            r.set_Sbyte(
+                j,
+                if op2.Sbyte(j) < 0 {
                     -(op2.Sbyte(j) as i16) as i8
                 } else {
                     op2.Sbyte(j)
-                });
-            }
+                },
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -365,13 +398,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_S16(j, if op2.S16(j) < 0 {
+        for j in 0..4usize {
+            r.set_S16(
+                j,
+                if op2.S16(j) < 0 {
                     -(op2.S16(j) as i32) as i16
                 } else {
                     op2.S16(j)
-                });
-            }
+                },
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -384,13 +420,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..2usize {
-                r.set_S32(j, if op2.S32(j) < 0 {
+        for j in 0..2usize {
+            r.set_S32(
+                j,
+                if op2.S32(j) < 0 {
                     -(op2.S32(j) as i64) as i32
                 } else {
                     op2.S32(j)
-                });
-            }
+                },
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -407,11 +446,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let r = if shift == 0 {
             op2
         } else if shift < 64 {
-                BxPackedRegister { bytes: ((op2.U64() >> shift) | (op1.U64() << (64 - shift))).to_le_bytes() }
+            BxPackedRegister {
+                bytes: ((op2.U64() >> shift) | (op1.U64() << (64 - shift))).to_le_bytes(),
+            }
         } else if shift == 64 {
             op1
         } else if shift < 128 {
-                BxPackedRegister { bytes: (op1.U64() >> (shift - 64)).to_le_bytes() }
+            BxPackedRegister {
+                bytes: (op1.U64() >> (shift - 64)).to_le_bytes(),
+            }
         } else {
             BxPackedRegister { bytes: [0; 8] }
         };
@@ -432,14 +475,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_Ubyte(7, op2.Ubyte(3));
-            r.set_Ubyte(6, op1.Ubyte(3));
-            r.set_Ubyte(5, op2.Ubyte(2));
-            r.set_Ubyte(4, op1.Ubyte(2));
-            r.set_Ubyte(3, op2.Ubyte(1));
-            r.set_Ubyte(2, op1.Ubyte(1));
-            r.set_Ubyte(1, op2.Ubyte(0));
-            r.set_Ubyte(0, op1.Ubyte(0));
+        r.set_Ubyte(7, op2.Ubyte(3));
+        r.set_Ubyte(6, op1.Ubyte(3));
+        r.set_Ubyte(5, op2.Ubyte(2));
+        r.set_Ubyte(4, op1.Ubyte(2));
+        r.set_Ubyte(3, op2.Ubyte(1));
+        r.set_Ubyte(2, op1.Ubyte(1));
+        r.set_Ubyte(1, op2.Ubyte(0));
+        r.set_Ubyte(0, op1.Ubyte(0));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -453,10 +496,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_U16(3, op2.U16(1));
-            r.set_U16(2, op1.U16(1));
-            r.set_U16(1, op2.U16(0));
-            r.set_U16(0, op1.U16(0));
+        r.set_U16(3, op2.U16(1));
+        r.set_U16(2, op1.U16(1));
+        r.set_U16(1, op2.U16(0));
+        r.set_U16(0, op1.U16(0));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -470,8 +513,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_U32(1, op2.U32(0));
-            r.set_U32(0, op1.U32(0));
+        r.set_U32(1, op2.U32(0));
+        r.set_U32(0, op1.U32(0));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -489,14 +532,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_Sbyte(0, saturate_word_s_to_byte_s(op1.S16(0)));
-            r.set_Sbyte(1, saturate_word_s_to_byte_s(op1.S16(1)));
-            r.set_Sbyte(2, saturate_word_s_to_byte_s(op1.S16(2)));
-            r.set_Sbyte(3, saturate_word_s_to_byte_s(op1.S16(3)));
-            r.set_Sbyte(4, saturate_word_s_to_byte_s(op2.S16(0)));
-            r.set_Sbyte(5, saturate_word_s_to_byte_s(op2.S16(1)));
-            r.set_Sbyte(6, saturate_word_s_to_byte_s(op2.S16(2)));
-            r.set_Sbyte(7, saturate_word_s_to_byte_s(op2.S16(3)));
+        r.set_Sbyte(0, saturate_word_s_to_byte_s(op1.S16(0)));
+        r.set_Sbyte(1, saturate_word_s_to_byte_s(op1.S16(1)));
+        r.set_Sbyte(2, saturate_word_s_to_byte_s(op1.S16(2)));
+        r.set_Sbyte(3, saturate_word_s_to_byte_s(op1.S16(3)));
+        r.set_Sbyte(4, saturate_word_s_to_byte_s(op2.S16(0)));
+        r.set_Sbyte(5, saturate_word_s_to_byte_s(op2.S16(1)));
+        r.set_Sbyte(6, saturate_word_s_to_byte_s(op2.S16(2)));
+        r.set_Sbyte(7, saturate_word_s_to_byte_s(op2.S16(3)));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -510,9 +553,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..8usize {
-                r.set_Ubyte(j, if op1.Sbyte(j) > op2.Sbyte(j) { 0xff } else { 0 });
-            }
+        for j in 0..8usize {
+            r.set_Ubyte(j, if op1.Sbyte(j) > op2.Sbyte(j) { 0xff } else { 0 });
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -526,9 +569,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_U16(j, if op1.S16(j) > op2.S16(j) { 0xffff } else { 0 });
-            }
+        for j in 0..4usize {
+            r.set_U16(j, if op1.S16(j) > op2.S16(j) { 0xffff } else { 0 });
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -542,13 +585,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..2usize {
-                r.set_U32(j, if op1.S32(j) > op2.S32(j) {
+        for j in 0..2usize {
+            r.set_U32(
+                j,
+                if op1.S32(j) > op2.S32(j) {
                     0xffffffff
                 } else {
                     0
-                });
-            }
+                },
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -562,14 +608,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_Ubyte(0, saturate_word_s_to_byte_u(op1.S16(0)));
-            r.set_Ubyte(1, saturate_word_s_to_byte_u(op1.S16(1)));
-            r.set_Ubyte(2, saturate_word_s_to_byte_u(op1.S16(2)));
-            r.set_Ubyte(3, saturate_word_s_to_byte_u(op1.S16(3)));
-            r.set_Ubyte(4, saturate_word_s_to_byte_u(op2.S16(0)));
-            r.set_Ubyte(5, saturate_word_s_to_byte_u(op2.S16(1)));
-            r.set_Ubyte(6, saturate_word_s_to_byte_u(op2.S16(2)));
-            r.set_Ubyte(7, saturate_word_s_to_byte_u(op2.S16(3)));
+        r.set_Ubyte(0, saturate_word_s_to_byte_u(op1.S16(0)));
+        r.set_Ubyte(1, saturate_word_s_to_byte_u(op1.S16(1)));
+        r.set_Ubyte(2, saturate_word_s_to_byte_u(op1.S16(2)));
+        r.set_Ubyte(3, saturate_word_s_to_byte_u(op1.S16(3)));
+        r.set_Ubyte(4, saturate_word_s_to_byte_u(op2.S16(0)));
+        r.set_Ubyte(5, saturate_word_s_to_byte_u(op2.S16(1)));
+        r.set_Ubyte(6, saturate_word_s_to_byte_u(op2.S16(2)));
+        r.set_Ubyte(7, saturate_word_s_to_byte_u(op2.S16(3)));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -583,14 +629,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_Ubyte(0, op1.Ubyte(4));
-            r.set_Ubyte(1, op2.Ubyte(4));
-            r.set_Ubyte(2, op1.Ubyte(5));
-            r.set_Ubyte(3, op2.Ubyte(5));
-            r.set_Ubyte(4, op1.Ubyte(6));
-            r.set_Ubyte(5, op2.Ubyte(6));
-            r.set_Ubyte(6, op1.Ubyte(7));
-            r.set_Ubyte(7, op2.Ubyte(7));
+        r.set_Ubyte(0, op1.Ubyte(4));
+        r.set_Ubyte(1, op2.Ubyte(4));
+        r.set_Ubyte(2, op1.Ubyte(5));
+        r.set_Ubyte(3, op2.Ubyte(5));
+        r.set_Ubyte(4, op1.Ubyte(6));
+        r.set_Ubyte(5, op2.Ubyte(6));
+        r.set_Ubyte(6, op1.Ubyte(7));
+        r.set_Ubyte(7, op2.Ubyte(7));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -604,10 +650,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_U16(0, op1.U16(2));
-            r.set_U16(1, op2.U16(2));
-            r.set_U16(2, op1.U16(3));
-            r.set_U16(3, op2.U16(3));
+        r.set_U16(0, op1.U16(2));
+        r.set_U16(1, op2.U16(2));
+        r.set_U16(2, op1.U16(3));
+        r.set_U16(3, op2.U16(3));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -621,8 +667,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_U32(0, op1.U32(1));
-            r.set_U32(1, op2.U32(1));
+        r.set_U32(0, op1.U32(1));
+        r.set_U32(1, op2.U32(1));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -636,10 +682,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_S16(0, saturate_dword_s_to_word_s(op1.S32(0)));
-            r.set_S16(1, saturate_dword_s_to_word_s(op1.S32(1)));
-            r.set_S16(2, saturate_dword_s_to_word_s(op2.S32(0)));
-            r.set_S16(3, saturate_dword_s_to_word_s(op2.S32(1)));
+        r.set_S16(0, saturate_dword_s_to_word_s(op1.S32(0)));
+        r.set_S16(1, saturate_dword_s_to_word_s(op1.S32(1)));
+        r.set_S16(2, saturate_dword_s_to_word_s(op2.S32(0)));
+        r.set_S16(3, saturate_dword_s_to_word_s(op2.S32(1)));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -655,7 +701,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
         let val = self.get_gpr32(instr.src1() as usize) as u64;
-        self.write_mmx_reg(instr.dst(), BxPackedRegister { bytes: (val).to_le_bytes() });
+        self.write_mmx_reg(
+            instr.dst(),
+            BxPackedRegister {
+                bytes: (val).to_le_bytes(),
+            },
+        );
         Ok(())
     }
 
@@ -667,7 +718,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eaddr = self.resolve_addr(instr);
         let val = self.v_read_dword(seg, eaddr)? as u64;
         self.prepare_fpu2mmx();
-        self.write_mmx_reg(instr.dst(), BxPackedRegister { bytes: (val).to_le_bytes() });
+        self.write_mmx_reg(
+            instr.dst(),
+            BxPackedRegister {
+                bytes: (val).to_le_bytes(),
+            },
+        );
         Ok(())
     }
 
@@ -677,7 +733,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
         let val = self.get_gpr64(instr.src1() as usize);
-        self.write_mmx_reg(instr.dst(), BxPackedRegister { bytes: (val).to_le_bytes() });
+        self.write_mmx_reg(
+            instr.dst(),
+            BxPackedRegister {
+                bytes: (val).to_le_bytes(),
+            },
+        );
         Ok(())
     }
 
@@ -689,7 +750,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eaddr = self.resolve_addr(instr);
         let val = self.v_read_qword(seg, eaddr)?;
         self.prepare_fpu2mmx();
-        self.write_mmx_reg(instr.dst(), BxPackedRegister { bytes: (val).to_le_bytes() });
+        self.write_mmx_reg(
+            instr.dst(),
+            BxPackedRegister {
+                bytes: (val).to_le_bytes(),
+            },
+        );
         Ok(())
     }
 
@@ -711,7 +777,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let eaddr = self.resolve_addr(instr);
         let val = self.v_read_qword(seg, eaddr)?;
         self.prepare_fpu2mmx();
-        self.write_mmx_reg(instr.dst(), BxPackedRegister { bytes: (val).to_le_bytes() });
+        self.write_mmx_reg(
+            instr.dst(),
+            BxPackedRegister {
+                bytes: (val).to_le_bytes(),
+            },
+        );
         Ok(())
     }
 
@@ -724,10 +795,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let order = instr.ib();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            r.set_U16(0, op.U16((order & 3) as usize));
-            r.set_U16(1, op.U16(((order >> 2) & 3) as usize));
-            r.set_U16(2, op.U16(((order >> 4) & 3) as usize));
-            r.set_U16(3, op.U16(((order >> 6) & 3) as usize));
+        r.set_U16(0, op.U16((order & 3) as usize));
+        r.set_U16(1, op.U16(((order >> 2) & 3) as usize));
+        r.set_U16(2, op.U16(((order >> 4) & 3) as usize));
+        r.set_U16(3, op.U16(((order >> 6) & 3) as usize));
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -741,13 +812,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..8usize {
-                r.set_Ubyte(j, if op1.Ubyte(j) == op2.Ubyte(j) {
+        for j in 0..8usize {
+            r.set_Ubyte(
+                j,
+                if op1.Ubyte(j) == op2.Ubyte(j) {
                     0xff
                 } else {
                     0
-                });
-            }
+                },
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -761,9 +835,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_U16(j, if op1.U16(j) == op2.U16(j) { 0xffff } else { 0 });
-            }
+        for j in 0..4usize {
+            r.set_U16(j, if op1.U16(j) == op2.U16(j) { 0xffff } else { 0 });
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -777,13 +851,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..2usize {
-                r.set_U32(j, if op1.U32(j) == op2.U32(j) {
+        for j in 0..2usize {
+            r.set_U32(
+                j,
+                if op1.U32(j) == op2.U32(j) {
                     0xffffffff
                 } else {
                     0
-                });
-            }
+                },
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -905,10 +982,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             op1 = BxPackedRegister { bytes: [0; 8] };
         } else {
             let shift = count as u16;
-                op1.set_U16(0, op1.U16(0) >> shift);
-                op1.set_U16(1, op1.U16(1) >> shift);
-                op1.set_U16(2, op1.U16(2) >> shift);
-                op1.set_U16(3, op1.U16(3) >> shift);
+            op1.set_U16(0, op1.U16(0) >> shift);
+            op1.set_U16(1, op1.U16(1) >> shift);
+            op1.set_U16(2, op1.U16(2) >> shift);
+            op1.set_U16(3, op1.U16(3) >> shift);
         }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
@@ -927,8 +1004,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             op1 = BxPackedRegister { bytes: [0; 8] };
         } else {
             let shift = count as u32;
-                op1.set_U32(0, op1.U32(0) >> shift);
-                op1.set_U32(1, op1.U32(1) >> shift);
+            op1.set_U32(0, op1.U32(0) >> shift);
+            op1.set_U32(1, op1.U32(1) >> shift);
         }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
@@ -946,7 +1023,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if count > 63 {
             op1 = BxPackedRegister { bytes: [0; 8] };
         } else {
-                op1.set_U64(op1.U64() >> count);
+            op1.set_U64(op1.U64() >> count);
         }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
@@ -959,7 +1036,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.read_mmx_reg(instr.dst());
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
-        let r = BxPackedRegister { bytes: (op1.U64().wrapping_add(op2.U64())).to_le_bytes() };
+        let r = BxPackedRegister {
+            bytes: (op1.U64().wrapping_add(op2.U64())).to_le_bytes(),
+        };
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -973,9 +1052,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_U16(j, (op1.U16(j) as u32).wrapping_mul(op2.U16(j) as u32) as u16);
-            }
+        for j in 0..4usize {
+            r.set_U16(
+                j,
+                (op1.U16(j) as u32).wrapping_mul(op2.U16(j) as u32) as u16,
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -987,11 +1069,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
         let op = self.read_mmx_reg(instr.src1());
         let mut mask = 0u32;
-            for j in 0..8usize {
-                if op.Ubyte(j) & 0x80 != 0 {
-                    mask |= 1 << j;
-                }
+        for j in 0..8usize {
+            if op.Ubyte(j) & 0x80 != 0 {
+                mask |= 1 << j;
             }
+        }
         self.set_gpr32(instr.dst() as usize, mask);
         Ok(())
     }
@@ -1007,9 +1089,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..8usize {
-                r.set_Ubyte(j, op1.Ubyte(j).saturating_sub(op2.Ubyte(j)));
-            }
+        for j in 0..8usize {
+            r.set_Ubyte(j, op1.Ubyte(j).saturating_sub(op2.Ubyte(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1021,9 +1103,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_U16(j, op1.U16(j).saturating_sub(op2.U16(j)));
-            }
+        for j in 0..4usize {
+            r.set_U16(j, op1.U16(j).saturating_sub(op2.U16(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1035,9 +1117,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..8usize {
-                r.set_Ubyte(j, op1.Ubyte(j).min(op2.Ubyte(j)));
-            }
+        for j in 0..8usize {
+            r.set_Ubyte(j, op1.Ubyte(j).min(op2.Ubyte(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1050,7 +1132,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
         self.write_mmx_reg(
             instr.dst(),
-            BxPackedRegister { bytes: (op1.U64() & op2.U64()).to_le_bytes() },
+            BxPackedRegister {
+                bytes: (op1.U64() & op2.U64()).to_le_bytes(),
+            },
         );
         Ok(())
     }
@@ -1062,9 +1146,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..8usize {
-                r.set_Ubyte(j, op1.Ubyte(j).saturating_add(op2.Ubyte(j)));
-            }
+        for j in 0..8usize {
+            r.set_Ubyte(j, op1.Ubyte(j).saturating_add(op2.Ubyte(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1076,9 +1160,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_U16(j, op1.U16(j).saturating_add(op2.U16(j)));
-            }
+        for j in 0..4usize {
+            r.set_U16(j, op1.U16(j).saturating_add(op2.U16(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1090,9 +1174,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..8usize {
-                r.set_Ubyte(j, op1.Ubyte(j).max(op2.Ubyte(j)));
-            }
+        for j in 0..8usize {
+            r.set_Ubyte(j, op1.Ubyte(j).max(op2.Ubyte(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1105,7 +1189,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
         self.write_mmx_reg(
             instr.dst(),
-            BxPackedRegister { bytes: (!op1.U64() & op2.U64()).to_le_bytes() },
+            BxPackedRegister {
+                bytes: (!op1.U64() & op2.U64()).to_le_bytes(),
+            },
         );
         Ok(())
     }
@@ -1121,9 +1207,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..8usize {
-                r.set_Ubyte(j, ((op1.Ubyte(j) as u16 + op2.Ubyte(j) as u16 + 1) >> 1) as u8);
-            }
+        for j in 0..8usize {
+            r.set_Ubyte(
+                j,
+                ((op1.Ubyte(j) as u16 + op2.Ubyte(j) as u16 + 1) >> 1) as u8,
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1137,13 +1226,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = op2.U64();
         if count == 0 { /* no change */
         } else if count > 15 {
-                for j in 0..4usize {
-                    op1.set_U16(j, if op1.S16(j) < 0 { 0xffff } else { 0 });
-                }
+            for j in 0..4usize {
+                op1.set_U16(j, if op1.S16(j) < 0 { 0xffff } else { 0 });
+            }
         } else {
-                for j in 0..4usize {
-                    op1.set_U16(j, (op1.S16(j) >> count as u16) as u16);
-                }
+            for j in 0..4usize {
+                op1.set_U16(j, (op1.S16(j) >> count as u16) as u16);
+            }
         }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
@@ -1158,13 +1247,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = op2.U64();
         if count == 0 { /* no change */
         } else if count > 31 {
-                for j in 0..2usize {
-                    op1.set_U32(j, if op1.S32(j) < 0 { 0xffffffff } else { 0 });
-                }
+            for j in 0..2usize {
+                op1.set_U32(j, if op1.S32(j) < 0 { 0xffffffff } else { 0 });
+            }
         } else {
-                for j in 0..2usize {
-                    op1.set_U32(j, (op1.S32(j) >> count as u32) as u32);
-                }
+            for j in 0..2usize {
+                op1.set_U32(j, (op1.S32(j) >> count as u32) as u32);
+            }
         }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
@@ -1177,9 +1266,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_U16(j, ((op1.U16(j) as u32 + op2.U16(j) as u32 + 1) >> 1) as u16);
-            }
+        for j in 0..4usize {
+            r.set_U16(j, ((op1.U16(j) as u32 + op2.U16(j) as u32 + 1) >> 1) as u16);
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1191,9 +1280,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_U16(j, ((op1.U16(j) as u32 * op2.U16(j) as u32) >> 16) as u16);
-            }
+        for j in 0..4usize {
+            r.set_U16(j, ((op1.U16(j) as u32 * op2.U16(j) as u32) >> 16) as u16);
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1205,9 +1294,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_U16(j, ((op1.S16(j) as i32 * op2.S16(j) as i32) >> 16) as u16);
-            }
+        for j in 0..4usize {
+            r.set_U16(j, ((op1.S16(j) as i32 * op2.S16(j) as i32) >> 16) as u16);
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1223,9 +1312,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..8usize {
-                r.set_Sbyte(j, saturate_word_s_to_byte_s(op1.Sbyte(j) as i16 - op2.Sbyte(j) as i16));
-            }
+        for j in 0..8usize {
+            r.set_Sbyte(
+                j,
+                saturate_word_s_to_byte_s(op1.Sbyte(j) as i16 - op2.Sbyte(j) as i16),
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1237,9 +1329,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_S16(j, saturate_dword_s_to_word_s(op1.S16(j) as i32 - op2.S16(j) as i32));
-            }
+        for j in 0..4usize {
+            r.set_S16(
+                j,
+                saturate_dword_s_to_word_s(op1.S16(j) as i32 - op2.S16(j) as i32),
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1251,9 +1346,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_S16(j, op1.S16(j).min(op2.S16(j)));
-            }
+        for j in 0..4usize {
+            r.set_S16(j, op1.S16(j).min(op2.S16(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1266,7 +1361,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
         self.write_mmx_reg(
             instr.dst(),
-            BxPackedRegister { bytes: (op1.U64() | op2.U64()).to_le_bytes() },
+            BxPackedRegister {
+                bytes: (op1.U64() | op2.U64()).to_le_bytes(),
+            },
         );
         Ok(())
     }
@@ -1278,9 +1375,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..8usize {
-                r.set_Sbyte(j, saturate_word_s_to_byte_s(op1.Sbyte(j) as i16 + op2.Sbyte(j) as i16));
-            }
+        for j in 0..8usize {
+            r.set_Sbyte(
+                j,
+                saturate_word_s_to_byte_s(op1.Sbyte(j) as i16 + op2.Sbyte(j) as i16),
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1292,9 +1392,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_S16(j, saturate_dword_s_to_word_s(op1.S16(j) as i32 + op2.S16(j) as i32));
-            }
+        for j in 0..4usize {
+            r.set_S16(
+                j,
+                saturate_dword_s_to_word_s(op1.S16(j) as i32 + op2.S16(j) as i32),
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1306,9 +1409,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_S16(j, op1.S16(j).max(op2.S16(j)));
-            }
+        for j in 0..4usize {
+            r.set_S16(j, op1.S16(j).max(op2.S16(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1321,7 +1424,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
         self.write_mmx_reg(
             instr.dst(),
-            BxPackedRegister { bytes: (op1.U64() ^ op2.U64()).to_le_bytes() },
+            BxPackedRegister {
+                bytes: (op1.U64() ^ op2.U64()).to_le_bytes(),
+            },
         );
         Ok(())
     }
@@ -1340,9 +1445,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if count > 15 {
             op1 = BxPackedRegister { bytes: [0; 8] };
         } else {
-                for j in 0..4usize {
-                    op1.set_U16(j, op1.U16(j) << count as u16);
-                }
+            for j in 0..4usize {
+                op1.set_U16(j, op1.U16(j) << count as u16);
+            }
         }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
@@ -1358,8 +1463,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if count > 31 {
             op1 = BxPackedRegister { bytes: [0; 8] };
         } else {
-                op1.set_U32(0, op1.U32(0) << count as u32);
-                op1.set_U32(1, op1.U32(1) << count as u32);
+            op1.set_U32(0, op1.U32(0) << count as u32);
+            op1.set_U32(1, op1.U32(1) << count as u32);
         }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
@@ -1375,7 +1480,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if count > 63 {
             op1 = BxPackedRegister { bytes: [0; 8] };
         } else {
-                op1.set_U64(op1.U64() << count);
+            op1.set_U64(op1.U64() << count);
         }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
@@ -1388,7 +1493,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let val = (op1.U32(0) as u64) * (op2.U32(0) as u64);
-        self.write_mmx_reg(instr.dst(), BxPackedRegister { bytes: (val).to_le_bytes() });
+        self.write_mmx_reg(
+            instr.dst(),
+            BxPackedRegister {
+                bytes: (val).to_le_bytes(),
+            },
+        );
         Ok(())
     }
 
@@ -1401,18 +1511,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            if op1.U32(0) == 0x80008000 && op2.U32(0) == 0x80008000 {
-                r.set_U32(0, 0x80000000);
-            } else {
-                r.set_S32(0, (op1.S16(0) as i32) * (op2.S16(0) as i32)
-                    + (op1.S16(1) as i32) * (op2.S16(1) as i32));
-            }
-            if op1.U32(1) == 0x80008000 && op2.U32(1) == 0x80008000 {
-                r.set_U32(1, 0x80000000);
-            } else {
-                r.set_S32(1, (op1.S16(2) as i32) * (op2.S16(2) as i32)
-                    + (op1.S16(3) as i32) * (op2.S16(3) as i32));
-            }
+        if op1.U32(0) == 0x80008000 && op2.U32(0) == 0x80008000 {
+            r.set_U32(0, 0x80000000);
+        } else {
+            r.set_S32(
+                0,
+                (op1.S16(0) as i32) * (op2.S16(0) as i32)
+                    + (op1.S16(1) as i32) * (op2.S16(1) as i32),
+            );
+        }
+        if op1.U32(1) == 0x80008000 && op2.U32(1) == 0x80008000 {
+            r.set_U32(1, 0x80000000);
+        } else {
+            r.set_S32(
+                1,
+                (op1.S16(2) as i32) * (op2.S16(2) as i32)
+                    + (op1.S16(3) as i32) * (op2.S16(3) as i32),
+            );
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1425,10 +1541,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_fpu2mmx();
 
         let mut temp = 0u16;
-            for j in 0..8usize {
-                temp += (op1.Ubyte(j) as i16 - op2.Ubyte(j) as i16).unsigned_abs();
-            }
-        self.write_mmx_reg(instr.dst(), BxPackedRegister { bytes: (temp as u64).to_le_bytes() });
+        for j in 0..8usize {
+            temp += (op1.Ubyte(j) as i16 - op2.Ubyte(j) as i16).unsigned_abs();
+        }
+        self.write_mmx_reg(
+            instr.dst(),
+            BxPackedRegister {
+                bytes: (temp as u64).to_le_bytes(),
+            },
+        );
         Ok(())
     }
 
@@ -1438,7 +1559,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
 
-        let op = self.read_mmx_reg(instr.dst());     // nnn = Pq (data source)
+        let op = self.read_mmx_reg(instr.dst()); // nnn = Pq (data source)
         let mask = self.read_mmx_reg(instr.src1()); // rm = Nq (mask)
 
         // If mask is all zero, nothing to do
@@ -1458,12 +1579,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let seg = BxSegregs::from(instr.seg());
 
         // Read-modify-write 8 bytes at [seg:rdi]
-        let mut tmp = BxPackedRegister { bytes: (self.v_read_qword(seg, rdi)?).to_le_bytes() };
-            for j in 0..8usize {
-                if mask.Ubyte(j) & 0x80 != 0 {
-                    tmp.set_Ubyte(j, op.Ubyte(j));
-                }
+        let mut tmp = BxPackedRegister {
+            bytes: (self.v_read_qword(seg, rdi)?).to_le_bytes(),
+        };
+        for j in 0..8usize {
+            if mask.Ubyte(j) & 0x80 != 0 {
+                tmp.set_Ubyte(j, op.Ubyte(j));
             }
+        }
         self.v_write_qword(seg, rdi, tmp.U64())?;
         Ok(())
     }
@@ -1479,9 +1602,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..8usize {
-                r.set_Ubyte(j, op1.Ubyte(j).wrapping_sub(op2.Ubyte(j)));
-            }
+        for j in 0..8usize {
+            r.set_Ubyte(j, op1.Ubyte(j).wrapping_sub(op2.Ubyte(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1493,9 +1616,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_U16(j, op1.U16(j).wrapping_sub(op2.U16(j)));
-            }
+        for j in 0..4usize {
+            r.set_U16(j, op1.U16(j).wrapping_sub(op2.U16(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1507,9 +1630,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..2usize {
-                r.set_U32(j, op1.U32(j).wrapping_sub(op2.U32(j)));
-            }
+        for j in 0..2usize {
+            r.set_U32(j, op1.U32(j).wrapping_sub(op2.U32(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1520,7 +1643,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.read_mmx_reg(instr.dst());
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
-        let r = BxPackedRegister { bytes: (op1.U64().wrapping_sub(op2.U64())).to_le_bytes() };
+        let r = BxPackedRegister {
+            bytes: (op1.U64().wrapping_sub(op2.U64())).to_le_bytes(),
+        };
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1532,9 +1657,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..8usize {
-                r.set_Ubyte(j, op1.Ubyte(j).wrapping_add(op2.Ubyte(j)));
-            }
+        for j in 0..8usize {
+            r.set_Ubyte(j, op1.Ubyte(j).wrapping_add(op2.Ubyte(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1546,9 +1671,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..4usize {
-                r.set_U16(j, op1.U16(j).wrapping_add(op2.U16(j)));
-            }
+        for j in 0..4usize {
+            r.set_U16(j, op1.U16(j).wrapping_add(op2.U16(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1560,9 +1685,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { bytes: [0; 8] };
-            for j in 0..2usize {
-                r.set_U32(j, op1.U32(j).wrapping_add(op2.U32(j)));
-            }
+        for j in 0..2usize {
+            r.set_U32(j, op1.U32(j).wrapping_add(op2.U32(j)));
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1581,9 +1706,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if shift > 15 {
             op = BxPackedRegister { bytes: [0; 8] };
         } else {
-                for j in 0..4usize {
-                    op.set_U16(j, op.U16(j) >> shift as u16);
-                }
+            for j in 0..4usize {
+                op.set_U16(j, op.U16(j) >> shift as u16);
+            }
         }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
@@ -1597,13 +1722,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let shift = instr.ib();
         if shift == 0 { /* no-op */
         } else if shift > 15 {
-                for j in 0..4usize {
-                    op.set_U16(j, if op.S16(j) < 0 { 0xffff } else { 0 });
-                }
+            for j in 0..4usize {
+                op.set_U16(j, if op.S16(j) < 0 { 0xffff } else { 0 });
+            }
         } else {
-                for j in 0..4usize {
-                    op.set_U16(j, (op.S16(j) >> shift as i16) as u16);
-                }
+            for j in 0..4usize {
+                op.set_U16(j, (op.S16(j) >> shift as i16) as u16);
+            }
         }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
@@ -1618,9 +1743,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if shift > 15 {
             op = BxPackedRegister { bytes: [0; 8] };
         } else {
-                for j in 0..4usize {
-                    op.set_U16(j, op.U16(j) << shift as u16);
-                }
+            for j in 0..4usize {
+                op.set_U16(j, op.U16(j) << shift as u16);
+            }
         }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
@@ -1635,8 +1760,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if shift > 31 {
             op = BxPackedRegister { bytes: [0; 8] };
         } else {
-                op.set_U32(0, op.U32(0) >> shift as u32);
-                op.set_U32(1, op.U32(1) >> shift as u32);
+            op.set_U32(0, op.U32(0) >> shift as u32);
+            op.set_U32(1, op.U32(1) >> shift as u32);
         }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
@@ -1650,13 +1775,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let shift = instr.ib();
         if shift == 0 { /* no-op */
         } else if shift > 31 {
-                for j in 0..2usize {
-                    op.set_U32(j, if op.S32(j) < 0 { 0xffffffff } else { 0 });
-                }
+            for j in 0..2usize {
+                op.set_U32(j, if op.S32(j) < 0 { 0xffffffff } else { 0 });
+            }
         } else {
-                for j in 0..2usize {
-                    op.set_U32(j, (op.S32(j) >> shift as i32) as u32);
-                }
+            for j in 0..2usize {
+                op.set_U32(j, (op.S32(j) >> shift as i32) as u32);
+            }
         }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
@@ -1671,8 +1796,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if shift > 31 {
             op = BxPackedRegister { bytes: [0; 8] };
         } else {
-                op.set_U32(0, op.U32(0) << shift as u32);
-                op.set_U32(1, op.U32(1) << shift as u32);
+            op.set_U32(0, op.U32(0) << shift as u32);
+            op.set_U32(1, op.U32(1) << shift as u32);
         }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
@@ -1687,7 +1812,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if shift > 63 {
             op = BxPackedRegister { bytes: [0; 8] };
         } else {
-                op.set_U64(op.U64() >> shift as u64);
+            op.set_U64(op.U64() >> shift as u64);
         }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
@@ -1702,7 +1827,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if shift > 63 {
             op = BxPackedRegister { bytes: [0; 8] };
         } else {
-                op.set_U64(op.U64() << shift as u64);
+            op.set_U64(op.U64() << shift as u64);
         }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
@@ -1735,7 +1860,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op = self.read_mmx_reg(instr.src1());
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-            self.v_write_qword(seg, eaddr, op.U64())?;
+        self.v_write_qword(seg, eaddr, op.U64())?;
         // prepare_fpu2mmx after write succeeds — if the write faults,
         // FPU state must not be corrupted (matches Bochs mmx.cc)
         self.prepare_fpu2mmx();

@@ -424,7 +424,6 @@ impl Default for VbeState {
     }
 }
 
-
 /// VGA controller state
 #[derive(Debug)]
 pub(crate) struct BxVgaC {
@@ -581,7 +580,6 @@ pub(crate) struct BxVgaC {
     /// Bit 5 of the value written to port 0x3C0 when flip_flop=0
     /// Bochs: s.attribute_ctrl.video_enabled
     video_enabled: bool,
-
 
     // =====================================================================
     // VBE (Bochs VGA Extension) state
@@ -798,11 +796,7 @@ impl BxVgaC {
         // Register memory handlers for VGA memory range (0xA0000-0xBFFFF)
         // This matches DEV_register_memory_handlers in vgacore.cc line 177
         let device_id = crate::memory::MemoryDeviceId::Vga(self as *mut BxVgaC);
-        mem.register_memory_handlers(
-            device_id,
-            VGA_WINDOW_GRAPHICS_BASE,
-            VGA_WINDOW_GRAPHICS_END,
-        )?;
+        mem.register_memory_handlers(device_id, VGA_WINDOW_GRAPHICS_BASE, VGA_WINDOW_GRAPHICS_END)?;
 
         tracing::debug!("VGA initialized (80x25 text mode)");
         Ok(())
@@ -840,7 +834,11 @@ impl BxVgaC {
         }
 
         // Character width: 8 or 9 dots
-        let cwidth: u32 = if (self.seq_regs[SEQ_REG_CLOCKING_MODE] & 0x01) != 0 { 8 } else { 9 };
+        let cwidth: u32 = if (self.seq_regs[SEQ_REG_CLOCKING_MODE] & 0x01) != 0 {
+            8
+        } else {
+            9
+        };
 
         // htotal from CRTC reg 0 + 5 (Bochs get_crtc_params)
         let htotal = self.crtc_regs[0x00] as u32 + 5;
@@ -870,8 +868,8 @@ impl BxVgaC {
         // Horizontal blanking
         let hbstart = self.crtc_regs[0x02] as u32;
         self.hbstart_usec = ((1_000_000.0 * hbstart as f64 * cwidth as f64) / vclock as f64) as u32;
-        let hbend_raw = (self.crtc_regs[0x03] as u32 & 0x1F)
-            + ((self.crtc_regs[0x05] as u32 & 0x80) >> 2);
+        let hbend_raw =
+            (self.crtc_regs[0x03] as u32 & 0x1F) + ((self.crtc_regs[0x05] as u32 & 0x80) >> 2);
         let hbend = hbstart + ((hbend_raw.wrapping_sub(hbstart)) & 0x3F);
         self.hbend_usec = ((1_000_000.0 * hbend as f64 * cwidth as f64) / vclock as f64) as u32;
 
@@ -964,8 +962,8 @@ impl BxVgaC {
         // Attribute controller for mode 3 (standard 16-color palette + mode)
         // Palette registers 0-15: standard EGA/VGA color mapping
         let palette: [u8; 16] = [
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
-            0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D,
+            0x3E, 0x3F,
         ];
         self.attr_regs[..16].copy_from_slice(&palette);
         self.attr_regs[0x10] = 0x0C; // Mode Control: blink enable + line graphics
@@ -1140,9 +1138,7 @@ impl BxVgaC {
             // EGA compatibility ports - return 0
             0x3CA | 0x3CB | 0x3CD => 0x00,
 
-            _ => {
-                0xFF
-            }
+            _ => 0xFF,
         }
     }
 
@@ -1562,8 +1558,16 @@ impl BxVgaC {
 
         let line_compare = {
             let lc_low = self.crtc_regs[CRTC_LINE_COMPARE] as u16;
-            let lc_bit8 = if self.crtc_regs[CRTC_OVERFLOW] & 0x10 != 0 { 0x100u16 } else { 0 };
-            let lc_bit9 = if self.crtc_regs[CRTC_MAX_SCAN_LINE] & 0x40 != 0 { 0x200u16 } else { 0 };
+            let lc_bit8 = if self.crtc_regs[CRTC_OVERFLOW] & 0x10 != 0 {
+                0x100u16
+            } else {
+                0
+            };
+            let lc_bit9 = if self.crtc_regs[CRTC_MAX_SCAN_LINE] & 0x40 != 0 {
+                0x200u16
+            } else {
+                0
+            };
             lc_low | lc_bit8 | lc_bit9
         };
         let h_panning = self.attr_regs[ATTR_REG_HORIZ_PIXEL_PAN] & ATTR_HPANNING_MASK;
@@ -1710,7 +1714,6 @@ impl BxVgaC {
     }
 }
 
-
 /// VGA memory read handler (called from memory system)
 /// Based on bx_vgacore_c::mem_read / mem_read_handler in vgacore.cc
 /// Implements read mode 0 (return selected plane) and read mode 1 (color compare).
@@ -1744,22 +1747,33 @@ fn vga_mem_read_byte(vga: &mut BxVgaC, addr: BxPhyAddress) -> u8 {
     let mut read_map_select = vga.graphics_regs[GFX_REG_READ_MAP_SELECT] & 0x03;
 
     // Window gating: compute offset from address (Bochs vgacore.cc)
-    let memory_mapping = (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
+    let memory_mapping =
+        (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
     let offset = if addr >= 0xA0000 {
         match memory_mapping {
-            1 => { // 0xA0000..0xAFFFF
-                if addr > 0xAFFFF { return 0xFF; }
+            1 => {
+                // 0xA0000..0xAFFFF
+                if addr > 0xAFFFF {
+                    return 0xFF;
+                }
                 (addr & 0xFFFF) as u32
             }
-            2 => { // 0xB0000..0xB7FFF
-                if !(0xB0000..=0xB7FFF).contains(&addr) { return 0xFF; }
+            2 => {
+                // 0xB0000..0xB7FFF
+                if !(0xB0000..=0xB7FFF).contains(&addr) {
+                    return 0xFF;
+                }
                 (addr & 0x7FFF) as u32
             }
-            3 => { // 0xB8000..0xBFFFF
-                if addr < 0xB8000 { return 0xFF; }
+            3 => {
+                // 0xB8000..0xBFFFF
+                if addr < 0xB8000 {
+                    return 0xFF;
+                }
                 (addr & 0x7FFF) as u32
             }
-            _ => { // 0xA0000..0xBFFFF
+            _ => {
+                // 0xA0000..0xBFFFF
                 (addr & 0x1FFFF) as u32
             }
         }
@@ -1835,23 +1849,36 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
     let graphics_alpha = (vga.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
 
     // Window gating: compute offset (Bochs vgacore.cc)
-    let memory_mapping = (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
+    let memory_mapping =
+        (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
     let offset = if addr >= 0xA0000 {
         match memory_mapping {
-            1 => { // 0xA0000..0xAFFFF
-                if !(0xA0000..=0xAFFFF).contains(&addr) { return; }
+            1 => {
+                // 0xA0000..0xAFFFF
+                if !(0xA0000..=0xAFFFF).contains(&addr) {
+                    return;
+                }
                 (addr & 0xFFFF) as u32
             }
-            2 => { // 0xB0000..0xB7FFF
-                if !(0xB0000..=0xB7FFF).contains(&addr) { return; }
+            2 => {
+                // 0xB0000..0xB7FFF
+                if !(0xB0000..=0xB7FFF).contains(&addr) {
+                    return;
+                }
                 (addr & 0x7FFF) as u32
             }
-            3 => { // 0xB8000..0xBFFFF
-                if !(0xB8000..=0xBFFFF).contains(&addr) { return; }
+            3 => {
+                // 0xB8000..0xBFFFF
+                if !(0xB8000..=0xBFFFF).contains(&addr) {
+                    return;
+                }
                 (addr & 0x7FFF) as u32
             }
-            _ => { // 0xA0000..0xBFFFF
-                if !(0xA0000..=0xBFFFF).contains(&addr) { return; }
+            _ => {
+                // 0xA0000..0xBFFFF
+                if !(0xA0000..=0xBFFFF).contains(&addr) {
+                    return;
+                }
                 (addr & 0x1FFFF) as u32
             }
         }
@@ -1901,61 +1928,161 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
             new_val[3] = vga.latch[3] & !bitmask;
 
             match raster_op {
-                0 => { // Replace
+                0 => {
+                    // Replace
                     new_val[0] |= if (enable_set_reset & 1) != 0 {
-                        if (set_reset & 1) != 0 { bitmask } else { 0 }
-                    } else { value & bitmask };
+                        if (set_reset & 1) != 0 {
+                            bitmask
+                        } else {
+                            0
+                        }
+                    } else {
+                        value & bitmask
+                    };
                     new_val[1] |= if (enable_set_reset & 2) != 0 {
-                        if (set_reset & 2) != 0 { bitmask } else { 0 }
-                    } else { value & bitmask };
+                        if (set_reset & 2) != 0 {
+                            bitmask
+                        } else {
+                            0
+                        }
+                    } else {
+                        value & bitmask
+                    };
                     new_val[2] |= if (enable_set_reset & 4) != 0 {
-                        if (set_reset & 4) != 0 { bitmask } else { 0 }
-                    } else { value & bitmask };
+                        if (set_reset & 4) != 0 {
+                            bitmask
+                        } else {
+                            0
+                        }
+                    } else {
+                        value & bitmask
+                    };
                     new_val[3] |= if (enable_set_reset & 8) != 0 {
-                        if (set_reset & 8) != 0 { bitmask } else { 0 }
-                    } else { value & bitmask };
+                        if (set_reset & 8) != 0 {
+                            bitmask
+                        } else {
+                            0
+                        }
+                    } else {
+                        value & bitmask
+                    };
                 }
-                1 => { // AND
+                1 => {
+                    // AND
                     new_val[0] |= if (enable_set_reset & 1) != 0 {
-                        if (set_reset & 1) != 0 { vga.latch[0] & bitmask } else { 0 }
-                    } else { (value & vga.latch[0]) & bitmask };
+                        if (set_reset & 1) != 0 {
+                            vga.latch[0] & bitmask
+                        } else {
+                            0
+                        }
+                    } else {
+                        (value & vga.latch[0]) & bitmask
+                    };
                     new_val[1] |= if (enable_set_reset & 2) != 0 {
-                        if (set_reset & 2) != 0 { vga.latch[1] & bitmask } else { 0 }
-                    } else { (value & vga.latch[1]) & bitmask };
+                        if (set_reset & 2) != 0 {
+                            vga.latch[1] & bitmask
+                        } else {
+                            0
+                        }
+                    } else {
+                        (value & vga.latch[1]) & bitmask
+                    };
                     new_val[2] |= if (enable_set_reset & 4) != 0 {
-                        if (set_reset & 4) != 0 { vga.latch[2] & bitmask } else { 0 }
-                    } else { (value & vga.latch[2]) & bitmask };
+                        if (set_reset & 4) != 0 {
+                            vga.latch[2] & bitmask
+                        } else {
+                            0
+                        }
+                    } else {
+                        (value & vga.latch[2]) & bitmask
+                    };
                     new_val[3] |= if (enable_set_reset & 8) != 0 {
-                        if (set_reset & 8) != 0 { vga.latch[3] & bitmask } else { 0 }
-                    } else { (value & vga.latch[3]) & bitmask };
+                        if (set_reset & 8) != 0 {
+                            vga.latch[3] & bitmask
+                        } else {
+                            0
+                        }
+                    } else {
+                        (value & vga.latch[3]) & bitmask
+                    };
                 }
-                2 => { // OR
+                2 => {
+                    // OR
                     new_val[0] |= if (enable_set_reset & 1) != 0 {
-                        if (set_reset & 1) != 0 { bitmask } else { vga.latch[0] & bitmask }
-                    } else { (value | vga.latch[0]) & bitmask };
+                        if (set_reset & 1) != 0 {
+                            bitmask
+                        } else {
+                            vga.latch[0] & bitmask
+                        }
+                    } else {
+                        (value | vga.latch[0]) & bitmask
+                    };
                     new_val[1] |= if (enable_set_reset & 2) != 0 {
-                        if (set_reset & 2) != 0 { bitmask } else { vga.latch[1] & bitmask }
-                    } else { (value | vga.latch[1]) & bitmask };
+                        if (set_reset & 2) != 0 {
+                            bitmask
+                        } else {
+                            vga.latch[1] & bitmask
+                        }
+                    } else {
+                        (value | vga.latch[1]) & bitmask
+                    };
                     new_val[2] |= if (enable_set_reset & 4) != 0 {
-                        if (set_reset & 4) != 0 { bitmask } else { vga.latch[2] & bitmask }
-                    } else { (value | vga.latch[2]) & bitmask };
+                        if (set_reset & 4) != 0 {
+                            bitmask
+                        } else {
+                            vga.latch[2] & bitmask
+                        }
+                    } else {
+                        (value | vga.latch[2]) & bitmask
+                    };
                     new_val[3] |= if (enable_set_reset & 8) != 0 {
-                        if (set_reset & 8) != 0 { bitmask } else { vga.latch[3] & bitmask }
-                    } else { (value | vga.latch[3]) & bitmask };
+                        if (set_reset & 8) != 0 {
+                            bitmask
+                        } else {
+                            vga.latch[3] & bitmask
+                        }
+                    } else {
+                        (value | vga.latch[3]) & bitmask
+                    };
                 }
-                _ => { // XOR
+                _ => {
+                    // XOR
                     new_val[0] |= if (enable_set_reset & 1) != 0 {
-                        if (set_reset & 1) != 0 { !vga.latch[0] & bitmask } else { vga.latch[0] & bitmask }
-                    } else { (value ^ vga.latch[0]) & bitmask };
+                        if (set_reset & 1) != 0 {
+                            !vga.latch[0] & bitmask
+                        } else {
+                            vga.latch[0] & bitmask
+                        }
+                    } else {
+                        (value ^ vga.latch[0]) & bitmask
+                    };
                     new_val[1] |= if (enable_set_reset & 2) != 0 {
-                        if (set_reset & 2) != 0 { !vga.latch[1] & bitmask } else { vga.latch[1] & bitmask }
-                    } else { (value ^ vga.latch[1]) & bitmask };
+                        if (set_reset & 2) != 0 {
+                            !vga.latch[1] & bitmask
+                        } else {
+                            vga.latch[1] & bitmask
+                        }
+                    } else {
+                        (value ^ vga.latch[1]) & bitmask
+                    };
                     new_val[2] |= if (enable_set_reset & 4) != 0 {
-                        if (set_reset & 4) != 0 { !vga.latch[2] & bitmask } else { vga.latch[2] & bitmask }
-                    } else { (value ^ vga.latch[2]) & bitmask };
+                        if (set_reset & 4) != 0 {
+                            !vga.latch[2] & bitmask
+                        } else {
+                            vga.latch[2] & bitmask
+                        }
+                    } else {
+                        (value ^ vga.latch[2]) & bitmask
+                    };
                     new_val[3] |= if (enable_set_reset & 8) != 0 {
-                        if (set_reset & 8) != 0 { !vga.latch[3] & bitmask } else { vga.latch[3] & bitmask }
-                    } else { (value ^ vga.latch[3]) & bitmask };
+                        if (set_reset & 8) != 0 {
+                            !vga.latch[3] & bitmask
+                        } else {
+                            vga.latch[3] & bitmask
+                        }
+                    } else {
+                        (value ^ vga.latch[3]) & bitmask
+                    };
                 }
             }
         }
@@ -1977,29 +2104,81 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
             new_val[3] = vga.latch[3] & !bitmask;
 
             match raster_op {
-                0 => { // Write
+                0 => {
+                    // Write
                     new_val[0] |= if (value & 1) != 0 { bitmask } else { 0 };
                     new_val[1] |= if (value & 2) != 0 { bitmask } else { 0 };
                     new_val[2] |= if (value & 4) != 0 { bitmask } else { 0 };
                     new_val[3] |= if (value & 8) != 0 { bitmask } else { 0 };
                 }
-                1 => { // AND
-                    new_val[0] |= if (value & 1) != 0 { vga.latch[0] & bitmask } else { 0 };
-                    new_val[1] |= if (value & 2) != 0 { vga.latch[1] & bitmask } else { 0 };
-                    new_val[2] |= if (value & 4) != 0 { vga.latch[2] & bitmask } else { 0 };
-                    new_val[3] |= if (value & 8) != 0 { vga.latch[3] & bitmask } else { 0 };
+                1 => {
+                    // AND
+                    new_val[0] |= if (value & 1) != 0 {
+                        vga.latch[0] & bitmask
+                    } else {
+                        0
+                    };
+                    new_val[1] |= if (value & 2) != 0 {
+                        vga.latch[1] & bitmask
+                    } else {
+                        0
+                    };
+                    new_val[2] |= if (value & 4) != 0 {
+                        vga.latch[2] & bitmask
+                    } else {
+                        0
+                    };
+                    new_val[3] |= if (value & 8) != 0 {
+                        vga.latch[3] & bitmask
+                    } else {
+                        0
+                    };
                 }
-                2 => { // OR
-                    new_val[0] |= if (value & 1) != 0 { bitmask } else { vga.latch[0] & bitmask };
-                    new_val[1] |= if (value & 2) != 0 { bitmask } else { vga.latch[1] & bitmask };
-                    new_val[2] |= if (value & 4) != 0 { bitmask } else { vga.latch[2] & bitmask };
-                    new_val[3] |= if (value & 8) != 0 { bitmask } else { vga.latch[3] & bitmask };
+                2 => {
+                    // OR
+                    new_val[0] |= if (value & 1) != 0 {
+                        bitmask
+                    } else {
+                        vga.latch[0] & bitmask
+                    };
+                    new_val[1] |= if (value & 2) != 0 {
+                        bitmask
+                    } else {
+                        vga.latch[1] & bitmask
+                    };
+                    new_val[2] |= if (value & 4) != 0 {
+                        bitmask
+                    } else {
+                        vga.latch[2] & bitmask
+                    };
+                    new_val[3] |= if (value & 8) != 0 {
+                        bitmask
+                    } else {
+                        vga.latch[3] & bitmask
+                    };
                 }
-                _ => { // XOR
-                    new_val[0] |= if (value & 1) != 0 { !vga.latch[0] & bitmask } else { vga.latch[0] & bitmask };
-                    new_val[1] |= if (value & 2) != 0 { !vga.latch[1] & bitmask } else { vga.latch[1] & bitmask };
-                    new_val[2] |= if (value & 4) != 0 { !vga.latch[2] & bitmask } else { vga.latch[2] & bitmask };
-                    new_val[3] |= if (value & 8) != 0 { !vga.latch[3] & bitmask } else { vga.latch[3] & bitmask };
+                _ => {
+                    // XOR
+                    new_val[0] |= if (value & 1) != 0 {
+                        !vga.latch[0] & bitmask
+                    } else {
+                        vga.latch[0] & bitmask
+                    };
+                    new_val[1] |= if (value & 2) != 0 {
+                        !vga.latch[1] & bitmask
+                    } else {
+                        vga.latch[1] & bitmask
+                    };
+                    new_val[2] |= if (value & 4) != 0 {
+                        !vga.latch[2] & bitmask
+                    } else {
+                        vga.latch[2] & bitmask
+                    };
+                    new_val[3] |= if (value & 8) != 0 {
+                        !vga.latch[3] & bitmask
+                    } else {
+                        vga.latch[3] & bitmask
+                    };
                 }
             }
         }
@@ -2026,29 +2205,97 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
             let masked_value = value & bitmask;
 
             match raster_op {
-                0 => { // Write
-                    new_val[0] |= if (set_reset & 1) != 0 { masked_value } else { 0 };
-                    new_val[1] |= if (set_reset & 2) != 0 { masked_value } else { 0 };
-                    new_val[2] |= if (set_reset & 4) != 0 { masked_value } else { 0 };
-                    new_val[3] |= if (set_reset & 8) != 0 { masked_value } else { 0 };
+                0 => {
+                    // Write
+                    new_val[0] |= if (set_reset & 1) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    };
+                    new_val[1] |= if (set_reset & 2) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    };
+                    new_val[2] |= if (set_reset & 4) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    };
+                    new_val[3] |= if (set_reset & 8) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    };
                 }
-                1 => { // AND
-                    new_val[0] |= (if (set_reset & 1) != 0 { masked_value } else { 0 }) & vga.latch[0];
-                    new_val[1] |= (if (set_reset & 2) != 0 { masked_value } else { 0 }) & vga.latch[1];
-                    new_val[2] |= (if (set_reset & 4) != 0 { masked_value } else { 0 }) & vga.latch[2];
-                    new_val[3] |= (if (set_reset & 8) != 0 { masked_value } else { 0 }) & vga.latch[3];
+                1 => {
+                    // AND
+                    new_val[0] |= (if (set_reset & 1) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    }) & vga.latch[0];
+                    new_val[1] |= (if (set_reset & 2) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    }) & vga.latch[1];
+                    new_val[2] |= (if (set_reset & 4) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    }) & vga.latch[2];
+                    new_val[3] |= (if (set_reset & 8) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    }) & vga.latch[3];
                 }
-                2 => { // OR
-                    new_val[0] |= (if (set_reset & 1) != 0 { masked_value } else { 0 }) | vga.latch[0];
-                    new_val[1] |= (if (set_reset & 2) != 0 { masked_value } else { 0 }) | vga.latch[1];
-                    new_val[2] |= (if (set_reset & 4) != 0 { masked_value } else { 0 }) | vga.latch[2];
-                    new_val[3] |= (if (set_reset & 8) != 0 { masked_value } else { 0 }) | vga.latch[3];
+                2 => {
+                    // OR
+                    new_val[0] |= (if (set_reset & 1) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    }) | vga.latch[0];
+                    new_val[1] |= (if (set_reset & 2) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    }) | vga.latch[1];
+                    new_val[2] |= (if (set_reset & 4) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    }) | vga.latch[2];
+                    new_val[3] |= (if (set_reset & 8) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    }) | vga.latch[3];
                 }
-                _ => { // XOR
-                    new_val[0] |= (if (set_reset & 1) != 0 { masked_value } else { 0 }) ^ vga.latch[0];
-                    new_val[1] |= (if (set_reset & 2) != 0 { masked_value } else { 0 }) ^ vga.latch[1];
-                    new_val[2] |= (if (set_reset & 4) != 0 { masked_value } else { 0 }) ^ vga.latch[2];
-                    new_val[3] |= (if (set_reset & 8) != 0 { masked_value } else { 0 }) ^ vga.latch[3];
+                _ => {
+                    // XOR
+                    new_val[0] |= (if (set_reset & 1) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    }) ^ vga.latch[0];
+                    new_val[1] |= (if (set_reset & 2) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    }) ^ vga.latch[1];
+                    new_val[2] |= (if (set_reset & 4) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    }) ^ vga.latch[2];
+                    new_val[3] |= (if (set_reset & 8) != 0 {
+                        masked_value
+                    } else {
+                        0
+                    }) ^ vga.latch[3];
                 }
             }
         }
@@ -2129,7 +2376,11 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
                 // (plane selection already handled by map_mask)
                 if (sequ_map_mask & 0x03) != 0 {
                     // Planes 0 or 1 are text-relevant
-                    let write_val = if (sequ_map_mask & 0x01) != 0 { new_val[0] } else { new_val[1] };
+                    let write_val = if (sequ_map_mask & 0x01) != 0 {
+                        new_val[0]
+                    } else {
+                        new_val[1]
+                    };
                     if let Some(slot) = vga.text_memory.get_mut(text_offset) {
                         if *slot != write_val {
                             *slot = write_val;
@@ -2141,7 +2392,6 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
         }
     }
 }
-
 
 // =============================================================================
 // VBE MMIO handlers for BAR2 (QEMU-compatible, used by OVMF QemuVideoDxe)
@@ -2164,9 +2414,7 @@ impl BxVgaC {
         let offset = (addr & 0xFFF) as u32;
         let mut value: u32 = 0xFFFF_FFFF;
 
-        if offset >= PCI_VGA_BOCHS_OFFSET
-            && offset < PCI_VGA_BOCHS_OFFSET + PCI_VGA_BOCHS_SIZE
-        {
+        if offset >= PCI_VGA_BOCHS_OFFSET && offset < PCI_VGA_BOCHS_OFFSET + PCI_VGA_BOCHS_SIZE {
             let reg_offset = offset - PCI_VGA_BOCHS_OFFSET;
             let index = (reg_offset >> 1) as u16;
             self.vbe.curindex = index;
@@ -2264,9 +2512,7 @@ impl BxVgaC {
             }
         };
 
-        if offset >= PCI_VGA_BOCHS_OFFSET
-            && offset < PCI_VGA_BOCHS_OFFSET + PCI_VGA_BOCHS_SIZE
-        {
+        if offset >= PCI_VGA_BOCHS_OFFSET && offset < PCI_VGA_BOCHS_OFFSET + PCI_VGA_BOCHS_SIZE {
             let reg_offset = offset - PCI_VGA_BOCHS_OFFSET;
             let index = (reg_offset >> 1) as u16;
             self.vbe.curindex = index;
@@ -2310,10 +2556,17 @@ impl BxVgaC {
             }
             VBE_DISPI_INDEX_BPP => {
                 if self.vbe.enabled == 0 {
-                    let bpp = if value16 == 0 { VBE_DISPI_BPP_8 } else { value16 };
-                    if bpp == VBE_DISPI_BPP_4 || bpp == VBE_DISPI_BPP_8
-                        || bpp == VBE_DISPI_BPP_15 || bpp == VBE_DISPI_BPP_16
-                        || bpp == VBE_DISPI_BPP_24 || bpp == VBE_DISPI_BPP_32
+                    let bpp = if value16 == 0 {
+                        VBE_DISPI_BPP_8
+                    } else {
+                        value16
+                    };
+                    if bpp == VBE_DISPI_BPP_4
+                        || bpp == VBE_DISPI_BPP_8
+                        || bpp == VBE_DISPI_BPP_15
+                        || bpp == VBE_DISPI_BPP_16
+                        || bpp == VBE_DISPI_BPP_24
+                        || bpp == VBE_DISPI_BPP_32
                     {
                         self.vbe.bpp = bpp;
                     }
@@ -2432,8 +2685,7 @@ impl BxVgaC {
             }
             VBE_DISPI_INDEX_X_OFFSET => {
                 self.vbe.offset_x = value16;
-                self.vbe.virtual_start =
-                    self.vbe.offset_y as u32 * self.vbe.line_offset as u32;
+                self.vbe.virtual_start = self.vbe.offset_y as u32 * self.vbe.line_offset as u32;
                 if self.vbe.bpp != VBE_DISPI_BPP_4 {
                     self.vbe.virtual_start +=
                         self.vbe.offset_x as u32 * self.vbe.bpp_multiplier as u32;
@@ -2444,8 +2696,7 @@ impl BxVgaC {
             }
             VBE_DISPI_INDEX_Y_OFFSET => {
                 self.vbe.offset_y = value16;
-                self.vbe.virtual_start =
-                    self.vbe.offset_y as u32 * self.vbe.line_offset as u32;
+                self.vbe.virtual_start = self.vbe.offset_y as u32 * self.vbe.line_offset as u32;
                 if self.vbe.bpp != VBE_DISPI_BPP_4 {
                     self.vbe.virtual_start +=
                         self.vbe.offset_x as u32 * self.vbe.bpp_multiplier as u32;
@@ -2476,13 +2727,11 @@ impl BxVgaC {
                 self.vbe.virtual_xres = final_width;
                 self.vbe.virtual_yres = final_height;
                 if self.vbe.bpp != VBE_DISPI_BPP_4 {
-                    self.vbe.line_offset =
-                        self.vbe.virtual_xres * self.vbe.bpp_multiplier as u16;
+                    self.vbe.line_offset = self.vbe.virtual_xres * self.vbe.bpp_multiplier as u16;
                 } else {
                     self.vbe.line_offset = self.vbe.virtual_xres >> 3;
                 }
-                self.vbe.visible_screen_size =
-                    self.vbe.line_offset as u32 * self.vbe.yres as u32;
+                self.vbe.visible_screen_size = self.vbe.line_offset as u32 * self.vbe.yres as u32;
             }
             VBE_DISPI_INDEX_VIRT_HEIGHT => {
                 // Read-only in Bochs; ignore writes
@@ -2491,7 +2740,11 @@ impl BxVgaC {
                 self.vbe.ddc_enabled = (value16 & 1) != 0;
             }
             _ => {
-                tracing::error!("VBE write: unknown index 0x{:x}, value 0x{:x}", index, value16);
+                tracing::error!(
+                    "VBE write: unknown index 0x{:x}, value 0x{:x}",
+                    index,
+                    value16
+                );
             }
         }
 

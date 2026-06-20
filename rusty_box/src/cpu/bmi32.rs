@@ -244,11 +244,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn adcx_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = self.get_gpr32(instr.dst() as usize);
         let op2 = self.read_ed32(instr, instr.src())?;
-        let cf_in = if self.getb_cf() != 0 {
-            1u32
-        } else {
-            0u32
-        };
+        let cf_in = if self.getb_cf() != 0 { 1u32 } else { 0u32 };
         let sum = op1.wrapping_add(op2).wrapping_add(cf_in);
         self.set_gpr32(instr.dst() as usize, sum);
 
@@ -262,11 +258,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn adox_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = self.get_gpr32(instr.dst() as usize);
         let op2 = self.read_ed32(instr, instr.src())?;
-        let of_in = if self.getb_of() != 0 {
-            1u32
-        } else {
-            0u32
-        };
+        let of_in = if self.getb_of() != 0 { 1u32 } else { 0u32 };
         let sum = op1.wrapping_add(op2).wrapping_add(of_in);
         self.set_gpr32(instr.dst() as usize, sum);
 

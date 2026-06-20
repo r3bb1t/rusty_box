@@ -1,5 +1,3 @@
-
-
 //! AVX-512F shuffle, permute, and miscellaneous handlers
 //!
 //! Implements VSHUFF32x4/64x2, VPERMILPS/PD, VPERMPD, VPERMPS,
@@ -7,20 +5,15 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512.cc` shuffle/permute section.
 
-use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
-    decoder::Instruction,
-    xmm::BxPackedZmmRegister,
-};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, xmm::BxPackedZmmRegister};
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
 fn dword_elements(vl: u8) -> usize {
     match vl {
-        0 => 4,   // 128-bit
-        1 => 8,   // 256-bit
-        _ => 16,  // 512-bit
+        0 => 4,  // 128-bit
+        1 => 8,  // 256-bit
+        _ => 16, // 512-bit
     }
 }
 
@@ -36,7 +29,10 @@ fn qword_elements(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, instr: &Instruction) -> u64 {
+fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    instr: &Instruction,
+) -> u64 {
     let k = instr.opmask();
     if k == 0 {
         u64::MAX // k0 = all elements active
@@ -48,7 +44,10 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<'_, I, T>, reg: u8) -> BxPackedZmmRegister {
+fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, I, T>,
+    reg: u8,
+) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
@@ -200,7 +199,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let src = read_zmm(self, instr.src());
         let order = instr.ib();
-        let nlanes = match vl { 0 => 1, 1 => 2, _ => 4 };
+        let nlanes = match vl {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let mut result = BxPackedZmmRegister::default();
 
         for lane in 0..nlanes {
@@ -232,7 +235,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let src = read_zmm(self, instr.src());
         let mut order = instr.ib();
-        let nlanes = match vl { 0 => 1, 1 => 2, _ => 4 };
+        let nlanes = match vl {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let mut result = BxPackedZmmRegister::default();
 
         for lane in 0..nlanes {
@@ -262,7 +269,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let src = read_zmm(self, instr.src1());
         let ctrl = read_zmm(self, instr.src2());
-        let nlanes = match vl { 0 => 1, 1 => 2, _ => 4 };
+        let nlanes = match vl {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let mut result = BxPackedZmmRegister::default();
 
         for lane in 0..nlanes {
@@ -298,7 +309,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = BxPackedZmmRegister::default();
 
         // Process per 256-bit lane (each has 4 qwords)
-        let nymm_lanes = match vl { 0 => 1, 1 => 1, _ => 2 };
+        let nymm_lanes = match vl {
+            0 => 1,
+            1 => 1,
+            _ => 2,
+        };
         for ymm in 0..nymm_lanes {
             let base = ymm * 4;
             result.set_zmm64u(base, src.zmm64u(base + ((control as usize) & 0x3)));
@@ -355,7 +370,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_zmm(self, instr.src2());
         let order = instr.ib();
-        let nlanes = match vl { 0 => 1, 1 => 2, _ => 4 };
+        let nlanes = match vl {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let mut result = BxPackedZmmRegister::default();
 
         for lane in 0..nlanes {
@@ -387,7 +406,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_zmm(self, instr.src2());
         let mut order = instr.ib();
-        let nlanes = match vl { 0 => 1, 1 => 2, _ => 4 };
+        let nlanes = match vl {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let mut result = BxPackedZmmRegister::default();
 
         for lane in 0..nlanes {
@@ -416,7 +439,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_zmm(self, instr.src2());
-        let nlanes = match vl { 0 => 1, 1 => 2, _ => 4 };
+        let nlanes = match vl {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let mut result = BxPackedZmmRegister::default();
 
         for lane in 0..nlanes {
@@ -446,7 +473,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_zmm(self, instr.src2());
-        let nlanes = match vl { 0 => 1, 1 => 2, _ => 4 };
+        let nlanes = match vl {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let mut result = BxPackedZmmRegister::default();
 
         for lane in 0..nlanes {
@@ -475,7 +506,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_zmm(self, instr.src2());
-        let nlanes = match vl { 0 => 1, 1 => 2, _ => 4 };
+        let nlanes = match vl {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let mut result = BxPackedZmmRegister::default();
 
         for lane in 0..nlanes {
@@ -502,7 +537,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_zmm(self, instr.src2());
-        let nlanes = match vl { 0 => 1, 1 => 2, _ => 4 };
+        let nlanes = match vl {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
         let mut result = BxPackedZmmRegister::default();
 
         for lane in 0..nlanes {

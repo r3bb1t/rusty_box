@@ -16,7 +16,6 @@
 //! - `countdown_event()` recalculates the next countdown period
 //! - `time_ticks()` returns precise current time including partial countdown
 
-
 use bitflags::bitflags;
 use thiserror::Error;
 
@@ -424,7 +423,6 @@ impl BxPcSystemC {
         }
     }
 
-
     /// Get the Hardware Request (DMA) line state
     pub fn get_hrq(&self) -> bool {
         self.hrq
@@ -582,7 +580,9 @@ impl BxPcSystemC {
         // timeToFire = (ticksTotal + Bit64u(currCountdownPeriod-currCountdown)) + ticks
         self.timers[timer_index].time_to_fire = self.time_ticks() + period;
         self.timers[timer_index].flags.insert(TimerFlags::ACTIVE);
-        self.timers[timer_index].flags.set(TimerFlags::CONTINUOUS, continuous);
+        self.timers[timer_index]
+            .flags
+            .set(TimerFlags::CONTINUOUS, continuous);
 
         // Adjust countdown if this timer fires sooner than current countdown
         // Bochs pc_system.cc
@@ -650,7 +650,9 @@ impl BxPcSystemC {
         self.timers[timer_index].period = period;
         self.timers[timer_index].time_to_fire += period;
         self.timers[timer_index].flags.insert(TimerFlags::ACTIVE);
-        self.timers[timer_index].flags.remove(TimerFlags::CONTINUOUS);
+        self.timers[timer_index]
+            .flags
+            .remove(TimerFlags::CONTINUOUS);
 
         // Adjust countdown if this timer fires sooner
         let ticks_until_fire = self.timers[timer_index]
@@ -693,7 +695,6 @@ impl BxPcSystemC {
         }
         Ok(())
     }
-
 
     /// Get the number of ticks until next timer event.
     /// Matches Bochs pc_system.h `getNumCpuTicksLeftNextEvent()`.
@@ -800,7 +801,7 @@ mod tests {
         assert!(!pc.enable_a20);
         assert_eq!(pc.a20_mask, 0xFFFF_FFFF_FFEF_FFFFu64);
         assert_eq!(pc.num_timers, 1); // null timer
-        // Countdown should be NULL_TIMER_INTERVAL (u32::MAX)
+                                      // Countdown should be NULL_TIMER_INTERVAL (u32::MAX)
         assert_eq!(pc.curr_countdown, 0xFFFF_FFFF);
         assert_eq!(pc.curr_countdown_period, 0xFFFF_FFFF);
     }
@@ -844,7 +845,6 @@ mod tests {
         assert_eq!(pc2.time_ticks(), 0);
     }
 
-
     #[test]
     fn test_timer_registration() {
         let mut pc = BxPcSystemC::new();
@@ -852,13 +852,7 @@ mod tests {
 
         // Register a timer — should get slot 1 (slot 0 is null timer)
         let idx = pc
-            .register_timer(
-                TimerOwner::PciIdeCh0,
-                1000,
-                true,
-                true,
-                "test_timer",
-            )
+            .register_timer(TimerOwner::PciIdeCh0, 1000, true, true, "test_timer")
             .unwrap();
         assert_eq!(idx, 1);
         assert_eq!(pc.num_timers, 2);
@@ -874,13 +868,7 @@ mod tests {
 
         // 1000 usec at 15 MIPS = 15000 ticks
         let idx = pc
-            .register_timer_usec(
-                TimerOwner::PciIdeCh0,
-                1000,
-                true,
-                true,
-                "usec_timer",
-            )
+            .register_timer_usec(TimerOwner::PciIdeCh0, 1000, true, true, "usec_timer")
             .unwrap();
         assert_eq!(idx, 1);
         assert_eq!(pc.timers[1].period, 15000);
@@ -893,13 +881,7 @@ mod tests {
 
         // Register a timer with period 100
         let _idx = pc
-            .register_timer(
-                TimerOwner::PciIdeCh0,
-                100,
-                true,
-                true,
-                "partial_test",
-            )
+            .register_timer(TimerOwner::PciIdeCh0, 100, true, true, "partial_test")
             .unwrap();
 
         // Advance 50 ticks — should NOT fire yet
@@ -995,13 +977,7 @@ mod tests {
 
         // Register timer with period 1000
         let _t1 = pc
-            .register_timer(
-                TimerOwner::PciIdeCh0,
-                1000,
-                true,
-                true,
-                "t1",
-            )
+            .register_timer(TimerOwner::PciIdeCh0, 1000, true, true, "t1")
             .unwrap();
         assert_eq!(pc.curr_countdown, 1000);
 
@@ -1011,13 +987,7 @@ mod tests {
 
         // Now activate a second timer with period 500 — should adjust countdown
         let t2 = pc
-            .register_timer(
-                TimerOwner::PciIdeCh1,
-                500,
-                true,
-                true,
-                "t2",
-            )
+            .register_timer(TimerOwner::PciIdeCh1, 500, true, true, "t2")
             .unwrap();
         // curr_countdown was 800, new timer needs 500 < 800
         // So countdown adjusted to 500

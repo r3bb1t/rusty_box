@@ -13,6 +13,8 @@ use super::{
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedXmmRegister,
 };
+#[cfg(not(feature = "std"))]
+use crate::cpu::float::FloatExt;
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
@@ -32,9 +34,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
 
         let mut result = BxPackedXmmRegister::default();
-            for i in 0..4 {
-                result.set_xmm32f(i, 1.0f32 / op.xmm32f(i));
-            }
+        for i in 0..4 {
+            result.set_xmm32f(i, 1.0f32 / op.xmm32f(i));
+        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -58,7 +60,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
 
         let mut result = self.read_xmm_reg(instr.dst());
-            result.set_xmm32f(0, 1.0f32 / src_f32);
+        result.set_xmm32f(0, 1.0f32 / src_f32);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -80,9 +82,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
 
         let mut result = BxPackedXmmRegister::default();
-            for i in 0..4 {
-                result.set_xmm32f(i, 1.0f32 / op.xmm32f(i).sqrt());
-            }
+        for i in 0..4 {
+            result.set_xmm32f(i, 1.0f32 / op.xmm32f(i).sqrt());
+        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -106,7 +108,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
 
         let mut result = self.read_xmm_reg(instr.dst());
-            result.set_xmm32f(0, 1.0f32 / src_f32.sqrt());
+        result.set_xmm32f(0, 1.0f32 / src_f32.sqrt());
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }

@@ -199,7 +199,11 @@ impl BxFwCfg {
     /// Create a new fw_cfg device with empty state.
     pub fn new() -> Self {
         Self {
-            slots: [FwCfgSlot { key: 0, offset: 0, len: 0 }; FW_CFG_MAX_ENTRIES],
+            slots: [FwCfgSlot {
+                key: 0,
+                offset: 0,
+                len: 0,
+            }; FW_CFG_MAX_ENTRIES],
             slot_count: 0,
             data_pool: [0u8; FW_CFG_DATA_POOL_SIZE],
             data_used: 0,
@@ -222,7 +226,10 @@ impl BxFwCfg {
         self.add_bytes(FW_CFG_SIGNATURE, b"QEMU");
 
         // ID with DMA support
-        self.add_bytes(FW_CFG_ID, &(FW_CFG_VERSION | FW_CFG_VERSION_DMA).to_le_bytes());
+        self.add_bytes(
+            FW_CFG_ID,
+            &(FW_CFG_VERSION | FW_CFG_VERSION_DMA).to_le_bytes(),
+        );
 
         // RAM size (little-endian 8 bytes)
         self.add_bytes(FW_CFG_RAM_SIZE, &ram_size.to_le_bytes());
@@ -251,10 +258,15 @@ impl BxFwCfg {
 
         // Linux kernel boot entries — zeroed (OVMF probes these)
         for key in [
-            FW_CFG_KERNEL_ADDR, FW_CFG_KERNEL_SIZE, FW_CFG_KERNEL_ENTRY,
-            FW_CFG_INITRD_ADDR, FW_CFG_INITRD_SIZE,
-            FW_CFG_CMDLINE_ADDR, FW_CFG_CMDLINE_SIZE,
-            FW_CFG_SETUP_ADDR, FW_CFG_SETUP_SIZE,
+            FW_CFG_KERNEL_ADDR,
+            FW_CFG_KERNEL_SIZE,
+            FW_CFG_KERNEL_ENTRY,
+            FW_CFG_INITRD_ADDR,
+            FW_CFG_INITRD_SIZE,
+            FW_CFG_CMDLINE_ADDR,
+            FW_CFG_CMDLINE_SIZE,
+            FW_CFG_SETUP_ADDR,
+            FW_CFG_SETUP_SIZE,
         ] {
             self.add_bytes(key, &0u32.to_le_bytes());
         }
@@ -361,7 +373,13 @@ impl BxFwCfg {
     /// - 0x510: selector (2-byte write sets cur_entry, resets offset)
     /// - 0x511: data write (ignored)
     /// - 0x514-0x51B: DMA address accumulation; writing low 32 bits triggers DMA
-    pub fn write_port(&mut self, address: u16, value: u32, io_len: u8, mem: Option<&mut BxMemC<'_>>) {
+    pub fn write_port(
+        &mut self,
+        address: u16,
+        value: u32,
+        io_len: u8,
+        mem: Option<&mut BxMemC<'_>>,
+    ) {
         match address {
             FW_CFG_IO_BASE => {
                 if io_len == 2 {
@@ -394,8 +412,8 @@ impl BxFwCfg {
                 } else if io_len == 1 {
                     // Byte-by-byte write (big-endian)
                     let shift = (7 - offset) * 8;
-                    self.dma_addr = (self.dma_addr & !(0xFFu64 << shift))
-                        | ((value as u64 & 0xFF) << shift);
+                    self.dma_addr =
+                        (self.dma_addr & !(0xFFu64 << shift)) | ((value as u64 & 0xFF) << shift);
 
                     // Trigger when last byte (offset 7) is written
                     if offset == 7 {
@@ -413,7 +431,10 @@ impl BxFwCfg {
         if let Some(m) = mem {
             self.process_dma(addr, m);
         } else {
-            tracing::error!("fw_cfg DMA: triggered at {:#x} but no memory available", addr);
+            tracing::error!(
+                "fw_cfg DMA: triggered at {:#x} but no memory available",
+                addr
+            );
         }
         self.dma_addr = 0;
     }
@@ -433,7 +454,10 @@ impl BxFwCfg {
         let mut desc = [0u8; 16];
         let da = dma_addr as usize;
         if da + 16 > ram_len {
-            tracing::error!("fw_cfg DMA: descriptor address {:#x} out of range", dma_addr);
+            tracing::error!(
+                "fw_cfg DMA: descriptor address {:#x} out of range",
+                dma_addr
+            );
             return;
         }
         unsafe {
@@ -444,13 +468,15 @@ impl BxFwCfg {
         let mut control = u32::from_be_bytes([desc[0], desc[1], desc[2], desc[3]]);
         let length = u32::from_be_bytes([desc[4], desc[5], desc[6], desc[7]]);
         let address = u64::from_be_bytes([
-            desc[8], desc[9], desc[10], desc[11],
-            desc[12], desc[13], desc[14], desc[15],
+            desc[8], desc[9], desc[10], desc[11], desc[12], desc[13], desc[14], desc[15],
         ]);
 
         tracing::debug!(
             "fw_cfg DMA: control={:#010x}, length={}, address={:#x}, cur_entry={:#06x}",
-            control, length, address, self.cur_entry
+            control,
+            length,
+            address,
+            self.cur_entry
         );
 
         // SELECT: choose entry from upper 16 bits of control
@@ -499,7 +525,9 @@ impl BxFwCfg {
                 self.cur_offset += to_read;
                 tracing::debug!(
                     "fw_cfg DMA: read {} bytes from entry {:#06x} to {:#x}",
-                    to_read, key, address
+                    to_read,
+                    key,
+                    address
                 );
                 true
             } else {
@@ -544,7 +572,9 @@ impl BxFwCfg {
         if self.data_used + data.len() > FW_CFG_DATA_POOL_SIZE {
             tracing::error!(
                 "fw_cfg: data pool full (used={}, need={}), cannot add key {:#06x}",
-                self.data_used, data.len(), key
+                self.data_used,
+                data.len(),
+                key
             );
             return;
         }
@@ -598,7 +628,8 @@ impl BxFwCfg {
         // size (big-endian u32)
         self.file_dir[entry_offset..entry_offset + 4].copy_from_slice(&data_len.to_be_bytes());
         // select (big-endian u16)
-        self.file_dir[entry_offset + 4..entry_offset + 6].copy_from_slice(&file_index.to_be_bytes());
+        self.file_dir[entry_offset + 4..entry_offset + 6]
+            .copy_from_slice(&file_index.to_be_bytes());
         // reserved (2 bytes, already zero)
         // name (56 bytes, zero-padded)
         let name_bytes = name.as_bytes();
@@ -621,7 +652,9 @@ impl BxFwCfg {
 
         tracing::info!(
             "fw_cfg: added file '{}' at index {:#06x} ({} bytes)",
-            name, file_index, data_len
+            name,
+            file_index,
+            data_len
         );
     }
 
@@ -662,7 +695,11 @@ impl BxFwCfg {
             (ram_size, 0u64)
         };
 
-        let mut entries = [E820Entry { address: 0, length: 0, entry_type: 0 }; 2];
+        let mut entries = [E820Entry {
+            address: 0,
+            length: 0,
+            entry_type: 0,
+        }; 2];
         let mut count = 0usize;
 
         // Entry 0: below 4GB RAM
@@ -724,7 +761,7 @@ impl BxFwCfg {
 
         cfg.hpet[0] = HpetFwEntry {
             event_timer_block_id: 0x8086A201, // Intel vendor ID
-            address: 0xFED0_0000,              // Standard HPET base
+            address: 0xFED0_0000,             // Standard HPET base
             min_tick: 100,
             page_prot: 0,
         };

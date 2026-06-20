@@ -12,7 +12,6 @@
 
 use crate::ring_buffer::RingBuffer;
 
-
 /// UART crystal oscillator frequency (Hz) — Bochs BX_PC_CLOCK_XTL
 const UART_CLOCK_XTL: f64 = 1_843_200.0;
 
@@ -82,8 +81,7 @@ struct FifoControl {
 }
 
 /// Line Control Register state
-#[derive(Debug, Clone, Copy)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Default)]
 struct LineControl {
     wordlen_sel: u8, // 0=5, 1=6, 2=7, 3=8 bits
     stopbits: bool,  // 0=1 stop, 1=1.5/2 stop
@@ -93,7 +91,6 @@ struct LineControl {
     break_cntl: bool,
     dlab: bool, // Divisor Latch Access Bit
 }
-
 
 /// Modem Control Register state
 #[derive(Debug, Default, Clone, Copy)]
@@ -857,11 +854,10 @@ impl BxSerialC {
                             s.ms_interrupt = true;
                             s.ms_ipending = false;
                         }
-                    } else if !new_modstat && s.int_enable.modstat_enable
-                        && s.ms_interrupt {
-                            s.ms_ipending = true;
-                            s.ms_interrupt = false;
-                        }
+                    } else if !new_modstat && s.int_enable.modstat_enable && s.ms_interrupt {
+                        s.ms_ipending = true;
+                        s.ms_interrupt = false;
+                    }
 
                     // TX hold enable transition
                     if new_txhold && !s.int_enable.txhold_enable {
@@ -899,11 +895,10 @@ impl BxSerialC {
                             s.ls_interrupt = true;
                             s.ls_ipending = false;
                         }
-                    } else if !new_rxlstat && s.int_enable.rxlstat_enable
-                        && s.ls_interrupt {
-                            s.ls_ipending = true;
-                            s.ls_interrupt = false;
-                        }
+                    } else if !new_rxlstat && s.int_enable.rxlstat_enable && s.ls_interrupt {
+                        s.ls_ipending = true;
+                        s.ls_interrupt = false;
+                    }
 
                     s.int_enable.rxdata_enable = new_rxdata;
                     s.int_enable.txhold_enable = new_txhold;
@@ -988,16 +983,9 @@ impl BxSerialC {
                         s.databyte_usec = (1_000_000.0 / s.baudrate as f64
                             * (s.line_cntl.wordlen_sel as f64 + 7.0))
                             as u32;
-                        tracing::trace!(
-                            "COM{}: databyte_usec={}",
-                            port_idx + 1,
-                            s.databyte_usec
-                        );
+                        tracing::trace!("COM{}: databyte_usec={}", port_idx + 1, s.databyte_usec);
                     } else {
-                        tracing::trace!(
-                            "COM{}: ignoring invalid baud rate divisor",
-                            port_idx + 1
-                        );
+                        tracing::trace!("COM{}: ignoring invalid baud rate divisor", port_idx + 1);
                     }
                 }
             }
@@ -1013,9 +1001,8 @@ impl BxSerialC {
                 s.modem_cntl.local_loopback = (val & 0x10) != 0;
 
                 // Bochs serial.cc: detect loopback transition
-                let need_break_enq_mcr = !prev_loopback
-                    && s.modem_cntl.local_loopback
-                    && s.line_cntl.break_cntl;
+                let need_break_enq_mcr =
+                    !prev_loopback && s.modem_cntl.local_loopback && s.line_cntl.break_cntl;
                 let is_loopback = s.modem_cntl.local_loopback;
                 if need_break_enq_mcr {
                     // Transition to loopback mode with break_cntl active

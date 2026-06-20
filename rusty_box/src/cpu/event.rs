@@ -54,6 +54,28 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             tracing::trace!("INIT event cleared (SMP not implemented)");
         }
 
+        // VMX Monitor-Trap-Flag — Bochs event.cc handleAsyncEvent runs
+        // this in Priority 3 (between INIT and the Priority-4 debug-trap
+        // check), gated only on the event being pending; the unmasked
+        // path takes the VMEXIT, the masked path simply unmasks for the
+        // next boundary.
+        if self.in_vmx_guest {
+            match self.vmexit_check_monitor_trap_flag() {
+                Ok(true) => {
+                    self.prev_rip = self.rip();
+                    return false;
+                }
+                Err(super::error::CpuError::CpuLoopRestart) => {
+                    self.prev_rip = self.rip();
+                    return false;
+                }
+                Err(e) => {
+                    tracing::warn!("VMX MTF vmexit failed: {:?}", e);
+                }
+                Ok(false) => {}
+            }
+        }
+
         // Priority 4: Debug trap exceptions (TF single-step, data/I/O breakpoints)
         // Bochs event.cc — check inhibition FIRST, then debug_trap
         if !self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG) {
@@ -90,15 +112,89 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Critical: do NOT clear PENDING_INTR here — it is cleared only by
         // pic.iac() → BX_CLEAR_INTR → clear_event(). If cleared here and
         // IF=0, the interrupt would be permanently lost.
+
+        // Bochs event.cc Priority 5: external interrupts. Bochs structures
+        // this as a single if/else-if chain so each branch is mutually
+        // exclusive — exactly one of {skip, preemption-timer VMEXIT,
+        // NMI-window VMEXIT, NMI delivery, interrupt-window VMEXIT,
+        // external-interrupt delivery} runs per boundary. The LAPIC poll
+        // matches Bochs's `vmx_preemption_timer_expired` callback by
+        // signalling BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED when the
+        // absolute fire time has been reached.
+        if self.in_vmx_guest {
+            self.poll_vmx_preemption_timer();
+        }
+
+        // Bochs vapic.cc / event.cc — process posted interrupts at the
+        // start of the Priority-5 external-event check so a pending
+        // notification clears PID.ON and raises
+        // BX_EVENT_PENDING_VMX_VIRTUAL_INTR before the interrupt-window
+        // VMEXIT path runs.
+        if self.in_vmx_guest && self.posted_interrupt_pending() {
+            if let Err(e) = self.process_posted_interrupts() {
+                tracing::warn!("posted-interrupt processing failed: {:?}", e);
+            }
+        }
+
         if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
             // STI/MOV SS shadow — skip all external interrupts this boundary
             // (Bochs event.cc)
+        } else if self.in_vmx_guest
+            && self.is_unmasked_event_pending(Self::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED)
+        {
+            // Bochs event.cc — VMexit(VMX_VMEXIT_VMX_PREEMPTION_TIMER_EXPIRED, 0).
+            match self.vmexit_check_preemption_timer() {
+                Ok(true) | Err(super::error::CpuError::CpuLoopRestart) => {
+                    self.prev_rip = self.rip();
+                    return false;
+                }
+                Err(e) => {
+                    tracing::warn!("VMX preemption-timer vmexit failed: {:?}", e);
+                }
+                Ok(false) => {}
+            }
+        } else if self.in_vmx_guest
+            && self.is_unmasked_event_pending(Self::BX_EVENT_VMX_VIRTUAL_NMI)
+        {
+            // Bochs event.cc — VMexit(VMX_VMEXIT_NMI_WINDOW, 0).
+            match self.vmexit_check_nmi_window() {
+                Ok(true) | Err(super::error::CpuError::CpuLoopRestart) => {
+                    self.prev_rip = self.rip();
+                    return false;
+                }
+                Err(e) => {
+                    tracing::warn!("VMX NMI-window vmexit failed: {:?}", e);
+                }
+                Ok(false) => {}
+            }
         } else if self.is_unmasked_event_pending(Self::BX_EVENT_NMI) {
             // NMI delivery (Bochs event.cc)
             self.clear_event(Self::BX_EVENT_NMI);
+            self.ext = true;
+            // Bochs vmexit.cc VMexit_Event(BX_NMI, 2, 0, 0): pin-based NMI
+            // exit fires before delivery into the guest IDT.
+            if self.in_vmx_guest {
+                match self.vmexit_check_nmi() {
+                    Ok(true) => {
+                        self.ext = false;
+                        self.mask_event(Self::BX_EVENT_NMI);
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Ok(false) => {}
+                    Err(super::error::CpuError::CpuLoopRestart) => {
+                        self.ext = false;
+                        self.mask_event(Self::BX_EVENT_NMI);
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Err(e) => {
+                        tracing::warn!("VMX NMI vmexit failed: {:?}", e);
+                    }
+                }
+            }
             self.mask_event(Self::BX_EVENT_NMI); // Block further NMIs until IRET
             self.activity_state = CpuActivityState::Active;
-            self.ext = true;
             let result = self.interrupt(2, super::exception::InterruptType::Nmi, false, false, 0); // NMI vector = 2
             self.ext = false;
             match result {
@@ -113,10 +209,49 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     tracing::warn!("NMI delivery failed: {:?}", e);
                 }
             }
+        } else if self.in_vmx_guest
+            && (self.pending_event & Self::BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING) != 0
+            && self.eflags.contains(EFlags::IF_)
+        {
+            // Bochs event.cc — VMexit(VMX_VMEXIT_INTERRUPT_WINDOW, 0).
+            match self.vmexit_check_interrupt_window() {
+                Ok(true) | Err(super::error::CpuError::CpuLoopRestart) => {
+                    self.prev_rip = self.rip();
+                    return false;
+                }
+                Err(e) => {
+                    tracing::warn!("VMX interrupt-window vmexit failed: {:?}", e);
+                }
+                Ok(false) => {}
+            }
         } else if self.is_unmasked_event_pending(
             Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
         ) {
-            // HandleExtInterrupt (Bochs event.cc)
+            // HandleExtInterrupt (Bochs event.cc).
+            //
+            // Bochs vmexit.cc VMexit_ExtInterrupt: with EXTERNAL_INTERRUPT_VMEXIT
+            // set and INTA_ON_VMEXIT clear, the VMEXIT happens BEFORE the
+            // controller is acknowledged so the interrupt remains pending in
+            // the host PIC/LAPIC for re-delivery. The INTA_ON_VMEXIT path
+            // acknowledges first and routes through vmexit_check_event_intr
+            // below so the vector lands in exit_intr_info.
+            if self.in_vmx_guest {
+                match self.vmexit_check_ext_intr_no_ack() {
+                    Ok(true) => {
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Ok(false) => {}
+                    Err(super::error::CpuError::CpuLoopRestart) => {
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Err(e) => {
+                        tracing::warn!("VMX ext-intr no-ack vmexit failed: {:?}", e);
+                    }
+                }
+            }
+
             // Deliver exactly ONE interrupt: LAPIC first, then PIC.
             let mut delivered = false;
 
@@ -127,13 +262,41 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 self.clear_event(Self::BX_EVENT_PENDING_LAPIC_INTR);
                 let vector = self.lapic.acknowledge_int();
                 if vector > 0 {
-                    #[cfg(debug_assertions)] {
+                    #[cfg(debug_assertions)]
+                    {
                         self.diag_hae_intr_delivered += 1;
                         self.diag_iac_vectors[vector as usize] += 1;
                     }
                     self.activity_state = CpuActivityState::Active;
                     self.ext = true;
-                    let result = self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, false, 0);
+                    // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
+                    // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set
+                    // — the acknowledged vector is recorded in exit_intr_info.
+                    if self.in_vmx_guest {
+                        match self.vmexit_check_event_intr(vector) {
+                            Ok(true) => {
+                                self.ext = false;
+                                self.prev_rip = self.rip();
+                                return false;
+                            }
+                            Ok(false) => {}
+                            Err(super::error::CpuError::CpuLoopRestart) => {
+                                self.ext = false;
+                                self.prev_rip = self.rip();
+                                return false;
+                            }
+                            Err(e) => {
+                                tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
+                            }
+                        }
+                    }
+                    let result = self.interrupt(
+                        vector,
+                        super::exception::InterruptType::ExternalInterrupt,
+                        false,
+                        false,
+                        0,
+                    );
                     self.ext = false;
                     delivered = true;
                     match result {
@@ -156,42 +319,74 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
             // Then check PIC (legacy 8259 path) — only if LAPIC didn't deliver
             if !delivered {
-              if let Some(pic) = pic {
-                if pic.has_interrupt() {
-                    let vector = pic.iac();
-                    tracing::trace!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
+                if let Some(pic) = pic {
+                    if pic.has_interrupt() {
+                        let vector = pic.iac();
+                        tracing::trace!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
                         vector, self.rip(), self.sregs[0].selector.value,
                         self.cpu_mode, self.eflags.contains(super::eflags::EFlags::IF_));
-                    // Wake from halt if needed
-                    self.activity_state = CpuActivityState::Active;
-                    // Mark as external interrupt (EXT=1)
-                    self.ext = true;
-                    // Deliver interrupt (matches Bochs interrupt() call in event.cc)
-                    let result = self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, false, 0);
-                    self.ext = false;
-                    match result {
-                        Ok(()) => {
-                            self.prev_rip = self.rip();
+                        // Wake from halt if needed
+                        self.activity_state = CpuActivityState::Active;
+                        // Mark as external interrupt (EXT=1)
+                        self.ext = true;
+                        // Bochs vmexit.cc VMexit_Event(BX_EXTERNAL_INTERRUPT, vector,
+                        // 0, 0): post-ack pin-based exit when INTA_ON_VMEXIT was set.
+                        if self.in_vmx_guest {
+                            match self.vmexit_check_event_intr(vector) {
+                                Ok(true) => {
+                                    self.ext = false;
+                                    self.prev_rip = self.rip();
+                                    return false;
+                                }
+                                Ok(false) => {}
+                                Err(super::error::CpuError::CpuLoopRestart) => {
+                                    self.ext = false;
+                                    self.prev_rip = self.rip();
+                                    return false;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("VMX ext-intr post-ack vmexit failed: {:?}", e);
+                                }
+                            }
                         }
-                        Err(super::error::CpuError::CpuLoopRestart) => {
-                            self.prev_rip = self.rip();
-                            return false;
+                        // Deliver interrupt (matches Bochs interrupt() call in event.cc)
+                        let result = self.interrupt(
+                            vector,
+                            super::exception::InterruptType::ExternalInterrupt,
+                            false,
+                            false,
+                            0,
+                        );
+                        self.ext = false;
+                        match result {
+                            Ok(()) => {
+                                self.prev_rip = self.rip();
+                            }
+                            Err(super::error::CpuError::CpuLoopRestart) => {
+                                self.prev_rip = self.rip();
+                                return false;
+                            }
+                            Err(e) => {
+                                tracing::warn!("PIC interrupt delivery failed: {:?}", e);
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!("PIC interrupt delivery failed: {:?}", e);
+                    } else {
+                        #[cfg(debug_assertions)]
+                        {
+                            self.diag_hae_intr_pic_empty += 1;
                         }
                     }
-                } else {
-                    #[cfg(debug_assertions)] { self.diag_hae_intr_pic_empty += 1; }
                 }
-            }
             }
         } else if self.pending_event
             & (Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR)
             != 0
         {
             // Event is pending but masked (IF=0) — don't clear it, just count
-            #[cfg(debug_assertions)] { self.diag_hae_intr_if_blocked += 1; }
+            #[cfg(debug_assertions)]
+            {
+                self.diag_hae_intr_if_blocked += 1;
+            }
         }
 
         // DMA HRQ handling (Bochs event.cc)
@@ -244,7 +439,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // MWAIT_IF (ECX[0]=1 at MWAIT): wake on interrupt even when IF=0
         // (Bochs event.cc)
         let mwait_if = matches!(self.activity_state, CpuActivityState::MwaitIf);
-        let in_mwait = matches!(self.activity_state, CpuActivityState::Mwait | CpuActivityState::MwaitIf);
+        let in_mwait = matches!(
+            self.activity_state,
+            CpuActivityState::Mwait | CpuActivityState::MwaitIf
+        );
 
         // NMI can always wake from HLT (Bochs event.cc)
         if self.pending_event & Self::BX_EVENT_NMI != 0 {
@@ -259,27 +457,29 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         // PIC interrupt can wake from HLT/MWAIT if IF=1
         if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0
-            && (self.eflags.contains(EFlags::IF_) || mwait_if) {
-                // Bochs event.cc: reset monitor when waking from MWAIT
-                if in_mwait {
-                    self.monitor.reset_monitor();
-                }
-                self.activity_state = CpuActivityState::Active;
-                self.inhibit_mask = 0;
-                return false; // Continue to interrupt delivery
+            && (self.eflags.contains(EFlags::IF_) || mwait_if)
+        {
+            // Bochs event.cc: reset monitor when waking from MWAIT
+            if in_mwait {
+                self.monitor.reset_monitor();
             }
+            self.activity_state = CpuActivityState::Active;
+            self.inhibit_mask = 0;
+            return false; // Continue to interrupt delivery
+        }
 
         // LAPIC interrupt can also wake from HLT/MWAIT if IF=1
         if (self.pending_event & Self::BX_EVENT_PENDING_LAPIC_INTR != 0 || self.lapic.intr)
-            && (self.eflags.contains(EFlags::IF_) || mwait_if) {
-                // Bochs event.cc: reset monitor when waking from MWAIT
-                if in_mwait {
-                    self.monitor.reset_monitor();
-                }
-                self.activity_state = CpuActivityState::Active;
-                self.inhibit_mask = 0;
-                return false; // Continue to LAPIC interrupt delivery
+            && (self.eflags.contains(EFlags::IF_) || mwait_if)
+        {
+            // Bochs event.cc: reset monitor when waking from MWAIT
+            if in_mwait {
+                self.monitor.reset_monitor();
             }
+            self.activity_state = CpuActivityState::Active;
+            self.inhibit_mask = 0;
+            return false; // Continue to LAPIC interrupt delivery
+        }
 
         // Monitor triggered by a write (wakeup_monitor set activity_state to Active)
         if matches!(self.activity_state, CpuActivityState::Active) {

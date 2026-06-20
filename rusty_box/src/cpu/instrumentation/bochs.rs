@@ -71,7 +71,9 @@ use crate::cpu::decoder::Instruction;
 pub trait Instrumentation {
     /// Declare which hook categories this implementation uses.
     /// The CPU skips dispatch for categories not in the returned mask.
-    fn active_hooks(&self) -> HookMask { HookMask::all() }
+    fn active_hooks(&self) -> HookMask {
+        HookMask::all()
+    }
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -189,21 +191,29 @@ pub trait Instrumentation {
 
     /// Before an undefined/unrecognized instruction raises #UD. Return
     /// `true` to suppress.
-    fn invalid_instruction(&mut self, rip: u64) -> bool { false }
+    fn invalid_instruction(&mut self, rip: u64) -> bool {
+        false
+    }
 
     /// Access to a not-present page. Return `true` to suppress the fault.
-    fn mem_unmapped(&mut self, ev: &MemUnmapped) -> bool { false }
+    fn mem_unmapped(&mut self, ev: &MemUnmapped) -> bool {
+        false
+    }
 
     /// Access denied by the `PagePermissions` bitmap. Return `true` to
     /// suppress the fault.
-    fn mem_perm_violation(&mut self, ev: &MemPermViolation) -> bool { false }
+    fn mem_perm_violation(&mut self, ev: &MemPermViolation) -> bool {
+        false
+    }
 }
 
 // ── Unit impl (no-op sentinel) ───────────────────────────────────────────────
 
 impl Instrumentation for () {
     /// Zero-cost no-op observer — tell the CPU to skip every dispatch.
-    fn active_hooks(&self) -> HookMask { HookMask::empty() }
+    fn active_hooks(&self) -> HookMask {
+        HookMask::empty()
+    }
 }
 
 // ── Tuple composition ───────────────────────────────────────────────────

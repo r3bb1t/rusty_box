@@ -12,7 +12,6 @@ pub type BxPtrEquiv = u64;
 #[cfg(not(any(target_pointer_width = "32", target_pointer_width = "64")))]
 compile_error!("could not define BxPtrEquivT to size of pointer");
 
-
 // ── No-alloc sizing constants ──────────────────────────────────────────────
 
 /// 4M BIOS ROM (must match memory_rusty_box::BIOSROMSZ)

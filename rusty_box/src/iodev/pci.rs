@@ -265,13 +265,9 @@ impl BxPciBridge {
         pam_changed
     }
 
-
     /// Apply PAM register settings to the memory subsystem.
     /// Called after pci_write returns pam_changed=true.
-    pub fn apply_pam_to_memory<'c>(
-        &self,
-        mem: &mut crate::memory::BxMemC<'c>,
-    ) {
+    pub fn apply_pam_to_memory<'c>(&self, mem: &mut crate::memory::BxMemC<'c>) {
         let pam59 = self.pci_conf[0x59];
         mem.set_memory_type(12, 0, (pam59 >> 4) & 0x1 != 0);
         mem.set_memory_type(12, 1, (pam59 >> 5) & 0x1 != 0);

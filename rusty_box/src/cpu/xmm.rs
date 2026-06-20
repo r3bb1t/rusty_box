@@ -37,9 +37,13 @@ macro_rules! packed_reg_accessors {
     // Signed integer accessor (reinterprets same bytes)
     (sint $name:ident, $setter:ident, $uname:ident, $usetter:ident, $sty:ty, $uty:ty) => {
         #[inline(always)]
-        pub fn $name(&self, i: usize) -> $sty { self.$uname(i) as $sty }
+        pub fn $name(&self, i: usize) -> $sty {
+            self.$uname(i) as $sty
+        }
         #[inline(always)]
-        pub fn $setter(&mut self, i: usize, v: $sty) { self.$usetter(i, v as $uty) }
+        pub fn $setter(&mut self, i: usize, v: $sty) {
+            self.$usetter(i, v as $uty)
+        }
     };
     // Float accessor
     (float $name:ident, $setter:ident, $fty:ty, $width:expr) => {
@@ -57,13 +61,21 @@ macro_rules! packed_reg_accessors {
     // Single-byte accessor (no endianness concern)
     (byte $name:ident, $setter:ident, $sname:ident, $ssetter:ident) => {
         #[inline(always)]
-        pub fn $name(&self, i: usize) -> u8 { self.bytes[i] }
+        pub fn $name(&self, i: usize) -> u8 {
+            self.bytes[i]
+        }
         #[inline(always)]
-        pub fn $setter(&mut self, i: usize, v: u8) { self.bytes[i] = v; }
+        pub fn $setter(&mut self, i: usize, v: u8) {
+            self.bytes[i] = v;
+        }
         #[inline(always)]
-        pub fn $sname(&self, i: usize) -> i8 { self.bytes[i] as i8 }
+        pub fn $sname(&self, i: usize) -> i8 {
+            self.bytes[i] as i8
+        }
         #[inline(always)]
-        pub fn $ssetter(&mut self, i: usize, v: i8) { self.bytes[i] = v as u8; }
+        pub fn $ssetter(&mut self, i: usize, v: i8) {
+            self.bytes[i] = v as u8;
+        }
     };
 }
 
@@ -78,7 +90,6 @@ pub struct BxPackedXmmRegister {
     pub(crate) bytes: [u8; 16],
 }
 
-
 impl BxPackedXmmRegister {
     packed_reg_accessors!(uint xmm64u, set_xmm64u, u64, 8);
     packed_reg_accessors!(uint xmm32u, set_xmm32u, u32, 4);
@@ -92,9 +103,13 @@ impl BxPackedXmmRegister {
 
     /// Raw byte slice (for bulk copy / memcmp).
     #[inline(always)]
-    pub fn raw(&self) -> &[u8; 16] { &self.bytes }
+    pub fn raw(&self) -> &[u8; 16] {
+        &self.bytes
+    }
     #[inline(always)]
-    pub fn raw_mut(&mut self) -> &mut [u8; 16] { &mut self.bytes }
+    pub fn raw_mut(&mut self) -> &mut [u8; 16] {
+        &mut self.bytes
+    }
 }
 
 impl core::fmt::Debug for BxPackedXmmRegister {
@@ -116,7 +131,6 @@ pub type BxXmmReg = BxPackedXmmRegister;
 pub struct BxPackedYmmRegister {
     pub(crate) bytes: [u8; 32],
 }
-
 
 impl BxPackedYmmRegister {
     packed_reg_accessors!(uint ymm64u, set_ymm64u, u64, 8);
@@ -144,9 +158,13 @@ impl BxPackedYmmRegister {
     }
 
     #[inline(always)]
-    pub fn raw(&self) -> &[u8; 32] { &self.bytes }
+    pub fn raw(&self) -> &[u8; 32] {
+        &self.bytes
+    }
     #[inline(always)]
-    pub fn raw_mut(&mut self) -> &mut [u8; 32] { &mut self.bytes }
+    pub fn raw_mut(&mut self) -> &mut [u8; 32] {
+        &mut self.bytes
+    }
 }
 
 impl core::fmt::Debug for BxPackedYmmRegister {
@@ -168,7 +186,9 @@ pub struct BxPackedZmmRegister {
 }
 
 impl Default for BxPackedZmmRegister {
-    fn default() -> Self { Self { bytes: [0; 64] } }
+    fn default() -> Self {
+        Self { bytes: [0; 64] }
+    }
 }
 
 impl BxPackedZmmRegister {
@@ -215,9 +235,13 @@ impl BxPackedZmmRegister {
     }
 
     #[inline(always)]
-    pub fn raw(&self) -> &[u8; 64] { &self.bytes }
+    pub fn raw(&self) -> &[u8; 64] {
+        &self.bytes
+    }
     #[inline(always)]
-    pub fn raw_mut(&mut self) -> &mut [u8; 64] { &mut self.bytes }
+    pub fn raw_mut(&mut self) -> &mut [u8; 64] {
+        &mut self.bytes
+    }
 }
 
 impl core::fmt::Debug for BxPackedZmmRegister {

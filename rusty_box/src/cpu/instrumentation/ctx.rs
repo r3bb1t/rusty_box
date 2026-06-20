@@ -52,21 +52,49 @@ impl<'a> HookCtx<'a> {
 
     // ── Delegate everything to the inner CpuAccess impl. ───────────────────
 
-    #[inline] pub fn reg_read(&self, reg: X86Reg) -> u64 { self.cpu.reg_read(reg) }
-    #[inline] pub fn reg_write(&mut self, reg: X86Reg, val: u64) { self.cpu.reg_write(reg, val) }
+    #[inline]
+    pub fn reg_read(&self, reg: X86Reg) -> u64 {
+        self.cpu.reg_read(reg)
+    }
+    #[inline]
+    pub fn reg_write(&mut self, reg: X86Reg, val: u64) {
+        self.cpu.reg_write(reg, val)
+    }
 
-    #[inline] pub fn mem_read(&self, addr: u64, buf: &mut [u8]) -> bool { self.cpu.mem_read(addr, buf) }
-    #[inline] pub fn mem_write(&mut self, addr: u64, data: &[u8]) -> bool { self.cpu.mem_write(addr, data) }
-    #[inline] pub fn virt_read(&self, vaddr: u64, buf: &mut [u8]) -> bool { self.cpu.virt_read(vaddr, buf) }
-    #[inline] pub fn virt_read_with_cr3(&self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool {
+    #[inline]
+    pub fn mem_read(&self, addr: u64, buf: &mut [u8]) -> bool {
+        self.cpu.mem_read(addr, buf)
+    }
+    #[inline]
+    pub fn mem_write(&mut self, addr: u64, data: &[u8]) -> bool {
+        self.cpu.mem_write(addr, data)
+    }
+    #[inline]
+    pub fn virt_read(&self, vaddr: u64, buf: &mut [u8]) -> bool {
+        self.cpu.virt_read(vaddr, buf)
+    }
+    #[inline]
+    pub fn virt_read_with_cr3(&self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool {
         self.cpu.virt_read_with_cr3(vaddr, cr3, buf)
     }
 
-    #[inline] pub fn stop(&mut self) { self.cpu.stop() }
+    #[inline]
+    pub fn stop(&mut self) {
+        self.cpu.stop()
+    }
 
-    #[inline] pub fn rip(&self) -> u64 { self.cpu.rip() }
-    #[inline] pub fn icount(&self) -> u64 { self.cpu.icount() }
-    #[inline] pub fn cr3(&self) -> u64 { self.cpu.cr3() }
+    #[inline]
+    pub fn rip(&self) -> u64 {
+        self.cpu.rip()
+    }
+    #[inline]
+    pub fn icount(&self) -> u64 {
+        self.cpu.icount()
+    }
+    #[inline]
+    pub fn cr3(&self) -> u64 {
+        self.cpu.cr3()
+    }
 
     /// Read a NUL-terminated string from guest user-space memory, starting at
     /// `vaddr`, translating via `cr3`. Up to `max_len` bytes. Returns empty
@@ -74,7 +102,9 @@ impl<'a> HookCtx<'a> {
     #[cfg(feature = "alloc")]
     pub fn read_cstr_user(&self, vaddr: u64, cr3: u64, max_len: usize) -> alloc::string::String {
         use alloc::string::String;
-        if vaddr == 0 || max_len == 0 { return String::new(); }
+        if vaddr == 0 || max_len == 0 {
+            return String::new();
+        }
         let mut buf = alloc::vec![0u8; max_len];
         if !self.cpu.virt_read_with_cr3(vaddr, cr3, &mut buf) {
             return String::new();
@@ -100,6 +130,12 @@ impl InstrAction {
         }
     }
 
-    #[inline] pub fn is_skip(self) -> bool { matches!(self, InstrAction::Skip | InstrAction::SkipAndStop) }
-    #[inline] pub fn is_stop(self) -> bool { matches!(self, InstrAction::Stop | InstrAction::SkipAndStop) }
+    #[inline]
+    pub fn is_skip(self) -> bool {
+        matches!(self, InstrAction::Skip | InstrAction::SkipAndStop)
+    }
+    #[inline]
+    pub fn is_stop(self) -> bool {
+        matches!(self, InstrAction::Stop | InstrAction::SkipAndStop)
+    }
 }

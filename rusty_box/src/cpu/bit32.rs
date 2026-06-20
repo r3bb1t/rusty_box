@@ -71,7 +71,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let result = op2.count_ones();
         // Bochs: clearEFlagsOSZAPC(); if (!op_32) assert_ZF();
         self.oszapc.set_oszapc_logic_32(1);
-        if result == 0 { self.oszapc.set_zf(true); }
+        if result == 0 {
+            self.oszapc.set_zf(true);
+        }
         self.set_gpr32(instr.dst() as usize, result);
         Ok(())
     }
@@ -92,7 +94,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_gpr32(dst, (current & 0xFFFF0000) | result as u32);
         // Bochs: clearEFlagsOSZAPC(); if (!op_16) assert_ZF();
         self.oszapc.set_oszapc_logic_32(1);
-        if result == 0 { self.oszapc.set_zf(true); }
+        if result == 0 {
+            self.oszapc.set_zf(true);
+        }
         Ok(())
     }
 

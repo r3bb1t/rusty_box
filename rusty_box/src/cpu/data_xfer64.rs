@@ -690,82 +690,114 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn cmovo_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if self.get_of() { self.set_gpr64(instr.dst() as usize, val); }
+        if self.get_of() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovno_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if !self.get_of() { self.set_gpr64(instr.dst() as usize, val); }
+        if !self.get_of() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovb_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if self.get_cf() { self.set_gpr64(instr.dst() as usize, val); }
+        if self.get_cf() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovnb_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if !self.get_cf() { self.set_gpr64(instr.dst() as usize, val); }
+        if !self.get_cf() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovz_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if self.get_zf() { self.set_gpr64(instr.dst() as usize, val); }
+        if self.get_zf() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovnz_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if !self.get_zf() { self.set_gpr64(instr.dst() as usize, val); }
+        if !self.get_zf() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovbe_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if self.get_cf() || self.get_zf() { self.set_gpr64(instr.dst() as usize, val); }
+        if self.get_cf() || self.get_zf() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovnbe_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if !self.get_cf() && !self.get_zf() { self.set_gpr64(instr.dst() as usize, val); }
+        if !self.get_cf() && !self.get_zf() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovs_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if self.get_sf() { self.set_gpr64(instr.dst() as usize, val); }
+        if self.get_sf() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovns_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if !self.get_sf() { self.set_gpr64(instr.dst() as usize, val); }
+        if !self.get_sf() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovp_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if self.get_pf() { self.set_gpr64(instr.dst() as usize, val); }
+        if self.get_pf() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovnp_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if !self.get_pf() { self.set_gpr64(instr.dst() as usize, val); }
+        if !self.get_pf() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovl_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if self.get_sf() != self.get_of() { self.set_gpr64(instr.dst() as usize, val); }
+        if self.get_sf() != self.get_of() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovnl_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if self.get_sf() == self.get_of() { self.set_gpr64(instr.dst() as usize, val); }
+        if self.get_sf() == self.get_of() {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovle_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if self.get_zf() || (self.get_sf() != self.get_of()) { self.set_gpr64(instr.dst() as usize, val); }
+        if self.get_zf() || (self.get_sf() != self.get_of()) {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
     pub fn cmovnle_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
-        if !self.get_zf() && (self.get_sf() == self.get_of()) { self.set_gpr64(instr.dst() as usize, val); }
+        if !self.get_zf() && (self.get_sf() == self.get_of()) {
+            self.set_gpr64(instr.dst() as usize, val);
+        }
         Ok(())
     }
 

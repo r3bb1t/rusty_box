@@ -25,20 +25,47 @@ pub struct RustyBoxApp {
     // Cached serial log for display (updated each frame from shared)
     cached_serial_log: String,
     serial_log_len: usize,
+    serial_input: String,
 }
 
 impl RustyBoxApp {
     /// Create a new RustyBoxApp with the given shared display.
     pub fn new(_cc: &eframe::CreationContext<'_>, shared: Arc<Mutex<SharedDisplay>>) -> Self {
+        Self::new_embedded(shared)
+    }
+
+    /// Create a RustyBoxApp for an already-managed shell surface.
+    pub fn new_embedded(shared: Arc<Mutex<SharedDisplay>>) -> Self {
         Self {
             shared,
             texture: None,
             last_width: 0,
             last_height: 0,
             cached_ips: 0,
-            cached_emu_running: true,
+            cached_emu_running: false,
             cached_serial_log: String::new(),
             serial_log_len: 0,
+            serial_input: String::new(),
+        }
+    }
+
+    fn shared_emu_running(&self) -> bool {
+        self.shared
+            .lock()
+            .map(|display| display.emu_running)
+            .unwrap_or(false)
+    }
+
+    fn send_serial_input(&mut self) {
+        if self.serial_input.is_empty() {
+            return;
+        }
+        if let Ok(mut display) = self.shared.lock() {
+            if !display.emu_running {
+                return;
+            }
+            display.queue_serial_input_line(&self.serial_input);
+            self.serial_input.clear();
         }
     }
 
@@ -110,7 +137,7 @@ impl RustyBoxApp {
     }
 
     /// Update the egui texture from the shared framebuffer.
-    fn update_texture(&mut self, ctx: &egui::Context) {
+    fn update_texture(&mut self, ctx: &egui::Context, update_title: bool) {
         let Ok(mut display) = self.shared.lock() else {
             return;
         };
@@ -173,121 +200,149 @@ impl RustyBoxApp {
             }
         }
 
-        // Update window title
-        let title = if self.cached_emu_running {
-            "Rusty Box - Running".to_string()
-        } else if self.cached_ips > 0 {
-            "Rusty Box - Finished".to_string()
-        } else {
-            "Rusty Box - Stopped".to_string()
-        };
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        if update_title {
+            let title = if self.cached_emu_running {
+                "Rusty Box - Running"
+            } else if self.cached_ips > 0 {
+                "Rusty Box - Finished"
+            } else {
+                "Rusty Box - Stopped"
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.to_owned()));
+        }
     }
 }
+impl RustyBoxApp {
+    /// Render the emulator UI inside a parent egui shell without overriding the shell theme.
+    pub fn ui_embedded(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.ui_embedded_with_serial(ui, frame, true);
+    }
 
-impl eframe::App for RustyBoxApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    /// Render the emulator UI inside a parent egui shell with serial visibility control.
+    pub fn ui_embedded_with_serial(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame: &mut eframe::Frame,
+        show_serial: bool,
+    ) {
+        self.ui_inner(ui, frame, false, show_serial, false);
+    }
+
+    fn ui_inner(
+        &mut self,
+        ui: &mut egui::Ui,
+        _frame: &mut eframe::Frame,
+        apply_theme: bool,
+        show_serial: bool,
+        show_status_bar: bool,
+    ) {
         let ctx = ui.ctx().clone();
-        // Apply dark theme
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = egui::Color32::from_rgb(0x1A, 0x1A, 0x2E);
-        visuals.window_fill = egui::Color32::from_rgb(0x1A, 0x1A, 0x2E);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(0x0D, 0x0D, 0x1A);
-        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(0x16, 0x16, 0x2B);
-        ctx.set_visuals(visuals);
+        if apply_theme {
+            // Apply dark theme
+            let mut visuals = egui::Visuals::dark();
+            visuals.panel_fill = egui::Color32::from_rgb(0x1A, 0x1A, 0x2E);
+            visuals.window_fill = egui::Color32::from_rgb(0x1A, 0x1A, 0x2E);
+            visuals.extreme_bg_color = egui::Color32::from_rgb(0x0D, 0x0D, 0x1A);
+            visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(0x16, 0x16, 0x2B);
+            ctx.set_visuals(visuals);
+        }
 
-        self.process_input(&ctx);
-        self.update_texture(&ctx);
-
-        // Status bar at the bottom — modern dark theme
-        let bar_bg = egui::Color32::from_rgb(0x12, 0x12, 0x24);
+        if self.shared_emu_running() && !ctx.egui_wants_keyboard_input() {
+            self.process_input(&ctx);
+        }
+        self.update_texture(&ctx, apply_theme);
         let text_dim = egui::Color32::from_rgb(0x88, 0x8B, 0x99);
-        let accent_green = egui::Color32::from_rgb(0x4E, 0xC9, 0xB0);
-        let accent_blue = egui::Color32::from_rgb(0x56, 0x9C, 0xD6);
-        let accent_yellow = egui::Color32::from_rgb(0xDC, 0xDC, 0xAA);
 
-        egui::Panel::bottom("status_bar")
-            .exact_size(26.0)
-            .frame(
-                egui::Frame::NONE
-                    .fill(bar_bg)
-                    .inner_margin(egui::Margin::symmetric(12, 4)),
-            )
-            .show_inside(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.spacing_mut().item_spacing.x = 20.0;
+        if show_status_bar {
+            // Status bar at the bottom — modern dark theme
+            let bar_bg = egui::Color32::from_rgb(0x12, 0x12, 0x24);
+            let accent_green = egui::Color32::from_rgb(0x4E, 0xC9, 0xB0);
+            let accent_blue = egui::Color32::from_rgb(0x56, 0x9C, 0xD6);
+            let accent_yellow = egui::Color32::from_rgb(0xDC, 0xDC, 0xAA);
 
-                    // IPS counter
-                    let ips_text = if self.cached_ips > 0 {
-                        let ips = self.cached_ips as f64;
-                        if ips >= 1_000_000.0 {
-                            format!("{:.3}M IPS", ips / 1_000_000.0)
-                        } else if ips >= 1_000.0 {
-                            format!("{:.0}K IPS", ips / 1_000.0)
+            egui::Panel::bottom("status_bar")
+                .exact_size(26.0)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(bar_bg)
+                        .inner_margin(egui::Margin::symmetric(12, 4)),
+                )
+                .show_inside(ui, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.spacing_mut().item_spacing.x = 20.0;
+
+                        // IPS counter
+                        let ips_text = if self.cached_ips > 0 {
+                            let ips = self.cached_ips as f64;
+                            if ips >= 1_000_000.0 {
+                                format!("{:.3}M IPS", ips / 1_000_000.0)
+                            } else if ips >= 1_000.0 {
+                                format!("{:.0}K IPS", ips / 1_000.0)
+                            } else {
+                                format!("{:.0} IPS", ips)
+                            }
                         } else {
-                            format!("{:.0} IPS", ips)
-                        }
-                    } else {
-                        "--- IPS".to_string()
-                    };
-                    ui.label(
-                        egui::RichText::new(ips_text)
-                            .monospace()
-                            .size(11.0)
-                            .color(accent_blue),
-                    );
-
-                    // Subtle separator
-                    ui.label(
-                        egui::RichText::new("|")
-                            .monospace()
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(0x3A, 0x3A, 0x50)),
-                    );
-
-                    // Emulator status with color coding
-                    let (status_text, status_color) = if self.cached_emu_running {
-                        ("Running", accent_green)
-                    } else if self.cached_ips > 0 {
-                        ("Finished", accent_yellow)
-                    } else {
-                        ("Stopped", text_dim)
-                    };
-                    ui.label(
-                        egui::RichText::new(status_text)
-                            .monospace()
-                            .size(11.0)
-                            .color(status_color),
-                    );
-
-                    // Reset button — right-aligned
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let btn = egui::Button::new(
-                            egui::RichText::new("Reset")
+                            "--- IPS".to_string()
+                        };
+                        ui.label(
+                            egui::RichText::new(ips_text)
                                 .monospace()
                                 .size(11.0)
-                                .color(egui::Color32::from_rgb(0xCC, 0x88, 0x44)),
-                        )
-                        .fill(egui::Color32::from_rgb(0x1E, 0x1E, 0x30))
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            egui::Color32::from_rgb(0x44, 0x44, 0x66),
-                        ));
-                        // Use click-only sense to exclude from Tab focus chain.
-                        // Without this, Tab+Enter accidentally triggers Reset.
-                        let btn = btn.sense(egui::Sense::click());
-                        if ui.add(btn).clicked() {
-                            if let Ok(mut d) = self.shared.lock() {
-                                d.stop_flag.store(true, Ordering::Relaxed);
-                                d.reset_requested = true;
+                                .color(accent_blue),
+                        );
+
+                        // Subtle separator
+                        ui.label(
+                            egui::RichText::new("|")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(0x3A, 0x3A, 0x50)),
+                        );
+
+                        // Emulator status with color coding
+                        let (status_text, status_color) = if self.cached_emu_running {
+                            ("Running", accent_green)
+                        } else if self.cached_ips > 0 {
+                            ("Finished", accent_yellow)
+                        } else {
+                            ("Stopped", text_dim)
+                        };
+                        ui.label(
+                            egui::RichText::new(status_text)
+                                .monospace()
+                                .size(11.0)
+                                .color(status_color),
+                        );
+
+                        // Restart button — right-aligned
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let btn = egui::Button::new(
+                                egui::RichText::new("Restart VM")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(0xCC, 0x88, 0x44)),
+                            )
+                            .fill(egui::Color32::from_rgb(0x1E, 0x1E, 0x30))
+                            .stroke(egui::Stroke::new(
+                                1.0_f32,
+                                egui::Color32::from_rgb(0x44, 0x44, 0x66),
+                            ));
+                            // Use click-only sense to exclude from Tab focus chain.
+                            // Without this, Tab+Enter accidentally triggers Restart VM.
+                            let btn = btn.sense(egui::Sense::click());
+                            if ui.add_enabled(self.cached_emu_running, btn).clicked() {
+                                if let Ok(mut d) = self.shared.lock() {
+                                    d.stop_flag.store(true, Ordering::Relaxed);
+                                    d.reset_requested = true;
+                                }
                             }
-                        }
+                        });
                     });
                 });
-            });
+        }
 
-        // Serial console panel — shown when there is serial output
-        if !self.cached_serial_log.is_empty() {
+        // Serial console panel — shown when enabled so input can be sent before output appears.
+        if show_serial {
             let console_bg = egui::Color32::from_rgb(0x0A, 0x0A, 0x14);
             let console_text = egui::Color32::from_rgb(0x00, 0xCC, 0x66);
             egui::Panel::bottom("serial_console")
@@ -319,6 +374,28 @@ impl eframe::App for RustyBoxApp {
                                     .color(console_text),
                             );
                         });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut self.serial_input)
+                                .desired_width(260.0)
+                                .hint_text("serial input"),
+                        );
+                        let enter_pressed = response.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                        let send_enabled = self.cached_emu_running && !self.serial_input.is_empty();
+                        if ui
+                            .add_enabled(send_enabled, egui::Button::new("Send"))
+                            .clicked()
+                            || (send_enabled && enter_pressed)
+                        {
+                            self.send_serial_input();
+                        }
+                        if ui.button("Copy Log").clicked() {
+                            ui.ctx().copy_text(self.cached_serial_log.clone());
+                        }
+                        ui.add_enabled(false, egui::Button::new("Paste"));
+                    });
                 });
         }
 
@@ -326,7 +403,7 @@ impl eframe::App for RustyBoxApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(0x0D, 0x0D, 0x1A)))
             .show_inside(ui, |ui| {
-                if let Some(ref tex) = self.texture {
+                if let Some(tex) = &self.texture {
                     let available = ui.available_size();
                     let tex_w = self.last_width as f32;
                     let tex_h = self.last_height.max(1) as f32;
@@ -360,6 +437,12 @@ impl eframe::App for RustyBoxApp {
         if self.cached_emu_running {
             ctx.request_repaint();
         }
+    }
+}
+
+impl eframe::App for RustyBoxApp {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.ui_inner(ui, frame, true, true, true);
     }
 }
 
@@ -477,5 +560,41 @@ fn egui_key_to_char(key: egui::Key) -> Option<char> {
         egui::Key::Period => Some('.'),
         egui::Key::Slash => Some('/'),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serial_input_is_not_queued_while_stopped() {
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        let mut app = RustyBoxApp::new_embedded(Arc::clone(&shared));
+        app.serial_input = "help".to_owned();
+
+        app.send_serial_input();
+
+        assert_eq!(
+            shared.lock().unwrap().drain_serial_input(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(app.serial_input, "help");
+    }
+
+    #[test]
+    fn serial_input_is_queued_while_running() {
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        shared.lock().unwrap().emu_running = true;
+        let mut app = RustyBoxApp::new_embedded(Arc::clone(&shared));
+        app.serial_input = "help".to_owned();
+
+        app.send_serial_input();
+
+        assert_eq!(
+            shared.lock().unwrap().drain_serial_input(),
+            b"help\n".to_vec()
+        );
+        assert!(app.serial_input.is_empty());
     }
 }

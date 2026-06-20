@@ -10,7 +10,10 @@ use crate::cpu::{BxCpuC, BxCpuIdTrait};
 /// Opcode: 0x03, ModRM: r32, r/m32 (register)
 /// operands.dst = destination register
 /// operands.src1 = source register
-pub fn ADD_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn ADD_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let dst_idx = instr.dst() as usize;
     let src_idx = instr.src1() as usize;
 
@@ -24,7 +27,10 @@ pub fn ADD_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// ADD_EdGd_R: ADD r/m32, r32 (register form)
 /// Opcode: 0x01: decoder swaps for 16/32-bit store: [0]=rm=DEST, [1]=nnn=SOURCE
-pub fn ADD_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn ADD_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1 = cpu.get_gpr32(instr.dst() as usize); // rm = destination/first operand
     let op2 = cpu.get_gpr32(instr.src1() as usize); // nnn = source/second operand
     let result = op1.wrapping_add(op2);
@@ -36,7 +42,10 @@ pub fn ADD_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// ADD_EAX_Id: ADD EAX, imm32
 /// Opcode: 0x05
 /// Immediate value stored in operand_data.Id
-pub fn ADD_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn ADD_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let eax = cpu.eax();
     let imm: u32 = instr.id();
     let result = eax.wrapping_add(imm);
@@ -48,7 +57,10 @@ pub fn ADD_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// ADD_EdId_R: ADD r32, imm32 (register form, sign-extended immediate)
 /// Original: bochs/cpu/arith32.cc ADD_EdIdR
 /// Opcode: 0x81/0x83, ModRM: r/m32, imm32/imm8
-pub fn ADD_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn ADD_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let dst_reg = instr.dst() as usize;
     let op1 = cpu.get_gpr32(dst_reg);
     let op2 = instr.id(); // Sign-extended immediate
@@ -60,7 +72,10 @@ pub fn ADD_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// SUB_GdEd_R: SUB r32, r/m32 (register form)
 /// Opcode: 0x2B, ModRM: r32, r/m32 (register)
-pub fn SUB_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn SUB_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let dst_idx = instr.dst() as usize;
     let src_idx = instr.src1() as usize;
 
@@ -74,7 +89,10 @@ pub fn SUB_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// SUB_EdGd_R: SUB r/m32, r32 (register form)
 /// Opcode: 0x29: decoder swaps for 16/32-bit store: [0]=rm=DEST, [1]=nnn=SOURCE
-pub fn SUB_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn SUB_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1 = cpu.get_gpr32(instr.dst() as usize); // rm = destination/first operand
     let op2 = cpu.get_gpr32(instr.src1() as usize); // nnn = source/second operand
     let result = op1.wrapping_sub(op2);
@@ -85,7 +103,10 @@ pub fn SUB_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// SUB_EAX_Id: SUB EAX, imm32
 /// Opcode: 0x2D
-pub fn SUB_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn SUB_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let eax = cpu.eax();
     let imm: u32 = instr.id();
     let result = eax.wrapping_sub(imm);
@@ -97,7 +118,10 @@ pub fn SUB_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// SUB_EdId_R: SUB r32, imm32 (register form, sign-extended immediate)
 /// Original: bochs/cpu/arith32.cc SUB_EdIdR
 /// Opcode: 0x81/0x83, ModRM: r/m32, imm32/imm8
-pub fn SUB_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn SUB_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let dst_reg = instr.dst() as usize;
     let op1 = cpu.get_gpr32(dst_reg);
     let op2 = instr.id(); // Sign-extended immediate
@@ -110,7 +134,10 @@ pub fn SUB_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// CMP_EdId_R: CMP r32, imm32 (register form, sign-extended immediate)
 /// Original: bochs/cpu/arith32.cc CMP_EdIdR
 /// Opcode: 0x81/0x83, ModRM: r/m32, imm32/imm8
-pub fn CMP_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn CMP_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let dst_reg = instr.dst() as usize;
     let op1 = cpu.get_gpr32(dst_reg);
     let op2 = instr.id(); // Sign-extended immediate
@@ -123,7 +150,10 @@ pub fn CMP_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// CMP_EdGd_R: CMP r/m32, r32 (register form)
 /// Opcode: 0x39: decoder swaps for 16/32-bit store: [0]=rm=first operand, [1]=nnn=second operand
 /// Performs rm - nnn and sets flags without storing result
-fn CMP_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+fn CMP_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1 = cpu.get_gpr32(instr.dst() as usize); // rm = first operand
     let op2 = cpu.get_gpr32(instr.src1() as usize); // nnn = second operand
     let diff = op1.wrapping_sub(op2);
@@ -133,7 +163,10 @@ fn CMP_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
 
 /// ADC_EdGd_R: ADC r/m32, r32 (register form)
 /// Opcode: 0x11: decoder swaps for 16/32-bit store: [0]=rm=DEST, [1]=nnn=SOURCE
-pub fn ADC_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn ADC_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1 = cpu.get_gpr32(instr.dst() as usize); // rm = destination/first operand
     let op2 = cpu.get_gpr32(instr.src1() as usize); // nnn = source/second operand
     let cf = cpu.get_cf() as u32;
@@ -146,7 +179,10 @@ pub fn ADC_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// ADC_GdEd_R: ADC r32, r/m32 (register form)
 /// Original: bochs/cpu/arith32.cc ADC_GdEd (register case)
 /// Opcode: 0x13, ModRM: r32, r/m32 (register)
-pub fn ADC_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn ADC_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let dst_idx = instr.dst() as usize;
     let src_idx = instr.src1() as usize;
 
@@ -485,7 +521,10 @@ pub fn ADC_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// ADC EAX, imm32 (opcode 0x15) - Bochs ADC_EAXId
-pub fn ADC_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn ADC_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1 = cpu.eax();
     let op2 = instr.id();
     let cf = cpu.get_cf() as u32;
@@ -495,7 +534,10 @@ pub fn ADC_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// ADC r/m32, imm32 - register form (opcode 0x81 /2) - Bochs ADC_EdIdR
-pub fn ADC_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn ADC_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1 = cpu.get_gpr32(instr.dst() as usize);
     let op2 = instr.id();
     let cf = cpu.get_cf() as u32;
@@ -534,7 +576,10 @@ pub fn ADC_EdId<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// ADC r/m32, imm8 sign-extended - register form (opcode 0x83 /2) - Bochs ADC_EdIbR
-pub fn ADC_EdIb_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn ADC_EdIb_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1 = cpu.get_gpr32(instr.dst() as usize);
     let op2 = instr.ib() as i8 as i32 as u32;
     let cf = cpu.get_cf() as u32;
@@ -636,7 +681,10 @@ pub fn SBB_EdsIb<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 // =========================================================================
 
 /// NEG r32 - Negate register (register form)
-pub fn NEG_EdR<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn NEG_EdR<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let dst = instr.dst() as usize;
     let op1 = cpu.get_gpr32(dst);
     let result = 0u32.wrapping_sub(op1);
@@ -676,7 +724,10 @@ pub fn NEG_Ed<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
 // =========================================================================
 
 /// SBB r/m32, r32 - register form (opcode 0x19)
-pub fn SBB_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn SBB_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1 = cpu.get_gpr32(instr.dst() as usize);
     let op2 = cpu.get_gpr32(instr.src1() as usize);
     let cf = cpu.get_cf() as u32;
@@ -715,7 +766,10 @@ pub fn SBB_EdGd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// SBB r32, r/m32 - register form (opcode 0x1B)
-pub fn SBB_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn SBB_GdEd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1 = cpu.get_gpr32(instr.dst() as usize);
     let op2 = cpu.get_gpr32(instr.src1() as usize);
     let cf = cpu.get_cf() as u32;
@@ -754,7 +808,10 @@ pub fn SBB_GdEd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation
 }
 
 /// SBB EAX, imm32 (opcode 0x1D)
-pub fn SBB_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn SBB_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let eax = cpu.eax();
     let imm = instr.id();
     let cf = cpu.get_cf() as u32;
@@ -764,7 +821,10 @@ pub fn SBB_EAX_Id<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// SBB r/m32, imm32 (opcode 0x81 /3) - register form
-pub fn SBB_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn SBB_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1 = cpu.get_gpr32(instr.dst() as usize);
     let op2 = instr.id();
     let cf = cpu.get_cf() as u32;
@@ -774,7 +834,10 @@ pub fn SBB_EdId_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 }
 
 /// SBB r/m32, imm8 sign-extended (opcode 0x83 /3) - register form
-pub fn SBB_EdIb_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn SBB_EdIb_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1 = cpu.get_gpr32(instr.dst() as usize);
     let op2 = instr.ib() as i8 as i32 as u32;
     let cf = cpu.get_cf() as u32;
@@ -794,7 +857,10 @@ pub fn SBB_EdIb_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// Otherwise, load dest into EAX. Flags set from the comparison.
 /// CMPXCHG r/m32, r32 — register form
 /// Bochs arith32.cc (CMPXCHG_EdGdR)
-pub fn CMPXCHG_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn CMPXCHG_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1_32 = cpu.get_gpr32(instr.dst() as usize);
     let diff_32 = cpu.eax().wrapping_sub(op1_32);
     cpu.update_flags_sub32(cpu.eax(), op1_32, diff_32);
@@ -876,7 +942,10 @@ pub fn CMPXCHG8B<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 
 /// XADD r/m32, r32 — register form
 /// Bochs arith32.cc
-pub fn XADD_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<I, T>, instr: &Instruction) {
+pub fn XADD_EdGd_R<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<I, T>,
+    instr: &Instruction,
+) {
     let op1_32 = cpu.get_gpr32(instr.dst() as usize);
     let op2_32 = cpu.get_gpr32(instr.src() as usize);
     let sum_32 = op1_32.wrapping_add(op2_32);

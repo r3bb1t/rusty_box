@@ -141,7 +141,9 @@ mod alloc_hooks {
 
     pub(crate) struct MemUnmappedHook {
         pub(crate) handle: HookHandle,
-        pub(crate) cb: Box<dyn FnMut(u64, usize, crate::cpu::instrumentation::types::MemAccessRW) -> bool + Send>,
+        pub(crate) cb: Box<
+            dyn FnMut(u64, usize, crate::cpu::instrumentation::types::MemAccessRW) -> bool + Send,
+        >,
     }
 }
 

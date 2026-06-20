@@ -1,4 +1,3 @@
-
 use super::{
     cpu::Exception,
     decoder::BxSegregs,
@@ -18,7 +17,9 @@ pub fn parse_selector(raw_selector: u16, selector: &mut BxSelector) {
     selector.rpl = raw_selector as u8 & 0x03;
 }
 
-impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cpu::BxCpuC<'_, I, T> {
+impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
+    super::cpu::BxCpuC<'_, I, T>
+{
     /// Fetch raw descriptor from GDT or LDT
     /// Based on BX_CPU_C::fetch_raw_descriptor in segment_ctrl_pro.cc
     pub(super) fn fetch_raw_descriptor(&mut self, selector: &BxSelector) -> Result<(u32, u32)> {
@@ -134,7 +135,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                     // 286 call/interrupt/trap gate
                     let param_count = (dword2 & 0x1F) as u8;
                     let dest_selector = (dword1 >> 16) as u16;
-                    let dest_offset = dword1 & 0xFFFF ;
+                    let dest_offset = dword1 & 0xFFFF;
 
                     descriptor.u = super::descriptor::Descriptor::Gate(DescriptorGate {
                         param_count,
@@ -147,7 +148,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                     // 386 call/interrupt/trap gate
                     let param_count = (dword2 & 0x1F) as u8;
                     let dest_selector = (dword1 >> 16) as u16;
-                    let dest_offset = (dword2 & 0xFFFF0000) | (dword1 & 0xFFFF) ;
+                    let dest_offset = (dword2 & 0xFFFF0000) | (dword1 & 0xFFFF);
 
                     descriptor.u = super::descriptor::Descriptor::Gate(DescriptorGate {
                         param_count,
@@ -159,7 +160,9 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 0x5 => {
                     // Task gate
                     let tss_selector = (dword1 >> 16) as u16;
-                    descriptor.u = super::descriptor::Descriptor::TaskGate(DescriptorTaskGate { tss_selector });
+                    descriptor.u = super::descriptor::Descriptor::TaskGate(DescriptorTaskGate {
+                        tss_selector,
+                    });
                     descriptor.valid = super::descriptor::SEG_VALID_CACHE;
                 }
                 0x2 | 0x1 | 0x3 | 0x9 | 0xB => {
@@ -292,7 +295,10 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     /// Fetch 16-byte (128-bit) raw descriptor from GDT/LDT for 64-bit system descriptors.
     /// Returns (dword1, dword2, dword3) where dword3 is the upper 32 bits of the 64-bit base.
     /// Based on BX_CPU_C::fetch_raw_descriptor_64 in segment_ctrl_pro.cc
-    pub(super) fn fetch_raw_descriptor_64(&mut self, selector: &BxSelector) -> Result<(u32, u32, u32)> {
+    pub(super) fn fetch_raw_descriptor_64(
+        &mut self,
+        selector: &BxSelector,
+    ) -> Result<(u32, u32, u32)> {
         let index = selector.index as u32;
         let offset: u64 = if selector.ti == 0 {
             // GDT — need 16 bytes (index*8 + 15)
@@ -491,14 +497,13 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         }
 
         // Bochs ctrl_xfer_pro.cc — L+D_B both set is invalid in long mode
-        if self.long_mode()
-            && descriptor.u.segment_l() && descriptor.u.segment_d_b() {
-                tracing::error!(
-                    "check_cs({:#06x}): Both CS.L and CS.D_B bits enabled!",
-                    cs_raw
-                );
-                return self.exception(Exception::Gp, cs_raw & 0xfffc);
-            }
+        if self.long_mode() && descriptor.u.segment_l() && descriptor.u.segment_d_b() {
+            tracing::error!(
+                "check_cs({:#06x}): Both CS.L and CS.D_B bits enabled!",
+                cs_raw
+            );
+            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+        }
 
         // Non-conforming code segment: DPL must = CPL
         if is_code_segment_non_conforming(descriptor.r#type) {
@@ -647,15 +652,14 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         if self.instrumentation.active.has_branch() {
             let new_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
             let src_rip = self.prev_rip;
-            self.instrumentation.fire_branch(
-                &super::instrumentation::BranchEvent::Far {
+            self.instrumentation
+                .fire_branch(&super::instrumentation::BranchEvent::Far {
                     kind: super::instrumentation::BranchType::Jmp,
                     src_cs: prev_cs,
                     src_rip,
                     dst_cs: new_cs,
                     dst_rip: new_rip,
-                },
-            );
+                });
         }
 
         Ok(())
@@ -664,8 +668,6 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     /// Jump to protected mode code segment
     /// Based on BX_CPU_C::jump_protected in jmp_far.cc
     pub(super) fn jump_protected(&mut self, cs_raw: u16, disp: u64) -> Result<()> {
-
-
         // Selector must not be null
         if (cs_raw & 0xFFFC) == 0 {
             tracing::trace!("jump_protected: null selector cs={:#06x}", cs_raw);
@@ -1049,6 +1051,22 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             return Ok(());
         }
 
+        // Bochs protect_ctrl.cc LLDT_Ew — SVM_INTERCEPT0_LDTR_WRITE.
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_LDTR_WRITE) {
+            return self.svm_vmexit(super::svm::SvmVmexit::LdtrWrite as i32, 0, 0);
+        }
+        // Bochs protect_ctrl.cc LLDT_Ew — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest {
+            let qual = if instr.mod_c0() {
+                0
+            } else {
+                self.resolve_addr(instr)
+            };
+            if self.vmexit_check_ldtr_tr_access(qual)? {
+                return Ok(());
+            }
+        }
+
         // Read selector from register or memory
         // Group 6 (0F 00): dst()=rm (Bochs: i->dst())
         let raw_selector = if instr.mod_c0() {
@@ -1112,7 +1130,9 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         // In long mode, extend base to 64 bits and check canonical
         // Bochs protect_ctrl.cc
         if self.long64_mode() {
-            descriptor.u.set_segment_base(descriptor.u.segment_base() | (dword3 as u64) << 32);
+            descriptor
+                .u
+                .set_segment_base(descriptor.u.segment_base() | (dword3 as u64) << 32);
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
             if !self.is_canonical(descriptor.u.segment_base()) {
                 tracing::error!("LLDT: non-canonical LDT descriptor base!");
@@ -1125,7 +1145,6 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         self.ldtr.selector = selector;
         self.ldtr.cache = descriptor;
         self.ldtr.cache.valid = SEG_VALID_CACHE;
-
 
         Ok(())
     }
@@ -1147,6 +1166,22 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             tracing::error!("LTR: CPL != 0");
             self.exception(Exception::Gp, 0)?;
             return Ok(());
+        }
+
+        // Bochs protect_ctrl.cc LTR_Ew — SVM_INTERCEPT0_TR_WRITE.
+        if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_TR_WRITE) {
+            return self.svm_vmexit(super::svm::SvmVmexit::TrWrite as i32, 0, 0);
+        }
+        // Bochs protect_ctrl.cc LTR_Ew — DESCRIPTOR_TABLE_VMEXIT gate.
+        if self.in_vmx_guest {
+            let qual = if instr.mod_c0() {
+                0
+            } else {
+                self.resolve_addr(instr)
+            };
+            if self.vmexit_check_ldtr_tr_access(qual)? {
+                return Ok(());
+            }
         }
 
         // Read selector from register or memory
@@ -1225,7 +1260,9 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         // In long mode, extend base to 64 bits and check canonical
         // Bochs protect_ctrl.cc
         if self.long64_mode() {
-            descriptor.u.set_segment_base(descriptor.u.segment_base() | (dword3 as u64) << 32);
+            descriptor
+                .u
+                .set_segment_base(descriptor.u.segment_base() | (dword3 as u64) << 32);
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
             if !self.is_canonical(descriptor.u.segment_base()) {
                 tracing::error!("LTR: non-canonical TSS descriptor base!");
@@ -1252,7 +1289,6 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         let phys_addr = self.translate_linear_system_write(gdt_offset)?;
         self.mem_write_dword(phys_addr, new_dword2);
 
-
         Ok(())
     }
 
@@ -1271,10 +1307,10 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 || !cache.segment
                 || is_data_segment(cache.r#type)
                 || is_code_segment_non_conforming(cache.r#type))
-            {
-                self.sregs[seg].selector.value = 0;
-                self.sregs[seg].cache.valid = 0;
-            }
+        {
+            self.sregs[seg].selector.value = 0;
+            self.sregs[seg].cache.valid = 0;
+        }
     }
 
     /// Validate ES/DS/FS/GS after privilege level change
@@ -1327,6 +1363,11 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
 
             let ss_seg = self.sregs[BxSegregs::Ss as usize].clone();
 
+            // Bochs call_far.cc call_protected \u2014 capture old CS / linear
+            // return-LIP before branch_far rewrites CS.
+            let old_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
+            let temp_lip = self.get_laddr32(BxSegregs::Cs as usize, self.eip()) as u64;
+
             if os32 {
                 self.write_new_stack_dword(
                     &ss_seg,
@@ -1366,6 +1407,12 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                     self.set_sp((temp_rsp.wrapping_sub(4)) as u16);
                 }
             }
+            // Bochs call_far.cc call_protected \u2014 push CET frame and arm
+            // indirect-branch tracking after branch_far / SP commit.
+            if self.shadow_stack_enabled(cpl) {
+                self.call_far_shadow_stack_push(old_cs, temp_lip, self.ssp())?;
+            }
+            self.track_indirect(cpl);
             return Ok(());
         }
 
@@ -1532,6 +1579,12 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             new_stack.selector.value =
                 (new_stack.selector.value & 0xfffc) | new_stack.selector.rpl as u16;
 
+            // Bochs call_far.cc call_gate \u2014 capture pre-transition CET
+            // state for the inner-priv shadow-stack switch.
+            let old_ss_dpl = self.sregs[BxSegregs::Ss as usize].cache.dpl;
+            let old_cpl = cpl;
+            let temp_lip = self.get_laddr32(BxSegregs::Cs as usize, return_eip) as u64;
+
             let is_386_gate = gate_descriptor.r#type == 0xC;
 
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -1589,8 +1642,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
 
                     for n in (1..=param_count as u32).rev() {
                         temp_esp = temp_esp.wrapping_sub(2);
-                        let param =
-                            self.stack_read_word(return_esp.wrapping_add((n - 1) * 2))?;
+                        let param = self.stack_read_word(return_esp.wrapping_add((n - 1) * 2))?;
                         self.write_new_stack_word(&new_stack, temp_esp, cs_descriptor.dpl, param)?;
                     }
 
@@ -1674,8 +1726,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
 
                     for n in (1..=param_count as u32).rev() {
                         temp_sp = temp_sp.wrapping_sub(2);
-                        let param =
-                            self.stack_read_word(return_esp.wrapping_add((n - 1) * 2))?;
+                        let param = self.stack_read_word(return_esp.wrapping_add((n - 1) * 2))?;
                         self.write_new_stack_word(
                             &new_stack,
                             temp_sp as u32,
@@ -1705,6 +1756,23 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 self.set_eip(new_eip);
                 self.set_sp(temp_sp);
             }
+
+            // Bochs call_far.cc call_gate \u2014 CALL GATE TO MORE PRIVILEGE
+            // shadow-stack epilogue: snapshot ring 3 SSP, switch to the new
+            // ring's SSP, and push the (CS, LIP, oldSSP) frame unless the old
+            // SS belonged to ring 3.
+            if self.shadow_stack_enabled(old_cpl) && old_cpl == 3 {
+                self.msr.ia32_pl_ssp[3] = self.ssp();
+            }
+            let new_cpl_cet = self.cs_rpl();
+            if self.shadow_stack_enabled(new_cpl_cet) {
+                let old_ssp = self.ssp();
+                self.shadow_stack_switch(self.msr.ia32_pl_ssp[new_cpl_cet as usize])?;
+                if old_ss_dpl != 3 {
+                    self.call_far_shadow_stack_push(return_cs, temp_lip, old_ssp)?;
+                }
+            }
+            self.track_indirect(new_cpl_cet);
         } else {
             // ── CALL GATE TO SAME PRIVILEGE ──
             tracing::trace!("call_gate: to SAME privilege");
@@ -1719,12 +1787,22 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 self.push_16(self.get_ip())?;
             }
 
+            // Bochs call_far.cc call_gate \u2014 CALL GATE TO SAME PRIVILEGE
+            // captures old CS / linear-LIP before branch_far rewrites CS.
+            let old_cs_same = self.sregs[BxSegregs::Cs as usize].selector.value;
+            let temp_lip_same = self.get_laddr32(BxSegregs::Cs as usize, new_eip) as u64;
+
             self.branch_far(
                 &mut gate_cs_selector,
                 &mut cs_descriptor,
                 new_eip as u64,
                 cpl,
             )?;
+
+            if self.shadow_stack_enabled(cpl) {
+                self.call_far_shadow_stack_push(old_cs_same, temp_lip_same, self.ssp())?;
+            }
+            self.track_indirect(cpl);
         }
 
         Ok(())
@@ -1837,6 +1915,17 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 return_eip
             );
 
+            // Bochs ret_far.cc return_protected \u2014 same-priv shadow-stack pop.
+            if self.shadow_stack_enabled(cpl) {
+                let return_lip = (cs_descriptor
+                    .u
+                    .segment_base()
+                    .wrapping_add(return_eip as u64))
+                    & 0xFFFF_FFFF;
+                let prev_ssp = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
+                self.set_ssp(prev_ssp);
+            }
+
             self.branch_far(&mut cs_selector, &mut cs_descriptor, return_eip as u64, cpl)?;
 
             if self.is_stack_32bit() {
@@ -1927,6 +2016,26 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 return self.exception(Exception::Ss, raw_ss_raw & 0xfffc);
             }
 
+            // Bochs ret_far.cc return_protected \u2014 outer-priv shadow-stack
+            // restore. Capture prev CPL and pop the saved SSP token (when not
+            // returning to ring 3) before branch_far reloads CS.
+            let prev_cpl = cpl;
+            let mut new_ssp_cet = self.msr.ia32_pl_ssp[3];
+            if self.shadow_stack_enabled(cpl) {
+                if self.ssp() & 0x7 != 0 {
+                    tracing::error!("return_protected: SSP not 8-byte aligned");
+                    self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
+                }
+                if cs_selector.rpl != 3 {
+                    let return_lip = (cs_descriptor
+                        .u
+                        .segment_base()
+                        .wrapping_add(return_eip as u64))
+                        & 0xFFFF_FFFF;
+                    new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
+                }
+            }
+
             // Load new CS
             let new_cpl = cs_selector.rpl;
             self.branch_far(
@@ -1946,6 +2055,20 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 self.set_sp((return_rsp as u16).wrapping_add(pop_bytes));
             }
 
+            // Bochs ret_far.cc return_protected \u2014 install new SSP and clear
+            // busy on the previous SSP.
+            let old_ssp = self.ssp();
+            let new_cpl_cet = self.cs_rpl();
+            if self.shadow_stack_enabled(new_cpl_cet) {
+                if !self.long64_mode() && (new_ssp_cet >> 32) != 0 {
+                    tracing::error!("return_protected: 64-bit SSP in legacy mode");
+                    return self.exception(Exception::Gp, 0);
+                }
+                self.set_ssp(new_ssp_cet);
+            }
+            if self.shadow_stack_enabled(prev_cpl) {
+                self.shadow_stack_atomic_clear_busy(old_ssp, prev_cpl)?;
+            }
             // Invalidate DS/ES/FS/GS if no longer accessible at new privilege level
             self.validate_seg_regs();
         }
@@ -2156,6 +2279,11 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
 
         if cs_descriptor.segment {
             // Normal code segment
+            // Bochs call_far.cc call_protected (long mode) \u2014 capture old
+            // CS / linear LIP before branch_far rewrites CS.
+            let old_cs_norm = self.sregs[BxSegregs::Cs as usize].selector.value;
+            let temp_lip_norm = self.get_laddr64(BxSegregs::Cs as usize, self.rip());
+
             self.check_cs(&cs_descriptor, cs_raw, cs_selector.rpl, cpl)?;
 
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -2206,8 +2334,7 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             } else {
                 // Legacy mode within long mode (compatibility sub-mode)
                 // SAFETY: segment cache populated during segment load; union read matches descriptor type
-                let temp_rsp = if self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b()
-                {
+                let temp_rsp = if self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b() {
                     self.esp() as u64
                 } else {
                     self.sp() as u64
@@ -2257,6 +2384,12 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                     }
                 }
             }
+            // Bochs call_far.cc call_protected \u2014 push CET frame and arm
+            // indirect-branch tracking after branch_far / SP commit.
+            if self.shadow_stack_enabled(cpl) {
+                self.call_far_shadow_stack_push(old_cs_norm, temp_lip_norm, self.ssp())?;
+            }
+            self.track_indirect(cpl);
             return Ok(());
         }
 
@@ -2349,6 +2482,11 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         let old_cs = self.sregs[BxSegregs::Cs as usize].selector.value as u64;
         let old_rip = self.rip();
 
+        // Bochs call_far.cc call_gate64 \u2014 capture pre-transition CET state.
+        let temp_lip = self.get_laddr64(BxSegregs::Cs as usize, self.rip());
+        let old_ss_dpl = self.sregs[BxSegregs::Ss as usize].cache.dpl;
+        let old_cpl = cpl;
+
         // CALL GATE TO MORE PRIVILEGE
         if is_code_segment_non_conforming(cs_descriptor.r#type) && cs_descriptor.dpl < cpl {
             tracing::trace!("CALL GATE64 TO MORE PRIVILEGE LEVEL");
@@ -2389,6 +2527,21 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             self.load_null_selector(BxSegregs::Ss, dest_dpl as u16);
 
             self.set_rsp(new_rsp);
+
+            // Bochs call_far.cc call_gate64 \u2014 CALL GATE64 TO MORE PRIVILEGE
+            // shadow-stack epilogue.
+            if self.shadow_stack_enabled(old_cpl) && old_cpl == 3 {
+                self.msr.ia32_pl_ssp[3] = self.ssp();
+            }
+            let new_cpl_cet = self.cs_rpl();
+            if self.shadow_stack_enabled(new_cpl_cet) {
+                let old_ssp = self.ssp();
+                self.shadow_stack_switch(self.msr.ia32_pl_ssp[new_cpl_cet as usize])?;
+                if old_ss_dpl != 3 {
+                    self.call_far_shadow_stack_push(old_cs as u16, temp_lip, old_ssp)?;
+                }
+            }
+            self.track_indirect(new_cpl_cet);
         } else {
             // CALL GATE64 TO SAME PRIVILEGE
             tracing::trace!("CALL GATE64 TO SAME PRIVILEGE");
@@ -2401,6 +2554,12 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
             self.branch_far(&mut cs_selector, &mut cs_descriptor, new_rip, cpl)?;
 
             self.set_rsp(self.rsp().wrapping_sub(16));
+
+            // Bochs call_far.cc call_gate64 \u2014 CALL GATE64 TO SAME PRIVILEGE.
+            if self.shadow_stack_enabled(cpl) {
+                self.call_far_shadow_stack_push(old_cs as u16, temp_lip, self.ssp())?;
+            }
+            self.track_indirect(cpl);
         }
 
         Ok(())
@@ -2470,6 +2629,18 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         if cs_selector.rpl == cpl {
             tracing::trace!("return_protected_64: return to SAME PRIVILEGE LEVEL");
 
+            // Bochs ret_far.cc return_protected \u2014 same-priv shadow-stack pop
+            // (long-mode path).
+            if self.shadow_stack_enabled(cpl) {
+                let return_lip = if self.long_mode() && cs_descriptor.u.segment_l() {
+                    return_rip
+                } else {
+                    (cs_descriptor.u.segment_base().wrapping_add(return_rip)) & 0xFFFF_FFFF
+                };
+                let prev_ssp = self.shadow_stack_restore_lip(raw_cs_selector, return_lip)?;
+                self.set_ssp(prev_ssp);
+            }
+
             self.branch_far(&mut cs_selector, &mut cs_descriptor, return_rip, cpl)?;
 
             if self.long64_mode() {
@@ -2500,8 +2671,8 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 let ss = self
                     .stack_read_qword(temp_rsp.wrapping_add(24).wrapping_add(pop_bytes as u64))?
                     as u16;
-                let rsp =
-                    self.stack_read_qword(temp_rsp.wrapping_add(16).wrapping_add(pop_bytes as u64))?;
+                let rsp = self
+                    .stack_read_qword(temp_rsp.wrapping_add(16).wrapping_add(pop_bytes as u64))?;
                 (ss, rsp)
             } else if instr.os32_l() != 0 {
                 let ss = self.stack_read_word(
@@ -2578,6 +2749,26 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 }
             }
 
+            // Bochs ret_far.cc return_protected \u2014 outer-priv shadow-stack
+            // restore (long mode). Capture prev CPL and the saved SSP token
+            // before branch_far reloads CS.
+            let prev_cpl = cpl;
+            let mut new_ssp_cet = self.msr.ia32_pl_ssp[3];
+            if self.shadow_stack_enabled(cpl) {
+                if self.ssp() & 0x7 != 0 {
+                    tracing::error!("return_protected_64: SSP not 8-byte aligned");
+                    self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
+                }
+                if cs_selector.rpl != 3 {
+                    let return_lip = if self.long_mode() && cs_descriptor.u.segment_l() {
+                        return_rip
+                    } else {
+                        (cs_descriptor.u.segment_base().wrapping_add(return_rip)) & 0xFFFF_FFFF
+                    };
+                    new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_selector, return_lip)?;
+                }
+            }
+
             // Load new CS
             let cs_rpl = cs_selector.rpl;
             self.branch_far(&mut cs_selector, &mut cs_descriptor, return_rip, cs_rpl)?;
@@ -2599,6 +2790,20 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 self.set_sp((return_rsp as u16).wrapping_add(pop_bytes));
             }
 
+            // Bochs ret_far.cc return_protected \u2014 install new SSP and clear
+            // busy on the previous SSP.
+            let old_ssp = self.ssp();
+            let new_cpl_cet = self.cs_rpl();
+            if self.shadow_stack_enabled(new_cpl_cet) {
+                if !self.long64_mode() && (new_ssp_cet >> 32) != 0 {
+                    tracing::error!("return_protected_64: 64-bit SSP in legacy mode");
+                    return self.exception(Exception::Gp, 0);
+                }
+                self.set_ssp(new_ssp_cet);
+            }
+            if self.shadow_stack_enabled(prev_cpl) {
+                self.shadow_stack_atomic_clear_busy(old_ssp, prev_cpl)?;
+            }
             // Validate segment registers for privilege change
             self.validate_seg_regs();
         }
@@ -2685,6 +2890,25 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
         if cs_selector.rpl == cpl && instr.os64_l() == 0 {
             tracing::trace!("LONG MODE INTERRUPT RETURN TO SAME PRIVILEGE LEVEL");
 
+            // Bochs iret.cc long_iret \u2014 same-priv shadow-stack restore.
+            // If the new SSP differs from the prev_SSP, atomically clear the
+            // busy bit on the previous SSP token.
+            let mut prev_ssp_same: u64 = 0;
+            let mut do_clear_same = false;
+            if self.shadow_stack_enabled(cpl) {
+                prev_ssp_same = self.ssp();
+                let return_lip = if cs_descriptor.u.segment_l() {
+                    new_rip
+                } else {
+                    (cs_descriptor.u.segment_base().wrapping_add(new_rip)) & 0xFFFF_FFFF
+                };
+                let new_ssp = self.shadow_stack_restore_lip(raw_cs_selector, return_lip)?;
+                self.set_ssp(new_ssp);
+                if new_ssp != prev_ssp_same {
+                    do_clear_same = true;
+                }
+            }
+
             // Load CS:RIP from stack
             self.branch_far(&mut cs_selector, &mut cs_descriptor, new_rip, cpl)?;
 
@@ -2721,6 +2945,9 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 self.set_esp(self.esp().wrapping_add(top_nbytes_same as u32));
             } else {
                 self.set_sp(self.sp().wrapping_add(top_nbytes_same as u16));
+            }
+            if do_clear_same {
+                self.shadow_stack_atomic_clear_busy(prev_ssp_same, cpl)?;
             }
         } else {
             // INTERRUPT RETURN TO OUTER PRIVILEGE LEVEL or 64-BIT MODE
@@ -2811,6 +3038,24 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 change_mask_val &= 0xffff;
             }
 
+            // Bochs iret.cc long_iret \u2014 outer-priv shadow-stack restore.
+            // Capture prev CPL and pop the saved SSP token before branch_far.
+            let mut new_ssp_cet = self.msr.ia32_pl_ssp[3];
+            if self.shadow_stack_enabled(cpl) {
+                if self.ssp() & 0x7 != 0 {
+                    tracing::error!("iret64: SSP not 8-byte aligned");
+                    self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
+                }
+                if cs_selector.rpl != 3 {
+                    let return_lip = if cs_descriptor.u.segment_l() {
+                        new_rip
+                    } else {
+                        (cs_descriptor.u.segment_base().wrapping_add(new_rip)) & 0xFFFF_FFFF
+                    };
+                    new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_selector, return_lip)?;
+                }
+            }
+
             // Set CPL to the RPL of the return CS selector
             let cs_rpl = cs_selector.rpl;
             self.branch_far(&mut cs_selector, &mut cs_descriptor, new_rip, cs_rpl)?;
@@ -2833,6 +3078,19 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 self.set_esp(new_rsp as u32);
             } else {
                 self.set_sp(new_rsp as u16);
+            }
+            // Bochs iret.cc long_iret \u2014 install new SSP and clear busy on prev SSP.
+            let old_ssp = self.ssp();
+            let new_cpl_cet = self.cs_rpl();
+            if self.shadow_stack_enabled(new_cpl_cet) {
+                if !self.long64_mode() && (new_ssp_cet >> 32) != 0 {
+                    tracing::error!("iret64: 64-bit SSP in legacy mode");
+                    return self.exception(Exception::Gp, 0);
+                }
+                self.set_ssp(new_ssp_cet);
+            }
+            if self.shadow_stack_enabled(prev_cpl) {
+                self.shadow_stack_atomic_clear_busy(old_ssp, prev_cpl)?;
             }
 
             if prev_cpl != self.sregs[BxSegregs::Cs as usize].selector.rpl {

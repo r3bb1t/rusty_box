@@ -505,5 +505,4 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.imul_gq_eq_sib_m(instr)
         }
     }
-
 }

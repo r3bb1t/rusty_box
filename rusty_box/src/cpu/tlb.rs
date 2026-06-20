@@ -1,6 +1,5 @@
 #![allow(private_interfaces, unused_assignments, dead_code)]
 
-
 use crate::config::{BxAddress, BxPhyAddress, BxPtrEquiv};
 
 pub type BxMemType = u32;
@@ -82,6 +81,23 @@ impl TLBEntry {
             self.memtype
         }
     }
+
+    /// CET: page can be read as shadow stack from the given privilege level.
+    /// Bochs tlb.h isShadowStackReadOK macro. With protection keys enabled
+    /// (BX_SUPPORT_PKEYS), the entry's PKEY allow-mask (passed as `pkey_mask`)
+    /// is AND-ed in; callers without PKEY support pass `u32::MAX`.
+    /// `user` must be 0 (supervisor) or 1 (user) — used as a shift amount.
+    #[inline]
+    pub(crate) fn is_shadow_stack_read_ok(&self, user: u32, pkey_mask: u32) -> bool {
+        (self.access_bits & (0x10u32 << user) & pkey_mask) != 0
+    }
+
+    /// CET: page can be written as shadow stack from the given privilege level.
+    /// Bochs tlb.h isShadowStackWriteOK macro.
+    #[inline]
+    pub(crate) fn is_shadow_stack_write_ok(&self, user: u32, pkey_mask: u32) -> bool {
+        (self.access_bits & (0x40u32 << user) & pkey_mask) != 0
+    }
 }
 
 // Our TLB struct, generic over the number of entries:
@@ -115,7 +131,7 @@ impl<const SIZE: usize> Tlb<SIZE> {
     pub fn get_index_of(&self, lpf: u64, len: u32) -> usize {
         // Mirror: ((size-1)<<12) mask, then shift down by 12
         let tlb_mask = ((SIZE - 1) as u64) << 12;
-        
+
         ((lpf.wrapping_add(len as u64) & tlb_mask) >> 12) as usize
     }
 
