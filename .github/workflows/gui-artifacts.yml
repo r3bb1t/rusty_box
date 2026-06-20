@@ -1,0 +1,143 @@
+name: GUI Artifacts
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-gui:
+    name: Windows GUI
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build native GUI
+        run: cargo build -p rusty_box_gui --release
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          Copy-Item target/release/rusty_box_gui.exe artifact/rusty_box_gui.exe
+
+      - name: Upload Windows GUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rusty-box-gui-windows
+          path: artifact/rusty_box_gui.exe
+          if-no-files-found: error
+
+  linux-gui:
+    name: Linux GUI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgl1-mesa-dev \
+            libx11-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libwayland-dev
+
+      - name: Build native GUI
+        run: cargo build -p rusty_box_gui --release
+
+      - name: Stage artifact
+        run: |
+          mkdir -p artifact
+          cp target/release/rusty_box_gui artifact/rusty_box_gui
+          chmod +x artifact/rusty_box_gui
+
+      - name: Upload Linux GUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rusty-box-gui-linux
+          path: artifact/rusty_box_gui
+          if-no-files-found: error
+
+  macos-gui:
+    name: macOS GUI
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build native GUI
+        run: cargo build -p rusty_box_gui --release
+
+      - name: Stage artifact
+        run: |
+          mkdir -p artifact
+          cp target/release/rusty_box_gui artifact/rusty_box_gui
+          chmod +x artifact/rusty_box_gui
+
+      - name: Upload macOS GUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rusty-box-gui-macos
+          path: artifact/rusty_box_gui
+          if-no-files-found: error
+
+  wasm-gui:
+    name: WASM GUI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install Trunk
+        run: cargo install trunk --locked
+
+      - name: Download Bochs BIOS ROMs
+        run: |
+          mkdir -p cpp_orig/bochs/bios/VGABIOS-lgpl
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.request import urlretrieve
+
+          downloads = {
+              "cpp_orig/bochs/bios/BIOS-bochs-latest":
+                  "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/BIOS-bochs-latest?format=raw",
+              "cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
+                  "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/VGABIOS-lgpl-latest?format=raw",
+          }
+
+          for destination, url in downloads.items():
+              path = Path(destination)
+              path.parent.mkdir(parents=True, exist_ok=True)
+              urlretrieve(url, path)
+              if path.stat().st_size == 0:
+                  raise SystemExit(f"{destination} downloaded as an empty file")
+          PY
+
+      - name: Build WASM GUI
+        working-directory: rusty_box_gui
+        run: trunk build --release
+
+      - name: Upload WASM GUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rusty-box-gui-wasm
+          path: rusty_box_gui/dist
+          if-no-files-found: error
