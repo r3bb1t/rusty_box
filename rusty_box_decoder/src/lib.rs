@@ -1,4 +1,8 @@
 #![forbid(unsafe_code)]
+#![no_std]
+
+#[cfg(test)]
+extern crate std;
 
 pub mod error;
 pub use error::{DecodeError, DecodeResult};

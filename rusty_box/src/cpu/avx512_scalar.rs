@@ -15,6 +15,8 @@ use super::{
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedZmmRegister,
 };
+#[cfg(not(feature = "std"))]
+use crate::cpu::float::FloatExt;
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]

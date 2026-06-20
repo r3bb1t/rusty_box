@@ -23,6 +23,8 @@ use super::{
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedZmmRegister,
 };
+#[cfg(not(feature = "std"))]
+use crate::cpu::float::FloatExt;
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]

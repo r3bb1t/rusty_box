@@ -80,6 +80,7 @@ pub(super) mod event;
 pub(super) mod exception;
 pub(super) mod flag_ctrl;
 pub(super) mod flag_ctrl_pro;
+pub(crate) mod float;
 pub(super) mod fpu;
 pub(super) mod fred;
 pub(super) mod gf2;

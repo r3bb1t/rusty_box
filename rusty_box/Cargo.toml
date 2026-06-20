@@ -34,6 +34,7 @@ byteorder.workspace = true
 tempfile = { version = "3.20", optional = true }
 bitflags.workspace = true
 paste.workspace = true
+libm = "0.2"
 rusty_box_decoder = { path = "../rusty_box_decoder" }
 crossterm = { version = "0.29", optional = true }
 egui = { workspace = true, optional = true }

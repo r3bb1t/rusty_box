@@ -1,12 +1,10 @@
-#[cfg(test)]
-extern crate std;
-
 use crate::{
     decoder::{decode32::fetch_decode32, decode64::fetch_decode64, tables::BxDecodeError},
     error::DecodeError,
     instruction::Instruction,
     opcode::Opcode,
 };
+use std::vec::Vec;
 
 /// Initialize tracing for tests (similar to examples/init_and_run.rs)
 fn init_tracing() {

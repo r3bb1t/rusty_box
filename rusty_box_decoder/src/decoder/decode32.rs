@@ -1395,6 +1395,7 @@ const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool, as_32: bool, nnn: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::vec;
 
     #[test]
     fn test_nop() {

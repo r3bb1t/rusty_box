@@ -13,6 +13,8 @@ use super::{
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedXmmRegister,
 };
+#[cfg(not(feature = "std"))]
+use crate::cpu::float::FloatExt;
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================

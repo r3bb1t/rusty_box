@@ -15,6 +15,9 @@
 //! uses SoftFloat3e, native FP is sufficient since we run on x86 host with
 //! the same FP behavior. SoftFloat integration can be added later if needed.
 
+#[cfg(not(feature = "std"))]
+use crate::cpu::float::FloatExt;
+
 /// Round-to-nearest-ties-even for f32 (no_std compatible).
 /// IEEE 754 default rounding: if exactly halfway, round to even.
 #[cfg(not(feature = "std"))]

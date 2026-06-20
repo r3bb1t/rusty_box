@@ -13,6 +13,8 @@ use super::{
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedZmmRegister,
 };
+#[cfg(not(feature = "std"))]
+use crate::cpu::float::FloatExt;
 
 // ============================================================================
 // Helper functions (duplicated from avx512.rs — module-private there)

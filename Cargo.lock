@@ -2595,6 +2595,7 @@ dependencies = [
  "crossterm",
  "eframe",
  "egui",
+ "libm",
  "paste",
  "rusty_box_decoder",
  "tempfile",

@@ -3025,9 +3025,9 @@ const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8,
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
 
     use super::*;
+    use std::{vec, vec::Vec};
 
     #[test]
     fn test_nop() {
