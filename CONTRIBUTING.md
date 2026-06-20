@@ -6,8 +6,12 @@
 # Full build
 cargo build --release --all-features
 
-# Run tests (187 tests)
-cargo test
+# Run tests for the crate you changed
+cargo test -p rusty_box
+cargo test -p rusty_box_decoder
+cargo test -p rusty_box_gui
+cargo test -p rusty_box_gui --no-default-features
+cargo test -p rusty_box_bximage
 
 # no_std + no_alloc build (full emulator, no heap)
 cargo check -p rusty_box --no-default-features
@@ -24,10 +28,12 @@ cd rusty_box_decoder && cargo +nightly fuzz run fuzz_target_1
 
 ## Architecture
 
-The emulator is organized as a Cargo workspace with four crates:
+The emulator is organized as a Cargo workspace with six crates:
 
 - **rusty_box** -- main emulator library (CPU, memory, I/O devices)
 - **rusty_box_decoder** -- standalone x86 instruction decoder
+- **rusty_box_gui** -- normal-user CLI/TOML launcher with egui tools
+- **rusty_box_bximage** -- bximage-compatible disk image creation helpers
 - **rusty_box_web** -- WASM web frontend (in `examples/rusty_box_web/`)
 - **rusty_box_uefi** -- UEFI bootable emulator (in `examples/rusty_box_uefi/`)
 

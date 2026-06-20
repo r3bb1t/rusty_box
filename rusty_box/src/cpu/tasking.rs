@@ -15,13 +15,17 @@ use super::{
     Result,
 };
 
-// Task switch source constants (matches Bochs)
-pub(super) const BX_TASK_FROM_JUMP: u32 = 0x0;
-pub(super) const BX_TASK_FROM_CALL: u32 = 0x1;
-pub(super) const BX_TASK_FROM_INT: u32 = 0x2;
-pub(super) const BX_TASK_FROM_IRET: u32 = 0x3;
+// Task switch source constants — Bochs cpu.h enum task_switch_source.
+// SVM/VMX task-switch qualification reads these values directly so the
+// numeric ordering is part of the ABI.
+pub(super) const BX_TASK_FROM_CALL: u32 = 0;
+pub(super) const BX_TASK_FROM_IRET: u32 = 1;
+pub(super) const BX_TASK_FROM_JUMP: u32 = 2;
+pub(super) const BX_TASK_FROM_INT: u32 = 3;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cpu::BxCpuC<'_, I, T> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
+    super::cpu::BxCpuC<'_, I, T>
+{
     /// Perform task switch
     /// Based on BX_CPU_C::task_switch in tasking.cc
     #[allow(clippy::too_many_arguments)]
@@ -48,12 +52,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
 
         // SVM task switch intercept — if the guest has the intercept enabled,
         // this triggers a VMEXIT before the switch proceeds.
-        self.svm_intercept_task_switch(
-            tss_selector.value,
-            source,
-            push_error,
-            error_code,
-        )?;
+        self.svm_intercept_task_switch(tss_selector.value, source, push_error, error_code)?;
+
+        // VMX task switch intercept — unconditional when in VMX guest mode
+        // (Bochs vmexit.cc VMexit_TaskSwitch).
+        if self.in_vmx_guest {
+            self.vmexit_check_task_switch(tss_selector.value, source)?;
+            return Ok(());
+        }
 
         // STEP 2: The processor performs limit-checking on the target TSS
         // Gather info about new TSS (matches lines 158-164)
@@ -268,6 +274,58 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
             )
         };
 
+        // Bochs tasking.cc \u2014 read newSSP from new TSS (386 TSS only)
+        let new_ssp_cet: u64 =
+            if tss_descriptor.r#type >= 9 && self.cr4.cet() && source != BX_TASK_FROM_IRET {
+                self.system_read_dword((nbase32 as u64) + 0x68)? as u64
+            } else {
+                0
+            };
+
+        // Bochs tasking.cc \u2014 capture pre-switch CET state. CPL is the
+        // outgoing task's CPL, captured before any segment reload. The
+        // shadow-stack pop / busy-clear path runs immediately for FROM_IRET
+        // so subsequent segment loads observe the correct SSP.
+        let cpl_pre_cet = self.cs_rpl();
+        let mut push_cs_lip_ssp = false;
+        let mut old_ssp_cet: u64 = 0;
+        let mut old_cs_cet: u16 = 0;
+        let mut old_rip_cet: u64 = 0;
+        let mut temp_ssp_cet: u64 = 0;
+        let mut shadow_lip_cet: u64 = 0;
+        let mut shadow_cs_cet: u16 = 0;
+        let mut verify_cs_lip = false;
+        if self.shadow_stack_enabled(cpl_pre_cet) {
+            let new_cpl = if (new_eflags & super::eflags::EFlags::VM.bits()) != 0 {
+                3
+            } else {
+                (raw_cs_selector & 0x3) as u8
+            };
+            if source == BX_TASK_FROM_CALL || source == BX_TASK_FROM_INT {
+                if new_cpl < cpl_pre_cet && cpl_pre_cet == 3 {
+                    self.msr.ia32_pl_ssp[3] = self.ssp();
+                } else {
+                    push_cs_lip_ssp = true;
+                    old_ssp_cet = self.ssp();
+                    old_cs_cet = self.sregs[BxSegregs::Cs as usize].selector.value;
+                    old_rip_cet = self.get_laddr32(BxSegregs::Cs as usize, self.eip()) as u64;
+                }
+            }
+            if source == BX_TASK_FROM_IRET {
+                if new_cpl == cpl_pre_cet || new_cpl < 3 {
+                    temp_ssp_cet = self.shadow_stack_pop_64()?;
+                    shadow_lip_cet = self.shadow_stack_pop_64()?;
+                    shadow_cs_cet = self.shadow_stack_pop_64()? as u16;
+                    verify_cs_lip = true;
+                } else {
+                    temp_ssp_cet = self.msr.ia32_pl_ssp[3];
+                }
+                let pre_ssp = self.ssp();
+                self.shadow_stack_atomic_clear_busy(pre_ssp, cpl_pre_cet)?;
+                self.set_ssp(0);
+            }
+        }
+
         // Step 7: If CALL, interrupt, or JMP, set busy flag in new task's TSS descriptor
         // Re-read dword2 from GDT for atomicity (Bochs tasking.cc)
         if source != BX_TASK_FROM_IRET {
@@ -290,16 +348,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
             .set32(self.dr7.get32() & !Self::DR7_LOCAL_ENABLE_MASK);
 
         // CR3 change — after commit point (Bochs tasking.cc)
-        if tss_descriptor.r#type >= 9 && self.cr0.pg()
-            && new_cr3 != 0 && (new_cr3 as u64) != self.cr3 {
-                tracing::trace!("task_switch(): changing CR3 to {:#x}", new_cr3);
-                self.cr3 = new_cr3 as u64;
-                if self.cr4.pge() {
-                    self.tlb_flush_non_global();
-                } else {
-                    self.tlb_flush();
-                }
+        if tss_descriptor.r#type >= 9
+            && self.cr0.pg()
+            && new_cr3 != 0
+            && (new_cr3 as u64) != self.cr3
+        {
+            tracing::trace!("task_switch(): changing CR3 to {:#x}", new_cr3);
+            self.cr3 = new_cr3 as u64;
+            if self.cr4.pge() {
+                self.tlb_flush_non_global();
+            } else {
+                self.tlb_flush();
             }
+        }
 
         // Step 10: If call or interrupt, set the NT flag in the eflags (matches lines 481-484)
         let mut final_eflags = new_eflags;
@@ -533,6 +594,53 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
             self.handle_alignment_check();
         }
 
+        // Bochs tasking.cc \u2014 late CET epilogue (post-segment-load).
+        let cpl_post_cet = self.cs_rpl();
+        if self.shadow_stack_enabled(cpl_post_cet) || self.endbranch_enabled(cpl_post_cet) {
+            if (new_eflags & super::eflags::EFlags::VM.bits()) != 0 {
+                tracing::error!("task_switch: shadow stack or endbranch enabled in vm8086");
+                return self.exception(Exception::Ts, self.tr.selector.value & 0xfffc);
+            }
+        }
+        if source != BX_TASK_FROM_IRET {
+            if self.shadow_stack_enabled(cpl_post_cet) {
+                if new_ssp_cet & 0x7 != 0 {
+                    tracing::error!("task_switch: newSSP not 8-byte aligned");
+                    return self.exception(Exception::Ts, self.tr.selector.value & 0xfffc);
+                }
+                self.shadow_stack_switch(new_ssp_cet)?;
+                if push_cs_lip_ssp {
+                    self.call_far_shadow_stack_push(old_cs_cet, old_rip_cet, old_ssp_cet)?;
+                }
+            }
+            self.track_indirect(cpl_post_cet);
+        } else {
+            if verify_cs_lip {
+                if raw_cs_selector != shadow_cs_cet {
+                    tracing::error!("task_switch shadow_stack_restore: CS mismatch");
+                    self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
+                }
+                let cur_lip = self.get_laddr32(BxSegregs::Cs as usize, self.eip()) as u64;
+                if cur_lip != shadow_lip_cet {
+                    tracing::error!("task_switch shadow_stack_restore: LIP mismatch");
+                    self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
+                }
+            }
+            if self.shadow_stack_enabled(cpl_post_cet) {
+                if temp_ssp_cet & 0x3 != 0 {
+                    tracing::error!(
+                        "task_switch shadow_stack_restore: tempSSP must be 4-byte aligned"
+                    );
+                    self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
+                }
+                if (temp_ssp_cet >> 32) != 0 {
+                    tracing::error!("task_switch shadow_stack_restore: prevSSP must be 32-bit");
+                    self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
+                }
+                self.set_ssp(temp_ssp_cet);
+            }
+        }
+
         // Set speculative RSP before error-code push (Bochs tasking.cc)
         self.speculative_rsp = true;
         self.prev_rsp = self.esp() as u64;
@@ -610,10 +718,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> super::cp
                     // If data or non-conforming code, RPL and CPL must be <= DPL
                     if (is_data_segment(descriptor.r#type)
                         || is_code_segment_non_conforming(descriptor.r#type))
-                        && (selector.rpl > descriptor.dpl || cs_rpl > descriptor.dpl) {
-                            tracing::error!("task_switch({:?}): RPL & CPL must be <= DPL", seg);
-                            return self.exception(Exception::Ts, raw_selector & 0xfffc);
-                        }
+                        && (selector.rpl > descriptor.dpl || cs_rpl > descriptor.dpl)
+                    {
+                        tracing::error!("task_switch({:?}): RPL & CPL must be <= DPL", seg);
+                        return self.exception(Exception::Ts, raw_selector & 0xfffc);
+                    }
 
                     if !descriptor.p {
                         tracing::error!("task_switch({:?}): descriptor not present", seg);

@@ -112,7 +112,6 @@
 //! to create a new edge. Level-triggered IRQs remain asserted in IRR until
 //! the device deasserts the line. IRQ0-2 and IRQ8,13 are always edge-triggered.
 
-
 /// PIC I/O port addresses
 pub const PIC_MASTER_CMD: u16 = 0x0020;
 pub const PIC_MASTER_DATA: u16 = 0x0021;
@@ -385,7 +384,6 @@ impl BxPicC {
             num_ioapic_forwards: 0,
         }
     }
-
 
     /// BX_RAISE_INTR — signal CPU that an external interrupt is pending.
     ///

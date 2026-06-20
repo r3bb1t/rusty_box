@@ -8,11 +8,13 @@ use tempfile::tempfile;
 use super::{Block, BxMemoryStubC, MemoryError, Result};
 use crate::cpu::cpuid::BxCpuIdTrait;
 
-use crate::config::{BxPhyAddress, MAX_MEM_BLOCKS};
 use crate::config::BxPhyAddress as A20Mask;
+use crate::config::{BxPhyAddress, MAX_MEM_BLOCKS};
 use crate::cpu::cpu::BxCpuC;
 use crate::cpu::icache::BxPageWriteStampTable;
-use crate::memory::memory_rusty_box::{bx_is_pci_hole_addr, bx_translate_gpa_to_linear, BIOSROMSZ, EXROMSIZE};
+use crate::memory::memory_rusty_box::{
+    bx_is_pci_hole_addr, bx_translate_gpa_to_linear, BIOSROMSZ, EXROMSIZE,
+};
 use crate::misc::bswap::{
     read_host_dword_to_little_endian, read_host_qword_to_little_endian,
     read_host_word_to_little_endian, write_host_dword_to_little_endian,
@@ -44,7 +46,8 @@ impl BxMemoryStubC {
         if ptr.is_null() {
             alloc::alloc::handle_alloc_error(layout);
         }
-        let actual_vector = unsafe { Vec::from_raw_parts(ptr, actual_vector_size, actual_vector_size) };
+        let actual_vector =
+            unsafe { Vec::from_raw_parts(ptr, actual_vector_size, actual_vector_size) };
         let actual_vector_ptr = actual_vector.as_ptr() as usize;
         let masked: usize = ((actual_vector_ptr + test_mask) & !test_mask) - actual_vector_ptr;
         (actual_vector, masked)
@@ -55,7 +58,11 @@ impl BxMemoryStubC {
     }
 
     #[cfg(feature = "alloc")]
-    pub fn create_and_init(guest: usize, host: usize, block_size: usize) -> Result<alloc::boxed::Box<Self>> {
+    pub fn create_and_init(
+        guest: usize,
+        host: usize,
+        block_size: usize,
+    ) -> Result<alloc::boxed::Box<Self>> {
         const ONE_MEGABYTE: usize = 1 << 20;
 
         if !host.is_multiple_of(ONE_MEGABYTE) || !guest.is_multiple_of(ONE_MEGABYTE) {
@@ -90,7 +97,11 @@ impl BxMemoryStubC {
         assert!((len / block_size) <= 0xffffffff);
 
         let num_blocks = len / block_size;
-        assert!(num_blocks <= MAX_MEM_BLOCKS, "num_blocks {} exceeds MAX_MEM_BLOCKS", num_blocks);
+        assert!(
+            num_blocks <= MAX_MEM_BLOCKS,
+            "num_blocks {} exceeds MAX_MEM_BLOCKS",
+            num_blocks
+        );
         tracing::debug!("{}MB", len / (1024 * 1024));
         tracing::debug!("mem block size = {:8X}, blocks={}", block_size, num_blocks);
 
@@ -146,7 +157,11 @@ impl BxMemoryStubC {
         let rom_offset = host;
         let bogus_offset = host + BIOSROMSZ + EXROMSIZE;
         let num_blocks = guest / block_size;
-        assert!(num_blocks <= MAX_MEM_BLOCKS, "num_blocks {} exceeds MAX_MEM_BLOCKS", num_blocks);
+        assert!(
+            num_blocks <= MAX_MEM_BLOCKS,
+            "num_blocks {} exceeds MAX_MEM_BLOCKS",
+            num_blocks
+        );
 
         #[cfg(feature = "std")]
         let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
@@ -169,7 +184,11 @@ impl BxMemoryStubC {
         })
     }
 
-    pub(super) fn get_vector<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    pub(super) fn get_vector<
+        'a,
+        I: BxCpuIdTrait,
+        T: crate::cpu::instrumentation::Instrumentation,
+    >(
         &'a mut self,
         addr: BxPhyAddress,
         _cpus: &[&BxCpuC<'_, I, T>],
@@ -200,8 +219,9 @@ impl BxMemoryStubC {
     #[cfg(feature = "std")]
     fn read_block(&self, block: usize) -> Result<()> {
         let block_address = block * self.block_size;
-        let chosen_block = self.block_by_index(block)
-            .ok_or(MemoryError::Internal("block_by_index returned None during read"))?;
+        let chosen_block = self.block_by_index(block).ok_or(MemoryError::Internal(
+            "block_by_index returned None during read",
+        ))?;
         let overflow_file = self.overflow_file_mut();
 
         overflow_file.seek(SeekFrom::Start(block_address.try_into()?))?;
@@ -210,7 +230,11 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub fn allocate_block<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(&self, block: usize, cpus: &[&BxCpuC<'_, I, T>]) -> Result<()> {
+    pub fn allocate_block<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        &self,
+        block: usize,
+        cpus: &[&BxCpuC<'_, I, T>],
+    ) -> Result<()> {
         // Without std, block swapping to overflow file is unavailable.
         // The params are used in the std path below.
         #[cfg(not(feature = "std"))]
@@ -275,8 +299,9 @@ impl BxMemoryStubC {
                     .map_err(|e| MemoryError::CantSeekToAddressOverflowFile(address, e))?;
 
                 overflow_file
-                    .write_all(self.block_by_index(self.next_swapout_idx.get())
-                        .ok_or(MemoryError::Internal("block_by_index returned None during swap-out"))?)
+                    .write_all(self.block_by_index(self.next_swapout_idx.get()).ok_or(
+                        MemoryError::Internal("block_by_index returned None during swap-out"),
+                    )?)
                     .map_err(|e| MemoryError::FailedToWriteToOverflowFIle(address, e))?;
 
                 // Mark swapped out block
@@ -311,7 +336,8 @@ impl BxMemoryStubC {
 
         while len > 0 {
             if a20_addr < self.len.try_into()? {
-                buf[buf_offset] = *self.get_vector(a20_addr, cpus)?
+                buf[buf_offset] = *self
+                    .get_vector(a20_addr, cpus)?
                     .first()
                     .ok_or(MemoryError::Internal("get_vector returned empty slice"))?;
             } else {
@@ -356,11 +382,7 @@ impl BxMemoryStubC {
         let mut addr = addr1;
         while addr <= addr2 {
             let idx = vo + addr as usize;
-            let byte = if idx < av.len() {
-                av[idx]
-            } else {
-                0xFF
-            };
+            let byte = if idx < av.len() { av[idx] } else { 0xFF };
             for bit in 0..8u32 {
                 let b = ((c ^ (byte as u32 >> bit)) & 1) != 0;
                 c >>= 1;
@@ -416,7 +438,10 @@ impl BxMemoryStubC {
         }
     }
 
-    pub(crate) fn write_physical_page<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    pub(crate) fn write_physical_page<
+        I: BxCpuIdTrait,
+        T: crate::cpu::instrumentation::Instrumentation,
+    >(
         &mut self,
         cpus: &[&BxCpuC<I, T>],
         page_write_stamp_table: &mut BxPageWriteStampTable,
@@ -513,7 +538,10 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub(crate) fn read_physical_page<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    pub(crate) fn read_physical_page<
+        I: BxCpuIdTrait,
+        T: crate::cpu::instrumentation::Instrumentation,
+    >(
         &mut self,
         cpus: &[&BxCpuC<I, T>],
         addr: BxPhyAddress,

@@ -26,7 +26,9 @@ pub fn frac_f16(a: u16) -> u16 {
 }
 #[inline]
 pub fn pack_to_f16(sign: bool, exp: i16, sig: u16) -> u16 {
-    ((sign as u16) << 15).wrapping_add((exp as u16) << 10).wrapping_add(sig)
+    ((sign as u16) << 15)
+        .wrapping_add((exp as u16) << 10)
+        .wrapping_add(sig)
 }
 #[inline]
 pub fn is_nan_f16(a: u16) -> bool {
@@ -48,7 +50,9 @@ pub fn frac_f32(a: u32) -> u32 {
 }
 #[inline]
 pub fn pack_to_f32(sign: bool, exp: i16, sig: u32) -> u32 {
-    ((sign as u32) << 31).wrapping_add((exp as u32) << 23).wrapping_add(sig)
+    ((sign as u32) << 31)
+        .wrapping_add((exp as u32) << 23)
+        .wrapping_add(sig)
 }
 #[inline]
 pub fn is_nan_f32(a: u32) -> bool {
@@ -70,7 +74,9 @@ pub fn frac_f64(a: u64) -> u64 {
 }
 #[inline]
 pub fn pack_to_f64(sign: bool, exp: i16, sig: u64) -> u64 {
-    ((sign as u64) << 63).wrapping_add((exp as u64) << 52).wrapping_add(sig)
+    ((sign as u64) << 63)
+        .wrapping_add((exp as u64) << 52)
+        .wrapping_add(sig)
 }
 #[inline]
 pub fn is_nan_f64(a: u64) -> bool {
@@ -166,7 +172,8 @@ pub fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatS
 
     if 0x1D <= (exp as u16) {
         if exp < 0 {
-            let is_tiny = (exp < -1) || ((sig as u32).wrapping_add(round_increment as u32) < 0x8000);
+            let is_tiny =
+                (exp < -1) || ((sig as u32).wrapping_add(round_increment as u32) < 0x8000);
             sig = shift_right_jam32(sig as u32, (-(exp as i32)) as u16) as u16;
             exp = 0;
             let round_bits = sig & 0xF;
@@ -187,13 +194,19 @@ pub fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatS
                     softfloat_setRoundingUp(status);
                 }
             }
-            return pack_to_f16(sign, 0x1F, 0).wrapping_sub(if round_increment == 0 { 1 } else { 0 });
+            return pack_to_f16(sign, 0x1F, 0).wrapping_sub(if round_increment == 0 {
+                1
+            } else {
+                0
+            });
         }
     }
     let sig_ref = sig;
     sig = (sig.wrapping_add(round_increment)) >> 4;
     sig &= !((!((round_bits ^ 8) != 0) as u16) & (round_near_even as u16));
-    if sig == 0 { exp = 0; }
+    if sig == 0 {
+        exp = 0;
+    }
     if round_bits != 0 {
         softfloat_raiseFlags(status, FLAG_INEXACT);
         if (sig << 4) > sig_ref {
@@ -267,7 +280,9 @@ pub fn round_pack_to_f32(sign: bool, exp: i16, sig: u32, status: &mut SoftFloatS
         softfloat_raiseFlags(status, FLAG_INEXACT);
     }
     sig >>= 7;
-    if sig == 0 { exp = 0; }
+    if sig == 0 {
+        exp = 0;
+    }
     pack_to_f32(sign, exp, sig)
 }
 
@@ -344,7 +359,9 @@ pub fn round_pack_to_f64(sign: bool, exp: i16, sig: u64, status: &mut SoftFloatS
         softfloat_raiseFlags(status, FLAG_INEXACT);
     }
     sig >>= 10;
-    if sig == 0 { exp = 0; }
+    if sig == 0 {
+        exp = 0;
+    }
     pack_to_f64(sign, exp, sig)
 }
 

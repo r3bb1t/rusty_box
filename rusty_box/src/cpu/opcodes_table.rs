@@ -169,7 +169,7 @@ pub(super) struct BxOpcodeEntry<I: BxCpuIdTrait, T: crate::cpu::instrumentation:
 ///
 /// # Returns
 /// - `Some(entry)` if the opcode has an entry in the table
-/// - `None` if the opcode is not yet implemented in the table
+/// - `None` if the opcode has no entry in the table
 ///
 /// # Note
 /// Since the table is not yet fully populated, this uses a match statement
@@ -480,7 +480,10 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait, T: crate::cpu::instrumentation::
     }
 
     // Error handler wrappers (these are used inside get_opcode_entry, so they stay here)
-    pub(super) fn bx_error_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    pub(super) fn bx_error_wrapper<
+        I: BxCpuIdTrait,
+        T: crate::cpu::instrumentation::Instrumentation,
+    >(
         cpu: &mut BxCpuC<'_, I, T>,
         instr: &Instruction,
     ) -> Result<()> {
@@ -868,20 +871,32 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait, T: crate::cpu::instrumentation::
     }
 
     // Wrapper functions for flag manipulation
-    fn cli_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<'_, I, T>, instr: &Instruction) -> Result<()> {
+    fn cli_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
         cpu.cli(instr)
     }
 
-    fn sti_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<'_, I, T>, instr: &Instruction) -> Result<()> {
+    fn sti_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
         cpu.sti(instr)
     }
 
-    fn cld_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<'_, I, T>, _instr: &Instruction) -> Result<()> {
+    fn cld_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        _instr: &Instruction,
+    ) -> Result<()> {
         cpu.eflags.remove(super::eflags::EFlags::DF);
         Ok(())
     }
 
-    fn std_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<'_, I, T>, _instr: &Instruction) -> Result<()> {
+    fn std_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        _instr: &Instruction,
+    ) -> Result<()> {
         cpu.eflags.insert(super::eflags::EFlags::DF);
         Ok(())
     }
@@ -1029,19 +1044,27 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait, T: crate::cpu::instrumentation::
         // or if the 32-bit value is significantly different from 16-bit, use 32-bit
         if instr.ilen() >= 6 && offset32 != offset16 {
             // 32-bit far jump
-            tracing::trace!("JmpfAp(w): FAR JMP 32-BIT to {:04x}:{:08x}", segment, offset32);
+            tracing::trace!(
+                "JmpfAp(w): FAR JMP 32-BIT to {:04x}:{:08x}",
+                segment,
+                offset32
+            );
             cpu.jmp_far32(instr, segment, offset32)?;
         } else {
             // 16-bit far jump
-            tracing::trace!("JmpfAp(w): FAR JMP 16-BIT to {:04x}:{:04x}", segment, offset16);
+            tracing::trace!(
+                "JmpfAp(w): FAR JMP 16-BIT to {:04x}:{:04x}",
+                segment,
+                offset16
+            );
             cpu.jmp_far16(instr, segment, offset16 as u16)?;
         }
 
         Ok(())
     }
 
-    // Match on opcode and return appropriate entry
-    // This is a placeholder - will be extended with all opcodes
+    // Match on opcode and return appropriate entry. The table is populated
+    // incrementally; opcodes without a match here fall through to `None`.
     match opcode {
         // Data transfer instructions - 32-bit
         Opcode::MovOp32GdEd => Some(BxOpcodeEntry {
@@ -1502,49 +1525,70 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait, T: crate::cpu::instrumentation::
 }
 
 // Error handler wrappers (moved outside get_opcode_entry to be accessible)
-pub(super) fn bx_no_fpu_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+pub(super) fn bx_no_fpu_wrapper<
+    I: BxCpuIdTrait,
+    T: crate::cpu::instrumentation::Instrumentation,
+>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_fpu(instr)
 }
 
-pub(super) fn bx_no_mmx_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+pub(super) fn bx_no_mmx_wrapper<
+    I: BxCpuIdTrait,
+    T: crate::cpu::instrumentation::Instrumentation,
+>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_mmx(instr)
 }
 
-pub(super) fn bx_no_sse_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+pub(super) fn bx_no_sse_wrapper<
+    I: BxCpuIdTrait,
+    T: crate::cpu::instrumentation::Instrumentation,
+>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_sse(instr)
 }
 
-pub(super) fn bx_no_avx_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+pub(super) fn bx_no_avx_wrapper<
+    I: BxCpuIdTrait,
+    T: crate::cpu::instrumentation::Instrumentation,
+>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_avx(instr)
 }
 
-pub(super) fn bx_no_opmask_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+pub(super) fn bx_no_opmask_wrapper<
+    I: BxCpuIdTrait,
+    T: crate::cpu::instrumentation::Instrumentation,
+>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_opmask(instr)
 }
 
-pub(super) fn bx_no_evex_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+pub(super) fn bx_no_evex_wrapper<
+    I: BxCpuIdTrait,
+    T: crate::cpu::instrumentation::Instrumentation,
+>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
 ) -> Result<()> {
     cpu.bx_no_evex(instr)
 }
 
-pub(super) fn bx_no_amx_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+pub(super) fn bx_no_amx_wrapper<
+    I: BxCpuIdTrait,
+    T: crate::cpu::instrumentation::Instrumentation,
+>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
 ) -> Result<()> {
@@ -1552,7 +1596,10 @@ pub(super) fn bx_no_amx_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation:
 }
 
 // MOV32S wrappers (moved outside get_opcode_entry to be accessible)
-pub(super) fn mov32s_gd_ed_m_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+pub(super) fn mov32s_gd_ed_m_wrapper<
+    I: BxCpuIdTrait,
+    T: crate::cpu::instrumentation::Instrumentation,
+>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
 ) -> Result<()> {
@@ -1560,7 +1607,10 @@ pub(super) fn mov32s_gd_ed_m_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumenta
     Ok(())
 }
 
-pub(super) fn mov32s_ed_gd_m_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+pub(super) fn mov32s_ed_gd_m_wrapper<
+    I: BxCpuIdTrait,
+    T: crate::cpu::instrumentation::Instrumentation,
+>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
 ) -> Result<()> {

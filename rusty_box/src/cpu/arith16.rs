@@ -993,7 +993,10 @@ pub fn CMP_EwIw<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 
 /// CMPXCHG r/m16, r16 — register form
 /// Bochs arith16.cc (CMPXCHG_EwGwR)
-pub fn CMPXCHG_EwGw_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<'c, I, T>, instr: &Instruction) {
+pub fn CMPXCHG_EwGw_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'c, I, T>,
+    instr: &Instruction,
+) {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
     let ax = cpu.ax();
     let diff_16 = ax.wrapping_sub(op1_16);
@@ -1035,7 +1038,10 @@ pub fn CMPXCHG_EwGw_M<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instr
 
 /// XADD r/m16, r16 — register form
 /// Bochs arith16.cc
-pub fn XADD_EwGw_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpu: &mut BxCpuC<'c, I, T>, instr: &Instruction) {
+pub fn XADD_EwGw_R<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'c, I, T>,
+    instr: &Instruction,
+) {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
     let op2_16 = cpu.get_gpr16(instr.src() as usize);
     let sum_16 = op1_16.wrapping_add(op2_16);

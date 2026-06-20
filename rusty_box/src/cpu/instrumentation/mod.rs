@@ -41,22 +41,22 @@
 //! collapses to one predictable branch-not-taken.
 
 pub mod bochs;
+pub mod ctx;
 pub mod hooks;
 pub mod registry;
 pub mod types;
-pub mod ctx;
 
 pub use bochs::Instrumentation;
-pub use registry::InstrumentationRegistry;
+pub use ctx::{CpuAccess, HookCtx};
 #[cfg(feature = "instrumentation")]
 pub use registry::InstrumentationError;
+pub use registry::InstrumentationRegistry;
 pub use types::{
     BranchEvent, BranchType, CacheCntrl, CodeSize, CpuSetupMode, CpuSnapshot, EmuStopReason,
-    ExitSet, HookMask, HwInterruptEvent, InvEptType, InvPcidType, IoHookEvent,
-    MemAccessRW, MemHookEvent, MemPerms, MemType, MwaitFlags, PrefetchHint, ResetType,
-    InstrAction, LinAccess, MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent,
-    PhyAccess, PrefetchEvent, TlbCntrl, X86Reg,
+    ExitSet, HookMask, HwInterruptEvent, InstrAction, InvEptType, InvPcidType, IoHookEvent,
+    LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemPerms, MemType, MemUnmapped,
+    MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent, PrefetchHint, ResetType,
+    TlbCntrl, X86Reg,
 };
 #[cfg(feature = "instrumentation")]
 pub use types::{HookHandle, IoHookType, MemHookType};
-pub use ctx::{CpuAccess, HookCtx};

@@ -31,7 +31,12 @@ enum ExceptionType {
 }
 
 /// Sentinel value for "no pending exception" (Bochs BX_ET_NONE = -1).
-const BX_ET_NONE: i32 = -1;
+pub(super) const BX_ET_NONE: i32 = -1;
+
+/// Vector for #CP (Control Protection Exception) — Bochs `BX_CP_EXCEPTION`.
+const BX_CP_EXCEPTION: u8 = 21;
+/// Vector for #SX (Security Exception) — Bochs `BX_SX_EXCEPTION`.
+const BX_SX_EXCEPTION: u8 = 30;
 
 // Match Bochs `is_exception_OK[3][3]` (cpu/exception.cc..855).
 // Indexes are {Benign, Contributory, PageFault}.
@@ -244,12 +249,35 @@ const EXCEPTIONS_INFO: [BxExceptionInfo; BX_CPU_HANDLED_EXCEPTIONS as _] = [
 ];
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+    /// Bochs `BX_CPU_C::get_exception_type` — returns the exception-type
+    /// classification (BENIGN/CONTRIBUTORY/PAGE_FAULT/DOUBLE_FAULT) for
+    /// the given vector. Out-of-range vectors return BENIGN. #CP and
+    /// #SX downgrade to BENIGN when the corresponding ISA extension
+    /// (CET / SVM) is not supported by the CPU model. Used by VMX
+    /// `vmenter_inject_events` to set `last_exception_type` and by
+    /// double-fault detection.
+    pub(super) fn exception_type_for(&self, vector: u8) -> i32 {
+        use super::decoder::features::X86Feature;
+        let idx = vector as usize;
+        if idx >= EXCEPTIONS_INFO.len() {
+            return ExceptionType::Benign as i32;
+        }
+        if vector == BX_CP_EXCEPTION && !self.bx_cpuid_support_isa_extension(X86Feature::IsaCet) {
+            return ExceptionType::Benign as i32;
+        }
+        if vector == BX_SX_EXCEPTION && !self.bx_cpuid_support_isa_extension(X86Feature::IsaSvm) {
+            return ExceptionType::Benign as i32;
+        }
+        EXCEPTIONS_INFO[idx].exception_type as i32
+    }
+
     // vector:     0..255: vector in IDT
     // error_code: if exception generates and error, push this error code
     #[track_caller]
     pub(super) fn exception(&mut self, vector: Exception, mut error_code: u16) -> Result<()> {
         // Track exception counts for diagnostics
-        #[cfg(debug_assertions)] {
+        #[cfg(debug_assertions)]
+        {
             let vec_idx = vector as usize;
             if vec_idx < 32 {
                 self.diag_exception_counts[vec_idx] += 1;
@@ -277,14 +305,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
          */
         if push_error
             && vector != Exception::Pf
-                && vector != Exception::Df
-                && vector != Exception::Cp
-                && vector != Exception::Sx
-            {
-                // Bochs ORs in EXT (0/1) into bit0 of the error code.
-                // Our `ext` is a bool, so convert explicitly.
-                error_code = (error_code & 0xfffe) | (u16::from(self.ext));
-            }
+            && vector != Exception::Df
+            && vector != Exception::Cp
+            && vector != Exception::Sx
+        {
+            // Bochs ORs in EXT (0/1) into bit0 of the error code.
+            // Our `ext` is a bool, so convert explicitly.
+            error_code = (error_code & 0xfffe) | (u16::from(self.ext));
+        }
 
         // BOCHS BX_INSTR_EXCEPTION(cpu_id, vector, error_code)
         #[cfg(feature = "instrumentation")]
@@ -327,7 +355,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Triple fault: 3rd exception with no resolution after #DF.
             if self.last_exception_type == ExceptionType::DoubleFault as i32 {
                 let rip = self.rip();
-                let cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
+                let cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
+                    .selector
+                    .value;
                 tracing::error!("TRIPLE FAULT at RIP={:#x} CS={:#x} vector={:?} error_code={:#x} icount={} CR0={:#x} CR3={:#x} CR2={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
                     rip, cs, vector, error_code, self.icount,
                     self.cr0.get32(), self.cr3, self.cr2, self.idtr.base, self.idtr.limit);
@@ -352,22 +382,50 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.ext = true;
 
         // If we've already had 1st exception, see if 2nd causes a Double Fault.
-        if self.last_exception_type != BX_ET_NONE && exception_type != ExceptionType::DoubleFault as i32 {
+        if self.last_exception_type != BX_ET_NONE
+            && exception_type != ExceptionType::DoubleFault as i32
+        {
             let last = self.last_exception_type as usize;
             let newt = exception_type as usize;
             if last < 3 && newt < 3 && !IS_EXCEPTION_OK[last][newt] {
                 tracing::error!("DOUBLE FAULT: 1st exception type={} 2nd={:?}(type={}) at RIP={:#x} error_code={:#x} icount={} CR2={:#x}",
                     last, vector, newt, self.rip(), error_code, self.icount, self.cr2);
-                tracing::error!("  RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
-                    self.rax(), self.rbx(), self.rcx(), self.rdx());
-                tracing::error!("  RSI={:#018x} RDI={:#018x} RBP={:#018x} RSP={:#018x}",
-                    self.rsi(), self.rdi(), self.rbp(), self.rsp());
-                tracing::error!("  R8 ={:#018x} R9 ={:#018x} R10={:#018x} R11={:#018x}",
-                    self.r8(), self.r9(), self.r10(), self.r11());
-                tracing::error!("  R12={:#018x} R13={:#018x} R14={:#018x} R15={:#018x}",
-                    self.r12(), self.r13(), self.r14(), self.r15());
-                tracing::error!("DOUBLE FAULT: 1st={} 2nd={:?} RIP={:#x} CR2={:#x} icount={}",
-                    last, vector, self.rip(), self.cr2, self.icount);
+                tracing::error!(
+                    "  RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
+                    self.rax(),
+                    self.rbx(),
+                    self.rcx(),
+                    self.rdx()
+                );
+                tracing::error!(
+                    "  RSI={:#018x} RDI={:#018x} RBP={:#018x} RSP={:#018x}",
+                    self.rsi(),
+                    self.rdi(),
+                    self.rbp(),
+                    self.rsp()
+                );
+                tracing::error!(
+                    "  R8 ={:#018x} R9 ={:#018x} R10={:#018x} R11={:#018x}",
+                    self.r8(),
+                    self.r9(),
+                    self.r10(),
+                    self.r11()
+                );
+                tracing::error!(
+                    "  R12={:#018x} R13={:#018x} R14={:#018x} R15={:#018x}",
+                    self.r12(),
+                    self.r13(),
+                    self.r14(),
+                    self.r15()
+                );
+                tracing::error!(
+                    "DOUBLE FAULT: 1st={} 2nd={:?} RIP={:#x} CR2={:#x} icount={}",
+                    last,
+                    vector,
+                    self.rip(),
+                    self.cr2,
+                    self.icount
+                );
                 return self.exception(Exception::Df, 0);
             }
         }
@@ -387,9 +445,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // bx_dbg_exception(BX_CPU_ID, vector, error_code);
         // #endif
 
-        // #if BX_SUPPORT_VMX
-        // VMexit_Event(BX_HARDWARE_EXCEPTION, vector, error_code, push_error);
-        // #endif
+        // VMX exception intercept — Bochs vmexit.cc VMexit_Event. Consults
+        // the exception bitmap (with PF mask/match for #PF) and, if the bit
+        // is set, takes a VMEXIT with interruption info populated.
+        if self.in_vmx_guest
+            && self.vmexit_check_exception(vector as u32, u32::from(error_code), push_error)?
+        {
+            return Ok(());
+        }
 
         // SVM exception intercept
         if self.in_svm_guest {
@@ -399,6 +462,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 push_error,
                 0, // qualification
             )?;
+        }
+
+        // Bochs exception.cc — SVM FERR_FREEZE intercept for #MF.
+        if vector == Exception::Mf
+            && self.in_svm_guest
+            && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_FERR_FREEZE)
+        {
+            return self.svm_vmexit(super::svm::SvmVmexit::FerrFreeze as i32, 0, 0);
         }
 
         // Call interrupt handler based on CPU mode
@@ -436,7 +507,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // call exception() recursively so double-fault detection runs normally.
             let delivery_result = if self.long_mode() {
                 if self.cr4.fred() {
-                    self.fred_event_delivery(vector_u8, InterruptType::HardwareException, error_code)
+                    self.fred_event_delivery(
+                        vector_u8,
+                        InterruptType::HardwareException,
+                        error_code,
+                    )
                 } else {
                     self.long_mode_int(vector_u8, false, push_error, error_code)
                 }
@@ -460,9 +535,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     );
                     return self.exception(new_vector, new_error_code);
                 }
-                Err(super::error::CpuError::Memory(
-                    crate::memory::MemoryError::PageNotPresent,
-                )) => {
+                Err(super::error::CpuError::Memory(crate::memory::MemoryError::PageNotPresent)) => {
                     // Exception delivery hit an unmapped page — escalate to #DF
                     tracing::trace!("Exception delivery: PageNotPresent for vec={:?} CR3={:#x} — escalating to #DF", vector, self.cr3);
                     return self.exception(Exception::Df, 0);

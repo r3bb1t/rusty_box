@@ -14,7 +14,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ---- 8-bit read/write helpers for shift instructions ----
     fn shift_read8(&mut self, instr: &Instruction) -> super::Result<(u8, Option<()>)> {
         if instr.mod_c0() {
-            Ok((self.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()), None))
+            Ok((
+                self.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()),
+                None,
+            ))
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());

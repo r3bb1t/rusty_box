@@ -636,29 +636,64 @@ impl Xcr0 {
     }
 }
 
-#[derive(Debug)]
-enum Xcr0Enum {
-    BxXcr0FpuBit = 0,
-    BxXcr0SseBit = 1,
-    BxXcr0YmmBit = 2,
-    BxXcr0BndregsBit = 3, // not implemented, deprecated
-    BxXcr0BndcfgBit = 4,  // not implemented, deprecated
-    BxXcr0OpmaskBit = 5,
-    BxXcr0ZmmHi256Bit = 6,
-    BxXcr0HiZmmBit = 7,
-    BxXcr0PtBit = 8, // not implemented yet
-    BxXcr0PkruBit = 9,
-    BxXcr0PasidBit = 10, // not implemented yet
-    BxXcr0CetUBit = 11,
-    BxXcr0CetSBit = 12,
-    BxXcr0HdcBit = 13, // not implemented yet
-    BxXcr0UintrBit = 14,
-    BxXcr0LbrBit = 15, // not implemented yet
-    BxXcr0HwpBit = 16, // not implemented yet
-    BxXcr0XtilecfgBit = 17,
-    BxXcr0XtiledataBit = 18,
-    BxXcr0ApxBit = 19,
-    BxXcr0Last, // make sure it is < 32
+/// XCR0 / XSAVE state-component bit positions.
+/// The discriminant equals the bit number in XCR0 and the XSAVE component
+/// index used throughout xsave/xrstor dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub(super) enum Xcr0Component {
+    Fpu = 0,
+    Sse = 1,
+    Ymm = 2,
+    /// MPX bound registers — Intel deprecated MPX in 2019.
+    Bndregs = 3,
+    /// MPX configuration — Intel deprecated MPX in 2019.
+    Bndcfg = 4,
+    Opmask = 5,
+    ZmmHi256 = 6,
+    HiZmm = 7,
+    Pt = 8,
+    Pkru = 9,
+    Pasid = 10,
+    CetU = 11,
+    CetS = 12,
+    Hdc = 13,
+    Uintr = 14,
+    Lbr = 15,
+    Hwp = 16,
+    Xtilecfg = 17,
+    Xtiledata = 18,
+    Apx = 19,
+}
+
+impl Xcr0Component {
+    /// Convert a bit index (0..32) to a defined XCR0 component, if any.
+    #[inline]
+    pub(super) fn from_bit(bit: u32) -> Option<Self> {
+        Some(match bit {
+            0 => Self::Fpu,
+            1 => Self::Sse,
+            2 => Self::Ymm,
+            3 => Self::Bndregs,
+            4 => Self::Bndcfg,
+            5 => Self::Opmask,
+            6 => Self::ZmmHi256,
+            7 => Self::HiZmm,
+            8 => Self::Pt,
+            9 => Self::Pkru,
+            10 => Self::Pasid,
+            11 => Self::CetU,
+            12 => Self::CetS,
+            13 => Self::Hdc,
+            14 => Self::Uintr,
+            15 => Self::Lbr,
+            16 => Self::Hwp,
+            17 => Self::Xtilecfg,
+            18 => Self::Xtiledata,
+            19 => Self::Apx,
+            _ => return None,
+        })
+    }
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -725,6 +760,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn mov_rd_cr0(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
+        // Bochs crregs.cc MOV_RdCR0 — SVM CR0 read intercept.
+        if self.in_svm_guest && self.svm_cr_read_intercepted(0) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Read as i32, 0, 0);
+        }
         let val_32 = self.cr0.get32();
         let gpr = instr.src() as usize;
         self.set_gpr32(gpr, val_32);
@@ -734,6 +773,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn mov_rd_cr2(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
+        // Bochs crregs.cc MOV_RdCR2 — SVM CR2 read intercept.
+        if self.in_svm_guest && self.svm_cr_read_intercepted(2) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr2Read as i32, 0, 0);
+        }
         let val_32 = self.cr2 as u32;
         let gpr = instr.src() as usize;
         self.set_gpr32(gpr, val_32);
@@ -743,15 +786,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn mov_rd_cr3(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
+        let gpr = instr.src();
+        // Bochs crregs.cc MOV_RdCR3 — SVM CR3 read intercept BEFORE VMX gate.
+        if self.in_svm_guest && self.svm_cr_read_intercepted(3) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr3Read as i32, 0, 0);
+        }
+        // Bochs vmexit.cc VMexit_CR3_Read — gated on CR3_READ_VMEXIT.
+        if self.in_vmx_guest && self.vmexit_check_cr3_read(gpr)? {
+            return Ok(());
+        }
         let val_32 = self.cr3 as u32;
-        let gpr = instr.src() as usize;
-        self.set_gpr32(gpr, val_32);
+        self.set_gpr32(usize::from(gpr), val_32);
 
         Ok(())
     }
 
     pub fn mov_rd_cr4(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
+        // Bochs crregs.cc MOV_RdCR4 — SVM CR4 read intercept.
+        if self.in_svm_guest && self.svm_cr_read_intercepted(4) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr4Read as i32, 0, 0);
+        }
         let val_32 = self.cr4.get32();
         let gpr = instr.src() as usize;
         self.set_gpr32(gpr, val_32);
@@ -764,9 +819,47 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn mov_cr0_rd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
         self.invalidate_prefetch_q();
+        let src = instr.src1();
+        let raw_val_32 = self.get_gpr32(usize::from(src));
+        // Bochs MOV_CR0Rd (crregs.cc:412-415): VMexit_CR0_Write runs BEFORE
+        // SetCR0; SetCR0 itself never re-runs the VMX intercept.
+        let val = if self.in_vmx_guest {
+            let (exited, merged) = self.vmexit_check_cr0_write(u64::from(raw_val_32), src)?;
+            if exited {
+                return Ok(());
+            }
+            merged
+        } else {
+            u64::from(raw_val_32)
+        };
+        // Bochs SetCR0 (crregs.cc:1112-1128): SVM CR0 write intercept fires
+        // AFTER the VMX merge, before the actual CR0 mutation. Bochs places
+        // this inside SetCR0; we keep it inline here so the VMEXIT exit point
+        // is visible at the call site.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(0) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Write as i32, 0, 0);
+        }
+        self.set_cr0(val, src)
+    }
 
-        let src = instr.src1() as usize;
-        let val_32 = self.get_gpr32(src);
+    /// Bochs `BX_CPU_C::SetCR0(bxInstruction_c *i, bx_address val)` —
+    /// the shared "apply CR0" routine called by every CR0 writer (the
+    /// 32-bit and 64-bit MOV CRn handlers, LMSW, INIT). Runs the VMEXIT
+    /// CR0-write intercept, the full `check_CR0` validation chain
+    /// (PG-without-PE, NW-without-CD, VMX NE / PE+PG, CET/WP), the
+    /// long-mode activation transition, reserved-bit masking, PDPTR
+    /// loading for PAE, and the post-write mode-change + TLB-flush
+    /// bookkeeping. Bochs's SetCR0 returns false on validation failure
+    /// and the caller raises #GP(0); we raise #GP(0) inline here.
+    pub(super) fn set_cr0(&mut self, raw_val: u64, _src: u8) -> super::Result<()> {
+        // Bochs check_CR0: "trying to set CR0 > 32 bits" returns false
+        // when any bit above 31 is set. Surfaces as #GP(0).
+        if (raw_val >> 32) != 0 {
+            tracing::trace!("set_cr0: upper 32 bits non-zero {:#018x}, #GP(0)", raw_val);
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let val_32 = raw_val as u32;
+
         let old_cr0 = self.cr0.get32();
 
         // Bochs check_CR0(): PG without PE is illegal, NW without CD is illegal
@@ -779,6 +872,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             tracing::trace!("MOV CR0: NW=1 without CD=1, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
+        // Bochs check_CR0(): VMX-specific bit checks (NE in vmx, PE+PG in
+        // vmx guest unless UNRESTRICTED_GUEST).
+        if !self.check_cr0_vmx(u64::from(val_32), false) {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        // Bochs crregs.cc SetCR0: CET requires WP. Clearing CR0.WP while
+        // CR4.CET=1 raises #GP(0).
+        if !new_cr0.contains(BxCr0::WP) && self.cr4.contains(BxCr4::CET) {
+            tracing::trace!("MOV CR0: clearing WP while CR4.CET=1, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
 
         let pg = new_cr0.contains(BxCr0::PG);
 
@@ -787,9 +891,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if !self.cr0.pg() && pg {
             if self.efer.lme() {
                 if !self.cr4.pae() {
-                    tracing::trace!(
-                        "MOV CR0: attempt to enter long mode without CR4.PAE, #GP(0)"
-                    );
+                    tracing::trace!("MOV CR0: attempt to enter long mode without CR4.PAE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -819,24 +921,60 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
             if self.efer.lma() {
+                // Bochs SetCR0: leaving long mode with CR4.PCIDE set is #GP(0).
+                if self.cr4.pcide() {
+                    tracing::trace!(
+                        "MOV CR0: attempt to leave 64-bit mode with CR4.PCIDE set, #GP(0)"
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                // Bochs SetCR0: leaving long mode with non-zero RIP upper
+                // half is unrecoverable — Bochs `BX_PANIC`. The CPU would
+                // truncate RIP to 32 bits and resume at garbage; bail out.
+                if self.gen_reg[crate::cpu::decoder::BX_64BIT_REG_RIP].hrx() != 0 {
+                    panic!(
+                        "set_cr0: attempt to leave x86-64 long mode with RIP upper bits non-zero (RIP={:#018x})",
+                        self.gen_reg[crate::cpu::decoder::BX_64BIT_REG_RIP].rrx()
+                    );
+                }
                 // Bochs crregs.cc — clear EFER.LMA
                 self.efer.set_lma(0);
                 tracing::trace!("MOV CR0: Long mode deactivated (EFER.LMA=0)");
             }
         }
 
-        // Bochs SetCR0() (crregs.cc): mask reserved bits for CPU level 6
-        let cr0_allowed = BxCr0::PG | BxCr0::CD | BxCr0::NW | BxCr0::AM | BxCr0::WP
-            | BxCr0::NE | BxCr0::ET | BxCr0::TS | BxCr0::EM | BxCr0::MP | BxCr0::PE;
-        let val_32 = val_32 & cr0_allowed.bits();
+        // Bochs SetCR0(): mask reserved bits, then OR in CR0.ET as sticky-1
+        // whenever the CPU advertises x87. Both stages stay on the bitflags
+        // type so the reserved-bit set remains declarative.
+        let cr0_allowed = BxCr0::PG
+            | BxCr0::CD
+            | BxCr0::NW
+            | BxCr0::AM
+            | BxCr0::WP
+            | BxCr0::NE
+            | BxCr0::ET
+            | BxCr0::TS
+            | BxCr0::EM
+            | BxCr0::MP
+            | BxCr0::PE;
+        let mut val_flags = BxCr0::from_bits_truncate(val_32) & cr0_allowed;
+        if self.bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaX87) {
+            val_flags.insert(BxCr0::ET);
+        }
+        let val_32 = val_flags.bits();
 
-        // Bochs crregs.cc — PDPTR check when enabling paging with PAE
-        if pg && self.cr4.pae() && !self.long_mode() {
-            self.load_pdptrs();
+        // Bochs SetCR0 — PDPTR check when enabling paging with PAE outside
+        // long mode. CheckPDPTR returns false on a reserved-bit violation
+        // and SetCR0 propagates as #GP(0). Predicate is `efer.lma()` (Bochs's
+        // `long_mode()` is `efer.get_LMA()` directly).
+        if pg && self.cr4.pae() && !self.efer.lma() && !self.check_pdptrs(self.cr3)? {
+            tracing::trace!("MOV CR0: PDPTR check failed, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
         }
 
         // Track PM↔RM transitions for diagnostics
-        #[cfg(debug_assertions)] {
+        #[cfg(debug_assertions)]
+        {
             let old_pe = BxCr0::from_bits_retain(old_cr0).contains(BxCr0::PE);
             let new_pe = BxCr0::from_bits_retain(val_32).contains(BxCr0::PE);
             if old_pe && !new_pe {
@@ -860,9 +998,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.handle_sse_mode_change();
         self.handle_avx_mode_change();
 
-        // Bochs crregs.cc — TLB flush only if PG, WP, or PE changed
+        // Bochs crregs.cc SetCR0: when PG, WP, or PE changes, both flush
+        // the TLB AND recompute the pkey mapping (set_PKeys depends on
+        // WP — WP=0 disables the SYS-write protection part of the
+        // table). Bochs gates both in the same `(oldCR0 ^ val) & PG_WP_PE`
+        // check so any of the three triggers both side-effects.
         if (old_cr0 & 0x80010001) != (val_32 & 0x80010001) {
             self.tlb_flush();
+            self.set_pkeys(self.pkru, self.pkrs);
         }
 
         // Bochs crregs.cc
@@ -871,9 +1014,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // BOCHS BX_INSTR_TLB_CNTRL with MovCr0 kind
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
-            self.instrumentation.fire_tlb_cntrl(
-                super::instrumentation::TlbCntrl::MovCr0 { new_value: val_32 as u64 },
-            );
+            self.instrumentation
+                .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr0 {
+                    new_value: val_32 as u64,
+                });
         }
 
         tracing::trace!(
@@ -889,6 +1033,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn mov_cr2_rd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
+        // Bochs crregs.cc MOV_CR2Rd — SVM CR2 write intercept BEFORE state mutation.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(2) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr2Write as i32, 0, 0);
+        }
         let src = instr.src1() as usize;
         let val_32 = self.get_gpr32(src);
         self.cr2 = val_32 as u64;
@@ -896,34 +1044,50 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// MOV CR3, Rd — Bochs `BX_CPU_C::MOV_CR3Rd` (cpu/crregs.cc:455).
+    ///
+    /// 32-bit operand-size handler. Always reads a 32-bit GPR (upper 32 bits
+    /// of the source register are not consulted), zero-extends to the CR3
+    /// store. Runs CheckPDPTR — with the Bochs `cr0.PG && cr4.PAE &&
+    /// !long_mode()` predicate — BEFORE writing CR3 so a reserved-bit
+    /// failure leaves CR3 unchanged.
+    ///
+    /// PCIDE NOFLUSH bit 63 is N/A here: a 32-bit GPR cannot encode bit 63.
+    /// Bochs MOV_CR3Rd does not mask it; we don't either.
     pub fn mov_cr3_rd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
         // Bochs crregs.cc — invalidate prefetch queue before CR3 change
         self.invalidate_prefetch_q();
-        let src = instr.src1() as usize;
+        let src = instr.src1();
+        let val = u64::from(self.get_gpr32(usize::from(src)));
 
-        // Bochs crregs.cc: In long mode, CR3 gets full 64-bit value
-        let mut val = if self.long_mode() {
-            self.get_gpr64(src)
-        } else {
-            self.get_gpr32(src) as u64
-        };
-
-        // Bochs crregs.cc — allow NOFLUSH hint (bit 63) when PCIDE is set,
-        // but ignore the hint: always clear it before storing to CR3
-        if self.cr4.pcide() {
-            val &= !(1u64 << 63);
+        // Bochs MOV_CR3Rd (crregs.cc:467-470): VMexit_CR3_Write fires BEFORE
+        // the SVM intercept, then SetCR3 runs.
+        if self.in_vmx_guest && self.vmexit_check_cr3_write(val, src)? {
+            return Ok(());
+        }
+        // Bochs MOV_CR3Rd (crregs.cc:472-481): SVM CR3 write intercept runs
+        // AFTER the VMX gate.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(3) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr3Write as i32, 0, 0);
         }
 
+        // Bochs MOV_CR3Rd (cpu/crregs.cc:484): when paging is active in PAE-not-
+        // long-mode, CheckPDPTR validates the 4 PDPTE entries BEFORE SetCR3 so a
+        // reserved-bit failure leaves CR3 unchanged. Predicate is `cr0.PG &&
+        // cr4.PAE && !long_mode()` (Bochs `long_mode()` is `efer.get_LMA()`
+        // directly, so we use `efer.lma()` here — rusty_box's
+        // `cpu.rs::long_mode()` is cpu_mode-derived and lags EFER.LMA across
+        // CR transitions). The `cr0.pg()` gate matters during long-mode entry:
+        // Linux loads CR3 with a long-mode PML4 (R/W=1, U/S=1) BEFORE CR0.PG=1
+        // — those bits would fail legacy PAE PDPTE reserved-bit checks.
+        if self.cr0.pg() && self.cr4.pae() && !self.efer.lma() && !self.check_pdptrs(val)? {
+            tracing::trace!("MOV CR3: PDPTR check failed for cr3={:#x}, #GP(0)", val);
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Bochs SetCR3 (cpu/crregs.cc:1446): cr3 = val; TLB_flush().
         self.cr3 = val;
-
-        // In PAE mode (but not long mode), validate and cache PDPTE entries.
-        // Bochs crregs.cc calls CheckPDPTR() which reads 4 PDPTE entries from
-        // physical memory at (cr3 & 0xFFFFFFE0) + n*8 and validates reserved bits.
-        if self.cr4.pae() && !self.efer.lma() {
-            self.load_pdptrs();
-        }
-
         // Always flush ALL TLB entries including global on CR3 write.
         // This ensures stale global entries (like GDT page mapped RW→RO)
         // don't persist. Bochs uses flush_non_global when PGE is enabled,
@@ -931,27 +1095,93 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Our kernel doesn't INVLPG the GDT page after remapping RW→RO.
         self.tlb_flush();
 
-
         // BOCHS BX_INSTR_TLB_CNTRL with MovCr3 kind
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
-            self.instrumentation.fire_tlb_cntrl(
-                super::instrumentation::TlbCntrl::MovCr3 { new_value: val },
-            );
+            self.instrumentation
+                .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr3 { new_value: val });
         }
-
 
         Ok(())
     }
 
-    // load_pdptrs is defined in paging.rs where page_walk_read_qword is accessible.
+    /// MOV CR3, Rq — Bochs `BX_CPU_C::MOV_CR3Rq` (cpu/crregs.cc:687).
+    ///
+    /// 64-bit operand-size handler (long mode only — the decoder dispatches
+    /// here when REX.W is set). Reads the full 64-bit GPR, then masks the
+    /// PCIDE NOFLUSH-hint bit 63 if CR4.PCIDE=1 (Bochs ignores the hint and
+    /// always flushes the TLB; clearing keeps the cached CR3 value clean).
+    ///
+    /// Bochs MOV_CR3Rq does NOT call CheckPDPTR — the `!long_mode()`
+    /// predicate that gates it is false in long mode by definition.
+    pub fn mov_cr3_rq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        self.invalidate_prefetch_q();
+        let src = instr.src1();
+        let mut val = self.get_gpr64(usize::from(src));
+
+        // Bochs MOV_CR3Rq (crregs.cc:703-706): VMexit_CR3_Write fires BEFORE
+        // the SVM intercept, then SetCR3 runs.
+        if self.in_vmx_guest && self.vmexit_check_cr3_write(val, src)? {
+            return Ok(());
+        }
+        // Bochs MOV_CR3Rq (crregs.cc:708-717): SVM CR3 write intercept runs
+        // AFTER the VMX gate.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(3) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr3Write as i32, 0, 0);
+        }
+
+        // Bochs MOV_CR3Rq: allow bit 63 (NOFLUSH hint) when PCIDE is set,
+        // but ignore the hint — always clear it before storing to CR3.
+        if self.cr4.pcide() {
+            val &= !(1u64 << 63);
+        }
+
+        // Bochs SetCR3: cr3 = val; TLB_flush(). No CheckPDPTR in 64-bit path.
+        self.cr3 = val;
+        self.tlb_flush();
+
+        #[cfg(feature = "instrumentation")]
+        if self.instrumentation.active.has_tlb() {
+            self.instrumentation
+                .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr3 { new_value: val });
+        }
+
+        Ok(())
+    }
+
+    // CheckPDPTR (Bochs paging.cc) is defined in paging.rs as `check_pdptrs`
+    // — it both validates and caches the 4 PAE PDPTE entries.
 
     pub fn mov_cr4_rd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
         self.invalidate_prefetch_q();
+        let src = instr.src1();
+        // Bochs MOV_CR4Rd (crregs.cc:512-515): VMexit_CR4_Write fires before
+        // SetCR4. Both VMX merge and SVM intercept live in `set_cr4` so the
+        // ordering relative to validation/CR4 write matches Bochs SetCR4.
+        let raw_val_32 = u64::from(self.get_gpr32(usize::from(src)));
+        self.set_cr4(raw_val_32, src)
+    }
 
-        let src = instr.src1() as usize;
-        let val_32 = self.get_gpr32(src) as u64;
+    /// Bochs `BX_CPU_C::SetCR4(bxInstruction_c *i, bx_address val)` —
+    /// the shared "apply CR4" routine called by every CR4 writer (the
+    /// 32-bit and 64-bit MOV CRn handlers). Runs the VMEXIT CR4-write
+    /// intercept, the full CR4 validation chain (supported-bits, LMA
+    /// transitions, LA57 lock, CET/WP cross-check, VMX VMXE pinning),
+    /// the actual CR4 write, and the post-write mode-change + TLB-flush
+    /// bookkeeping.
+    pub(super) fn set_cr4(&mut self, raw_val: u64, src: u8) -> super::Result<()> {
+        // Bochs vmexit.cc VMexit_CR4_Write — VMEXIT or merge per mask/shadow.
+        let val_32 = if self.in_vmx_guest {
+            let (exited, merged) = self.vmexit_check_cr4_write(raw_val, src)?;
+            if exited {
+                return Ok(());
+            }
+            merged
+        } else {
+            raw_val
+        };
 
         // Bochs check_CR4(): reject unsupported bits using cr4_suppmask
         // computed at reset from CPUID features (matches crregs.cc)
@@ -966,51 +1196,110 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let new_cr4 = BxCr4::from_bits_retain(val_32);
 
-        // Bochs crregs.cc — long-mode checks
-        // (1) Cannot clear CR4.PAE when EFER.LMA=1
+        // Bochs check_CR4 (crregs.cc) sequence — must match ordering exactly
+        // for Bochs-correct fault prioritisation. Bochs's `long_mode()` is
+        // `efer.get_LMA()` directly, so the long-mode predicates are gated on
+        // `efer.lma()` here (rusty_box's `cpu.rs::long_mode()` is
+        // cpu_mode-derived and lags EFER.LMA across CR transitions, so it
+        // would observe stale state mid-handler).
+        // (1) PAE cannot be cleared when in long mode.
         if self.efer.lma() && !new_cr4.contains(BxCr4::PAE) {
-            tracing::trace!("MOV CR4: attempt to clear PAE while EFER.LMA=1, #GP(0)");
+            tracing::trace!("MOV CR4: attempt to clear PAE while in long mode, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
-        // (2) Cannot change CR4.LA57 when EFER.LMA=1
-        if self.efer.lma()
-            && (new_cr4.contains(BxCr4::LA57) != self.cr4.contains(BxCr4::LA57))
-        {
-            tracing::trace!("MOV CR4: attempt to change LA57 while EFER.LMA=1, #GP(0)");
-            return self.exception(super::cpu::Exception::Gp, 0);
-        }
-        // (3) Cannot set CR4.PCIDE when EFER.LMA=0
+        // (2) PCIDE cannot be set when not in long mode.
         if !self.efer.lma() && new_cr4.contains(BxCr4::PCIDE) {
-            tracing::trace!("MOV CR4: attempt to set PCIDE while EFER.LMA=0, #GP(0)");
+            tracing::trace!("MOV CR4: attempt to set PCIDE outside long mode, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        // (3) FRED cannot be set when not in long mode (Bochs check_CR4 FRED).
+        if !self.efer.lma() && new_cr4.contains(BxCr4::FRED) {
+            tracing::trace!("MOV CR4: attempt to set FRED outside long mode, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        // (4) VMX-specific bit checks (VMXE pinned in vmx, forbidden in SMM).
+        if !self.check_cr4_vmx(val_32) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        let old_cr4 = self.cr4.get();
-        self.cr4.set_val(val_32);
+        // Bochs SetCR4 post-check_CR4 ordering (crregs.cc SetCR4):
+        //   CET/WP cross-check -> LA57-while-long-mode -> FLUSH_TLB_MASK block.
+        // CET/WP first.
+        if new_cr4.contains(BxCr4::CET) && !self.cr0.contains(BxCr0::WP) {
+            tracing::trace!("MOV CR4: setting CET while CR0.WP=0, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        // LA57 cannot change while in long mode (Bochs SetCR4 LA57 block).
+        if self.efer.lma() && (new_cr4.contains(BxCr4::LA57) != self.cr4.contains(BxCr4::LA57)) {
+            tracing::trace!("MOV CR4: attempt to change LA57 while in long mode, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
 
-        // Bochs: TLB flush only if paging-related bits changed
-        // BX_CR4_FLUSH_TLB_MASK = PSE|PAE|PGE|PCIDE|SMEP|SMAP
-        let cr4_flush_tlb_mask = BxCr4::PSE.bits()
-            | BxCr4::PAE.bits()
-            | BxCr4::PGE.bits()
-            | BxCr4::PCIDE.bits()
-            | BxCr4::SMEP.bits()
-            | BxCr4::SMAP.bits();
-        if (old_cr4 ^ val_32) & cr4_flush_tlb_mask != 0 {
+        // Bochs SetCR4 FLUSH_TLB_MASK block (crregs.h `BX_CR4_FLUSH_TLB_MASK`
+        // = PSE | PAE | PGE | LA57 | PCIDE | SMEP | SMAP | PKE | CET | PKS |
+        // LASS). When any TLB-relevant bit flips, run the BEFORE-write
+        // side-effects:
+        //   - if (cr0.PG && new.PAE && !efer.lma): CheckPDPTR or #GP(0).
+        //   - else (long mode): if PCIDE 0->1, require (cr3 & 0xfff)==0.
+        // Bochs `TLB_flush()` runs INSIDE that block (crregs.cc SetCR4) BEFORE
+        // `cr4 = temp_cr4` so it sees the OLD CR4 — keep that ordering.
+        let flush_mask = BxCr4::PSE
+            | BxCr4::PAE
+            | BxCr4::PGE
+            | BxCr4::LA57
+            | BxCr4::PCIDE
+            | BxCr4::SMEP
+            | BxCr4::SMAP
+            | BxCr4::PKE
+            | BxCr4::CET
+            | BxCr4::PKS
+            | BxCr4::LASS;
+        let changed_bits = self.cr4.symmetric_difference(new_cr4);
+        let tlb_relevant_change = changed_bits.intersects(flush_mask);
+        if tlb_relevant_change {
+            if self.cr0.pg() && new_cr4.contains(BxCr4::PAE) && !self.efer.lma() {
+                if !self.check_pdptrs(self.cr3)? {
+                    tracing::trace!("MOV CR4: PDPTR check failed, #GP(0)");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+            } else if !self.cr4.contains(BxCr4::PCIDE)
+                && new_cr4.contains(BxCr4::PCIDE)
+                && (self.cr3 & 0xFFF) != 0
+            {
+                tracing::trace!(
+                    "MOV CR4: enabling PCIDE with non-zero PCID in CR3 ({:#x}), #GP(0)",
+                    self.cr3 & 0xFFF
+                );
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
             self.tlb_flush();
         }
+
+        // Bochs SetCR4 (crregs.cc:1412-1421): SVM CR4 write intercept fires
+        // AFTER the full check_CR4 chain, immediately before the CR4 write.
+        // VMX merge ran above (`vmexit_check_cr4_write`).
+        if self.in_svm_guest && self.svm_cr_write_intercepted(4) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr4Write as i32, 0, 0);
+        }
+
+        self.cr4.set_val(val_32);
 
         // Bochs crregs.cc — mode change handlers after CR4 write
         self.handle_fpu_mmx_mode_change();
         self.handle_sse_mode_change();
         self.handle_avx_mode_change();
 
+        // Bochs crregs.cc SetCR4: set_PKeys() is called unconditionally
+        // at the end of the routine. The pkey allow-mask depends on
+        // CR4.PKE and CR4.PKS, but Bochs recomputes always to keep the
+        // tail of SetCR4 free of conditional branches.
+        self.set_pkeys(self.pkru, self.pkrs);
+
         // BOCHS BX_INSTR_TLB_CNTRL with MovCr4 kind
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_tlb() {
-            self.instrumentation.fire_tlb_cntrl(
-                super::instrumentation::TlbCntrl::MovCr4 { new_value: val_32 },
-            );
+            self.instrumentation
+                .fire_tlb_cntrl(super::instrumentation::TlbCntrl::MovCr4 { new_value: val_32 });
         }
 
         // Bochs: update linaddr_width based on LA57 (5-level paging support)
@@ -1019,50 +1308,88 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    // ----- CR8 helpers -----
+
+    /// CR8 read — Bochs crregs.cc ReadCR8. CR8 is aliased to LAPIC.TPR[7:4]
+    /// (the high TPR nibble). The VMX `CR8_READ_VMEXIT` intercept is the
+    /// caller's responsibility because a VMEXIT must terminate instruction
+    /// execution before the destination GPR is written; folding it into the
+    /// reader would force a sentinel value.
+    pub(super) fn read_cr8(&self) -> u64 {
+        u64::from((self.lapic.get_tpr() >> 4) & 0xF)
+    }
+
+    /// CR8 write — Bochs crregs.cc WriteCR8. Validates that only the low
+    /// four bits are set (#GP otherwise), then writes `(val & 0xF) << 4`
+    /// into LAPIC.TPR. Caller checks the VMX `CR8_WRITE_VMEXIT` intercept
+    /// first so the LAPIC update is skipped on a VMEXIT.
+    pub(super) fn write_cr8(&mut self, val: u64) -> super::Result<()> {
+        if val & 0xFFFF_FFFF_FFFF_FFF0 != 0 {
+            tracing::trace!("WriteCR8: reserved bits set in {:#018x}, #GP(0)", val);
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let tpr = ((val as u8) & 0xF) << 4;
+        self.lapic.set_tpr(tpr);
+        Ok(())
+    }
+
     // ----- 64-bit MOV CRn, Rq (writes in long mode) -----
 
-    /// MOV CR0, Rq — Bochs crregs.cc
-    /// Reads full 64-bit register; upper 32 bits must be zero (#GP if not).
+    /// MOV CR0, Rq — Bochs crregs.cc `BX_CPU_C::MOV_CR0Rq`.
+    /// Reads full 64-bit register; upper 32 bits must be zero (#GP if
+    /// not). With REX.R the destination index can be 8, in which case
+    /// Bochs routes the write to CR8 (TPR alias).
     pub fn mov_cr0_rq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
         self.invalidate_prefetch_q();
 
-        let src = instr.src1() as usize;
-        let val_64 = self.get_gpr64(src);
+        let src_gpr = instr.src1();
+        let cr_idx = instr.dst();
+        let val_64 = self.get_gpr64(usize::from(src_gpr));
 
-        // Bochs check_CR0(): upper 32 bits must be zero
-        if (val_64 >> 32) != 0 {
-            tracing::trace!("MOV CR0 (64-bit): upper 32 bits non-zero {:#018x}, #GP(0)", val_64);
-            return self.exception(super::cpu::Exception::Gp, 0);
+        if cr_idx == 8 {
+            // Bochs WriteCR8 (crregs.cc:1508-1517): SVM CR8 write intercept
+            // fires BEFORE the VMX intercept and BEFORE the LAPIC update.
+            if self.in_svm_guest && self.svm_cr_write_intercepted(8) {
+                return self.svm_vmexit(super::svm::SvmVmexit::Cr8Write as i32, 0, 0);
+            }
+            // Bochs WriteCR8 (crregs.cc:1519-1522): VMX intercept fires
+            // AFTER the SVM check, before the LAPIC TPR update.
+            if self.in_vmx_guest && self.vmexit_check_cr8_write(src_gpr)? {
+                return Ok(());
+            }
+            return self.write_cr8(val_64);
         }
 
-        // Delegate to 32-bit handler for the actual CR0 logic
-        // Temporarily set the GPR to val_64 low 32 bits so mov_cr0_rd reads it
-        // Actually, just inline the same logic with the known value
-        let val_32 = val_64 as u32;
-        let old_cr0 = self.cr0.get32();
-
-        // Bochs check_CR0(): PG without PE is illegal, NW without CD is illegal
-        let new_cr0 = BxCr0::from_bits_retain(val_32);
-        if new_cr0.contains(BxCr0::PG) && !new_cr0.contains(BxCr0::PE) {
-            tracing::trace!("MOV CR0 (64-bit): PG=1 without PE=1, #GP(0)");
-            return self.exception(super::cpu::Exception::Gp, 0);
+        // Bochs MOV_CR0Rq (crregs.cc:643-646): VMexit_CR0_Write runs BEFORE
+        // SetCR0; SetCR0 itself never re-runs the VMX intercept.
+        let val = if self.in_vmx_guest {
+            let (exited, merged) = self.vmexit_check_cr0_write(val_64, src_gpr)?;
+            if exited {
+                return Ok(());
+            }
+            merged
+        } else {
+            val_64
+        };
+        // Bochs SetCR0 (crregs.cc:1112-1128): SVM CR0 write intercept fires
+        // AFTER the VMX merge, before the actual CR0 mutation. Bochs places
+        // this inside SetCR0; we keep it inline here so the VMEXIT exit point
+        // is visible at the call site.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(0) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Write as i32, 0, 0);
         }
-        if new_cr0.contains(BxCr0::NW) && !new_cr0.contains(BxCr0::CD) {
-            tracing::trace!("MOV CR0 (64-bit): NW=1 without CD=1, #GP(0)");
-            return self.exception(super::cpu::Exception::Gp, 0);
-        }
-
-        // Call the shared CR0 write logic (reuse mov_cr0_rd body)
-        // We need to set the GPR temporarily so the 32-bit handler reads the right value
-        self.set_gpr32(src, val_32);
-        self.mov_cr0_rd(instr)
+        self.set_cr0(val, src_gpr)
     }
 
     /// MOV CR2, Rq — Bochs crregs.cc
     /// Full 64-bit store (CR2 holds the faulting linear address in long mode).
     pub fn mov_cr2_rq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
+        // Bochs crregs.cc MOV_CR2Rq — SVM CR2 write intercept.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(2) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr2Write as i32, 0, 0);
+        }
         let src = instr.src1() as usize;
         let val_64 = self.get_gpr64(src);
         self.cr2 = val_64;
@@ -1070,24 +1397,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// MOV CR4, Rq — Bochs crregs.cc
-    /// Reads full 64-bit register; upper 32 bits must be zero (#GP if not).
+    /// MOV CR4, Rq — Bochs crregs.cc `BX_CPU_C::MOV_CR4Rq` (line 733).
+    /// Calls `set_cr4` to apply, mirroring Bochs's `SetCR4(i, val_64)`.
+    /// Upper-32 bits are rejected inside `set_cr4` via the cr4_suppmask
+    /// check (matches Bochs `check_CR4` line 1316: `cr4_val & ~cr4_suppmask`).
     pub fn mov_cr4_rq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
         self.invalidate_prefetch_q();
 
-        let src = instr.src1() as usize;
-        let val_64 = self.get_gpr64(src);
+        let src = instr.src1();
+        // Bochs MOV_CR4Rq (crregs.cc:748-751): VMexit_CR4_Write fires before
+        // SetCR4. Both VMX merge and SVM intercept live in `set_cr4`.
+        let val_64 = self.get_gpr64(usize::from(src));
 
-        // Bochs check_CR4(): upper 32 bits must be zero
-        if (val_64 >> 32) != 0 {
-            tracing::trace!("MOV CR4 (64-bit): upper 32 bits non-zero {:#018x}, #GP(0)", val_64);
-            return self.exception(super::cpu::Exception::Gp, 0);
-        }
-
-        // Delegate to 32-bit handler with the low 32 bits
-        self.set_gpr32(src, val_64 as u32);
-        self.mov_cr4_rd(instr)
+        self.set_cr4(val_64, src)
     }
 
     // ----- LMSW -----
@@ -1105,6 +1428,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
+        // Bochs LMSW_Ew (crregs.cc:880-884): SVM CR0 write intercept fires
+        // BEFORE the source operand is read. For memory-form LMSW this means
+        // an SVM #VMEXIT preempts any #PF that the memory read might raise.
+        if self.in_svm_guest && self.svm_cr_write_intercepted(0) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Write as i32, 0, 0);
+        }
+
+        // Bochs LMSW_Ew (crregs.cc:886-894): read the 16-bit source. For
+        // register form, BX_READ_16BIT_REG(i->src()); for memory form,
+        // resolve_addr + read_virtual_word. We track `linear_addr` so the VMX
+        // intercept below can report it on a VMEXIT.
+        let is_memory = !instr.mod_c0();
+        let mut linear_addr: u64 = 0;
         let mut msw = if instr.mod_c0() {
             // For Group 7 (0F 01): b1=0x101, (b1 & 0x0F)==0x01 → Ed,Gd branch: DST=rm, SRC1=nnn
             // So dst() = rm = actual register. Matches Bochs: BX_READ_16BIT_REG(i->src()) where
@@ -1113,8 +1449,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = super::decoder::BxSegregs::from(instr.seg());
+            linear_addr = self.get_laddr64(seg as usize, u64::from(eaddr));
             self.v_read_word(seg, eaddr)?
         };
+
+        // Bochs LMSW_Ew (crregs.cc:898-901) / vmexit.cc VMexit_LMSW: VMX
+        // intercept fires AFTER the SVM check and AFTER the source read; it
+        // inspects the raw source value and either VMEXITs or returns the
+        // masked-merged value.
+        if self.in_vmx_guest {
+            let (exited, merged) =
+                self.vmexit_check_lmsw(u32::from(msw), is_memory, linear_addr)?;
+            if exited {
+                return Ok(());
+            }
+            msw = merged as u16;
+        }
 
         // LMSW cannot clear PE (Bochs crregs.cc)
         if self.cr0.pe() {
@@ -1127,18 +1477,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let old_cr0 = self.cr0.get32();
         let cr0_val = (old_cr0 & 0xFFFFFFF0) | msw as u32;
 
-        // Use same path as MOV CR0 — SetCR0 equivalent
-        // (Bochs crregs.cc calls SetCR0)
-        self.cr0.set32(cr0_val);
-
-        // TLB flush if PG, PE, or WP changed (Bochs crregs.cc)
-        let tlb_relevant = BxCr0::PG | BxCr0::WP | BxCr0::PE;
-        if (old_cr0 & tlb_relevant.bits()) != (cr0_val & tlb_relevant.bits()) {
-            self.tlb_flush();
-        }
-
-        // handleAlignmentCheck + handleCpuModeChange (Bochs crregs.cc)
-        self.handle_cpu_context_change();
+        // Bochs LMSW_Ew: SetCR0(i, cr0); on false → exception(#GP, 0).
+        // SetCR0 handles ET-sticky, CET/WP, long-mode transitions, PDPTR
+        // reload, mode-change handlers, set_PKeys, and TLB flush — none
+        // of which the historical fast path here invoked.
+        let src = if instr.mod_c0() { instr.dst() } else { 0 };
+        self.set_cr0(u64::from(cr0_val), src)?;
 
         tracing::trace!(
             "LMSW: msw={:#06x}, CR0={:#010x} (PE={})",
@@ -1147,6 +1491,72 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.cr0.pe()
         );
         Ok(())
+    }
+
+    // =========================================================================
+    // VMX-specific CR0 / CR4 validity checks — Bochs crregs.cc check_CR0
+    // and check_CR4 (the in_vmx / in_vmx_guest branches).
+    // =========================================================================
+
+    /// Validate the VMX-mandatory bits of a CR0 value — Bochs crregs.cc
+    /// check_CR0.
+    ///
+    /// `vmenter` should be `true` when validating guest CR0 from the
+    /// VMENTRY load path (so the guest-mode bit checks apply even before
+    /// `in_vmx_guest` flips). Returns `true` when the value is valid; the
+    /// caller raises #GP(0).
+    ///
+    /// Bochs rules in VMX (crregs.cc check_CR0):
+    ///   - CR0.NE must be set whenever in_vmx (root or guest).
+    ///   - CR0.PE and CR0.PG must be set whenever in VMX, EXCEPT inside a
+    ///     VMX guest with `UNRESTRICTED_GUEST` enabled. In particular,
+    ///     VMX-root mode (in_vmx && !in_vmx_guest && !vmenter) MUST
+    ///     enforce PE+PG — Bochs's literal predicate is
+    ///     `!vmx_guest || (vmx_guest && !UNRESTRICTED_GUEST())`.
+    pub(super) fn check_cr0_vmx(&self, val: u64, vmenter: bool) -> bool {
+        if !self.in_vmx {
+            return true;
+        }
+        let cr0 = super::crregs::BxCr0::from_bits_retain(val as u32);
+        if !cr0.contains(super::crregs::BxCr0::NE) {
+            tracing::trace!("check_cr0_vmx: CR0.NE clear in VMX mode, #GP(0)");
+            return false;
+        }
+        let vmx_guest = self.in_vmx_guest || vmenter;
+        let unrestricted = self.vmcs.secondary_proc_based_ctls
+            & super::vmx::VMX_VM_EXEC_CTRL2_UNRESTRICTED_GUEST
+            != 0;
+        if !vmx_guest || !unrestricted {
+            if !cr0.contains(super::crregs::BxCr0::PE) || !cr0.contains(super::crregs::BxCr0::PG) {
+                tracing::trace!(
+                    "check_cr0_vmx: CR0.PE/PG clear in VMX (guest={}, unrestricted={}), #GP(0)",
+                    vmx_guest,
+                    unrestricted
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Validate the VMX-mandatory bits of a CR4 value — Bochs crregs.cc
+    /// check_CR4.
+    ///
+    /// Bochs rules:
+    ///   - CR4.VMXE must remain set whenever in_vmx.
+    ///   - CR4.VMXE may not be set while in SMM.
+    pub(super) fn check_cr4_vmx(&self, val: u64) -> bool {
+        let cr4 = super::crregs::BxCr4::from_bits_retain(val);
+        let vmxe = cr4.contains(super::crregs::BxCr4::VMXE);
+        if !vmxe && self.in_vmx {
+            tracing::trace!("check_cr4_vmx: clearing CR4.VMXE in VMX mode, #GP(0)");
+            return false;
+        }
+        if vmxe && self.in_smm {
+            tracing::trace!("check_cr4_vmx: setting CR4.VMXE in SMM, #GP(0)");
+            return false;
+        }
+        true
     }
 
     // =========================================================================
@@ -1346,25 +1756,66 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn mov_rq_cr0(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
-        let val = self.cr0.get32() as u64;
-        self.set_gpr64(instr.src() as usize, val);
+        // Bochs MOV_RqCR0: the CR index (extended by REX.R) is carried in
+        // dst() in the rusty_box decoder; instr.src() carries the GPR.
+        // CR8 reads land here too because the form_opcode mask is 3 bits.
+        let cr_idx = instr.dst();
+        let dst_gpr = instr.src();
+        if cr_idx == 8 {
+            // Bochs ReadCR8 (crregs.cc:1566-1572): SVM CR8 read intercept
+            // fires BEFORE the VMX intercept.
+            if self.in_svm_guest && self.svm_cr_read_intercepted(8) {
+                return self.svm_vmexit(super::svm::SvmVmexit::Cr8Read as i32, 0, 0);
+            }
+            // Bochs ReadCR8 (crregs.cc:1574-1582): VMX intercept fires
+            // AFTER the SVM check.
+            if self.in_vmx_guest && self.vmexit_check_cr8_read(dst_gpr)? {
+                return Ok(());
+            }
+            let val = self.read_cr8();
+            self.set_gpr64(usize::from(dst_gpr), val);
+            return Ok(());
+        }
+        // Bochs crregs.cc MOV_RqCR0 — SVM CR0 read intercept.
+        if self.in_svm_guest && self.svm_cr_read_intercepted(0) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr0Read as i32, 0, 0);
+        }
+        let val = u64::from(self.cr0.get32());
+        self.set_gpr64(usize::from(dst_gpr), val);
         Ok(())
     }
 
     pub fn mov_rq_cr2(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
+        // Bochs crregs.cc MOV_RqCR2 — SVM CR2 read intercept.
+        if self.in_svm_guest && self.svm_cr_read_intercepted(2) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr2Read as i32, 0, 0);
+        }
         self.set_gpr64(instr.src() as usize, self.cr2);
         Ok(())
     }
 
     pub fn mov_rq_cr3(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
-        self.set_gpr64(instr.src() as usize, self.cr3);
+        let gpr = instr.src();
+        // Bochs crregs.cc MOV_RqCR3 — SVM CR3 read intercept BEFORE VMX gate.
+        if self.in_svm_guest && self.svm_cr_read_intercepted(3) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr3Read as i32, 0, 0);
+        }
+        // Bochs vmexit.cc VMexit_CR3_Read — gated on CR3_READ_VMEXIT.
+        if self.in_vmx_guest && self.vmexit_check_cr3_read(gpr)? {
+            return Ok(());
+        }
+        self.set_gpr64(usize::from(gpr), self.cr3);
         Ok(())
     }
 
     pub fn mov_rq_cr4(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
+        // Bochs crregs.cc MOV_RqCR4 — SVM CR4 read intercept.
+        if self.in_svm_guest && self.svm_cr_read_intercepted(4) {
+            return self.svm_vmexit(super::svm::SvmVmexit::Cr4Read as i32, 0, 0);
+        }
         let val = self.cr4.get();
         self.set_gpr64(instr.src() as usize, val);
         Ok(())

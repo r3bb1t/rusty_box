@@ -363,7 +363,8 @@ impl WasmEmulatorApp {
             }
         });
 
-        input.add_event_listener_with_callback("change", closure.as_ref().unchecked_ref())
+        input
+            .add_event_listener_with_callback("change", closure.as_ref().unchecked_ref())
             .unwrap();
         closure.forget();
         input.click();
@@ -432,9 +433,11 @@ impl WasmEmulatorApp {
 
             ui.add_space(4.0);
             ui.label(
-                egui::RichText::new("Upload an Alpine Virtual x86 ISO from alpinelinux.org/downloads")
-                    .size(11.0)
-                    .color(TEXT_MUTED),
+                egui::RichText::new(
+                    "Upload an Alpine Virtual x86 ISO from alpinelinux.org/downloads",
+                )
+                .size(11.0)
+                .color(TEXT_MUTED),
             );
         });
     }
@@ -463,11 +466,7 @@ impl WasmEmulatorApp {
                         BootMode::Dlx => "DLX Linux",
                         BootMode::Alpine => "Alpine Linux",
                     };
-                    ui.label(
-                        egui::RichText::new(mode_str)
-                            .size(11.0)
-                            .color(TEXT_MUTED),
-                    );
+                    ui.label(egui::RichText::new(mode_str).size(11.0).color(TEXT_MUTED));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let instr_text = if self.total_instructions > 0 {

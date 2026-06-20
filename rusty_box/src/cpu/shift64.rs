@@ -527,5 +527,4 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_cf_of(cf != 0, of != 0);
         Ok(())
     }
-
 }

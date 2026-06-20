@@ -3,8 +3,11 @@
 //! Provides `fetch_decode32` and `fetch_decode32_inplace` — both are `const fn`
 //! decoders for x86 protected/real mode that produce an [`Instruction`].
 
-use crate::instruction::{Instruction, InstructionFlags};
 use crate::error::{DecodeError, DecodeResult};
+use crate::instruction::{
+    has_lock_prefix_bits, lock_rep_value_from_bits, set_lock_rep_value_bits, Instruction,
+    InstructionFlags, LOCK_REP_LOCK, LOCK_REP_REP, LOCK_REP_REPNE,
+};
 use crate::opcode::Opcode;
 use crate::BxSegregs;
 
@@ -26,31 +29,7 @@ use super::tables::{
     AS32_OFFSET, LOCK_PREFIX_OFFSET, MODC0_OFFSET, NNN_OFFSET, OS32_OFFSET, RRR_OFFSET,
     SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET,
 };
-
-/// Search opcode table for matching opcode
-const fn find_opcode_in_table(table: &[u64], decmask: u32) -> Opcode {
-    let mut i = 0;
-    while i < table.len() {
-        let entry = table[i];
-        let ignmsk = (entry & 0xFFFFFF) as u32;
-        let opmsk = (entry >> 24) as u32;
-
-        if (opmsk & ignmsk) == (decmask & ignmsk) {
-            let opcode_raw = ((entry >> 48) & 0x7FFF) as u16;
-            return Opcode::from_u16_const(opcode_raw);
-        }
-
-        if (entry as i64) < 0 {
-            break;
-        }
-
-        i += 1;
-    }
-    Opcode::IaError
-}
-
-// Backward-compatible aliases for MetaInfoFlags
-use InstructionFlags as MetaInfoFlags;
+use super::{find_opcode_in_table, read_u16_le, read_u32_le};
 
 // 16-bit register indices — matching Bochs BX_16BIT_REG_* constants
 const BX_16BIT_REG_BX: u8 = 3;
@@ -118,8 +97,14 @@ pub const fn fetch_decode32_inplace(
         length: 0,
         flags: InstructionFlags::empty(),
         operands: crate::instruction::Operands {
-            dst: 0, src1: 0, src2: 0, src3: 0,
-            segment: 0, base: 0, index: 0, scale: 0,
+            dst: 0,
+            src1: 0,
+            src2: 0,
+            src3: 0,
+            segment: 0,
+            base: 0,
+            index: 0,
+            scale: 0,
         },
         immediate: 0,
         displacement: 0,
@@ -134,7 +119,7 @@ pub const fn fetch_decode32_inplace(
 
     // Initialize metainfo1: os32 and as32 based on mode
     let mut metainfo1_bits: u8 = if is_32 {
-        MetaInfoFlags::Os32.bits() | MetaInfoFlags::As32.bits()
+        InstructionFlags::Os32.bits() | InstructionFlags::As32.bits()
     } else {
         0
     };
@@ -163,9 +148,9 @@ pub const fn fetch_decode32_inplace(
                     sse_prefix = SsePrefix::Prefix66 as u8;
                 }
                 if os_32 {
-                    metainfo1_bits |= MetaInfoFlags::Os32.bits();
+                    metainfo1_bits |= InstructionFlags::Os32.bits();
                 } else {
-                    metainfo1_bits &= !MetaInfoFlags::Os32.bits();
+                    metainfo1_bits &= !InstructionFlags::Os32.bits();
                 }
             }
 
@@ -173,26 +158,26 @@ pub const fn fetch_decode32_inplace(
             0x67 => {
                 as_32 = !is_32;
                 if as_32 {
-                    metainfo1_bits |= MetaInfoFlags::As32.bits();
+                    metainfo1_bits |= InstructionFlags::As32.bits();
                 } else {
-                    metainfo1_bits &= !MetaInfoFlags::As32.bits();
+                    metainfo1_bits &= !InstructionFlags::As32.bits();
                 }
             }
 
             // LOCK prefix
             0xF0 => {
-                metainfo1_bits = (metainfo1_bits & 0x3F) | (1 << 6);
+                metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_LOCK);
             }
 
             // REPNE/REPNZ
             0xF2 => {
-                metainfo1_bits = (metainfo1_bits & 0x3F) | (2 << 6);
+                metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_REPNE);
                 sse_prefix = SsePrefix::PrefixF2 as u8;
             }
 
             // REP/REPE/REPZ
             0xF3 => {
-                metainfo1_bits = (metainfo1_bits & 0x3F) | (3 << 6);
+                metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_REP);
                 sse_prefix = SsePrefix::PrefixF3 as u8;
             }
 
@@ -307,8 +292,7 @@ pub const fn fetch_decode32_inplace(
         let force_modc0 = opcode_map == 1 && matches!(b1 & 0xFF, 0x20..=0x26);
 
         if mod_field == 3 || force_modc0 {
-            // Register mode (or forced register for MOV CR/DR)
-            metainfo1_bits |= MetaInfoFlags::ModC0.bits();
+            metainfo1_bits |= InstructionFlags::ModC0.bits();
         } else {
             // Memory mode - depends on address size
             if as_32 {
@@ -446,8 +430,7 @@ pub const fn fetch_decode32_inplace(
             }
         }
     } else {
-        // No ModRM - instruction uses register encoded in opcode (low 3 bits = rm)
-        metainfo1_bits |= MetaInfoFlags::ModC0.bits();
+        metainfo1_bits |= InstructionFlags::ModC0.bits();
     }
 
     // Store register fields
@@ -491,7 +474,7 @@ pub const fn fetch_decode32_inplace(
                 // Matches Bochs convention where group opcodes always put rm in dst()
                 | 0x100  // Group 6: SLDT/STR/LLDT/LTR/VERR/VERW (0F 00)
                 | 0x1AE  // Group 15: FXSAVE/FXRSTOR/LDMXCSR/STMXCSR/CLFLUSH (0F AE)
-                | 0x1C7  // Group 9: CMPXCHG8B/CMPXCHG16B (0F C7)
+                | 0x1C7 // Group 9: CMPXCHG8B/CMPXCHG16B (0F C7)
         );
 
         // Segment register move instructions: 8C (MOV Ew,Sw) and 8E (MOV Sw,Ew)
@@ -649,11 +632,10 @@ pub const fn fetch_decode32_inplace(
 
     // Finalize instruction
     instr.length = pos as u8;
-    instr.flags = MetaInfoFlags::from_bits_retain(metainfo1_bits);
+    instr.flags = InstructionFlags::from_bits_retain(metainfo1_bits);
 
     // Build decmask for opcode lookup
-    // Match C++ implementation: decmask uses i->osize() and i->asize() which return actual values
-    let mod_c0 = (metainfo1_bits & MetaInfoFlags::ModC0.bits()) != 0;
+    let mod_c0 = (metainfo1_bits & InstructionFlags::ModC0.bits()) != 0;
     // Extract osize and asize from metainfo1 bits (same as osize() and asize() methods)
     // osize = (bits >> 2) & 0x3, asize = bits & 0x3
     let osize_val = ((metainfo1_bits >> 2) & 0x3) as u32;
@@ -662,12 +644,15 @@ pub const fn fetch_decode32_inplace(
     // Match C++ implementation exactly:
     // - decoder32 (no ModRM): decmask includes osize, asize, sse_prefix, MODC0, and SRC_EQ_DST_OFFSET if nnn==rm
     // - decoder32_modrm: decmask includes osize, asize, sse_prefix, MODC0, nnn, rm, and SRC_EQ_DST_OFFSET if mod_c0 && nnn==rm
-    // No IS32_OFFSET bit in 32-bit mode decmask
-    let lock_rep_value = (metainfo1_bits >> 6) & 0x3;
+    let lock_rep_value = lock_rep_value_from_bits(metainfo1_bits);
     let decmask: u32 = (osize_val << OS32_OFFSET)
         | (asize_val << AS32_OFFSET)
         | ((sse_prefix as u32) << SSE_PREFIX_OFFSET)
-        | (if lock_rep_value == 1 { 1 } else { 0 } << LOCK_PREFIX_OFFSET)
+        | (if lock_rep_value == LOCK_REP_LOCK {
+            1
+        } else {
+            0
+        } << LOCK_PREFIX_OFFSET)
         | (if mod_c0 { 1 } else { 0 } << MODC0_OFFSET)
         | if needs_modrm {
             (rm << RRR_OFFSET) | (nnn << NNN_OFFSET)
@@ -728,9 +713,8 @@ pub const fn fetch_decode32_inplace(
     }
 
     // Post-decode LOCK validation (Bochs fetchdecode32.cc)
-    // LOCK prefix on register operand (modC0) is always invalid → #UD
-    let has_lock = (metainfo1_bits >> 6) & 0x3 == 1;
-    let mod_c0 = (metainfo1_bits & MetaInfoFlags::ModC0.bits()) != 0;
+    let has_lock = has_lock_prefix_bits(metainfo1_bits);
+    let mod_c0 = (metainfo1_bits & InstructionFlags::ModC0.bits()) != 0;
     if has_lock && mod_c0 {
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
     }
@@ -746,8 +730,14 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
         length: 0,
         flags: InstructionFlags::empty(),
         operands: crate::instruction::Operands {
-            dst: 0, src1: 0, src2: 0, src3: 0,
-            segment: 0, base: 0, index: 0, scale: 0,
+            dst: 0,
+            src1: 0,
+            src2: 0,
+            src3: 0,
+            segment: 0,
+            base: 0,
+            index: 0,
+            scale: 0,
         },
         immediate: 0,
         displacement: 0,
@@ -1319,20 +1309,18 @@ const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool, as_32: bool, nnn: 
             // Group 3a (F6): TEST (nnn=0,1) has Ib, others have no immediate
             // Based on Bochs cpu/decoder/fetchdecode32.cc (fetchImmediate)
             // and opcodes table entries for Group 3a
-            0xF6
-                if (nnn == 0 || nnn == 1) => {
-                    1 // TEST r/m8, imm8
-                }
+            0xF6 if (nnn == 0 || nnn == 1) => {
+                1 // TEST r/m8, imm8
+            }
 
             // Group 3b (F7): TEST (nnn=0,1) has Iv, others have no immediate
-            0xF7
-                if (nnn == 0 || nnn == 1) => {
-                    if os_32 {
-                        4 // TEST r/m32, imm32
-                    } else {
-                        2 // TEST r/m16, imm16
-                    }
+            0xF7 if (nnn == 0 || nnn == 1) => {
+                if os_32 {
+                    4 // TEST r/m32, imm32
+                } else {
+                    2 // TEST r/m16, imm16
                 }
+            }
 
             // Iw
             0xC2 | 0xCA => 2,
@@ -1400,19 +1388,6 @@ const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool, as_32: bool, nnn: 
     }
 }
 
-/// Read u16 little-endian
-const fn read_u16_le(bytes: &[u8], pos: usize) -> u16 {
-    (bytes[pos] as u16) | ((bytes[pos + 1] as u16) << 8)
-}
-
-/// Read u32 little-endian
-const fn read_u32_le(bytes: &[u8], pos: usize) -> u32 {
-    (bytes[pos] as u32)
-        | ((bytes[pos + 1] as u32) << 8)
-        | ((bytes[pos + 2] as u32) << 16)
-        | ((bytes[pos + 3] as u32) << 24)
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1420,6 +1395,7 @@ const fn read_u32_le(bytes: &[u8], pos: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::vec;
 
     #[test]
     fn test_nop() {

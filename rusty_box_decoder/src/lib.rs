@@ -1,4 +1,8 @@
 #![forbid(unsafe_code)]
+#![no_std]
+
+#[cfg(test)]
+extern crate std;
 
 pub mod error;
 pub use error::{DecodeError, DecodeResult};
@@ -24,10 +28,10 @@ pub mod opcode;
 pub mod typed;
 
 // Re-export key public types and functions at crate root for convenience.
-pub use decoder::{decode32, decode64};
 pub use decoder::decode32::fetch_decode32;
 pub use decoder::decode64::fetch_decode64;
 pub use decoder::tables::{BxDecodeError, SsePrefix};
+pub use decoder::{decode32, decode64};
 
 #[cfg(test)]
 mod tests;

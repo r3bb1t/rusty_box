@@ -29,6 +29,10 @@ pub const BX_MSR_IA32_APERF: u32 = 0x0E7;
 /// IA32_MPERF (Maximum Performance Frequency Clock Count)
 pub const BX_MSR_IA32_MPERF: u32 = 0x0E8;
 
+/// IA32_UMWAIT_CONTROL (WAITPKG: TPAUSE/UMWAIT max-delay control)
+/// Bochs msr.h BX_MSR_IA32_UMWAIT_CONTROL.
+pub const BX_MSR_IA32_UMWAIT_CONTROL: u32 = 0x0E1;
+
 /// MTRR Capability register
 pub const BX_MSR_MTRRCAP: u32 = 0x0FE;
 
@@ -84,6 +88,69 @@ pub const BX_MSR_MTRR_DEFTYPE: u32 = 0x2FF;
 
 /// IA32_TSC_DEADLINE
 pub const BX_MSR_TSC_DEADLINE: u32 = 0x6E0;
+
+// =========================================================================
+// CET MSRs — Bochs msr.h
+// =========================================================================
+
+/// IA32_U_CET — user-mode CET control (shadow stack + ENDBRANCH).
+pub const BX_MSR_IA32_U_CET: u32 = 0x6A0;
+/// IA32_S_CET — supervisor-mode CET control.
+pub const BX_MSR_IA32_S_CET: u32 = 0x6A2;
+/// IA32_PL0_SSP — Privilege Level 0 Shadow Stack Pointer.
+pub const BX_MSR_IA32_PL0_SSP: u32 = 0x6A4;
+/// IA32_PL3_SSP — Privilege Level 3 Shadow Stack Pointer (last in PLn_SSP block).
+pub const BX_MSR_IA32_PL3_SSP: u32 = 0x6A7;
+/// IA32_INTERRUPT_SSP_TABLE_ADDR — interrupt-SSP-table base address.
+pub const BX_MSR_IA32_INTERRUPT_SSP_TABLE_ADDR: u32 = 0x6A8;
+
+// =========================================================================
+// User Interrupts (UINTR) MSRs — Bochs msr.h
+// =========================================================================
+
+/// IA32_UINTR_RR — user-level interrupt request register.
+pub const BX_MSR_IA32_UINTR_RR: u32 = 0x985;
+/// IA32_UINTR_HANDLER — user-level interrupt handler address (canonical).
+pub const BX_MSR_IA32_UINTR_HANDLER: u32 = 0x986;
+/// IA32_UINTR_STACKADJUST — user-level stack adjustment.
+pub const BX_MSR_IA32_UINTR_STACKADJUST: u32 = 0x987;
+/// IA32_UINTR_MISC — low 32 = UITT_SIZE, high 32 = UINV (notification vector).
+pub const BX_MSR_IA32_UINTR_MISC: u32 = 0x988;
+/// IA32_UINTR_PD — user-level posted-interrupt descriptor address.
+pub const BX_MSR_IA32_UINTR_PD: u32 = 0x989;
+/// IA32_UINTR_TT — user-level interrupt target table address.
+pub const BX_MSR_IA32_UINTR_TT: u32 = 0x98A;
+
+/// IA32_PKRS — Supervisor Protection Key Rights (PKS). Bochs msr.h.
+pub const BX_MSR_IA32_PKRS: u32 = 0x6E1;
+
+// =========================================================================
+// VMX MSRs — Bochs msr.h
+// =========================================================================
+
+/// IA32_FEATURE_CONTROL — VMX enable + LOCK bits.
+pub const BX_MSR_IA32_FEATURE_CONTROL: u32 = 0x03A;
+
+pub const BX_MSR_VMX_BASIC: u32 = 0x480;
+pub const BX_MSR_VMX_PINBASED_CTRLS: u32 = 0x481;
+pub const BX_MSR_VMX_PROCBASED_CTRLS: u32 = 0x482;
+pub const BX_MSR_VMX_VMEXIT_CTRLS: u32 = 0x483;
+pub const BX_MSR_VMX_VMENTRY_CTRLS: u32 = 0x484;
+pub const BX_MSR_VMX_MISC: u32 = 0x485;
+pub const BX_MSR_VMX_CR0_FIXED0: u32 = 0x486;
+pub const BX_MSR_VMX_CR0_FIXED1: u32 = 0x487;
+pub const BX_MSR_VMX_CR4_FIXED0: u32 = 0x488;
+pub const BX_MSR_VMX_CR4_FIXED1: u32 = 0x489;
+pub const BX_MSR_VMX_VMCS_ENUM: u32 = 0x48A;
+pub const BX_MSR_VMX_PROCBASED_CTRLS2: u32 = 0x48B;
+pub const BX_MSR_VMX_EPT_VPID_CAP: u32 = 0x48C;
+pub const BX_MSR_VMX_TRUE_PINBASED_CTRLS: u32 = 0x48D;
+pub const BX_MSR_VMX_TRUE_PROCBASED_CTRLS: u32 = 0x48E;
+pub const BX_MSR_VMX_TRUE_VMEXIT_CTRLS: u32 = 0x48F;
+pub const BX_MSR_VMX_TRUE_VMENTRY_CTRLS: u32 = 0x490;
+pub const BX_MSR_VMX_VMFUNC: u32 = 0x491;
+pub const BX_MSR_VMX_PROCBASED_CTRLS3: u32 = 0x492;
+pub const BX_MSR_VMX_VMEXIT_CTRLS2: u32 = 0x493;
 
 // =========================================================================
 // Long-mode MSRs (AMD64/Intel EM64T) — Bochs msr.h

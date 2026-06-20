@@ -501,7 +501,11 @@ fn run_dlxlinux() -> Result<()> {
                         "[{}M] VGA: {}{}",
                         total_executed / 1_000_000,
                         preview_str,
-                        if has_login && !logged_in { " *** LOGIN DETECTED ***" } else { "" }
+                        if has_login && !logged_in {
+                            " *** LOGIN DETECTED ***"
+                        } else {
+                            ""
+                        }
                     );
 
                     if has_login && !logged_in {

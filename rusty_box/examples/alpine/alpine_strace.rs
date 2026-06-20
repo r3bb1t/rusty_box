@@ -22,8 +22,8 @@
 
 use rusty_box::{
     cpu::{
-        core_i7_skylake::Corei7SkylakeX,
-        HookCtx, HookMask, InstrAction, Instrumentation, ResetReason, X86Reg,
+        core_i7_skylake::Corei7SkylakeX, HookCtx, HookMask, InstrAction, Instrumentation,
+        ResetReason, X86Reg,
     },
     emulator::{Emulator, EmulatorConfig},
     gui::{NoGui, TermGui},
@@ -112,10 +112,17 @@ fn extract_from_iso(iso_data: &[u8], target_path: &[&str]) -> Option<Vec<u8>> {
         return None;
     }
     let root_record = &pvd[156..156 + 34];
-    let mut current_lba =
-        u32::from_le_bytes([root_record[2], root_record[3], root_record[4], root_record[5]]);
+    let mut current_lba = u32::from_le_bytes([
+        root_record[2],
+        root_record[3],
+        root_record[4],
+        root_record[5],
+    ]);
     let mut current_len = u32::from_le_bytes([
-        root_record[10], root_record[11], root_record[12], root_record[13],
+        root_record[10],
+        root_record[11],
+        root_record[12],
+        root_record[13],
     ]);
     for (depth, &name) in target_path.iter().enumerate() {
         let is_file = depth == target_path.len() - 1;
@@ -197,10 +204,16 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let iso_path = std::env::var("ALPINE_ISO")
-        .unwrap_or_else(|_| "alpine-virt-3.23.3-x86_64.iso".to_string());
-    let ram_mb: usize = std::env::var("ALPINE_RAM_MB").ok().and_then(|s| s.parse().ok()).unwrap_or(256);
-    let max_instructions: u64 = std::env::var("MAX_INSTRUCTIONS").ok().and_then(|s| s.parse().ok()).unwrap_or(4_000_000_000);
+    let iso_path =
+        std::env::var("ALPINE_ISO").unwrap_or_else(|_| "alpine-virt-3.23.3-x86_64.iso".to_string());
+    let ram_mb: usize = std::env::var("ALPINE_RAM_MB")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256);
+    let max_instructions: u64 = std::env::var("MAX_INSTRUCTIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4_000_000_000);
     let headless = std::env::var("RUSTY_BOX_HEADLESS").is_ok();
     let bios_boot = std::env::var("RUSTY_BOX_BOOT").unwrap_or_default() != "direct";
 
@@ -264,7 +277,11 @@ fn run() -> Result<()> {
         emu.configure_memory_in_cmos_from_config();
         emu.configure_boot_sequence(3, 0, 0);
         emu.attach_cdrom(1, 0, &iso_path).expect("attach CDROM");
-        if headless { emu.set_gui(NoGui::new()); } else { emu.set_gui(TermGui::new()); }
+        if headless {
+            emu.set_gui(NoGui::new());
+        } else {
+            emu.set_gui(TermGui::new());
+        }
         emu.init_gui(0, &[])?;
         emu.reset(ResetReason::Hardware)?;
         emu.init_gui_signal_handlers();
@@ -281,7 +298,11 @@ fn run() -> Result<()> {
         emu.init_cpu_and_devices()?;
         emu.configure_memory_in_cmos_from_config();
         emu.attach_cdrom(1, 0, &iso_path).expect("attach CDROM");
-        if headless { emu.set_gui(NoGui::new()); } else { emu.set_gui(TermGui::new()); }
+        if headless {
+            emu.set_gui(NoGui::new());
+        } else {
+            emu.set_gui(TermGui::new());
+        }
         emu.init_gui(0, &[])?;
         emu.reset(ResetReason::Hardware)?;
         emu.init_vga_text_mode3();

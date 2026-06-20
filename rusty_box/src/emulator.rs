@@ -159,20 +159,34 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         let io_ptr = core::ptr::NonNull::from(&mut self.devices);
         let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
         let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
-        io_ptr.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm_ptr);
+        io_ptr
+            .as_ptr()
+            .as_mut()
+            .unwrap_unchecked()
+            .set_device_manager(dm_ptr);
         let mem_static = self.mem_nonnull_static();
-        io_ptr.as_ptr().as_mut().unwrap_unchecked().set_mem_ptr(mem_static);
+        io_ptr
+            .as_ptr()
+            .as_mut()
+            .unwrap_unchecked()
+            .set_mem_ptr(mem_static);
         (*dm_ptr.as_ptr()).mem_ptr = Some(mem_static);
         let pic_ref: *mut _ = &mut self.device_manager.pic;
         let dma_ref: *mut _ = &mut self.device_manager.dma;
-        let r = self.cpu
-            .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr, ps_ptr, Some(&mut *pic_ref), Some(&mut *dma_ref));
+        let r = self.cpu.cpu_loop_n_with_io(
+            mem_extended,
+            &[],
+            batch_size,
+            io_ptr,
+            ps_ptr,
+            Some(&mut *pic_ref),
+            Some(&mut *dma_ref),
+        );
         self.devices.clear_device_manager();
         self.devices.clear_mem_ptr();
         self.device_manager.mem_ptr = None;
         r
     }
-
 
     /// Inject an external interrupt with temporary memory bus wiring.
     ///
@@ -187,12 +201,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Same invariants as `borrow_memory_for_cpu`.
     pub unsafe fn inject_interrupt(&mut self, vector: u8) -> crate::cpu::Result<()> {
         let mem_extended = self.borrow_memory_for_cpu();
-        self.cpu.set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
+        self.cpu
+            .set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
         let r = self.cpu.inject_external_interrupt(vector);
         self.cpu.clear_mem_bus();
         r
     }
-
 }
 
 #[cfg(feature = "alloc")]
@@ -217,7 +231,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         Self::new_inner(config, cpu)
     }
 
-    fn new_inner(config: EmulatorConfig, cpu: alloc::boxed::Box<BxCpuC<'static, I, T>>) -> Result<Box<Self>> {
+    fn new_inner(
+        config: EmulatorConfig,
+        cpu: alloc::boxed::Box<BxCpuC<'static, I, T>>,
+    ) -> Result<Box<Self>> {
         let pc_system = BxPcSystemC::new();
         let mem_stub = BxMemoryStubC::create_and_init(
             config.guest_memory_size,
@@ -242,7 +259,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
             core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
             core::ptr::addr_of_mut!((*ptr).config).write(config);
-            core::ptr::addr_of_mut!((*ptr).exit_set).write(crate::cpu::instrumentation::ExitSet::new());
+            core::ptr::addr_of_mut!((*ptr).initialized).write(false);
+            core::ptr::addr_of_mut!((*ptr).gui).write(None);
+            #[cfg(feature = "std")]
+            core::ptr::addr_of_mut!((*ptr).bios_output_file).write(None);
+            core::ptr::addr_of_mut!((*ptr).exit_set)
+                .write(crate::cpu::instrumentation::ExitSet::new());
             core::ptr::addr_of_mut!((*ptr).stop_flag).write(Arc::new(AtomicBool::new(false)));
             Ok(alloc::boxed::Box::from_raw(ptr))
         }
@@ -369,14 +391,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         }
         tracing::trace!("Devices initialized");
 
-
         // Wire DMA→memory for physical DMA transfers
         let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
-        self.device_manager.dma.set_memory_ptrs(
-            ram_base,
-            ram_len,
-        );
-
+        self.device_manager.dma.set_memory_ptrs(ram_base, ram_len);
 
         // Register PCI IDE BM-DMA timers (Bochs pci_ide.cc)
         {
@@ -558,14 +575,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         }
         tracing::debug!("Device initialization complete");
 
-
         // Wire DMA→memory for physical DMA transfers
         let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
-        self.device_manager.dma.set_memory_ptrs(
-            ram_base,
-            ram_len,
-        );
-
+        self.device_manager.dma.set_memory_ptrs(ram_base, ram_len);
 
         // Register PCI IDE BM-DMA timers (Bochs pci_ide.cc)
         {
@@ -891,13 +903,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     pub fn prepare_run(&mut self) {
         tracing::trace!("Starting CPU execution at RIP={:#x}", self.cpu.rip());
 
-
-
         // Initialize PIT icount sync so PIT counter reads advance with CPU time.
         // This is critical for kernel PIT-polling calibration loops (e.g., Alpine Linux).
         let ips = self.config.ips as u64;
         if ips > 0 {
-            self.device_manager.pit.init_icount_sync(self.cpu.icount, ips);
+            self.device_manager
+                .pit
+                .init_icount_sync(self.cpu.icount, ips);
         }
 
         // Initialize VGA icount-based timing for retrace computation.
@@ -905,7 +917,6 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             let ips = self.config.ips as u64;
             self.device_manager.vga.set_icount_sync(ips);
         }
-
 
         self.start();
     }
@@ -976,7 +987,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     ///
     /// Call this after Port 92h writes to update A20 state throughout the system.
     pub fn sync_a20_state(&mut self) {
-        self.pc_system.set_enable_a20(self.device_manager.port92.a20_gate);
+        self.pc_system
+            .set_enable_a20(self.device_manager.port92.a20_gate);
         self.memory.set_a20_mask(self.pc_system.a20_mask());
         // Bochs pc_system.cc MemoryMappingChanged() calls BX_CPU(0)->TLB_flush()
         // after A20 changes, since A20 masking affects physical address translation.
@@ -1097,7 +1109,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Simulate time passing (for timer-based devices)
     pub fn tick_devices(&mut self, usec: u64) {
         let icount = self.cpu.icount;
-        self.device_manager.tick(usec, icount, Some(&mut self.cpu.lapic));
+        self.device_manager
+            .tick(usec, icount, Some(&mut self.cpu.lapic));
         // Process deferred ATAPI seek completion (Bochs seek_timer pattern).
         // In Bochs, start_seek() activates a timer that fires after a seek
         // delay and calls ready_to_send_atapi(). We process it here during
@@ -1108,7 +1121,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             for ch in 0..2 {
                 if dm.harddrv.seek_complete_pending[ch] {
                     dm.harddrv.seek_complete_pending[ch] = false;
-                    let crate::iodev::devices::DeviceManager { ref mut harddrv, ref mut pic, ref mut pci_ide, .. } = *dm;
+                    let crate::iodev::devices::DeviceManager {
+                        ref mut harddrv,
+                        ref mut pic,
+                        ref mut pci_ide,
+                        ..
+                    } = *dm;
                     harddrv.ready_to_send_atapi(ch, pic, pci_ide);
                 }
             }
@@ -1134,9 +1152,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                     self.device_manager.pci_ide.timer(1);
                 }
                 crate::pc_system::TimerOwner::Lapic => {
-                    {
-                        self.cpu.lapic.timer_fired = true;
-                    }
+                    self.cpu.lapic.timer_fired = true;
                 }
             }
         }
@@ -1275,51 +1291,78 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     ) -> Result<()> {
         // Validate bzImage header
         if bzimage.len() < 0x264 {
-            return Err(crate::Error::Cpu(crate::cpu::CpuError::UnimplementedOpcode {
-                opcode: "bzImage too small".into(),
-            }));
+            return Err(crate::Error::Cpu(
+                crate::cpu::CpuError::UnimplementedOpcode {
+                    opcode: "bzImage too small".into(),
+                },
+            ));
         }
         if bzimage[0x1FE] != 0x55 || bzimage[0x1FF] != 0xAA {
-            return Err(crate::Error::Cpu(crate::cpu::CpuError::UnimplementedOpcode {
-                opcode: "Invalid bzImage boot signature".into(),
-            }));
+            return Err(crate::Error::Cpu(
+                crate::cpu::CpuError::UnimplementedOpcode {
+                    opcode: "Invalid bzImage boot signature".into(),
+                },
+            ));
         }
         let header_magic = u32::from_le_bytes([
-            bzimage[0x202], bzimage[0x203], bzimage[0x204], bzimage[0x205],
+            bzimage[0x202],
+            bzimage[0x203],
+            bzimage[0x204],
+            bzimage[0x205],
         ]);
         if header_magic != 0x53726448 {
             // "HdrS"
-            return Err(crate::Error::Cpu(crate::cpu::CpuError::UnimplementedOpcode {
-                opcode: "Invalid bzImage header magic".into(),
-            }));
+            return Err(crate::Error::Cpu(
+                crate::cpu::CpuError::UnimplementedOpcode {
+                    opcode: "Invalid bzImage header magic".into(),
+                },
+            ));
         }
         let boot_version = u16::from_le_bytes([bzimage[0x206], bzimage[0x207]]);
         if boot_version < 0x0204 {
-            return Err(crate::Error::Cpu(crate::cpu::CpuError::UnimplementedOpcode {
-                opcode: "boot protocol too old (need >= 2.04)",
-            }));
+            return Err(crate::Error::Cpu(
+                crate::cpu::CpuError::UnimplementedOpcode {
+                    opcode: "boot protocol too old (need >= 2.04)",
+                },
+            ));
         }
 
         // Parse bzImage header
-        let setup_sects = if bzimage[0x1F1] == 0 { 4 } else { bzimage[0x1F1] as usize };
+        let setup_sects = if bzimage[0x1F1] == 0 {
+            4
+        } else {
+            bzimage[0x1F1] as usize
+        };
         let setup_size = (setup_sects + 1) * 512;
         let pm_kernel = &bzimage[setup_size..];
 
         let code32_start = u32::from_le_bytes([
-            bzimage[0x214], bzimage[0x215], bzimage[0x216], bzimage[0x217],
+            bzimage[0x214],
+            bzimage[0x215],
+            bzimage[0x216],
+            bzimage[0x217],
         ]);
 
         // Read pref_address (protocol >= 2.10) and init_size for boot_params placement
         let pref_address = if boot_version >= 0x020A {
             u64::from_le_bytes([
-                bzimage[0x258], bzimage[0x259], bzimage[0x25A], bzimage[0x25B],
-                bzimage[0x25C], bzimage[0x25D], bzimage[0x25E], bzimage[0x25F],
+                bzimage[0x258],
+                bzimage[0x259],
+                bzimage[0x25A],
+                bzimage[0x25B],
+                bzimage[0x25C],
+                bzimage[0x25D],
+                bzimage[0x25E],
+                bzimage[0x25F],
             ])
         } else {
             0 // Old kernels: use legacy boot_params address
         };
         let init_size = u32::from_le_bytes([
-            bzimage[0x260], bzimage[0x261], bzimage[0x262], bzimage[0x263],
+            bzimage[0x260],
+            bzimage[0x261],
+            bzimage[0x262],
+            bzimage[0x263],
         ]) as u64;
 
         tracing::debug!(
@@ -1358,7 +1401,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         let cmdline_addr: u64 = 0x20000;
         tracing::debug!(
             "boot_params at {:#x}, cmdline at {:#x} (pref={:#x}, init_size={:#x})",
-            boot_params_addr, cmdline_addr, pref_address, init_size
+            boot_params_addr,
+            cmdline_addr,
+            pref_address,
+            init_size
         );
         let mut boot_params = [0u8; 4096];
 
@@ -1374,8 +1420,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         boot_params[0x211] |= 0x01; // LOADED_HIGH
 
         // cmd_line_ptr = physical address of command line
-        boot_params[0x228..0x22C]
-            .copy_from_slice(&(cmdline_addr as u32).to_le_bytes());
+        boot_params[0x228..0x22C].copy_from_slice(&(cmdline_addr as u32).to_le_bytes());
 
         // heap_end_ptr: relative to setup header start (unused for direct boot)
         boot_params[0x224..0x226].copy_from_slice(&0xFE00u16.to_le_bytes());
@@ -1391,11 +1436,11 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         //   0x0e: orig_video_lines (text rows)
         //   0x0f: orig_video_isVGA (0=no, 1=VGA, 0x22=EGA/VGA)
         //   0x10: orig_video_points (u16, font height in pixels)
-        boot_params[0x00] = 0;    // orig_x
-        boot_params[0x01] = 0;    // orig_y
+        boot_params[0x00] = 0; // orig_x
+        boot_params[0x01] = 0; // orig_y
         boot_params[0x06] = 0x03; // orig_video_mode = 3 (80x25 color text)
-        boot_params[0x07] = 80;   // orig_video_cols
-        boot_params[0x0E] = 25;   // orig_video_lines
+        boot_params[0x07] = 80; // orig_video_cols
+        boot_params[0x0E] = 25; // orig_video_lines
         boot_params[0x0F] = 0x01; // orig_video_isVGA = 1
         boot_params[0x10..0x12].copy_from_slice(&16u16.to_le_bytes()); // orig_video_points = 16
 
@@ -1414,7 +1459,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         // initrd_addr_max from boot protocol (offset 0x22C) - max address kernel can handle
         let initrd_addr_max = if boot_version >= 0x0203 {
             u32::from_le_bytes([
-                bzimage[0x22C], bzimage[0x22D], bzimage[0x22E], bzimage[0x22F],
+                bzimage[0x22C],
+                bzimage[0x22D],
+                bzimage[0x22E],
+                bzimage[0x22F],
             ]) as u64
         } else {
             0x37FFFFFF // Default for old protocols
@@ -1438,11 +1486,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             self.memory.load_RAM(initrd_data, initrd_load_addr)?;
 
             // ramdisk_image = physical address
-            boot_params[0x218..0x21C]
-                .copy_from_slice(&(initrd_load_addr as u32).to_le_bytes());
+            boot_params[0x218..0x21C].copy_from_slice(&(initrd_load_addr as u32).to_le_bytes());
             // ramdisk_size
-            boot_params[0x21C..0x220]
-                .copy_from_slice(&(initrd_data.len() as u32).to_le_bytes());
+            boot_params[0x21C..0x220].copy_from_slice(&(initrd_data.len() as u32).to_le_bytes());
         }
 
         // =====================================================================
@@ -1513,8 +1559,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             madt[4..8].copy_from_slice(&madt_len.to_le_bytes());
             // Revision
             madt[8] = 3; // ACPI 2.0 revision
-            // Checksum (byte 9) — filled later
-            // OEM ID
+                         // Checksum (byte 9) — filled later
+                         // OEM ID
             madt[10..16].copy_from_slice(b"RUSTYB");
             // OEM Table ID
             madt[16..24].copy_from_slice(b"BXMADT  ");
@@ -1582,10 +1628,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             // RSDP v2.0 = 36 bytes
             let mut rsdp = [0u8; 36];
             rsdp[0..8].copy_from_slice(b"RSD PTR "); // signature
-            // checksum (byte 8) — filled later
+                                                     // checksum (byte 8) — filled later
             rsdp[9..15].copy_from_slice(b"RUSTYB"); // OEM ID
             rsdp[15] = 2; // revision (2 = ACPI 2.0+)
-            // RSDT address (offset 16) — point to XSDT address as 32-bit for v1 compat
+                          // RSDT address (offset 16) — point to XSDT address as 32-bit for v1 compat
             rsdp[16..20].copy_from_slice(&(XSDT_ADDR as u32).to_le_bytes());
             // Length (offset 20) — v2.0 extended length
             rsdp[20..24].copy_from_slice(&36u32.to_le_bytes());
@@ -1602,7 +1648,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
             tracing::debug!(
                 "ACPI tables: RSDP at {:#x}, XSDT at {:#x}, MADT at {:#x} ({}B)",
-                RSDP_ADDR, XSDT_ADDR, MADT_ADDR, madt_len
+                RSDP_ADDR,
+                XSDT_ADDR,
+                MADT_ADDR,
+                madt_len
             );
         }
 
@@ -1638,7 +1687,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
             // Do NOT program PIT — kernel will set up its own timer via time_init().
             // quick_pit_calibrate() programs PIT C2 via port 0x43/0x42 directly.
-            tracing::debug!("Direct boot: PIC initialized (master=0x20, slave=0x28), all IRQs masked");
+            tracing::debug!(
+                "Direct boot: PIC initialized (master=0x20, slave=0x28), all IRQs masked"
+            );
         }
 
         // =====================================================================
@@ -1646,7 +1697,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         // =====================================================================
         tracing::debug!(
             "Loading kernel ({} bytes) at {:#x}",
-            pm_kernel.len(), code32_start
+            pm_kernel.len(),
+            code32_start
         );
         self.memory.load_RAM(pm_kernel, code32_start as u64)?;
 
@@ -1662,7 +1714,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
         tracing::debug!(
             "Direct boot ready: EIP={:#x}, ESI={:#x}, ESP={:#x}",
-            code32_start, boot_params_addr, 0x20000u32
+            code32_start,
+            boot_params_addr,
+            0x20000u32
         );
 
         Ok(())
@@ -1717,9 +1771,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         let mut last_ips_update = std::time::Instant::now();
         #[cfg(feature = "std")]
         let mut last_ips_instructions = self.cpu.icount; // Bochs-compatible: track icount for IPS
-        // MIPS terminal log: separate tracker fired every 5M instructions.
-        // At 20 MIPS (active) fires every 250ms; at 40K IPS (idle) fires every ~125s.
-        // This prevents flooding the terminal with "0.04 MIPS" lines during HLT idle.
+                                                         // MIPS terminal log: separate tracker fired every 5M instructions.
+                                                         // At 20 MIPS (active) fires every 250ms; at 40K IPS (idle) fires every ~125s.
+                                                         // This prevents flooding the terminal with "0.04 MIPS" lines during HLT idle.
         #[cfg(feature = "std")]
         let mut last_mips_log_update = std::time::Instant::now();
         #[cfg(feature = "std")]
@@ -1775,7 +1829,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
             // Apply PAM register changes immediately (BIOS needs this before next batch)
             if self.device_manager.pam_needs_update {
-                self.device_manager.process_pci_deferred(&mut self.devices, &mut self.memory);
+                self.device_manager
+                    .process_pci_deferred(&mut self.devices, &mut self.memory);
             }
 
             let _should_update_gui = match result {
@@ -1806,11 +1861,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                         // Use counter-based approach: only break after N consecutive
                         // zero-batch HLT+IF=0 cycles. This allows transient IF=0 states
                         // (e.g. kernel cli/hlt sequences before init scripts) to recover.
-                        if matches!(self.cpu.activity_state,
+                        if matches!(
+                            self.cpu.activity_state,
                             crate::cpu::cpu::CpuActivityState::Hlt
-                            | crate::cpu::cpu::CpuActivityState::Mwait
-                            | crate::cpu::cpu::CpuActivityState::MwaitIf)
-                            && !self.cpu.interrupts_enabled()
+                                | crate::cpu::cpu::CpuActivityState::Mwait
+                                | crate::cpu::cpu::CpuActivityState::MwaitIf
+                        ) && !self.cpu.interrupts_enabled()
                         {
                             hlt_if0_count += 1;
                             // Warn once at 1000 but DON'T break — match egui behavior.
@@ -1835,7 +1891,11 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                         #[cfg(debug_assertions)]
                         {
                             use std::io::Write;
-                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("reset_log.txt") {
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("reset_log.txt")
+                            {
                                 let _ = writeln!(f, "{}", msg);
                             }
                         }
@@ -1844,7 +1904,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
                     if self.cpu.is_in_shutdown() {
                         #[cfg(feature = "std")]
-                        log_reset(&format!("TRIPLE-FAULT SHUTDOWN at RIP={:#x} CS={:#06x} icount={}", self.cpu.rip(), self.cpu.get_cs_selector(), self.cpu.icount));
+                        log_reset(&format!(
+                            "TRIPLE-FAULT SHUTDOWN at RIP={:#x} CS={:#06x} icount={}",
+                            self.cpu.rip(),
+                            self.cpu.get_cs_selector(),
+                            self.cpu.icount
+                        ));
                         break;
                     }
 
@@ -1857,18 +1922,34 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
                     // Check for reset requests: Port 92h, keyboard 0xFE, or PCI CF9
                     let pci_reset = self.device_manager.pci2isa.reset_request.take();
-                    if self.device_manager.port92.reset_request || self.device_manager.keyboard.reset_requested || pci_reset.is_some() {
+                    if self.device_manager.port92.reset_request
+                        || self.device_manager.keyboard.reset_requested
+                        || pci_reset.is_some()
+                    {
                         if self.device_manager.port92.reset_request {
                             #[cfg(feature = "std")]
-                            log_reset(&format!("PORT 92h FAST RESET at RIP={:#x} icount={}", self.cpu.rip(), self.cpu.icount));
+                            log_reset(&format!(
+                                "PORT 92h FAST RESET at RIP={:#x} icount={}",
+                                self.cpu.rip(),
+                                self.cpu.icount
+                            ));
                         }
                         if self.device_manager.keyboard.reset_requested {
                             #[cfg(feature = "std")]
-                            log_reset(&format!("KEYBOARD 0xFE RESET at RIP={:#x} icount={}", self.cpu.rip(), self.cpu.icount));
+                            log_reset(&format!(
+                                "KEYBOARD 0xFE RESET at RIP={:#x} icount={}",
+                                self.cpu.rip(),
+                                self.cpu.icount
+                            ));
                         }
                         if let Some(hw) = pci_reset {
                             #[cfg(feature = "std")]
-                            log_reset(&format!("PCI CF9 {} RESET at RIP={:#x} icount={}", if hw {"HARDWARE"} else {"SOFTWARE"}, self.cpu.rip(), self.cpu.icount));
+                            log_reset(&format!(
+                                "PCI CF9 {} RESET at RIP={:#x} icount={}",
+                                if hw { "HARDWARE" } else { "SOFTWARE" },
+                                self.cpu.rip(),
+                                self.cpu.icount
+                            ));
                         }
                         self.device_manager.port92.reset_request = false;
                         self.device_manager.keyboard.reset_requested = false;
@@ -1931,17 +2012,26 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                 let ax = self.cpu.eax() as u16;
                                 let mem_peek = self.memory.ram_slice();
                                 let bp2 = if bp_phys + 3 < mem_peek.len() {
-                                    u16::from_le_bytes([mem_peek[bp_phys + 2], mem_peek[bp_phys + 3]])
+                                    u16::from_le_bytes([
+                                        mem_peek[bp_phys + 2],
+                                        mem_peek[bp_phys + 3],
+                                    ])
                                 } else {
                                     0
                                 };
                                 let bp4 = if bp_phys + 5 < mem_peek.len() {
-                                    u16::from_le_bytes([mem_peek[bp_phys + 4], mem_peek[bp_phys + 5]])
+                                    u16::from_le_bytes([
+                                        mem_peek[bp_phys + 4],
+                                        mem_peek[bp_phys + 5],
+                                    ])
                                 } else {
                                     0
                                 };
                                 let bp6 = if bp_phys + 7 < mem_peek.len() {
-                                    u16::from_le_bytes([mem_peek[bp_phys + 6], mem_peek[bp_phys + 7]])
+                                    u16::from_le_bytes([
+                                        mem_peek[bp_phys + 6],
+                                        mem_peek[bp_phys + 7],
+                                    ])
                                 } else {
                                     0
                                 };
@@ -1993,8 +2083,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                         if matches!(
                             self.cpu.activity_state,
                             crate::cpu::cpu::CpuActivityState::Hlt
-                            | crate::cpu::cpu::CpuActivityState::Mwait
-                            | crate::cpu::cpu::CpuActivityState::MwaitIf
+                                | crate::cpu::cpu::CpuActivityState::Mwait
+                                | crate::cpu::cpu::CpuActivityState::MwaitIf
                         ) {
                             // CPU is halted/mwait: advance virtual clock in 10-usec steps until an
                             // interrupt is pending. Matches Bochs handleWaitForEvent + BX_TICKN.
@@ -2021,12 +2111,17 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                             // We cap at 100M ticks to yield for max_instructions/GUI checks.
                             // No icount inflation — TSC reads pc_system.time_ticks() directly.
                             // MwaitIf: wake on interrupt even when IF=0 (ECX[0]=1).
-                            let mwait_if = matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::MwaitIf);
+                            let mwait_if = matches!(
+                                self.cpu.activity_state,
+                                crate::cpu::cpu::CpuActivityState::MwaitIf
+                            );
                             let mut hlt_budget = 0u64;
                             #[cfg(feature = "std")]
                             let hlt_wall_start = std::time::Instant::now();
                             while hlt_budget < 100_000_000 {
-                                if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) {
+                                if self.has_interrupt()
+                                    && (self.cpu.interrupts_enabled() || mwait_if)
+                                {
                                     break;
                                 }
                                 if self.stop_flag.load(core::sync::atomic::Ordering::Relaxed) {
@@ -2047,39 +2142,54 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                             }
                                         }
                                     }
-                                    if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
+                                    if let Some(period) =
+                                        self.cpu.lapic.timer_activate_request.take()
+                                    {
                                         if let Some(h) = self.cpu.lapic.timer_handle {
-                                            if let Err(e) = self.pc_system.activate_timer(h, period, false) {
+                                            if let Err(e) =
+                                                self.pc_system.activate_timer(h, period, false)
+                                            {
                                                 tracing::error!("LAPIC activate: {}", e);
                                             }
                                         }
                                         let ticks = self.pc_system.time_ticks();
                                         self.cpu.lapic.set_ticks_initial(ticks);
                                     }
-                                    if let Some(eoi_vec) = self.cpu.lapic.pending_eoi_vector.take() {
+                                    if let Some(eoi_vec) = self.cpu.lapic.pending_eoi_vector.take()
+                                    {
                                         self.device_manager.ioapic.receive_eoi(eoi_vec);
                                     }
-                                    if self.cpu.lapic.intr && (self.cpu.interrupts_enabled() || mwait_if) {
+                                    if self.cpu.lapic.intr
+                                        && (self.cpu.interrupts_enabled() || mwait_if)
+                                    {
                                         self.cpu.signal_event(1 << 2);
                                         break;
                                     }
                                 }
                                 // 2. Now get accurate countdown and advance
-                                let step = self.pc_system.get_num_ticks_left_next_event().clamp(1, 100_000);
+                                let step = self
+                                    .pc_system
+                                    .get_num_ticks_left_next_event()
+                                    .clamp(1, 100_000);
                                 self.pc_system.tickn(step);
                                 self.dispatch_timer_fires();
                                 hlt_budget += step as u64;
-                                let dev_usec = (step as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
+                                let dev_usec = (step as u64 * 1_000_000
+                                    / (self.config.ips as u64).max(1))
+                                .max(1);
                                 self.tick_devices(dev_usec);
                                 self.sync_event_flags();
                                 // Wall-clock throttle: sleep if virtual time races ahead
                                 #[cfg(feature = "std")]
                                 {
-                                    let virtual_usec = hlt_budget * 1_000_000 / (self.config.ips as u64).max(1);
+                                    let virtual_usec =
+                                        hlt_budget * 1_000_000 / (self.config.ips as u64).max(1);
                                     let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
                                     if virtual_usec > wall_usec + 1_000 {
                                         let sleep_usec = (virtual_usec - wall_usec).min(15_000);
-                                        std::thread::sleep(std::time::Duration::from_micros(sleep_usec));
+                                        std::thread::sleep(std::time::Duration::from_micros(
+                                            sleep_usec,
+                                        ));
                                     }
                                 }
                             }
@@ -2099,8 +2209,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                             let mwait_wall_budget = std::time::Duration::from_millis(15);
                             loop {
                                 #[cfg(feature = "std")]
-                                if mwait_wall_start.elapsed() >= mwait_wall_budget { break; }
-                                if self.stop_flag.load(core::sync::atomic::Ordering::Relaxed) { break; }
+                                if mwait_wall_start.elapsed() >= mwait_wall_budget {
+                                    break;
+                                }
+                                if self.stop_flag.load(core::sync::atomic::Ordering::Relaxed) {
+                                    break;
+                                }
                                 // Deliver PIC interrupt if pending
                                 if self.device_manager.has_interrupt()
                                     && self.cpu.get_b_if() != 0
@@ -2108,20 +2222,30 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                 {
                                     let vec = self.iac();
                                     // SAFETY: see borrow_memory_for_cpu / inject_interrupt
-                                    unsafe { let _ = self.inject_interrupt(vec); };
+                                    unsafe {
+                                        let _ = self.inject_interrupt(vec);
+                                    };
                                 }
                                 // Run CPU batch — handle_async_event inside cpu_loop_n
                                 // will process LAPIC events and wake from MWAIT.
                                 // Don't check activity_state here — LAPIC uses signal_event
                                 // which sets async_event but doesn't change activity_state
                                 // until handle_async_event runs inside the CPU loop.
-                                let batch2 = (max_instructions.saturating_sub(instructions_executed)).min(INSTRUCTION_BATCH_SIZE);
-                                if batch2 == 0 { break; }
+                                let batch2 = (max_instructions
+                                    .saturating_sub(instructions_executed))
+                                .min(INSTRUCTION_BATCH_SIZE);
+                                if batch2 == 0 {
+                                    break;
+                                }
                                 // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
                                 let r2 = unsafe { self.run_cpu_batch(batch2) };
                                 if let Ok(ex2) = r2 {
                                     instructions_executed += ex2;
-                                    let u2 = if self.config.ips != 0 { (ex2 * 1_000_000 / (self.config.ips as u64)).max(10) } else { 10 };
+                                    let u2 = if self.config.ips != 0 {
+                                        (ex2 * 1_000_000 / (self.config.ips as u64)).max(10)
+                                    } else {
+                                        10
+                                    };
                                     self.tick_devices(u2);
                                     self.sync_event_flags();
                                     self.pc_system.tickn(ex2 as u32);
@@ -2133,58 +2257,110 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                         self.cpu.lapic.current_ticks = tn;
                                         self.cpu.lapic.ticks_at_sync = tn;
                                         self.cpu.lapic.icount_at_sync = self.cpu.icount;
-                                        if self.cpu.lapic.timer_fired { self.cpu.lapic.timer_fired = false; self.cpu.lapic.periodic(tn); }
+                                        if self.cpu.lapic.timer_fired {
+                                            self.cpu.lapic.timer_fired = false;
+                                            self.cpu.lapic.periodic(tn);
+                                        }
                                         if self.cpu.lapic.timer_deactivate_request {
                                             self.cpu.lapic.timer_deactivate_request = false;
-                                            if let Some(h) = self.cpu.lapic.timer_handle { let _ = self.pc_system.deactivate_timer(h); }
+                                            if let Some(h) = self.cpu.lapic.timer_handle {
+                                                let _ = self.pc_system.deactivate_timer(h);
+                                            }
                                         }
-                                        if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
-                                            if let Some(h) = self.cpu.lapic.timer_handle { let _ = self.pc_system.reactivate_timer_relative(h, period); }
+                                        if let Some(period) =
+                                            self.cpu.lapic.timer_activate_request.take()
+                                        {
+                                            if let Some(h) = self.cpu.lapic.timer_handle {
+                                                let _ = self
+                                                    .pc_system
+                                                    .reactivate_timer_relative(h, period);
+                                            }
                                             let ticks = self.pc_system.time_ticks();
                                             self.cpu.lapic.set_ticks_initial(ticks);
                                         }
-                                        if let Some(eoi_vec) = self.cpu.lapic.pending_eoi_vector.take() {
+                                        if let Some(eoi_vec) =
+                                            self.cpu.lapic.pending_eoi_vector.take()
+                                        {
                                             self.device_manager.ioapic.receive_eoi(eoi_vec);
                                         }
-                                        if self.cpu.lapic.intr { self.cpu.signal_event(1 << 2); }
+                                        if self.cpu.lapic.intr {
+                                            self.cpu.signal_event(1 << 2);
+                                        }
                                     }
-                                } else { break; }
+                                } else {
+                                    break;
+                                }
                                 // If CPU re-entered MWAIT, advance time again
-                                if !matches!(self.cpu.activity_state,
+                                if !matches!(
+                                    self.cpu.activity_state,
                                     crate::cpu::cpu::CpuActivityState::Hlt
-                                    | crate::cpu::cpu::CpuActivityState::Mwait
-                                    | crate::cpu::cpu::CpuActivityState::MwaitIf
+                                        | crate::cpu::cpu::CpuActivityState::Mwait
+                                        | crate::cpu::cpu::CpuActivityState::MwaitIf
                                 ) {
                                     break; // CPU is active — return to outer loop
                                 }
                                 // HLT loop: advance time to next interrupt
-                                let mwait_if2 = matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::MwaitIf);
+                                let mwait_if2 = matches!(
+                                    self.cpu.activity_state,
+                                    crate::cpu::cpu::CpuActivityState::MwaitIf
+                                );
                                 let mut hlt2 = 0u64;
                                 while hlt2 < 100_000_000 {
-                                    if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if2) { break; }
+                                    if self.has_interrupt()
+                                        && (self.cpu.interrupts_enabled() || mwait_if2)
                                     {
-                                        if self.cpu.lapic.timer_fired { self.cpu.lapic.timer_fired = false; let t = self.pc_system.time_ticks(); self.cpu.lapic.periodic(t); }
+                                        break;
+                                    }
+                                    {
+                                        if self.cpu.lapic.timer_fired {
+                                            self.cpu.lapic.timer_fired = false;
+                                            let t = self.pc_system.time_ticks();
+                                            self.cpu.lapic.periodic(t);
+                                        }
                                         if self.cpu.lapic.timer_deactivate_request {
                                             self.cpu.lapic.timer_deactivate_request = false;
-                                            if let Some(h) = self.cpu.lapic.timer_handle { let _ = self.pc_system.deactivate_timer(h); }
+                                            if let Some(h) = self.cpu.lapic.timer_handle {
+                                                let _ = self.pc_system.deactivate_timer(h);
+                                            }
                                         }
-                                        if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
-                                            if let Some(h) = self.cpu.lapic.timer_handle { let _ = self.pc_system.activate_timer(h, period, false); }
+                                        if let Some(period) =
+                                            self.cpu.lapic.timer_activate_request.take()
+                                        {
+                                            if let Some(h) = self.cpu.lapic.timer_handle {
+                                                let _ =
+                                                    self.pc_system.activate_timer(h, period, false);
+                                            }
                                             let t = self.pc_system.time_ticks();
                                             self.cpu.lapic.set_ticks_initial(t);
                                         }
-                                        if let Some(eoi_vec) = self.cpu.lapic.pending_eoi_vector.take() { self.device_manager.ioapic.receive_eoi(eoi_vec); }
-                                        if self.cpu.lapic.intr && (self.cpu.interrupts_enabled() || mwait_if2) { self.cpu.signal_event(1 << 2); break; }
+                                        if let Some(eoi_vec) =
+                                            self.cpu.lapic.pending_eoi_vector.take()
+                                        {
+                                            self.device_manager.ioapic.receive_eoi(eoi_vec);
+                                        }
+                                        if self.cpu.lapic.intr
+                                            && (self.cpu.interrupts_enabled() || mwait_if2)
+                                        {
+                                            self.cpu.signal_event(1 << 2);
+                                            break;
+                                        }
                                     }
-                                    let s = self.pc_system.get_num_ticks_left_next_event().clamp(1, 100_000);
+                                    let s = self
+                                        .pc_system
+                                        .get_num_ticks_left_next_event()
+                                        .clamp(1, 100_000);
                                     self.pc_system.tickn(s);
                                     self.dispatch_timer_fires();
                                     hlt2 += s as u64;
-                                    let du = (s as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
+                                    let du = (s as u64 * 1_000_000
+                                        / (self.config.ips as u64).max(1))
+                                    .max(1);
                                     self.tick_devices(du);
                                     self.sync_event_flags();
                                 }
-                                if self.cpu.lapic_has_intr() { self.cpu.signal_event(1 << 2); }
+                                if self.cpu.lapic_has_intr() {
+                                    self.cpu.signal_event(1 << 2);
+                                }
                             }
                         } else {
                             let usec_from_instr =
@@ -2240,7 +2416,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                             // Process pending timer reactivation (periodic catch-up)
                             if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
                                 if let Some(handle) = self.cpu.lapic.timer_handle {
-                                    let _ = self.pc_system.reactivate_timer_relative(handle, period);
+                                    let _ =
+                                        self.pc_system.reactivate_timer_relative(handle, period);
                                 }
                                 let t = self.pc_system.time_ticks();
                                 self.cpu.lapic.set_ticks_initial(t);
@@ -2308,7 +2485,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                         let bda_ticks = {
                             let (ptr, len) = self.memory.get_raw_memory_ptr();
                             if 0x046C + 4 <= len {
-                        // SAFETY: pointer and length validated by caller; memory region is valid
+                                // SAFETY: pointer and length validated by caller; memory region is valid
                                 unsafe {
                                     let p = ptr.add(0x046C) as *const u32;
                                     *p
@@ -2485,9 +2662,11 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                     slowdown_start = std::time::Instant::now();
                     slowdown_ticks_base = self.pc_system.time_ticks();
                 } else {
-                    let delta_ticks = self.pc_system.time_ticks().saturating_sub(slowdown_ticks_base);
-                    let emu_usec = delta_ticks.saturating_mul(1_000_000)
-                        / (self.config.ips as u64);
+                    let delta_ticks = self
+                        .pc_system
+                        .time_ticks()
+                        .saturating_sub(slowdown_ticks_base);
+                    let emu_usec = delta_ticks.saturating_mul(1_000_000) / (self.config.ips as u64);
                     // Sleep if emulated time is >50ms ahead within this window.
                     // 50ms threshold avoids Windows 15.6ms timer granularity issues.
                     if emu_usec > wall_elapsed + 50_000 {
@@ -2515,7 +2694,11 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             let ic_m = self.cpu.perf_icache_miss;
             let pf = self.cpu.perf_prefetch;
             let tlb_total = tlb_h + tlb_m;
-            let tlb_pct = if tlb_total > 0 { tlb_h as f64 / tlb_total as f64 * 100.0 } else { 0.0 };
+            let tlb_pct = if tlb_total > 0 {
+                tlb_h as f64 / tlb_total as f64 * 100.0
+            } else {
+                0.0
+            };
             // icount = instruction count (REP iterations count as separate ticks)
             let bochs_ticks = self.cpu.icount;
             tracing::debug!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
@@ -2573,7 +2756,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                 self.cpu.lapic.icount_at_sync = self.cpu.icount;
                 let mut catchup_count = 0u32;
                 loop {
-                    if !self.cpu.lapic.timer_fired || catchup_count >= 1000 { break; }
+                    if !self.cpu.lapic.timer_fired || catchup_count >= 1000 {
+                        break;
+                    }
                     self.cpu.lapic.timer_fired = false;
                     self.cpu.lapic.diag_timer_fires += 1;
                     let t = self.pc_system.time_ticks();
@@ -2618,15 +2803,20 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             if matches!(
                 self.cpu.activity_state,
                 crate::cpu::cpu::CpuActivityState::Hlt
-                | crate::cpu::cpu::CpuActivityState::Mwait
-                | crate::cpu::cpu::CpuActivityState::MwaitIf
+                    | crate::cpu::cpu::CpuActivityState::Mwait
+                    | crate::cpu::cpu::CpuActivityState::MwaitIf
             ) {
-                let mwait_if = matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::MwaitIf);
+                let mwait_if = matches!(
+                    self.cpu.activity_state,
+                    crate::cpu::cpu::CpuActivityState::MwaitIf
+                );
                 let mut hlt_budget = 0u64;
                 #[cfg(feature = "std")]
                 let hlt_wall_start = std::time::Instant::now();
                 while hlt_budget < 100_000_000 {
-                    if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) { break; }
+                    if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) {
+                        break;
+                    }
                     {
                         if self.cpu.lapic.timer_fired {
                             self.cpu.lapic.timer_fired = false;
@@ -2654,7 +2844,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                             break;
                         }
                     }
-                    let step = self.pc_system.get_num_ticks_left_next_event().clamp(1, 100_000);
+                    let step = self
+                        .pc_system
+                        .get_num_ticks_left_next_event()
+                        .clamp(1, 100_000);
                     self.pc_system.tickn(step);
                     self.dispatch_timer_fires();
                     hlt_budget += step as u64;
@@ -2684,21 +2877,29 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             {
                 let vector = self.iac();
                 // SAFETY: see borrow_memory_for_cpu / inject_interrupt
-                unsafe { let _ = self.inject_interrupt(vector); };
+                unsafe {
+                    let _ = self.inject_interrupt(vector);
+                };
             }
 
             // --- Tight loop: if CPU was woken from MWAIT and wall budget remains,
             // run another cycle instead of returning to egui event loop.
             // This matches Bochs's dedicated CPU thread which never yields to GUI.
-            if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Active)
-                && {
-                    #[cfg(feature = "std")]
-                    { wall_start.elapsed() < wall_budget }
-                    #[cfg(not(feature = "std"))]
-                    { true }
-                } {
-                    continue 'batch;
+            if matches!(
+                self.cpu.activity_state,
+                crate::cpu::cpu::CpuActivityState::Active
+            ) && {
+                #[cfg(feature = "std")]
+                {
+                    wall_start.elapsed() < wall_budget
                 }
+                #[cfg(not(feature = "std"))]
+                {
+                    true
+                }
+            } {
+                continue 'batch;
+            }
 
             break 'batch;
         }
@@ -2727,12 +2928,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     #[cfg(feature = "alloc")]
     /// Attach a CD-ROM ISO from in-memory data (for UEFI, WASM, or any environment).
-    pub fn attach_cdrom_data(
-        &mut self,
-        channel: usize,
-        drive: usize,
-        data: alloc::vec::Vec<u8>,
-    ) {
+    pub fn attach_cdrom_data(&mut self, channel: usize, drive: usize, data: alloc::vec::Vec<u8>) {
         self.device_manager
             .harddrv
             .attach_cdrom_data(channel, drive, data);
@@ -2758,12 +2954,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 
     /// Attach a CD-ROM ISO from a static byte slice (no-alloc).
-    pub fn attach_cdrom_data_ref(
-        &mut self,
-        channel: usize,
-        drive: usize,
-        data: &'static [u8],
-    ) {
+    pub fn attach_cdrom_data_ref(&mut self, channel: usize, drive: usize, data: &'static [u8]) {
         self.device_manager
             .harddrv
             .attach_cdrom_data_ref(channel, drive, data);
@@ -2838,8 +3029,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
             if update_result.dimension_changed {
                 display.resize(
-                    update_result.iwidth.checked_div(update_result.fwidth).unwrap_or(update_result.iwidth),
-                    update_result.iheight.checked_div(update_result.fheight).unwrap_or(update_result.iheight),
+                    update_result
+                        .iwidth
+                        .checked_div(update_result.fwidth)
+                        .unwrap_or(update_result.iwidth),
+                    update_result
+                        .iheight
+                        .checked_div(update_result.fheight)
+                        .unwrap_or(update_result.iheight),
                     update_result.fwidth,
                     update_result.fheight,
                 );
@@ -2931,9 +3128,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     pub fn ata_ch1_diag(&self) -> String {
         let ch1 = &self.device_manager.harddrv.channels[1];
         let d = ch1.selected_drive();
-        let (vec15, masked15, trig15, _dmode15) = self.device_manager.ioapic.redirect_entry_diag(15);
+        let (vec15, masked15, trig15, _dmode15) =
+            self.device_manager.ioapic.redirect_entry_diag(15);
         // Check LAPIC IRR/ISR for the IDE vector
-        let (irr_set, isr_set) = if vec15 > 0 { self.cpu.lapic_vector_state(vec15) } else { (false, false) };
+        let (irr_set, isr_set) = if vec15 > 0 {
+            self.cpu.lapic_vector_state(vec15)
+        } else {
+            (false, false)
+        };
         format!("s={:?} cmd={:#04x} ip={} acmd={:#04x} nIEN={} IOAPIC15[v={:#04x} m={} t={}] LAPIC[irr={} isr={}]",
             d.controller.status, d.controller.current_command,
             d.controller.interrupt_pending,
@@ -3027,7 +3229,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     pub fn get_dtlb_info(&self, laddr: u64) -> (u64, u64, u32, crate::config::BxPtrEquiv) {
         let idx = self.cpu.dtlb.get_index_of(laddr, 3);
         let entry = &self.cpu.dtlb.entries[idx];
-        (entry.lpf, entry.ppf, entry.access_bits, entry.host_page_addr)
+        (
+            entry.lpf,
+            entry.ppf,
+            entry.access_bits,
+            entry.host_page_addr,
+        )
     }
 
     /// Get user_pl flag (true = CPL==3).
@@ -3064,30 +3271,61 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
     #[cfg(all(feature = "std", debug_assertions))]
     pub fn dump_alpine_diag(&mut self) {
         tracing::trace!("\n=== DIAGNOSTIC DUMP ===");
-        tracing::trace!("RIP={:#018x} RSP={:#018x} RBP={:#018x}",
-            self.cpu.rip(), self.cpu.rsp(), self.cpu.rbp());
-        tracing::trace!("RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
-            self.cpu.rax(), self.cpu.rbx(), self.cpu.rcx(), self.cpu.rdx());
-        tracing::trace!("RSI={:#018x} RDI={:#018x} R8={:#018x}  R9={:#018x}",
-            self.cpu.rsi(), self.cpu.rdi(), self.cpu.r8(), self.cpu.r9());
-        tracing::trace!("CS={:#06x} mode={} IF={}",
-            self.cpu.get_cs_selector(), self.get_cpu_mode_str(),
-            if self.cpu.get_b_if() != 0 { 1 } else { 0 });
-        tracing::trace!("CR0={:#010x} CR3={:#018x}",
-            self.cpu.cr0.bits(), self.cpu.cr3);
-        tracing::trace!("pending_event={:#010x} event_mask={:#010x} async_event={}",
-            self.cpu.pending_event, self.cpu.event_mask, self.cpu.async_event);
+        tracing::trace!(
+            "RIP={:#018x} RSP={:#018x} RBP={:#018x}",
+            self.cpu.rip(),
+            self.cpu.rsp(),
+            self.cpu.rbp()
+        );
+        tracing::trace!(
+            "RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
+            self.cpu.rax(),
+            self.cpu.rbx(),
+            self.cpu.rcx(),
+            self.cpu.rdx()
+        );
+        tracing::trace!(
+            "RSI={:#018x} RDI={:#018x} R8={:#018x}  R9={:#018x}",
+            self.cpu.rsi(),
+            self.cpu.rdi(),
+            self.cpu.r8(),
+            self.cpu.r9()
+        );
+        tracing::trace!(
+            "CS={:#06x} mode={} IF={}",
+            self.cpu.get_cs_selector(),
+            self.get_cpu_mode_str(),
+            if self.cpu.get_b_if() != 0 { 1 } else { 0 }
+        );
+        tracing::trace!(
+            "CR0={:#010x} CR3={:#018x}",
+            self.cpu.cr0.bits(),
+            self.cpu.cr3
+        );
+        tracing::trace!(
+            "pending_event={:#010x} event_mask={:#010x} async_event={}",
+            self.cpu.pending_event,
+            self.cpu.event_mask,
+            self.cpu.async_event
+        );
         #[cfg(debug_assertions)]
         {
-            tracing::trace!("diag: intr_delivered={} if_blocked={} pic_empty={}",
-                self.cpu.diag_hae_intr_delivered, self.cpu.diag_hae_intr_if_blocked,
-                self.cpu.diag_hae_intr_pic_empty);
+            tracing::trace!(
+                "diag: intr_delivered={} if_blocked={} pic_empty={}",
+                self.cpu.diag_hae_intr_delivered,
+                self.cpu.diag_hae_intr_if_blocked,
+                self.cpu.diag_hae_intr_pic_empty
+            );
             // SYSCALL ring buffer
-            tracing::trace!("--- Last {} SYSCALLs (total={}, sysret={}, blocked={}) ---",
+            tracing::trace!(
+                "--- Last {} SYSCALLs (total={}, sysret={}, blocked={}) ---",
                 self.cpu.diag_syscall_ring_idx.min(32),
                 self.cpu.diag_syscall_count,
                 self.cpu.diag_sysret_count,
-                self.cpu.diag_syscall_count.saturating_sub(self.cpu.diag_sysret_count));
+                self.cpu
+                    .diag_syscall_count
+                    .saturating_sub(self.cpu.diag_sysret_count)
+            );
             {
                 let count = self.cpu.diag_syscall_ring_idx.min(32);
                 let start = self.cpu.diag_syscall_ring_idx.saturating_sub(32);
@@ -3099,37 +3337,56 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
         }
         // PIC state
         tracing::trace!("--- PIC State ---");
-        tracing::trace!("  master: IMR={:#04x} IRR={:#04x} ISR={:#04x} has_int={}",
+        tracing::trace!(
+            "  master: IMR={:#04x} IRR={:#04x} ISR={:#04x} has_int={}",
             self.device_manager.pic.master.imr,
             self.device_manager.pic.master.irr,
             self.device_manager.pic.master.isr,
-            self.device_manager.pic.has_interrupt());
-        tracing::trace!("  slave:  IMR={:#04x} IRR={:#04x} ISR={:#04x}",
+            self.device_manager.pic.has_interrupt()
+        );
+        tracing::trace!(
+            "  slave:  IMR={:#04x} IRR={:#04x} ISR={:#04x}",
             self.device_manager.pic.slave.imr,
             self.device_manager.pic.slave.irr,
-            self.device_manager.pic.slave.isr);
+            self.device_manager.pic.slave.isr
+        );
         // PIT state
         let pit_c0 = &self.device_manager.pit.counters[0];
         tracing::trace!("--- PIT State ---");
-        tracing::trace!("  C0: mode={:?} count={} gate={} output={}",
-            pit_c0.mode, pit_c0.count, pit_c0.gate, pit_c0.output);
+        tracing::trace!(
+            "  C0: mode={:?} count={} gate={} output={}",
+            pit_c0.mode,
+            pit_c0.count,
+            pit_c0.gate,
+            pit_c0.output
+        );
         // Device tick diagnostics
         tracing::trace!("--- Device Tick Diag ---");
-        tracing::trace!("  tick_count={} total_usec={} pit_fires={} irq0_latched={} iac_count={}",
+        tracing::trace!(
+            "  tick_count={} total_usec={} pit_fires={} irq0_latched={} iac_count={}",
             self.device_manager.diag_tick_count,
             self.device_manager.diag_total_usec,
             self.device_manager.diag_pit_fires,
             self.device_manager.diag_irq0_latched,
-            self.device_manager.diag_iac_count);
-        tracing::trace!("  lapic_timer_fires={} set_initial_count={} timer_masked={}",
-            self.cpu.lapic.diag_timer_fires, self.cpu.lapic.diag_set_initial_count,
-            self.cpu.lapic.diag_timer_masked);
+            self.device_manager.diag_iac_count
+        );
+        tracing::trace!(
+            "  lapic_timer_fires={} set_initial_count={} timer_masked={}",
+            self.cpu.lapic.diag_timer_fires,
+            self.cpu.lapic.diag_set_initial_count,
+            self.cpu.lapic.diag_timer_masked
+        );
         // Show pc_system timer state for LAPIC timer
         if let Some(handle) = self.cpu.lapic.timer_handle {
             let t = &self.pc_system.timers[handle];
-            tracing::trace!("  pc_system_timer[{}]: flags={:?} time_to_fire={} period={} ticks_total={}",
-                handle, t.flags, t.time_to_fire, t.period,
-                self.pc_system.time_ticks());
+            tracing::trace!(
+                "  pc_system_timer[{}]: flags={:?} time_to_fire={} period={} ticks_total={}",
+                handle,
+                t.flags,
+                t.time_to_fire,
+                t.period,
+                self.pc_system.time_ticks()
+            );
         }
         self.cpu.lapic.dump_state();
         // ATA channel diagnostics
@@ -3153,7 +3410,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
             for (paddr, label) in addrs {
                 let p = *paddr as usize;
                 if p + 48 <= ram.len() {
-                    let code = &ram[p..p+48];
+                    let code = &ram[p..p + 48];
                     tracing::trace!("--- {} (phys={:#010x}) ---", label, paddr);
                     for row in 0..3 {
                         let off = row * 16;
@@ -3181,26 +3438,48 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
                 let page_off = addr & 0xFFF;
                 let safe_read = |phys: u64| -> u64 {
                     let off = phys as usize;
-                    if off + 8 > ram_len { return 0; }
-                    u64::from_le_bytes(ram[off..off + 8].try_into().expect("8-byte slice converts to [u8; 8]"))
+                    if off + 8 > ram_len {
+                        return 0;
+                    }
+                    u64::from_le_bytes(
+                        ram[off..off + 8]
+                            .try_into()
+                            .expect("8-byte slice converts to [u8; 8]"),
+                    )
                 };
                 let pml4e = safe_read(cr3 + pml4_idx * 8);
-                if pml4e & 1 == 0 { return 0; }
+                if pml4e & 1 == 0 {
+                    return 0;
+                }
                 let pdpte = safe_read((pml4e & 0xFFFFF_FFFFF000) + pdpt_idx * 8);
-                if pdpte & 1 == 0 { return 0; }
-                if pdpte & 0x80 != 0 { return safe_read((pdpte & 0xFFFFF_C0000000) | (addr & 0x3FFFFFFF)); }
+                if pdpte & 1 == 0 {
+                    return 0;
+                }
+                if pdpte & 0x80 != 0 {
+                    return safe_read((pdpte & 0xFFFFF_C0000000) | (addr & 0x3FFFFFFF));
+                }
                 let pde = safe_read((pdpte & 0xFFFFF_FFFFF000) + pd_idx * 8);
-                if pde & 1 == 0 { return 0; }
-                if pde & 0x80 != 0 { return safe_read((pde & 0xFFFFF_FFE00000) | (addr & 0x1FFFFF)); }
+                if pde & 1 == 0 {
+                    return 0;
+                }
+                if pde & 0x80 != 0 {
+                    return safe_read((pde & 0xFFFFF_FFE00000) | (addr & 0x1FFFFF));
+                }
                 let pte = safe_read((pde & 0xFFFFF_FFFFF000) + pt_idx * 8);
-                if pte & 1 == 0 { return 0; }
+                if pte & 1 == 0 {
+                    return 0;
+                }
                 safe_read((pte & 0xFFFFF_FFFFF000) | page_off)
             };
             tracing::trace!("--- Stack at RSP={:#018x} ---", rsp);
             for i in 0..16 {
                 let addr = rsp.wrapping_add(i * 8);
                 let val = read_u64(addr);
-                let marker = if val > 0xffffffff81000000 && val < 0xffffffff82000000 { " <-- kernel text?" } else { "" };
+                let marker = if val > 0xffffffff81000000 && val < 0xffffffff82000000 {
+                    " <-- kernel text?"
+                } else {
+                    ""
+                };
                 tracing::trace!("  [{:+4}] {:#018x}{}", i * 8, val, marker);
             }
         }
@@ -3212,8 +3491,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
             let read_u64 = |paddr: u64| -> u64 {
                 let p = paddr as usize;
                 if p + 8 <= ram.len() {
-                    u64::from_le_bytes(ram[p..p+8].try_into().expect("8-byte slice converts to [u8; 8]"))
-                } else { 0 }
+                    u64::from_le_bytes(
+                        ram[p..p + 8]
+                            .try_into()
+                            .expect("8-byte slice converts to [u8; 8]"),
+                    )
+                } else {
+                    0
+                }
             };
             let pml4_idx = (rip >> 39) & 0x1FF;
             let pdpt_idx = (rip >> 30) & 0x1FF;
@@ -3234,9 +3519,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
                                 let pte = read_u64((pde & 0x000FFFFF_FFFFF000) + pt_idx * 8);
                                 if pte & 1 != 0 {
                                     (pte & 0x000FFFFF_FFFFF000) | (rip & 0xFFF)
-                                } else { 0 }
+                                } else {
+                                    0
+                                }
                             }
-                        } else { 0 }
+                        } else {
+                            0
+                        }
                     };
                     if paddr != 0 && (paddr as usize) + 64 <= ram.len() {
                         let code = &ram[paddr as usize..(paddr as usize) + 64];
@@ -3260,7 +3549,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
 
 // Ensure Emulator is Send (can be moved between threads)
 // Each instance is fully independent with no shared state
-unsafe impl<I: BxCpuIdTrait + Send, T: crate::cpu::instrumentation::Instrumentation + Send> Send for Emulator<'_, I, T> {}
+unsafe impl<I: BxCpuIdTrait + Send, T: crate::cpu::instrumentation::Instrumentation + Send> Send
+    for Emulator<'_, I, T>
+{
+}
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
@@ -3274,8 +3566,9 @@ mod tests {
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let emu = Emulator::<Corei7SkylakeX>::new(config);
-                assert!(emu.is_ok());
+                let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                #[cfg(feature = "std")]
+                assert!(emu.bios_output_file.is_none());
             })
             .unwrap()
             .join()

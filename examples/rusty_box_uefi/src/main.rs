@@ -29,7 +29,11 @@ fn print_bytes(bytes: &[u8]) {
     let mut pos = 0;
     for &b in bytes {
         let ch = match b {
-            b'\n' => { buf[pos] = b'\r' as u16; pos += 1; b'\n' as u16 }
+            b'\n' => {
+                buf[pos] = b'\r' as u16;
+                pos += 1;
+                b'\n' as u16
+            }
             b'\r' => continue,
             0x20..=0x7E => b as u16,
             _ => continue,
@@ -39,14 +43,18 @@ fn print_bytes(bytes: &[u8]) {
         if pos >= buf.len() - 2 {
             buf[pos] = 0;
             let s = unsafe { uefi::CStr16::from_u16_with_nul_unchecked(&buf[..=pos]) };
-            let _ = uefi::system::with_stdout(|out| { let _ = out.output_string(s); });
+            let _ = uefi::system::with_stdout(|out| {
+                let _ = out.output_string(s);
+            });
             pos = 0;
         }
     }
     if pos > 0 {
         buf[pos] = 0;
         let s = unsafe { uefi::CStr16::from_u16_with_nul_unchecked(&buf[..=pos]) };
-        let _ = uefi::system::with_stdout(|out| { let _ = out.output_string(s); });
+        let _ = uefi::system::with_stdout(|out| {
+            let _ = out.output_string(s);
+        });
     }
 }
 
@@ -91,7 +99,9 @@ fn alloc_zeroed_for<T>() -> *mut T {
     }
     // allocate_pages returns zeroed memory (LOADER_DATA from firmware)
     // but let's be safe:
-    unsafe { core::ptr::write_bytes(ptr, 0, size); }
+    unsafe {
+        core::ptr::write_bytes(ptr, 0, size);
+    }
     ptr as *mut T
 }
 
@@ -106,7 +116,8 @@ fn main() -> Status {
         uefi::boot::AllocateType::AnyPages,
         uefi::boot::MemoryType::LOADER_DATA,
         stack_pages,
-    ).expect("failed to allocate stack");
+    )
+    .expect("failed to allocate stack");
     let new_sp = stack_base.as_ptr() as usize + STACK_SIZE;
     let result: usize;
     unsafe {
@@ -135,8 +146,12 @@ fn run() -> Status {
     uefi::helpers::init().unwrap();
 
     info!("=== Rusty Box UEFI - DLX Linux (no-alloc) ===");
-    info!("BIOS: {} KB, VGA: {} KB, Disk: {} MB (all embedded)",
-        BIOS_ROM.len() / 1024, VGA_BIOS.len() / 1024, DLX_DISK.len() / (1024 * 1024));
+    info!(
+        "BIOS: {} KB, VGA: {} KB, Disk: {} MB (all embedded)",
+        BIOS_ROM.len() / 1024,
+        VGA_BIOS.len() / 1024,
+        DLX_DISK.len() / (1024 * 1024)
+    );
 
     let config = EmulatorConfig {
         guest_memory_size: 32 * 1024 * 1024,
@@ -150,7 +165,10 @@ fn run() -> Status {
     // --- Allocate large structs via UEFI pages (no Rust allocator) ---
 
     // 1. CPU (~17-50MB, mostly BxICache fixed arrays)
-    info!("Allocating CPU ({} bytes)...", core::mem::size_of::<BxCpuC<Corei7SkylakeX>>());
+    info!(
+        "Allocating CPU ({} bytes)...",
+        core::mem::size_of::<BxCpuC<Corei7SkylakeX>>()
+    );
     let cpu_ptr: *mut BxCpuC<Corei7SkylakeX> = alloc_zeroed_for();
     let cpu = unsafe {
         match BxCpuBuilder::<Corei7SkylakeX>::init_cpu_at(cpu_ptr, ()) {
@@ -164,9 +182,14 @@ fn run() -> Status {
     let mem_pages = (mem_buf_size + 4095) / 4096;
     let mem_ptr = alloc_pages(mem_pages);
     if mem_ptr.is_null() {
-        bail!("Failed to allocate {} MB for guest RAM", mem_buf_size / (1024 * 1024));
+        bail!(
+            "Failed to allocate {} MB for guest RAM",
+            mem_buf_size / (1024 * 1024)
+        );
     }
-    unsafe { core::ptr::write_bytes(mem_ptr, 0, mem_buf_size); }
+    unsafe {
+        core::ptr::write_bytes(mem_ptr, 0, mem_buf_size);
+    }
 
     let mem_stub = unsafe {
         match BxMemoryStubC::create_from_raw(
@@ -182,7 +205,10 @@ fn run() -> Status {
     };
 
     // 3. Emulator struct (~2-3MB, embeds DeviceManager with VGA/IDE buffers)
-    info!("Allocating Emulator ({} bytes)...", core::mem::size_of::<Emulator<Corei7SkylakeX>>());
+    info!(
+        "Allocating Emulator ({} bytes)...",
+        core::mem::size_of::<Emulator<Corei7SkylakeX>>()
+    );
     let emu_ptr: *mut Emulator<Corei7SkylakeX> = alloc_zeroed_for();
     let emu = unsafe {
         match Emulator::<Corei7SkylakeX>::init_at(emu_ptr, cpu, mem_stub, config) {
@@ -195,17 +221,23 @@ fn run() -> Status {
     emu.init_pc_system();
 
     let bios_addr = !(BIOS_ROM.len() as u64 - 1);
-    if let Err(e) = emu.load_bios(BIOS_ROM, bios_addr) { bail!("BIOS: {:?}", e); }
+    if let Err(e) = emu.load_bios(BIOS_ROM, bios_addr) {
+        bail!("BIOS: {:?}", e);
+    }
     let _ = emu.load_optional_rom(VGA_BIOS, 0xC0000);
 
-    if let Err(e) = emu.init_cpu_and_devices() { bail!("CPU init: {:?}", e); }
+    if let Err(e) = emu.init_cpu_and_devices() {
+        bail!("CPU init: {:?}", e);
+    }
 
     emu.configure_memory_in_cmos_from_config();
     emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
     emu.configure_boot_sequence(2, 0, 0);
     emu.attach_disk_data_ref(0, 0, DLX_DISK, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
 
-    if let Err(e) = emu.reset(ResetReason::Hardware) { bail!("Reset: {:?}", e); }
+    if let Err(e) = emu.reset(ResetReason::Hardware) {
+        bail!("Reset: {:?}", e);
+    }
     emu.start();
     emu.prepare_run();
 
@@ -223,20 +255,26 @@ fn run() -> Status {
     while total < max {
         let n = match unsafe { emu.run_cpu_batch(batch) } {
             Ok(n) => n,
-            Err(e) => { error!("CPU error at {}M: {:?}", total / 1_000_000, e); break; }
+            Err(e) => {
+                error!("CPU error at {}M: {:?}", total / 1_000_000, e);
+                break;
+            }
         };
         total += n;
 
         // Process PAM register changes (BIOS needs this)
         if emu.device_manager.pam_needs_update {
-            emu.device_manager.process_pci_deferred(&mut emu.devices, &mut emu.memory);
+            emu.device_manager
+                .process_pci_deferred(&mut emu.devices, &mut emu.memory);
         }
 
         // Drain and print BIOS/serial output (no Vec allocation)
         {
             let mut had_output = false;
             for b in emu.devices.drain_port_e9_output() {
-                if !had_output { had_output = true; }
+                if !had_output {
+                    had_output = true;
+                }
                 // Print byte-by-byte through print_bytes
                 print_bytes(&[b]);
             }
@@ -254,7 +292,9 @@ fn run() -> Status {
         // Inhibition window (MOV SS/STI) expired during the batch.
         if emu.device_manager.has_interrupt() && emu.cpu.interrupts_enabled() {
             let vec = emu.iac();
-            unsafe { let _ = emu.inject_interrupt(vec); }
+            unsafe {
+                let _ = emu.inject_interrupt(vec);
+            }
         }
 
         // Port 92h A20 sync
@@ -267,22 +307,29 @@ fn run() -> Status {
                 last_port92 = 0;
                 continue;
             }
-            Err(e) => { error!("Reset failed: {:?}", e); break; }
+            Err(e) => {
+                error!("Reset failed: {:?}", e);
+                break;
+            }
             _ => {}
         }
 
         // HLT handling — advance virtual clock to next timer event
         if n == 0 {
             use rusty_box::cpu::cpu::CpuActivityState;
-            if matches!(emu.cpu.activity_state,
-                CpuActivityState::Hlt | CpuActivityState::Mwait | CpuActivityState::MwaitIf)
-            {
+            if matches!(
+                emu.cpu.activity_state,
+                CpuActivityState::Hlt | CpuActivityState::Mwait | CpuActivityState::MwaitIf
+            ) {
                 let mut hlt_budget = 0u64;
                 while hlt_budget < 10_000_000 {
                     if emu.has_interrupt() && emu.cpu.interrupts_enabled() {
                         break;
                     }
-                    let step = emu.pc_system.get_num_ticks_left_next_event().clamp(1, 100_000);
+                    let step = emu
+                        .pc_system
+                        .get_num_ticks_left_next_event()
+                        .clamp(1, 100_000);
                     emu.pc_system.tickn(step);
                     emu.dispatch_timer_fires();
                     hlt_budget += step as u64;
@@ -293,7 +340,11 @@ fn run() -> Status {
             }
 
             if emu.cpu.is_in_shutdown() {
-                info!("SHUTDOWN at {}k instr, RIP={:#x}", total / 1000, emu.cpu.rip());
+                info!(
+                    "SHUTDOWN at {}k instr, RIP={:#x}",
+                    total / 1000,
+                    emu.cpu.rip()
+                );
                 break;
             }
         }
@@ -308,8 +359,13 @@ fn run() -> Status {
 
         #[cfg(feature = "verbose")]
         if total % 500_000 < batch {
-            info!("  {}k instr, RIP={:#x}, batch={}, IF={}",
-                total / 1000, emu.cpu.rip(), n, emu.cpu.interrupts_enabled());
+            info!(
+                "  {}k instr, RIP={:#x}, batch={}, IF={}",
+                total / 1000,
+                emu.cpu.rip(),
+                n,
+                emu.cpu.interrupts_enabled()
+            );
         }
     }
 

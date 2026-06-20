@@ -9,12 +9,7 @@
 //!
 //! All operations use the AES reduction polynomial x^8 + x^4 + x^3 + x + 1 (0x11B).
 
-use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
-    decoder::Instruction,
-    xmm::BxPackedXmmRegister,
-};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, xmm::BxPackedXmmRegister};
 
 // ============================================================================
 // GF(2^8) Inverse table (from Bochs gf2.cc)
@@ -170,9 +165,9 @@ fn affine_byte(src2: u64, src1byte: u8, imm8: u8) -> u8 {
 ///
 /// Matches Bochs xmm_gf2p8affineqb().
 fn xmm_gf2p8affineqb(dst: &mut BxPackedXmmRegister, src: &BxPackedXmmRegister, imm8: u8) {
-        for i in 0..16 {
-            dst.set_xmmubyte(i, affine_byte(src.xmm64u(i / 8), dst.xmmubyte(i), imm8));
-        }
+    for i in 0..16 {
+        dst.set_xmmubyte(i, affine_byte(src.xmm64u(i / 8), dst.xmmubyte(i), imm8));
+    }
 }
 
 /// GF(2) affine transformation with multiplicative inverse on all 16 bytes.
@@ -182,9 +177,12 @@ fn xmm_gf2p8affineqb(dst: &mut BxPackedXmmRegister, src: &BxPackedXmmRegister, i
 ///
 /// Matches Bochs xmm_gf2p8affineinvqb().
 fn xmm_gf2p8affineinvqb(dst: &mut BxPackedXmmRegister, src: &BxPackedXmmRegister, imm8: u8) {
-        for i in 0..16 {
-            dst.set_xmmubyte(i, affine_byte(src.xmm64u(i / 8), GF256_INV[dst.xmmubyte(i) as usize], imm8));
-        }
+    for i in 0..16 {
+        dst.set_xmmubyte(
+            i,
+            affine_byte(src.xmm64u(i / 8), GF256_INV[dst.xmmubyte(i) as usize], imm8),
+        );
+    }
 }
 
 /// GF(2^8) multiply two bytes with reduction polynomial 0x11B.
@@ -244,9 +242,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut dst = self.read_xmm_reg(instr.dst());
         let src = self.sse_read_op2_xmm(instr)?;
 
-            for n in 0..16 {
-                dst.set_xmmubyte(n, gf2p8mul(dst.xmmubyte(n), src.xmmubyte(n)));
-            }
+        for n in 0..16 {
+            dst.set_xmmubyte(n, gf2p8mul(dst.xmmubyte(n), src.xmmubyte(n)));
+        }
 
         self.write_xmm_reg_lo128(instr.dst(), dst);
         Ok(())
@@ -305,7 +303,12 @@ mod tests {
         // Identity matrix as u64: byte[7]=0x80, byte[6]=0x40, ..., byte[0]=0x01
         let identity: u64 = 0x0102040810204080;
         for b in 0..=255u8 {
-            assert_eq!(affine_byte(identity, b, 0), b, "identity failed for {:#x}", b);
+            assert_eq!(
+                affine_byte(identity, b, 0),
+                b,
+                "identity failed for {:#x}",
+                b
+            );
         }
     }
 
@@ -326,8 +329,11 @@ mod tests {
         assert_eq!(GF256_INV[1], 1);
         // inv(inv(x)) = x for all x
         for i in 0..=255u8 {
-            assert_eq!(GF256_INV[GF256_INV[i as usize] as usize], i,
-                "double-inverse failed for {:#x}", i);
+            assert_eq!(
+                GF256_INV[GF256_INV[i as usize] as usize], i,
+                "double-inverse failed for {:#x}",
+                i
+            );
         }
     }
 }

@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - dev
+      - 'feature/**'
+  pull_request:
+    branches:
+      - master
+      - dev
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust feature and target matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgl1-mesa-dev \
+            libx11-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libwayland-dev
+
+      - name: Install Rust targets
+        run: |
+          rustup target add x86_64-unknown-none
+          rustup target add x86_64-unknown-uefi
+          rustup target add wasm32-unknown-unknown
+
+      - name: Check decoder no_std
+        run: cargo check -p rusty_box_decoder --no-default-features --target x86_64-unknown-none
+
+      - name: Test decoder on host
+        run: cargo test -p rusty_box_decoder
+
+      - name: Check core no_std no_alloc on host
+        run: cargo check -p rusty_box --no-default-features
+
+      - name: Check core no_std no_alloc freestanding target
+        run: cargo check -p rusty_box --no-default-features --target x86_64-unknown-none
+
+      - name: Check emulator no_std no_alloc link smoke
+        run: cargo check -p rusty_box_no_alloc_smoke --target x86_64-unknown-none
+
+      - name: Check core no_std no_alloc UEFI target
+        run: cargo check -p rusty_box --no-default-features --target x86_64-unknown-uefi
+
+      - name: Check core no_std alloc on host
+        run: cargo check -p rusty_box --no-default-features --features alloc
+
+      - name: Check core no_std alloc wasm target
+        run: cargo check -p rusty_box --no-default-features --features alloc --target wasm32-unknown-unknown
+
+      - name: Test core std default
+        run: cargo test -p rusty_box
+
+      - name: Test core std egui serial path
+        run: cargo test -p rusty_box --features gui-egui serial
+
+      - name: Test bximage helpers
+        run: cargo test -p rusty_box_bximage
+
+      - name: Check GUI CLI without egui defaults
+        run: cargo check -p rusty_box_gui --no-default-features
+
+      - name: Test GUI native default
+        run: cargo test -p rusty_box_gui
+
+      - name: Download Bochs BIOS ROMs for wasm GUI
+        run: |
+          mkdir -p cpp_orig/bochs/bios/VGABIOS-lgpl
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.request import urlretrieve
+
+          downloads = {
+              "cpp_orig/bochs/bios/BIOS-bochs-latest":
+                  "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/BIOS-bochs-latest?format=raw",
+              "cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
+                  "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/VGABIOS-lgpl-latest?format=raw",
+          }
+
+          for destination, url in downloads.items():
+              path = Path(destination)
+              path.parent.mkdir(parents=True, exist_ok=True)
+              urlretrieve(url, path)
+              if path.stat().st_size == 0:
+                  raise SystemExit(f"{destination} downloaded as an empty file")
+          PY
+
+      - name: Check GUI wasm target
+        run: cargo check -p rusty_box_gui --target wasm32-unknown-unknown

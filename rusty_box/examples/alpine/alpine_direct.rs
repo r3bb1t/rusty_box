@@ -110,8 +110,7 @@ fn extract_from_iso(iso_data: &[u8], target_path: &[&str]) -> Option<Vec<u8>> {
 
             let name_len = dir_data[pos + 32] as usize;
             if name_len > 0 && pos + 33 + name_len <= dir_data.len() {
-                let entry_name =
-                    String::from_utf8_lossy(&dir_data[pos + 33..pos + 33 + name_len]);
+                let entry_name = String::from_utf8_lossy(&dir_data[pos + 33..pos + 33 + name_len]);
                 let entry_name_upper = entry_name.to_uppercase();
 
                 if entry_name_upper.starts_with(name) {
@@ -169,8 +168,8 @@ fn run_alpine() -> Result<()> {
     // =========================================================================
     // Configuration
     // =========================================================================
-    let iso_path = std::env::var("ALPINE_ISO")
-        .unwrap_or_else(|_| "alpine-virt-3.23.3-x86_64.iso".to_string());
+    let iso_path =
+        std::env::var("ALPINE_ISO").unwrap_or_else(|_| "alpine-virt-3.23.3-x86_64.iso".to_string());
 
     let ram_mb: usize = std::env::var("ALPINE_RAM_MB")
         .ok()
@@ -185,8 +184,7 @@ fn run_alpine() -> Result<()> {
         .unwrap_or(4_000_000_000);
 
     // Boot mode: "bios" (default) or "direct"
-    let boot_mode = std::env::var("RUSTY_BOX_BOOT")
-        .unwrap_or_else(|_| "bios".to_string());
+    let boot_mode = std::env::var("RUSTY_BOX_BOOT").unwrap_or_else(|_| "bios".to_string());
     let bios_boot = boot_mode != "direct";
 
     // =========================================================================
@@ -206,12 +204,11 @@ fn run_alpine() -> Result<()> {
     // Read ISO
     // =========================================================================
     println!("Reading ISO: {}", iso_path);
-    let iso_data = std::fs::read(&iso_path)
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to read ISO file '{}': {}", iso_path, e);
-            eprintln!("Set ALPINE_ISO=/path/to/alpine-virt-*.iso");
-            std::process::exit(1);
-        });
+    let iso_data = std::fs::read(&iso_path).unwrap_or_else(|e| {
+        eprintln!("Failed to read ISO file '{}': {}", iso_path, e);
+        eprintln!("Set ALPINE_ISO=/path/to/alpine-virt-*.iso");
+        std::process::exit(1);
+    });
     println!("  ISO size: {} MB", iso_data.len() / 1024 / 1024);
 
     // =========================================================================
@@ -226,7 +223,10 @@ fn run_alpine() -> Result<()> {
         ..EmulatorConfig::default()
     };
 
-    println!("Creating emulator with {} MB RAM (boot mode: {})...", ram_mb, boot_mode);
+    println!(
+        "Creating emulator with {} MB RAM (boot mode: {})...",
+        ram_mb, boot_mode
+    );
     let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
 
     // Initialize memory + PC system
@@ -245,8 +245,8 @@ fn run_alpine() -> Result<()> {
             "cpp_orig/bochs/bios/BIOS-bochs-latest".to_string(),
         ];
         let bios_strs: Vec<&str> = bios_candidates.iter().map(|s| s.as_str()).collect();
-        let (bios_path, bios_data) = find_file(&bios_strs)
-            .expect("Could not find BIOS-bochs-latest");
+        let (bios_path, bios_data) =
+            find_file(&bios_strs).expect("Could not find BIOS-bochs-latest");
         println!("  BIOS loaded: {} bytes ({})", bios_data.len(), bios_path);
 
         let bios_size = bios_data.len() as u64;
@@ -296,19 +296,23 @@ fn run_alpine() -> Result<()> {
         // =====================================================================
         // Direct Kernel Boot Path
         // =====================================================================
-        let vmlinuz = extract_from_iso(&iso_data, &["BOOT", "VMLINUZ_VIRT."])
-            .unwrap_or_else(|| {
+        let vmlinuz =
+            extract_from_iso(&iso_data, &["BOOT", "VMLINUZ_VIRT."]).unwrap_or_else(|| {
                 eprintln!("Failed to find BOOT/VMLINUZ_VIRT in ISO");
                 std::process::exit(1);
             });
         println!("  Kernel: {} bytes", vmlinuz.len());
 
-        let initramfs = extract_from_iso(&iso_data, &["BOOT", "INITRAMFS_VIRT."])
-            .unwrap_or_else(|| {
+        let initramfs =
+            extract_from_iso(&iso_data, &["BOOT", "INITRAMFS_VIRT."]).unwrap_or_else(|| {
                 eprintln!("Failed to find BOOT/INITRAMFS_VIRT in ISO");
                 std::process::exit(1);
             });
-        println!("  Initramfs: {} bytes ({} MB)", initramfs.len(), initramfs.len() / 1024 / 1024);
+        println!(
+            "  Initramfs: {} bytes ({} MB)",
+            initramfs.len(),
+            initramfs.len() / 1024 / 1024
+        );
 
         let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_|
             "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr kfence.sample_interval=0 modules=loop,squashfs,cdrom,sr_mod,isofs modloop=/boot/modloop-virt".to_string()
@@ -344,7 +348,10 @@ fn run_alpine() -> Result<()> {
         println!("  Boot: direct kernel (EIP={:#010x})", emu.cpu.rip());
     }
 
-    println!("Starting Alpine Linux (max {} instructions)...\n", max_instructions);
+    println!(
+        "Starting Alpine Linux (max {} instructions)...\n",
+        max_instructions
+    );
 
     // =========================================================================
     // =========================================================================
@@ -358,13 +365,20 @@ fn run_alpine() -> Result<()> {
         let _ = emu.hook_add_code(.., move |rip, instr| {
             let ic = icount.get() + 1;
             icount.set(ic);
-            if ic < 3_000_000_000 || rip < 0x400000 { return; }
-            if hits.get() >= 100 { return; }
+            if ic < 3_000_000_000 || rip < 0x400000 {
+                return;
+            }
+            if hits.get() >= 100 {
+                return;
+            }
             let opcode = instr.get_ia_opcode() as u16;
             if (opcode == 42 || opcode == 70 || opcode == 38) && hits.get() < 30 {
                 tracing::info!(
                     "[INSTR] op={} RIP={:#x} ilen={} icount={}",
-                    opcode, rip, instr.ilen(), ic
+                    opcode,
+                    rip,
+                    instr.ilen(),
+                    ic
                 );
                 hits.set(hits.get() + 1);
             }
@@ -383,7 +397,6 @@ fn run_alpine() -> Result<()> {
     // BIOS boot: inject Enter key at ISOLINUX prompt (~18M instructions)
     // Enter scancode: PS/2 set 2 — make=0x5A, break=0xF0 0x5A
     let mut enter_injected = !bios_boot; // skip for direct boot
-
 
     loop {
         if total_executed >= max_instructions {
@@ -412,12 +425,13 @@ fn run_alpine() -> Result<()> {
         // Just press Enter to use the ISO's default syslinux.cfg.
         // Don't append console=ttyS0 — it spawns a serial getty that steals keyboard input.
         if !enter_injected && total_executed >= 18_000_000 {
-            println!("[{}M] Pressing Enter at ISOLINUX boot prompt", total_executed / 1_000_000);
+            println!(
+                "[{}M] Pressing Enter at ISOLINUX boot prompt",
+                total_executed / 1_000_000
+            );
             emu.send_string("\n");
             enter_injected = true;
         }
-
-
 
         // Drain serial port output periodically
         if last_serial_drain.elapsed().as_millis() >= 100 {

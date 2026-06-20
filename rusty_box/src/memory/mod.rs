@@ -4,8 +4,8 @@ mod error;
 pub(crate) mod memory_rusty_box;
 pub mod memory_stub;
 pub mod misc_mem;
-pub mod permissions;
 pub mod mmio;
+pub mod permissions;
 
 //#[cfg(test)]
 //mod tests;
@@ -261,8 +261,9 @@ impl BxMemoryStubC {
         if let Some(Block::Block { offset }) = self.blocks_offsets().get(index) {
             let start = self.vector_offset + *offset;
             // SAFETY: We're accessing within bounds of actual_vector via interior mutability pattern
-            let slice =
-                unsafe { core::slice::from_raw_parts_mut(self.actual_vector.add(start), self.block_size) };
+            let slice = unsafe {
+                core::slice::from_raw_parts_mut(self.actual_vector.add(start), self.block_size)
+            };
             Some(slice)
         } else {
             None

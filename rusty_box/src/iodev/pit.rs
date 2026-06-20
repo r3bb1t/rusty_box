@@ -10,7 +10,6 @@
 //!
 //! Base frequency: 1.193182 MHz
 
-
 /// PIT I/O port addresses
 pub const PIT_COUNTER0: u16 = 0x0040;
 pub const PIT_COUNTER1: u16 = 0x0041;
@@ -319,10 +318,9 @@ impl PitCounter {
                 }
                 self.next_change_time = 1;
             }
-            1
-                if self.trigger_gate => {
-                    self.next_change_time = 1;
-                }
+            1 if self.trigger_gate => {
+                self.next_change_time = 1;
+            }
             2 | 6 => {
                 self.next_change_time = 1;
             }
@@ -332,10 +330,9 @@ impl PitCounter {
             4 => {
                 self.next_change_time = 1;
             }
-            5
-                if self.trigger_gate => {
-                    self.next_change_time = 1;
-                }
+            5 if self.trigger_gate => {
+                self.next_change_time = 1;
+            }
             _ => {}
         }
     }
@@ -434,8 +431,7 @@ impl PitCounter {
                         // COUNTING phase
                         if self.gate {
                             self.decrement();
-                            self.next_change_time =
-                                self.count_binary.wrapping_sub(1) as u32;
+                            self.next_change_time = self.count_binary.wrapping_sub(1) as u32;
                             if self.count == 1 {
                                 // Terminal: pulse LOW, schedule reload
                                 self.next_change_time = 1;
@@ -628,10 +624,9 @@ impl PitCounter {
                     self.next_change_time = 0;
                 }
             }
-            1
-                if data && self.count_written => {
-                    self.next_change_time = 1;
-                }
+            1 if data && self.count_written => {
+                self.next_change_time = 1;
+            }
             2 | 6 => {
                 if !data {
                     // GATE dropped LOW: force output HIGH, stop counting
@@ -671,10 +666,9 @@ impl PitCounter {
                     self.next_change_time = 0;
                 }
             }
-            5
-                if data && self.count_written => {
-                    self.next_change_time = 1;
-                }
+            5 if data && self.count_written => {
+                self.next_change_time = 1;
+            }
             _ => {}
         }
     }

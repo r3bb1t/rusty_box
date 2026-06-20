@@ -4,12 +4,12 @@
 //! Based on Bochs cpu/paging.cc
 //! Implements page table walking and address translation
 
-use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, Result};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, vmx::BxRwAccess, Result};
 use crate::{
     config::{BxAddress, BxPhyAddress},
     cpu::{
         rusty_box::MemoryAccessType,
-        tlb::{BxHostpageaddr, LPF_MASK, TLBEntry},
+        tlb::{BxHostpageaddr, TLBEntry, LPF_MASK},
     },
     memory::BxMemC,
 };
@@ -35,6 +35,9 @@ bitflags! {
         const CODE_ACCESS  = 0x10;
         /// Protection key violation (bit 5)
         const PKEY         = 0x20;
+        /// Shadow stack access (bit 6) — set when access type was SS read/write.
+        /// Bochs paging.cc raises ERROR_SHADOW_STACK on SS-page-vs-regular mismatch.
+        const SHADOW_STACK = 0x40;
     }
 }
 
@@ -51,10 +54,15 @@ bitflags! {
     /// DTLB access permission bits (matching Bochs tlb.h).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct TlbAccess: u32 {
-        const SYS_READ_OK   = 0x01;
-        const USER_READ_OK  = 0x02;
-        const SYS_WRITE_OK  = 0x04;
-        const USER_WRITE_OK = 0x08;
+        const SYS_READ_OK            = 0x01;
+        const USER_READ_OK           = 0x02;
+        const SYS_WRITE_OK           = 0x04;
+        const USER_WRITE_OK          = 0x08;
+        // CET shadow-stack access bits (Bochs tlb.h).
+        const SYS_READ_SS_OK         = 0x10;
+        const USER_READ_SS_OK        = 0x20;
+        const SYS_WRITE_SS_OK        = 0x40;
+        const USER_WRITE_SS_OK       = 0x80;
     }
 }
 
@@ -94,10 +102,10 @@ impl PteBits {
 /// 32-bit aliases for use in legacy (non-PAE) paging with u32 page entries.
 mod pte_bits32 {
     use super::PteBits;
-    pub const PRESENT: u32  = PteBits::PRESENT.bits() as u32;
+    pub const PRESENT: u32 = PteBits::PRESENT.bits() as u32;
     pub const ACCESSED: u32 = PteBits::ACCESSED.bits() as u32;
-    pub const DIRTY: u32    = PteBits::DIRTY.bits() as u32;
-    pub const PS: u32       = PteBits::PS.bits() as u32;
+    pub const DIRTY: u32 = PteBits::DIRTY.bits() as u32;
+    pub const PS: u32 = PteBits::PS.bits() as u32;
 }
 
 // Paging level constants (matching Bochs paging.cc)
@@ -134,7 +142,16 @@ const PAGING_LEGACY_PAE_RESERVED_BITS: u64 = PAGING_PAE_PHY_RESERVED_BITS | 0x7F
 // PAE PDE 2MB: bits 20:13 must be zero + PHY reserved
 const PAGING_PAE_PDE2M_RESERVED_BITS: u64 = PAGING_PAE_PHY_RESERVED_BITS | 0x001F_E000;
 
-// PAE PDPTE reserved: PHY + bits 63:52, 8:5, 2:1
+// PAE PDPTE reserved bits — matches Bochs `PAGING_PAE_PDPTE_RESERVED_BITS`
+// (cpu/paging.cc:953): PHY-reserved | bits 63:52 | bits 8:5 | bits 2:1.
+//
+// Bochs/Intel deviation: Intel SDM Vol 3A Table 4-8 marks bits 62:52 (and bit
+// 63) as `Ignored` for legacy PAE PDPTE — only bits 51:M are reserved up
+// top. Bochs treats bits 63:52 as reserved-must-be-zero. We match Bochs because
+// the project goal is Bochs 1:1 parity; both the legacy PAE walker and the
+// `CheckPDPTR` helper reject any present PDPTE with these bits set. If a guest
+// OS sets bits 63:52 in a PDPTE we will raise #GP(0) where Intel-strict
+// hardware would silently ignore.
 const PAGING_PAE_PDPTE_RESERVED_BITS: u64 = PAGING_PAE_PHY_RESERVED_BITS | 0xFFF0_0000_0000_01E6;
 
 // Long mode PDPTE 1GB: bits 29:13 + PHY reserved
@@ -261,7 +278,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     ) -> Result<BxPhyAddress> {
         // Get page directory base from CR3
         let cr3 = self.cr3;
-        let mut ppf = (cr3 & BX_CR3_PAGING_MASK) as u32;
+        // Bochs paging.cc: in EPT-active mode CR3 itself is a guest-physical
+        // address; translate it before any PDE read.
+        let cr3_host = self.ept_translate_for_walk(cr3 & BX_CR3_PAGING_MASK, laddr)?;
+        let mut ppf = cr3_host as u32;
 
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut entry_addr = [0u64; 2];
@@ -326,9 +346,35 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 )?;
             }
             let ppf_4m = (entry[BX_LEVEL_PDE] & 0xFFC00000) as u64;
-            let offset = laddr & 0x3FFFFF;
-            return Ok(ppf_4m | offset);
+            // Bochs translate_linear (paging.cc): for a large-page leaf the
+            // outer caller merges `(laddr & lpf_mask)` into `paddress`
+            // BEFORE calling translate_guest_physical, so EPT walks with
+            // the full guest-physical including the in-page offset and
+            // returns `host_ppf | (paddress & 0xFFF)`. The result already
+            // carries the low 12 bits — never re-OR `(laddr & lpf_mask)`
+            // afterwards, which would land in the wrong host page when
+            // the EPT leaf is 4 KiB and the offset crosses a 4 KiB
+            // boundary.
+            let merged = ppf_4m | (laddr & 0x003F_FFFF);
+            return self.ept_translate_for_data(
+                merged,
+                laddr,
+                (combined & CombinedAccess::USER.bits()) != 0,
+                (combined & CombinedAccess::WRITE.bits()) != 0,
+                false,
+                if matches!(rw, MemoryAccessType::Execute) {
+                    BxRwAccess::Execute
+                } else if is_write {
+                    BxRwAccess::Write
+                } else {
+                    BxRwAccess::Read
+                },
+            );
         }
+
+        // PDE points at the PT in guest-physical space.
+        let ppf_host = self.ept_translate_for_walk(u64::from(ppf), laddr)?;
+        ppf = ppf_host as u32;
 
         // Walk page table (PTE)
         let pte_index = ((laddr >> 12) & 0x3FF) as u32;
@@ -380,12 +426,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Extract page frame from PTE
         ppf = entry[BX_LEVEL_PTE] & 0xFFFFF000;
-        let offset = (laddr & 0xFFF) as u32;
-
-        Ok((ppf as u64) | (offset as u64))
+        // Bochs translate_linear (paging.cc) merges (laddr & lpf_mask)
+        // into paddress before translate_guest_physical; the EPT walker
+        // returns `host_ppf | (paddress & 0xFFF)`.
+        let merged = u64::from(ppf) | (laddr & 0xFFF);
+        self.ept_translate_for_data(
+            merged,
+            laddr,
+            (combined_access & CombinedAccess::USER.bits()) != 0,
+            (combined_access & CombinedAccess::WRITE.bits()) != 0,
+            false,
+            if matches!(rw, MemoryAccessType::Execute) {
+                BxRwAccess::Execute
+            } else if is_write {
+                BxRwAccess::Write
+            } else {
+                BxRwAccess::Read
+            },
+        )
     }
 
-    /// Update accessed and dirty bits in page table entries
+    /// Update accessed and dirty bits in page table entries — Bochs
+    /// cpu/paging.cc `update_access_dirty`. Writes go to the cached
+    /// post-EPT host-physical entry_addr; rusty_box does not yet
+    /// advertise EPT-A/D, so the EPT-side writeback that Bochs runs
+    /// inside `translate_guest_physical` after a successful walk
+    /// (`update_ept_access_dirty`) is intentionally not modelled here.
     fn update_access_dirty(
         &mut self,
         entry_addr: &[u64; 2],
@@ -396,16 +462,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
     ) -> Result<()> {
         // Update PDE accessed bit if needed (when accessing PTE)
-        if leaf == BX_LEVEL_PTE
-            && (entry[BX_LEVEL_PDE] & pte_bits32::ACCESSED) == 0 {
-                entry[BX_LEVEL_PDE] |= pte_bits32::ACCESSED;
-                self.write_physical_dword(
-                    entry_addr[BX_LEVEL_PDE],
-                    entry[BX_LEVEL_PDE],
-                    mem,
-                    page_write_stamp_table,
-                )?;
-            }
+        if leaf == BX_LEVEL_PTE && (entry[BX_LEVEL_PDE] & pte_bits32::ACCESSED) == 0 {
+            entry[BX_LEVEL_PDE] |= pte_bits32::ACCESSED;
+            self.write_physical_dword(
+                entry_addr[BX_LEVEL_PDE],
+                entry[BX_LEVEL_PDE],
+                mem,
+                page_write_stamp_table,
+            )?;
+        }
 
         // Update PTE accessed/dirty bits
         let set_dirty = write && (entry[leaf] & pte_bits32::DIRTY) == 0;
@@ -468,16 +533,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             Err(e) => {
                 // Check if this is a not-present fault (unmapped memory)
-                let is_not_present = !matches!(&e,
-                    super::CpuError::Memory(crate::memory::MemoryError::PageProtectionViolation) |
-                    super::CpuError::Memory(crate::memory::MemoryError::PageReservedBitViolation)
+                let is_not_present = !matches!(
+                    &e,
+                    super::CpuError::Memory(crate::memory::MemoryError::PageProtectionViolation)
+                        | super::CpuError::Memory(
+                            crate::memory::MemoryError::PageReservedBitViolation
+                        )
                 );
 
                 #[cfg(feature = "instrumentation")]
                 if is_not_present && self.instrumentation.active.has_mem_unmapped() {
                     let instr_rw = match rw {
                         MemoryAccessType::Write => crate::cpu::instrumentation::MemAccessRW::Write,
-                        MemoryAccessType::Execute => crate::cpu::instrumentation::MemAccessRW::Execute,
+                        MemoryAccessType::Execute => {
+                            crate::cpu::instrumentation::MemAccessRW::Execute
+                        }
                         _ => crate::cpu::instrumentation::MemAccessRW::Read,
                     };
                     // size=0 since translate_linear doesn't know the access size
@@ -500,11 +570,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 let mut error_code = match &e {
                     super::CpuError::Memory(
                         crate::memory::MemoryError::PageReservedBitViolation,
-                    ) => PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits() | ((user as u32) << 2) | ((is_write as u32) << 1),
+                    ) => {
+                        PageFaultError::RESERVED.bits()
+                            | PageFaultError::PROTECTION.bits()
+                            | ((user as u32) << 2)
+                            | ((is_write as u32) << 1)
+                    }
                     super::CpuError::Memory(
                         crate::memory::MemoryError::PageProtectionViolation,
-                    ) => PageFaultError::PROTECTION.bits() | ((user as u32) << 2) | ((is_write as u32) << 1),
-                    _ => PageFaultError::NOT_PRESENT.bits() | ((user as u32) << 2) | ((is_write as u32) << 1),
+                    ) => {
+                        PageFaultError::PROTECTION.bits()
+                            | ((user as u32) << 2)
+                            | ((is_write as u32) << 1)
+                    }
+                    _ => {
+                        PageFaultError::NOT_PRESENT.bits()
+                            | ((user as u32) << 2)
+                            | ((is_write as u32) << 1)
+                    }
                 };
                 // Set I/D bit for execute access when PAE+NXE is enabled
                 if is_execute && self.cr4.pae() && self.efer.nxe() {
@@ -549,7 +632,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 crate::memory::MemoryError::PageNotPresent,
             ));
         }
-        let mut ppf = pdpte.bits() & 0x000F_FFFF_FFFF_F000;
+        // Bochs paging.cc: PDPTE points at the PD in guest-physical space —
+        // translate through EPT before reading the PDE.
+        let mut ppf = self.ept_translate_for_walk(pdpte.bits() & 0x000F_FFFF_FFFF_F000, laddr)?;
 
         let mut entry_addr = [0u64; 2];
         let mut entry = [PteBits::empty(); 2];
@@ -595,8 +680,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             ppf = entry[BX_LEVEL_PDE].bits() & 0x000F_FFFF_FFE0_0000;
 
-            combined_access &=
-                (entry[BX_LEVEL_PDE].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+            combined_access &= (entry[BX_LEVEL_PDE].bits() as u32)
+                & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
             let is_write = matches!(rw, MemoryAccessType::Write);
             let is_execute = matches!(rw, MemoryAccessType::Execute);
             let priv_index = ((self.cr0.wp() as u32) << 4)
@@ -620,13 +705,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 ));
             }
 
-            // A/D bits
-            let needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
+            // A/D bits.
+            let needed = PteBits::ACCESSED
+                | if is_write {
+                    PteBits::DIRTY
+                } else {
+                    PteBits::empty()
+                };
             if !entry[BX_LEVEL_PDE].contains(needed) {
                 entry[BX_LEVEL_PDE].insert(needed);
                 let data = entry[BX_LEVEL_PDE].bits().to_le_bytes();
                 let cpu_ref = as_cpu_ref();
-                // A/D bit update on page table entry
                 if let Err(e) = mem.write_physical_page(
                     &[cpu_ref],
                     _page_write_stamp_table,
@@ -634,13 +723,38 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     8,
                     &mut data.clone(),
                 ) {
-                    tracing::trace!("A/D bit update failed for PDE at {:#x}: {e}", entry_addr[BX_LEVEL_PDE]);
+                    tracing::trace!(
+                        "A/D bit update failed for PDE at {:#x}: {e}",
+                        entry_addr[BX_LEVEL_PDE]
+                    );
                 }
             }
-            return Ok(ppf | (laddr & 0x1FFFFF));
+            // Bochs translate_linear (paging.cc) merges `(laddr & lpf_mask)`
+            // into `paddress` BEFORE the translate_guest_physical call so
+            // the EPT walker sees the full guest-physical and returns
+            // `host_ppf | (paddress & 0xFFF)`; never re-OR offset bits on
+            // top of the result.
+            let merged = ppf | (laddr & 0x001F_FFFF);
+            return self.ept_translate_for_data(
+                merged,
+                laddr,
+                (combined_access & CombinedAccess::USER.bits()) != 0,
+                (combined_access & CombinedAccess::WRITE.bits()) != 0,
+                nx_page,
+                if matches!(rw, MemoryAccessType::Execute) {
+                    BxRwAccess::Execute
+                } else if matches!(rw, MemoryAccessType::Write) {
+                    BxRwAccess::Write
+                } else {
+                    BxRwAccess::Read
+                },
+            );
         }
 
         combined_access &= entry[BX_LEVEL_PDE].bits() as u32;
+
+        // PDE points at the PT in guest-physical space.
+        ppf = self.ept_translate_for_walk(ppf, laddr)?;
 
         // ---- PTE ----
         entry_addr[BX_LEVEL_PTE] = ppf + (((laddr >> 12) & 0x1FF) << 3);
@@ -672,8 +786,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             nx_page = true;
         }
 
-        combined_access &=
-            (entry[BX_LEVEL_PTE].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+        combined_access &= (entry[BX_LEVEL_PTE].bits() as u32)
+            & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
         let is_write = matches!(rw, MemoryAccessType::Write);
         let is_execute = matches!(rw, MemoryAccessType::Execute);
         let priv_index = ((self.cr0.wp() as u32) << 4)
@@ -697,7 +811,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             ));
         }
 
-        // A/D bits — PDE gets A, PTE gets A+D
+        // A/D bits — PDE gets A, PTE gets A+D. Bochs cpu/paging.cc
+        // update_ept_access_dirty re-checks EPT WRITE permission for
+        // each entry RMW.
         if !entry[BX_LEVEL_PDE].contains(PteBits::ACCESSED) {
             entry[BX_LEVEL_PDE].insert(PteBits::ACCESSED);
             let data = entry[BX_LEVEL_PDE].bits().to_le_bytes();
@@ -709,10 +825,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 8,
                 &mut data.clone(),
             ) {
-                tracing::trace!("A/D bit update failed for PDE at {:#x}: {e}", entry_addr[BX_LEVEL_PDE]);
+                tracing::trace!(
+                    "A/D bit update failed for PDE at {:#x}: {e}",
+                    entry_addr[BX_LEVEL_PDE]
+                );
             }
         }
-        let pte_needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
+        let pte_needed = PteBits::ACCESSED
+            | if is_write {
+                PteBits::DIRTY
+            } else {
+                PteBits::empty()
+            };
         if !entry[BX_LEVEL_PTE].contains(pte_needed) {
             entry[BX_LEVEL_PTE].insert(pte_needed);
             let data = entry[BX_LEVEL_PTE].bits().to_le_bytes();
@@ -724,12 +848,31 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 8,
                 &mut data.clone(),
             ) {
-                tracing::trace!("A/D bit update failed for PTE at {:#x}: {e}", entry_addr[BX_LEVEL_PTE]);
+                tracing::trace!(
+                    "A/D bit update failed for PTE at {:#x}: {e}",
+                    entry_addr[BX_LEVEL_PTE]
+                );
             }
         }
 
         ppf = entry[BX_LEVEL_PTE].bits() & 0x000F_FFFF_FFFF_F000;
-        Ok(ppf | (laddr & 0xFFF))
+        // Bochs translate_linear (paging.cc) merges (laddr & lpf_mask)
+        // into paddress before translate_guest_physical.
+        let merged = ppf | (laddr & 0xFFF);
+        self.ept_translate_for_data(
+            merged,
+            laddr,
+            (combined_access & CombinedAccess::USER.bits()) != 0,
+            (combined_access & CombinedAccess::WRITE.bits()) != 0,
+            nx_page,
+            if matches!(rw, MemoryAccessType::Execute) {
+                BxRwAccess::Execute
+            } else if matches!(rw, MemoryAccessType::Write) {
+                BxRwAccess::Write
+            } else {
+                BxRwAccess::Read
+            },
+        )
     }
 
     /// Long mode paging translation (slow path, used by translate_linear for prefetch).
@@ -758,7 +901,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             BX_LEVEL_PML4
         };
-        let mut ppf = self.cr3 & BX_CR3_PAGING_MASK_PAE;
+        // Bochs paging.cc: when EPT is active each guest-physical address
+        // used as a paging-structure base is first translated through the
+        // EPT walker. We translate CR3, then every next-level page-frame
+        // base before the matching mem read.
+        let mut ppf = self.ept_translate_for_walk(self.cr3 & BX_CR3_PAGING_MASK_PAE, laddr)?;
         let mut offset_mask = (1u64 << self.linaddr_width as u64) - 1;
 
         let mut entry_addr = [0u64; 5];
@@ -768,13 +915,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         loop {
             // Bochs paging.cc: entry_addr[leaf] = ppf + ((laddr >> (9 + 9*leaf)) & 0xff8);
-            // The & 0xFF8 mask extracts bits 11:3 of shifted value = 9-bit index * 8
             entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
 
             let entry_val = {
                 let mut buf = [0u8; 8];
-                let cpu_ref = as_cpu_ref();
-                match mem.read_physical_page(&[cpu_ref], entry_addr[leaf], 8, &mut buf) {
+                let cpu_ptr2: *const BxCpuC<I, T> = self as *const BxCpuC<I, T>;
+                // SAFETY: cpu_ptr2 points to the same self that holds the &mut
+                // borrow used outside this block; no other thread can reach
+                // it. The reference is dropped before we re-borrow self mutably.
+                let cpu_ref2 = unsafe { &*cpu_ptr2 };
+                match mem.read_physical_page(&[cpu_ref2], entry_addr[leaf], 8, &mut buf) {
                     Ok(()) => u64::from_le_bytes(buf),
                     Err(_) => {
                         return Err(super::CpuError::Memory(
@@ -827,11 +977,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             combined_access &= curr_entry.bits() as u32;
             leaf -= 1;
+            // Translate the next-level page-table base through EPT before
+            // the next iteration's read.
+            ppf = self.ept_translate_for_walk(ppf, laddr)?;
         }
 
         // Leaf permission check
-        combined_access &=
-            (entry[leaf].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+        combined_access &= (entry[leaf].bits() as u32)
+            & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
         let is_write = matches!(rw, MemoryAccessType::Write);
         let is_execute = matches!(rw, MemoryAccessType::Execute);
 
@@ -906,13 +1059,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             ));
         }
 
-        // A/D bits
+        // A/D bits — Bochs cpu/paging.cc update_ept_access_dirty
+        // re-checks EPT WRITE permission for each entry RMW.
         for level in (leaf + 1..=start_leaf).rev() {
             if !entry[level].contains(PteBits::ACCESSED) {
                 entry[level].insert(PteBits::ACCESSED);
                 let data = entry[level].bits().to_le_bytes();
                 let cpu_ref = as_cpu_ref();
-                // A/D bit update on page table entry
                 if let Err(e) = mem.write_physical_page(
                     &[cpu_ref],
                     _page_write_stamp_table,
@@ -920,11 +1073,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     8,
                     &mut data.clone(),
                 ) {
-                    tracing::trace!("A/D bit update failed at level {} addr {:#x}: {e}", level, entry_addr[level]);
+                    tracing::trace!(
+                        "A/D bit update failed at level {} addr {:#x}: {e}",
+                        level,
+                        entry_addr[level]
+                    );
                 }
             }
         }
-        let leaf_needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
+        let leaf_needed = PteBits::ACCESSED
+            | if is_write {
+                PteBits::DIRTY
+            } else {
+                PteBits::empty()
+            };
         if !entry[leaf].contains(leaf_needed) {
             entry[leaf].insert(leaf_needed);
             let data = entry[leaf].bits().to_le_bytes();
@@ -936,11 +1098,34 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 8,
                 &mut data.clone(),
             ) {
-                tracing::trace!("A/D bit update failed for leaf at {:#x}: {e}", entry_addr[leaf]);
+                tracing::trace!(
+                    "A/D bit update failed for leaf at {:#x}: {e}",
+                    entry_addr[leaf]
+                );
             }
         }
 
-        Ok(ppf | (laddr & lpf_mask as u64))
+        // Bochs paging.cc applies the EPT translation for the data page
+        // last, after the leaf permission and A/D-bit updates have run.
+        // For both 4 KiB and large-page leaves Bochs merges
+        // `(laddr & lpf_mask)` into `paddress` BEFORE translate_guest_-
+        // physical so the EPT walker sees the full guest-physical
+        // (including in-page offset). The walker returns
+        // `host_ppf | (paddress & 0xFFF)`; never re-OR `laddr & lpf_mask`
+        // afterwards or we'd land in the wrong host page when the EPT
+        // leaf is 4 KiB and the offset crosses a 4 KiB boundary.
+        let user_page = (combined_access & CombinedAccess::USER.bits()) != 0;
+        let writeable_page = (combined_access & CombinedAccess::WRITE.bits()) != 0;
+        let is_write_local = matches!(rw, MemoryAccessType::Write);
+        let ept_rw = if matches!(rw, MemoryAccessType::Execute) {
+            BxRwAccess::Execute
+        } else if is_write_local {
+            BxRwAccess::Write
+        } else {
+            BxRwAccess::Read
+        };
+        let merged = ppf | (laddr & u64::from(lpf_mask));
+        self.ept_translate_for_data(merged, laddr, user_page, writeable_page, nx_page, ept_rw)
     }
 }
 
@@ -1000,7 +1185,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     "system_write PSE PDE4M: reserved bit set: PDE={:#010x}",
                     pde
                 );
-                self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, false, true)?;
+                self.page_fault(
+                    PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(),
+                    laddr,
+                    false,
+                    true,
+                )?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
             // Set Accessed + Dirty bits on PDE for 4MB page
@@ -1068,7 +1258,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // 2MB page
         if pde.contains(PteBits::PS) {
             if pde.bits() & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
-                self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, false, true)?;
+                self.page_fault(
+                    PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(),
+                    laddr,
+                    false,
+                    true,
+                )?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
             let needed = PteBits::ACCESSED | PteBits::DIRTY;
@@ -1142,7 +1337,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if entry[leaf].contains(PteBits::PS) {
                 ppf &= 0x000F_FFFF_FFFF_E000;
                 if ppf & offset_mask != 0 {
-                    self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, false, true)?;
+                    self.page_fault(
+                        PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(),
+                        laddr,
+                        false,
+                        true,
+                    )?;
                     return Err(super::CpuError::CpuLoopRestart);
                 }
                 break;
@@ -1329,7 +1529,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if !self.long_mode() {
             return None;
         }
-        let start_leaf = if self.cr4.la57() { BX_LEVEL_PML5 } else { BX_LEVEL_PML4 };
+        let start_leaf = if self.cr4.la57() {
+            BX_LEVEL_PML5
+        } else {
+            BX_LEVEL_PML4
+        };
         let mut ppf = cr3 & BX_CR3_PAGING_MASK_PAE;
         let mut offset_mask = (1u64 << self.linaddr_width as u64) - 1;
         let mut leaf = start_leaf;
@@ -1337,9 +1541,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let entry_addr = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
             let entry = PteBits::from_raw(self.page_walk_read_qword(entry_addr));
             offset_mask >>= 9;
-            if !entry.contains(PteBits::PRESENT) { return None; }
+            if !entry.contains(PteBits::PRESENT) {
+                return None;
+            }
             ppf = entry.bits() & 0x000F_FFFF_FFFF_F000;
-            if leaf == BX_LEVEL_PTE { break; }
+            if leaf == BX_LEVEL_PTE {
+                break;
+            }
             if entry.contains(PteBits::PS) {
                 ppf &= 0x000F_FFFF_FFFF_E000;
                 break;
@@ -1381,17 +1589,37 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs `translate_linear` for legacy 32-bit paging.
     #[inline]
     pub(super) fn translate_data_read(&mut self, laddr: u64) -> Result<u64> {
-        self.translate_data_access(laddr, false)
+        self.translate_data_access(laddr, false, false)
     }
 
     /// Translate a linear address to physical for a data write.
     #[inline]
     pub(super) fn translate_data_write(&mut self, laddr: u64) -> Result<u64> {
-        self.translate_data_access(laddr, true)
+        self.translate_data_access(laddr, true, false)
+    }
+
+    /// CET: translate a linear address to physical for a shadow-stack read.
+    /// Bochs paging.cc encodes shadow-stack as `rw & 4`. The walk requires the
+    /// leaf PTE to be a shadow-stack page (R/W=0, D=1) — see check at the leaf
+    /// step in each `page_walk_for_dtlb_*` function.
+    #[inline]
+    pub(super) fn translate_shadow_stack_read(&mut self, laddr: u64) -> Result<u64> {
+        self.translate_data_access(laddr, false, true)
+    }
+
+    /// CET: translate a linear address to physical for a shadow-stack write.
+    #[inline]
+    pub(super) fn translate_shadow_stack_write(&mut self, laddr: u64) -> Result<u64> {
+        self.translate_data_access(laddr, true, true)
     }
 
     #[inline]
-    fn translate_data_access(&mut self, laddr: u64, is_write: bool) -> Result<u64> {
+    fn translate_data_access(
+        &mut self,
+        laddr: u64,
+        is_write: bool,
+        is_shadow_stack: bool,
+    ) -> Result<u64> {
         // Mask to 32 bits if not in long mode
         let laddr = if self.long_mode() {
             laddr
@@ -1408,12 +1636,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let lpf = laddr & LPF_MASK; // linear page frame
 
         // ---- DTLB lookup ----
-        // Compute which access bit we need:
-        //   read  + supervisor(0) → bit 0 (TlbAccess::SYS_READ_OK.bits())
-        //   read  + user(1)       → bit 1 (TlbAccess::USER_READ_OK.bits())
-        //   write + supervisor(0) → bit 2 (TlbAccess::SYS_WRITE_OK.bits())
-        //   write + user(1)       → bit 3 (TlbAccess::USER_WRITE_OK.bits())
-        let needed_bit = 1u32 << (((is_write as u32) << 1) | (user as u32));
+        // Bochs paging.cc — `(1 << (isShadowStack | (isWrite<<1) | user))`.
+        // Encodes the four normal {sys/user} × {read/write} bits and, with bit 4
+        // set (isShadowStack), the four SS variants 0x10..0x80.
+        let is_ss = is_shadow_stack as u32;
+        let needed_bit = 1u32 << ((is_ss << 2) | ((is_write as u32) << 1) | (user as u32));
         {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
             if tlb_entry.lpf == lpf && (tlb_entry.access_bits & needed_bit) != 0 {
@@ -1426,37 +1653,53 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // ---- DTLB miss — full page table walk ----
         self.perf_tlb_miss += 1;
-        let (paddr, combined_access, lpf_mask, pkey) = self.page_walk_for_dtlb(laddr, user, is_write)?;
+        let (paddr, combined_access, lpf_mask, pkey) =
+            self.page_walk_for_dtlb(laddr, user, is_write, is_shadow_stack)?;
         let paddr = self.apply_a20(paddr);
         let is_large_page = lpf_mask > 0xFFF;
 
         // ---- Populate DTLB entry ----
-        // Compute full access bits for this page so future accesses with
-        // different user/write combinations can also hit the TLB.
-        let wp = self.cr0.wp() as u32;
         let mut access_bits = 0u32;
-        // Check all 4 combinations: {sys_read, user_read, sys_write, user_write}
-        for &(bit, u, w) in &[
-            (TlbAccess::SYS_READ_OK.bits(), 0u32, 0u32),
-            (TlbAccess::USER_READ_OK.bits(), 1, 0),
-            (TlbAccess::SYS_WRITE_OK.bits(), 0, 1),
-            (TlbAccess::USER_WRITE_OK.bits(), 1, 1),
-        ] {
-            let priv_index = (wp << 4) | (u << 3) | combined_access | w;
-            if PRIV_CHECK[priv_index as usize] != 0 {
-                access_bits |= bit;
+        if is_shadow_stack {
+            // Bochs paging.cc — SS pages get only SS bits (+ matching ReadOK).
+            if (combined_access & CombinedAccess::USER.bits()) == 0 {
+                access_bits |= TlbAccess::SYS_READ_OK.bits() | TlbAccess::SYS_READ_SS_OK.bits();
+                if is_write {
+                    access_bits |= TlbAccess::SYS_WRITE_SS_OK.bits();
+                }
+            } else {
+                access_bits |= TlbAccess::USER_READ_OK.bits() | TlbAccess::USER_READ_SS_OK.bits();
+                if is_write {
+                    access_bits |= TlbAccess::USER_WRITE_SS_OK.bits();
+                }
             }
-        }
-        // For writes, we also need the dirty bit to have been set.
-        // If this was a read access but the page is writable, the dirty bit
-        // may not be set yet. When a future write hits this TLB entry, we
-        // need to ensure the dirty bit gets set. We handle this by only
-        // granting write permission in the TLB if the dirty bit is already set,
-        // OR if this was a write access (which already set the dirty bit).
-        // For simplicity and correctness, only grant write TLB permission
-        // when the current access is a write (dirty bit was just set).
-        if !is_write {
-            access_bits &= !(TlbAccess::SYS_WRITE_OK.bits() | TlbAccess::USER_WRITE_OK.bits());
+        } else {
+            // Compute full access bits for this page so future accesses with
+            // different user/write combinations can also hit the TLB.
+            let wp = self.cr0.wp() as u32;
+            // Check all 4 combinations: {sys_read, user_read, sys_write, user_write}
+            for &(bit, u, w) in &[
+                (TlbAccess::SYS_READ_OK.bits(), 0u32, 0u32),
+                (TlbAccess::USER_READ_OK.bits(), 1, 0),
+                (TlbAccess::SYS_WRITE_OK.bits(), 0, 1),
+                (TlbAccess::USER_WRITE_OK.bits(), 1, 1),
+            ] {
+                let priv_index = (wp << 4) | (u << 3) | combined_access | w;
+                if PRIV_CHECK[priv_index as usize] != 0 {
+                    access_bits |= bit;
+                }
+            }
+            // For writes, we also need the dirty bit to have been set.
+            // If this was a read access but the page is writable, the dirty bit
+            // may not be set yet. When a future write hits this TLB entry, we
+            // need to ensure the dirty bit gets set. We handle this by only
+            // granting write permission in the TLB if the dirty bit is already set,
+            // OR if this was a write access (which already set the dirty bit).
+            // For simplicity and correctness, only grant write TLB permission
+            // when the current access is a write (dirty bit was just set).
+            if !is_write {
+                access_bits &= !(TlbAccess::SYS_WRITE_OK.bits() | TlbAccess::USER_WRITE_OK.bits());
+            }
         }
 
         let ppf = paddr & LPF_MASK;
@@ -1479,7 +1722,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 0
             }
         };
-
 
         {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
@@ -1512,7 +1754,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let a20_addr = (paddr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;
         if !host_base.is_null() && a20_addr + 4 <= self.mem_host_len {
-            return super::access::read_unaligned_u32(super::access::host_offset(host_base, a20_addr));
+            return super::access::read_unaligned_u32(super::access::host_offset(
+                host_base, a20_addr,
+            ));
         }
         // Fallback for addresses outside RAM (shouldn't happen for page tables)
         self.mem_read_dword(paddr)
@@ -1524,7 +1768,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let a20_addr = (paddr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;
         if !host_base.is_null() && a20_addr + 4 <= self.mem_host_len {
-            super::access::write_unaligned_u32(super::access::host_offset_mut(host_base, a20_addr), val);
+            super::access::write_unaligned_u32(
+                super::access::host_offset_mut(host_base, a20_addr),
+                val,
+            );
             return;
         }
         self.mem_write_dword(paddr, val);
@@ -1536,7 +1783,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let a20_addr = (paddr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;
         if !host_base.is_null() && a20_addr + 8 <= self.mem_host_len {
-            return super::access::read_unaligned_u64(super::access::host_offset(host_base, a20_addr));
+            return super::access::read_unaligned_u64(super::access::host_offset(
+                host_base, a20_addr,
+            ));
         }
         // Fallback
         self.mem_read_qword(paddr)
@@ -1547,10 +1796,74 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let a20_addr = (paddr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;
         if !host_base.is_null() && a20_addr + 8 <= self.mem_host_len {
-            super::access::write_unaligned_u64(super::access::host_offset_mut(host_base, a20_addr), val);
+            super::access::write_unaligned_u64(
+                super::access::host_offset_mut(host_base, a20_addr),
+                val,
+            );
             return;
         }
         self.mem_write_qword(paddr, val);
+    }
+
+    /// EPT-translate a guest-physical paging-structure address to host
+    /// physical, then read 4 bytes. Bochs cpu/paging.cc — every paging-
+    /// structure access inside the page walker goes through
+    /// translate_guest_physical with `is_page_walk=true, rw=BX_READ`.
+    /// When EPT is inactive the address passes through unchanged so the
+    /// non-VMX hot path stays free of overhead.
+    #[inline]
+    fn ept_walk_read_dword(&mut self, paddr_guest: u64, laddr: u64) -> Result<u32> {
+        let host = self.ept_translate_for_walk(paddr_guest, laddr)?;
+        Ok(self.page_walk_read_dword(host))
+    }
+
+    #[inline]
+    fn ept_walk_read_qword(&mut self, paddr_guest: u64, laddr: u64) -> Result<u64> {
+        let host = self.ept_translate_for_walk(paddr_guest, laddr)?;
+        Ok(self.page_walk_read_qword(host))
+    }
+
+    /// EPT-translate a guest-physical paging-structure address, then
+    /// write. Bochs cpu/paging.cc translates paging-structure A/D RMWs
+    /// the same way as reads (`rw=BX_READ, is_page_walk=true`); the
+    /// `rw=BX_WRITE` upgrade for the EPT permission check happens only
+    /// when EPT-A/D is enabled (Bochs paging.cc translate_guest_physical
+    /// at the `BX_VMX_EPT_ACCESS_DIRTY_ENABLED` branch), and that
+    /// upgrade is performed INSIDE `translate_guest_physical` — never
+    /// at the call site. We therefore call the same `ept_translate_for_
+    /// walk` helper as the read path; `translate_guest_physical` picks
+    /// up the Write upgrade automatically when EPTP bit 6 is set.
+    #[inline]
+    fn ept_walk_write_dword(&mut self, paddr_guest: u64, laddr: u64, val: u32) -> Result<()> {
+        let host = self.ept_translate_for_walk(paddr_guest, laddr)?;
+        self.page_walk_write_dword(host, val);
+        Ok(())
+    }
+
+    #[inline]
+    fn ept_walk_write_qword(&mut self, paddr_guest: u64, laddr: u64, val: u64) -> Result<()> {
+        let host = self.ept_translate_for_walk(paddr_guest, laddr)?;
+        self.page_walk_write_qword(host, val);
+        Ok(())
+    }
+
+    /// Pick the EPT-walker `rw` that matches a leaf data access. Mirrors
+    /// Bochs cpu/paging.cc — leaf access is (Shadow)Stack-tagged when the
+    /// caller drove the walk in shadow-stack mode; otherwise plain
+    /// Read/Write. Execute fetches go through a different walk path.
+    #[inline]
+    fn ept_leaf_rw(is_write: bool, is_shadow_stack: bool) -> BxRwAccess {
+        if is_shadow_stack {
+            if is_write {
+                BxRwAccess::ShadowStackWrite
+            } else {
+                BxRwAccess::ShadowStackRead
+            }
+        } else if is_write {
+            BxRwAccess::Write
+        } else {
+            BxRwAccess::Read
+        }
     }
 
     /// DIAGNOSTIC: public wrapper for page_walk_read_qword (read-only PTE read)
@@ -1558,48 +1871,90 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.page_walk_read_qword(paddr)
     }
 
-    /// Load PDPTE entries from physical memory into the PDPTR cache.
-    /// Called when CR3 is written in PAE mode (not long mode).
-    /// Based on Bochs CheckPDPTR (paging.cc).
-    pub(super) fn load_pdptrs(&mut self) {
-        let cr3_val = self.cr3 & 0xFFFF_FFE0; // bits 31:5 of CR3
-        for n in 0..4usize {
-            let pdpe_addr = cr3_val | ((n as u64) << 3);
-            let pdptr = self.page_walk_read_qword(pdpe_addr);
-            self.pdptrcache.entry[n] = pdptr;
-            // Bochs validates reserved bits and returns false on violation,
-            // which causes #GP(0). We check reserved bits at walk time.
+    /// Bochs `CheckPDPTR(cr3_val)` — read four PAE PDPTE entries from
+    /// physical memory and validate. Returns `Ok(true)` when each
+    /// present PDPTE has its reserved bits clear; `Ok(false)` would
+    /// cause a Bochs VMABORT on host-state load of a 32-bit PAE host.
+    /// Returns `Err` when an EPT-violation surfaces during the cr3
+    /// translation (only possible when running as a VMX guest with EPT
+    /// enabled). Bochs cpu/paging.cc `CheckPDPTR` EPT-translates the
+    /// cr3 base ONCE with `guest_laddr_valid=false, is_page_walk=true,
+    /// rw=BX_READ`, reads the four PDPTEs from the resulting host base,
+    /// validates reserved bits, AND populates `PDPTR_CACHE.entry[n] =
+    /// pdptr[n]` (paging.cc `CheckPDPTR` final loop). Skipping the
+    /// cache load would leave the host PAE walker reading stale guest
+    /// PDPTRs.
+    pub(super) fn check_pdptrs(&mut self, cr3_val: u64) -> Result<bool> {
+        let cr3_base = cr3_val & 0xFFFF_FFE0;
+        let host_base = if self.ept_active() {
+            self.translate_guest_physical(
+                cr3_base,
+                /*guest_laddr=*/ 0,
+                /*guest_laddr_valid=*/ false,
+                /*is_page_walk=*/ true,
+                false,
+                false,
+                false,
+                BxRwAccess::Read,
+            )?
+        } else {
+            cr3_base
+        };
+        let mut entries = [0u64; 4];
+        for n in 0..4u64 {
+            let pdpte = self.page_walk_read_qword(host_base | (n << 3));
+            if pdpte & 0x1 != 0 && pdpte & PAGING_PAE_PDPTE_RESERVED_BITS != 0 {
+                return Ok(false);
+            }
+            entries[n as usize] = pdpte;
         }
+        // Bochs CheckPDPTR final loop: cache the validated PDPTEs.
+        for (n, e) in entries.iter().enumerate() {
+            self.pdptrcache.entry[n] = *e;
+        }
+        Ok(true)
     }
 
     /// DIAGNOSTIC: Read-only 4-level page walk that does NOT modify PTEs or TLB.
     /// Returns the physical address for the given linear address, or None if not present.
     /// Used to verify TLB entries against actual page table state.
     pub(super) fn diag_verify_laddr_ro(&self, laddr: u64) -> Option<u64> {
-        if !self.long_mode() { return None; } // only long mode for now
+        if !self.long_mode() {
+            return None;
+        } // only long mode for now
         let cr3 = self.cr3;
         // PML4E
         let pml4e_addr = (cr3 & 0x000F_FFFF_FFFF_F000) | (((laddr >> 39) & 0x1FF) << 3);
         let pml4e = self.page_walk_read_qword(pml4e_addr);
-        if pml4e & 1 == 0 { return None; }
+        if pml4e & 1 == 0 {
+            return None;
+        }
         // PDPE
         let pdpe_addr = (pml4e & 0x000F_FFFF_FFFF_F000) | (((laddr >> 30) & 0x1FF) << 3);
         let pdpe = self.page_walk_read_qword(pdpe_addr);
-        if pdpe & 1 == 0 { return None; }
-        if pdpe & 0x80 != 0 { // 1GB page
+        if pdpe & 1 == 0 {
+            return None;
+        }
+        if pdpe & 0x80 != 0 {
+            // 1GB page
             return Some((pdpe & 0x000F_FFFF_C000_0000) | (laddr & 0x3FFF_FFFF));
         }
         // PDE
         let pde_addr = (pdpe & 0x000F_FFFF_FFFF_F000) | (((laddr >> 21) & 0x1FF) << 3);
         let pde = self.page_walk_read_qword(pde_addr);
-        if pde & 1 == 0 { return None; }
-        if pde & 0x80 != 0 { // 2MB page
+        if pde & 1 == 0 {
+            return None;
+        }
+        if pde & 0x80 != 0 {
+            // 2MB page
             return Some((pde & 0x000F_FFFF_FFE0_0000) | (laddr & 0x001F_FFFF));
         }
         // PTE
         let pte_addr = (pde & 0x000F_FFFF_FFFF_F000) | (((laddr >> 12) & 0x1FF) << 3);
         let pte = self.page_walk_read_qword(pte_addr);
-        if pte & 1 == 0 { return None; }
+        if pte & 1 == 0 {
+            return None;
+        }
         Some((pte & 0x000F_FFFF_FFFF_F000) | (laddr & 0xFFF))
     }
 
@@ -1613,30 +1968,37 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         user: bool,
         is_write: bool,
+        is_shadow_stack: bool,
     ) -> Result<(u64, u32, u32, u32)> {
         self.perf_page_walk += 1;
         if self.long_mode() {
-            return self.page_walk_for_dtlb_long_mode(laddr, user, is_write);
+            return self.page_walk_for_dtlb_long_mode(laddr, user, is_write, is_shadow_stack);
         }
         // Legacy and PAE modes don't support protection keys — pkey=0
         let (paddr, combined_access, lpf_mask) = if self.cr4.pae() {
-            self.page_walk_for_dtlb_pae(laddr, user, is_write)?
+            self.page_walk_for_dtlb_pae(laddr, user, is_write, is_shadow_stack)?
         } else {
-            self.page_walk_for_dtlb_legacy(laddr, user, is_write)?
+            self.page_walk_for_dtlb_legacy(laddr, user, is_write, is_shadow_stack)?
         };
         Ok((paddr, combined_access, lpf_mask, 0))
     }
 
     /// Legacy 32-bit paging page walk for DTLB (2-level, 32-bit entries).
+    /// Each paging-structure access goes through `ept_walk_*` so the
+    /// guest-physical entry address is EPT-translated to host-physical
+    /// before the host RAM access. The leaf data page itself is also
+    /// EPT-translated before being returned. Bochs cpu/paging.cc
+    /// `translate_linear_legacy`.
     fn page_walk_for_dtlb_legacy(
         &mut self,
         laddr: u64,
         user: bool,
         is_write: bool,
+        is_shadow_stack: bool,
     ) -> Result<(u64, u32, u32)> {
         // ---- PDE ----
         let pde_addr = (self.cr3 & BX_CR3_PAGING_MASK) | (((laddr >> 22) & 0x3FF) << 2);
-        let pde = self.page_walk_read_dword(pde_addr);
+        let pde = self.ept_walk_read_dword(pde_addr, laddr)?;
 
         if pde & pte_bits32::PRESENT == 0 {
             self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, user, is_write)?;
@@ -1648,53 +2010,100 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Bochs paging.cc: check reserved bits in PSE PDE
             if (pde & PAGING_PDE4M_RESERVED_BITS) != 0 {
                 tracing::trace!("PSE PDE4M: reserved bit is set: PDE={:#010x}", pde);
-                self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                self.page_fault(
+                    PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(),
+                    laddr,
+                    user,
+                    is_write,
+                )?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
-            let combined = pde & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
-            let priv_index =
-                ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);
-            if PRIV_CHECK[priv_index as usize] == 0 {
-                self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
-                return Err(super::CpuError::CpuLoopRestart);
-            }
+            let combined = if is_shadow_stack {
+                // Bochs paging.cc — shadow-stack leaf check.
+                let upper_ca = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
+                self.check_shadow_stack_leaf(pde as u64, upper_ca, laddr, user, is_write)?
+            } else {
+                let combined = pde & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+                let priv_index = ((self.cr0.wp() as u32) << 4)
+                    | ((user as u32) << 3)
+                    | combined
+                    | (is_write as u32);
+                if PRIV_CHECK[priv_index as usize] == 0 {
+                    self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                    return Err(super::CpuError::CpuLoopRestart);
+                }
+                combined
+            };
             // Set A/D bits on the PDE.
             let needed = pte_bits32::ACCESSED | if is_write { pte_bits32::DIRTY } else { 0 };
             if pde & needed != needed {
-                self.page_walk_write_dword(pde_addr, pde | needed);
+                self.ept_walk_write_dword(pde_addr, laddr, pde | needed)?;
             }
-            let paddr = (pde as u64 & 0xFFC0_0000) | (laddr & 0x003F_FFFF);
+            // Translate the 4 MiB data page through EPT for the leaf
+            // access. Bochs cpu/paging.cc translate_guest_physical with
+            // is_page_walk=false carries the user/writeable metadata
+            // into the EPT-violation qualification.
+            let ppf_4m = pde as u64 & 0xFFC0_0000;
+            let combined_flags = CombinedAccess::from_bits_truncate(combined);
+            let host_4m = self.ept_translate_for_data(
+                ppf_4m,
+                laddr,
+                combined_flags.contains(CombinedAccess::USER),
+                combined_flags.contains(CombinedAccess::WRITE),
+                false,
+                Self::ept_leaf_rw(is_write, is_shadow_stack),
+            )?;
+            let paddr = host_4m | (laddr & 0x003F_FFFF);
             return Ok((paddr, combined, 0x3F_FFFF)); // 4MB lpf_mask
         }
 
         // ---- PTE ----
         let pte_addr = (pde as u64 & 0xFFFF_F000) | (((laddr >> 12) & 0x3FF) << 2);
-        let pte = self.page_walk_read_dword(pte_addr);
+        let pte = self.ept_walk_read_dword(pte_addr, laddr)?;
 
         if pte & pte_bits32::PRESENT == 0 {
             self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
-        let combined = (pde & pte) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
-        let priv_index =
-            ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);
-        if PRIV_CHECK[priv_index as usize] == 0 {
-            self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
-            return Err(super::CpuError::CpuLoopRestart);
-        }
+        let combined = if is_shadow_stack {
+            // Bochs paging.cc — leaf SS check uses upper-levels combined.
+            let upper_ca = pde & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+            self.check_shadow_stack_leaf(pte as u64, upper_ca, laddr, user, is_write)?
+        } else {
+            let combined =
+                (pde & pte) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+            let priv_index =
+                ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);
+            if PRIV_CHECK[priv_index as usize] == 0 {
+                self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
+            combined
+        };
 
         // Set A bit on PDE if needed.
         if pde & pte_bits32::ACCESSED == 0 {
-            self.page_walk_write_dword(pde_addr, pde | pte_bits32::ACCESSED);
+            self.ept_walk_write_dword(pde_addr, laddr, pde | pte_bits32::ACCESSED)?;
         }
         // Set A/D bits on PTE.
         let pte_needed = pte_bits32::ACCESSED | if is_write { pte_bits32::DIRTY } else { 0 };
         if pte & pte_needed != pte_needed {
-            self.page_walk_write_dword(pte_addr, pte | pte_needed);
+            self.ept_walk_write_dword(pte_addr, laddr, pte | pte_needed)?;
         }
 
-        let paddr = (pte as u64 & 0xFFFF_F000) | (laddr & 0xFFF);
+        // Translate the 4 KiB data page through EPT for the leaf access.
+        let ppf = pte as u64 & 0xFFFF_F000;
+        let combined_flags = CombinedAccess::from_bits_truncate(combined);
+        let host_ppf = self.ept_translate_for_data(
+            ppf,
+            laddr,
+            combined_flags.contains(CombinedAccess::USER),
+            combined_flags.contains(CombinedAccess::WRITE),
+            false,
+            Self::ept_leaf_rw(is_write, is_shadow_stack),
+        )?;
+        let paddr = host_ppf | (laddr & 0xFFF);
         Ok((paddr, combined, 0xFFF)) // 4KB lpf_mask
     }
 
@@ -1705,6 +2114,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         user: bool,
         is_write: bool,
+        is_shadow_stack: bool,
     ) -> Result<(u64, u32, u32)> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
@@ -1730,7 +2140,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // but also verify here for safety.
         if pdpte.bits() & PAGING_PAE_PDPTE_RESERVED_BITS != 0 {
             tracing::trace!("PAE PDPTE: reserved bit set: {:#018x}", pdpte.bits());
-            self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+            self.page_fault(
+                PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(),
+                laddr,
+                user,
+                is_write,
+            )?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
@@ -1742,7 +2157,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Bochs: ppf + ((laddr >> (9 + 9*1)) & 0xFF8) — extracts laddr bits 29:21 as byte offset
         entry_addr[BX_LEVEL_PDE] = ppf + ((laddr >> 18) & 0xFF8);
-        entry[BX_LEVEL_PDE] = PteBits::from_raw(self.page_walk_read_qword(entry_addr[BX_LEVEL_PDE]));
+        entry[BX_LEVEL_PDE] =
+            PteBits::from_raw(self.ept_walk_read_qword(entry_addr[BX_LEVEL_PDE], laddr)?);
 
         // Check present
         if !entry[BX_LEVEL_PDE].contains(PteBits::PRESENT) {
@@ -1757,7 +2173,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 entry[BX_LEVEL_PDE].bits(),
                 entry[BX_LEVEL_PDE].bits() & reserved
             );
-            self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+            self.page_fault(
+                PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(),
+                laddr,
+                user,
+                is_write,
+            )?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
@@ -1773,8 +2194,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if entry[BX_LEVEL_PDE].contains(PteBits::PS) {
             // Check 2MB PDE reserved bits (bits 20:13 must be zero)
             if entry[BX_LEVEL_PDE].bits() & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
-                tracing::trace!("PAE PDE2M: reserved bit set: {:#018x}", entry[BX_LEVEL_PDE].bits());
-                self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                tracing::trace!(
+                    "PAE PDE2M: reserved bit set: {:#018x}",
+                    entry[BX_LEVEL_PDE].bits()
+                );
+                self.page_fault(
+                    PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(),
+                    laddr,
+                    user,
+                    is_write,
+                )?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
 
@@ -1782,8 +2211,114 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             ppf = entry[BX_LEVEL_PDE].bits() & 0x000F_FFFF_FFE0_0000;
 
             // Leaf entry permission check
-            combined_access &=
-                (entry[BX_LEVEL_PDE].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+            if is_shadow_stack {
+                // Bochs paging.cc — leaf SS check.
+                combined_access = self.check_shadow_stack_leaf(
+                    entry[BX_LEVEL_PDE].bits(),
+                    combined_access,
+                    laddr,
+                    user,
+                    is_write,
+                )?;
+            } else {
+                combined_access &= (entry[BX_LEVEL_PDE].bits() as u32)
+                    & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+
+                let priv_index = ((self.cr0.wp() as u32) << 4)
+                    | ((user as u32) << 3)
+                    | combined_access
+                    | (is_write as u32);
+                if PRIV_CHECK[priv_index as usize] == 0 {
+                    self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                    return Err(super::CpuError::CpuLoopRestart);
+                }
+
+                // SMAP check for 2MB page (skipped for SS — Bochs doesn't apply SMAP on SS access)
+                if self.cr4.smap()
+                    && !user
+                    && (combined_access & CombinedAccess::USER.bits()) != 0
+                    && self.get_ac() == 0
+                {
+                    self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                    return Err(super::CpuError::CpuLoopRestart);
+                }
+            }
+
+            // Update A/D bits on PDE (leaf for 2MB page)
+            let needed = PteBits::ACCESSED
+                | if is_write {
+                    PteBits::DIRTY
+                } else {
+                    PteBits::empty()
+                };
+            if !entry[BX_LEVEL_PDE].contains(needed) {
+                entry[BX_LEVEL_PDE].insert(needed);
+                self.ept_walk_write_qword(
+                    entry_addr[BX_LEVEL_PDE],
+                    laddr,
+                    entry[BX_LEVEL_PDE].bits(),
+                )?;
+            }
+
+            // EPT-translate the 2 MiB data page for the leaf access.
+            let combined_flags = CombinedAccess::from_bits_truncate(combined_access);
+            let host_ppf = self.ept_translate_for_data(
+                ppf,
+                laddr,
+                combined_flags.contains(CombinedAccess::USER),
+                combined_flags.contains(CombinedAccess::WRITE),
+                nx_page,
+                Self::ept_leaf_rw(is_write, is_shadow_stack),
+            )?;
+            let paddr = host_ppf | (laddr & 0x001F_FFFF);
+            return Ok((paddr, combined_access, 0x1F_FFFF)); // 2MB lpf_mask
+        }
+
+        combined_access &= entry[BX_LEVEL_PDE].bits() as u32; // U/S and R/W from PDE
+
+        // ---- PTE ----
+        entry_addr[BX_LEVEL_PTE] = ppf + (((laddr >> 12) & 0x1FF) << 3);
+        entry[BX_LEVEL_PTE] =
+            PteBits::from_raw(self.ept_walk_read_qword(entry_addr[BX_LEVEL_PTE], laddr)?);
+
+        // Check present
+        if !entry[BX_LEVEL_PTE].contains(PteBits::PRESENT) {
+            self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        // Check reserved bits
+        if entry[BX_LEVEL_PTE].bits() & reserved != 0 {
+            tracing::trace!(
+                "PAE PTE: reserved bit set: {:#018x}",
+                entry[BX_LEVEL_PTE].bits()
+            );
+            self.page_fault(
+                PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(),
+                laddr,
+                user,
+                is_write,
+            )?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        // Check NX on PTE
+        if entry[BX_LEVEL_PTE].bits() & PAGE_DIRECTORY_NX_BIT != 0 {
+            nx_page = true;
+        }
+
+        // Leaf permission check
+        if is_shadow_stack {
+            combined_access = self.check_shadow_stack_leaf(
+                entry[BX_LEVEL_PTE].bits(),
+                combined_access,
+                laddr,
+                user,
+                is_write,
+            )?;
+        } else {
+            combined_access &= (entry[BX_LEVEL_PTE].bits() as u32)
+                & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
 
             let priv_index = ((self.cr0.wp() as u32) << 4)
                 | ((user as u32) << 3)
@@ -1794,82 +2329,98 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return Err(super::CpuError::CpuLoopRestart);
             }
 
-            // SMAP check for 2MB page
-            if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
-                && self.get_ac() == 0 {
-                    self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
-                    return Err(super::CpuError::CpuLoopRestart);
-                }
-
-            // Update A/D bits on PDE (leaf for 2MB page)
-            let needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
-            if !entry[BX_LEVEL_PDE].contains(needed) {
-                entry[BX_LEVEL_PDE].insert(needed);
-                self.page_walk_write_qword(entry_addr[BX_LEVEL_PDE], entry[BX_LEVEL_PDE].bits());
-            }
-
-            let paddr = ppf | (laddr & 0x001F_FFFF);
-            return Ok((paddr, combined_access, 0x1F_FFFF)); // 2MB lpf_mask
-        }
-
-        combined_access &= entry[BX_LEVEL_PDE].bits() as u32; // U/S and R/W from PDE
-
-        // ---- PTE ----
-        entry_addr[BX_LEVEL_PTE] = ppf + (((laddr >> 12) & 0x1FF) << 3);
-        entry[BX_LEVEL_PTE] = PteBits::from_raw(self.page_walk_read_qword(entry_addr[BX_LEVEL_PTE]));
-
-        // Check present
-        if !entry[BX_LEVEL_PTE].contains(PteBits::PRESENT) {
-            self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, user, is_write)?;
-            return Err(super::CpuError::CpuLoopRestart);
-        }
-
-        // Check reserved bits
-        if entry[BX_LEVEL_PTE].bits() & reserved != 0 {
-            tracing::trace!("PAE PTE: reserved bit set: {:#018x}", entry[BX_LEVEL_PTE].bits());
-            self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
-            return Err(super::CpuError::CpuLoopRestart);
-        }
-
-        // Check NX on PTE
-        if entry[BX_LEVEL_PTE].bits() & PAGE_DIRECTORY_NX_BIT != 0 {
-            nx_page = true;
-        }
-
-        // Leaf permission check
-        combined_access &=
-            (entry[BX_LEVEL_PTE].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
-
-        let priv_index = ((self.cr0.wp() as u32) << 4)
-            | ((user as u32) << 3)
-            | combined_access
-            | (is_write as u32);
-        if PRIV_CHECK[priv_index as usize] == 0 {
-            self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
-            return Err(super::CpuError::CpuLoopRestart);
-        }
-
-        // SMAP check: supervisor data access to user page when AC=0
-        if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
-            && self.get_ac() == 0 {
+            // SMAP check: supervisor data access to user page when AC=0
+            if self.cr4.smap()
+                && !user
+                && (combined_access & CombinedAccess::USER.bits()) != 0
+                && self.get_ac() == 0
+            {
                 self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
+        }
 
         // Update A/D bits — PDE gets A bit, PTE gets A+D
         if !entry[BX_LEVEL_PDE].contains(PteBits::ACCESSED) {
             entry[BX_LEVEL_PDE].insert(PteBits::ACCESSED);
-            self.page_walk_write_qword(entry_addr[BX_LEVEL_PDE], entry[BX_LEVEL_PDE].bits());
+            self.ept_walk_write_qword(entry_addr[BX_LEVEL_PDE], laddr, entry[BX_LEVEL_PDE].bits())?;
         }
-        let pte_needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
+        let pte_needed = PteBits::ACCESSED
+            | if is_write {
+                PteBits::DIRTY
+            } else {
+                PteBits::empty()
+            };
         if !entry[BX_LEVEL_PTE].contains(pte_needed) {
             entry[BX_LEVEL_PTE].insert(pte_needed);
-            self.page_walk_write_qword(entry_addr[BX_LEVEL_PTE], entry[BX_LEVEL_PTE].bits());
+            self.ept_walk_write_qword(entry_addr[BX_LEVEL_PTE], laddr, entry[BX_LEVEL_PTE].bits())?;
         }
 
+        // EPT-translate the 4 KiB data page for the leaf access.
         ppf = entry[BX_LEVEL_PTE].bits() & 0x000F_FFFF_FFFF_F000;
-        let paddr = ppf | (laddr & 0xFFF);
+        let combined_flags = CombinedAccess::from_bits_truncate(combined_access);
+        let host_ppf = self.ept_translate_for_data(
+            ppf,
+            laddr,
+            combined_flags.contains(CombinedAccess::USER),
+            combined_flags.contains(CombinedAccess::WRITE),
+            nx_page,
+            Self::ept_leaf_rw(is_write, is_shadow_stack),
+        )?;
+        let paddr = host_ppf | (laddr & 0xFFF);
         Ok((paddr, combined_access, 0xFFF)) // 4KB lpf_mask
+    }
+
+    /// CET shadow-stack leaf-entry check, mirrors Bochs paging.cc.
+    ///
+    /// `combined_access` is the (USER, WRITE) intersection accumulated across
+    /// upper levels, BEFORE being AND-ed with the leaf entry. `leaf_entry` is
+    /// the raw u64 leaf PDE/PTE value (legacy callers widen u32 → u64).
+    ///
+    /// On success, returns the post-AND combined_access. On failure raises #PF.
+    fn check_shadow_stack_leaf(
+        &mut self,
+        leaf_entry: u64,
+        combined_access: u32,
+        laddr: u64,
+        user: bool,
+        is_write: bool,
+    ) -> Result<u32> {
+        // Bochs paging.cc — `shadow_stack_page = WRITEABLE && (entry & 0x40 == D) && (entry & 0x02 == 0 == !R/W)`.
+        let combined_writeable = (combined_access & CombinedAccess::WRITE.bits()) != 0;
+        let leaf_d = (leaf_entry & PteBits::DIRTY.bits()) != 0;
+        let leaf_rw_clear = (leaf_entry & PteBits::RW.bits()) == 0;
+        let shadow_stack_page = combined_writeable && leaf_d && leaf_rw_clear;
+        let mut err = PageFaultError::PROTECTION.bits() | PageFaultError::SHADOW_STACK.bits();
+        if is_write {
+            err |= PageFaultError::WRITE_ACCESS.bits();
+        }
+        if user {
+            err |= PageFaultError::USER_ACCESS.bits();
+        }
+        if !shadow_stack_page {
+            tracing::trace!(
+                "shadow stack access on non-SS page: laddr={:#x} leaf={:#x} CA={:#x}",
+                laddr,
+                leaf_entry,
+                combined_access
+            );
+            self.page_fault(err, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+        let combined = combined_access & (leaf_entry as u32);
+        // Bochs paging.cc — U/S of leaf must match user (1=user shadow stack, 0=supervisor).
+        if (combined & CombinedAccess::USER.bits()) ^ ((user as u32) << 2) != 0 {
+            tracing::trace!(
+                "shadow stack U/S mismatch: laddr={:#x} CA={:#x} user={}",
+                laddr,
+                combined,
+                user
+            );
+            self.page_fault(err, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+        Ok(combined)
     }
 
     /// Handle protection keys (PKRU/PKS) for a page table leaf entry.
@@ -1884,16 +2435,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         user_page: bool,
         is_write: bool,
     ) -> Result<u32> {
-
         if self.cr4.pke() && user_page {
             let pkey = ((leaf_entry >> 59) & 0xf) as u32;
 
             // check of accessDisable bit set
             if self.pkru & (1 << (pkey * 2)) != 0 {
-                tracing::error!("protection key access not allowed PKRU={:#x} pkey={}", self.pkru, pkey);
+                tracing::error!(
+                    "protection key access not allowed PKRU={:#x} pkey={}",
+                    self.pkru,
+                    pkey
+                );
                 self.page_fault(
                     PageFaultError::PROTECTION.bits() | PageFaultError::PKEY.bits(),
-                    laddr, user, is_write,
+                    laddr,
+                    user,
+                    is_write,
                 )?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
@@ -1901,10 +2457,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // check of writeDisable bit set
             if self.pkru & (1 << (pkey * 2 + 1)) != 0 {
                 if is_write && (user || self.cr0.wp()) {
-                    tracing::error!("protection key write not allowed PKRU={:#x} pkey={}", self.pkru, pkey);
+                    tracing::error!(
+                        "protection key write not allowed PKRU={:#x} pkey={}",
+                        self.pkru,
+                        pkey
+                    );
                     self.page_fault(
                         PageFaultError::PROTECTION.bits() | PageFaultError::PKEY.bits(),
-                        laddr, user, is_write,
+                        laddr,
+                        user,
+                        is_write,
                     )?;
                     return Err(super::CpuError::CpuLoopRestart);
                 }
@@ -1916,10 +2478,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             // check of accessDisable bit set
             if self.pkrs & (1 << (pkey * 2)) != 0 {
-                tracing::error!("protection key access not allowed PKRS={:#x} pkey={}", self.pkrs, pkey);
+                tracing::error!(
+                    "protection key access not allowed PKRS={:#x} pkey={}",
+                    self.pkrs,
+                    pkey
+                );
                 self.page_fault(
                     PageFaultError::PROTECTION.bits() | PageFaultError::PKEY.bits(),
-                    laddr, user, is_write,
+                    laddr,
+                    user,
+                    is_write,
                 )?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
@@ -1927,10 +2495,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // check of writeDisable bit set
             if self.pkrs & (1 << (pkey * 2 + 1)) != 0 {
                 if is_write && self.cr0.wp() {
-                    tracing::error!("protection key write not allowed PKRS={:#x} pkey={}", self.pkrs, pkey);
+                    tracing::error!(
+                        "protection key write not allowed PKRS={:#x} pkey={}",
+                        self.pkrs,
+                        pkey
+                    );
                     self.page_fault(
                         PageFaultError::PROTECTION.bits() | PageFaultError::PKEY.bits(),
-                        laddr, user, is_write,
+                        laddr,
+                        user,
+                        is_write,
                     )?;
                     return Err(super::CpuError::CpuLoopRestart);
                 }
@@ -1949,6 +2523,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         user: bool,
         is_write: bool,
+        is_shadow_stack: bool,
     ) -> Result<(u64, u32, u32, u32)> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
@@ -1979,7 +2554,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         loop {
             entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
-            entry[leaf] = PteBits::from_raw(self.page_walk_read_qword(entry_addr[leaf]));
+            entry[leaf] = PteBits::from_raw(self.ept_walk_read_qword(entry_addr[leaf], laddr)?);
 
             offset_mask >>= 9;
 
@@ -1993,7 +2568,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             // Check reserved bits
             if curr_entry.bits() & reserved != 0 {
-                self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                self.page_fault(
+                    PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(),
+                    laddr,
+                    user,
+                    is_write,
+                )?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
 
@@ -2002,7 +2582,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 // PS bit set — valid only at BX_LEVEL_PDE (2MB) and BX_LEVEL_PDPTE (1GB)
                 if leaf > BX_LEVEL_PDPTE {
                     // PS at PML4 or PML5 level is reserved
-                    self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                    self.page_fault(
+                        PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(),
+                        laddr,
+                        user,
+                        is_write,
+                    )?;
                     return Err(super::CpuError::CpuLoopRestart);
                 }
             }
@@ -2022,7 +2607,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if curr_entry.contains(PteBits::PS) {
                 ppf &= 0x000F_FFFF_FFFF_E000; // clear bit 12 for large pages
                 if ppf & offset_mask != 0 {
-                    self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                    self.page_fault(
+                        PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(),
+                        laddr,
+                        user,
+                        is_write,
+                    )?;
                     return Err(super::CpuError::CpuLoopRestart);
                 }
                 lpf_mask = offset_mask as u32;
@@ -2033,48 +2623,82 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             leaf -= 1;
         }
 
+        // Protection keys check (Bochs handle_pkeys) — runs for both regular and SS paths.
+        // Bochs paging.cc calls handle_pkeys before check_leaf_entry_faults; we
+        // mirror that order so PKEY faults still take precedence.
+        let pre_leaf_user = ((entry[leaf].bits() as u32) & CombinedAccess::USER.bits()) != 0;
+        let pkey = self.handle_pkeys(laddr, entry[leaf].bits(), user, pre_leaf_user, is_write)?;
+
         // Leaf entry permission check
-        combined_access &=
-            (entry[leaf].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
+        if is_shadow_stack {
+            combined_access = self.check_shadow_stack_leaf(
+                entry[leaf].bits(),
+                combined_access,
+                laddr,
+                user,
+                is_write,
+            )?;
+        } else {
+            combined_access &= (entry[leaf].bits() as u32)
+                & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
 
-        // Protection keys check (Bochs handle_pkeys)
-        let user_page = (combined_access & CombinedAccess::USER.bits()) != 0;
-        let pkey = self.handle_pkeys(laddr, entry[leaf].bits(), user, user_page, is_write)?;
-
-        let priv_index = ((self.cr0.wp() as u32) << 4)
-            | ((user as u32) << 3)
-            | combined_access
-            | (is_write as u32);
-        if PRIV_CHECK[priv_index as usize] == 0 {
-            self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
-            return Err(super::CpuError::CpuLoopRestart);
-        }
-
-        // SMEP check: not applicable for data access (handled by translate_linear for execute)
-
-        // SMAP check: supervisor data access to user page when AC=0
-        // Bochs paging.cc
-        if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
-            && self.get_ac() == 0 {
+            let priv_index = ((self.cr0.wp() as u32) << 4)
+                | ((user as u32) << 3)
+                | combined_access
+                | (is_write as u32);
+            if PRIV_CHECK[priv_index as usize] == 0 {
                 self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
+
+            // SMEP check: not applicable for data access (handled by translate_linear for execute)
+
+            // SMAP check: supervisor data access to user page when AC=0
+            // Bochs paging.cc — skipped for SS access (Bochs check_leaf_entry_faults
+            // doesn't apply SMAP on shadow-stack accesses).
+            if self.cr4.smap()
+                && !user
+                && (combined_access & CombinedAccess::USER.bits()) != 0
+                && self.get_ac() == 0
+            {
+                self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
+        }
 
         // Update A/D bits for all levels
         // Non-leaf levels get A bit, leaf gets A+D
         for level in (leaf + 1..=start_leaf).rev() {
             if !entry[level].contains(PteBits::ACCESSED) {
                 entry[level].insert(PteBits::ACCESSED);
-                self.page_walk_write_qword(entry_addr[level], entry[level].bits());
+                self.ept_walk_write_qword(entry_addr[level], laddr, entry[level].bits())?;
             }
         }
-        let leaf_needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
+        let leaf_needed = PteBits::ACCESSED
+            | if is_write {
+                PteBits::DIRTY
+            } else {
+                PteBits::empty()
+            };
         if !entry[leaf].contains(leaf_needed) {
             entry[leaf].insert(leaf_needed);
-            self.page_walk_write_qword(entry_addr[leaf], entry[leaf].bits());
+            self.ept_walk_write_qword(entry_addr[leaf], laddr, entry[leaf].bits())?;
         }
 
-        let paddr = ppf | (laddr & lpf_mask as u64);
+        // EPT-translate the leaf data page. Bochs cpu/paging.cc translates
+        // the final guest_paddr through translate_guest_physical with
+        // is_page_walk=false so the EPT-violation qualification carries
+        // user/writeable/nx page metadata.
+        let combined_flags = CombinedAccess::from_bits_truncate(combined_access);
+        let host_ppf = self.ept_translate_for_data(
+            ppf,
+            laddr,
+            combined_flags.contains(CombinedAccess::USER),
+            combined_flags.contains(CombinedAccess::WRITE),
+            nx_page,
+            Self::ept_leaf_rw(is_write, is_shadow_stack),
+        )?;
+        let paddr = host_ppf | (laddr & lpf_mask as u64);
         Ok((paddr, combined_access, lpf_mask, pkey))
     }
 }

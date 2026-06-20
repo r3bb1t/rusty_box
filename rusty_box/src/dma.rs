@@ -23,7 +23,6 @@
 //! Currently no devices register DMA handlers (IDE uses PIO, floppy not implemented),
 //! so the machinery exists structurally but no actual data transfers occur.
 
-
 /// DMA buffer size for transfers (Bochs dma.h BX_DMA_BUFFER_SIZE = 512)
 const BX_DMA_BUFFER_SIZE: usize = 512;
 
@@ -230,11 +229,7 @@ impl BxDmaC {
     /// Set RAM pointer for physical DMA transfers.
     /// Must be called after init() with valid pointer to emulator RAM.
     /// Matches Bochs DEV_MEM_READ_PHYSICAL_DMA / DEV_MEM_WRITE_PHYSICAL_DMA.
-    pub fn set_memory_ptrs(
-        &mut self,
-        mem_base: *mut u8,
-        mem_len: usize,
-    ) {
+    pub fn set_memory_ptrs(&mut self, mem_base: *mut u8, mem_len: usize) {
         self.memory_base = core::ptr::NonNull::new(mem_base);
         self.memory_len = mem_len;
     }
@@ -290,10 +285,7 @@ impl BxDmaC {
         name: &str,
     ) -> bool {
         if !(4..=7).contains(&channel) {
-            tracing::error!(
-                "registerDMA16Channel: invalid channel number({})",
-                channel
-            );
+            tracing::error!("registerDMA16Channel: invalid channel number({})", channel);
             return false;
         }
         let ch = channel & 0x03;
@@ -560,8 +552,9 @@ impl BxDmaC {
 
         // Update address and count (Bochs dma.cc)
         if !self.s[ma_sl].chan[channel].mode.address_decrement {
-            self.s[ma_sl].chan[channel].current_address =
-                self.s[ma_sl].chan[channel].current_address.wrapping_add(len);
+            self.s[ma_sl].chan[channel].current_address = self.s[ma_sl].chan[channel]
+                .current_address
+                .wrapping_add(len);
         } else {
             self.s[ma_sl].chan[channel].current_address =
                 self.s[ma_sl].chan[channel].current_address.wrapping_sub(1);
@@ -582,8 +575,7 @@ impl BxDmaC {
                 // Autoinit: reload count and base address (Bochs dma.cc)
                 self.s[ma_sl].chan[channel].current_address =
                     self.s[ma_sl].chan[channel].base_address;
-                self.s[ma_sl].chan[channel].current_count =
-                    self.s[ma_sl].chan[channel].base_count;
+                self.s[ma_sl].chan[channel].current_count = self.s[ma_sl].chan[channel].base_count;
             }
 
             // Clear TC, HLDA, HRQ, DACK (Bochs dma.cc)
@@ -630,7 +622,9 @@ impl BxDmaC {
         match self.memory_base {
             Some(ptr) if offset < self.memory_len => {
                 // SAFETY: bounds checked above; pointer valid for emulator lifetime.
-                unsafe { *ptr.as_ptr().add(offset) = value; }
+                unsafe {
+                    *ptr.as_ptr().add(offset) = value;
+                }
             }
             _ => {}
         }
@@ -643,10 +637,7 @@ impl BxDmaC {
         // The array is stack-allocated with natural alignment >= 2 for u16.
         // Length BX_DMA_BUFFER_SIZE / 2 stays within the buffer.
         unsafe {
-            core::slice::from_raw_parts(
-                buffer.as_ptr() as *const u16,
-                BX_DMA_BUFFER_SIZE / 2,
-            )
+            core::slice::from_raw_parts(buffer.as_ptr() as *const u16, BX_DMA_BUFFER_SIZE / 2)
         }
     }
 
@@ -655,10 +646,7 @@ impl BxDmaC {
     fn buffer_as_word_slice_mut(buffer: &mut [u8; BX_DMA_BUFFER_SIZE]) -> &mut [u16] {
         // SAFETY: same as buffer_as_word_slice; mutable borrow is exclusive.
         unsafe {
-            core::slice::from_raw_parts_mut(
-                buffer.as_mut_ptr() as *mut u16,
-                BX_DMA_BUFFER_SIZE / 2,
-            )
+            core::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u16, BX_DMA_BUFFER_SIZE / 2)
         }
     }
 
@@ -674,7 +662,10 @@ impl BxDmaC {
 
     /// Write physical memory for DMA transfer.
     fn mem_write_physical_dma(&mut self, addr: u32, len: u32, buffer: &[u8]) {
-        for (i, &byte) in buffer[..(len as usize).min(buffer.len())].iter().enumerate() {
+        for (i, &byte) in buffer[..(len as usize).min(buffer.len())]
+            .iter()
+            .enumerate()
+        {
             self.write_memory_byte(addr as usize + i, byte);
         }
     }
@@ -690,8 +681,7 @@ impl BxDmaC {
         match address {
             // Current address registers (Bochs dma.cc)
             0x00 | 0x02 | 0x04 | 0x06 | 0xC0 | 0xC4 | 0xC8 | 0xCC => {
-                let channel =
-                    ((address >> (1 + ma_sl as u16)) & 0x03) as usize;
+                let channel = ((address >> (1 + ma_sl as u16)) & 0x03) as usize;
                 if !self.s[ma_sl].flip_flop {
                     self.s[ma_sl].flip_flop = true;
                     (self.s[ma_sl].chan[channel].current_address & 0xFF) as u32
@@ -703,8 +693,7 @@ impl BxDmaC {
 
             // Current count registers (Bochs dma.cc)
             0x01 | 0x03 | 0x05 | 0x07 | 0xC2 | 0xC6 | 0xCA | 0xCE => {
-                let channel =
-                    ((address >> (1 + ma_sl as u16)) & 0x03) as usize;
+                let channel = ((address >> (1 + ma_sl as u16)) & 0x03) as usize;
                 if !self.s[ma_sl].flip_flop {
                     self.s[ma_sl].flip_flop = true;
                     (self.s[ma_sl].chan[channel].current_count & 0xFF) as u32
@@ -744,10 +733,7 @@ impl BxDmaC {
 
             // Extra page registers (Bochs dma.cc)
             0x0080 | 0x0084 | 0x0085 | 0x0086 | 0x0088 | 0x008C | 0x008D | 0x008E => {
-                tracing::trace!(
-                    "DMA: read extra page register {:#06x} (unused)",
-                    address
-                );
+                tracing::trace!("DMA: read extra page register {:#06x} (unused)", address);
                 self.ext_page_reg[(address & 0x0F) as usize] as u32
             }
 
@@ -780,11 +766,7 @@ impl BxDmaC {
                 self.write(address + 1, value >> 8, 1);
                 return;
             }
-            tracing::trace!(
-                "DMA: io write to address {:#010x}, len={}",
-                address,
-                io_len
-            );
+            tracing::trace!("DMA: io write to address {:#010x}, len={}", address, io_len);
             return;
         }
 
@@ -794,8 +776,7 @@ impl BxDmaC {
         match address {
             // Address registers (Bochs dma.cc)
             0x00 | 0x02 | 0x04 | 0x06 | 0xC0 | 0xC4 | 0xC8 | 0xCC => {
-                let channel =
-                    ((address >> (1 + ma_sl as u16)) & 0x03) as usize;
+                let channel = ((address >> (1 + ma_sl as u16)) & 0x03) as usize;
                 if !self.s[ma_sl].flip_flop {
                     // 1st byte
                     self.s[ma_sl].chan[channel].base_address = value as u16;
@@ -810,8 +791,7 @@ impl BxDmaC {
 
             // Count registers (Bochs dma.cc)
             0x01 | 0x03 | 0x05 | 0x07 | 0xC2 | 0xC6 | 0xCA | 0xCE => {
-                let channel =
-                    ((address >> (1 + ma_sl as u16)) & 0x03) as usize;
+                let channel = ((address >> (1 + ma_sl as u16)) & 0x03) as usize;
                 if !self.s[ma_sl].flip_flop {
                     // 1st byte
                     self.s[ma_sl].chan[channel].base_count = value as u16;
@@ -843,11 +823,7 @@ impl BxDmaC {
                 if value & 0x04 != 0 {
                     // Set request bit in status reg
                     self.s[ma_sl].status_reg |= 1 << (channel + 4);
-                    tracing::trace!(
-                        "DMA-{}: set request bit for channel {}",
-                        ma_sl + 1,
-                        channel
-                    );
+                    tracing::trace!("DMA-{}: set request bit for channel {}", ma_sl + 1, channel);
                 } else {
                     // Clear request bit in status reg
                     self.s[ma_sl].status_reg &= !(1 << (channel + 4));
@@ -943,16 +919,11 @@ impl BxDmaC {
             }
 
             _ => {
-                tracing::trace!(
-                    "DMA: write ignored: {:#06x} = {:#04x}",
-                    address,
-                    value
-                );
+                tracing::trace!("DMA: write ignored: {:#06x} = {:#04x}", address, value);
             }
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

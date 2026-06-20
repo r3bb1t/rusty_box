@@ -8,12 +8,7 @@
 //! - PCMPISTRM (66 0F 3A 62): Implicit-length (null-terminated), result to XMM0
 //! - PCMPISTRI (66 0F 3A 63): Implicit-length, index to ECX
 
-use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
-    decoder::Instruction,
-    xmm::BxPackedXmmRegister,
-};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, xmm::BxPackedXmmRegister};
 
 // ============================================================================
 // Helper functions (free functions matching Bochs static helpers)
@@ -51,14 +46,26 @@ fn compare_strings(
                     bool_res[j][i] = match aggregation_operation {
                         0 | 2 | 3 => {
                             // 'equal' comparison
-                            if a == b { 1 } else { 0 }
+                            if a == b {
+                                1
+                            } else {
+                                0
+                            }
                         }
                         1 => {
                             // 'ranges' comparison
                             if (i % 2) == 0 {
-                                if a <= b { 1 } else { 0 }
+                                if a <= b {
+                                    1
+                                } else {
+                                    0
+                                }
                             } else {
-                                if a >= b { 1 } else { 0 }
+                                if a >= b {
+                                    1
+                                } else {
+                                    0
+                                }
                             }
                         }
                         _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
@@ -74,13 +81,25 @@ fn compare_strings(
                     let b = op2.xmm16u(j);
                     bool_res[j][i] = match aggregation_operation {
                         0 | 2 | 3 => {
-                            if a == b { 1 } else { 0 }
+                            if a == b {
+                                1
+                            } else {
+                                0
+                            }
                         }
                         1 => {
                             if (i % 2) == 0 {
-                                if a <= b { 1 } else { 0 }
+                                if a <= b {
+                                    1
+                                } else {
+                                    0
+                                }
                             } else {
-                                if a >= b { 1 } else { 0 }
+                                if a >= b {
+                                    1
+                                } else {
+                                    0
+                                }
                             }
                         }
                         _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
@@ -96,13 +115,25 @@ fn compare_strings(
                     let b = op2.xmm_sbyte(j);
                     bool_res[j][i] = match aggregation_operation {
                         0 | 2 | 3 => {
-                            if a == b { 1 } else { 0 }
+                            if a == b {
+                                1
+                            } else {
+                                0
+                            }
                         }
                         1 => {
                             if (i % 2) == 0 {
-                                if a <= b { 1 } else { 0 }
+                                if a <= b {
+                                    1
+                                } else {
+                                    0
+                                }
                             } else {
-                                if a >= b { 1 } else { 0 }
+                                if a >= b {
+                                    1
+                                } else {
+                                    0
+                                }
                             }
                         }
                         _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
@@ -118,13 +149,25 @@ fn compare_strings(
                     let b = op2.xmm16s(j);
                     bool_res[j][i] = match aggregation_operation {
                         0 | 2 | 3 => {
-                            if a == b { 1 } else { 0 }
+                            if a == b {
+                                1
+                            } else {
+                                0
+                            }
                         }
                         1 => {
                             if (i % 2) == 0 {
-                                if a <= b { 1 } else { 0 }
+                                if a <= b {
+                                    1
+                                } else {
+                                    0
+                                }
                             } else {
-                                if a >= b { 1 } else { 0 }
+                                if a >= b {
+                                    1
+                                } else {
+                                    0
+                                }
                             }
                         }
                         _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
@@ -276,12 +319,7 @@ fn aggregate(bool_res: &[[u8; 16]; 16], len1: usize, len2: usize, imm: u8) -> u1
             for j in 0..num_elements {
                 let mut res = false;
                 for i in 0..num_elements {
-                    if override_if_data_invalid(
-                        bool_res[j][i] != 0,
-                        i < len1,
-                        j < len2,
-                        imm,
-                    ) {
+                    if override_if_data_invalid(bool_res[j][i] != 0, i < len1, j < len2, imm) {
                         res = true;
                         break;
                     }
@@ -297,17 +335,14 @@ fn aggregate(bool_res: &[[u8; 16]; 16], len1: usize, len2: usize, imm: u8) -> u1
                 let mut res = false;
                 let mut i = 0;
                 while i < num_elements {
-                    if override_if_data_invalid(
-                        bool_res[j][i] != 0,
-                        i < len1,
-                        j < len2,
-                        imm,
-                    ) && override_if_data_invalid(
-                        bool_res[j][i + 1] != 0,
-                        (i + 1) < len1,
-                        j < len2,
-                        imm,
-                    ) {
+                    if override_if_data_invalid(bool_res[j][i] != 0, i < len1, j < len2, imm)
+                        && override_if_data_invalid(
+                            bool_res[j][i + 1] != 0,
+                            (i + 1) < len1,
+                            j < len2,
+                            imm,
+                        )
+                    {
                         res = true;
                         break;
                     }
@@ -321,12 +356,7 @@ fn aggregate(bool_res: &[[u8; 16]; 16], len1: usize, len2: usize, imm: u8) -> u1
         2 => {
             // 'equal each'
             for j in 0..num_elements {
-                if override_if_data_invalid(
-                    bool_res[j][j] != 0,
-                    j < len1,
-                    j < len2,
-                    imm,
-                ) {
+                if override_if_data_invalid(bool_res[j][j] != 0, j < len1, j < len2, imm) {
                     result |= 1 << j;
                 }
             }
@@ -338,12 +368,7 @@ fn aggregate(bool_res: &[[u8; 16]; 16], len1: usize, len2: usize, imm: u8) -> u1
                 let mut i = 0;
                 let mut k = j;
                 while i < (num_elements - j) && k < num_elements {
-                    if !override_if_data_invalid(
-                        bool_res[k][i] != 0,
-                        i < len1,
-                        k < len2,
-                        imm,
-                    ) {
+                    if !override_if_data_invalid(bool_res[k][i] != 0, i < len1, k < len2, imm) {
                         res = false;
                         break;
                     }
@@ -389,10 +414,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Lengths from EAX/RAX (op1 length) and EDX/RDX (op2 length).
     /// Result written to XMM0.
     /// Sets CF, ZF, SF, OF; clears AF, PF.
-    pub(super) fn pcmpestrm_vdq_wdq_ib(
-        &mut self,
-        instr: &Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn pcmpestrm_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
@@ -425,26 +447,41 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if imm8 & 0x40 != 0 {
             if num_elements == 8 {
                 for index in 0..8 {
-                        result.set_xmm16u(index, if result2 & (1 << index) != 0 { 0xFFFF } else { 0 });
+                    result.set_xmm16u(
+                        index,
+                        if result2 & (1 << index) != 0 {
+                            0xFFFF
+                        } else {
+                            0
+                        },
+                    );
                 }
             } else {
                 // num_elements = 16
                 for index in 0..16 {
-                        result.set_xmmubyte(index, if result2 & (1 << index) != 0 { 0xFF } else { 0 });
+                    result.set_xmmubyte(index, if result2 & (1 << index) != 0 { 0xFF } else { 0 });
                 }
             }
         } else {
-                result.set_xmm64u(1, 0);
-                result.set_xmm64u(0, result2 as u64);
+            result.set_xmm64u(1, 0);
+            result.set_xmm64u(0, result2 as u64);
         }
 
         // Bochs sse_string.cc PCMPESTRM: setEFlagsOSZAPC(flags)
         let mut flags: u32 = 0;
         use super::eflags::EFlags;
-        if result2 != 0 { flags |= EFlags::CF.bits(); }
-        if len1 < num_elements { flags |= EFlags::SF.bits(); }
-        if len2 < num_elements { flags |= EFlags::ZF.bits(); }
-        if result2 & 0x1 != 0 { flags |= EFlags::OF.bits(); }
+        if result2 != 0 {
+            flags |= EFlags::CF.bits();
+        }
+        if len1 < num_elements {
+            flags |= EFlags::SF.bits();
+        }
+        if len2 < num_elements {
+            flags |= EFlags::ZF.bits();
+        }
+        if result2 & 0x1 != 0 {
+            flags |= EFlags::OF.bits();
+        }
         self.set_eflags_oszapc(flags);
 
         // Store result to XMM0
@@ -458,10 +495,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Lengths from EAX/RAX (op1 length) and EDX/RDX (op2 length).
     /// Index of first/last set bit written to ECX/RCX.
     /// Sets CF, ZF, SF, OF; clears AF, PF.
-    pub(super) fn pcmpestri_vdq_wdq_ib(
-        &mut self,
-        instr: &Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn pcmpestri_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
@@ -499,11 +533,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     break;
                 }
             }
-            index = if idx < 0 {
-                num_elements
-            } else {
-                idx as usize
-            };
+            index = if idx < 0 { num_elements } else { idx as usize };
         } else {
             // The index returned to ECX is of the LSB in result2
             let mut idx = num_elements;
@@ -520,10 +550,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs sse_string.cc PCMPESTRI: setEFlagsOSZAPC(flags)
         let mut flags: u32 = 0;
         use super::eflags::EFlags;
-        if result2 != 0 { flags |= EFlags::CF.bits(); }
-        if len1 < num_elements { flags |= EFlags::SF.bits(); }
-        if len2 < num_elements { flags |= EFlags::ZF.bits(); }
-        if result2 & 0x1 != 0 { flags |= EFlags::OF.bits(); }
+        if result2 != 0 {
+            flags |= EFlags::CF.bits();
+        }
+        if len1 < num_elements {
+            flags |= EFlags::SF.bits();
+        }
+        if len2 < num_elements {
+            flags |= EFlags::ZF.bits();
+        }
+        if result2 & 0x1 != 0 {
+            flags |= EFlags::OF.bits();
+        }
         self.set_eflags_oszapc(flags);
 
         Ok(())
@@ -534,10 +572,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Lengths determined by scanning operands for null terminators.
     /// Result written to XMM0.
     /// Sets CF, ZF, SF, OF; clears AF, PF.
-    pub(super) fn pcmpistrm_vdq_wdq_ib(
-        &mut self,
-        instr: &Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn pcmpistrm_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
@@ -559,26 +594,41 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if imm8 & 0x40 != 0 {
             if num_elements == 8 {
                 for index in 0..8 {
-                        result.set_xmm16u(index, if result2 & (1 << index) != 0 { 0xFFFF } else { 0 });
+                    result.set_xmm16u(
+                        index,
+                        if result2 & (1 << index) != 0 {
+                            0xFFFF
+                        } else {
+                            0
+                        },
+                    );
                 }
             } else {
                 // num_elements = 16
                 for index in 0..16 {
-                        result.set_xmmubyte(index, if result2 & (1 << index) != 0 { 0xFF } else { 0 });
+                    result.set_xmmubyte(index, if result2 & (1 << index) != 0 { 0xFF } else { 0 });
                 }
             }
         } else {
-                result.set_xmm64u(1, 0);
-                result.set_xmm64u(0, result2 as u64);
+            result.set_xmm64u(1, 0);
+            result.set_xmm64u(0, result2 as u64);
         }
 
         // Bochs sse_string.cc PCMPISTRM: setEFlagsOSZAPC(flags)
         let mut flags: u32 = 0;
         use super::eflags::EFlags;
-        if result2 != 0 { flags |= EFlags::CF.bits(); }
-        if len1 < num_elements { flags |= EFlags::SF.bits(); }
-        if len2 < num_elements { flags |= EFlags::ZF.bits(); }
-        if result2 & 0x1 != 0 { flags |= EFlags::OF.bits(); }
+        if result2 != 0 {
+            flags |= EFlags::CF.bits();
+        }
+        if len1 < num_elements {
+            flags |= EFlags::SF.bits();
+        }
+        if len2 < num_elements {
+            flags |= EFlags::ZF.bits();
+        }
+        if result2 & 0x1 != 0 {
+            flags |= EFlags::OF.bits();
+        }
         self.set_eflags_oszapc(flags);
 
         // Store result to XMM0
@@ -592,10 +642,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Lengths determined by scanning operands for null terminators.
     /// Index of first/last set bit written to ECX/RCX.
     /// Sets CF, ZF, SF, OF; clears AF, PF.
-    pub(super) fn pcmpistri_vdq_wdq_ib(
-        &mut self,
-        instr: &Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn pcmpistri_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
@@ -622,11 +669,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     break;
                 }
             }
-            index = if idx < 0 {
-                num_elements
-            } else {
-                idx as usize
-            };
+            index = if idx < 0 { num_elements } else { idx as usize };
         } else {
             // The index returned to ECX is of the LSB in result2
             let mut idx = num_elements;
@@ -643,10 +686,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs sse_string.cc PCMPISTRI: setEFlagsOSZAPC(flags)
         let mut flags: u32 = 0;
         use super::eflags::EFlags;
-        if result2 != 0 { flags |= EFlags::CF.bits(); }
-        if len1 < num_elements { flags |= EFlags::SF.bits(); }
-        if len2 < num_elements { flags |= EFlags::ZF.bits(); }
-        if result2 & 0x1 != 0 { flags |= EFlags::OF.bits(); }
+        if result2 != 0 {
+            flags |= EFlags::CF.bits();
+        }
+        if len1 < num_elements {
+            flags |= EFlags::SF.bits();
+        }
+        if len2 < num_elements {
+            flags |= EFlags::ZF.bits();
+        }
+        if result2 & 0x1 != 0 {
+            flags |= EFlags::OF.bits();
+        }
         self.set_eflags_oszapc(flags);
 
         Ok(())

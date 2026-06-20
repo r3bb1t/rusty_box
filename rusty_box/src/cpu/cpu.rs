@@ -45,6 +45,7 @@ pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 const BX_DTLB_SIZE: usize = 4096;
 const BX_ITLB_SIZE: usize = 1024;
 
+#[cfg(feature = "alloc")]
 use super::avx::AMX;
 
 use super::tlb::BxMemType;
@@ -61,13 +62,19 @@ pub struct BxGenReg {
 impl BxGenReg {
     /// Full 64-bit value (RAX, RCX, ...).
     #[inline(always)]
-    pub fn rrx(&self) -> u64 { self.value }
+    pub fn rrx(&self) -> u64 {
+        self.value
+    }
     #[inline(always)]
-    pub fn set_rrx(&mut self, v: u64) { self.value = v; }
+    pub fn set_rrx(&mut self, v: u64) {
+        self.value = v;
+    }
 
     /// Lower 32-bit dword (EAX, ECX, ...). Does NOT zero-extend on read.
     #[inline(always)]
-    pub fn erx(&self) -> u32 { self.value as u32 }
+    pub fn erx(&self) -> u32 {
+        self.value as u32
+    }
     /// Write lower 32 bits, PRESERVING upper 32 bits.
     /// Callers that need x86-64 zero-extension must also call set_hrx(0).
     #[inline(always)]
@@ -77,7 +84,9 @@ impl BxGenReg {
 
     /// Upper 32 bits (used for zero-extension checks).
     #[inline(always)]
-    pub fn hrx(&self) -> u32 { (self.value >> 32) as u32 }
+    pub fn hrx(&self) -> u32 {
+        (self.value >> 32) as u32
+    }
     #[inline(always)]
     pub fn set_hrx(&mut self, v: u32) {
         self.value = (self.value & 0x0000_0000_FFFF_FFFF) | ((v as u64) << 32);
@@ -85,7 +94,9 @@ impl BxGenReg {
 
     /// Lower 16-bit word (AX, CX, ...).
     #[inline(always)]
-    pub fn rx(&self) -> u16 { self.value as u16 }
+    pub fn rx(&self) -> u16 {
+        self.value as u16
+    }
     /// Write lower 16 bits, preserving all other bits.
     #[inline(always)]
     pub fn set_rx(&mut self, v: u16) {
@@ -94,7 +105,9 @@ impl BxGenReg {
 
     /// Low byte (AL, CL, ...).
     #[inline(always)]
-    pub fn rl(&self) -> u8 { self.value as u8 }
+    pub fn rl(&self) -> u8 {
+        self.value as u8
+    }
     #[inline(always)]
     pub fn set_rl(&mut self, v: u8) {
         self.value = (self.value & !0xFF) | v as u64;
@@ -102,7 +115,9 @@ impl BxGenReg {
 
     /// High byte of low word (AH, CH, ...).
     #[inline(always)]
-    pub fn rh(&self) -> u8 { (self.value >> 8) as u8 }
+    pub fn rh(&self) -> u8 {
+        (self.value >> 8) as u8
+    }
     #[inline(always)]
     pub fn set_rh(&mut self, v: u8) {
         self.value = (self.value & !0xFF00) | ((v as u64) << 8);
@@ -461,7 +476,15 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
 
     pub(super) msrs: [MSR; BX_MSR_MAX_INDEX],
 
-    pub(super) amx: Option<AMX>,
+    // Box-allocated under `feature = "alloc"` because AMX carries 8 KiB of
+    // tile-data buffers \u2014 too big to inline into every CpuC when most CPUs
+    // (e.g. Skylake-X) never need it. Without an allocator (UEFI / no_std)
+    // AMX is unsupported by construction; the Option degenerates to a
+    // zero-sized never-Some via `Infallible`.
+    #[cfg(feature = "alloc")]
+    pub(super) amx: Option<alloc::boxed::Box<AMX>>,
+    #[cfg(not(feature = "alloc"))]
+    pub(super) amx: Option<core::convert::Infallible>,
 
     pub(super) in_vmx: bool,
     pub(super) in_vmx_guest: bool,
@@ -688,11 +711,9 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     #[cfg(feature = "bx_debugger")]
     pub(super) guard_found: BxGuardFound,
 
-
     /// Instrumentation: monomorphized tracer + closure hooks.
     /// With `T = ()` and no closures registered, this is 4 bytes (the bitmask).
     pub(crate) instrumentation: super::instrumentation::InstrumentationRegistry<T>,
-
 
     #[cfg(feature = "instrumentation")]
     pub(crate) page_permissions: Option<crate::memory::permissions::PagePermissions>,
@@ -749,7 +770,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// Wired by the emulator during execution, cleared afterwards.
     pub(super) pc_system_ptr: Option<NonNull<crate::pc_system::BxPcSystemC>>,
 
-
     /// Debug flags for one-time boot diagnostics (no globals).
     ///
     /// Bit 0: reported unsupported opcode
@@ -765,30 +785,83 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// outer-loop iteration to check for wake conditions.
     pub(super) const BX_ASYNC_EVENT_SLEEP: u32 = 1;
 
-    /// Event bit: external interrupt pending (PIC int_pin asserted).
-    /// Bochs uses bit 10; we use bit 0 for internal consistency.
-    pub(crate) const BX_EVENT_PENDING_INTR: u32 = 1 << 0;
+    // Event bit layout — matches Bochs `cpu.h:1193-1208` exactly.
+    // Each bit identifies a single asynchronous event in the
+    // `pending_event` / `event_mask` bitmaps the cpu maintains.
 
-    /// Event bit: NMI pending/masked. Bochs cpu.h uses bit 0,
-    /// but we use bit 1 to avoid conflict with PENDING_INTR.
-    /// Masked on NMI delivery, unmasked on IRET.
-    pub(super) const BX_EVENT_NMI: u32 = 1 << 1;
+    /// Bochs cpu.h `BX_EVENT_NMI`. Masked on NMI delivery, unmasked
+    /// on IRET.
+    pub(super) const BX_EVENT_NMI: u32 = 1 << 0;
 
-    /// Event bit: LAPIC interrupt pending.
-    /// Bochs cpu.h uses bit 11; we use bit 2.
-    pub(crate) const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 2;
-
-    /// Event bit: System Management Interrupt pending.
-    /// Bochs cpu.h uses bit 1; we use bit 6 (bits 0-2 already taken).
-    /// SMI enters System Management Mode — not implemented for single-CPU Alpine/DLX.
+    /// Bochs cpu.h `BX_EVENT_SMI`. SMI enters System Management Mode
+    /// — not implemented for single-CPU Alpine/DLX.
     #[allow(dead_code)]
-    pub(super) const BX_EVENT_SMI: u32 = 1 << 6;
+    pub(super) const BX_EVENT_SMI: u32 = 1 << 1;
 
-    /// Event bit: INIT signal pending (CPU reset).
-    /// Bochs cpu.h uses bit 2; we use bit 7 (bits 0-2 already taken).
-    /// INIT is used by multiprocessor startup (INIT-SIPI-SIPI) — not implemented.
+    /// Bochs cpu.h `BX_EVENT_INIT`. INIT is used by multiprocessor
+    /// startup (INIT-SIPI-SIPI) — not implemented.
     #[allow(dead_code)]
-    pub(super) const BX_EVENT_INIT: u32 = 1 << 7;
+    pub(super) const BX_EVENT_INIT: u32 = 1 << 2;
+
+    /// Bochs cpu.h `BX_EVENT_VMX_MONITOR_TRAP_FLAG`. Signalled at
+    /// VMENTRY when MONITOR_TRAP_FLAG ctrl is set, or by injected MTF
+    /// (type=Other, vector=0); consumed after the next guest
+    /// instruction to fire the MTF VMEXIT.
+    pub(super) const BX_EVENT_VMX_MONITOR_TRAP_FLAG: u32 = 1 << 4;
+
+    /// Bochs cpu.h `BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED`. Signalled
+    /// by the LAPIC tick callback when the preemption-timer fire
+    /// deadline is reached; consumed by `handle_async_event`.
+    pub(super) const BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED: u32 = 1 << 5;
+
+    /// Bochs cpu.h `BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING`. Signalled
+    /// at VMENTRY when `INTERRUPT_WINDOW_VMEXIT` is set in proc-based
+    /// controls; consumed by `handle_async_event` whenever
+    /// `RFLAGS.IF=1` and external-interrupt inhibition is clear.
+    pub(super) const BX_EVENT_VMX_INTERRUPT_WINDOW_EXITING: u32 = 1 << 6;
+
+    /// Bochs cpu.h `BX_EVENT_VMX_VIRTUAL_NMI`. Used in place of
+    /// `BX_EVENT_NMI` for masking when the pin-based VIRTUAL_NMI
+    /// control is set, so the host-side NMI state is independent of
+    /// the guest's virtual-NMI tracking.
+    pub(super) const BX_EVENT_VMX_VIRTUAL_NMI: u32 = 1 << 7;
+
+    /// Bochs cpu.h `BX_EVENT_PENDING_VMX_VIRTUAL_INTR`. Pending
+    /// virtual-interrupt request (VMX virtual-interrupt-delivery).
+    /// Cleared on VMEXIT.
+    #[allow(dead_code)]
+    pub(super) const BX_EVENT_PENDING_VMX_VIRTUAL_INTR: u32 = 1 << 9;
+
+    /// Bochs cpu.h `BX_EVENT_PENDING_INTR`. External interrupt pending
+    /// (PIC int_pin asserted).
+    pub(crate) const BX_EVENT_PENDING_INTR: u32 = 1 << 10;
+
+    /// Bochs cpu.h `BX_EVENT_PENDING_LAPIC_INTR`. LAPIC interrupt
+    /// pending.
+    pub(crate) const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 11;
+
+    /// Bochs cpu.h `BX_EVENT_PENDING_UINTR`. User-level interrupt
+    /// pending.
+    pub(super) const BX_EVENT_PENDING_UINTR: u32 = 1 << 12;
+
+    /// Bochs cpu.h `BX_EVENT_VMX_VTPR_UPDATE`. Signalled when the
+    /// virtual-TPR shadow is mutated and the next instruction
+    /// boundary needs to re-evaluate TPR-threshold VMEXIT.
+    /// Cleared on VMEXIT.
+    #[allow(dead_code)]
+    pub(super) const BX_EVENT_VMX_VTPR_UPDATE: u32 = 1 << 13;
+
+    /// Bochs cpu.h `BX_EVENT_VMX_VEOI_UPDATE`. Signalled by virtual
+    /// EOI on the virtual-APIC page; consumed to deliver the
+    /// virtualized-EOI VMEXIT. Cleared on VMEXIT.
+    #[allow(dead_code)]
+    pub(super) const BX_EVENT_VMX_VEOI_UPDATE: u32 = 1 << 14;
+
+    /// Bochs cpu.h `BX_EVENT_VMX_VIRTUAL_APIC_WRITE`. Signalled when
+    /// a write hits the virtual-APIC page so the next instruction
+    /// boundary can deliver the APIC-WRITE VMEXIT. Cleared on VMEXIT.
+    #[allow(dead_code)]
+    pub(super) const BX_EVENT_VMX_VIRTUAL_APIC_WRITE: u32 = 1 << 15;
 
     /// Returns a mutable raw pointer to the Local APIC for cross-module wiring.
     /// Used by emulator.rs to wire I/O APIC → LAPIC interrupt delivery.
@@ -837,6 +910,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs: cpu_mode >= BX_MODE_IA32_PROTECTED (includes Protected, LongCompat, Long64)
     pub(super) fn protected_mode(&self) -> bool {
         self.cpu_mode >= CpuMode::Ia32Protected
+    }
+
+    /// Borrow the optional AMX state. Always `None` on no-alloc builds: the
+    /// `Option` storage degenerates to `Option<Infallible>` so this returns
+    /// `None` without any cfg-gating at the call site.
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub(super) fn amx_ref(&self) -> Option<&crate::cpu::avx::AMX> {
+        self.amx.as_deref()
+    }
+    #[cfg(not(feature = "alloc"))]
+    #[inline]
+    pub(super) fn amx_ref(&self) -> Option<&crate::cpu::avx::AMX> {
+        None
+    }
+
+    /// Mutable counterpart of [`amx_ref`]. Always `None` on no-alloc builds.
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub(super) fn amx_mut(&mut self) -> Option<&mut crate::cpu::avx::AMX> {
+        self.amx.as_deref_mut()
+    }
+    #[cfg(not(feature = "alloc"))]
+    #[inline]
+    pub(super) fn amx_mut(&mut self) -> Option<&mut crate::cpu::avx::AMX> {
+        None
     }
 
     pub(super) fn bx_write_opmask(&mut self, index: usize, val_64: u64) {
@@ -934,8 +1033,6 @@ pub(super) struct PdptrCache {
     pub(crate) entry: [u64; 4],
 }
 
-
-
 #[derive(Debug, Default)]
 pub struct BxRegsMsr {
     pub(crate) apicbase: BxPhyAddress,
@@ -973,8 +1070,8 @@ pub struct BxRegsMsr {
     pub(crate) ia32_interrupt_ssp_table: u64,
 
     // FRED MSRs
-    pub(crate) ia32_fred_rsp: [u64; 4],          // RSP0-RSP3
-    pub(crate) ia32_fred_ssp: [u64; 4],          // SSP0-SSP3 (CET)
+    pub(crate) ia32_fred_rsp: [u64; 4], // RSP0-RSP3
+    pub(crate) ia32_fred_ssp: [u64; 4], // SSP0-SSP3 (CET)
     pub(crate) ia32_fred_stack_levels: u64,
     pub(crate) ia32_fred_cfg: u64,
 
@@ -992,7 +1089,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn v8086_mode(&self) -> bool {
         self.cpu_mode == CpuMode::Ia32V8086
     }
-
 
     fn bx_write_32bit_regz(&mut self, index: usize, val: u32) {
         self.gen_reg[index].set_rrx(val as _);
@@ -1111,20 +1207,20 @@ impl MonitorAddr {
 
 #[derive(Debug, Default)]
 pub(super) struct Uintr {
-    ui_handler: BxAddress,
-    stack_adjust: u64,
+    pub(super) ui_handler: BxAddress,
+    pub(super) stack_adjust: u64,
     /// user interrupt notification vector, actually 8 bit
-    uinv: u32,
+    pub(super) uinv: u32,
     /// user interrupt target table size
-    uitt_size: u32,
+    pub(super) uitt_size: u32,
     /// user interrupt target table address
-    uitt_addr: BxAddress,
+    pub(super) uitt_addr: BxAddress,
     /// user posted-interrupt descriptor address
-    upid_addr: BxAddress,
+    pub(super) upid_addr: BxAddress,
     /// user-interrupt request register
-    uirr: u64,
+    pub(super) uirr: u64,
     /// if UIF=0 user interrupt cannot be delivered
-    uif: bool,
+    pub(super) uif: bool,
 }
 
 impl Uintr {
@@ -1315,7 +1411,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 let src = self.prev_rip;
                 let dst = self.rip();
                 self.instrumentation.fire_branch(
-                    &super::instrumentation::BranchEvent::CnearTaken { src_rip: src, dst_rip: dst },
+                    &super::instrumentation::BranchEvent::CnearTaken {
+                        src_rip: src,
+                        dst_rip: dst,
+                    },
                 );
             }
         } else {
@@ -1337,17 +1436,20 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Fire an unconditional near branch hook (JMP/CALL/RET/LOOP).
     /// Call AFTER the branch_near* sets the new IP.
     #[inline(always)]
-    pub(crate) fn on_ucnear_branch(&mut self, what: super::instrumentation::BranchType, new_rip: u64) {
+    pub(crate) fn on_ucnear_branch(
+        &mut self,
+        what: super::instrumentation::BranchType,
+        new_rip: u64,
+    ) {
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_branch() {
             let src = self.prev_rip;
-            self.instrumentation.fire_branch(
-                &super::instrumentation::BranchEvent::Ucnear {
+            self.instrumentation
+                .fire_branch(&super::instrumentation::BranchEvent::Ucnear {
                     kind: what,
                     src_rip: src,
                     dst_rip: new_rip,
-                },
-            );
+                });
         }
         #[cfg(not(feature = "instrumentation"))]
         {
@@ -1367,15 +1469,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_branch() {
             let src_rip = self.prev_rip;
-            self.instrumentation.fire_branch(
-                &super::instrumentation::BranchEvent::Far {
+            self.instrumentation
+                .fire_branch(&super::instrumentation::BranchEvent::Far {
                     kind: what,
                     src_cs: prev_cs,
                     src_rip,
                     dst_cs: new_cs,
                     dst_rip: new_rip,
-                },
-            );
+                });
         }
         #[cfg(not(feature = "instrumentation"))]
         {
@@ -1415,18 +1516,19 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// # Safety
     /// `ptr` must point to a zeroed buffer of at least `size_of::<BxCpuC<I, T>>()`
     /// bytes, properly aligned, exclusively owned, and valid for `'static`.
-    pub unsafe fn init_on_ptr(ptr: *mut Self) where T: Default {
+    pub unsafe fn init_on_ptr(ptr: *mut Self)
+    where
+        T: Default,
+    {
         core::ptr::addr_of_mut!((*ptr).cpuid).write(I::new());
         core::ptr::addr_of_mut!((*ptr).ignore_bad_msrs).write(true);
         core::ptr::addr_of_mut!((*ptr).a20_mask).write(0xFFFF_FFFF_FFFF_FFFF);
         core::ptr::addr_of_mut!((*ptr).last_exception_type).write(-1);
-        core::ptr::addr_of_mut!((*ptr).instrumentation).write(
-            super::instrumentation::InstrumentationRegistry::with_tracer(T::default()),
-        );
+        core::ptr::addr_of_mut!((*ptr).instrumentation)
+            .write(super::instrumentation::InstrumentationRegistry::with_tracer(T::default()));
         core::ptr::addr_of_mut!((*ptr).dtlb).write(super::tlb::Tlb::new());
         core::ptr::addr_of_mut!((*ptr).itlb).write(super::tlb::Tlb::new());
     }
-
 
     #[inline]
     pub fn set_pc_system_ptr(&mut self, ps: NonNull<crate::pc_system::BxPcSystemC>) {
@@ -1445,7 +1547,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     pub(super) fn io_bus_mut(&mut self) -> Option<&mut crate::iodev::BxDevicesC> {
         self.io_bus.map(|mut p| unsafe { p.as_mut() })
     }
-
 
     #[inline(always)]
     pub(super) fn pc_system_mut(&mut self) -> Option<&mut crate::pc_system::BxPcSystemC> {
@@ -1470,7 +1571,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// lifetime, and the `*const BxCpuC` re-borrow is non-aliasing because
     /// nothing writes through it while `mem` is live.
     #[inline(always)]
-    pub(super) fn mem_bus_and_cpu(&self) -> Option<(&mut crate::memory::BxMemC<'c>, &BxCpuC<'c, I, T>)> {
+    pub(super) fn mem_bus_and_cpu(
+        &self,
+    ) -> Option<(&mut crate::memory::BxMemC<'c>, &BxCpuC<'c, I, T>)> {
         let mem_bus = self.mem_bus?;
         // SAFETY: mem_bus valid for duration of cpu_loop; single-threaded access
         let mem = unsafe { &mut *mem_bus.as_ptr() };
@@ -1478,7 +1581,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         let cpu_ref: &BxCpuC<'c, I, T> = unsafe { &*(self as *const BxCpuC<'c, I, T>) };
         Some((mem, cpu_ref))
     }
-
 
     /// Propagate PIC interrupt flags to CPU event state.
     ///
@@ -1494,8 +1596,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if let Some(io) = self.io_bus_mut() {
             let pending = io.pic_irq_pending;
             let cleared = io.pic_irq_cleared;
-            if pending { io.pic_irq_pending = false; }
-            if cleared { io.pic_irq_cleared = false; }
+            if pending {
+                io.pic_irq_pending = false;
+            }
+            if cleared {
+                io.pic_irq_cleared = false;
+            }
             // io borrow ends here (NLL); safe to mutate self fields
             if pending {
                 self.pending_event |= Self::BX_EVENT_PENDING_INTR;
@@ -1506,8 +1612,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             }
         }
     }
-
-
 
     /// Check HRQ (DMA Hold Request) state from pc_system.
     /// Matches Bochs `BX_HRQ` macro (pc_system.h) which reads
@@ -1606,7 +1710,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Sets EXT=1, uses the unified interrupt() for proper inhibit_mask clearing,
     /// speculative_rsp, and BadVector recovery, then commits prev_rip.
     pub(crate) fn inject_external_interrupt(&mut self, vector: u8) -> Result<()> {
-        #[cfg(debug_assertions)] {
+        #[cfg(debug_assertions)]
+        {
             self.diag_inject_ext_intr_count += 1;
             self.diag_inject_ext_intr_vectors[vector as usize] += 1;
         }
@@ -1614,7 +1719,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // BOCHS BX_INSTR_HWINTERRUPT(cpu_id, vector, cs, eip)
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_hw_interrupt() {
-            let cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
+            let cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
+                .selector
+                .value;
             let rip = self.rip();
             let ev = super::instrumentation::HwInterruptEvent { vector, cs, rip };
             self.instrumentation.fire_hwinterrupt(&ev);
@@ -1638,7 +1745,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // - BadVector → exception() recovery
         // - mode dispatch (real vs protected)
         // soft_int=false, no error code for external IRQs
-        let result = self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, false, 0);
+        let result = self.interrupt(
+            vector,
+            super::exception::InterruptType::ExternalInterrupt,
+            false,
+            false,
+            0,
+        );
 
         // Commit prev_rip after successful delivery (Bochs event.cc)
         if result.is_ok() {
@@ -1911,17 +2024,27 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // ilen=0 is valid ONLY for InsertedOpcode (trace boundary marker)
                 if ilen_val == 0 || ilen_val > 15 {
                     let oc = instr_ref().get_ia_opcode();
-                    assert!(ilen_val == 0 && oc == super::decoder::Opcode::InsertedOpcode,
-                        "Invalid ilen={} opcode={:?} at RIP={:#x}", ilen_val, oc, self.gen_reg[BX_64BIT_REG_RIP].rrx());
+                    assert!(
+                        ilen_val == 0 && oc == super::decoder::Opcode::InsertedOpcode,
+                        "Invalid ilen={} opcode={:?} at RIP={:#x}",
+                        ilen_val,
+                        oc,
+                        self.gen_reg[BX_64BIT_REG_RIP].rrx()
+                    );
                 }
-                self.gen_reg[BX_64BIT_REG_RIP].set_rrx(self.gen_reg[BX_64BIT_REG_RIP].rrx() + ilen_val as u64);
+                self.gen_reg[BX_64BIT_REG_RIP]
+                    .set_rrx(self.gen_reg[BX_64BIT_REG_RIP].rrx() + ilen_val as u64);
                 if is_real {
-                    self.gen_reg[BX_64BIT_REG_RIP].set_rrx(self.gen_reg[BX_64BIT_REG_RIP].rrx() & 0xFFFF);
+                    self.gen_reg[BX_64BIT_REG_RIP]
+                        .set_rrx(self.gen_reg[BX_64BIT_REG_RIP].rrx() & 0xFFFF);
                 }
 
                 // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
                 let opcode = instr_ref().get_ia_opcode();
-                #[cfg(debug_assertions)] { self.diag_current_opcode = opcode as u16; }
+                #[cfg(debug_assertions)]
+                {
+                    self.diag_current_opcode = opcode as u16;
+                }
 
                 // Bochs BX_INSTR_BEFORE_EXECUTION(cpu_id, i)
                 #[cfg(feature = "instrumentation")]
@@ -1973,12 +2096,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 self.perf_instructions += 1;
 
                 iteration += 1;
-
-
-
-
-
-
 
                 // Check async events (matching C++ line 215: if (async_event) break;)
                 // When async_event is set (branch taken, exception, HLT, etc.), we MUST
@@ -2193,7 +2310,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         let cache_hit = matches!(entry.p_addr, crate::cpu::icache::IcacheAddress::Address(addr) if addr == p_addr)
             && entry.i.ilen() != 0;
 
-
         if cache_hit {
             // SMC detection: compare first 8 bytes against current memory
             let mut smc_invalid = false;
@@ -2259,7 +2375,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.gen_reg[idx].set_hrx(0);
         }
     }
-
 
     pub(super) fn update_flags_add32(&mut self, op1: u32, op2: u32, res: u32) {
         // Bochs SET_FLAGS_OSZAPC_ADD_32: works for ADD and ADC
@@ -2332,20 +2447,56 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     // See docs/future-plans/lazy-flags-read-side.md for the plan.
 
     /// Read a single arithmetic flag from the lazy `oszapc` store.
-    #[inline] pub(super) fn getb_cf(&self) -> u32 { self.oszapc.getb_cf() }
-    #[inline] pub(super) fn getb_pf(&self) -> u32 { self.oszapc.getb_pf() }
-    #[inline] pub(super) fn getb_af(&self) -> u32 { self.oszapc.getb_af() }
-    #[inline] pub(super) fn getb_zf(&self) -> u32 { self.oszapc.getb_zf() }
-    #[inline] pub(super) fn getb_sf(&self) -> u32 { self.oszapc.getb_sf() }
-    #[inline] pub(super) fn getb_of(&self) -> u32 { self.oszapc.getb_of() }
+    #[inline]
+    pub(super) fn getb_cf(&self) -> u32 {
+        self.oszapc.getb_cf()
+    }
+    #[inline]
+    pub(super) fn getb_pf(&self) -> u32 {
+        self.oszapc.getb_pf()
+    }
+    #[inline]
+    pub(super) fn getb_af(&self) -> u32 {
+        self.oszapc.getb_af()
+    }
+    #[inline]
+    pub(super) fn getb_zf(&self) -> u32 {
+        self.oszapc.getb_zf()
+    }
+    #[inline]
+    pub(super) fn getb_sf(&self) -> u32 {
+        self.oszapc.getb_sf()
+    }
+    #[inline]
+    pub(super) fn getb_of(&self) -> u32 {
+        self.oszapc.getb_of()
+    }
 
     /// Write a single arithmetic flag into the lazy `oszapc` store.
-    #[inline] pub(super) fn set_cf(&mut self, val: bool) { self.oszapc.set_cf(val) }
-    #[inline] pub(super) fn set_pf(&mut self, val: bool) { self.oszapc.set_pf(val) }
-    #[inline] pub(super) fn set_af(&mut self, val: bool) { self.oszapc.set_af(val) }
-    #[inline] pub(super) fn set_zf(&mut self, val: bool) { self.oszapc.set_zf(val) }
-    #[inline] pub(super) fn set_sf(&mut self, val: bool) { self.oszapc.set_sf(val) }
-    #[inline] pub(super) fn set_of(&mut self, val: bool) { self.oszapc.set_of(val) }
+    #[inline]
+    pub(super) fn set_cf(&mut self, val: bool) {
+        self.oszapc.set_cf(val)
+    }
+    #[inline]
+    pub(super) fn set_pf(&mut self, val: bool) {
+        self.oszapc.set_pf(val)
+    }
+    #[inline]
+    pub(super) fn set_af(&mut self, val: bool) {
+        self.oszapc.set_af(val)
+    }
+    #[inline]
+    pub(super) fn set_zf(&mut self, val: bool) {
+        self.oszapc.set_zf(val)
+    }
+    #[inline]
+    pub(super) fn set_sf(&mut self, val: bool) {
+        self.oszapc.set_sf(val)
+    }
+    #[inline]
+    pub(super) fn set_of(&mut self, val: bool) {
+        self.oszapc.set_of(val)
+    }
 
     /// Materialize all six arithmetic flags from `oszapc` into `eflags`.
     /// Bochs `force_flags()`. Call before any code that reads the full
@@ -2358,9 +2509,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             | (self.oszapc.getb_sf() << 7)
             | (self.oszapc.getb_of() << 11);
         let mask = EFlags::OSZAPC.bits();
-        self.eflags = EFlags::from_bits_retain(
-            (self.eflags.bits() & !mask) | (new & mask)
-        );
+        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !mask) | (new & mask));
     }
 
     /// Materialize lazy flags then return the full `eflags` value.
@@ -2400,7 +2549,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     fn before_execution(&mut self, _cpu_id: u32) {
         // Populate RIP ring buffer for post-mortem analysis.
         // Cheap: one array write per instruction, no I/O.
-        #[cfg(debug_assertions)] {
+        #[cfg(debug_assertions)]
+        {
             let idx = self.diag_rip_ring_idx % 256;
             self.diag_rip_ring[idx] = self.rip();
             self.diag_rip_ring_idx += 1;
@@ -2500,7 +2650,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 return Ok(());
             }
 
-
             // Only set eip_page_bias if limit check passed (matching C++ order)
             self.eip_page_bias = eip_page_bias_calc;
 
@@ -2536,20 +2685,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         let fetch_ptr_option = if tlb_hit {
             self.p_addr_fetch_page = tlb_ppf;
-            // Bochs populates ITLB from DTLB, so whenever ITLB has an entry
-            // the DTLB also had it (though it may have been evicted since).
-            // Ensure the DTLB still has this page — if evicted, re-populate
-            // via a page walk. This is critical during kernel startup where
-            // boot page tables overlap with decompressed kernel data: the
-            // DTLB must cache translations so data accesses don't walk
-            // through corrupted page table entries.
-            {
-                let dtlb_lpf = self.dtlb.get_entry_of(laddr, 0).lpf;
-                if dtlb_lpf != lpf {
-                    // Speculative TLB population — miss is expected and harmless
-                    let _ = self.translate_data_read(laddr);
-                }
-            }
+            // Bochs cpu/cpu.cc prefetch path does NOT speculatively
+            // populate the DTLB on an ITLB hit. The earlier rusty_box
+            // workaround that called `translate_data_read(laddr)` here
+            // could synchronously raise #PF (mutating CR2 + pushing the
+            // exception frame) for an unrelated data access, then
+            // swallow the `CpuLoopRestart` and continue prefetching
+            // from a stale RIP. Removed to match Bochs.
             Some(tlb_host_addr)
         } else {
             // TLB miss - need to walk page tables
@@ -2579,16 +2721,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         p_addr,
                         self.p_addr_fetch_page
                     );
-                    // Bochs behaviour: ITLB miss page walk populates BOTH DTLB
-                    // and ITLB. The DTLB entry ensures that subsequent data
-                    // accesses to the same page as code hit the DTLB without
-                    // re-walking the page tables. This is critical during Linux
-                    // kernel startup where boot page tables overlap with the
-                    // decompressed kernel's page table symbols — the TLB must
-                    // shield data accesses from the corrupted boot page tables
-                    // until CR3 is switched.
-                    // Speculative TLB population — miss is expected and harmless
-                    let _ = self.translate_data_read(laddr);
+                    // Bochs `BX_CPU_C::prefetch` (cpu.cc) does NOT
+                    // populate the DTLB after an ITLB miss — only the
+                    // ITLB entry it just walked. The earlier rusty_box
+                    // workaround that called `translate_data_read(laddr)`
+                    // here could synchronously raise #PF (mutating CR2 +
+                    // pushing the exception frame) for an unrelated data
+                    // access, then swallow the `CpuLoopRestart` and
+                    // continue prefetching from a stale RIP. Removed to
+                    // match Bochs.
                     None
                 }
                 Err(e) => {
@@ -3001,18 +3142,16 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 selected_handler = Some(entry.execute1);
 
                 // Special case: MOV with SS segment override (matching lines 2049-2056)
-                if ia_opcode == Opcode::MovOp32GdEd
-                    && instr.seg() == BxSegregs::Ss as u8 {
-                        // Use MOV32S_GdEdM handler (matching C++ line 2051)
-                        use super::opcodes_table::mov32s_gd_ed_m_wrapper;
-                        selected_handler = Some(mov32s_gd_ed_m_wrapper);
-                    }
-                if ia_opcode == Opcode::MovOp32EdGd
-                    && instr.seg() == BxSegregs::Ss as u8 {
-                        // Use MOV32S_EdGdM handler (matching C++ line 2055)
-                        use super::opcodes_table::mov32s_ed_gd_m_wrapper;
-                        selected_handler = Some(mov32s_ed_gd_m_wrapper);
-                    }
+                if ia_opcode == Opcode::MovOp32GdEd && instr.seg() == BxSegregs::Ss as u8 {
+                    // Use MOV32S_GdEdM handler (matching C++ line 2051)
+                    use super::opcodes_table::mov32s_gd_ed_m_wrapper;
+                    selected_handler = Some(mov32s_gd_ed_m_wrapper);
+                }
+                if ia_opcode == Opcode::MovOp32EdGd && instr.seg() == BxSegregs::Ss as u8 {
+                    // Use MOV32S_EdGdM handler (matching C++ line 2055)
+                    use super::opcodes_table::mov32s_ed_gd_m_wrapper;
+                    selected_handler = Some(mov32s_ed_gd_m_wrapper);
+                }
             } else {
                 // Register form: use execute2 from table as execute1 (matching line 2059)
                 if let Some(execute2) = entry.execute2 {
@@ -3140,14 +3279,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Check AMX availability
         {
             if !fetch_mode_mask.contains(FetchModeMask::AMX_OK)
-                && op_flags.contains(OpFlags::PREPARE_AMX) {
-                    // Matching C++ line 2126: only assign if execute1 != BxError
-                    if !is_bx_error {
-                        use super::opcodes_table::bx_no_amx_wrapper;
-                        selected_handler = Some(bx_no_amx_wrapper);
-                    }
-                    return Ok((true, selected_handler)); // Stop trace
+                && op_flags.contains(OpFlags::PREPARE_AMX)
+            {
+                // Matching C++ line 2126: only assign if execute1 != BxError
+                if !is_bx_error {
+                    use super::opcodes_table::bx_no_amx_wrapper;
+                    selected_handler = Some(bx_no_amx_wrapper);
                 }
+                return Ok((true, selected_handler)); // Stop trace
+            }
         }
 
         // Check if trace should end (matching line 2135)

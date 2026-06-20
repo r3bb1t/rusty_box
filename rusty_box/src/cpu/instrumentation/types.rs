@@ -35,7 +35,6 @@ pub enum InstrAction {
     SkipAndStop,
 }
 
-
 // ─────────────────────────── Hook handle ───────────────────────────
 
 #[cfg(feature = "instrumentation")]
@@ -755,19 +754,91 @@ pub enum X86Reg {
     // EFER MSR (alias for convenience — also accessible via msr_read/msr_write)
     Efer,
     // FPU registers (x87)
-    Fpr0, Fpr1, Fpr2, Fpr3, Fpr4, Fpr5, Fpr6, Fpr7,
-    FpSw, FpCw, FpTag,
+    Fpr0,
+    Fpr1,
+    Fpr2,
+    Fpr3,
+    Fpr4,
+    Fpr5,
+    Fpr6,
+    Fpr7,
+    FpSw,
+    FpCw,
+    FpTag,
     // SSE/AVX/AVX-512
-    Xmm0, Xmm1, Xmm2, Xmm3, Xmm4, Xmm5, Xmm6, Xmm7,
-    Xmm8, Xmm9, Xmm10, Xmm11, Xmm12, Xmm13, Xmm14, Xmm15,
+    Xmm0,
+    Xmm1,
+    Xmm2,
+    Xmm3,
+    Xmm4,
+    Xmm5,
+    Xmm6,
+    Xmm7,
+    Xmm8,
+    Xmm9,
+    Xmm10,
+    Xmm11,
+    Xmm12,
+    Xmm13,
+    Xmm14,
+    Xmm15,
     Mxcsr,
-    Ymm0, Ymm1, Ymm2, Ymm3, Ymm4, Ymm5, Ymm6, Ymm7,
-    Ymm8, Ymm9, Ymm10, Ymm11, Ymm12, Ymm13, Ymm14, Ymm15,
-    Zmm0, Zmm1, Zmm2, Zmm3, Zmm4, Zmm5, Zmm6, Zmm7,
-    Zmm8, Zmm9, Zmm10, Zmm11, Zmm12, Zmm13, Zmm14, Zmm15,
-    Zmm16, Zmm17, Zmm18, Zmm19, Zmm20, Zmm21, Zmm22, Zmm23,
-    Zmm24, Zmm25, Zmm26, Zmm27, Zmm28, Zmm29, Zmm30, Zmm31,
-    Opmask0, Opmask1, Opmask2, Opmask3, Opmask4, Opmask5, Opmask6, Opmask7,
+    Ymm0,
+    Ymm1,
+    Ymm2,
+    Ymm3,
+    Ymm4,
+    Ymm5,
+    Ymm6,
+    Ymm7,
+    Ymm8,
+    Ymm9,
+    Ymm10,
+    Ymm11,
+    Ymm12,
+    Ymm13,
+    Ymm14,
+    Ymm15,
+    Zmm0,
+    Zmm1,
+    Zmm2,
+    Zmm3,
+    Zmm4,
+    Zmm5,
+    Zmm6,
+    Zmm7,
+    Zmm8,
+    Zmm9,
+    Zmm10,
+    Zmm11,
+    Zmm12,
+    Zmm13,
+    Zmm14,
+    Zmm15,
+    Zmm16,
+    Zmm17,
+    Zmm18,
+    Zmm19,
+    Zmm20,
+    Zmm21,
+    Zmm22,
+    Zmm23,
+    Zmm24,
+    Zmm25,
+    Zmm26,
+    Zmm27,
+    Zmm28,
+    Zmm29,
+    Zmm30,
+    Zmm31,
+    Opmask0,
+    Opmask1,
+    Opmask2,
+    Opmask3,
+    Opmask4,
+    Opmask5,
+    Opmask6,
+    Opmask7,
 }
 
 // ─────────────────────────── EmuStopReason ───────────────────────────
@@ -814,7 +885,6 @@ pub enum CpuSetupMode {
     FlatLong64,
 }
 
-
 // ─────────────────────────── ExitSet ───────────────────────────
 
 /// Fixed-capacity set of exit addresses (no alloc).
@@ -825,16 +895,27 @@ pub struct ExitSet {
 }
 
 impl ExitSet {
-    pub const fn new() -> Self { Self { addrs: [0; 64], len: 0 } }
+    pub const fn new() -> Self {
+        Self {
+            addrs: [0; 64],
+            len: 0,
+        }
+    }
     pub fn set(&mut self, exits: &[u64]) {
         let n = exits.len().min(64);
         self.addrs[..n].copy_from_slice(&exits[..n]);
         self.len = n as u8;
     }
-    pub fn clear(&mut self) { self.len = 0; }
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
     pub fn add(&mut self, addr: u64) -> bool {
-        if self.len as usize >= 64 { return false; }
-        if self.contains(addr) { return true; }
+        if self.len as usize >= 64 {
+            return false;
+        }
+        if self.contains(addr) {
+            return true;
+        }
         self.addrs[self.len as usize] = addr;
         self.len += 1;
         true
@@ -853,9 +934,13 @@ impl ExitSet {
     pub fn contains(&self, addr: u64) -> bool {
         self.addrs[..self.len as usize].contains(&addr)
     }
-    pub fn is_empty(&self) -> bool { self.len == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 }
 
 impl Default for ExitSet {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

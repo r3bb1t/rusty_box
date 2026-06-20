@@ -31,22 +31,22 @@ impl<'a> BxPageWriteStampTable<'a> {
             return;
         }
         let index = Self::hash(p_addr);
-        if index < self.fine_granularity_mapping.len()
-            && self.fine_granularity_mapping[index] != 0 {
-                // Calculate mask for affected cache lines (128-byte granularity)
-                let page_offset = (p_addr as u32) & 0xfff;
-                let shift1 = (page_offset >> 7).min(31);
-                let shift2 = ((page_offset + len - 1) >> 7).min(31);
-                let mut mask: u32 = 1 << shift1;
-                mask |= 1 << shift2;
+        if index < self.fine_granularity_mapping.len() && self.fine_granularity_mapping[index] != 0
+        {
+            // Calculate mask for affected cache lines (128-byte granularity)
+            let page_offset = (p_addr as u32) & 0xfff;
+            let shift1 = (page_offset >> 7).min(31);
+            let shift2 = ((page_offset + len - 1) >> 7).min(31);
+            let mut mask: u32 = 1 << shift1;
+            mask |= 1 << shift2;
 
-                if self.fine_granularity_mapping[index] & mask != 0 {
-                    // TODO: Call handle_smc to invalidate instruction cache
-                    // This requires access to CPUs which we don't have here
-                    // For now, just clear the affected bits
-                    self.fine_granularity_mapping[index] &= !mask;
-                }
+            if self.fine_granularity_mapping[index] & mask != 0 {
+                // TODO: Call handle_smc to invalidate instruction cache
+                // This requires access to CPUs which we don't have here
+                // For now, just clear the affected bits
+                self.fine_granularity_mapping[index] &= !mask;
             }
+        }
     }
 
     /// Decrement write stamp for a whole page
@@ -62,22 +62,22 @@ impl<'a> BxPageWriteStampTable<'a> {
             return;
         }
         let index = Self::hash(p_addr);
-        if index < self.fine_granularity_mapping.len()
-            && self.fine_granularity_mapping[index] != 0 {
-                // Calculate mask for affected cache lines (128-byte granularity)
-                let page_offset = (p_addr as u32) & 0xfff;
-                let shift1 = (page_offset >> 7).min(31);
-                let shift2 = ((page_offset + len - 1) >> 7).min(31);
-                let mut mask: u32 = 1 << shift1;
-                mask |= 1 << shift2;
+        if index < self.fine_granularity_mapping.len() && self.fine_granularity_mapping[index] != 0
+        {
+            // Calculate mask for affected cache lines (128-byte granularity)
+            let page_offset = (p_addr as u32) & 0xfff;
+            let shift1 = (page_offset >> 7).min(31);
+            let shift2 = ((page_offset + len - 1) >> 7).min(31);
+            let mut mask: u32 = 1 << shift1;
+            mask |= 1 << shift2;
 
-                if self.fine_granularity_mapping[index] & mask != 0 {
-                    // TODO: Call handle_smc to invalidate instruction cache
-                    // This requires access to CPUs which we don't have here
-                    // For now, just clear the affected bits
-                    self.fine_granularity_mapping[index] &= !mask;
-                }
+            if self.fine_granularity_mapping[index] & mask != 0 {
+                // TODO: Call handle_smc to invalidate instruction cache
+                // This requires access to CPUs which we don't have here
+                // For now, just clear the affected bits
+                self.fine_granularity_mapping[index] &= !mask;
             }
+        }
     }
 
     pub fn mark_icache_mask(&mut self, p_addr: BxPhyAddress, mask: u32) {
@@ -101,7 +101,11 @@ struct BxPageWriteStampTableInternal {
     fine_granularity_mapping: [u32; 32768], // 128MB / 4KB = 32768 pages
 }
 
-fn handle_smc<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(cpus: &mut [BxCpuC<I, T>], p_addr: BxPhyAddress, mask: u32) {
+fn handle_smc<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpus: &mut [BxCpuC<I, T>],
+    p_addr: BxPhyAddress,
+    mask: u32,
+) {
     // INC_SMC_STAT(smc);
     for cpu in cpus {
         cpu.i_cache.handle_smc(p_addr, mask);
@@ -293,19 +297,19 @@ impl BxICache {
         let entry = &mut self.entry[index];
 
         if let IcacheAddress::Address(addr) = entry.p_addr {
-            if addr == p_addr
-                && entry.trace_mask & mask != 0 {
-                    flush_smc(entry);
-                }
+            if addr == p_addr && entry.trace_mask & mask != 0 {
+                flush_smc(entry);
+            }
         }
 
         // Check page split entries
         let ppf = ppf_of(p_addr);
         for i in 0..BX_ICACHE_ENTRIES {
             if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS
-                && ppf_of(self.page_split_index[i].ppf) == ppf {
-                    flush_smc(&mut self.page_split_index[i].e);
-                }
+                && ppf_of(self.page_split_index[i].ppf) == ppf
+            {
+                flush_smc(&mut self.page_split_index[i].e);
+            }
         }
     }
 
@@ -322,9 +326,10 @@ impl BxICache {
         // Flush page split entries
         for i in 0..BX_ICACHE_ENTRIES {
             if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS
-                && ppf_of(self.page_split_index[i].ppf) == ppf {
-                    flush_smc(&mut self.page_split_index[i].e);
-                }
+                && ppf_of(self.page_split_index[i].ppf) == ppf
+            {
+                flush_smc(&mut self.page_split_index[i].e);
+            }
         }
     }
 
@@ -374,10 +379,11 @@ impl BxICache {
         // Invalidate page split entries
         for i in 0..BX_ICACHE_ENTRIES {
             if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS
-                && ppf_of(self.page_split_index[i].ppf) == ppf {
-                    self.page_split_index[i].ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                    flush_smc(&mut self.page_split_index[i].e);
-                }
+                && ppf_of(self.page_split_index[i].ppf) == ppf
+            {
+                self.page_split_index[i].ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                flush_smc(&mut self.page_split_index[i].e);
+            }
         }
     }
 
@@ -650,7 +656,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         let mut trace_mask = 0u32;
 
-
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let is_32_bit_mode = self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
             .cache
@@ -728,7 +733,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
             match decode_result {
                 Ok(()) => {
-
                     // Instruction is already in mpool[current_mpindex] — get its length
                     let i_len = { self.i_cache.mpool[current_mpindex].ilen() as u32 };
 
@@ -749,7 +753,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     // BX_INSTR_OPCODE (matching C++ icache.cc:178-179)
                     #[cfg(feature = "instrumentation")]
                     if self.instrumentation.active.has_exec() {
-                        let rip = self.prev_rip + (current_page_offset as u64 - (page_offset as u64));
+                        let rip =
+                            self.prev_rip + (current_page_offset as u64 - (page_offset as u64));
                         let bytes = &current_fetch_ptr[..i_len as usize];
                         let size = if long64 {
                             super::instrumentation::CodeSize::Bits64
@@ -795,7 +800,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     current_p_addr += i_len as u64;
                     current_page_offset = (current_page_offset + i_len) & 0xfff;
                     current_fetch_ptr = &current_fetch_ptr[i_len as usize..];
-
 
                     // Try to find a trace starting from current pAddr and merge
                     // TODO: Check if debugger is active (matching C++ line 194)
@@ -1101,7 +1105,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             } else {
                 super::instrumentation::CodeSize::Bits16
             };
-            let ev = super::instrumentation::OpcodeEvent { rip, instr: &instr, bytes, size };
+            let ev = super::instrumentation::OpcodeEvent {
+                rip,
+                instr: &instr,
+                bytes,
+                size,
+            };
             self.instrumentation.fire_opcode(&ev);
         }
 

@@ -171,11 +171,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.dr6 = BxDr6::from_bits_retain(u32_at(d, &mut off));
         self.dr7 = BxDr7::from_bits_retain(u32_at(d, &mut off));
         self.debug_trap = u32_at(d, &mut off);
-        self.xcr0 = Xcr0 { value: u32_at(d, &mut off) };
+        self.xcr0 = Xcr0 {
+            value: u32_at(d, &mut off),
+        };
         self.xcr0_suppmask = u32_at(d, &mut off);
         self.pkru = u32_at(d, &mut off);
         self.pkrs = u32_at(d, &mut off);
-        self.linaddr_width = d[off]; off += 1;
+        self.linaddr_width = d[off];
+        off += 1;
         self.tsc_adjust = i64_at(d, &mut off);
         self.tsc_offset = i64_at(d, &mut off);
 
@@ -251,10 +254,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.pending_event = u32_at(d, &mut off);
         self.event_mask = u32_at(d, &mut off);
         self.async_event = u32_at(d, &mut off);
-        self.user_pl = d[off] != 0; off += 1;
-        self.in_smm = d[off] != 0; off += 1;
-        self.ext = d[off] != 0; off += 1;
-        self.nmi_unblocking_iret = d[off] != 0; off += 1;
+        self.user_pl = d[off] != 0;
+        off += 1;
+        self.in_smm = d[off] != 0;
+        off += 1;
+        self.ext = d[off] != 0;
+        off += 1;
+        self.nmi_unblocking_iret = d[off] != 0;
+        off += 1;
         self.last_exception_type = i32_at(d, &mut off);
         self.smbase = u32_at(d, &mut off);
         self.alignment_check_mask = u32_at(d, &mut off);
@@ -303,18 +310,27 @@ fn read_seg_reg(d: &[u8], off: &mut usize, seg: &mut BxSegmentReg) {
     seg.selector.value = u16_at(d, off);
     seg.selector.index = u16_at(d, off);
     seg.selector.ti = u16_at(d, off);
-    seg.selector.rpl = d[*off]; *off += 1;
+    seg.selector.rpl = d[*off];
+    *off += 1;
     seg.cache.valid = u32_at(d, off);
-    seg.cache.p = d[*off] != 0; *off += 1;
-    seg.cache.dpl = d[*off]; *off += 1;
-    seg.cache.segment = d[*off] != 0; *off += 1;
-    seg.cache.r#type = d[*off]; *off += 1;
+    seg.cache.p = d[*off] != 0;
+    *off += 1;
+    seg.cache.dpl = d[*off];
+    *off += 1;
+    seg.cache.segment = d[*off] != 0;
+    *off += 1;
+    seg.cache.r#type = d[*off];
+    *off += 1;
     seg.cache.u.set_segment_base(u64_at(d, off));
     seg.cache.u.set_segment_limit_scaled(u32_at(d, off));
-    seg.cache.u.set_segment_g(d[*off] != 0); *off += 1;
-    seg.cache.u.set_segment_d_b(d[*off] != 0); *off += 1;
-    seg.cache.u.set_segment_l(d[*off] != 0); *off += 1;
-    seg.cache.u.set_segment_avl(d[*off] != 0); *off += 1;
+    seg.cache.u.set_segment_g(d[*off] != 0);
+    *off += 1;
+    seg.cache.u.set_segment_d_b(d[*off] != 0);
+    *off += 1;
+    seg.cache.u.set_segment_l(d[*off] != 0);
+    *off += 1;
+    seg.cache.u.set_segment_avl(d[*off] != 0);
+    *off += 1;
 }
 
 fn read_global_seg(d: &[u8], off: &mut usize, seg: &mut BxGlobalSegmentReg) {
@@ -333,25 +349,41 @@ fn u16_at(d: &[u8], off: &mut usize) -> u16 {
 }
 
 fn u32_at(d: &[u8], off: &mut usize) -> u32 {
-    let v = u32::from_le_bytes(d[*off..*off + 4].try_into().unwrap_or_else(|_| unreachable!("slice is exactly 4 bytes")));
+    let v = u32::from_le_bytes(
+        d[*off..*off + 4]
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("slice is exactly 4 bytes")),
+    );
     *off += 4;
     v
 }
 
 fn i32_at(d: &[u8], off: &mut usize) -> i32 {
-    let v = i32::from_le_bytes(d[*off..*off + 4].try_into().unwrap_or_else(|_| unreachable!("slice is exactly 4 bytes")));
+    let v = i32::from_le_bytes(
+        d[*off..*off + 4]
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("slice is exactly 4 bytes")),
+    );
     *off += 4;
     v
 }
 
 fn u64_at(d: &[u8], off: &mut usize) -> u64 {
-    let v = u64::from_le_bytes(d[*off..*off + 8].try_into().unwrap_or_else(|_| unreachable!("slice is exactly 8 bytes")));
+    let v = u64::from_le_bytes(
+        d[*off..*off + 8]
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("slice is exactly 8 bytes")),
+    );
     *off += 8;
     v
 }
 
 fn i64_at(d: &[u8], off: &mut usize) -> i64 {
-    let v = i64::from_le_bytes(d[*off..*off + 8].try_into().unwrap_or_else(|_| unreachable!("slice is exactly 8 bytes")));
+    let v = i64::from_le_bytes(
+        d[*off..*off + 8]
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("slice is exactly 8 bytes")),
+    );
     *off += 8;
     v
 }

@@ -200,17 +200,17 @@ fn enable_extension(bitmask: &mut [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE], feature: 
 ///   Extra: DTES64|DS_CPL|EST|TM2|xTPR|PDCM
 const LEAF1_ECX_BASE: CpuIdStd1Ecx = CpuIdStd1Ecx::SSE3
     .union(CpuIdStd1Ecx::PCLMULQDQ)
-    .union(CpuIdStd1Ecx::DTES64)       // extra
+    .union(CpuIdStd1Ecx::DTES64) // extra
     .union(CpuIdStd1Ecx::MONITOR_MWAIT)
-    .union(CpuIdStd1Ecx::DS_CPL)       // extra
+    .union(CpuIdStd1Ecx::DS_CPL) // extra
     .union(CpuIdStd1Ecx::VMX) // VMX MSRs + #UD on VMXON (stubs)
-    .union(CpuIdStd1Ecx::EST)          // extra
-    .union(CpuIdStd1Ecx::TM2)          // extra
+    .union(CpuIdStd1Ecx::EST) // extra
+    .union(CpuIdStd1Ecx::TM2) // extra
     .union(CpuIdStd1Ecx::SSSE3)
     .union(CpuIdStd1Ecx::FMA)
     .union(CpuIdStd1Ecx::CMPXCHG16B)
-    .union(CpuIdStd1Ecx::XTPR)         // extra
-    .union(CpuIdStd1Ecx::PDCM)         // extra
+    .union(CpuIdStd1Ecx::XTPR) // extra
+    .union(CpuIdStd1Ecx::PDCM) // extra
     .union(CpuIdStd1Ecx::PCID)
     .union(CpuIdStd1Ecx::SSE4_1)
     .union(CpuIdStd1Ecx::SSE4_2)
@@ -246,16 +246,16 @@ const LEAF1_EDX_BASE: CpuIdStd1Edx = CpuIdStd1Edx::X87
     .union(CpuIdStd1Edx::PAT)
     .union(CpuIdStd1Edx::PSE36)
     .union(CpuIdStd1Edx::CLFLUSH)
-    .union(CpuIdStd1Edx::DEBUG_STORE)      // extra
-    .union(CpuIdStd1Edx::ACPI)             // extra
+    .union(CpuIdStd1Edx::DEBUG_STORE) // extra
+    .union(CpuIdStd1Edx::ACPI) // extra
     .union(CpuIdStd1Edx::MMX)
     .union(CpuIdStd1Edx::FXSAVE_FXRSTOR)
     .union(CpuIdStd1Edx::SSE)
     .union(CpuIdStd1Edx::SSE2)
-    .union(CpuIdStd1Edx::SELF_SNOOP)       // extra
-    .union(CpuIdStd1Edx::HT)               // extra
-    .union(CpuIdStd1Edx::THERMAL_MONITOR)   // extra
-    .union(CpuIdStd1Edx::PBE);              // extra
+    .union(CpuIdStd1Edx::SELF_SNOOP) // extra
+    .union(CpuIdStd1Edx::HT) // extra
+    .union(CpuIdStd1Edx::THERMAL_MONITOR) // extra
+    .union(CpuIdStd1Edx::PBE); // extra
 
 /// Leaf 7 subleaf 0 EBX:
 ///   ISA: FSGSBASE|TSC_ADJUST|BMI1|FDP_DEPR|SMEP|BMI2|INVPCID|
@@ -271,10 +271,10 @@ const LEAF7_EBX_BASE: CpuIdStd7Ebx = CpuIdStd7Ebx::FSGSBASE
     .union(CpuIdStd7Ebx::FDP_DEPRECATION)
     .union(CpuIdStd7Ebx::SMEP)
     .union(CpuIdStd7Ebx::BMI2)
-    .union(CpuIdStd7Ebx::ERMS)             // extra
+    .union(CpuIdStd7Ebx::ERMS) // extra
     .union(CpuIdStd7Ebx::INVPCID)
     .union(CpuIdStd7Ebx::DEPRECATE_FCS_FDS)
-    .union(CpuIdStd7Ebx::AVX512F)    // enabled: foundation handlers + opmask implemented
+    .union(CpuIdStd7Ebx::AVX512F) // enabled: foundation handlers + opmask implemented
     // .union(CpuIdStd7Ebx::AVX512DQ)  // disabled: DQ-specific handlers not implemented
     .union(CpuIdStd7Ebx::RDSEED)
     .union(CpuIdStd7Ebx::ADX)
@@ -283,7 +283,7 @@ const LEAF7_EBX_BASE: CpuIdStd7Ebx = CpuIdStd7Ebx::FSGSBASE
     .union(CpuIdStd7Ebx::CLWB)
     // .union(CpuIdStd7Ebx::AVX512CD)  // disabled: CD-specific handlers not implemented
     // .union(CpuIdStd7Ebx::AVX512BW)  // disabled: BW-specific handlers not implemented
-    .union(CpuIdStd7Ebx::AVX512VL);   // enabled: EVEX 128/256 with opmask
+    .union(CpuIdStd7Ebx::AVX512VL); // enabled: EVEX 128/256 with opmask
 
 /// Extended leaf 0x80000001 ECX:
 ///   LAHF_SAHF | LZCNT | PREFETCHW
@@ -410,10 +410,10 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         enable_extension(&mut b, X86Feature::IsaAdx);
         enable_extension(&mut b, X86Feature::IsaSmap);
         enable_extension(&mut b, X86Feature::IsaFdpDeprecation);
-        enable_extension(&mut b, X86Feature::IsaAvx512);    // foundation handlers implemented
-        // enable_extension(&mut b, X86Feature::IsaAvx512Dq);  // disabled: DQ handlers not implemented
-        // enable_extension(&mut b, X86Feature::IsaAvx512Cd);  // disabled: CD handlers not implemented
-        // enable_extension(&mut b, X86Feature::IsaAvx512Bw);  // disabled: BW handlers not implemented
+        enable_extension(&mut b, X86Feature::IsaAvx512); // foundation handlers implemented
+                                                         // enable_extension(&mut b, X86Feature::IsaAvx512Dq);  // disabled: DQ handlers not implemented
+                                                         // enable_extension(&mut b, X86Feature::IsaAvx512Cd);  // disabled: CD handlers not implemented
+                                                         // enable_extension(&mut b, X86Feature::IsaAvx512Bw);  // disabled: BW handlers not implemented
         enable_extension(&mut b, X86Feature::IsaClflushopt);
         enable_extension(&mut b, X86Feature::IsaClwb);
         if no_avx_mode() {
@@ -469,13 +469,8 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                         .difference(CpuIdStd1Ecx::FMA)
                         .difference(CpuIdStd1Ecx::AVX_F16C);
                 }
-                (
-                    0x00050654,
-                    0x00010800,
-                    ecx.bits(),
-                    LEAF1_EDX_BASE.bits(),
-                )
-            },
+                (0x00050654, 0x00010800, ecx.bits(), LEAF1_EDX_BASE.bits())
+            }
 
             // ── Leaf 2: Cache/TLB descriptors ───────────────────────────
             // Bochs corei7_skylake-x.cc
@@ -523,10 +518,10 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                                 .difference(CpuIdStd7Ebx::AVX512VL);
                         }
                         (
-                            0x00000000,  // EAX: max sub-leaf = 0
-                            ebx.bits(),  // EBX: feature flags
-                            0x00000000,  // ECX: no features
-                            0x00000000,  // EDX: no features
+                            0x00000000, // EAX: max sub-leaf = 0
+                            ebx.bits(), // EBX: feature flags
+                            0x00000000, // ECX: no features
+                            0x00000000, // EDX: no features
                         )
                     }
                     _ => (0, 0, 0, 0),
@@ -575,16 +570,15 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                     ),
                     1 => (
                         // XSAVEOPT(0) + XSAVEC(1) + XGETBV_ECX1(2) + XSAVES(3)
-                        0x0000000F,
-                        0x00000000, // EBX: overridden dynamically
+                        0x0000000F, 0x00000000, // EBX: overridden dynamically
                         0x00000000, // ECX: IA32_XSS lower supported bits
                         0x00000000, // EDX: IA32_XSS upper supported bits
                     ),
                     // Per-component sub-leaves: (len, offset, flags, 0)
-                    2 => (256, 576, 0, 0),    // YMM state
-                    5 => (64, 1088, 0, 0),    // OPMASK
-                    6 => (512, 1152, 0, 0),   // ZMM_HI256
-                    7 => (1024, 1664, 0, 0),  // HI_ZMM
+                    2 => (256, 576, 0, 0),   // YMM state
+                    5 => (64, 1088, 0, 0),   // OPMASK
+                    6 => (512, 1152, 0, 0),  // ZMM_HI256
+                    7 => (1024, 1664, 0, 0), // HI_ZMM
                     _ => (0, 0, 0, 0),
                 }
             }
@@ -614,7 +608,6 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             ),
 
             // ── Extended CPUID Leaves ───────────────────────────────────
-
             0x80000000 => (
                 0x80000008, // Max extended leaf
                 0x00000000, 0x00000000, 0x00000000,
@@ -648,8 +641,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             0x80000008 => (
                 0x00003024, // [7:0]=36 phys, [15:8]=48 virt
                 0x00000200, // EBX: bit 9 = WBNOINVD
-                0x00000000,
-                0x00000000,
+                0x00000000, 0x00000000,
             ),
 
             // ── Default: beyond max leaf → return leaf 0x16 data ────────

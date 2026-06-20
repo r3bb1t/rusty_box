@@ -86,8 +86,7 @@ impl BxGui for TermGui {
         self.render_text_mode();
     }
 
-    fn graphics_tile_update(&mut self, _tile: &[u8], _x: u32, _y: u32) {
-    }
+    fn graphics_tile_update(&mut self, _tile: &[u8], _x: u32, _y: u32) {}
 
     fn handle_events(&mut self) {
         use crossterm::event::{self, Event};
@@ -175,8 +174,7 @@ impl BxGui for TermGui {
         tracing::trace!("TermGUI: Display mode changed to {:?}", mode);
     }
 
-    fn show_ips(&mut self, _ips_count: u32) {
-    }
+    fn show_ips(&mut self, _ips_count: u32) {}
 
     fn get_pending_scancodes(&mut self) -> Vec<u8> {
         let mut result = Vec::new();

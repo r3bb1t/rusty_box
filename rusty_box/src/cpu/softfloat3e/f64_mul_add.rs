@@ -2,7 +2,7 @@
 //! Float64 fused multiply-add: a*b + c (with operation modifier).
 //! Ported from Berkeley SoftFloat 3e f64_mulAdd.c.
 
-use super::f128::{SOFTFLOAT_MULADD_SUB_C, SOFTFLOAT_MULADD_SUB_PROD, short_shift_right_jam128};
+use super::f128::{short_shift_right_jam128, SOFTFLOAT_MULADD_SUB_C, SOFTFLOAT_MULADD_SUB_PROD};
 use super::internals::*;
 use super::primitives::*;
 use super::softfloat::*;
@@ -48,20 +48,30 @@ pub(crate) fn f64_mul_add(
 
     // Denormals-are-zeros
     if softfloat_denormalsAreZeros(status) {
-        if exp_a == 0 { sig_a = 0; }
-        if exp_b == 0 { sig_b = 0; }
-        if exp_c == 0 { sig_c = 0; }
+        if exp_a == 0 {
+            sig_a = 0;
+        }
+        if exp_b == 0 {
+            sig_b = 0;
+        }
+        if exp_c == 0 {
+            sig_c = 0;
+        }
     }
 
     // Infinity handling for A
     if exp_a == 0x7FF {
         let mag_bits = (exp_b as u64) | sig_b;
-        return inf_prod_arg_f64(sign_z, sign_c, exp_a, sig_a, exp_b, sig_b, exp_c, sig_c, mag_bits, ui_c, status);
+        return inf_prod_arg_f64(
+            sign_z, sign_c, exp_a, sig_a, exp_b, sig_b, exp_c, sig_c, mag_bits, ui_c, status,
+        );
     }
     // Infinity handling for B
     if exp_b == 0x7FF {
         let mag_bits = (exp_a as u64) | sig_a;
-        return inf_prod_arg_f64(sign_z, sign_c, exp_a, sig_a, exp_b, sig_b, exp_c, sig_c, mag_bits, ui_c, status);
+        return inf_prod_arg_f64(
+            sign_z, sign_c, exp_a, sig_a, exp_b, sig_b, exp_c, sig_c, mag_bits, ui_c, status,
+        );
     }
     // Infinity handling for C
     if exp_c == 0x7FF {
@@ -234,7 +244,10 @@ fn inf_prod_arg_f64(
     if mag_bits != 0 {
         let ui_z = pack_to_f64(sign_z, 0x7FF, 0);
         if sign_z == sign_c || exp_c != 0x7FF {
-            if (sig_a != 0 && exp_a == 0) || (sig_b != 0 && exp_b == 0) || (sig_c != 0 && exp_c == 0) {
+            if (sig_a != 0 && exp_a == 0)
+                || (sig_b != 0 && exp_b == 0)
+                || (sig_c != 0 && exp_c == 0)
+            {
                 softfloat_raiseFlags(status, FLAG_DENORMAL);
             }
             return ui_z;

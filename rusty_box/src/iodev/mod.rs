@@ -16,12 +16,13 @@
 //! - **Keyboard (8042)**: PS/2 keyboard and mouse controller
 //! - **HardDrive (ATA/IDE)**: Hard disk controller
 
+use crate::ring_buffer::RingBuffer;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-use crate::ring_buffer::RingBuffer;
 
 pub mod acpi;
-#[cfg(feature = "alloc")] pub mod acpi_tables;
+#[cfg(feature = "alloc")]
+pub mod acpi_tables;
 pub mod cmos;
 pub mod devices;
 pub use crate::dma;
@@ -33,16 +34,17 @@ pub mod pci;
 pub mod pci2isa;
 pub mod pci_ide;
 pub use crate::pic;
+#[cfg(feature = "alloc")]
+pub mod geforce;
 pub mod pit;
 pub mod serial;
 pub mod vga;
-#[cfg(feature = "alloc")] pub mod geforce;
 
 // Re-export device types for convenience
 pub use acpi::BxAcpiCtrl;
 pub use cmos::BxCmosC;
-pub use fw_cfg::BxFwCfg;
 pub use dma::BxDmaC;
+pub use fw_cfg::BxFwCfg;
 pub use harddrv::BxHardDriveC;
 pub use ioapic::BxIoApic;
 pub use keyboard::BxKeyboardC;
@@ -53,7 +55,8 @@ pub use pic::BxPicC;
 pub use pit::BxPitC;
 pub use serial::BxSerialC;
 // BxVgaC is pub(crate) - not exported outside the crate
-#[cfg(feature = "alloc")] pub use geforce::BxGeForceC;
+#[cfg(feature = "alloc")]
+pub use geforce::BxGeForceC;
 
 /// Number of I/O ports (0x0000 - 0xFFFF)
 pub const IO_PORTS: usize = 0x10000;
@@ -276,17 +279,18 @@ impl BxDevicesC {
                 {
                     let (fwds, count) = dm.pic.take_ioapic_forwards();
                     for &(irq, level) in &fwds[..count] {
-                        dm.ioapic.set_irq_level(
-                            irq,
-                            level,
-                            None,
-                            None,
-                        );
+                        dm.ioapic.set_irq_level(irq, level, None, None);
                     }
                 }
                 // Consume PIC interrupt flags; propagated to io_bus below
-                if dm.pic.irq_pending { dm.pic.irq_pending = false; pic_pending = true; }
-                if dm.pic.irq_cleared { dm.pic.irq_cleared = false; pic_cleared = true; }
+                if dm.pic.irq_pending {
+                    dm.pic.irq_pending = false;
+                    pic_pending = true;
+                }
+                if dm.pic.irq_cleared {
+                    dm.pic.irq_cleared = false;
+                    pic_cleared = true;
+                }
                 result
             } else {
                 self.default_read_handler(port, io_len)
@@ -294,8 +298,12 @@ impl BxDevicesC {
         } else {
             self.default_read_handler(port, io_len)
         };
-        if pic_pending { self.pic_irq_pending = true; }
-        if pic_cleared { self.pic_irq_cleared = true; }
+        if pic_pending {
+            self.pic_irq_pending = true;
+        }
+        if pic_cleared {
+            self.pic_irq_cleared = true;
+        }
 
         self.last_io_read_port = port;
         self.last_io_read_value = value;
@@ -320,23 +328,28 @@ impl BxDevicesC {
                 {
                     let (fwds, count) = dm.pic.take_ioapic_forwards();
                     for &(irq, level) in &fwds[..count] {
-                        dm.ioapic.set_irq_level(
-                            irq,
-                            level,
-                            None,
-                            None,
-                        );
+                        dm.ioapic.set_irq_level(irq, level, None, None);
                     }
                 }
                 // Consume PIC interrupt flags; propagated to io_bus below
-                if dm.pic.irq_pending { dm.pic.irq_pending = false; pic_pending = true; }
-                if dm.pic.irq_cleared { dm.pic.irq_cleared = false; pic_cleared = true; }
+                if dm.pic.irq_pending {
+                    dm.pic.irq_pending = false;
+                    pic_pending = true;
+                }
+                if dm.pic.irq_cleared {
+                    dm.pic.irq_cleared = false;
+                    pic_cleared = true;
+                }
                 true
             } else {
                 false
             };
-            if pic_pending { self.pic_irq_pending = true; }
-            if pic_cleared { self.pic_irq_cleared = true; }
+            if pic_pending {
+                self.pic_irq_pending = true;
+            }
+            if pic_cleared {
+                self.pic_irq_cleared = true;
+            }
             // dm borrow dropped; apply PAM update with fresh borrows
             if dispatched {
                 self.apply_pending_pam();
@@ -364,7 +377,12 @@ impl BxDevicesC {
         }
         if let Some(dm) = self.device_manager_mut() {
             {
-                let devices::DeviceManager { ref mut harddrv, ref mut pic, ref mut pci_ide, .. } = *dm;
+                let devices::DeviceManager {
+                    ref mut harddrv,
+                    ref mut pic,
+                    ref mut pci_ide,
+                    ..
+                } = *dm;
                 harddrv.bulk_read_data(port, buf, pic, pci_ide)
             }
         } else {
@@ -411,7 +429,6 @@ impl BxDevicesC {
             );
             self.port_e9_output.push_back(value as u8);
         }
-
     }
 
     /// Check if PCI is enabled
@@ -507,18 +524,33 @@ impl BxDevicesC {
 
     /// Dispatch a port read to the device identified by `id`.
     #[inline]
-    fn dispatch_read(dm: &mut devices::DeviceManager, id: DeviceId, port: u16, io_len: u8, icount: u64) -> u32 {
+    fn dispatch_read(
+        dm: &mut devices::DeviceManager,
+        id: DeviceId,
+        port: u16,
+        io_len: u8,
+        icount: u64,
+    ) -> u32 {
         match id {
             DeviceId::Pic => dm.pic.read(port, io_len),
             DeviceId::Pit => dm.pit.read(port, io_len, icount),
             DeviceId::Cmos => dm.cmos.read(port, io_len),
             DeviceId::Dma => dm.dma.read(port, io_len),
             DeviceId::Keyboard => {
-                let devices::DeviceManager { ref mut keyboard, ref mut pit, .. } = *dm;
+                let devices::DeviceManager {
+                    ref mut keyboard,
+                    ref mut pit,
+                    ..
+                } = *dm;
                 keyboard.read(port, io_len, icount, Some(pit))
             }
             DeviceId::HardDrive => {
-                let devices::DeviceManager { ref mut harddrv, ref mut pic, ref mut pci_ide, .. } = *dm;
+                let devices::DeviceManager {
+                    ref mut harddrv,
+                    ref mut pic,
+                    ref mut pci_ide,
+                    ..
+                } = *dm;
                 harddrv.read(port, io_len, pic, pci_ide)
             }
             DeviceId::Serial => dm.serial.read(port, io_len),
@@ -535,18 +567,33 @@ impl BxDevicesC {
 
     /// Dispatch a port write to the device identified by `id`.
     #[inline]
-    fn dispatch_write(dm: &mut devices::DeviceManager, id: DeviceId, port: u16, value: u32, io_len: u8) {
+    fn dispatch_write(
+        dm: &mut devices::DeviceManager,
+        id: DeviceId,
+        port: u16,
+        value: u32,
+        io_len: u8,
+    ) {
         match id {
             DeviceId::Pic => dm.pic.write(port, value, io_len),
             DeviceId::Pit => dm.pit.write(port, value, io_len),
             DeviceId::Cmos => dm.cmos.write(port, value, io_len),
             DeviceId::Dma => dm.dma.write(port, value, io_len),
             DeviceId::Keyboard => {
-                let devices::DeviceManager { ref mut keyboard, ref mut pit, .. } = *dm;
+                let devices::DeviceManager {
+                    ref mut keyboard,
+                    ref mut pit,
+                    ..
+                } = *dm;
                 keyboard.write(port, value, io_len, Some(pit))
             }
             DeviceId::HardDrive => {
-                let devices::DeviceManager { ref mut harddrv, ref mut pic, ref mut pci_ide, .. } = *dm;
+                let devices::DeviceManager {
+                    ref mut harddrv,
+                    ref mut pic,
+                    ref mut pci_ide,
+                    ..
+                } = *dm;
                 harddrv.write(port, value, io_len, pic, pci_ide)
             }
             DeviceId::Serial => dm.serial.write(port, value, io_len),
@@ -556,10 +603,9 @@ impl BxDevicesC {
             DeviceId::Acpi => dm.acpi_write(port, value, io_len),
             DeviceId::PciIde => dm.pci_ide_write(port, value, io_len),
             DeviceId::FwCfg => dm.fw_cfg_write(port, value, io_len),
-            DeviceId::Ioapic | DeviceId::None => {},
+            DeviceId::Ioapic | DeviceId::None => {}
         }
     }
-
 }
 
 #[cfg(test)]

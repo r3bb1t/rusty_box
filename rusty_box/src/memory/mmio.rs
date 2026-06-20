@@ -50,7 +50,12 @@ impl MmioRegistry {
         // Find first empty slot
         for slot in self.regions.iter_mut() {
             if slot.is_none() {
-                *slot = Some(MmioRegion { start: addr, size, read_cb, write_cb });
+                *slot = Some(MmioRegion {
+                    start: addr,
+                    size,
+                    read_cb,
+                    write_cb,
+                });
                 self.count += 1;
                 return;
             }
@@ -70,7 +75,12 @@ impl MmioRegistry {
         assert!(self.count < MAX_MMIO_REGIONS, "MMIO region overflow");
         for slot in self.regions.iter_mut() {
             if slot.is_none() {
-                *slot = Some(MmioRegion { start: addr, size, read_cb, write_cb });
+                *slot = Some(MmioRegion {
+                    start: addr,
+                    size,
+                    read_cb,
+                    write_cb,
+                });
                 self.count += 1;
                 return;
             }
@@ -96,9 +106,10 @@ impl MmioRegistry {
     /// Find region containing `addr`. Returns mutable ref for dispatch.
     #[inline]
     pub(crate) fn find_mut(&mut self, addr: u64) -> Option<&mut MmioRegion> {
-        self.regions.iter_mut().filter_map(|s| s.as_mut()).find(|r| {
-            addr >= r.start && addr < r.start + r.size
-        })
+        self.regions
+            .iter_mut()
+            .filter_map(|s| s.as_mut())
+            .find(|r| addr >= r.start && addr < r.start + r.size)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -107,5 +118,7 @@ impl MmioRegistry {
 }
 
 impl Default for MmioRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

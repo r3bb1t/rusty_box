@@ -400,7 +400,10 @@ impl fmt::Display for SockAddr {
 
 pub fn decode_sockaddr(data: &[u8]) -> SockAddr {
     if data.len() < 2 {
-        return SockAddr::Unknown { family: 0, len: data.len() };
+        return SockAddr::Unknown {
+            family: 0,
+            len: data.len(),
+        };
     }
     let family = u16::from_le_bytes([data[0], data[1]]);
     match family {
@@ -413,14 +416,25 @@ pub fn decode_sockaddr(data: &[u8]) -> SockAddr {
             let port = u16::from_be_bytes([data[2], data[3]]);
             let mut octets = [0u8; 16];
             octets.copy_from_slice(&data[8..24]);
-            SockAddr::Inet6 { port, addr: Ipv6Addr::from(octets) }
+            SockAddr::Inet6 {
+                port,
+                addr: Ipv6Addr::from(octets),
+            }
         }
         1 => {
             let path_bytes = &data[2..];
-            let end = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
-            SockAddr::Unix { path: String::from_utf8_lossy(&path_bytes[..end]).into_owned() }
+            let end = path_bytes
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(path_bytes.len());
+            SockAddr::Unix {
+                path: String::from_utf8_lossy(&path_bytes[..end]).into_owned(),
+            }
         }
-        _ => SockAddr::Unknown { family, len: data.len() },
+        _ => SockAddr::Unknown {
+            family,
+            len: data.len(),
+        },
     }
 }
 
@@ -434,10 +448,25 @@ pub fn decode_sockaddr(data: &[u8]) -> SockAddr {
 #[derive(Debug, Clone)]
 pub enum Syscall {
     // Typed variants where structured fields add value over raw args.
-    Socket { domain: AddressFamily, sock_type: SockType, protocol: i32 },
-    Connect { sockfd: i32, addr: SockAddr, addrlen: u32 },
-    Bind { sockfd: i32, addr: SockAddr, addrlen: u32 },
-    ArchPrctl { code: ArchPrctlCode, addr: u64 },
+    Socket {
+        domain: AddressFamily,
+        sock_type: SockType,
+        protocol: i32,
+    },
+    Connect {
+        sockfd: i32,
+        addr: SockAddr,
+        addrlen: u32,
+    },
+    Bind {
+        sockfd: i32,
+        addr: SockAddr,
+        addrlen: u32,
+    },
+    ArchPrctl {
+        code: ArchPrctlCode,
+        addr: u64,
+    },
     Fork,
     Vfork,
     Sync,
@@ -493,10 +522,10 @@ pub enum ArgKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchPrctlCode {
-    SetGs,   // 0x1001
-    SetFs,   // 0x1002
-    GetFs,   // 0x1003
-    GetGs,   // 0x1004
+    SetGs, // 0x1001
+    SetFs, // 0x1002
+    GetFs, // 0x1003
+    GetGs, // 0x1004
     Other(u64),
 }
 
@@ -540,25 +569,39 @@ impl Syscall {
     ) -> Self {
         // Typed variants first for syscalls where structured args add value.
         match nr {
-            41 => return Self::Socket {
-                domain: AddressFamily::from_raw(a[0]),
-                sock_type: SockType::from_raw(a[1]),
-                protocol: a[2] as i32,
-            },
-            42 => return Self::Connect {
-                sockfd: a[0] as i32,
-                addr: SockAddr::Unknown { family: 0, len: a[2] as usize },
-                addrlen: a[2] as u32,
-            },
-            49 => return Self::Bind {
-                sockfd: a[0] as i32,
-                addr: SockAddr::Unknown { family: 0, len: a[2] as usize },
-                addrlen: a[2] as u32,
-            },
-            158 => return Self::ArchPrctl {
-                code: ArchPrctlCode::from_raw(a[0]),
-                addr: a[1],
-            },
+            41 => {
+                return Self::Socket {
+                    domain: AddressFamily::from_raw(a[0]),
+                    sock_type: SockType::from_raw(a[1]),
+                    protocol: a[2] as i32,
+                }
+            }
+            42 => {
+                return Self::Connect {
+                    sockfd: a[0] as i32,
+                    addr: SockAddr::Unknown {
+                        family: 0,
+                        len: a[2] as usize,
+                    },
+                    addrlen: a[2] as u32,
+                }
+            }
+            49 => {
+                return Self::Bind {
+                    sockfd: a[0] as i32,
+                    addr: SockAddr::Unknown {
+                        family: 0,
+                        len: a[2] as usize,
+                    },
+                    addrlen: a[2] as u32,
+                }
+            }
+            158 => {
+                return Self::ArchPrctl {
+                    code: ArchPrctlCode::from_raw(a[0]),
+                    addr: a[1],
+                }
+            }
             24 => return Self::SchedYield,
             34 => return Self::Pause,
             15 => return Self::RtSigreturn,
@@ -587,7 +630,14 @@ impl Syscall {
                 strings[i] = pre_strings[i].clone().or_else(|| Some(read_str(a[i])));
             }
         }
-        Self::Generic { nr, name, args: a, strings, arg_kinds: kinds, nargs: nargs as u8 }
+        Self::Generic {
+            nr,
+            name,
+            args: a,
+            strings,
+            arg_kinds: kinds,
+            nargs: nargs as u8,
+        }
     }
 }
 
@@ -795,11 +845,20 @@ fn syscall_arg_kinds_x86_64(nr: u64) -> (&'static str, [ArgKind; 6], usize) {
 
 /// Format a dirfd value: AT_FDCWD (-100) prints symbolically.
 fn fmt_dirfd(fd: i32) -> String {
-    if fd == -100 { "AT_FDCWD".into() } else { fd.to_string() }
+    if fd == -100 {
+        "AT_FDCWD".into()
+    } else {
+        fd.to_string()
+    }
 }
 
 /// Format a single arg based on its descriptor.
-fn fmt_arg(f: &mut fmt::Formatter<'_>, kind: ArgKind, raw: u64, decoded_str: Option<&str>) -> fmt::Result {
+fn fmt_arg(
+    f: &mut fmt::Formatter<'_>,
+    kind: ArgKind,
+    raw: u64,
+    decoded_str: Option<&str>,
+) -> fmt::Result {
     match kind {
         ArgKind::None => Ok(()),
         ArgKind::Hex => write!(f, "{raw:#x}"),
@@ -821,14 +880,22 @@ fn fmt_arg(f: &mut fmt::Formatter<'_>, kind: ArgKind, raw: u64, decoded_str: Opt
 impl fmt::Display for Syscall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Socket { domain, sock_type, protocol } =>
-                write!(f, "socket({domain}, {sock_type}, {protocol})"),
-            Self::Connect { sockfd, addr, addrlen } =>
-                write!(f, "connect({sockfd}, {{{addr}}}, {addrlen})"),
-            Self::Bind { sockfd, addr, addrlen } =>
-                write!(f, "bind({sockfd}, {{{addr}}}, {addrlen})"),
-            Self::ArchPrctl { code, addr } =>
-                write!(f, "arch_prctl({code}, {addr:#x})"),
+            Self::Socket {
+                domain,
+                sock_type,
+                protocol,
+            } => write!(f, "socket({domain}, {sock_type}, {protocol})"),
+            Self::Connect {
+                sockfd,
+                addr,
+                addrlen,
+            } => write!(f, "connect({sockfd}, {{{addr}}}, {addrlen})"),
+            Self::Bind {
+                sockfd,
+                addr,
+                addrlen,
+            } => write!(f, "bind({sockfd}, {{{addr}}}, {addrlen})"),
+            Self::ArchPrctl { code, addr } => write!(f, "arch_prctl({code}, {addr:#x})"),
             Self::Fork => f.write_str("fork()"),
             Self::Vfork => f.write_str("vfork()"),
             Self::Sync => f.write_str("sync()"),
@@ -847,10 +914,19 @@ impl fmt::Display for Syscall {
             Self::RtSigreturn => f.write_str("rt_sigreturn()"),
             Self::InotifyInit => f.write_str("inotify_init()"),
 
-            Self::Generic { name, args, strings, arg_kinds, nargs, .. } => {
+            Self::Generic {
+                name,
+                args,
+                strings,
+                arg_kinds,
+                nargs,
+                ..
+            } => {
                 write!(f, "{name}(")?;
                 for i in 0..(*nargs as usize) {
-                    if i > 0 { f.write_str(", ")?; }
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
                     fmt_arg(f, arg_kinds[i], args[i], strings[i].as_deref())?;
                 }
                 f.write_str(")")

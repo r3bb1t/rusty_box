@@ -9,9 +9,9 @@
 //! - `Emulator::cpu_snapshot`
 //! - `Emulator::setup_cpu_mode` (and friends)
 
-use super::{BxCpuC, BxCpuIdTrait};
 use super::decoder::BxSegregs;
 use super::instrumentation::X86Reg;
+use super::{BxCpuC, BxCpuIdTrait};
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ── RFLAGS / EFLAGS ────────────────────────────────────────────────
@@ -439,14 +439,30 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     // ── FPU scalar register access ───────────────────────────────────
 
-    pub(crate) fn fpu_sw_for_api(&self) -> u16 { self.the_i387.swd }
-    pub(crate) fn set_fpu_sw_for_api(&mut self, v: u16) { self.the_i387.swd = v; }
-    pub(crate) fn fpu_cw_for_api(&self) -> u16 { self.the_i387.cwd }
-    pub(crate) fn set_fpu_cw_for_api(&mut self, v: u16) { self.the_i387.cwd = v; }
-    pub(crate) fn fpu_tag_for_api(&self) -> u16 { self.the_i387.twd }
-    pub(crate) fn set_fpu_tag_for_api(&mut self, v: u16) { self.the_i387.twd = v; }
-    pub(crate) fn mxcsr_for_api(&self) -> u32 { self.mxcsr.mxcsr }
-    pub(crate) fn set_mxcsr_for_api(&mut self, v: u32) { self.mxcsr.mxcsr = v; }
+    pub(crate) fn fpu_sw_for_api(&self) -> u16 {
+        self.the_i387.swd
+    }
+    pub(crate) fn set_fpu_sw_for_api(&mut self, v: u16) {
+        self.the_i387.swd = v;
+    }
+    pub(crate) fn fpu_cw_for_api(&self) -> u16 {
+        self.the_i387.cwd
+    }
+    pub(crate) fn set_fpu_cw_for_api(&mut self, v: u16) {
+        self.the_i387.cwd = v;
+    }
+    pub(crate) fn fpu_tag_for_api(&self) -> u16 {
+        self.the_i387.twd
+    }
+    pub(crate) fn set_fpu_tag_for_api(&mut self, v: u16) {
+        self.the_i387.twd = v;
+    }
+    pub(crate) fn mxcsr_for_api(&self) -> u32 {
+        self.mxcsr.mxcsr
+    }
+    pub(crate) fn set_mxcsr_for_api(&mut self, v: u32) {
+        self.mxcsr.mxcsr = v;
+    }
 
     // ── Generic register read/write by enum tag ──
     //
@@ -583,24 +599,78 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             // Wide registers handled by dedicated reg_read_{fp80,xmm,ymm,zmm} —
             // scalar path returns 0 as sentinel.
-            X86Reg::Fpr0 | X86Reg::Fpr1 | X86Reg::Fpr2 | X86Reg::Fpr3
-            | X86Reg::Fpr4 | X86Reg::Fpr5 | X86Reg::Fpr6 | X86Reg::Fpr7
-            | X86Reg::Xmm0 | X86Reg::Xmm1 | X86Reg::Xmm2 | X86Reg::Xmm3
-            | X86Reg::Xmm4 | X86Reg::Xmm5 | X86Reg::Xmm6 | X86Reg::Xmm7
-            | X86Reg::Xmm8 | X86Reg::Xmm9 | X86Reg::Xmm10 | X86Reg::Xmm11
-            | X86Reg::Xmm12 | X86Reg::Xmm13 | X86Reg::Xmm14 | X86Reg::Xmm15
-            | X86Reg::Ymm0 | X86Reg::Ymm1 | X86Reg::Ymm2 | X86Reg::Ymm3
-            | X86Reg::Ymm4 | X86Reg::Ymm5 | X86Reg::Ymm6 | X86Reg::Ymm7
-            | X86Reg::Ymm8 | X86Reg::Ymm9 | X86Reg::Ymm10 | X86Reg::Ymm11
-            | X86Reg::Ymm12 | X86Reg::Ymm13 | X86Reg::Ymm14 | X86Reg::Ymm15
-            | X86Reg::Zmm0 | X86Reg::Zmm1 | X86Reg::Zmm2 | X86Reg::Zmm3
-            | X86Reg::Zmm4 | X86Reg::Zmm5 | X86Reg::Zmm6 | X86Reg::Zmm7
-            | X86Reg::Zmm8 | X86Reg::Zmm9 | X86Reg::Zmm10 | X86Reg::Zmm11
-            | X86Reg::Zmm12 | X86Reg::Zmm13 | X86Reg::Zmm14 | X86Reg::Zmm15
-            | X86Reg::Zmm16 | X86Reg::Zmm17 | X86Reg::Zmm18 | X86Reg::Zmm19
-            | X86Reg::Zmm20 | X86Reg::Zmm21 | X86Reg::Zmm22 | X86Reg::Zmm23
-            | X86Reg::Zmm24 | X86Reg::Zmm25 | X86Reg::Zmm26 | X86Reg::Zmm27
-            | X86Reg::Zmm28 | X86Reg::Zmm29 | X86Reg::Zmm30 | X86Reg::Zmm31 => 0,
+            X86Reg::Fpr0
+            | X86Reg::Fpr1
+            | X86Reg::Fpr2
+            | X86Reg::Fpr3
+            | X86Reg::Fpr4
+            | X86Reg::Fpr5
+            | X86Reg::Fpr6
+            | X86Reg::Fpr7
+            | X86Reg::Xmm0
+            | X86Reg::Xmm1
+            | X86Reg::Xmm2
+            | X86Reg::Xmm3
+            | X86Reg::Xmm4
+            | X86Reg::Xmm5
+            | X86Reg::Xmm6
+            | X86Reg::Xmm7
+            | X86Reg::Xmm8
+            | X86Reg::Xmm9
+            | X86Reg::Xmm10
+            | X86Reg::Xmm11
+            | X86Reg::Xmm12
+            | X86Reg::Xmm13
+            | X86Reg::Xmm14
+            | X86Reg::Xmm15
+            | X86Reg::Ymm0
+            | X86Reg::Ymm1
+            | X86Reg::Ymm2
+            | X86Reg::Ymm3
+            | X86Reg::Ymm4
+            | X86Reg::Ymm5
+            | X86Reg::Ymm6
+            | X86Reg::Ymm7
+            | X86Reg::Ymm8
+            | X86Reg::Ymm9
+            | X86Reg::Ymm10
+            | X86Reg::Ymm11
+            | X86Reg::Ymm12
+            | X86Reg::Ymm13
+            | X86Reg::Ymm14
+            | X86Reg::Ymm15
+            | X86Reg::Zmm0
+            | X86Reg::Zmm1
+            | X86Reg::Zmm2
+            | X86Reg::Zmm3
+            | X86Reg::Zmm4
+            | X86Reg::Zmm5
+            | X86Reg::Zmm6
+            | X86Reg::Zmm7
+            | X86Reg::Zmm8
+            | X86Reg::Zmm9
+            | X86Reg::Zmm10
+            | X86Reg::Zmm11
+            | X86Reg::Zmm12
+            | X86Reg::Zmm13
+            | X86Reg::Zmm14
+            | X86Reg::Zmm15
+            | X86Reg::Zmm16
+            | X86Reg::Zmm17
+            | X86Reg::Zmm18
+            | X86Reg::Zmm19
+            | X86Reg::Zmm20
+            | X86Reg::Zmm21
+            | X86Reg::Zmm22
+            | X86Reg::Zmm23
+            | X86Reg::Zmm24
+            | X86Reg::Zmm25
+            | X86Reg::Zmm26
+            | X86Reg::Zmm27
+            | X86Reg::Zmm28
+            | X86Reg::Zmm29
+            | X86Reg::Zmm30
+            | X86Reg::Zmm31 => 0,
         }
     }
 
@@ -697,8 +767,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_rflags_for_api(preserved | (val & 0xFFFF));
             }
 
-            X86Reg::Cs | X86Reg::Ss | X86Reg::Ds
-            | X86Reg::Es | X86Reg::Fs | X86Reg::Gs => {
+            X86Reg::Cs | X86Reg::Ss | X86Reg::Ds | X86Reg::Es | X86Reg::Fs | X86Reg::Gs => {
                 // Raw selector write without descriptor-cache reload. Callers
                 // should use `setup_cpu_mode` for correct protected-mode setup.
                 self.set_seg_selector_raw_for_api(reg, trunc_u16(val));
@@ -745,24 +814,78 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             // Wide registers — use dedicated reg_write_{fp80,xmm,ymm,zmm}.
             // Scalar path ignores.
-            X86Reg::Fpr0 | X86Reg::Fpr1 | X86Reg::Fpr2 | X86Reg::Fpr3
-            | X86Reg::Fpr4 | X86Reg::Fpr5 | X86Reg::Fpr6 | X86Reg::Fpr7
-            | X86Reg::Xmm0 | X86Reg::Xmm1 | X86Reg::Xmm2 | X86Reg::Xmm3
-            | X86Reg::Xmm4 | X86Reg::Xmm5 | X86Reg::Xmm6 | X86Reg::Xmm7
-            | X86Reg::Xmm8 | X86Reg::Xmm9 | X86Reg::Xmm10 | X86Reg::Xmm11
-            | X86Reg::Xmm12 | X86Reg::Xmm13 | X86Reg::Xmm14 | X86Reg::Xmm15
-            | X86Reg::Ymm0 | X86Reg::Ymm1 | X86Reg::Ymm2 | X86Reg::Ymm3
-            | X86Reg::Ymm4 | X86Reg::Ymm5 | X86Reg::Ymm6 | X86Reg::Ymm7
-            | X86Reg::Ymm8 | X86Reg::Ymm9 | X86Reg::Ymm10 | X86Reg::Ymm11
-            | X86Reg::Ymm12 | X86Reg::Ymm13 | X86Reg::Ymm14 | X86Reg::Ymm15
-            | X86Reg::Zmm0 | X86Reg::Zmm1 | X86Reg::Zmm2 | X86Reg::Zmm3
-            | X86Reg::Zmm4 | X86Reg::Zmm5 | X86Reg::Zmm6 | X86Reg::Zmm7
-            | X86Reg::Zmm8 | X86Reg::Zmm9 | X86Reg::Zmm10 | X86Reg::Zmm11
-            | X86Reg::Zmm12 | X86Reg::Zmm13 | X86Reg::Zmm14 | X86Reg::Zmm15
-            | X86Reg::Zmm16 | X86Reg::Zmm17 | X86Reg::Zmm18 | X86Reg::Zmm19
-            | X86Reg::Zmm20 | X86Reg::Zmm21 | X86Reg::Zmm22 | X86Reg::Zmm23
-            | X86Reg::Zmm24 | X86Reg::Zmm25 | X86Reg::Zmm26 | X86Reg::Zmm27
-            | X86Reg::Zmm28 | X86Reg::Zmm29 | X86Reg::Zmm30 | X86Reg::Zmm31 => {}
+            X86Reg::Fpr0
+            | X86Reg::Fpr1
+            | X86Reg::Fpr2
+            | X86Reg::Fpr3
+            | X86Reg::Fpr4
+            | X86Reg::Fpr5
+            | X86Reg::Fpr6
+            | X86Reg::Fpr7
+            | X86Reg::Xmm0
+            | X86Reg::Xmm1
+            | X86Reg::Xmm2
+            | X86Reg::Xmm3
+            | X86Reg::Xmm4
+            | X86Reg::Xmm5
+            | X86Reg::Xmm6
+            | X86Reg::Xmm7
+            | X86Reg::Xmm8
+            | X86Reg::Xmm9
+            | X86Reg::Xmm10
+            | X86Reg::Xmm11
+            | X86Reg::Xmm12
+            | X86Reg::Xmm13
+            | X86Reg::Xmm14
+            | X86Reg::Xmm15
+            | X86Reg::Ymm0
+            | X86Reg::Ymm1
+            | X86Reg::Ymm2
+            | X86Reg::Ymm3
+            | X86Reg::Ymm4
+            | X86Reg::Ymm5
+            | X86Reg::Ymm6
+            | X86Reg::Ymm7
+            | X86Reg::Ymm8
+            | X86Reg::Ymm9
+            | X86Reg::Ymm10
+            | X86Reg::Ymm11
+            | X86Reg::Ymm12
+            | X86Reg::Ymm13
+            | X86Reg::Ymm14
+            | X86Reg::Ymm15
+            | X86Reg::Zmm0
+            | X86Reg::Zmm1
+            | X86Reg::Zmm2
+            | X86Reg::Zmm3
+            | X86Reg::Zmm4
+            | X86Reg::Zmm5
+            | X86Reg::Zmm6
+            | X86Reg::Zmm7
+            | X86Reg::Zmm8
+            | X86Reg::Zmm9
+            | X86Reg::Zmm10
+            | X86Reg::Zmm11
+            | X86Reg::Zmm12
+            | X86Reg::Zmm13
+            | X86Reg::Zmm14
+            | X86Reg::Zmm15
+            | X86Reg::Zmm16
+            | X86Reg::Zmm17
+            | X86Reg::Zmm18
+            | X86Reg::Zmm19
+            | X86Reg::Zmm20
+            | X86Reg::Zmm21
+            | X86Reg::Zmm22
+            | X86Reg::Zmm23
+            | X86Reg::Zmm24
+            | X86Reg::Zmm25
+            | X86Reg::Zmm26
+            | X86Reg::Zmm27
+            | X86Reg::Zmm28
+            | X86Reg::Zmm29
+            | X86Reg::Zmm30
+            | X86Reg::Zmm31 => {}
         }
     }
 }
@@ -770,9 +893,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 // Explicit truncation helpers. The only place in the CPU API surface where
 // `as` is used — it's architectural (x86 register writes silently truncate)
 // and concentrating it in named helpers makes every callsite self-documenting.
-#[inline] fn trunc_u16(v: u64) -> u16 { (v & 0xFFFF) as u16 }
-#[inline] fn trunc_u8(v: u64) -> u8 { (v & 0xFF) as u8 }
-#[inline] fn trunc_u32(v: u64) -> u32 { (v & 0xFFFF_FFFF) as u32 }
+#[inline]
+fn trunc_u16(v: u64) -> u16 {
+    (v & 0xFFFF) as u16
+}
+#[inline]
+fn trunc_u8(v: u64) -> u8 {
+    (v & 0xFF) as u8
+}
+#[inline]
+fn trunc_u32(v: u64) -> u32 {
+    (v & 0xFFFF_FFFF) as u32
+}
 
 // ─────────────────────────── CpuAccess impl for HookCtx ───────────────────────────
 //
@@ -782,7 +914,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
 use crate::cpu::instrumentation::CpuAccess;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> CpuAccess for BxCpuC<'_, I, T> {
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> CpuAccess
+    for BxCpuC<'_, I, T>
+{
     fn reg_read(&self, reg: X86Reg) -> u64 {
         self.api_reg_read(reg)
     }
@@ -806,34 +940,43 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> CpuAccess
     }
 
     fn virt_read(&self, vaddr: u64, buf: &mut [u8]) -> bool {
-        virt_read_chunked(buf, vaddr, |va| self.translate_linear_for_diag(va),
-                          |pa| self.mem_read_byte(pa))
+        virt_read_chunked(
+            buf,
+            vaddr,
+            |va| self.translate_linear_for_diag(va),
+            |pa| self.mem_read_byte(pa),
+        )
     }
 
     fn virt_read_with_cr3(&self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool {
-        virt_read_chunked(buf, vaddr, |va| self.translate_linear_with_cr3(va, cr3),
-                          |pa| self.mem_read_byte(pa))
+        virt_read_chunked(
+            buf,
+            vaddr,
+            |va| self.translate_linear_with_cr3(va, cr3),
+            |pa| self.mem_read_byte(pa),
+        )
     }
 
     fn stop(&mut self) {
         self.instrumentation.stop_request = true;
     }
 
-    fn rip(&self) -> u64 { BxCpuC::rip(self) }
-    fn icount(&self) -> u64 { self.icount }
-    fn cr3(&self) -> u64 { self.cr3 }
+    fn rip(&self) -> u64 {
+        BxCpuC::rip(self)
+    }
+    fn icount(&self) -> u64 {
+        self.icount
+    }
+    fn cr3(&self) -> u64 {
+        self.cr3
+    }
 }
 
 /// Page-aware chunked virtual memory read. Walks `buf` page-by-page, calling
 /// `translate(va) -> Option<pa>` once per page and `read_byte(pa) -> u8` for
 /// each byte. Returns `true` on success, `false` if any page translation
 /// fails (partial read leaves earlier pages populated).
-fn virt_read_chunked<Tr, Rd>(
-    buf: &mut [u8],
-    start_va: u64,
-    translate: Tr,
-    read_byte: Rd,
-) -> bool
+fn virt_read_chunked<Tr, Rd>(buf: &mut [u8], start_va: u64, translate: Tr, read_byte: Rd) -> bool
 where
     Tr: Fn(u64) -> Option<u64>,
     Rd: Fn(u64) -> u8,
@@ -843,7 +986,9 @@ where
         let va = start_va.wrapping_add(off as u64);
         let page_off = usize::try_from(va & 0xFFF).expect("page offset fits usize");
         let chunk = (0x1000 - page_off).min(buf.len() - off);
-        let Some(pa) = translate(va) else { return false; };
+        let Some(pa) = translate(va) else {
+            return false;
+        };
         for i in 0..chunk {
             buf[off + i] = read_byte(pa + i as u64);
         }

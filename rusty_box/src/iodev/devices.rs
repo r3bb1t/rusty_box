@@ -11,16 +11,18 @@
 //! - Standard devices (HardDrive, Floppy, VGA) are configurable
 //! - Each device registers its own I/O port handlers
 
-#[cfg(feature = "alloc")] use alloc::format;
-#[cfg(feature = "alloc")] use alloc::string::String;
+#[cfg(feature = "alloc")]
+use alloc::format;
+#[cfg(feature = "alloc")]
+use alloc::string::String;
 
 use crate::{cpu::ResetReason, memory::BxMemC, pc_system::BxPcSystemC, Result};
 
 use super::acpi::BxAcpiCtrl;
 use super::cmos::{BxCmosC, CMOS_ADDR, CMOS_DATA};
 use super::dma::BxDmaC;
-use super::harddrv::BxHardDriveC;
 use super::fw_cfg::BxFwCfg;
+use super::harddrv::BxHardDriveC;
 use super::ioapic::BxIoApic;
 use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT, SYSTEM_CONTROL_B};
 use super::pci::BxPciBridge;
@@ -302,9 +304,24 @@ impl DeviceManager {
         // Issue #610 — Darwin boot fix: allow 1/2/4-byte reads (width 7), write stays 1-byte
         io.register_io_read_handler(DeviceId::Keyboard, KBD_DATA_PORT, "Keyboard Data", 0x7);
         io.register_io_write_handler(DeviceId::Keyboard, KBD_DATA_PORT, "Keyboard Data", 0x1);
-        io.register_io_read_handler(DeviceId::Keyboard, KBD_STATUS_PORT, "Keyboard Status/Command", 0x7);
-        io.register_io_write_handler(DeviceId::Keyboard, KBD_STATUS_PORT, "Keyboard Status/Command", 0x1);
-        io.register_io_handler(DeviceId::Keyboard, SYSTEM_CONTROL_B, "System Control B", 0x1);
+        io.register_io_read_handler(
+            DeviceId::Keyboard,
+            KBD_STATUS_PORT,
+            "Keyboard Status/Command",
+            0x7,
+        );
+        io.register_io_write_handler(
+            DeviceId::Keyboard,
+            KBD_STATUS_PORT,
+            "Keyboard Status/Command",
+            0x1,
+        );
+        io.register_io_handler(
+            DeviceId::Keyboard,
+            SYSTEM_CONTROL_B,
+            "System Control B",
+            0x1,
+        );
     }
 
     /// Register Hard Drive I/O handlers
@@ -379,7 +396,12 @@ impl DeviceManager {
     /// Bochs: devices.cc (PCI bridge init order)
     fn register_pci_handlers(&mut self, io: &mut BxDevicesC) {
         // PCI config address register (0xCF8) — 4-byte write only
-        io.register_io_handler(DeviceId::Pci, super::pci::PCI_CONFIG_ADDR, "PCI Config Addr", 0x4);
+        io.register_io_handler(
+            DeviceId::Pci,
+            super::pci::PCI_CONFIG_ADDR,
+            "PCI Config Addr",
+            0x4,
+        );
 
         // PCI config data register (0xCFC-0xCFF) — 1/2/4-byte
         for port in 0x0CFC..=0x0CFF_u16 {
@@ -463,9 +485,7 @@ impl DeviceManager {
             // Device 1, Func 3: PIIX4 ACPI controller
             0x0B => self.acpi.pci_read(address, io_len),
             // Unrecognized device
-            _ => {
-                0xFFFF_FFFF
-            }
+            _ => 0xFFFF_FFFF,
         }
     }
 
@@ -519,7 +539,12 @@ impl DeviceManager {
 
     /// Simulate time passing for timer-based devices
     /// Returns true if any interrupt is pending
-    pub fn tick(&mut self, usec: u64, icount: u64, mut lapic: Option<&mut crate::cpu::apic::BxLocalApic>) -> bool {
+    pub fn tick(
+        &mut self,
+        usec: u64,
+        icount: u64,
+        mut lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
+    ) -> bool {
         self.diag_tick_count += 1;
         self.diag_total_usec += usec;
 
@@ -594,12 +619,8 @@ impl DeviceManager {
         {
             let (fwds, count) = self.pic.take_ioapic_forwards();
             for &(irq, level) in &fwds[..count] {
-                self.ioapic.set_irq_level(
-                    irq,
-                    level,
-                    None,
-                    lapic.as_deref_mut(),
-                );
+                self.ioapic
+                    .set_irq_level(irq, level, None, lapic.as_deref_mut());
             }
         }
 
@@ -826,10 +847,7 @@ impl BxDevicesC {
     /// # Arguments
     /// * `mem` - Memory subsystem reference
     /// * `port92_state` - Optional pointer to SystemControlPort for Port 92h handling
-    pub fn init(
-        &mut self,
-        _mem: &mut BxMemC,
-    ) -> Result<()> {
+    pub fn init(&mut self, _mem: &mut BxMemC) -> Result<()> {
         tracing::debug!("Initializing device subsystem");
 
         // Register Port 92h - System Control Port (A20 gate, fast reset)
@@ -882,7 +900,6 @@ impl BxDevicesC {
         Ok(())
     }
 }
-
 
 /// Helper structure for managing Port 92h state
 /// This is used by the Emulator to track and respond to Port 92h changes

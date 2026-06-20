@@ -158,7 +158,7 @@ mod bridge_impl {
 
         fn get_pending_serial_input(&mut self) -> Vec<u8> {
             if let Ok(mut display) = self.shared.lock() {
-                display.pending_serial_input.drain(..).collect()
+                display.drain_serial_input()
             } else {
                 Vec::new()
             }

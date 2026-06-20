@@ -80,10 +80,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             // 64-bit memory operand
             let eaddr = self.resolve_addr64(instr);
-            self.read_virtual_qword_64(
-                BxSegregs::from(instr.seg()),
-                eaddr,
-            )?
+            self.read_virtual_qword_64(BxSegregs::from(instr.seg()), eaddr)?
         };
 
         let mut op2 = self.get_gpr32(instr.dst() as usize);
