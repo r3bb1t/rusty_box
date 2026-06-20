@@ -54,6 +54,9 @@ jobs:
       - name: Check core no_std no_alloc freestanding target
         run: cargo check -p rusty_box --no-default-features --target x86_64-unknown-none
 
+      - name: Check emulator no_std no_alloc link smoke
+        run: cargo check -p rusty_box_no_alloc_smoke --target x86_64-unknown-none
+
       - name: Check core no_std no_alloc UEFI target
         run: cargo check -p rusty_box --no-default-features --target x86_64-unknown-uefi
 

@@ -1,5 +1,5 @@
 [workspace]
-members = ["rusty_box", "rusty_box_decoder", "rusty_box_gui", "rusty_box_bximage", "examples/rusty_box_web", "examples/rusty_box_uefi"]
+members = ["rusty_box", "rusty_box_decoder", "rusty_box_gui", "rusty_box_bximage", "examples/rusty_box_web", "examples/rusty_box_uefi", "examples/no_alloc_smoke"]
 default-members = ["rusty_box"]
 resolver = "2"
 

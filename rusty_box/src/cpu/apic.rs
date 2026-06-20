@@ -7,6 +7,7 @@
 //!
 //! Bochs source: cpp_orig/bochs/cpu/apic.cc + apic.h
 
+#[cfg(feature = "alloc")]
 use tracing::{debug, error, info};
 
 use crate::config::BxPhyAddress;

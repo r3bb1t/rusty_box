@@ -2645,6 +2645,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_box_no_alloc_smoke"
+version = "0.0.3"
+dependencies = [
+ "rusty_box",
+]
+
+[[package]]
 name = "rusty_box_uefi"
 version = "0.0.3"
 dependencies = [

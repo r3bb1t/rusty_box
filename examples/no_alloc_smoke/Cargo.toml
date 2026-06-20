@@ -1,0 +1,10 @@
+[package]
+name = "rusty_box_no_alloc_smoke"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+rusty_box = { path = "../../rusty_box", default-features = false }

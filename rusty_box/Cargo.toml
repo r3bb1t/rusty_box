@@ -18,8 +18,8 @@ path = "src/lib.rs"
 [features]
 default = ["std"]
 
-alloc = []
-std = ["tracing/std", "tempfile", "crossterm", "alloc"]
+alloc = ["dep:tracing"]
+std = ["alloc", "tracing/std", "tempfile", "crossterm"]
 gui-egui = ["dep:egui", "dep:eframe"]
 bx_debugger = []
 bx_gdb_stub = []
@@ -28,7 +28,7 @@ profiling = ["std"]
 bench = ["std", "dep:criterion"]
 
 [dependencies]
-tracing.workspace = true
+tracing = { workspace = true, optional = true }
 thiserror.workspace = true
 byteorder.workspace = true
 tempfile = { version = "3.20", optional = true }
