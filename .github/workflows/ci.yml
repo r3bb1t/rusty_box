@@ -81,5 +81,27 @@ jobs:
       - name: Test GUI native default
         run: cargo test -p rusty_box_gui
 
+      - name: Download Bochs BIOS ROMs for wasm GUI
+        run: |
+          mkdir -p cpp_orig/bochs/bios/VGABIOS-lgpl
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.request import urlretrieve
+
+          downloads = {
+              "cpp_orig/bochs/bios/BIOS-bochs-latest":
+                  "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/BIOS-bochs-latest?format=raw",
+              "cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
+                  "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/VGABIOS-lgpl-latest?format=raw",
+          }
+
+          for destination, url in downloads.items():
+              path = Path(destination)
+              path.parent.mkdir(parents=True, exist_ok=True)
+              urlretrieve(url, path)
+              if path.stat().st_size == 0:
+                  raise SystemExit(f"{destination} downloaded as an empty file")
+          PY
+
       - name: Check GUI wasm target
         run: cargo check -p rusty_box_gui --target wasm32-unknown-unknown
