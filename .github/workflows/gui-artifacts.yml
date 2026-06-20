@@ -19,21 +19,51 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Download Bochs BIOS ROMs
+        shell: bash
+        run: |
+          mkdir -p cpp_orig/bochs/bios/VGABIOS-lgpl
+          python - <<'PY'
+          from pathlib import Path
+          from urllib.request import urlretrieve
+
+          downloads = {
+              "cpp_orig/bochs/bios/BIOS-bochs-latest":
+                  "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/BIOS-bochs-latest?format=raw",
+              "cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
+                  "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/VGABIOS-lgpl-latest?format=raw",
+          }
+
+          for destination, url in downloads.items():
+              path = Path(destination)
+              path.parent.mkdir(parents=True, exist_ok=True)
+              urlretrieve(url, path)
+              if path.stat().st_size == 0:
+                  raise SystemExit(f"{destination} downloaded as an empty file")
+          PY
+
 
       - name: Build native GUI
-        run: cargo build -p rusty_box_gui --release
+        run: cargo build -p rusty_box_gui --release --features windows-gui-subsystem
 
       - name: Stage artifact
-        shell: pwsh
+        shell: bash
         run: |
-          New-Item -ItemType Directory -Force artifact | Out-Null
-          Copy-Item target/release/rusty_box_gui.exe artifact/rusty_box_gui.exe
+          mkdir -p artifact/roms
+          cp target/release/rusty_box_gui.exe artifact/rusty_box_gui.exe
+          cp cpp_orig/bochs/bios/BIOS-bochs-latest artifact/roms/BIOS-bochs-latest
+          cp cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin artifact/roms/VGABIOS-lgpl-latest.bin
+          cat > artifact/rusty_box.toml <<'EOF'
+          [rom]
+          bios = "roms/BIOS-bochs-latest"
+          vga_bios = "roms/VGABIOS-lgpl-latest.bin"
+          EOF
 
       - name: Upload Windows GUI artifact
         uses: actions/upload-artifact@v4
         with:
           name: rusty-box-gui-windows
-          path: artifact/rusty_box_gui.exe
+          path: artifact
           if-no-files-found: error
 
   linux-gui:
@@ -42,6 +72,28 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Download Bochs BIOS ROMs
+        run: |
+          mkdir -p cpp_orig/bochs/bios/VGABIOS-lgpl
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.request import urlretrieve
+
+          downloads = {
+              "cpp_orig/bochs/bios/BIOS-bochs-latest":
+                  "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/BIOS-bochs-latest?format=raw",
+              "cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
+                  "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/VGABIOS-lgpl-latest?format=raw",
+          }
+
+          for destination, url in downloads.items():
+              path = Path(destination)
+              path.parent.mkdir(parents=True, exist_ok=True)
+              urlretrieve(url, path)
+              if path.stat().st_size == 0:
+                  raise SystemExit(f"{destination} downloaded as an empty file")
+          PY
+
 
       - name: Install native GUI dependencies
         run: |
@@ -62,15 +114,22 @@ jobs:
 
       - name: Stage artifact
         run: |
-          mkdir -p artifact
+          mkdir -p artifact/roms
           cp target/release/rusty_box_gui artifact/rusty_box_gui
           chmod +x artifact/rusty_box_gui
+          cp cpp_orig/bochs/bios/BIOS-bochs-latest artifact/roms/BIOS-bochs-latest
+          cp cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin artifact/roms/VGABIOS-lgpl-latest.bin
+          cat > artifact/rusty_box.toml <<'EOF'
+          [rom]
+          bios = "roms/BIOS-bochs-latest"
+          vga_bios = "roms/VGABIOS-lgpl-latest.bin"
+          EOF
 
       - name: Upload Linux GUI artifact
         uses: actions/upload-artifact@v4
         with:
           name: rusty-box-gui-linux
-          path: artifact/rusty_box_gui
+          path: artifact
           if-no-files-found: error
 
   macos-gui:
@@ -79,21 +138,50 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Download Bochs BIOS ROMs
+        run: |
+          mkdir -p cpp_orig/bochs/bios/VGABIOS-lgpl
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.request import urlretrieve
+
+          downloads = {
+              "cpp_orig/bochs/bios/BIOS-bochs-latest":
+                  "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/BIOS-bochs-latest?format=raw",
+              "cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
+                  "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/VGABIOS-lgpl-latest?format=raw",
+          }
+
+          for destination, url in downloads.items():
+              path = Path(destination)
+              path.parent.mkdir(parents=True, exist_ok=True)
+              urlretrieve(url, path)
+              if path.stat().st_size == 0:
+                  raise SystemExit(f"{destination} downloaded as an empty file")
+          PY
+
 
       - name: Build native GUI
         run: cargo build -p rusty_box_gui --release
 
       - name: Stage artifact
         run: |
-          mkdir -p artifact
+          mkdir -p artifact/roms
           cp target/release/rusty_box_gui artifact/rusty_box_gui
           chmod +x artifact/rusty_box_gui
+          cp cpp_orig/bochs/bios/BIOS-bochs-latest artifact/roms/BIOS-bochs-latest
+          cp cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin artifact/roms/VGABIOS-lgpl-latest.bin
+          cat > artifact/rusty_box.toml <<'EOF'
+          [rom]
+          bios = "roms/BIOS-bochs-latest"
+          vga_bios = "roms/VGABIOS-lgpl-latest.bin"
+          EOF
 
       - name: Upload macOS GUI artifact
         uses: actions/upload-artifact@v4
         with:
           name: rusty-box-gui-macos
-          path: artifact/rusty_box_gui
+          path: artifact
           if-no-files-found: error
 
   wasm-gui:

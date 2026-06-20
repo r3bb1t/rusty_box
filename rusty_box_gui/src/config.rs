@@ -228,7 +228,7 @@ fn resolve_config_with_base(
 
     let disk = resolve_disk(&file, args, config_dir)?;
     let cdrom = resolve_cdrom(&file, args, config_dir);
-    let boot_order = resolve_boot_order(&file, args, disk.is_some(), cdrom.is_some())?;
+    let boot_order = resolve_boot_order(&file, args, display, disk.is_some(), cdrom.is_some())?;
     validate_boot_order(&boot_order, disk.is_some(), cdrom.is_some())?;
 
     Ok(ResolvedConfig {
@@ -438,6 +438,7 @@ fn resolve_cdrom(
 fn resolve_boot_order(
     file: &FileConfig,
     args: &Args,
+    display: DisplayBackend,
     has_disk: bool,
     has_cdrom: bool,
 ) -> Result<Vec<BootDevice>, RunError> {
@@ -449,6 +450,8 @@ fn resolve_boot_order(
         vec![BootDevice::Disk]
     } else if has_cdrom {
         vec![BootDevice::Cdrom]
+    } else if allow_empty_boot_order(display) {
+        Vec::new()
     } else {
         return Err(RunError::EmptyBootOrder);
     };
@@ -508,6 +511,16 @@ fn default_display_backend() -> DisplayBackend {
 #[cfg(not(feature = "gui-egui"))]
 fn default_display_backend() -> DisplayBackend {
     DisplayBackend::Terminal
+}
+
+#[cfg(feature = "gui-egui")]
+fn allow_empty_boot_order(display: DisplayBackend) -> bool {
+    display == DisplayBackend::Egui
+}
+
+#[cfg(not(feature = "gui-egui"))]
+fn allow_empty_boot_order(_display: DisplayBackend) -> bool {
+    false
 }
 
 fn ensure_nonzero(field: &'static str, value: u32) -> Result<(), RunError> {
@@ -987,6 +1000,26 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         remove_test_file(&config_path);
         remove_test_dir(&dir);
     }
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn egui_allows_launch_without_boot_media() {
+        let file = config(
+            r#"
+[display]
+backend = "egui"
+
+[rom]
+bios = "bios.bin"
+"#,
+        );
+
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        assert!(resolved.boot_order.is_empty());
+        assert!(resolved.disk.is_none());
+        assert!(resolved.cdrom.is_none());
+    }
+
     #[test]
     fn rejects_missing_bios() {
         let error = resolve_config(FileConfig::default(), &args(["rusty_box_gui"])).unwrap_err();

@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(windows, feature = "windows-gui-subsystem"),
+    windows_subsystem = "windows"
+)]
+
 #[cfg(not(target_arch = "wasm32"))]
 use clap::Parser;
 #[cfg(not(target_arch = "wasm32"))]

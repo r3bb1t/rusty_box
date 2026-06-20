@@ -1967,10 +1967,12 @@ enum WebBootMode {
     Alpine,
 }
 
-#[cfg(target_arch = "wasm32")]
-const BATCH_SIZE: u64 = 50_000;
-#[cfg(target_arch = "wasm32")]
-const FRAME_BUDGET: u64 = 200_000;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_GUEST_MEMORY_MIB: usize = 128;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_BATCH_SIZE: u64 = 5_000;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_FRAME_BUDGET: u64 = 20_000;
 #[cfg(target_arch = "wasm32")]
 const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bios/BIOS-bochs-latest");
 #[cfg(target_arch = "wasm32")]
@@ -1984,7 +1986,7 @@ impl WebShellApp {
         let chrome = ShellChrome::with_library(vec![VmLibraryEntry::new(
             "Rusty Box Web",
             "ISO upload",
-            "256 MB",
+            "128 MB",
             "None",
             "No uploaded media",
         )]);
@@ -2016,7 +2018,7 @@ impl WebShellApp {
             emulator::{Emulator, EmulatorConfig},
         };
 
-        let ram_size = 256 * 1024 * 1024;
+        let ram_size = WEB_GUEST_MEMORY_MIB * 1024 * 1024;
         let config = EmulatorConfig {
             guest_memory_size: ram_size,
             host_memory_size: ram_size,
@@ -2181,8 +2183,8 @@ impl WebShellApp {
         if self.initialized && !self.shutdown {
             if let Some(emu) = &mut self.emulator {
                 let mut frame_executed = 0u64;
-                while frame_executed < FRAME_BUDGET {
-                    match emu.step_batch(BATCH_SIZE) {
+                while frame_executed < WEB_FRAME_BUDGET {
+                    match emu.step_batch(WEB_BATCH_SIZE) {
                         Ok((executed, is_shutdown)) => {
                             frame_executed = frame_executed.saturating_add(executed);
                             if is_shutdown {
@@ -2584,9 +2586,9 @@ impl WebShellApp {
                 hardware_intro(
                     ui,
                     "Browser memory preset",
-                    "The web launcher uses a fixed 256 MiB profile so uploaded ISO boots stay predictable in the browser.",
+                    "The web launcher uses a fixed 128 MiB profile so uploaded ISO boots stay responsive in the browser.",
                 );
-                detail_row(ui, "Installed memory", "256 MB");
+                detail_row(ui, "Installed memory", "128 MB");
                 detail_row(ui, "Guest RAM", "Browser launcher preset");
             }
             HardwareDevice::Processors => {
@@ -3101,6 +3103,13 @@ mod tests {
     fn web_upload_recreates_existing_browser_vm() {
         assert!(!web_upload_replaces_browser_vm(false));
         assert!(web_upload_replaces_browser_vm(true));
+    }
+
+    #[test]
+    fn web_alpine_profile_stays_browser_friendly() {
+        assert!(WEB_GUEST_MEMORY_MIB <= 128);
+        assert!(WEB_FRAME_BUDGET <= 20_000);
+        assert!(WEB_BATCH_SIZE <= WEB_FRAME_BUDGET);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

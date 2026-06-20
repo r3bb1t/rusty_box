@@ -12,6 +12,10 @@ use std::sync::{
     {Arc, Mutex},
 };
 
+const SERIAL_PANEL_MIN_HEIGHT: f32 = 48.0;
+const SERIAL_PANEL_DEFAULT_HEIGHT: f32 = 88.0;
+const SERIAL_PANEL_MAX_HEIGHT: f32 = 200.0;
+
 /// The eframe application that displays the emulator's VGA output.
 pub struct RustyBoxApp {
     shared: Arc<Mutex<SharedDisplay>>,
@@ -347,9 +351,9 @@ impl RustyBoxApp {
             let console_text = egui::Color32::from_rgb(0x00, 0xCC, 0x66);
             egui::Panel::bottom("serial_console")
                 .resizable(true)
-                .min_size(60.0)
-                .default_size(160.0)
-                .max_size(400.0)
+                .min_size(SERIAL_PANEL_MIN_HEIGHT)
+                .default_size(SERIAL_PANEL_DEFAULT_HEIGHT)
+                .max_size(SERIAL_PANEL_MAX_HEIGHT)
                 .frame(
                     egui::Frame::NONE
                         .fill(console_bg)
@@ -596,5 +600,11 @@ mod tests {
             b"help\n".to_vec()
         );
         assert!(app.serial_input.is_empty());
+    }
+
+    #[test]
+    fn serial_panel_uses_compact_default_size() {
+        assert!(SERIAL_PANEL_DEFAULT_HEIGHT <= 96.0);
+        assert!(SERIAL_PANEL_MAX_HEIGHT <= 220.0);
     }
 }
