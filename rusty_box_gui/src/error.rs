@@ -55,6 +55,28 @@ pub enum RunError {
     #[error("disk image too large for BIOS CHS auto-detection: {} needs {cylinders} cylinders", path.display())]
     DiskTooLargeForChs { path: PathBuf, cylinders: u64 },
 
+    #[error("disk.create path is required when disk creation is requested")]
+    MissingDiskCreatePath,
+
+    #[error("conflicting disk options: {first} cannot be used with {second}")]
+    ConflictingDiskOptions {
+        first: &'static str,
+        second: &'static str,
+    },
+
+    #[error("created disk CHS exceeds current GUI geometry field: {} needs {cylinders} cylinders", path.display())]
+    CreatedDiskChsOverflow { path: PathBuf, cylinders: u64 },
+
+    #[error("invalid disk.create.size: {source}")]
+    DiskCreateSize {
+        source: rusty_box_bximage::BxImageError,
+    },
+
+    #[error("failed to create disk image: {source}")]
+    DiskCreate {
+        source: rusty_box_bximage::BxImageError,
+    },
+
     #[error("path must be valid UTF-8 for current emulator media API: {path:?}")]
     NonUtf8Path { path: PathBuf },
 
@@ -64,6 +86,16 @@ pub enum RunError {
         path: PathBuf,
         source: io::Error,
     },
+
+    #[error("failed to start emulator thread: {source}")]
+    ThreadStart { source: io::Error },
+
+    #[error("emulator thread panicked")]
+    EmulatorThreadPanic,
+
+    #[cfg(feature = "gui-egui")]
+    #[error("egui window failed: {message}")]
+    Gui { message: String },
 
     #[error(transparent)]
     Emulator(#[from] rusty_box::Error),

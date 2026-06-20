@@ -105,6 +105,8 @@ rusty_box/
 |   +-- src/ring_buffer.rs     # Fixed-capacity ring buffer (replaces VecDeque)
 |   +-- examples/              # Desktop examples (DLX, Alpine, egui GUI)
 +-- rusty_box_decoder/         # x86 instruction decoder (separate crate)
++-- rusty_box_gui/             # User launcher with CLI/TOML config and egui disk creator
++-- rusty_box_bximage/         # bximage-compatible disk image creation helpers
 +-- examples/rusty_box_web/    # WASM web frontend
 +-- examples/rusty_box_uefi/   # UEFI bootable emulator (no allocator)
 ```

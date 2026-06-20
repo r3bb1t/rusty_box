@@ -26,15 +26,57 @@ use super::x87::{
     BX_OPCODE_INFO_FLOATING_POINT_DE, BX_OPCODE_INFO_FLOATING_POINT_DF,
 };
 
-// Register constants for clarity
+#[derive(Clone, Copy)]
+struct RexPrefix(u8);
+
+impl RexPrefix {
+    const B_BIT: u8 = 0x01;
+    const X_BIT: u8 = 0x02;
+    const R_BIT: u8 = 0x04;
+    const W_BIT: u8 = 0x08;
+
+    #[inline]
+    const fn empty() -> Self {
+        Self(0)
+    }
+
+    #[inline]
+    const fn new(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    #[inline]
+    const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    #[inline]
+    const fn has_b(self) -> bool {
+        (self.0 & Self::B_BIT) != 0
+    }
+
+    #[inline]
+    const fn has_x(self) -> bool {
+        (self.0 & Self::X_BIT) != 0
+    }
+
+    #[inline]
+    const fn has_r(self) -> bool {
+        (self.0 & Self::R_BIT) != 0
+    }
+
+    #[inline]
+    const fn has_w(self) -> bool {
+        (self.0 & Self::W_BIT) != 0
+    }
+}
+
 const BX_NIL_REGISTER: u8 = 19;
 const BX_64BIT_REG_RIP: u8 = 16; // BX_GENERAL_REGISTERS = 16, matching Bochs
 const BX_NO_INDEX: u8 = 4;
-
 const DS: u8 = BxSegregs::Ds as u8;
 const SS: u8 = BxSegregs::Ss as u8;
 
-// Segment default tables for 64-bit mode (matching Bochs fetchdecode64.cc lines 45-81)
 // Index by base register (0-15). RSP(4)→SS, RBP(5)→SS in mod!=0; only RSP(4)→SS in mod==0
 const SREG_MOD0_BASE32_64: [u8; 16] = [
     DS, DS, DS, DS, SS, DS, DS, DS, // base 0-7
@@ -87,7 +129,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         | InstructionFlags::As64.bits();
 
     // REX prefix tracking
-    let mut rex_prefix: u8 = 0;
+    let mut rex_prefix = RexPrefix::empty();
     let mut sse_prefix: u8 = SsePrefix::PrefixNone as u8;
     let mut seg_override: u8 = 7; // 7 = none
 
@@ -101,21 +143,21 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // Segment overrides (ES, CS, SS, DS ignored in 64-bit for most; FS/GS valid)
             // In 64-bit mode, CS:, DS:, ES:, SS: are ignored but reset REX
             0x26 | 0x2E | 0x36 | 0x3E => {
-                rex_prefix = 0; // Reset REX prefix
-                                // These segment overrides are ignored in 64-bit mode
+                rex_prefix = RexPrefix::empty();
+                // These segment overrides are ignored in 64-bit mode
             }
             0x64 => {
-                rex_prefix = 0;
+                rex_prefix = RexPrefix::empty();
                 seg_override = 4; // FS - valid in 64-bit
             }
             0x65 => {
-                rex_prefix = 0;
+                rex_prefix = RexPrefix::empty();
                 seg_override = 5; // GS - valid in 64-bit
             }
 
             // Operand size override
             0x66 => {
-                rex_prefix = 0;
+                rex_prefix = RexPrefix::empty();
                 metainfo1_bits &= !InstructionFlags::Os32.bits();
                 if sse_prefix == SsePrefix::PrefixNone as u8 {
                     sse_prefix = SsePrefix::Prefix66 as u8;
@@ -126,26 +168,26 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // Default 64-bit: As32=1, As64=1. With 0x67: As32=1, As64=0 (32-bit addressing)
             // Clearing both would give asize()=0 (16-bit — invalid in 64-bit mode)
             0x67 => {
-                rex_prefix = 0;
+                rex_prefix = RexPrefix::empty();
                 metainfo1_bits &= !InstructionFlags::As64.bits();
             }
 
             // LOCK prefix
             0xF0 => {
-                rex_prefix = 0;
+                rex_prefix = RexPrefix::empty();
                 metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_LOCK);
             }
 
             // REPNE/REPNZ (also SSE prefix)
             0xF2 => {
-                rex_prefix = 0;
+                rex_prefix = RexPrefix::empty();
                 metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_REPNE);
                 sse_prefix = SsePrefix::PrefixF2 as u8;
             }
 
             // REP/REPE/REPZ (also SSE prefix)
             0xF3 => {
-                rex_prefix = 0;
+                rex_prefix = RexPrefix::empty();
                 metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_REP);
                 sse_prefix = SsePrefix::PrefixF3 as u8;
             }
@@ -156,7 +198,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // Store full byte (not b & 0x0F) so bare REX 0x40 is still non-zero.
             // Bochs: rex_prefix = b; — ensures REX.none (0x40) enables Extend8bit.
             0x40..=0x4F => {
-                rex_prefix = b;
+                rex_prefix = RexPrefix::new(b);
             }
 
             _ => break,
@@ -166,10 +208,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // Post-prefix REX processing (matches Bochs fetchDecode64:1476-1482)
     // Must happen AFTER prefix loop so REX.W overrides any prior 0x66 prefix
-    if rex_prefix != 0 {
+    if !rex_prefix.is_empty() {
         // assertExtend8bit: REX prefix enables extended 8-bit registers (SPL, BPL, SIL, DIL)
         metainfo1_bits |= InstructionFlags::Extend8bit.bits();
-        if (rex_prefix & 0x08) != 0 {
+        if rex_prefix.has_w() {
             // REX.W: assert BOTH Os64 AND Os32 (Bochs assertOs64 + assertOs32)
             metainfo1_bits |= InstructionFlags::Os64.bits();
             metainfo1_bits |= InstructionFlags::Os32.bits();
@@ -211,7 +253,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     if b1 == 0xC4 || b1 == 0xC5 {
         // VEX prefix — in 64-bit mode, C4/C5 are always VEX (never LES/LDS)
         // Bochs decoder_vex64 (fetchdecode64.cc)
-        if sse_prefix != SsePrefix::PrefixNone as u8 || rex_prefix != 0 {
+        if sse_prefix != SsePrefix::PrefixNone as u8 || !rex_prefix.is_empty() {
             return Err(DecodeError::Decoder(
                 BxDecodeError::BxIllegalVexXopWithRexPrefix,
             ));
@@ -261,7 +303,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
         // Build rex_prefix from VEX R/X/B bits (matching Bochs convention)
         // rex_prefix bit layout: 0=B, 1=X, 2=R, 3=W
-        rex_prefix = (rex_b >> 3) | ((rex_x >> 3) << 1) | ((rex_r >> 3) << 2);
+        rex_prefix = RexPrefix::new((rex_b >> 3) | ((rex_x >> 3) << 1) | ((rex_r >> 3) << 2));
 
         // Read opcode byte
         if pos >= max_len {
@@ -303,7 +345,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         // P0: ~R ~X ~B ~R' 00 mm
         // P1: W ~vvvv 1 pp
         // P2: z L'L b ~V' aaa
-        if sse_prefix != SsePrefix::PrefixNone as u8 || rex_prefix != 0 {
+        if sse_prefix != SsePrefix::PrefixNone as u8 || !rex_prefix.is_empty() {
             return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
         }
         if pos + 3 >= max_len {
@@ -324,10 +366,22 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         }
         let evex_map = p0 & 0x07; // 3-bit map (Bochs: evex & 0x7)
                                   // R/X/B from P0 (inverted bits) — bit 3 extension for register encoding
-        let rex_r_bit = if (p0 & 0x80) == 0 { 4u8 } else { 0u8 }; // ~R → REX.R (bit 2 of rex_prefix)
-        let rex_x_bit = if (p0 & 0x40) == 0 { 2u8 } else { 0u8 }; // ~X → REX.X (bit 1)
-        let rex_b_bit = if (p0 & 0x20) == 0 { 1u8 } else { 0u8 }; // ~B → REX.B (bit 0)
-                                                                  // R' from P0 bit 4 — extends R to 5 bits for EVEX register encoding
+        let rex_r_bit = if (p0 & 0x80) == 0 {
+            RexPrefix::R_BIT
+        } else {
+            0
+        }; // ~R → REX.R (bit 2 of rex_prefix)
+        let rex_x_bit = if (p0 & 0x40) == 0 {
+            RexPrefix::X_BIT
+        } else {
+            0
+        }; // ~X → REX.X (bit 1)
+        let rex_b_bit = if (p0 & 0x20) == 0 {
+            RexPrefix::B_BIT
+        } else {
+            0
+        }; // ~B → REX.B (bit 0)
+           // R' from P0 bit 4 — extends R to 5 bits for EVEX register encoding
         evex_r_prime = if (p0 & 0x10) == 0 { 1u8 } else { 0u8 }; // ~R' inverted, extends nnn to 5 bits
 
         // P1: W(7) ~vvvv(6:3) 1(2) pp(1:0)
@@ -351,7 +405,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         // V' extends vvvv to 5 bits (inverted)
         evex_v_prime = if (p2 & 0x08) == 0 { 1u8 } else { 0u8 }; // ~V' inverted, extends vvvv (or VSIB index) to 5 bits
 
-        rex_prefix = rex_b_bit | rex_x_bit | rex_r_bit;
+        rex_prefix = RexPrefix::new(rex_r_bit | rex_x_bit | rex_b_bit);
 
         // Read opcode byte
         if pos >= max_len {
@@ -504,7 +558,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // REX.B extends register encoded in opcode low bits for non-ModRM opcodes
     // (PUSH r64, POP r64, MOV r64/imm, XCHG r64/RAX, BSWAP, INC/DEC)
-    if !needs_modrm && (rex_prefix & 0x01) != 0 {
+    if !needs_modrm && rex_prefix.has_b() {
         rm |= 8;
     }
 
@@ -522,13 +576,13 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         rm = (modrm & 0x7) as u32;
 
         // REX extensions
-        if (rex_prefix & 0x04) != 0 {
+        if rex_prefix.has_r() {
             nnn |= 8;
         } // REX.R
           // EVEX.R' extends nnn to 5 bits for the 32-vector register file.
           // For non-EVEX paths `evex_r_prime` is zero so this is a no-op.
         nnn |= (evex_r_prime as u32) << 4;
-        if (rex_prefix & 0x01) != 0 {
+        if rex_prefix.has_b() {
             rm |= 8;
         } // REX.B
 
@@ -541,7 +595,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // Register mode (or forced register for MOV CR/DR)
             metainfo1_bits |= InstructionFlags::ModC0.bits();
             // EVEX.X extends rm to 5 bits for vector register encoding (mod==3 only)
-            if is_evex && (rex_prefix & 0x02) != 0 {
+            if is_evex && rex_prefix.has_x() {
                 rm |= 16;
             }
         } else {
@@ -561,10 +615,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 let mut base = sib & 0x7;
 
                 // REX extensions
-                if (rex_prefix & 0x02) != 0 {
+                if rex_prefix.has_x() {
                     index |= 8;
                 } // REX.X
-                if (rex_prefix & 0x01) != 0 {
+                if rex_prefix.has_b() {
                     base |= 8;
                 } // REX.B
 
@@ -919,7 +973,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         instr.opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
     } else if opcode_map == 0 && b1 == 0x90 {
         // Special NOP/PAUSE/XCHG handling (Bochs decoder64_nop)
-        if (rex_prefix & 0x01) != 0 {
+        if rex_prefix.has_b() {
             // REX.B set: actual XCHG R8, RAX — use normal table
             instr.opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
         } else if sse_prefix == SsePrefix::PrefixF3 as u8 {

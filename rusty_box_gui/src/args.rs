@@ -38,6 +38,15 @@ pub struct Args {
     #[arg(long = "disk-chs", value_name = "CYLINDERS:HEADS:SPT")]
     pub disk_chs: Option<DiskGeometry>,
 
+    #[arg(long = "create-disk", value_name = "PATH", conflicts_with_all = ["disk", "disk_chs"])]
+    pub create_disk: Option<PathBuf>,
+
+    #[arg(long = "create-disk-size", value_name = "SIZE", conflicts_with_all = ["disk", "disk_chs"])]
+    pub create_disk_size: Option<HumanDiskSize>,
+
+    #[arg(long = "overwrite-created-disk", action = ArgAction::SetTrue, conflicts_with_all = ["disk", "disk_chs"])]
+    pub overwrite_created_disk: bool,
+
     #[arg(long = "cdrom", value_name = "PATH")]
     pub cdrom: Option<PathBuf>,
 
@@ -77,6 +86,8 @@ pub struct Args {
 pub enum DisplayBackend {
     Terminal,
     Headless,
+    #[cfg(feature = "gui-egui")]
+    Egui,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Deserialize)]
@@ -101,6 +112,17 @@ pub struct DiskGeometry {
     pub cylinders: u16,
     pub heads: u8,
     pub sectors_per_track: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HumanDiskSize(pub rusty_box_bximage::ImageSize);
+
+impl FromStr for HumanDiskSize {
+    type Err = rusty_box_bximage::BxImageError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        rusty_box_bximage::ImageSize::parse(value).map(Self)
+    }
 }
 
 impl fmt::Display for BootDevice {

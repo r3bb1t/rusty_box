@@ -384,7 +384,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let paddr = self.vmcbptr + offset as u64;
         if self.vmcbhostptr != 0 {
             // Fast path: host pointer available
-            let host = (self.vmcbhostptr | offset as u64) as *const u8;
+            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const u8;
             // SAFETY: vmcbhostptr validated by set_vmcbptr; single-threaded
             unsafe { *host }
         } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
@@ -400,7 +400,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn vmcb_read16(&mut self, offset: u32) -> u16 {
         let paddr = self.vmcbptr + offset as u64;
         if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as u64) as *const [u8; 2];
+            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const [u8; 2];
             u16::from_le_bytes(unsafe { *host })
         } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let mut data = [0u8; 2];
@@ -415,7 +415,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn vmcb_read32(&mut self, offset: u32) -> u32 {
         let paddr = self.vmcbptr + offset as u64;
         if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as u64) as *const [u8; 4];
+            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const [u8; 4];
             u32::from_le_bytes(unsafe { *host })
         } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let mut data = [0u8; 4];
@@ -430,7 +430,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn vmcb_read64(&mut self, offset: u32) -> u64 {
         let paddr = self.vmcbptr + offset as u64;
         if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as u64) as *const [u8; 8];
+            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const [u8; 8];
             u64::from_le_bytes(unsafe { *host })
         } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let mut data = [0u8; 8];
@@ -445,7 +445,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn vmcb_write8(&mut self, offset: u32, val: u8) {
         let paddr = self.vmcbptr + offset as u64;
         if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as u64) as *mut u8;
+            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *mut u8;
             // SAFETY: vmcbhostptr validated; single-threaded
             unsafe {
                 *host = val;
@@ -464,7 +464,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn vmcb_write16(&mut self, offset: u32, val: u16) {
         let paddr = self.vmcbptr + offset as u64;
         if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as u64) as *mut [u8; 2];
+            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *mut [u8; 2];
             unsafe {
                 *host = val.to_le_bytes();
             }
@@ -482,7 +482,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn vmcb_write32(&mut self, offset: u32, val: u32) {
         let paddr = self.vmcbptr + offset as u64;
         if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as u64) as *mut [u8; 4];
+            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *mut [u8; 4];
             unsafe {
                 *host = val.to_le_bytes();
             }
@@ -500,7 +500,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn vmcb_write64(&mut self, offset: u32, val: u64) {
         let paddr = self.vmcbptr + offset as u64;
         if self.vmcbhostptr != 0 {
-            let host = (self.vmcbhostptr | offset as u64) as *mut [u8; 8];
+            let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *mut [u8; 8];
             unsafe {
                 *host = val.to_le_bytes();
             }

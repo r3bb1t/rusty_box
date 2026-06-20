@@ -1,0 +1,16 @@
+[package]
+name = "rusty_box_bximage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Bochs bximage-compatible disk image creation helpers for Rusty Box"
+
+[lib]
+name = "rusty_box_bximage"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror.workspace = true

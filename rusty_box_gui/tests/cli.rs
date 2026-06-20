@@ -1,4 +1,5 @@
 use clap::Parser;
+use rusty_box_bximage::ImageSize;
 use rusty_box_gui::{Args, DiskGeometry, DisplayBackend};
 
 #[test]
@@ -55,4 +56,61 @@ fn pci_negation_is_explicit() {
 
     assert!(args.no_pci);
     assert!(!args.pci);
+}
+
+#[test]
+fn parses_create_disk_flags() {
+    let args = Args::try_parse_from([
+        "rusty_box_gui",
+        "--create-disk",
+        "c.img",
+        "--create-disk-size",
+        "20G",
+        "--overwrite-created-disk",
+    ])
+    .unwrap();
+
+    assert_eq!(args.create_disk.unwrap().as_os_str(), "c.img");
+    assert_eq!(args.create_disk_size.unwrap().0, ImageSize::gib(20));
+    assert!(args.overwrite_created_disk);
+}
+
+#[test]
+fn create_disk_conflicts_with_existing_disk() {
+    let result = Args::try_parse_from([
+        "rusty_box_gui",
+        "--disk",
+        "existing.img",
+        "--create-disk",
+        "c.img",
+    ]);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn create_disk_size_conflicts_with_disk_chs() {
+    let result = Args::try_parse_from([
+        "rusty_box_gui",
+        "--create-disk-size",
+        "20G",
+        "--disk-chs",
+        "20:16:63",
+    ]);
+
+    assert!(result.is_err());
+}
+
+#[cfg(feature = "gui-egui")]
+#[test]
+fn parses_egui_display_backend_when_feature_enabled() {
+    let args = Args::try_parse_from(["rusty_box_gui", "--display", "egui"]).unwrap();
+
+    assert_eq!(args.display, Some(DisplayBackend::Egui));
+}
+
+#[cfg(not(feature = "gui-egui"))]
+#[test]
+fn rejects_egui_display_backend_without_feature() {
+    assert!(Args::try_parse_from(["rusty_box_gui", "--display", "egui"]).is_err());
 }

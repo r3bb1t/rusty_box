@@ -1,30 +1,28 @@
-//! Typed command-line and TOML configuration runner for Rusty Box.
+//! Typed command-line, TOML, desktop egui, and browser egui runner for Rusty Box.
 //!
-//! `rusty_box_gui` is the user-facing emulator launcher crate. It keeps CLI
-//! parsing, TOML loading, validation, and emulator startup separate from the
-//! core `rusty_box` emulator library so future GUI frontends can share one
-//! resolved runner configuration.
+//! `rusty_box_gui` is the user-facing emulator launcher crate. Native builds keep
+//! CLI parsing, TOML loading, validation, and emulator startup separate from the
+//! core `rusty_box` emulator library. The egui shell supports both desktop and
+//! browser targets with target-specific runtime paths.
 //!
-//! The runner supports terminal and headless display backends today. The
-//! `gui-egui` feature only forwards the matching core emulator feature; it does
-//! not install an egui window yet.
+//! Native builds use the egui/eframe backend by default. Headless and terminal
+//! backends remain available through `display.backend`; building with
+//! `--no-default-features` removes egui support and falls back to terminal.
 //!
-//! Configuration is resolved in this order:
-//!
-//! 1. built-in defaults,
-//! 2. `rusty_box.toml` from the current directory, or `--config PATH`,
-//! 3. explicit CLI overrides.
-//!
-//! Use [`Args`] for Clap parsing, [`FileConfig`] for TOML input,
-//! [`ResolvedConfig`] for validated startup state, and [`run`] or
-//! [`run_resolved`] to start the emulator.
+//! Browser builds start an egui shell through `eframe::WebRunner` and avoid host
+//! filesystem access.
 
+#[cfg(feature = "gui-egui")]
+pub mod app;
 pub mod args;
 pub mod config;
+mod disk_images;
 pub mod error;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod runner;
 
 pub use args::{Args, BootDevice, DiskGeometry, DisplayBackend};
 pub use config::{FileConfig, ResolvedConfig};
 pub use error::RunError;
+#[cfg(not(target_arch = "wasm32"))]
 pub use runner::{run, run_resolved, RunSummary};

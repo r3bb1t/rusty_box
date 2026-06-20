@@ -1,16 +1,23 @@
 use crate::{
     args::{Args, BootDevice, DisplayBackend, LogLevel},
-    config::ResolvedConfig,
+    config::{ResolvedCdrom, ResolvedConfig, ResolvedDisk},
     error::RunError,
 };
+#[cfg(feature = "gui-egui")]
+use rusty_box::gui::{shared_display::SharedDisplay, BridgeGui};
 use rusty_box::{
     cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
     emulator::{Emulator, EmulatorConfig},
-    gui::{NoGui, TermGui},
+    gui::{BxGui, NoGui, TermGui},
 };
+#[cfg(feature = "gui-egui")]
+use std::sync::atomic::Ordering;
+#[cfg(feature = "gui-egui")]
+use std::sync::{mpsc, Mutex};
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    sync::{atomic::AtomicBool, Arc},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +31,48 @@ pub fn run(args: Args) -> Result<RunSummary, RunError> {
 }
 
 pub fn run_resolved(config: ResolvedConfig) -> Result<RunSummary, RunError> {
+    match config.display {
+        DisplayBackend::Headless => run_with_gui(config, NoGui::new(), None, true),
+        DisplayBackend::Terminal => run_with_gui(config, TermGui::new(), None, true),
+        #[cfg(feature = "gui-egui")]
+        DisplayBackend::Egui => run_egui(config),
+    }
+}
+
+pub(crate) fn create_configured_disk_images(config: &ResolvedConfig) -> Result<(), RunError> {
+    if let Some(disk) = &config.disk {
+        if let Some(creation) = &disk.creation {
+            crate::disk_images::create_startup_disk(creation)?;
+        }
+    }
+    Ok(())
+}
+
+fn prepare_configured_media_files(
+    config: &ResolvedConfig,
+    create_startup_disks: bool,
+) -> Result<(), RunError> {
+    if create_startup_disks {
+        create_configured_disk_images(config)?;
+    }
+    if let Some(disk) = &config.disk {
+        verify_media_file("disk", &disk.path)?;
+    }
+    if let Some(cdrom) = &config.cdrom {
+        verify_media_file("CD-ROM", &cdrom.path)?;
+    }
+    Ok(())
+}
+
+fn run_with_gui<G>(
+    config: ResolvedConfig,
+    gui: G,
+    stop_flag: Option<Arc<AtomicBool>>,
+    create_startup_disks: bool,
+) -> Result<RunSummary, RunError>
+where
+    G: BxGui + 'static,
+{
     init_tracing(config.log_level);
 
     let bios_data = read_required_file("BIOS", &config.bios)?;
@@ -31,13 +80,8 @@ pub fn run_resolved(config: ResolvedConfig) -> Result<RunSummary, RunError> {
         Some(path) => Some(read_vga_bios_file(path)?),
         None => None,
     };
-    if let Some(disk) = &config.disk {
-        verify_media_file("disk", &disk.path)?;
-    }
-    if let Some(cdrom) = &config.cdrom {
-        verify_media_file("CD-ROM", &cdrom.path)?;
-    }
     validate_configured_media_slots(&config)?;
+    prepare_configured_media_files(&config, create_startup_disks)?;
 
     let emulator_config = EmulatorConfig {
         guest_memory_size: mib_to_bytes("memory_mib", config.memory_mib)?,
@@ -50,10 +94,10 @@ pub fn run_resolved(config: ResolvedConfig) -> Result<RunSummary, RunError> {
     };
 
     let mut emu = Emulator::<Corei7SkylakeX>::new(emulator_config)?;
-    match config.display {
-        DisplayBackend::Headless => emu.set_gui(NoGui::new()),
-        DisplayBackend::Terminal => emu.set_gui(TermGui::new()),
+    if let Some(stop_flag) = stop_flag {
+        emu.stop_flag = stop_flag;
     }
+    emu.set_gui(gui);
 
     emu.init_memory_and_pc_system()?;
     let bios_load_addr = !(bios_data.len() as u64 - 1);
@@ -104,6 +148,10 @@ pub fn run_resolved(config: ResolvedConfig) -> Result<RunSummary, RunError> {
     emu.reset(ResetReason::Hardware)?;
     emu.init_gui_signal_handlers();
     emu.start();
+    if should_prequeue_boot_enter(&config.boot_order) {
+        emu.prepare_run();
+        emu.send_string("\n");
+    }
     let instructions_executed = emu.run_interactive(config.max_instructions)?;
 
     Ok(RunSummary {
@@ -111,8 +159,139 @@ pub fn run_resolved(config: ResolvedConfig) -> Result<RunSummary, RunError> {
     })
 }
 
+#[cfg(feature = "gui-egui")]
+fn run_egui(config: ResolvedConfig) -> Result<RunSummary, RunError> {
+    let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+    let (command_tx, command_rx) = mpsc::channel();
+    let shared_for_emu = Arc::clone(&shared);
+    let emulator_thread = std::thread::Builder::new()
+        .name("rusty_box_gui_emulator".to_owned())
+        .stack_size(1500 * 1024 * 1024)
+        .spawn(move || run_egui_emulator_loop(command_rx, shared_for_emu))
+        .map_err(|source| RunError::ThreadStart { source })?;
+
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1180.0, 760.0])
+            .with_min_inner_size([960.0, 600.0])
+            .with_drag_and_drop(true)
+            .with_title("Rusty Box Workstation"),
+        ..Default::default()
+    };
+    let shared_for_gui = Arc::clone(&shared);
+    let gui_result = eframe::run_native(
+        "Rusty Box Workstation",
+        native_options,
+        Box::new(move |cc| {
+            Ok(Box::new(crate::app::NativeShellApp::new(
+                cc,
+                shared_for_gui,
+                command_tx,
+                config,
+            )))
+        }),
+    );
+
+    signal_egui_stop(&shared);
+    let emulator_result = emulator_thread
+        .join()
+        .map_err(|_| RunError::EmulatorThreadPanic)?;
+    gui_result.map_err(|source| RunError::Gui {
+        message: source.to_string(),
+    })?;
+    emulator_result
+}
+
+#[cfg(feature = "gui-egui")]
+fn run_egui_emulator_loop(
+    command_rx: mpsc::Receiver<crate::app::NativeEmulatorCommand>,
+    shared: Arc<Mutex<SharedDisplay>>,
+) -> Result<RunSummary, RunError> {
+    let mut instructions_executed = 0u64;
+    let mut create_startup_disks = true;
+
+    while let Ok(command) = command_rx.recv() {
+        match command {
+            crate::app::NativeEmulatorCommand::Start(config) => loop {
+                let stop_flag = prepare_egui_run(&shared);
+                let bridge = BridgeGui::new(Arc::clone(&shared));
+                let summary = match run_with_gui(
+                    config.clone(),
+                    bridge,
+                    Some(stop_flag),
+                    create_startup_disks,
+                ) {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        record_egui_error(&shared, &error);
+                        break;
+                    }
+                };
+                create_startup_disks = false;
+                instructions_executed =
+                    instructions_executed.saturating_add(summary.instructions_executed);
+
+                let restart_requested = finish_egui_run(&shared);
+                if !restart_requested {
+                    break;
+                }
+            },
+        }
+    }
+
+    Ok(RunSummary {
+        instructions_executed,
+    })
+}
+
+#[cfg(feature = "gui-egui")]
+fn prepare_egui_run(shared: &Arc<Mutex<SharedDisplay>>) -> Arc<AtomicBool> {
+    if let Ok(mut display) = shared.lock() {
+        display.stop_flag.store(false, Ordering::Relaxed);
+        display.emu_running = true;
+        display.start_pending = false;
+        display.reset_requested = false;
+        display.runtime_error = None;
+        drop(display.drain_serial_input());
+        Arc::clone(&display.stop_flag)
+    } else {
+        Arc::new(AtomicBool::new(false))
+    }
+}
+
+#[cfg(feature = "gui-egui")]
+fn finish_egui_run(shared: &Arc<Mutex<SharedDisplay>>) -> bool {
+    if let Ok(mut display) = shared.lock() {
+        let restart_requested = display.reset_requested;
+        display.emu_running = false;
+        display.start_pending = false;
+        restart_requested
+    } else {
+        false
+    }
+}
+
+#[cfg(feature = "gui-egui")]
+fn record_egui_error(shared: &Arc<Mutex<SharedDisplay>>, error: &RunError) {
+    if let Ok(mut display) = shared.lock() {
+        display.emu_running = false;
+        display.start_pending = false;
+        display.reset_requested = false;
+        display.runtime_error = Some(format!("Emulator startup failed: {error}"));
+    }
+}
+
+#[cfg(feature = "gui-egui")]
+fn signal_egui_stop(shared: &Arc<Mutex<SharedDisplay>>) {
+    if let Ok(mut display) = shared.lock() {
+        display.emu_running = false;
+        display.stop_flag.store(true, Ordering::Relaxed);
+        display.start_pending = false;
+    }
+}
+
 fn init_tracing(log_level: LogLevel) {
-    let _ = tracing_subscriber::fmt()
+    match tracing_subscriber::fmt()
         .without_time()
         .with_target(false)
         .with_max_level(match log_level {
@@ -122,7 +301,13 @@ fn init_tracing(log_level: LogLevel) {
             LogLevel::Warn => tracing::Level::WARN,
             LogLevel::Error => tracing::Level::ERROR,
         })
-        .try_init();
+        .try_init()
+    {
+        Ok(()) => {}
+        Err(error) => {
+            tracing::debug!(?error, "tracing subscriber already initialized");
+        }
+    }
 }
 
 fn read_required_file(kind: &'static str, path: &Path) -> Result<Vec<u8>, RunError> {
@@ -212,8 +397,8 @@ fn validate_configured_media_slots(config: &ResolvedConfig) -> Result<(), RunErr
 }
 
 fn validate_distinct_media_slots(
-    disk: &crate::config::ResolvedDisk,
-    cdrom: &crate::config::ResolvedCdrom,
+    disk: &ResolvedDisk,
+    cdrom: &ResolvedCdrom,
 ) -> Result<(), RunError> {
     if disk.channel == cdrom.channel && disk.drive == cdrom.drive {
         Err(RunError::MediaAttach {
@@ -234,8 +419,12 @@ fn validate_ata_slot(field: &'static str, value: usize) -> Result<(), RunError> 
     }
 }
 
-fn disk_cmos_drive(disk: &crate::config::ResolvedDisk) -> u8 {
+fn disk_cmos_drive(disk: &ResolvedDisk) -> u8 {
     disk.drive as u8
+}
+
+fn should_prequeue_boot_enter(boot_order: &[BootDevice]) -> bool {
+    boot_order.first() == Some(&BootDevice::Cdrom)
 }
 
 fn path_to_str(path: &PathBuf) -> Result<&str, RunError> {
@@ -247,7 +436,8 @@ fn path_to_str(path: &PathBuf) -> Result<&str, RunError> {
 mod tests {
     use super::*;
     use crate::args::DiskGeometry;
-    use crate::config::{ResolvedCdrom, ResolvedDisk};
+    use crate::config::ResolvedDiskCreation;
+    use rusty_box_bximage::ImageSize;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -280,13 +470,187 @@ mod tests {
         })
         .unwrap_err();
 
-        let _ = fs::remove_file(&bios);
-        let _ = fs::remove_file(&vga);
+        remove_test_file(&bios);
+        remove_test_file(&vga);
 
         assert!(matches!(
             error,
             RunError::InvalidVgaBiosSize { path, len: 0 } if path == vga
         ));
+    }
+
+    fn remove_test_file(path: &Path) {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => panic!("failed to remove {}: {error}", path.display()),
+        }
+    }
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{name}-{}-{suffix}.img", std::process::id()))
+    }
+
+    fn disk_creation_config(path: PathBuf, overwrite: bool) -> ResolvedConfig {
+        ResolvedConfig {
+            memory_mib: 32,
+            host_memory_mib: 32,
+            memory_block_kib: 128,
+            ips: 4_000_000,
+            pci: true,
+            sync_slowdown: false,
+            max_instructions: 0,
+            display: DisplayBackend::Headless,
+            bios: unique_temp_path("rusty-box-gui-bios"),
+            vga_bios: None,
+            boot_order: vec![BootDevice::Disk],
+            disk: Some(ResolvedDisk {
+                path: path.clone(),
+                geometry: DiskGeometry {
+                    cylinders: 20,
+                    heads: 16,
+                    sectors_per_track: 63,
+                },
+                channel: 0,
+                drive: 0,
+                creation: Some(ResolvedDiskCreation {
+                    path,
+                    size: ImageSize::mib(10),
+                    overwrite,
+                }),
+            }),
+            cdrom: None::<ResolvedCdrom>,
+            log_level: LogLevel::Warn,
+        }
+    }
+
+    #[test]
+    fn startup_disk_creation_creates_file_before_verification() {
+        let disk = unique_temp_path("rusty-box-gui-created-disk");
+        let config = disk_creation_config(disk.clone(), false);
+        fs::write(&config.bios, [0xEA]).unwrap();
+
+        create_configured_disk_images(&config).unwrap();
+
+        assert_eq!(fs::metadata(&disk).unwrap().len(), 10_321_920);
+        remove_test_file(&disk);
+        remove_test_file(&config.bios);
+    }
+
+    #[test]
+    fn startup_disk_creation_respects_no_overwrite() {
+        let disk = unique_temp_path("rusty-box-gui-existing-disk");
+        fs::write(&disk, [0x00]).unwrap();
+        let config = disk_creation_config(disk.clone(), false);
+        fs::write(&config.bios, [0xEA]).unwrap();
+
+        let error = create_configured_disk_images(&config).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RunError::DiskCreate {
+                source: rusty_box_bximage::BxImageError::AlreadyExists { path }
+            } if path == disk
+        ));
+        remove_test_file(&disk);
+        remove_test_file(&config.bios);
+    }
+
+    #[test]
+    fn startup_disk_creation_can_be_skipped_for_egui_restart() {
+        let disk = unique_temp_path("rusty-box-gui-restart-disk");
+        fs::write(&disk, [0x00]).unwrap();
+        let config = disk_creation_config(disk.clone(), false);
+
+        prepare_configured_media_files(&config, false).unwrap();
+
+        assert_eq!(fs::metadata(&disk).unwrap().len(), 1);
+        remove_test_file(&disk);
+    }
+
+    #[test]
+    fn startup_disk_creation_waits_until_media_slots_are_valid() {
+        let disk = unique_temp_path("rusty-box-gui-invalid-slot-disk");
+        let cdrom = unique_temp_path("rusty-box-gui-invalid-slot-cdrom");
+        let mut config = disk_creation_config(disk.clone(), false);
+        fs::write(&config.bios, [0xEA]).unwrap();
+        fs::write(&cdrom, [0x00]).unwrap();
+        config.cdrom = Some(ResolvedCdrom {
+            path: cdrom.clone(),
+            channel: 0,
+            drive: 0,
+        });
+
+        let error = run_resolved(config).unwrap_err();
+        let disk_exists = fs::metadata(&disk).is_ok();
+        if disk_exists {
+            remove_test_file(&disk);
+        }
+        remove_test_file(&cdrom);
+
+        assert!(matches!(
+            error,
+            RunError::MediaAttach { kind: "CD-ROM", path, source }
+                if path == cdrom && source.kind() == std::io::ErrorKind::InvalidInput
+        ));
+        assert!(!disk_exists);
+    }
+
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn prepare_egui_run_clears_pending_serial_input() {
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        shared.lock().unwrap().queue_serial_input_line("stale");
+
+        drop(prepare_egui_run(&shared));
+
+        assert_eq!(
+            shared.lock().unwrap().drain_serial_input(),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn egui_emulator_loop_clears_lifecycle_on_startup_error() {
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        let (command_tx, command_rx) = mpsc::channel();
+        let missing_bios = unique_temp_path("rusty-box-gui-missing-bios");
+
+        command_tx
+            .send(crate::app::NativeEmulatorCommand::Start(ResolvedConfig {
+                memory_mib: 32,
+                host_memory_mib: 32,
+                memory_block_kib: 128,
+                ips: 4_000_000,
+                pci: true,
+                sync_slowdown: false,
+                max_instructions: 0,
+                display: DisplayBackend::Egui,
+                bios: missing_bios,
+                vga_bios: None,
+                boot_order: Vec::new(),
+                disk: None::<ResolvedDisk>,
+                cdrom: None::<ResolvedCdrom>,
+                log_level: LogLevel::Warn,
+            }))
+            .unwrap();
+        drop(command_tx);
+
+        let result = run_egui_emulator_loop(command_rx, Arc::clone(&shared));
+
+        assert!(result.is_ok());
+        let display = shared.lock().unwrap();
+        assert!(!display.emu_running);
+        assert!(!display.start_pending);
+        assert!(display
+            .runtime_error
+            .as_deref()
+            .is_some_and(|message| message.contains("Emulator startup failed")));
     }
 
     #[test]
@@ -296,6 +660,20 @@ mod tests {
             boot_sequence(&[BootDevice::Cdrom, BootDevice::Disk]),
             (3, 2, 0)
         );
+    }
+
+    #[test]
+    fn prequeues_enter_for_cdrom_first_boot() {
+        assert!(should_prequeue_boot_enter(&[BootDevice::Cdrom]));
+        assert!(should_prequeue_boot_enter(&[
+            BootDevice::Cdrom,
+            BootDevice::Disk
+        ]));
+        assert!(!should_prequeue_boot_enter(&[
+            BootDevice::Disk,
+            BootDevice::Cdrom
+        ]));
+        assert!(!should_prequeue_boot_enter(&[]));
     }
 
     #[test]
@@ -325,6 +703,7 @@ mod tests {
             },
             channel: 0,
             drive: 1,
+            creation: None,
         };
 
         assert_eq!(disk_cmos_drive(&disk), 1);
@@ -341,6 +720,7 @@ mod tests {
             },
             channel: 0,
             drive: 0,
+            creation: None,
         };
         let cdrom = ResolvedCdrom {
             path: PathBuf::from("cdrom.iso"),

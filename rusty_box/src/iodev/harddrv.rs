@@ -197,7 +197,7 @@ pub struct DriveGeometry {
     pub(crate) cylinders: u16,
     pub(crate) heads: u8,
     pub(crate) sectors_per_track: u8,
-    pub(crate) total_sectors: u32,
+    pub(crate) total_sectors: u64,
 }
 
 impl DriveGeometry {
@@ -207,7 +207,7 @@ impl DriveGeometry {
             cylinders,
             heads,
             sectors_per_track: spt,
-            total_sectors: cylinders as u32 * heads as u32 * spt as u32,
+            total_sectors: cylinders as u64 * heads as u64 * spt as u64,
         }
     }
 
@@ -710,8 +710,8 @@ impl AtaDrive {
     pub fn attach_image(&mut self, path: &str) -> std::io::Result<()> {
         let file = File::options().read(true).write(true).open(path)?;
 
-        let size = file.metadata()?.len() as u32;
-        self.geometry.total_sectors = size / SECTOR_SIZE as u32;
+        let size = file.metadata()?.len();
+        self.geometry.total_sectors = size / SECTOR_SIZE as u64;
 
         tracing::debug!(
             "ATA: Attached image '{}' ({} sectors, {} MB)",
@@ -728,7 +728,7 @@ impl AtaDrive {
     /// Attach disk data directly (alloc path).
     #[cfg(feature = "alloc")]
     pub fn attach_data(&mut self, data: Vec<u8>) {
-        self.geometry.total_sectors = (data.len() / SECTOR_SIZE) as u32;
+        self.geometry.total_sectors = data.len() as u64 / SECTOR_SIZE as u64;
         tracing::debug!(
             "ATA: Attached disk data ({} sectors, {} KB)",
             self.geometry.total_sectors,
@@ -739,7 +739,7 @@ impl AtaDrive {
 
     /// Attach disk data as a static ref (no-alloc path).
     pub fn attach_data_ref(&mut self, data: &'static [u8]) {
-        self.geometry.total_sectors = (data.len() / SECTOR_SIZE) as u32;
+        self.geometry.total_sectors = data.len() as u64 / SECTOR_SIZE as u64;
         tracing::debug!(
             "ATA: Attached disk data ref ({} sectors, {} KB)",
             self.geometry.total_sectors,
@@ -1019,8 +1019,10 @@ impl AtaDrive {
         if self.disk_data_ref.is_some() {
             let data = self.disk_data_ref.unwrap();
             for _ in 0..sector_count {
-                let lba = self.get_lba();
-                let disk_offset = lba as usize * SECTOR_SIZE;
+                let lba = self.current_lba();
+                let Some(disk_offset) = Self::memory_disk_offset(lba) else {
+                    return false;
+                };
 
                 if disk_offset + SECTOR_SIZE > data.len() {
                     return false;
@@ -1046,8 +1048,10 @@ impl AtaDrive {
         #[cfg(feature = "alloc")]
         if self.disk_data.is_some() {
             for _ in 0..sector_count {
-                let lba = self.get_lba();
-                let disk_offset = lba as usize * SECTOR_SIZE;
+                let lba = self.current_lba();
+                let Some(disk_offset) = Self::memory_disk_offset(lba) else {
+                    return false;
+                };
                 let data = self.disk_data.as_ref().unwrap();
 
                 if disk_offset + SECTOR_SIZE > data.len() {
@@ -1074,8 +1078,10 @@ impl AtaDrive {
         #[cfg(feature = "std")]
         {
             for _ in 0..sector_count {
-                let lba = self.get_lba();
-                let offset = lba as u64 * SECTOR_SIZE as u64;
+                let lba = self.current_lba();
+                let Some(offset) = lba.checked_mul(SECTOR_SIZE as u64) else {
+                    return false;
+                };
 
                 let file = match self.image_file.as_mut() {
                     Some(f) => f,
@@ -1126,8 +1132,10 @@ impl AtaDrive {
         #[cfg(feature = "alloc")]
         if self.disk_data.is_some() {
             for _ in 0..sector_count {
-                let lba = self.get_lba();
-                let disk_offset = lba as usize * SECTOR_SIZE;
+                let lba = self.current_lba();
+                let Some(disk_offset) = Self::memory_disk_offset(lba) else {
+                    return false;
+                };
                 let data = self.disk_data.as_mut().unwrap();
 
                 if disk_offset + SECTOR_SIZE > data.len() {
@@ -1156,8 +1164,10 @@ impl AtaDrive {
         #[cfg(feature = "std")]
         {
             for _ in 0..sector_count {
-                let lba = self.get_lba();
-                let offset = lba as u64 * SECTOR_SIZE as u64;
+                let lba = self.current_lba();
+                let Some(offset) = lba.checked_mul(SECTOR_SIZE as u64) else {
+                    return false;
+                };
 
                 let file = match self.image_file.as_mut() {
                     Some(f) => f,
@@ -1389,12 +1399,15 @@ impl AtaDrive {
         buf[186] = 0x01;
         buf[187] = 0x60;
 
-        // Words 100-103: 48-bit total number of sectors (Bochs harddrv.cc)
+        // Words 100-103: 48-bit total sector count (Bochs harddrv.cc)
         buf[200] = (total & 0xFF) as u8;
         buf[201] = ((total >> 8) & 0xFF) as u8;
         buf[202] = ((total >> 16) & 0xFF) as u8;
         buf[203] = ((total >> 24) & 0xFF) as u8;
-        // buf[204-207] = 0 (total < 2^32 for any reasonable disk)
+        buf[204] = ((total >> 32) & 0xFF) as u8;
+        buf[205] = ((total >> 40) & 0xFF) as u8;
+        buf[206] = ((total >> 48) & 0xFF) as u8;
+        buf[207] = ((total >> 56) & 0xFF) as u8;
 
         self.controller.buffer_size = 512;
         self.controller.buffer_index = 0;
@@ -1413,6 +1426,22 @@ impl AtaDrive {
                 self.controller.sector_no,
             )
         }
+    }
+
+    fn current_lba(&self) -> u64 {
+        if self.controller.lba_mode && self.controller.lba48 {
+            ((self.controller.hob.hcyl as u64) << 40)
+                | ((self.controller.hob.lcyl as u64) << 32)
+                | ((self.controller.hob.sector as u64) << 24)
+                | ((self.controller.cylinder_no as u64) << 8)
+                | (self.controller.sector_no as u64)
+        } else {
+            self.get_lba() as u64
+        }
+    }
+
+    fn memory_disk_offset(lba: u64) -> Option<usize> {
+        usize::try_from(lba).ok()?.checked_mul(SECTOR_SIZE)
     }
 
     /// Calculate logical sector address with bounds checking.
@@ -4277,6 +4306,63 @@ impl BxHardDriveC {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs::{self, File},
+        io::{Read, Seek, SeekFrom, Write},
+    };
+
+    fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{name}-{}-{nanos}.img", std::process::id()))
+    }
+
+    #[cfg(windows)]
+    fn make_sparse(file: &File) {
+        use std::ffi::c_void;
+        use std::os::windows::io::AsRawHandle;
+
+        const FSCTL_SET_SPARSE: u32 = 0x0009_00C4;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn DeviceIoControl(
+                hDevice: *mut c_void,
+                dwIoControlCode: u32,
+                lpInBuffer: *mut c_void,
+                nInBufferSize: u32,
+                lpOutBuffer: *mut c_void,
+                nOutBufferSize: u32,
+                lpBytesReturned: *mut u32,
+                lpOverlapped: *mut c_void,
+            ) -> i32;
+        }
+
+        let mut bytes_returned = 0;
+        let ok = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                FSCTL_SET_SPARSE,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &mut bytes_returned,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            ok,
+            0,
+            "FSCTL_SET_SPARSE failed: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    #[cfg(not(windows))]
+    fn make_sparse(_: &File) {}
 
     #[test]
     fn test_geometry_conversion() {
@@ -4295,6 +4381,69 @@ mod tests {
         // LBA to CHS
         let (c, h, s) = geom.lba_to_chs(0);
         assert_eq!((c, h, s), (0, 0, 1));
+    }
+
+    #[test]
+    fn attach_image_preserves_large_raw_sector_count() {
+        let path = unique_temp_path("rusty-box-large-raw");
+        let file = File::create(&path).unwrap();
+        make_sparse(&file);
+        file.set_len(5_u64 * 1024 * 1024 * 1024).unwrap();
+
+        let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(10, 16, 63));
+        let path_str = path.to_str().unwrap();
+        drive.attach_image(path_str).unwrap();
+
+        assert_eq!(drive.geometry.total_sectors, 10_485_760);
+        drop(drive);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn lba48_file_io_uses_high_order_address_bytes() {
+        const HIGH_LBA: u64 = 0x0100_0000;
+        const HIGH_OFFSET: u64 = HIGH_LBA * SECTOR_SIZE as u64;
+
+        let path = unique_temp_path("rusty-box-lba48-raw");
+        let mut file = File::create(&path).unwrap();
+        make_sparse(&file);
+        file.set_len(HIGH_OFFSET + SECTOR_SIZE as u64).unwrap();
+        file.seek(SeekFrom::Start(HIGH_OFFSET)).unwrap();
+        file.write_all(&[0xA5; SECTOR_SIZE]).unwrap();
+        drop(file);
+
+        let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(10, 16, 63));
+        drive.attach_image(path.to_str().unwrap()).unwrap();
+        drive.controller.lba_mode = true;
+        drive.controller.lba48 = true;
+        drive.controller.hob.sector = 1;
+        drive.controller.cylinder_no = 0;
+        drive.controller.sector_no = 0;
+        drive.controller.buffer_size = SECTOR_SIZE;
+        drive.controller.num_sectors = 1;
+
+        assert!(drive.ide_read_sector());
+        assert_eq!(
+            &drive.controller.buffer[..SECTOR_SIZE],
+            &[0xA5; SECTOR_SIZE]
+        );
+
+        drive.controller.hob.sector = 1;
+        drive.controller.cylinder_no = 0;
+        drive.controller.sector_no = 0;
+        drive.controller.buffer_size = SECTOR_SIZE;
+        drive.controller.num_sectors = 1;
+        drive.controller.buffer[..SECTOR_SIZE].fill(0x5A);
+
+        assert!(drive.ide_write_sector());
+        drop(drive);
+
+        let mut file = File::open(&path).unwrap();
+        file.seek(SeekFrom::Start(HIGH_OFFSET)).unwrap();
+        let mut sector = [0u8; SECTOR_SIZE];
+        file.read_exact(&mut sector).unwrap();
+        assert_eq!(sector, [0x5A; SECTOR_SIZE]);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
