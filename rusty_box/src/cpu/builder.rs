@@ -44,7 +44,9 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
         );
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut BxCpuC<'static, I, T>;
         if ptr.is_null() {
-            alloc::alloc::handle_alloc_error(layout);
+            return Err(
+                crate::memory::MemoryError::UnableToAllocateGuestMemory(layout.size()).into(),
+            );
         }
         tracing::info!("CPU alloc OK at {:p}", ptr);
 

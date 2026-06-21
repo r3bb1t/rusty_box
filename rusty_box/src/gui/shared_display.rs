@@ -255,6 +255,30 @@ impl SharedDisplay {
 
         self.fb_dirty = true;
     }
+
+    /// Render a VGA text update using the core VGA metadata type.
+    ///
+    /// This keeps `VgaTextModeInfo` internals private while allowing external
+    /// GUI frontends to implement `BxGui::text_update`.
+    pub fn render_vga_text_update(
+        &mut self,
+        text: &[u8],
+        cursor_x: u32,
+        cursor_y: u32,
+        tm_info: &crate::iodev::vga::VgaTextModeInfo,
+    ) {
+        self.render_text_to_framebuffer(
+            text,
+            cursor_x,
+            cursor_y,
+            tm_info.cs_start,
+            tm_info.cs_end,
+            tm_info.line_graphics,
+            tm_info.start_address as u32,
+            tm_info.line_offset as u32,
+            &tm_info.actl_palette,
+        );
+    }
 }
 
 impl Default for SharedDisplay {
@@ -287,5 +311,30 @@ mod tests {
 
         assert_eq!(shared.drain_serial_input(), b"boot\n");
         assert!(shared.drain_serial_input().is_empty());
+    }
+
+    #[test]
+    fn render_vga_text_update_marks_framebuffer_dirty() {
+        let mut shared = SharedDisplay::new();
+        let mut text = vec![0u8; (shared.screen_cols * shared.screen_rows * 2) as usize];
+        text[0] = b'A';
+        text[1] = 0x07;
+        let tm_info = crate::iodev::vga::VgaTextModeInfo {
+            start_address: 0,
+            cs_start: 14,
+            cs_end: 15,
+            line_offset: (shared.screen_cols * 2) as u16,
+            line_compare: 0,
+            h_panning: 0,
+            v_panning: 0,
+            line_graphics: false,
+            split_hpanning: false,
+            blink_flags: 0,
+            actl_palette: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        };
+
+        shared.render_vga_text_update(&text, 0, 0, &tm_info);
+
+        assert!(shared.fb_dirty);
     }
 }

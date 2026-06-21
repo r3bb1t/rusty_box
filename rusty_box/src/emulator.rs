@@ -250,7 +250,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         let layout = alloc::alloc::Layout::new::<Self>();
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut Self;
         if ptr.is_null() {
-            alloc::alloc::handle_alloc_error(layout);
+            return Err(
+                crate::memory::MemoryError::UnableToAllocateGuestMemory(layout.size()).into(),
+            );
         }
         unsafe {
             core::ptr::addr_of_mut!((*ptr).cpu).write(cpu);

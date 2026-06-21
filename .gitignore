@@ -50,6 +50,17 @@ rusty_box_web/dist/
 # Claude Code worktrees
 .claude/
 
+.omp/
+
+# Local runner configuration
+/rusty_box.toml
+
+# Generated browser/native artifacts
+/rusty_box_gui/dist/
+
+# Local disk/image scratch files
+/NONE
+
 # Rust analyzer artifacts
 **/target/rust-analyzer/
 
@@ -60,3 +71,6 @@ rusty_box_uefi.img
 rusty_box_uefi_disk/
 efi_test/
 examples/rusty_box_uefi/alpine.iso
+/rusty_box_android/assets/alpine.iso
+/rustybox_*.png
+/xtask_android.png
