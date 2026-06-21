@@ -542,15 +542,28 @@ fn default_hard_disk_size() -> &'static str {
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
-const WEB_HARDWARE_READ_ONLY_NOTICE: &str =
-    "Browser build uses fixed memory/device settings. Upload media on Home to boot a different image.";
+const WEB_HARDWARE_NOTICE: &str =
+    "Browser hardware can be changed before boot. Reset the VM to edit it again.";
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_BOOT_MEDIA_ACTION_LABEL: &str = "Boot OS Image";
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_BOOT_MEDIA_ACTION_DESCRIPTION: &str =
+    "Upload an ISO or disk image for any supported x86 guest.";
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_MIN_MEMORY_MIB: usize = 1;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_DEFAULT_MEMORY_MIB: usize = 128;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_MAX_MEMORY_MIB: usize = 4096;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_MEMORY_DRAG_SPEED_MIB: f64 = 1.0;
 
 #[cfg(any(test, target_arch = "wasm32"))]
 fn web_primary_action_label(has_vm: bool) -> &'static str {
     if has_vm {
         "Console"
     } else {
-        "▶ Boot ISO"
+        "▶ Boot OS Image"
     }
 }
 
@@ -1935,24 +1948,26 @@ impl DiskCreatorPanel {
 }
 
 #[cfg(target_arch = "wasm32")]
+type WebEmulator =
+    Box<rusty_box::emulator::Emulator<'static, rusty_box::cpu::core_i7_skylake::Corei7SkylakeX>>;
+
+#[cfg(target_arch = "wasm32")]
 pub struct WebShellApp {
     chrome: ShellChrome,
     disk_creator: DiskCreatorPanel,
     boot_mode: WebBootMode,
-    emulator: Option<
-        Box<
-            rusty_box::emulator::Emulator<'static, rusty_box::cpu::core_i7_skylake::Corei7SkylakeX>,
-        >,
-    >,
+    emulator: Option<WebEmulator>,
     display: rusty_box::gui::shared_display::SharedDisplay,
     texture: Option<egui::TextureHandle>,
     initialized: bool,
     init_error: Option<String>,
     shutdown: bool,
-    pending_iso: Option<WebUploadedMedia>,
+    startup: Option<WebStartupState>,
     file_slot: std::rc::Rc<core::cell::RefCell<Option<WebUploadedMedia>>>,
+    file_picker: Option<WebFilePicker>,
     uploaded_media_name: Option<String>,
     uploaded_media_bytes: Option<usize>,
+    web_memory_mib: usize,
     total_instructions: u64,
     last_ips_time: web_time::Instant,
     last_ips_instructions: u64,
@@ -1964,15 +1979,205 @@ pub struct WebShellApp {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WebBootMode {
     Launcher,
-    Alpine,
+    UploadedMedia,
+}
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebStartupStage {
+    CreateEmulator,
+    InitializeMemory,
+    LoadBios,
+    LoadVgaBios,
+    InitializeDevices,
+    AttachMedia,
+    StartEmulator,
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
-const WEB_GUEST_MEMORY_MIB: usize = 128;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebRuntimeState {
+    Error,
+    Starting,
+    Launcher,
+    Stopped,
+    Running,
+}
+
 #[cfg(any(test, target_arch = "wasm32"))]
-const WEB_BATCH_SIZE: u64 = 5_000;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebConsoleSurface {
+    Error,
+    Starting,
+    Display,
+    Launcher,
+    WaitingForDisplay,
+}
+
+#[cfg(target_arch = "wasm32")]
+struct WebStartupState {
+    stage: WebStartupStage,
+    emulator: Option<WebEmulator>,
+    iso_data: Option<Vec<u8>>,
+    memory_mib: usize,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WebStartupState {
+    fn new(iso_data: Vec<u8>, memory_mib: usize) -> Self {
+        Self {
+            stage: WebStartupStage::CreateEmulator,
+            emulator: None,
+            iso_data: Some(iso_data),
+            memory_mib,
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct WebFilePicker {
+    input: web_sys::HtmlInputElement,
+    change_handler: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WebFilePicker {
+    fn new(
+        input: web_sys::HtmlInputElement,
+        change_handler: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+    ) -> Self {
+        Self {
+            input,
+            change_handler,
+        }
+    }
+
+    fn activate(&self) {
+        debug_assert_eq!(self.input.type_(), "file");
+        debug_assert!(self.change_handler.as_ref().is_function());
+        self.input.click();
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for WebFilePicker {
+    fn drop(&mut self) {
+        self.input.set_onchange(None);
+    }
+}
+
 #[cfg(any(test, target_arch = "wasm32"))]
-const WEB_FRAME_BUDGET: u64 = 20_000;
+const WEB_BATCH_SIZE: u64 = 1_000;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_FRAME_BUDGET: u64 = 8_000;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_FRAME_TIME_BUDGET_MS: u64 = 6;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_STARTUP_STEPS_PER_FRAME: usize = 1;
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_next_startup_stage(stage: WebStartupStage) -> Option<WebStartupStage> {
+    match stage {
+        WebStartupStage::CreateEmulator => Some(WebStartupStage::InitializeMemory),
+        WebStartupStage::InitializeMemory => Some(WebStartupStage::LoadBios),
+        WebStartupStage::LoadBios => Some(WebStartupStage::LoadVgaBios),
+        WebStartupStage::LoadVgaBios => Some(WebStartupStage::InitializeDevices),
+        WebStartupStage::InitializeDevices => Some(WebStartupStage::AttachMedia),
+        WebStartupStage::AttachMedia => Some(WebStartupStage::StartEmulator),
+        WebStartupStage::StartEmulator => None,
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_startup_stage_label(stage: WebStartupStage) -> &'static str {
+    match stage {
+        WebStartupStage::CreateEmulator => "Allocating guest memory",
+        WebStartupStage::InitializeMemory => "Allocating guest memory",
+        WebStartupStage::LoadBios => "Loading BIOS",
+        WebStartupStage::LoadVgaBios => "Loading VGA BIOS",
+        WebStartupStage::InitializeDevices => "Initializing devices",
+        WebStartupStage::AttachMedia => "Attaching boot media",
+        WebStartupStage::StartEmulator => "Starting CPU",
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_memory_label(memory_mib: usize) -> String {
+    format!("{memory_mib} MB")
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_memory_mib_is_supported(memory_mib: usize) -> bool {
+    (WEB_MIN_MEMORY_MIB..=WEB_MAX_MEMORY_MIB).contains(&memory_mib)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_can_edit_memory(has_vm: bool) -> bool {
+    !has_vm
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_runtime_state(
+    has_error: bool,
+    startup_pending: bool,
+    initialized: bool,
+    shutdown: bool,
+) -> WebRuntimeState {
+    if has_error {
+        WebRuntimeState::Error
+    } else if startup_pending {
+        WebRuntimeState::Starting
+    } else if !initialized {
+        WebRuntimeState::Launcher
+    } else if shutdown {
+        WebRuntimeState::Stopped
+    } else {
+        WebRuntimeState::Running
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_console_surface(
+    has_error: bool,
+    startup_pending: bool,
+    has_texture: bool,
+    launcher: bool,
+) -> WebConsoleSurface {
+    if has_error {
+        WebConsoleSurface::Error
+    } else if startup_pending {
+        WebConsoleSurface::Starting
+    } else if has_texture {
+        WebConsoleSurface::Display
+    } else if launcher {
+        WebConsoleSurface::Launcher
+    } else {
+        WebConsoleSurface::WaitingForDisplay
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_should_pump_emulator_this_frame(advanced_startup: bool, has_input: bool) -> bool {
+    !advanced_startup && !has_input
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_should_continue_emulator_frame(frame_executed: u64, elapsed: core::time::Duration) -> bool {
+    frame_executed < WEB_FRAME_BUDGET
+        && elapsed < core::time::Duration::from_millis(WEB_FRAME_TIME_BUDGET_MS)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_uploaded_media_config(memory_mib: usize) -> rusty_box::emulator::EmulatorConfig {
+    let ram_size = memory_mib * 1024 * 1024;
+    rusty_box::emulator::EmulatorConfig {
+        guest_memory_size: ram_size,
+        host_memory_size: ram_size,
+        memory_block_size: 128 * 1024,
+        ips: 300_000_000,
+        pci_enabled: true,
+        ..Default::default()
+    }
+}
 #[cfg(target_arch = "wasm32")]
 const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bios/BIOS-bochs-latest");
 #[cfg(target_arch = "wasm32")]
@@ -1985,8 +2190,8 @@ impl WebShellApp {
         configure_shell_style(&cc.egui_ctx);
         let chrome = ShellChrome::with_library(vec![VmLibraryEntry::new(
             "Rusty Box Web",
-            "ISO upload",
-            "128 MB",
+            "Media upload",
+            &web_memory_label(WEB_DEFAULT_MEMORY_MIB),
             "None",
             "No uploaded media",
         )]);
@@ -2000,10 +2205,12 @@ impl WebShellApp {
             initialized: false,
             init_error: None,
             shutdown: false,
-            pending_iso: None,
+            startup: None,
             file_slot: std::rc::Rc::new(core::cell::RefCell::new(None)),
+            file_picker: None,
             uploaded_media_name: None,
             uploaded_media_bytes: None,
+            web_memory_mib: WEB_DEFAULT_MEMORY_MIB,
             total_instructions: 0,
             last_ips_time: web_time::Instant::now(),
             last_ips_instructions: 0,
@@ -2012,67 +2219,141 @@ impl WebShellApp {
         }
     }
 
-    fn initialize_alpine(&mut self, iso_data: Vec<u8>) {
-        use rusty_box::{
-            cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
-            emulator::{Emulator, EmulatorConfig},
-        };
+    fn begin_uploaded_media_startup(&mut self, upload: WebUploadedMedia) {
+        self.record_uploaded_media_metadata(&upload.name, upload.data.len());
+        self.startup = Some(WebStartupState::new(upload.data, self.web_memory_mib));
+        self.boot_mode = WebBootMode::UploadedMedia;
+        self.chrome.selected_page = ShellPage::Console;
+        self.initialized = false;
+        self.init_error = None;
+        self.shutdown = false;
+    }
 
-        let ram_size = WEB_GUEST_MEMORY_MIB * 1024 * 1024;
-        let config = EmulatorConfig {
-            guest_memory_size: ram_size,
-            host_memory_size: ram_size,
-            memory_block_size: 128 * 1024,
-            ips: 300_000_000,
-            pci_enabled: true,
-            ..Default::default()
-        };
-
-        let result = (|| -> rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>> {
-            let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
-            emu.init_memory_and_pc_system()?;
-
-            let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
-            emu.load_bios(BIOS_DATA, bios_load_addr)?;
-
-            let mut vga_data = VGA_BIOS_DATA.to_vec();
-            let remainder = vga_data.len() % 512;
-            if remainder != 0 {
-                vga_data.resize(vga_data.len() + (512 - remainder), 0);
+    fn advance_uploaded_media_startup(&mut self) -> bool {
+        let mut advanced = false;
+        for startup_step in 0..WEB_STARTUP_STEPS_PER_FRAME {
+            match self.try_advance_uploaded_media_startup() {
+                Ok(Some(emu)) => {
+                    advanced = true;
+                    self.emulator = Some(emu);
+                    self.startup = None;
+                    self.initialized = true;
+                    self.init_error = None;
+                    self.shutdown = false;
+                    break;
+                }
+                Ok(None) => {
+                    advanced = true;
+                }
+                Err(error) => {
+                    advanced = true;
+                    self.init_error = Some(error);
+                    self.startup = None;
+                    self.shutdown = true;
+                    break;
+                }
             }
-            emu.load_optional_rom(&vga_data, 0xC0000)?;
-
-            emu.init_cpu_and_devices()?;
-            let ext_kb = ((ram_size / 1024) - 1024).min(u16::MAX as usize);
-            emu.configure_memory_in_cmos(640, ext_kb as u16);
-            emu.configure_boot_sequence(3, 0, 0);
-            emu.attach_cdrom_data(1, 0, iso_data);
-            emu.init_gui(0, &[])?;
-            emu.reset(ResetReason::Hardware)?;
-            emu.start();
-            emu.force_vga_update();
-
-            Ok(emu)
-        })();
-
-        match result {
-            Ok(emu) => {
-                self.emulator = Some(emu);
-                self.initialized = true;
-                self.init_error = None;
-                self.shutdown = false;
-            }
-            Err(error) => {
-                self.init_error = Some(format!("{error:?}"));
+            if startup_step + 1 >= WEB_STARTUP_STEPS_PER_FRAME {
+                break;
             }
         }
+        advanced
+    }
+
+    fn try_advance_uploaded_media_startup(&mut self) -> Result<Option<WebEmulator>, String> {
+        let Some(startup) = self.startup.as_mut() else {
+            return Ok(None);
+        };
+
+        match startup.stage {
+            WebStartupStage::CreateEmulator => {
+                let emu = rusty_box::emulator::Emulator::<
+                    rusty_box::cpu::core_i7_skylake::Corei7SkylakeX,
+                >::new(web_uploaded_media_config(startup.memory_mib))
+                .map_err(|error| format!("{error:?}"))?;
+                startup.emulator = Some(emu);
+            }
+            WebStartupStage::InitializeMemory => {
+                startup
+                    .emulator
+                    .as_mut()
+                    .expect("startup emulator should exist before memory initialization")
+                    .init_memory_and_pc_system()
+                    .map_err(|error| format!("{error:?}"))?;
+            }
+            WebStartupStage::LoadBios => {
+                let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
+                startup
+                    .emulator
+                    .as_mut()
+                    .expect("startup emulator should exist before BIOS load")
+                    .load_bios(BIOS_DATA, bios_load_addr)
+                    .map_err(|error| format!("{error:?}"))?;
+            }
+            WebStartupStage::LoadVgaBios => {
+                let mut vga_data = VGA_BIOS_DATA.to_vec();
+                let remainder = vga_data.len() % 512;
+                if remainder != 0 {
+                    vga_data.resize(vga_data.len() + (512 - remainder), 0);
+                }
+                startup
+                    .emulator
+                    .as_mut()
+                    .expect("startup emulator should exist before VGA BIOS load")
+                    .load_optional_rom(&vga_data, 0xC0000)
+                    .map_err(|error| format!("{error:?}"))?;
+            }
+            WebStartupStage::InitializeDevices => {
+                let emu = startup
+                    .emulator
+                    .as_mut()
+                    .expect("startup emulator should exist before device initialization");
+                emu.init_cpu_and_devices()
+                    .map_err(|error| format!("{error:?}"))?;
+                let ram_size = startup.memory_mib * 1024 * 1024;
+                let ext_kb = ((ram_size / 1024) - 1024).min(u16::MAX as usize);
+                emu.configure_memory_in_cmos(640, ext_kb as u16);
+                emu.configure_boot_sequence(3, 0, 0);
+            }
+            WebStartupStage::AttachMedia => {
+                let iso_data = startup.iso_data.take().ok_or_else(|| {
+                    "uploaded boot media was not available during startup".to_owned()
+                })?;
+                startup
+                    .emulator
+                    .as_mut()
+                    .expect("startup emulator should exist before media attach")
+                    .attach_cdrom_data(1, 0, iso_data);
+            }
+            WebStartupStage::StartEmulator => {
+                let emu = startup
+                    .emulator
+                    .as_mut()
+                    .expect("startup emulator should exist before emulator start");
+                emu.init_gui(0, &[]).map_err(|error| format!("{error:?}"))?;
+                emu.reset(rusty_box::cpu::ResetReason::Hardware)
+                    .map_err(|error| format!("{error:?}"))?;
+                emu.start();
+                emu.force_vga_update();
+                return Ok(Some(
+                    startup
+                        .emulator
+                        .take()
+                        .expect("startup emulator should exist after start"),
+                ));
+            }
+        }
+
+        startup.stage = web_next_startup_stage(startup.stage)
+            .expect("startup stage should advance until StartEmulator");
+        Ok(None)
     }
 
     fn web_has_vm(&self) -> bool {
         self.boot_mode != WebBootMode::Launcher
             || self.initialized
             || self.emulator.is_some()
-            || self.pending_iso.is_some()
+            || self.startup.is_some()
     }
 
     fn handle_primary_toolbar_action(&mut self) {
@@ -2089,7 +2370,7 @@ impl WebShellApp {
         self.uploaded_media_name = Some(display_name.clone());
         self.uploaded_media_bytes = Some(byte_len);
         if let Some(entry) = self.chrome.vm_library.get_mut(0) {
-            entry.boot = "Uploaded ISO".to_owned();
+            entry.boot = "Uploaded media".to_owned();
             entry.cdrom = web_uploaded_media_summary(&display_name, byte_len);
         }
     }
@@ -2098,8 +2379,18 @@ impl WebShellApp {
         self.uploaded_media_name = None;
         self.uploaded_media_bytes = None;
         if let Some(entry) = self.chrome.vm_library.get_mut(0) {
-            entry.boot = "ISO upload".to_owned();
+            entry.boot = "Media upload".to_owned();
             entry.cdrom = "No uploaded media".to_owned();
+        }
+    }
+
+    fn set_web_memory_mib(&mut self, memory_mib: usize) {
+        if !web_memory_mib_is_supported(memory_mib) || !web_can_edit_memory(self.web_has_vm()) {
+            return;
+        }
+        self.web_memory_mib = memory_mib;
+        if let Some(entry) = self.chrome.vm_library.get_mut(0) {
+            entry.memory = web_memory_label(memory_mib);
         }
     }
 
@@ -2132,58 +2423,57 @@ impl WebShellApp {
         input.set_accept(".iso,.img");
 
         let slot = std::rc::Rc::clone(&self.file_slot);
-        let closure = Closure::once(move |event: web_sys::Event| {
-            let Some(target) = event.target() else {
-                return;
-            };
-            let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() else {
-                return;
-            };
-            let Some(files) = input.files() else {
-                return;
-            };
-            let Some(file) = files.get(0) else {
-                return;
-            };
-            let Ok(reader) = web_sys::FileReader::new() else {
-                return;
-            };
-            let upload_name = file.name();
-            let reader_clone = reader.clone();
-            let slot_inner = std::rc::Rc::clone(&slot);
-            let onload = Closure::once(move |_: web_sys::Event| {
-                if let Ok(result) = reader_clone.result() {
-                    let array = js_sys::Uint8Array::new(&result);
-                    let data = array.to_vec();
-                    *slot_inner.borrow_mut() = Some(WebUploadedMedia {
-                        name: upload_name,
-                        data,
-                    });
-                }
-            });
-            reader.set_onload(Some(onload.as_ref().unchecked_ref()));
-            onload.forget();
-            if reader.read_as_array_buffer(&file).is_err() {
-                *slot.borrow_mut() = None;
-            }
-        });
+        let closure =
+            Closure::<dyn FnMut(web_sys::Event)>::wrap(Box::new(move |event: web_sys::Event| {
+                let Some(target) = event.target() else {
+                    return;
+                };
+                let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() else {
+                    return;
+                };
+                let Some(files) = input.files() else {
+                    return;
+                };
+                let Some(file) = files.get(0) else {
+                    return;
+                };
 
-        if input
-            .add_event_listener_with_callback("change", closure.as_ref().unchecked_ref())
-            .is_err()
-        {
-            self.init_error = Some("failed to register file picker callback".to_owned());
-            return;
+                let upload_name = file.name();
+                let slot_inner = std::rc::Rc::clone(&slot);
+                let array_buffer = file.array_buffer();
+                wasm_bindgen_futures::spawn_local(async move {
+                    match wasm_bindgen_futures::JsFuture::from(array_buffer).await {
+                        Ok(result) => {
+                            let array = js_sys::Uint8Array::new(&result);
+                            let data = array.to_vec();
+                            *slot_inner.borrow_mut() = Some(WebUploadedMedia {
+                                name: upload_name,
+                                data,
+                            });
+                        }
+                        Err(_) => {
+                            *slot_inner.borrow_mut() = None;
+                        }
+                    }
+                });
+            }));
+
+        input.set_onchange(Some(closure.as_ref().unchecked_ref()));
+        self.file_picker = Some(WebFilePicker::new(input, closure));
+        if let Some(file_picker) = self.file_picker.as_ref() {
+            file_picker.activate();
         }
-        closure.forget();
-        input.click();
     }
 
     fn pump_emulator(&mut self) {
         if self.initialized && !self.shutdown {
             if let Some(emu) = &mut self.emulator {
+                let frame_start = web_time::Instant::now();
                 let mut frame_executed = 0u64;
-                while frame_executed < WEB_FRAME_BUDGET {
+                while web_should_continue_emulator_frame(
+                    frame_executed,
+                    web_time::Instant::now().duration_since(frame_start),
+                ) {
                     match emu.step_batch(WEB_BATCH_SIZE) {
                         Ok((executed, is_shutdown)) => {
                             frame_executed = frame_executed.saturating_add(executed);
@@ -2290,7 +2580,7 @@ impl WebShellApp {
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.menu_button("File", |ui| {
-                        if ui.button("Boot Alpine ISO").clicked() {
+                        if ui.button(WEB_BOOT_MEDIA_ACTION_LABEL).clicked() {
                             self.open_file_picker();
                             ui.close();
                         }
@@ -2423,14 +2713,18 @@ impl WebShellApp {
             )
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let (label, color) = if self.init_error.is_some() {
-                        ("Error", ACCENT_RED)
-                    } else if !self.initialized {
-                        ("Launcher", ACCENT_AMBER)
-                    } else if self.shutdown {
-                        ("Stopped", TEXT_MUTED)
-                    } else {
-                        ("Running", ACCENT_CYAN)
+                    let state = web_runtime_state(
+                        self.init_error.is_some(),
+                        self.startup.is_some(),
+                        self.initialized,
+                        self.shutdown,
+                    );
+                    let (label, color) = match state {
+                        WebRuntimeState::Error => ("Error", ACCENT_RED),
+                        WebRuntimeState::Starting => ("Starting", ACCENT_AMBER),
+                        WebRuntimeState::Launcher => ("Launcher", ACCENT_AMBER),
+                        WebRuntimeState::Stopped => ("Stopped", TEXT_MUTED),
+                        WebRuntimeState::Running => ("Running", ACCENT_CYAN),
                     };
                     status_dot(ui, color);
                     ui.label(RichText::new(label).monospace().size(11.0).color(color));
@@ -2484,8 +2778,8 @@ impl WebShellApp {
             ui.columns(3, |columns| {
                 action_tile(
                     &mut columns[0],
-                    "Boot Alpine ISO",
-                    "Upload an Alpine Virtual x86 ISO or disk image.",
+                    WEB_BOOT_MEDIA_ACTION_LABEL,
+                    WEB_BOOT_MEDIA_ACTION_DESCRIPTION,
                     ACCENT_BLUE,
                     || self.open_file_picker(),
                 );
@@ -2506,90 +2800,170 @@ impl WebShellApp {
     }
 
     fn draw_web_console_page(&mut self, ui: &mut egui::Ui) {
-        if let Some(error) = &self.init_error {
-            ui.centered_and_justified(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        RichText::new("Initialization Error")
-                            .size(18.0)
-                            .color(ACCENT_RED),
-                    );
-                    ui.label(RichText::new(error).monospace().color(TEXT_MUTED));
+        match web_console_surface(
+            self.init_error.is_some(),
+            self.startup.is_some(),
+            self.texture.is_some(),
+            self.boot_mode == WebBootMode::Launcher,
+        ) {
+            WebConsoleSurface::Error => {
+                let error = self
+                    .init_error
+                    .as_deref()
+                    .unwrap_or("unknown initialization error");
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("Initialization Error")
+                                .size(18.0)
+                                .color(ACCENT_RED),
+                        );
+                        ui.label(RichText::new(error).monospace().color(TEXT_MUTED));
+                    });
                 });
-            });
-        } else if let Some(texture) = &self.texture {
-            let available = ui.available_size();
-            let tex_w = self.display.fb_width as f32;
-            let tex_h = self.display.fb_height.max(1) as f32;
-            let max_scale_x = (available.x / tex_w).floor().max(1.0);
-            let max_scale_y = (available.y / tex_h).floor().max(1.0);
-            let scale = max_scale_x.min(max_scale_y);
-            let size = egui::vec2(tex_w * scale, tex_h * scale);
-            ui.centered_and_justified(|ui| {
-                ui.image(egui::load::SizedTexture::new(texture.id(), size));
-            });
-        } else if self.boot_mode == WebBootMode::Launcher {
-            ui.centered_and_justified(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("No VM booted").size(18.0).color(TEXT_PRIMARY));
-                    if ui.button("Boot Alpine ISO").clicked() {
-                        self.open_file_picker();
-                    }
+            }
+            WebConsoleSurface::Starting => {
+                let stage = self
+                    .startup
+                    .as_ref()
+                    .map(|startup| startup.stage)
+                    .unwrap_or(WebStartupStage::CreateEmulator);
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new(web_startup_stage_label(stage))
+                                .size(18.0)
+                                .color(TEXT_PRIMARY),
+                        );
+                        ui.label(
+                            RichText::new("Preparing the browser VM. This can take a moment.")
+                                .color(TEXT_MUTED),
+                        );
+                    });
                 });
-            });
-        } else {
-            ui.centered_and_justified(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("Starting emulator...").color(TEXT_MUTED));
-                    ui.spinner();
+            }
+            WebConsoleSurface::Display => {
+                let texture = self
+                    .texture
+                    .as_ref()
+                    .expect("display surface requires a texture");
+                let available = ui.available_size();
+                let tex_w = self.display.fb_width as f32;
+                let tex_h = self.display.fb_height.max(1) as f32;
+                let max_scale_x = (available.x / tex_w).floor().max(1.0);
+                let max_scale_y = (available.y / tex_h).floor().max(1.0);
+                let scale = max_scale_x.min(max_scale_y);
+                let size = egui::vec2(tex_w * scale, tex_h * scale);
+                ui.centered_and_justified(|ui| {
+                    ui.image(egui::load::SizedTexture::new(texture.id(), size));
                 });
-            });
+            }
+            WebConsoleSurface::Launcher => {
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new("No VM booted").size(18.0).color(TEXT_PRIMARY));
+                        if ui.button(WEB_BOOT_MEDIA_ACTION_LABEL).clicked() {
+                            self.open_file_picker();
+                        }
+                    });
+                });
+            }
+            WebConsoleSurface::WaitingForDisplay => {
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new("Waiting for VGA output...").color(TEXT_MUTED));
+                        ui.spinner();
+                    });
+                });
+            }
         }
     }
 
     fn draw_web_hardware_page(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             shell_card_frame().show(ui, |ui| {
-                ui.set_min_width(190.0);
-                ui.label(RichText::new("Devices").strong().color(TEXT_PRIMARY));
-                ui.add_space(8.0);
-                for device in HardwareDevice::ALL {
-                    if ui
-                        .selectable_label(self.chrome.selected_hardware == device, device.label())
-                        .clicked()
-                    {
-                        self.chrome.selected_hardware = device;
+                ui.vertical(|ui| {
+                    ui.set_min_width(190.0);
+                    ui.label(RichText::new("Devices").strong().color(TEXT_PRIMARY));
+                    ui.add_space(8.0);
+                    for device in HardwareDevice::ALL {
+                        if ui
+                            .selectable_label(
+                                self.chrome.selected_hardware == device,
+                                device.label(),
+                            )
+                            .clicked()
+                        {
+                            self.chrome.selected_hardware = device;
+                        }
                     }
-                }
+                });
             });
             shell_card_frame().show(ui, |ui| {
-                ui.set_min_width(520.0);
-                ui.label(
-                    RichText::new(format!(
-                        "Hardware Summary  |  {}",
-                        self.chrome.selected_hardware.label()
-                    ))
-                    .size(18.0)
-                    .strong(),
-                );
-                ui.separator();
-                ui.label(RichText::new(WEB_HARDWARE_READ_ONLY_NOTICE).color(ACCENT_AMBER));
-                ui.add_space(8.0);
-                self.draw_web_hardware_detail(ui);
+                ui.vertical(|ui| {
+                    ui.set_min_width(520.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "Hardware Summary  |  {}",
+                            self.chrome.selected_hardware.label()
+                        ))
+                        .size(18.0)
+                        .strong(),
+                    );
+                    ui.separator();
+                    ui.add(
+                        egui::Label::new(RichText::new(WEB_HARDWARE_NOTICE).color(ACCENT_AMBER))
+                            .wrap(),
+                    );
+                    ui.add_space(8.0);
+                    self.draw_web_hardware_detail(ui);
+                });
             });
         });
     }
 
-    fn draw_web_hardware_detail(&self, ui: &mut egui::Ui) {
+    fn draw_web_hardware_detail(&mut self, ui: &mut egui::Ui) {
         match self.chrome.selected_hardware {
             HardwareDevice::Memory => {
                 hardware_intro(
                     ui,
-                    "Browser memory preset",
-                    "The web launcher uses a fixed 128 MiB profile so uploaded ISO boots stay responsive in the browser.",
+                    "Browser memory",
+                    "Choose guest RAM before boot. Wasm32 can address up to 4 GiB, but allocation still depends on browser and device memory.",
                 );
-                detail_row(ui, "Installed memory", "128 MB");
-                detail_row(ui, "Guest RAM", "Browser launcher preset");
+                detail_row(
+                    ui,
+                    "Installed memory",
+                    &web_memory_label(self.web_memory_mib),
+                );
+                let can_edit = web_can_edit_memory(self.web_has_vm());
+                let mut memory_mib = self.web_memory_mib;
+                ui.add_enabled_ui(can_edit, |ui| {
+                    let changed = ui
+                        .add(
+                            egui::DragValue::new(&mut memory_mib)
+                                .range(WEB_MIN_MEMORY_MIB..=WEB_MAX_MEMORY_MIB)
+                                .speed(WEB_MEMORY_DRAG_SPEED_MIB)
+                                .suffix(" MB"),
+                        )
+                        .changed();
+                    ui.label(
+                        RichText::new(format!(
+                            "Range: {} MB – {} MB",
+                            WEB_MIN_MEMORY_MIB, WEB_MAX_MEMORY_MIB
+                        ))
+                        .color(TEXT_MUTED),
+                    );
+                    if changed {
+                        self.set_web_memory_mib(memory_mib);
+                    }
+                });
+                if !can_edit {
+                    ui.label(
+                        RichText::new("Reset the browser VM before changing memory.")
+                            .color(TEXT_MUTED),
+                    );
+                }
             }
             HardwareDevice::Processors => {
                 hardware_intro(
@@ -2625,11 +2999,11 @@ impl WebShellApp {
                 };
                 hardware_intro(
                     ui,
-                    "Uploaded ISO",
-                    "Home opens a browser file picker and attaches the selected image as CD/DVD media.",
+                    "Uploaded boot media",
+                    "Home opens a browser file picker and attaches the selected image as bootable CD/DVD media.",
                 );
                 detail_row(ui, "Attached media", &attached_media);
-                detail_row(ui, "Boot mode", "Uploaded CD/DVD image");
+                detail_row(ui, "Boot mode", "Uploaded boot image");
             }
             HardwareDevice::Display => {
                 hardware_intro(
@@ -2654,7 +3028,8 @@ impl WebShellApp {
     fn reset_web_vm(&mut self) {
         self.emulator = None;
         self.texture = None;
-        self.pending_iso = None;
+        self.startup = None;
+        self.file_picker = None;
         self.initialized = false;
         self.init_error = None;
         self.shutdown = false;
@@ -2674,21 +3049,27 @@ impl eframe::App for WebShellApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.frame_count = self.frame_count.saturating_add(1);
         let uploaded = self.file_slot.borrow_mut().take();
+        let mut uploaded_this_frame = false;
         if let Some(upload) = uploaded {
+            uploaded_this_frame = true;
             if web_upload_replaces_browser_vm(self.web_has_vm()) {
                 self.reset_web_vm();
             }
-            self.record_uploaded_media_metadata(&upload.name, upload.data.len());
-            self.pending_iso = Some(upload);
-            self.boot_mode = WebBootMode::Alpine;
-            self.chrome.selected_page = ShellPage::Console;
+            self.file_picker = None;
+            self.begin_uploaded_media_startup(upload);
         }
-        if self.boot_mode == WebBootMode::Alpine && !self.initialized && self.init_error.is_none() {
-            if let Some(upload) = self.pending_iso.take() {
-                self.initialize_alpine(upload.data);
-            }
+        let mut advanced_startup_this_frame = false;
+        if !uploaded_this_frame
+            && self.boot_mode == WebBootMode::UploadedMedia
+            && !self.initialized
+            && self.init_error.is_none()
+        {
+            advanced_startup_this_frame = self.advance_uploaded_media_startup();
         }
-        self.pump_emulator();
+        let has_input_this_frame = ui.ctx().input(|input| !input.events.is_empty());
+        if web_should_pump_emulator_this_frame(advanced_startup_this_frame, has_input_this_frame) {
+            self.pump_emulator();
+        }
         if self.chrome.selected_page == ShellPage::Console {
             self.process_keyboard(ui.ctx());
         }
@@ -3078,8 +3459,8 @@ mod tests {
     }
 
     #[test]
-    fn web_primary_action_label_starts_with_boot_iso_then_console() {
-        assert_eq!(web_primary_action_label(false), "▶ Boot ISO");
+    fn web_primary_action_label_starts_with_boot_media_then_console() {
+        assert_eq!(web_primary_action_label(false), "▶ Boot OS Image");
         assert_eq!(web_primary_action_label(true), "Console");
     }
 
@@ -3092,11 +3473,27 @@ mod tests {
     }
 
     #[test]
-    fn web_hardware_notice_marks_browser_settings_read_only() {
+    fn web_hardware_notice_explains_when_memory_is_editable() {
         assert_eq!(
-            WEB_HARDWARE_READ_ONLY_NOTICE,
-            "Browser build uses fixed memory/device settings. Upload media on Home to boot a different image."
+            WEB_HARDWARE_NOTICE,
+            "Browser hardware can be changed before boot. Reset the VM to edit it again."
         );
+        assert!(WEB_HARDWARE_NOTICE.len() <= 78);
+    }
+
+    #[test]
+    fn web_memory_profiles_are_user_selectable() {
+        assert_eq!(WEB_DEFAULT_MEMORY_MIB, 128);
+        assert_eq!(WEB_MAX_MEMORY_MIB, 4096);
+        assert_eq!(web_memory_label(4096), "4096 MB");
+        assert_eq!(WEB_MEMORY_DRAG_SPEED_MIB, 1.0);
+        assert!(web_memory_mib_is_supported(777));
+        assert!(web_memory_mib_is_supported(1));
+        assert!(web_memory_mib_is_supported(4096));
+        assert!(!web_memory_mib_is_supported(0));
+        assert!(!web_memory_mib_is_supported(4097));
+        assert!(web_can_edit_memory(false));
+        assert!(!web_can_edit_memory(true));
     }
 
     #[test]
@@ -3106,10 +3503,69 @@ mod tests {
     }
 
     #[test]
-    fn web_alpine_profile_stays_browser_friendly() {
-        assert!(WEB_GUEST_MEMORY_MIB <= 128);
-        assert!(WEB_FRAME_BUDGET <= 20_000);
-        assert!(WEB_BATCH_SIZE <= WEB_FRAME_BUDGET);
+    fn web_boot_media_labels_are_os_neutral() {
+        assert_eq!(WEB_BOOT_MEDIA_ACTION_LABEL, "Boot OS Image");
+        assert!(!WEB_BOOT_MEDIA_ACTION_LABEL.contains("Alpine"));
+        assert!(!WEB_BOOT_MEDIA_ACTION_DESCRIPTION.contains("Alpine"));
+    }
+
+    #[test]
+    fn web_emulator_frame_respects_wall_clock_budget() {
+        assert!(WEB_FRAME_TIME_BUDGET_MS <= 8);
+        assert!(WEB_BATCH_SIZE <= 1_000);
+        assert!(web_should_continue_emulator_frame(
+            0,
+            core::time::Duration::from_millis(0)
+        ));
+        assert!(!web_should_continue_emulator_frame(
+            0,
+            core::time::Duration::from_millis(WEB_FRAME_TIME_BUDGET_MS + 1)
+        ));
+        assert!(!web_should_continue_emulator_frame(
+            WEB_FRAME_BUDGET,
+            core::time::Duration::from_millis(0)
+        ));
+    }
+
+    #[test]
+    fn web_uploaded_media_startup_is_split_across_frames() {
+        assert_eq!(WEB_STARTUP_STEPS_PER_FRAME, 1);
+        assert_eq!(
+            web_next_startup_stage(WebStartupStage::CreateEmulator),
+            Some(WebStartupStage::InitializeMemory)
+        );
+        assert_eq!(web_next_startup_stage(WebStartupStage::StartEmulator), None);
+        assert_eq!(
+            web_startup_stage_label(WebStartupStage::CreateEmulator),
+            "Allocating guest memory"
+        );
+        assert_eq!(
+            web_startup_stage_label(WebStartupStage::InitializeMemory),
+            "Allocating guest memory"
+        );
+    }
+
+    #[test]
+    fn web_console_prefers_startup_message_over_stale_texture() {
+        assert_eq!(
+            web_console_surface(false, true, true, false),
+            WebConsoleSurface::Starting
+        );
+    }
+
+    #[test]
+    fn web_status_reports_starting_while_upload_boots() {
+        assert_eq!(
+            web_runtime_state(false, true, false, false),
+            WebRuntimeState::Starting
+        );
+    }
+
+    #[test]
+    fn web_emulator_pump_yields_to_input_frames() {
+        assert!(web_should_pump_emulator_this_frame(false, false));
+        assert!(!web_should_pump_emulator_this_frame(true, false));
+        assert!(!web_should_pump_emulator_this_frame(false, true));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

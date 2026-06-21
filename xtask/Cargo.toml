@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "Repository automation tasks for Rusty Box"
+readme = "README.md"
+
+[dependencies]
+adb_client = { version = "3.2.2", default-features = false }
+ureq = "2"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }

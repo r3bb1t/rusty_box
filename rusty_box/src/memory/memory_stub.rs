@@ -35,22 +35,38 @@ const BX_MEM_VECTOR_ALIGN: usize = 4096;
 
 impl BxMemoryStubC {
     #[cfg(feature = "alloc")]
-    pub fn alloc_vector_aligned(bytes: usize, alignment: usize) -> (Vec<u8>, usize) {
+    pub fn alloc_vector_aligned(bytes: usize, alignment: usize) -> Result<(Vec<u8>, usize)> {
         let test_mask: usize = alignment - 1;
         let actual_vector_size = bytes + test_mask;
-        // Use alloc_zeroed with page alignment to avoid UEFI pool allocator
-        // limitations on large contiguous allocations.
-        let layout = alloc::alloc::Layout::from_size_align(actual_vector_size, alignment)
-            .expect("invalid layout for memory vector");
-        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
-        if ptr.is_null() {
-            alloc::alloc::handle_alloc_error(layout);
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut actual_vector = Vec::new();
+            actual_vector
+                .try_reserve_exact(actual_vector_size)
+                .map_err(|_| MemoryError::UnableToAllocateGuestMemory(actual_vector_size))?;
+            actual_vector.resize(actual_vector_size, 0);
+            let actual_vector_ptr = actual_vector.as_ptr() as usize;
+            let masked: usize = ((actual_vector_ptr + test_mask) & !test_mask) - actual_vector_ptr;
+            Ok((actual_vector, masked))
         }
-        let actual_vector =
-            unsafe { Vec::from_raw_parts(ptr, actual_vector_size, actual_vector_size) };
-        let actual_vector_ptr = actual_vector.as_ptr() as usize;
-        let masked: usize = ((actual_vector_ptr + test_mask) & !test_mask) - actual_vector_ptr;
-        (actual_vector, masked)
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Use alloc_zeroed with page alignment to avoid UEFI pool allocator
+            // limitations on large contiguous allocations.
+            let layout = alloc::alloc::Layout::from_size_align(actual_vector_size, alignment)
+                .map_err(|_| MemoryError::UnableToAllocateGuestMemory(actual_vector_size))?;
+            let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+            if ptr.is_null() {
+                return Err(MemoryError::UnableToAllocateGuestMemory(actual_vector_size).into());
+            }
+            let actual_vector =
+                unsafe { Vec::from_raw_parts(ptr, actual_vector_size, actual_vector_size) };
+            let actual_vector_ptr = actual_vector.as_ptr() as usize;
+            let masked: usize = ((actual_vector_ptr + test_mask) & !test_mask) - actual_vector_ptr;
+            Ok((actual_vector, masked))
+        }
     }
 
     pub fn get_memory_len(&self) -> usize {
@@ -74,7 +90,7 @@ impl BxMemoryStubC {
         }
 
         let (mut actual_vector, vector_offset) =
-            Self::alloc_vector_aligned(host + BIOSROMSZ + EXROMSIZE + 4096, BX_MEM_VECTOR_ALIGN);
+            Self::alloc_vector_aligned(host + BIOSROMSZ + EXROMSIZE + 4096, BX_MEM_VECTOR_ALIGN)?;
         tracing::debug!(
             "allocated memory at {:p}. after alignment, vector={:p}, block_size = {}k",
             actual_vector.as_ptr(),
@@ -110,7 +126,7 @@ impl BxMemoryStubC {
         let layout = alloc::alloc::Layout::new::<Self>();
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut Self;
         if ptr.is_null() {
-            alloc::alloc::handle_alloc_error(layout);
+            return Err(MemoryError::UnableToAllocateGuestMemory(layout.size()).into());
         }
 
         let actual_vector_ptr = actual_vector.as_mut_ptr();

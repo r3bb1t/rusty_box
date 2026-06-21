@@ -14,5 +14,8 @@ MAX_INSTRUCTIONS="20000000000"
 # CMDLINE="console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 nomodeset"
 
 
+
+[alias]
+xtask = "run --package xtask --"
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "link-args=-z stack-size=8388608"]

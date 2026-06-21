@@ -36,6 +36,16 @@ cargo test
 cd examples/rusty_box_web && trunk serve
 ```
 
+### Android APK quick start
+
+```bash
+cargo xtask android build
+cargo xtask android run
+cargo xtask android screenshot rustybox_android.png
+```
+
+`cargo xtask android` installs the Android SDK components, Rust target, and `cargo-apk` as needed; copies `~/Downloads/alpine-virt-3.23.3-x86_64.iso` to the ignored `rusty_box_android/assets/alpine.iso`; signs with a generated local dev keystore under your home directory; and uses `adb_client` for install, launch, and screenshots. The first Android crate embeds Alpine with `include_bytes!` for simplicity, does not commit the ISO or signing material, and shows emulated Linux serial logs in the `Linux Serial Log (ttyS0)` panel.
+
 See [UEFI Example](examples/rusty_box_uefi/) for building and running on UEFI firmware.
 
 ## Getting Alpine Linux ISO
@@ -106,7 +116,9 @@ rusty_box/
 |   +-- examples/              # Desktop examples (DLX, Alpine, egui GUI)
 +-- rusty_box_decoder/         # x86 instruction decoder (separate crate)
 +-- rusty_box_gui/             # User launcher with CLI/TOML config and egui disk creator
++-- rusty_box_android/         # Android NativeActivity APK frontend
 +-- rusty_box_bximage/         # bximage-compatible disk image creation helpers
++-- xtask/                     # Cross-platform repository automation
 +-- examples/rusty_box_web/    # WASM web frontend
 +-- examples/rusty_box_uefi/   # UEFI bootable emulator (no allocator)
 ```

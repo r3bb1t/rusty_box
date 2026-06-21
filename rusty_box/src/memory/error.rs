@@ -15,6 +15,8 @@ pub enum MemoryError {
     InsufficientRam,
     #[error("Memory is not a multiply of 1 megabyte")]
     MemorySizeIsNotAMultiplyOf1Megabyte,
+    #[error("Unable to allocate {0} bytes of guest memory")]
+    UnableToAllocateGuestMemory(usize),
     #[cfg(feature = "std")]
     #[error("Unable to allocate memory overflow file: {0}")]
     UnableToCreateTempFile(std::io::Error),
