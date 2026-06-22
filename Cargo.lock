@@ -3146,6 +3146,7 @@ version = "0.0.3"
 dependencies = [
  "android_logger",
  "eframe",
+ "jni",
  "log",
  "rusty_box",
  "rusty_box_gui",

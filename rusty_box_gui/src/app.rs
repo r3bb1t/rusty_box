@@ -756,6 +756,10 @@ impl NativeShellApp {
     }
 
     fn draw_shell_notice(&mut self, ui: &mut egui::Ui) {
+        if cfg!(target_os = "android") {
+            return;
+        }
+
         let Some(notice) = self.shell_notice.clone() else {
             return;
         };
@@ -1251,6 +1255,8 @@ impl NativeShellApp {
 
         match self.chrome.selected_hardware {
             HardwareDevice::Memory => {
+                let memory_step = if cfg!(target_os = "android") { 64 } else { 1 };
+                let memory_block_step = if cfg!(target_os = "android") { 64 } else { 1 };
                 hardware_intro(
                     ui,
                     "Memory",
@@ -1259,33 +1265,42 @@ impl NativeShellApp {
                 ui.add_enabled_ui(editable, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Guest memory").strong().color(TEXT_PRIMARY));
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut self.settings.memory_mib)
-                                    .range(1..=4096)
-                                    .suffix(" MB"),
-                            )
-                            .changed();
+                        changed |= draw_u32_field(
+                            ui,
+                            &mut self.settings.memory_mib,
+                            1,
+                            4096,
+                            " MB",
+                            editable,
+                            memory_step,
+                            None,
+                        );
                     });
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Host memory").strong().color(TEXT_PRIMARY));
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut self.settings.host_memory_mib)
-                                    .range(1..=4096)
-                                    .suffix(" MB"),
-                            )
-                            .changed();
+                        changed |= draw_u32_field(
+                            ui,
+                            &mut self.settings.host_memory_mib,
+                            1,
+                            4096,
+                            " MB",
+                            editable,
+                            memory_step,
+                            None,
+                        );
                     });
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Memory block").strong().color(TEXT_PRIMARY));
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut self.settings.memory_block_kib)
-                                    .range(1..=65_536)
-                                    .suffix(" KiB"),
-                            )
-                            .changed();
+                        changed |= draw_u32_field(
+                            ui,
+                            &mut self.settings.memory_block_kib,
+                            1,
+                            65_536,
+                            " KiB",
+                            editable,
+                            memory_block_step,
+                            None,
+                        );
                     });
                 });
             }
@@ -1299,13 +1314,16 @@ impl NativeShellApp {
                 ui.add_enabled_ui(editable, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("IPS target").strong().color(TEXT_PRIMARY));
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut self.settings.ips)
-                                    .range(1..=2_000_000_000)
-                                    .speed(1_000_000.0),
-                            )
-                            .changed();
+                        changed |= draw_u32_field(
+                            ui,
+                            &mut self.settings.ips,
+                            1,
+                            2_000_000_000,
+                            "",
+                            editable,
+                            1_000_000,
+                            Some(1_000_000.0),
+                        );
                     });
                     changed |= ui
                         .checkbox(&mut self.settings.sync_slowdown, "Sync slowdown")
@@ -1316,17 +1334,18 @@ impl NativeShellApp {
                                 .strong()
                                 .color(TEXT_PRIMARY),
                         );
-                        changed |= ui
-                            .add(egui::DragValue::new(&mut self.settings.max_instructions))
-                            .changed();
+                        changed |= draw_u64_field(
+                            ui,
+                            &mut self.settings.max_instructions,
+                            0,
+                            u64::MAX,
+                            "",
+                            editable,
+                            1_000_000,
+                            Some(1.0),
+                        );
                     });
                 });
-                detail_row(ui, "Applied target", &format_ips_u32(self.vm_info.ips));
-                detail_row(
-                    ui,
-                    "Restart behavior",
-                    "toolbar restart stops and relaunches the VM",
-                );
             }
             HardwareDevice::Devices => {
                 hardware_intro(
@@ -1806,6 +1825,22 @@ impl NativeShellApp {
                         }
                     });
                     ui.separator();
+                    let state = if running {
+                        "Running"
+                    } else if status.start_pending {
+                        "Starting"
+                    } else {
+                        "Stopped"
+                    };
+                    ui.label(RichText::new(state).monospace().size(11.0).color(TEXT_PRIMARY));
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format_ips_u32(status.ips))
+                            .monospace()
+                            .size(11.0)
+                            .color(ACCENT_BLUE),
+                    );
+                    ui.separator();
                     self.nav_button(ui, ShellPage::Home, "Home");
                     self.nav_button(ui, ShellPage::Console, "Console");
                     self.nav_button(ui, ShellPage::Hardware, "Hardware");
@@ -1845,6 +1880,7 @@ impl eframe::App for NativeShellApp {
         #[cfg(target_os = "android")]
         if self.chrome.selected_page == ShellPage::Console {
             self.draw_android_console_header(ui);
+            self.draw_status_strip(ui);
             self.draw_central(ui, frame);
             draw_about_window(ui.ctx(), &mut self.chrome);
             return;
@@ -3226,6 +3262,7 @@ fn draw_about_window(ctx: &egui::Context, chrome: &mut ShellChrome) {
             ));
         });
 }
+
 fn metadata_text(label: &str, value: &str) -> RichText {
     RichText::new(format!("{label}: {value}"))
         .size(11.0)
@@ -3236,6 +3273,120 @@ fn hardware_intro(ui: &mut egui::Ui, title: &str, body: &str) {
     ui.label(RichText::new(title).size(16.0).strong().color(TEXT_PRIMARY));
     ui.label(RichText::new(body).color(TEXT_MUTED));
     ui.add_space(10.0);
+}
+
+#[cfg(target_os = "android")]
+fn draw_u32_field(
+    ui: &mut egui::Ui,
+    value: &mut u32,
+    min: u32,
+    max: u32,
+    suffix: &str,
+    editable: bool,
+    step: u32,
+    _speed: Option<f64>,
+) -> bool {
+    let mut changed = false;
+    let step = step.max(1);
+    let decrement = value.saturating_sub(step).max(min);
+    if ui
+        .add_enabled(editable, egui::Button::new("−"))
+        .on_hover_text("decrement")
+        .clicked()
+        && *value != decrement
+    {
+        *value = decrement;
+        changed = true;
+    }
+    ui.label(RichText::new(format!("{value}{suffix}")).color(TEXT_MUTED));
+    let increment = value.saturating_add(step).min(max);
+    if ui
+        .add_enabled(editable, egui::Button::new("+"))
+        .on_hover_text("increment")
+        .clicked()
+        && *value != increment
+    {
+        *value = increment;
+        changed = true;
+    }
+    changed
+}
+
+#[cfg(not(target_os = "android"))]
+fn draw_u32_field(
+    ui: &mut egui::Ui,
+    value: &mut u32,
+    min: u32,
+    max: u32,
+    suffix: &str,
+    editable: bool,
+    speed: u32,
+    speed_override: Option<f64>,
+) -> bool {
+    let mut widget = egui::DragValue::new(value).range(min..=max).suffix(suffix);
+    if let Some(speed_override) = speed_override {
+        widget = widget.speed(speed_override);
+    } else {
+        widget = widget.speed(speed as f64);
+    }
+    ui.add_enabled(editable, widget).changed()
+}
+
+#[cfg(target_os = "android")]
+fn draw_u64_field(
+    ui: &mut egui::Ui,
+    value: &mut u64,
+    min: u64,
+    max: u64,
+    suffix: &str,
+    editable: bool,
+    step: u64,
+    _speed: Option<f64>,
+) -> bool {
+    let mut changed = false;
+    let step = step.max(1);
+    let decrement = value.saturating_sub(step).max(min);
+    if ui
+        .add_enabled(editable, egui::Button::new("−"))
+        .on_hover_text("decrement")
+        .clicked()
+        && *value != decrement
+    {
+        *value = decrement;
+        changed = true;
+    }
+    ui.label(RichText::new(format!("{value}{suffix}")).color(TEXT_MUTED));
+    let increment = value.saturating_add(step).min(max);
+    if ui
+        .add_enabled(editable, egui::Button::new("+"))
+        .on_hover_text("increment")
+        .clicked()
+        && *value != increment
+    {
+        *value = increment;
+        changed = true;
+    }
+    changed
+}
+
+#[cfg(not(target_os = "android"))]
+fn draw_u64_field(
+    ui: &mut egui::Ui,
+    value: &mut u64,
+    min: u64,
+    max: u64,
+    suffix: &str,
+    editable: bool,
+    speed: u64,
+    speed_override: Option<f64>,
+) -> bool {
+    let mut widget = egui::DragValue::new(value).range(min..=max).suffix(suffix);
+    if let Some(speed_override) = speed_override {
+        widget = widget.speed(speed_override);
+    } else {
+        widget = widget.speed(speed as f64);
+    }
+    ui.add_enabled(editable, widget).changed()
 }
 
 fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
