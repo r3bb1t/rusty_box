@@ -13,7 +13,7 @@ use adb_client::{server::ADBServer, server_device::ADBServerDevice, ADBDeviceExt
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 const CMDLINE_TOOLS_VERSION: &str = "14742923";
-const ANDROID_PLATFORM: &str = "android-35";
+const ANDROID_PLATFORM: &str = "android-34";
 const BUILD_TOOLS_VERSION: &str = "35.0.0";
 const NDK_VERSION: &str = "29.0.14206865";
 const RUST_TARGET: &str = "aarch64-linux-android";

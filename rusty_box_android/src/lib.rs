@@ -13,14 +13,14 @@ use rusty_box_gui::{
 use std::{
     collections::VecDeque,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bios/BIOS-bochs-latest");
@@ -36,7 +36,15 @@ const FRAME_BUDGET: u64 = 200_000;
 const ANDROID_EMULATOR_STACK_SIZE: usize = 256 * 1024 * 1024;
 const SERIAL_LOG_LIMIT: usize = 65_536;
 const SERIAL_LOG_RETAIN: usize = 49_152;
-
+#[cfg(target_os = "android")]
+const ANDROID_READ_EXTERNAL_STORAGE_PERMISSION: &str = "android.permission.READ_EXTERNAL_STORAGE";
+#[cfg(target_os = "android")]
+const ANDROID_STORAGE_PERMISSION_REQUEST_CODE: i32 = 1_001;
+#[cfg(target_os = "android")]
+const ANDROID_STORAGE_PERMISSION_REQUEST_THROTTLE: Duration = Duration::from_millis(500);
+#[cfg(target_os = "android")]
+const ANDROID_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION: &str =
+    "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION";
 type AndroidEmulator =
     Box<rusty_box::emulator::Emulator<'static, rusty_box::cpu::core_i7_skylake::Corei7SkylakeX>>;
 
@@ -44,6 +52,44 @@ type AndroidEmulator =
 enum AndroidIsoSource {
     EmbeddedAlpine,
     File(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum AndroidIsoBrowserEntryKind {
+    Directory,
+    IsoFile,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AndroidIsoBrowserEntry {
+    name: String,
+    path: PathBuf,
+    kind: AndroidIsoBrowserEntryKind,
+}
+
+impl AndroidIsoBrowserEntry {
+    fn directory(name: impl Into<String>, path: PathBuf) -> Self {
+        Self {
+            name: name.into(),
+            path,
+            kind: AndroidIsoBrowserEntryKind::Directory,
+        }
+    }
+
+    fn iso_file(name: impl Into<String>, path: PathBuf) -> Self {
+        Self {
+            name: name.into(),
+            path,
+            kind: AndroidIsoBrowserEntryKind::IsoFile,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self.kind {
+            AndroidIsoBrowserEntryKind::Directory => format!("[dir] {}", self.name),
+            AndroidIsoBrowserEntryKind::IsoFile => format!("[iso] {}", self.name),
+        }
+    }
 }
 
 #[cfg(feature = "embedded-alpine")]
@@ -62,7 +108,10 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
+    configure_android_window_for_safe_content(&app);
+    set_android_game_mode_flags(&app);
 
+    let app_for_safe_area = app.clone();
     let options = eframe::NativeOptions {
         android_app: Some(app),
         ..Default::default()
@@ -71,7 +120,11 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     eframe::run_native(
         "Rusty Box",
         options,
-        Box::new(|cc| Ok(Box::new(RustyBoxAndroidApp::new(cc)))),
+        Box::new(move |cc| {
+            Ok(Box::new(
+                RustyBoxAndroidApp::new(cc).with_android_app(app_for_safe_area.clone()),
+            ))
+        }),
     )
     .unwrap();
 }
@@ -221,8 +274,18 @@ pub struct RustyBoxAndroidApp {
     key_text: String,
     iso_path_text: String,
     iso_status: Option<String>,
+    iso_browser_dir: PathBuf,
+    iso_browser_entries: Vec<AndroidIsoBrowserEntry>,
+    iso_browser_status: Option<String>,
+    iso_browser_loaded: bool,
     show_keypad: bool,
     show_iso_picker: bool,
+    #[cfg(target_os = "android")]
+    storage_permission_prompted_at: Option<Instant>,
+    #[cfg(target_os = "android")]
+    android_app: Option<winit::platform::android::activity::AndroidApp>,
+    #[cfg(target_os = "android")]
+    android_game_ui_applied: bool,
 }
 
 fn android_gui_config() -> ResolvedConfig {
@@ -246,6 +309,106 @@ fn android_gui_config() -> ResolvedConfig {
         }),
         log_level: LogLevel::Warn,
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AndroidSafeAreaWindowFlagBits {
+    add: u32,
+    remove: u32,
+}
+
+fn android_safe_area_window_flag_bits() -> AndroidSafeAreaWindowFlagBits {
+    AndroidSafeAreaWindowFlagBits {
+        add: 0x0000_0100 | 0x0000_0800 | 0x0001_0000,
+        remove: 0x0000_0400 | 0x0000_0200,
+    }
+}
+
+#[cfg(target_os = "android")]
+fn configure_android_window_for_safe_content(app: &winit::platform::android::activity::AndroidApp) {
+    use winit::platform::android::activity::WindowManagerFlags;
+
+    let add = WindowManagerFlags::LAYOUT_IN_SCREEN
+        | WindowManagerFlags::FORCE_NOT_FULLSCREEN
+        | WindowManagerFlags::LAYOUT_INSET_DECOR;
+    let remove = WindowManagerFlags::FULLSCREEN | WindowManagerFlags::LAYOUT_NO_LIMITS;
+    let expected = android_safe_area_window_flag_bits();
+    debug_assert_eq!(add.bits(), expected.add);
+    debug_assert_eq!(remove.bits(), expected.remove);
+}
+
+#[cfg(target_os = "android")]
+fn set_android_game_mode_flags(app: &winit::platform::android::activity::AndroidApp) -> bool {
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    if let Err(error) = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+        let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
+        let activity =
+            unsafe { env.as_cast_raw::<jni::objects::Global<jni::objects::JObject>>(&raw_activity)? };
+        let window = env
+            .call_method(
+                activity.as_ref(),
+                jni::jni_str!("getWindow"),
+                jni::jni_sig!("()Landroid/view/Window;"),
+                &[],
+            )?
+            .l()?;
+        let decor_view = env
+            .call_method(
+                &window,
+                jni::jni_str!("getDecorView"),
+                jni::jni_sig!("()Landroid/view/View;"),
+                &[],
+            )?
+            .l()?;
+        let system_ui_flags: i32 =
+            0x0000_0100 | 0x0000_0200 | 0x0000_0002 | 0x0000_0004 | 0x0000_1000;
+        env.call_method(
+            &decor_view,
+            jni::jni_str!("setSystemUiVisibility"),
+            jni::jni_sig!("(I)V"),
+            &[jni::objects::JValue::Int(system_ui_flags)],
+        )?;
+        let soft_input_mode: i32 = 0x0000_0002 | 0x0000_0030;
+        env.call_method(
+            &window,
+            jni::jni_str!("setSoftInputMode"),
+            jni::jni_sig!("(I)V"),
+            &[jni::objects::JValue::Int(soft_input_mode)],
+        )?;
+        Ok(())
+    }) {
+        log::warn!("Failed to enforce Android game-mode UI flags: {error}");
+        false
+    } else {
+        true
+    }
+}
+
+fn safe_content_rect_from_android_pixels(
+    viewport_rect: egui::Rect,
+    pixels_per_point: f32,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+) -> Option<egui::Rect> {
+    if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 || right <= left || bottom <= top {
+        return None;
+    }
+
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(
+            left as f32 / pixels_per_point,
+            top as f32 / pixels_per_point,
+        ),
+        egui::pos2(
+            right as f32 / pixels_per_point,
+            bottom as f32 / pixels_per_point,
+        ),
+    )
+    .intersect(viewport_rect);
+
+    (rect.width() > 0.0 && rect.height() > 0.0).then_some(rect)
 }
 
 impl RustyBoxAndroidApp {
@@ -275,9 +438,171 @@ impl RustyBoxAndroidApp {
             key_text: String::new(),
             iso_path_text: String::new(),
             iso_status: None,
+            iso_browser_dir: default_android_iso_browser_dir(),
+            iso_browser_entries: Vec::new(),
+            iso_browser_status: None,
+            iso_browser_loaded: false,
             show_keypad: false,
             show_iso_picker: false,
+        #[cfg(target_os = "android")]
+        storage_permission_prompted_at: None,
+        #[cfg(target_os = "android")]
+        android_app: None,
+        #[cfg(target_os = "android")]
+        android_game_ui_applied: false,
         }
+    }
+    #[cfg(target_os = "android")]
+    pub fn with_android_app(
+        mut self,
+        app: winit::platform::android::activity::AndroidApp,
+    ) -> Self {
+        self.android_app = Some(app);
+        self
+    }
+
+
+    #[cfg(target_os = "android")]
+    fn ensure_android_game_mode(&mut self) {
+        if self.android_game_ui_applied {
+            return;
+        }
+        let Some(android_app) = self.android_app.as_ref() else {
+            return;
+        };
+        self.android_game_ui_applied = set_android_game_mode_flags(android_app);
+    }
+
+    #[cfg(target_os = "android")]
+    fn request_storage_permission_if_needed(&mut self) -> bool {
+        let Some(android_app) = self.android_app.as_ref() else {
+            return false;
+        };
+        let vm = unsafe { jni::JavaVM::from_raw(android_app.vm_as_ptr().cast()) };
+
+        let now = Instant::now();
+        let should_request = match self.storage_permission_prompted_at {
+            Some(last_request_at) => {
+                now.duration_since(last_request_at) >= ANDROID_STORAGE_PERMISSION_REQUEST_THROTTLE
+            }
+            None => true,
+        };
+        if !should_request {
+            return false;
+        }
+
+        let is_permission_granted = vm.attach_current_thread(|env| -> jni::errors::Result<bool> {
+            let version_class = env.find_class(jni::jni_str!("android/os/Build$VERSION"))?;
+            let sdk = env
+                .get_static_field(&version_class, jni::jni_str!("SDK_INT"), jni::jni_sig!("I"))?
+                .i()?;
+            if sdk >= 30 {
+                let environment_class = env.find_class(jni::jni_str!("android/os/Environment"))?;
+                return env
+                    .call_static_method(
+                        environment_class,
+                        jni::jni_str!("isExternalStorageManager"),
+                        jni::jni_sig!("()Z"),
+                        &[],
+                    )
+                    .map(|value| value.z().unwrap_or(false));
+            }
+
+            let raw_activity = android_app.activity_as_ptr() as jni::sys::jobject;
+            let activity = unsafe {
+                env.as_cast_raw::<jni::objects::Global<jni::objects::JObject>>(&raw_activity)?
+            };
+            let permission = env.new_string(ANDROID_READ_EXTERNAL_STORAGE_PERMISSION)?;
+            let granted = env
+                .call_method(
+                    activity.as_ref(),
+                    jni::jni_str!("checkSelfPermission"),
+                    jni::jni_sig!("(Ljava/lang/String;)I"),
+                    &[jni::objects::JValue::Object(&permission)],
+                )?
+                .i()?;
+            Ok(granted == 0)
+        });
+        let is_permission_granted = match is_permission_granted {
+            Ok(is_permission_granted) => is_permission_granted,
+            Err(error) => {
+                log::warn!("Failed to check Android storage permission: {error}");
+                false
+            }
+        };
+        if is_permission_granted {
+            self.storage_permission_prompted_at = None;
+            return true;
+        }
+
+        let request = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+            let raw_activity = android_app.activity_as_ptr() as jni::sys::jobject;
+            let activity = unsafe {
+                env.as_cast_raw::<jni::objects::Global<jni::objects::JObject>>(&raw_activity)?
+            };
+
+            let version_class = env.find_class(jni::jni_str!("android/os/Build$VERSION"))?;
+            let sdk = env
+                .get_static_field(&version_class, jni::jni_str!("SDK_INT"), jni::jni_sig!("I"))?
+                .i()?;
+            if sdk >= 30 {
+                let action = env.new_string(ANDROID_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)?;
+                let intent_class = env.find_class(jni::jni_str!("android/content/Intent"))?;
+                let intent = env.new_object(
+                    &intent_class,
+                    jni::jni_sig!("(Ljava/lang/String;)V"),
+                    &[jni::objects::JValue::Object(&action)],
+                )?;
+                env.call_method(
+                    activity.as_ref(),
+                    jni::jni_str!("startActivity"),
+                    jni::jni_sig!("(Landroid/content/Intent;)V"),
+                    &[jni::objects::JValue::Object(&intent)],
+                )?;
+                return Ok(());
+            }
+
+            let permission = env.new_string(ANDROID_READ_EXTERNAL_STORAGE_PERMISSION)?;
+            let string_class = env.find_class(jni::jni_str!("java/lang/String"))?;
+            let permissions =
+                env.new_object_array(1, string_class, jni::objects::JObject::null())?;
+            env.set_object_array_element(&permissions, 0, &permission)?;
+            env.call_method(
+                activity.as_ref(),
+                jni::jni_str!("requestPermissions"),
+                jni::jni_sig!("([Ljava/lang/String;I)V"),
+                &[
+                    jni::objects::JValue::Object(&permissions),
+                    jni::objects::JValue::Int(ANDROID_STORAGE_PERMISSION_REQUEST_CODE),
+                ],
+            )?;
+            Ok(())
+        });
+        if let Err(error) = request {
+            log::warn!("Failed to request Android storage permission: {error}");
+            return false;
+        }
+        self.storage_permission_prompted_at = Some(now);
+        false
+    }
+
+    fn safe_content_rect(&self, ctx: &egui::Context) -> egui::Rect {
+        #[cfg(target_os = "android")]
+        if let Some(android_app) = &self.android_app {
+            let rect = android_app.content_rect();
+            if let Some(rect) = safe_content_rect_from_android_pixels(
+                ctx.viewport_rect(),
+                ctx.pixels_per_point(),
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+            ) {
+                return rect;
+            }
+        }
+
+        ctx.content_rect()
     }
 
     fn initialize_alpine(&mut self) {
@@ -412,6 +737,46 @@ impl RustyBoxAndroidApp {
         }
     }
 
+    fn refresh_iso_browser(&mut self) {
+        match scan_android_iso_browser_dir(&self.iso_browser_dir) {
+            Ok(entries) => {
+                self.iso_browser_status = Some(format!(
+                    "{} ISO/director{} in {}",
+                    entries.len(),
+                    if entries.len() == 1 { "y" } else { "ies" },
+                    self.iso_browser_dir.display()
+                ));
+                self.iso_browser_entries = entries;
+            }
+            Err(error) => {
+                self.iso_browser_entries.clear();
+                #[cfg(target_os = "android")]
+                let error = if error.contains("Permission denied")
+                    || error.contains("EACCES")
+                    || error.contains("Operation not permitted")
+                {
+                    format!("{error} (storage permission may be denied)")
+                } else {
+                    error
+                };
+                #[cfg(not(target_os = "android"))]
+                let error = error;
+                self.iso_browser_status = Some(error);
+            }
+        }
+        self.iso_browser_loaded = true;
+    }
+
+    fn open_iso_browser_dir(&mut self, dir: PathBuf) {
+        self.iso_browser_dir = dir;
+        self.refresh_iso_browser();
+    }
+
+    fn select_iso_browser_file(&mut self, path: PathBuf) {
+        self.iso_path_text = path.display().to_string();
+        self.iso_status = Some(format!("Selected {}", path.display()));
+    }
+
     fn drain_gui_commands(&mut self) {
         while let Ok(command) = self.gui_command_rx.try_recv() {
             match command {
@@ -426,8 +791,9 @@ impl RustyBoxAndroidApp {
         }
     }
 
-    fn draw_android_overlays(&mut self, ctx: &egui::Context) {
+    fn draw_android_overlays(&mut self, ctx: &egui::Context, safe_rect: egui::Rect) {
         egui::Area::new(egui::Id::new("android_overlay_buttons"))
+            .constrain_to(safe_rect)
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 8.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -440,11 +806,11 @@ impl RustyBoxAndroidApp {
                     }
                 });
             });
-        self.draw_android_keypad(ctx);
-        self.draw_iso_picker(ctx);
+        self.draw_android_keypad(ctx, safe_rect);
+        self.draw_iso_picker(ctx, safe_rect);
     }
 
-    fn draw_android_keypad(&mut self, ctx: &egui::Context) {
+    fn draw_android_keypad(&mut self, ctx: &egui::Context, safe_rect: egui::Rect) {
         if !self.show_keypad {
             return;
         }
@@ -454,6 +820,7 @@ impl RustyBoxAndroidApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
+            .constrain_to(safe_rect)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let response = ui.add(
@@ -487,37 +854,127 @@ impl RustyBoxAndroidApp {
                             queue_touch_key(&self.display, key);
                         }
                     }
+                    if ui.button("Ctrl").clicked() {
+                        queue_ps2_ctrl_key(&self.display);
+                    }
                 });
             });
         self.show_keypad = open;
     }
 
-    fn draw_iso_picker(&mut self, ctx: &egui::Context) {
+    fn draw_iso_picker(&mut self, ctx: &egui::Context, safe_rect: egui::Rect) {
         if !self.show_iso_picker {
             return;
         }
+        #[cfg(target_os = "android")]
+        if self.request_storage_permission_if_needed() {
+            if !self.iso_browser_loaded {
+                self.refresh_iso_browser();
+            }
+        } else {
+            self.iso_browser_loaded = false;
+            self.iso_browser_entries.clear();
+            self.iso_browser_status = Some(
+                "Storage permission required to browse files. On Android 11+, open 'All files access' in settings and return."
+                    .to_owned(),
+            );
+        }
+        #[cfg(not(target_os = "android"))]
+        if !self.iso_browser_loaded {
+            self.refresh_iso_browser();
+        }
 
-        let mut open = self.show_iso_picker;
-        egui::Window::new("Boot ISO")
-            .open(&mut open)
+        let mut window_open = self.show_iso_picker;
+        let mut close_after_boot = false;
+        let default_iso_hint = default_android_iso_browser_dir().join("alpine.iso");
+        egui::Window::new("Boot ISO from Android filesystem")
+            .open(&mut window_open)
             .collapsible(false)
-            .resizable(false)
+            .resizable(true)
+            .default_width(520.0)
+            .constrain_to(safe_rect)
             .show(ctx, |ui| {
-                ui.label("Readable Android file path:");
+                ui.horizontal(|ui| {
+                    if ui.button("Refresh").clicked() {
+                        self.refresh_iso_browser();
+                    }
+                    let parent_dir = self.iso_browser_dir.parent().map(Path::to_path_buf);
+                    if ui
+                        .add_enabled(parent_dir.is_some(), egui::Button::new("Up"))
+                        .clicked()
+                    {
+                        if let Some(parent_dir) = parent_dir {
+                            self.open_iso_browser_dir(parent_dir);
+                        }
+                    }
+                    if ui.button("Downloads").clicked() {
+                        self.open_iso_browser_dir(default_android_iso_browser_dir());
+                    }
+                });
+
+                ui.label(
+                    egui::RichText::new(self.iso_browser_dir.display().to_string())
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0x88, 0x8B, 0x99)),
+                );
+
+                egui::ScrollArea::vertical()
+                    .max_height(180.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        let entries = self.iso_browser_entries.clone();
+                        if entries.is_empty() {
+                            ui.label("No folders or .iso files found here.");
+                        }
+                        for entry in entries {
+                            if ui.button(entry.label()).clicked() {
+                                match entry.kind {
+                                    AndroidIsoBrowserEntryKind::Directory => {
+                                        self.open_iso_browser_dir(entry.path);
+                                    }
+                                    AndroidIsoBrowserEntryKind::IsoFile => {
+                                        self.select_iso_browser_file(entry.path.clone());
+                                        self.reboot_from_custom_iso();
+                                        close_after_boot = true;
+                                    }
+                                }
+                            }
+                        }
+                    });
+
+                if let Some(status) = &self.iso_browser_status {
+                    ui.label(
+                        egui::RichText::new(status.as_str())
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0x88, 0x8B, 0x99)),
+                    );
+                }
+
+                ui.separator();
+                ui.label("Selected ISO path:");
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.iso_path_text)
-                        .desired_width(360.0)
-                        .hint_text("/sdcard/Download/alpine.iso"),
+                        .desired_width(460.0)
+                        .hint_text(default_iso_hint.display().to_string()),
                 );
                 let boot_custom = (!self.iso_path_text.trim().is_empty()
                     && response.lost_focus()
                     && ui.input(|input| input.key_pressed(egui::Key::Enter)))
-                    || ui.button("Boot custom ISO").clicked();
+                    || ui
+                        .add_enabled(
+                            !self.iso_path_text.trim().is_empty(),
+                            egui::Button::new("Boot selected ISO"),
+                        )
+                        .clicked();
                 if boot_custom {
                     self.reboot_from_custom_iso();
+                    close_after_boot = true;
                 }
                 if ui.button("Boot embedded Alpine").clicked() {
                     self.reboot_from_embedded_iso();
+                    close_after_boot = true;
                 }
                 if let Some(status) = &self.iso_status {
                     ui.label(
@@ -527,24 +984,28 @@ impl RustyBoxAndroidApp {
                             .color(egui::Color32::from_rgb(0x88, 0x8B, 0x99)),
                     );
                 }
-                ui.label(
-                    egui::RichText::new("Document-picker content:// URIs need a SAF bridge; use a readable /sdcard/... path for now.")
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(0x88, 0x8B, 0x99)),
-                );
             });
-        self.show_iso_picker = open;
+        self.show_iso_picker = if close_after_boot { false } else { window_open };
     }
 }
 
 impl eframe::App for RustyBoxAndroidApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        #[cfg(target_os = "android")]
+        self.ensure_android_game_mode();
         self.sync_worker_status();
         self.drain_gui_commands();
         self.sync_worker_status();
         self.update_android_ips();
-        eframe::App::ui(&mut self.screen, ui, frame);
-        self.draw_android_overlays(ui.ctx());
+        let safe_rect = self.safe_content_rect(ui.ctx());
+        let mut safe_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(safe_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        safe_ui.set_clip_rect(safe_rect);
+        eframe::App::ui(&mut self.screen, &mut safe_ui, frame);
+        self.draw_android_overlays(ui.ctx(), safe_rect);
 
         if !self.shutdown {
             ui.ctx().request_repaint();
@@ -685,6 +1146,69 @@ fn validate_android_iso_path(input: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn default_android_iso_browser_dir() -> PathBuf {
+    android_iso_browser_dir_candidates()
+        .into_iter()
+        .find(|path| fs::read_dir(path).is_ok())
+        .unwrap_or_else(|| PathBuf::from("/sdcard/Download"))
+}
+
+fn android_iso_browser_dir_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(external_storage) = std::env::var("EXTERNAL_STORAGE") {
+        if !external_storage.trim().is_empty() {
+            let external_storage = PathBuf::from(external_storage);
+            candidates.push(external_storage.join("Download"));
+            candidates.push(external_storage.join("Downloads"));
+        }
+    }
+    candidates.push(PathBuf::from("/storage/emulated/0/Download"));
+    candidates.push(PathBuf::from("/storage/emulated/0/Downloads"));
+    candidates.push(PathBuf::from("/storage/self/primary/Download"));
+    candidates.push(PathBuf::from("/storage/self/primary/Downloads"));
+    candidates.push(PathBuf::from("/sdcard/Download"));
+    candidates.push(PathBuf::from("/sdcard/Downloads"));
+    candidates
+}
+
+fn scan_android_iso_browser_dir(dir: &Path) -> Result<Vec<AndroidIsoBrowserEntry>, String> {
+    let mut entries = Vec::new();
+    for entry in
+        fs::read_dir(dir).map_err(|error| format!("cannot open '{}': {error}", dir.display()))?
+    {
+        let entry =
+            entry.map_err(|error| format!("cannot read entry in '{}': {error}", dir.display()))?;
+        let path = entry.path();
+        let metadata = entry.metadata().ok();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        match metadata {
+            Some(metadata) if metadata.is_dir() => {
+                entries.push(AndroidIsoBrowserEntry::directory(name, path));
+            }
+            Some(metadata) if metadata.is_file() && is_android_iso_file(&path) => {
+                entries.push(AndroidIsoBrowserEntry::iso_file(name, path));
+            }
+            None if is_android_iso_file(&path) => {
+                entries.push(AndroidIsoBrowserEntry::iso_file(name, path));
+            }
+            _ => {}
+        }
+    }
+    entries.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(entries)
+}
+
+fn is_android_iso_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("iso"))
+        .unwrap_or(false)
+}
+
 fn append_serial_log(log: &mut String, bytes: &[u8]) {
     log.push_str(&String::from_utf8_lossy(bytes));
     if log.len() > SERIAL_LOG_LIMIT {
@@ -694,14 +1218,21 @@ fn append_serial_log(log: &mut String, bytes: &[u8]) {
 }
 
 fn queue_touch_key(shared: &Arc<Mutex<SharedDisplay>>, key: egui::Key) {
-    let mut scancodes = egui_key_to_scancodes(key, true);
-    scancodes.extend_from_slice(&egui_key_to_scancodes(key, false));
-    if scancodes.is_empty() {
+    queue_raw_scancodes(shared, &egui_key_to_scancodes(key, true));
+    queue_raw_scancodes(shared, &egui_key_to_scancodes(key, false));
+}
+
+fn queue_ps2_ctrl_key(shared: &Arc<Mutex<SharedDisplay>>) {
+    // PS/2 left control: make (0x14), break (0xF0 0x14)
+    queue_raw_scancodes(shared, &[0x14, 0xF0, 0x14]);
+}
+
+fn queue_raw_scancodes(shared: &Arc<Mutex<SharedDisplay>>, codes: &[u8]) {
+    if codes.is_empty() {
         return;
     }
-
     if let Ok(mut display) = shared.lock() {
-        display.pending_scancodes.extend_from_slice(&scancodes);
+        display.pending_scancodes.extend_from_slice(codes);
     }
 }
 
@@ -710,13 +1241,7 @@ fn queue_text_keys(shared: &Arc<Mutex<SharedDisplay>>, text: &str) {
     for ch in text.chars() {
         scancodes.extend_from_slice(&rusty_box::gui::char_to_scancode_sequence(ch));
     }
-    if scancodes.is_empty() {
-        return;
-    }
-
-    if let Ok(mut display) = shared.lock() {
-        display.pending_scancodes.extend_from_slice(&scancodes);
-    }
+    queue_raw_scancodes(shared, &scancodes);
 }
 
 fn egui_key_to_scancodes(key: egui::Key, pressed: bool) -> Vec<u8> {
@@ -789,6 +1314,25 @@ mod tests {
     }
 
     #[test]
+    fn android_safe_content_rect_converts_platform_pixels_to_egui_points() {
+        let viewport = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1280.0, 548.0));
+
+        let safe_rect = safe_content_rect_from_android_pixels(viewport, 2.0, 0, 48, 2496, 1096)
+            .expect("valid content rect");
+
+        assert_eq!(safe_rect.min, egui::pos2(0.0, 24.0));
+        assert_eq!(safe_rect.max, egui::pos2(1248.0, 548.0));
+    }
+
+    #[test]
+    fn android_safe_area_window_flags_request_decorated_content_rect() {
+        let flags = android_safe_area_window_flag_bits();
+
+        assert_eq!(flags.add, 0x0001_0900);
+        assert_eq!(flags.remove, 0x0000_0600);
+    }
+
+    #[test]
     fn android_gui_config_describes_embedded_boot_media() {
         let config = android_gui_config();
         assert_eq!(config.memory_mib, ANDROID_MEMORY_MIB as u32);
@@ -820,6 +1364,35 @@ mod tests {
         );
 
         fs::remove_file(&path).expect("remove temp iso");
+    }
+
+    #[test]
+    fn android_iso_browser_lists_directories_and_iso_files() {
+        let root = std::env::temp_dir().join(format!(
+            "rusty_box_android_iso_browser_{}",
+            std::process::id()
+        ));
+        let nested = root.join("nested");
+        let first_iso = root.join("alpine.iso");
+        let second_iso = root.join("BOOT.ISO");
+        let ignored = root.join("notes.txt");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        fs::write(&first_iso, b"iso").expect("write first iso");
+        fs::write(&second_iso, b"iso").expect("write second iso");
+        fs::write(&ignored, b"text").expect("write ignored file");
+
+        let entries = scan_android_iso_browser_dir(&root).expect("scan browser dir");
+
+        assert_eq!(
+            entries,
+            vec![
+                AndroidIsoBrowserEntry::directory("nested", nested),
+                AndroidIsoBrowserEntry::iso_file("BOOT.ISO", second_iso),
+                AndroidIsoBrowserEntry::iso_file("alpine.iso", first_iso),
+            ]
+        );
+
+        fs::remove_dir_all(&root).expect("remove browser temp dir");
     }
 
     #[test]

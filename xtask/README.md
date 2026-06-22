@@ -19,7 +19,7 @@ Prepares the local Android toolchain and builds `target/release/apk/RustyBoxAndr
 It performs these steps:
 
 1. Ensures Android command-line tools are installed under `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or `~/Android/Sdk`.
-2. Accepts SDK licenses and installs `platform-tools`, `platforms;android-35`, `build-tools;35.0.0`, and `ndk;29.0.14206865` when missing.
+2. Accepts SDK licenses and installs `platform-tools`, `platforms;android-34`, `build-tools;35.0.0`, and `ndk;29.0.14206865` when missing.
 3. Runs `rustup target add aarch64-linux-android`.
 4. Installs `cargo-apk` if `cargo apk --version` is unavailable.
 5. Copies the Alpine ISO into the ignored Android asset path.
