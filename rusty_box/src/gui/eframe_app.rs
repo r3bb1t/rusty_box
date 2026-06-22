@@ -30,6 +30,7 @@ pub struct RustyBoxApp {
     cached_serial_log: String,
     serial_log_len: usize,
     serial_input: String,
+    fit_to_available: bool,
 }
 
 impl RustyBoxApp {
@@ -50,7 +51,13 @@ impl RustyBoxApp {
             cached_serial_log: String::new(),
             serial_log_len: 0,
             serial_input: String::new(),
+            fit_to_available: false,
         }
+    }
+
+    /// Use fractional scaling to fill constrained embedded surfaces.
+    pub fn set_fit_to_available(&mut self, fit_to_available: bool) {
+        self.fit_to_available = fit_to_available;
     }
 
     fn shared_emu_running(&self) -> bool {
@@ -412,10 +419,14 @@ impl RustyBoxApp {
                     let tex_w = self.last_width as f32;
                     let tex_h = self.last_height.max(1) as f32;
 
-                    // Integer scaling for crisp pixels
-                    let max_scale_x = (available.x / tex_w).floor().max(1.0);
-                    let max_scale_y = (available.y / tex_h).floor().max(1.0);
-                    let scale = max_scale_x.min(max_scale_y);
+                    let scale = if self.fit_to_available {
+                        (available.x / tex_w).min(available.y / tex_h).max(1.0)
+                    } else {
+                        // Integer scaling for crisp desktop pixels.
+                        let max_scale_x = (available.x / tex_w).floor().max(1.0);
+                        let max_scale_y = (available.y / tex_h).floor().max(1.0);
+                        max_scale_x.min(max_scale_y)
+                    };
                     let (w, h) = (tex_w * scale, tex_h * scale);
 
                     // Center the image

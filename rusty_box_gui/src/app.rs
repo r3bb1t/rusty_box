@@ -724,9 +724,17 @@ impl NativeShellApp {
         let vm_info = profile.vm_info();
         let settings = profile.settings.clone();
         let config = profile.config.clone();
-        let chrome = ShellChrome::with_library(vec![profile.library_entry()]);
+        let mut chrome = ShellChrome::with_library(vec![profile.library_entry()]);
+        #[cfg(target_os = "android")]
+        {
+            chrome.show_library = false;
+            chrome.show_serial = false;
+        }
+        let mut emulator = rusty_box::gui::RustyBoxApp::new(cc, Arc::clone(&shared));
+        #[cfg(target_os = "android")]
+        emulator.set_fit_to_available(true);
         Self {
-            emulator: rusty_box::gui::RustyBoxApp::new(cc, Arc::clone(&shared)),
+            emulator,
             chrome,
             disk_creator: DiskCreatorPanel::default(),
             profiles: vec![profile],
@@ -1745,6 +1753,79 @@ impl NativeShellApp {
         }
     }
 
+    #[cfg(target_os = "android")]
+    fn draw_android_console_header(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("android_console_header")
+            .exact_size(32.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(BG_PANEL)
+                    .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
+                    .inner_margin(egui::Margin::symmetric(12, 4)),
+            )
+            .show_inside(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    let status = self.runtime_status();
+                    let running = status.running;
+                    let start_blocked = running || status.start_pending;
+                    ui.menu_button("File", |ui| {
+                        if ui.button("Home").clicked() {
+                            self.chrome.selected_page = ShellPage::Home;
+                            ui.close();
+                        }
+                        if ui.button("Create Disk Image").clicked() {
+                            self.chrome.selected_page = ShellPage::Images;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Quit").clicked() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    });
+                    ui.menu_button("VM", |ui| {
+                        if ui
+                            .add_enabled(!start_blocked, egui::Button::new("Power On"))
+                            .clicked()
+                        {
+                            self.start_vm();
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(running, egui::Button::new("Power Off"))
+                            .clicked()
+                        {
+                            self.request_power_off();
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(running, egui::Button::new("Restart VM"))
+                            .clicked()
+                        {
+                            self.request_reset();
+                            ui.close();
+                        }
+                    });
+                    ui.separator();
+                    self.nav_button(ui, ShellPage::Home, "Home");
+                    self.nav_button(ui, ShellPage::Console, "Console");
+                    self.nav_button(ui, ShellPage::Hardware, "Hardware");
+                    self.nav_button(ui, ShellPage::Images, "Images");
+                    if ui
+                        .add_enabled(!start_blocked, egui::Button::new("Power On"))
+                        .clicked()
+                    {
+                        self.start_vm();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(&self.vm_info.name)
+                                .strong()
+                                .color(TEXT_PRIMARY),
+                        );
+                    });
+                });
+            });
+    }
     fn request_reset(&mut self) {
         if !self.is_vm_running() {
             return;
@@ -1761,6 +1842,14 @@ impl NativeShellApp {
 impl eframe::App for NativeShellApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.handle_native_dropped_files(ui.ctx());
+        #[cfg(target_os = "android")]
+        if self.chrome.selected_page == ShellPage::Console {
+            self.draw_android_console_header(ui);
+            self.draw_central(ui, frame);
+            draw_about_window(ui.ctx(), &mut self.chrome);
+            return;
+        }
+
         self.draw_menu_bar(ui);
         self.draw_toolbar(ui);
         if shell_should_draw_library(&self.chrome) {
