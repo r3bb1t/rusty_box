@@ -12,6 +12,7 @@ use rusty_box_gui::{
 };
 use std::{
     collections::VecDeque,
+    fs,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -38,6 +39,12 @@ const SERIAL_LOG_RETAIN: usize = 49_152;
 
 type AndroidEmulator =
     Box<rusty_box::emulator::Emulator<'static, rusty_box::cpu::core_i7_skylake::Corei7SkylakeX>>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AndroidIsoSource {
+    EmbeddedAlpine,
+    File(PathBuf),
+}
 
 #[cfg(feature = "embedded-alpine")]
 fn embedded_alpine_iso() -> Result<&'static [u8], &'static str> {
@@ -201,9 +208,10 @@ impl BxGui for AndroidBridgeGui {
 pub struct RustyBoxAndroidApp {
     display: Arc<Mutex<SharedDisplay>>,
     screen: NativeShellApp,
-    _gui_command_rx: Receiver<NativeEmulatorCommand>,
+    gui_command_rx: Receiver<NativeEmulatorCommand>,
     worker: Option<JoinHandle<()>>,
     total_instructions_shared: Arc<AtomicU64>,
+    iso_source: AndroidIsoSource,
     initialized: bool,
     init_error: Option<String>,
     shutdown: bool,
@@ -211,6 +219,10 @@ pub struct RustyBoxAndroidApp {
     last_ips_time: Instant,
     last_ips_instructions: u64,
     key_text: String,
+    iso_path_text: String,
+    iso_status: Option<String>,
+    show_keypad: bool,
+    show_iso_picker: bool,
 }
 
 fn android_gui_config() -> ResolvedConfig {
@@ -250,9 +262,10 @@ impl RustyBoxAndroidApp {
         Self {
             display,
             screen,
-            _gui_command_rx: gui_command_rx,
+            gui_command_rx,
             worker: None,
             total_instructions_shared: Arc::new(AtomicU64::new(0)),
+            iso_source: AndroidIsoSource::EmbeddedAlpine,
             initialized: false,
             init_error: None,
             shutdown: false,
@@ -260,6 +273,10 @@ impl RustyBoxAndroidApp {
             last_ips_time: Instant::now(),
             last_ips_instructions: 0,
             key_text: String::new(),
+            iso_path_text: String::new(),
+            iso_status: None,
+            show_keypad: false,
+            show_iso_picker: false,
         }
     }
 
@@ -270,6 +287,7 @@ impl RustyBoxAndroidApp {
 
         let shared = Arc::clone(&self.display);
         let total_instructions = Arc::clone(&self.total_instructions_shared);
+        let iso_source = self.iso_source.clone();
         self.total_instructions_shared.store(0, Ordering::Relaxed);
         if let Ok(mut display) = shared.lock() {
             display.stop_flag.store(false, Ordering::Relaxed);
@@ -286,7 +304,9 @@ impl RustyBoxAndroidApp {
             .stack_size(ANDROID_EMULATOR_STACK_SIZE)
             .spawn(move || {
                 let shared_for_error = Arc::clone(&shared);
-                if let Err(error) = run_alpine_emulator_worker(shared, total_instructions) {
+                if let Err(error) =
+                    run_alpine_emulator_worker(shared, total_instructions, iso_source)
+                {
                     if let Ok(mut display) = shared_for_error.lock() {
                         display.emu_running = false;
                         display.start_pending = false;
@@ -354,13 +374,88 @@ impl RustyBoxAndroidApp {
         }
     }
 
-    fn draw_android_keyboard_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::new()
-            .fill(egui::Color32::from_rgb(0x10, 0x18, 0x20))
-            .inner_margin(egui::Margin::symmetric(8, 4))
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new("Android input").strong());
+    fn restart_emulator(&mut self) {
+        if let Ok(display) = self.display.lock() {
+            display.stop_flag.store(true, Ordering::Relaxed);
+        }
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                self.initialized = false;
+                self.shutdown = true;
+                self.init_error =
+                    Some("Android emulator worker panicked while rebooting".to_owned());
+                return;
+            }
+        }
+        self.initialized = false;
+        self.shutdown = false;
+        self.init_error = None;
+        self.initialize_alpine();
+    }
+
+    fn reboot_from_embedded_iso(&mut self) {
+        self.iso_source = AndroidIsoSource::EmbeddedAlpine;
+        self.iso_status = Some("Booting embedded Alpine ISO".to_owned());
+        self.restart_emulator();
+    }
+
+    fn reboot_from_custom_iso(&mut self) {
+        match validate_android_iso_path(&self.iso_path_text) {
+            Ok(path) => {
+                self.iso_source = AndroidIsoSource::File(path.clone());
+                self.iso_status = Some(format!("Booting {}", path.display()));
+                self.restart_emulator();
+            }
+            Err(error) => {
+                self.iso_status = Some(error);
+            }
+        }
+    }
+
+    fn drain_gui_commands(&mut self) {
+        while let Ok(command) = self.gui_command_rx.try_recv() {
+            match command {
+                NativeEmulatorCommand::Start(_) => {
+                    if self.worker.is_none() {
+                        self.shutdown = false;
+                        self.init_error = None;
+                        self.initialize_alpine();
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_android_overlays(&mut self, ctx: &egui::Context) {
+        egui::Area::new(egui::Id::new("android_overlay_buttons"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 8.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Keys").clicked() {
+                        self.show_keypad = true;
+                    }
+                    if ui.button("ISO").clicked() {
+                        self.show_iso_picker = true;
+                    }
+                });
+            });
+        self.draw_android_keypad(ctx);
+        self.draw_iso_picker(ctx);
+    }
+
+    fn draw_android_keypad(&mut self, ctx: &egui::Context) {
+        if !self.show_keypad {
+            return;
+        }
+
+        let mut open = self.show_keypad;
+        egui::Window::new("Android PS/2 keys")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.key_text)
                             .desired_width(180.0)
@@ -376,59 +471,80 @@ impl RustyBoxAndroidApp {
                         queue_text_keys(&self.display, &self.key_text);
                         self.key_text.clear();
                     }
+                });
 
+                ui.horizontal_wrapped(|ui| {
                     for (label, key) in [
                         ("Esc", egui::Key::Escape),
                         ("Tab", egui::Key::Tab),
                         ("Enter", egui::Key::Enter),
-                        ("←", egui::Key::ArrowLeft),
-                        ("↑", egui::Key::ArrowUp),
-                        ("↓", egui::Key::ArrowDown),
-                        ("→", egui::Key::ArrowRight),
+                        ("Left", egui::Key::ArrowLeft),
+                        ("Up", egui::Key::ArrowUp),
+                        ("Down", egui::Key::ArrowDown),
+                        ("Right", egui::Key::ArrowRight),
                     ] {
-                        if ui.add(egui::Button::new(label)).clicked() {
+                        if ui.button(label).clicked() {
                             queue_touch_key(&self.display, key);
                         }
                     }
                 });
             });
+        self.show_keypad = open;
+    }
+
+    fn draw_iso_picker(&mut self, ctx: &egui::Context) {
+        if !self.show_iso_picker {
+            return;
+        }
+
+        let mut open = self.show_iso_picker;
+        egui::Window::new("Boot ISO")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Readable Android file path:");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.iso_path_text)
+                        .desired_width(360.0)
+                        .hint_text("/sdcard/Download/alpine.iso"),
+                );
+                let boot_custom = (!self.iso_path_text.trim().is_empty()
+                    && response.lost_focus()
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                    || ui.button("Boot custom ISO").clicked();
+                if boot_custom {
+                    self.reboot_from_custom_iso();
+                }
+                if ui.button("Boot embedded Alpine").clicked() {
+                    self.reboot_from_embedded_iso();
+                }
+                if let Some(status) = &self.iso_status {
+                    ui.label(
+                        egui::RichText::new(status.as_str())
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0x88, 0x8B, 0x99)),
+                    );
+                }
+                ui.label(
+                    egui::RichText::new("Document-picker content:// URIs need a SAF bridge; use a readable /sdcard/... path for now.")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(0x88, 0x8B, 0x99)),
+                );
+            });
+        self.show_iso_picker = open;
     }
 }
 
 impl eframe::App for RustyBoxAndroidApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if self.init_error.is_none() && !self.initialized {
-            self.initialize_alpine();
-        }
-
         self.sync_worker_status();
-
-        if let Some(error) = self.init_error.clone() {
-            egui::CentralPanel::default().show_inside(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.colored_label(egui::Color32::RED, error);
-                    ui.label(
-                        "Rebuild with --features embedded-alpine after copying the Alpine ISO.",
-                    );
-                });
-            });
-            return;
-        }
-
-        if !self.initialized {
-            egui::CentralPanel::default().show_inside(ui, |ui| {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Booting Alpine from embedded ISO...");
-                });
-            });
-            ui.ctx().request_repaint();
-            return;
-        }
-
+        self.drain_gui_commands();
         self.sync_worker_status();
         self.update_android_ips();
-        self.draw_android_keyboard_bar(ui);
         eframe::App::ui(&mut self.screen, ui, frame);
+        self.draw_android_overlays(ui.ctx());
 
         if !self.shutdown {
             ui.ctx().request_repaint();
@@ -447,8 +563,8 @@ impl Drop for RustyBoxAndroidApp {
 fn run_alpine_emulator_worker(
     shared: Arc<Mutex<SharedDisplay>>,
     total_instructions: Arc<AtomicU64>,
+    iso_source: AndroidIsoSource,
 ) -> Result<(), String> {
-    let iso = embedded_alpine_iso().map_err(str::to_string)?;
     let ram_size = ANDROID_MEMORY_MIB * 1024 * 1024;
     let config = EmulatorConfig {
         guest_memory_size: ram_size,
@@ -485,7 +601,7 @@ fn run_alpine_emulator_worker(
         .map_err(|error| format!("{error:?}"))?;
     emu.configure_memory_in_cmos_from_config();
     emu.configure_boot_sequence(3, 0, 0);
-    emu.attach_cdrom_data_ref(1, 0, iso);
+    attach_android_iso(&mut emu, iso_source)?;
     emu.init_gui(0, &[]).map_err(|error| format!("{error:?}"))?;
     emu.reset(ResetReason::Hardware)
         .map_err(|error| format!("{error:?}"))?;
@@ -528,6 +644,45 @@ fn run_alpine_emulator_worker(
     }
 
     run_result
+}
+
+fn attach_android_iso(emu: &mut AndroidEmulator, source: AndroidIsoSource) -> Result<(), String> {
+    match source {
+        AndroidIsoSource::EmbeddedAlpine => {
+            let iso = embedded_alpine_iso().map_err(str::to_string)?;
+            emu.attach_cdrom_data_ref(1, 0, iso);
+        }
+        AndroidIsoSource::File(path) => {
+            let data = fs::read(&path)
+                .map_err(|error| format!("failed to read ISO '{}': {error}", path.display()))?;
+            if data.is_empty() {
+                return Err(format!("ISO '{}' is empty", path.display()));
+            }
+            emu.attach_cdrom_data(1, 0, data);
+        }
+    }
+    Ok(())
+}
+
+fn validate_android_iso_path(input: &str) -> Result<PathBuf, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Enter an ISO file path first.".to_owned());
+    }
+    if trimmed.starts_with("content://") {
+        return Err(
+            "content:// picker URIs need an Android SAF bridge; use a readable /sdcard/... path for now."
+                .to_owned(),
+        );
+    }
+
+    let path = PathBuf::from(trimmed);
+    let metadata = fs::metadata(&path)
+        .map_err(|error| format!("cannot read ISO '{}': {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("ISO path '{}' is not a file", path.display()));
+    }
+    Ok(path)
 }
 
 fn append_serial_log(log: &mut String, bytes: &[u8]) {
@@ -642,6 +797,29 @@ mod tests {
             config.cdrom.expect("embedded cdrom").path,
             PathBuf::from("embedded://alpine.iso")
         );
+    }
+
+    #[test]
+    fn android_iso_path_rejects_picker_uri_without_saf_bridge() {
+        let error = validate_android_iso_path("content://downloads/document/1")
+            .expect_err("content URI needs SAF bridge");
+        assert!(error.contains("content://"));
+    }
+
+    #[test]
+    fn android_iso_path_accepts_regular_file_path() {
+        let path = std::env::temp_dir().join(format!(
+            "rusty_box_android_iso_path_{}.iso",
+            std::process::id()
+        ));
+        fs::write(&path, b"iso").expect("write temp iso");
+
+        assert_eq!(
+            validate_android_iso_path(path.to_str().expect("utf-8 temp path")).expect("valid iso"),
+            path
+        );
+
+        fs::remove_file(&path).expect("remove temp iso");
     }
 
     #[test]
