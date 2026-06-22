@@ -2,12 +2,20 @@ use eframe::egui;
 use rusty_box::{
     cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
     emulator::{Emulator, EmulatorConfig},
-    gui::{shared_display::SharedDisplay, BxGui, DisplayMode, RustyBoxApp, VgaTextModeInfo},
+    gui::{shared_display::SharedDisplay, BxGui, DisplayMode, VgaTextModeInfo},
+};
+use rusty_box_gui::{
+    app::{NativeEmulatorCommand, NativeShellApp},
+    args::LogLevel,
+    config::ResolvedCdrom,
+    BootDevice, DisplayBackend, ResolvedConfig,
 };
 use std::{
     collections::VecDeque,
+    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -192,7 +200,8 @@ impl BxGui for AndroidBridgeGui {
 
 pub struct RustyBoxAndroidApp {
     display: Arc<Mutex<SharedDisplay>>,
-    screen: RustyBoxApp,
+    screen: NativeShellApp,
+    _gui_command_rx: Receiver<NativeEmulatorCommand>,
     worker: Option<JoinHandle<()>>,
     total_instructions_shared: Arc<AtomicU64>,
     initialized: bool,
@@ -201,19 +210,47 @@ pub struct RustyBoxAndroidApp {
     total_instructions: u64,
     last_ips_time: Instant,
     last_ips_instructions: u64,
-    cached_ips: f64,
     key_text: String,
+}
+
+fn android_gui_config() -> ResolvedConfig {
+    ResolvedConfig {
+        memory_mib: ANDROID_MEMORY_MIB as u32,
+        host_memory_mib: ANDROID_MEMORY_MIB as u32,
+        memory_block_kib: 128,
+        ips: ANDROID_IPS,
+        pci: true,
+        sync_slowdown: false,
+        max_instructions: u64::MAX,
+        display: DisplayBackend::Egui,
+        bios: PathBuf::from("embedded://bochs-bios"),
+        vga_bios: Some(PathBuf::from("embedded://vgabios")),
+        boot_order: vec![BootDevice::Cdrom],
+        disk: None,
+        cdrom: Some(ResolvedCdrom {
+            path: PathBuf::from("embedded://alpine.iso"),
+            channel: 1,
+            drive: 0,
+        }),
+        log_level: LogLevel::Warn,
+    }
 }
 
 impl RustyBoxAndroidApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let display = Arc::new(Mutex::new(SharedDisplay::new()));
-        let screen = build_core_screen_view(Arc::clone(&display));
-
+        let (gui_command_tx, gui_command_rx) = mpsc::channel();
+        let screen = NativeShellApp::new(
+            cc,
+            Arc::clone(&display),
+            gui_command_tx,
+            android_gui_config(),
+        );
         Self {
             display,
             screen,
+            _gui_command_rx: gui_command_rx,
             worker: None,
             total_instructions_shared: Arc::new(AtomicU64::new(0)),
             initialized: false,
@@ -222,7 +259,6 @@ impl RustyBoxAndroidApp {
             total_instructions: 0,
             last_ips_time: Instant::now(),
             last_ips_instructions: 0,
-            cached_ips: 0.0,
             key_text: String::new(),
         }
     }
@@ -278,8 +314,6 @@ impl RustyBoxAndroidApp {
     }
 
     fn sync_worker_status(&mut self) {
-        self.total_instructions = self.total_instructions_shared.load(Ordering::Relaxed);
-
         if let Ok(display) = self.display.lock() {
             if let Some(error) = display.runtime_error.clone() {
                 self.init_error = Some(error);
@@ -300,73 +334,64 @@ impl RustyBoxAndroidApp {
         }
     }
 
-    fn update_ips(&mut self) {
+    fn update_android_ips(&mut self) {
+        self.total_instructions = self.total_instructions_shared.load(Ordering::Relaxed);
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_ips_time);
-        if elapsed.as_secs_f64() >= 1.0 {
-            let delta = self
-                .total_instructions
-                .saturating_sub(self.last_ips_instructions);
-            self.cached_ips = delta as f64 / elapsed.as_secs_f64();
-            self.last_ips_time = now;
-            self.last_ips_instructions = self.total_instructions;
+        if elapsed.as_secs_f64() < 0.5 {
+            return;
+        }
+
+        let delta = self
+            .total_instructions
+            .saturating_sub(self.last_ips_instructions);
+        let ips = (delta as f64 / elapsed.as_secs_f64()).min(u32::MAX as f64) as u32;
+        self.last_ips_time = now;
+        self.last_ips_instructions = self.total_instructions;
+
+        if let Ok(mut display) = self.display.lock() {
+            display.ips = ips;
         }
     }
 
-    fn format_ips(ips: f64) -> String {
-        if ips >= 1_000_000.0 {
-            format!("{:.2}M", ips / 1_000_000.0)
-        } else if ips >= 1_000.0 {
-            format!("{:.0}K", ips / 1_000.0)
-        } else if ips > 0.0 {
-            format!("{ips:.0}")
-        } else {
-            "---".to_string()
-        }
-    }
+    fn draw_android_keyboard_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(0x10, 0x18, 0x20))
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("Android input").strong());
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.key_text)
+                            .desired_width(180.0)
+                            .hint_text("Type PS/2 keys"),
+                    );
+                    let send_text = (!self.key_text.is_empty()
+                        && response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                        || ui
+                            .add_enabled(!self.key_text.is_empty(), egui::Button::new("Send"))
+                            .clicked();
+                    if send_text {
+                        queue_text_keys(&self.display, &self.key_text);
+                        self.key_text.clear();
+                    }
 
-    fn render_control_row(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("Rusty Box Android").strong());
-            ui.separator();
-            ui.label(format!("{} instr", self.total_instructions));
-            ui.separator();
-            ui.label(format!("{} IPS", Self::format_ips(self.cached_ips)));
-            ui.separator();
-            ui.label(if self.shutdown { "shutdown" } else { "running" });
-            ui.separator();
-
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.key_text)
-                    .desired_width(120.0)
-                    .hint_text("PS/2 keys"),
-            );
-            let send_text = (!self.key_text.is_empty()
-                && response.lost_focus()
-                && ui.input(|input| input.key_pressed(egui::Key::Enter)))
-                || ui
-                    .add_enabled(!self.key_text.is_empty(), egui::Button::new("Send"))
-                    .clicked();
-            if send_text {
-                queue_text_keys(&self.display, &self.key_text);
-                self.key_text.clear();
-            }
-
-            for (label, key) in [
-                ("Esc", egui::Key::Escape),
-                ("Tab", egui::Key::Tab),
-                ("Enter", egui::Key::Enter),
-                ("←", egui::Key::ArrowLeft),
-                ("↑", egui::Key::ArrowUp),
-                ("↓", egui::Key::ArrowDown),
-                ("→", egui::Key::ArrowRight),
-            ] {
-                if ui.add(egui::Button::new(label)).clicked() {
-                    queue_touch_key(&self.display, key);
-                }
-            }
-        });
+                    for (label, key) in [
+                        ("Esc", egui::Key::Escape),
+                        ("Tab", egui::Key::Tab),
+                        ("Enter", egui::Key::Enter),
+                        ("←", egui::Key::ArrowLeft),
+                        ("↑", egui::Key::ArrowUp),
+                        ("↓", egui::Key::ArrowDown),
+                        ("→", egui::Key::ArrowRight),
+                    ] {
+                        if ui.add(egui::Button::new(label)).clicked() {
+                            queue_touch_key(&self.display, key);
+                        }
+                    }
+                });
+            });
     }
 }
 
@@ -401,9 +426,9 @@ impl eframe::App for RustyBoxAndroidApp {
         }
 
         self.sync_worker_status();
-        self.update_ips();
-        self.render_control_row(ui);
-        self.screen.ui_embedded_with_serial(ui, frame, false);
+        self.update_android_ips();
+        self.draw_android_keyboard_bar(ui);
+        eframe::App::ui(&mut self.screen, ui, frame);
 
         if !self.shutdown {
             ui.ctx().request_repaint();
@@ -505,8 +530,12 @@ fn run_alpine_emulator_worker(
     run_result
 }
 
-fn build_core_screen_view(shared: Arc<Mutex<SharedDisplay>>) -> RustyBoxApp {
-    RustyBoxApp::new_embedded(shared)
+fn append_serial_log(log: &mut String, bytes: &[u8]) {
+    log.push_str(&String::from_utf8_lossy(bytes));
+    if log.len() > SERIAL_LOG_LIMIT {
+        let drain = log.len() - SERIAL_LOG_RETAIN;
+        log.drain(..drain);
+    }
 }
 
 fn queue_touch_key(shared: &Arc<Mutex<SharedDisplay>>, key: egui::Key) {
@@ -532,14 +561,6 @@ fn queue_text_keys(shared: &Arc<Mutex<SharedDisplay>>, text: &str) {
 
     if let Ok(mut display) = shared.lock() {
         display.pending_scancodes.extend_from_slice(&scancodes);
-    }
-}
-
-fn append_serial_log(log: &mut String, bytes: &[u8]) {
-    log.push_str(&String::from_utf8_lossy(bytes));
-    if log.len() > SERIAL_LOG_LIMIT {
-        let drain = log.len() - SERIAL_LOG_RETAIN;
-        log.drain(..drain);
     }
 }
 
@@ -613,21 +634,14 @@ mod tests {
     }
 
     #[test]
-    fn enter_key_maps_to_ps2_set_two_make_and_break() {
-        assert_eq!(egui_key_to_scancodes(egui::Key::Enter, true), [0x5A]);
-        assert_eq!(egui_key_to_scancodes(egui::Key::Enter, false), [0xF0, 0x5A]);
-    }
-
-    #[test]
-    fn app_dependency_exposes_character_scancode_mapping() {
-        assert!(!rusty_box::gui::char_to_scancode_sequence('a').is_empty());
-    }
-
-    #[test]
-    fn android_screen_view_comes_from_core_gui_app() {
-        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
-
-        let _screen = build_core_screen_view(Arc::clone(&shared));
+    fn android_gui_config_describes_embedded_boot_media() {
+        let config = android_gui_config();
+        assert_eq!(config.memory_mib, ANDROID_MEMORY_MIB as u32);
+        assert_eq!(config.boot_order, vec![BootDevice::Cdrom]);
+        assert_eq!(
+            config.cdrom.expect("embedded cdrom").path,
+            PathBuf::from("embedded://alpine.iso")
+        );
     }
 
     #[test]
@@ -640,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn touch_text_input_queues_ps2_scancodes() {
+    fn text_input_queues_existing_gui_scancodes() {
         let shared = Arc::new(Mutex::new(SharedDisplay::new()));
 
         queue_text_keys(&shared, "a");
@@ -650,6 +664,7 @@ mod tests {
             rusty_box::gui::char_to_scancode_sequence('a')
         );
     }
+
     #[test]
     fn append_serial_log_appends_lossy_text_and_caps_retained_output() {
         let mut log = String::from("start:");

@@ -32,7 +32,7 @@ const ACCENT_RED: Color32 = Color32::from_rgb(0xFF, 0x5C, 0x6C);
 const BROWSER_MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) enum NativeEmulatorCommand {
+pub enum NativeEmulatorCommand {
     Start(crate::config::ResolvedConfig),
 }
 
@@ -75,8 +75,30 @@ impl ShellNotice {
     }
 }
 
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+fn pick_native_file() -> Option<PathBuf> {
+    rfd::FileDialog::new().pick_file()
+}
+
+#[cfg(all(not(target_arch = "wasm32"), target_os = "android"))]
+fn pick_native_file() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+fn save_native_file(default_name: &'static str) -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_file_name(default_name)
+        .save_file()
+}
+
+#[cfg(all(not(target_arch = "wasm32"), target_os = "android"))]
+fn save_native_file(_default_name: &'static str) -> Option<PathBuf> {
+    None
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct NativeShellApp {
+pub struct NativeShellApp {
     emulator: rusty_box::gui::RustyBoxApp,
     chrome: ShellChrome,
     disk_creator: DiskCreatorPanel,
@@ -691,7 +713,7 @@ fn shell_card_frame() -> egui::Frame {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeShellApp {
-    pub(crate) fn new(
+    pub fn new(
         cc: &eframe::CreationContext<'_>,
         shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
         command_tx: Sender<NativeEmulatorCommand>,
@@ -1346,7 +1368,7 @@ impl NativeShellApp {
                             )
                             .changed();
                         if ui.button("Browse").clicked() {
-                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                            if let Some(path) = pick_native_file() {
                                 self.settings.disk_path = path.display().to_string();
                                 self.settings.disk_enabled = true;
                                 changed = true;
@@ -1397,7 +1419,7 @@ impl NativeShellApp {
                             )
                             .changed();
                         if ui.button("Browse").clicked() {
-                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                            if let Some(path) = pick_native_file() {
                                 self.settings.cdrom_path = path.display().to_string();
                                 self.settings.cdrom_enabled = true;
                                 changed = true;
@@ -1453,7 +1475,7 @@ impl NativeShellApp {
                             )
                             .changed();
                         if ui.button("Browse").clicked() {
-                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                            if let Some(path) = pick_native_file() {
                                 self.settings.bios_path = path.display().to_string();
                                 changed = true;
                             }
@@ -1468,7 +1490,7 @@ impl NativeShellApp {
                             )
                             .changed();
                         if ui.button("Browse").clicked() {
-                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                            if let Some(path) = pick_native_file() {
                                 self.settings.vga_bios_path = path.display().to_string();
                                 changed = true;
                             }
@@ -1860,10 +1882,7 @@ impl DiskCreatorPanel {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn choose_native_image_path(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .set_file_name(self.default_image_filename())
-            .save_file()
-        {
+        if let Some(path) = save_native_file(self.default_image_filename()) {
             self.path = path.display().to_string();
         }
     }
