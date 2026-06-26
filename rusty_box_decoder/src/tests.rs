@@ -617,6 +617,120 @@ fn test_final_entry_0f3a_sse66_lookup() {
 }
 
 #[test]
+fn test_vex_vperm2f128_decode_ubuntu_sha512_sequence() {
+    // Ubuntu 26.04 kernel sha512_transform_rorx uses this AVX2 sequence when
+    // CPUID advertises AVX2/BMI2. It must decode as VPERM2F128, not #UD.
+    let instr = fetch_decode64(&[0xC4, 0xE3, 0x45, 0x06, 0xC6, 0x03]).unwrap();
+    assert_eq!(instr.ilen(), 6);
+    assert_eq!(instr.get_ia_opcode(), Opcode::V256Vperm2f128VdqHdqWdqIb);
+    assert_eq!(instr.ib(), 0x03);
+}
+
+#[test]
+fn test_vex_vpmin_vpmax_family_decode() {
+    let cases: &[(&[u8], Opcode, u8)] = &[
+        (&[0xC5, 0xE9, 0xDA, 0xCB], Opcode::V128VpminubVdqHdqWdq, 0),
+        (&[0xC5, 0xED, 0xDA, 0xCB], Opcode::V256VpminubVdqHdqWdq, 1),
+        (&[0xC5, 0xE9, 0xDE, 0xCB], Opcode::V128VpmaxubVdqHdqWdq, 0),
+        (&[0xC5, 0xED, 0xDE, 0xCB], Opcode::V256VpmaxubVdqHdqWdq, 1),
+        (&[0xC5, 0xE9, 0xEA, 0xCB], Opcode::V128VpminswVdqHdqWdq, 0),
+        (&[0xC5, 0xED, 0xEA, 0xCB], Opcode::V256VpminswVdqHdqWdq, 1),
+        (&[0xC5, 0xE9, 0xEE, 0xCB], Opcode::V128VpmaxswVdqHdqWdq, 0),
+        (&[0xC5, 0xED, 0xEE, 0xCB], Opcode::V256VpmaxswVdqHdqWdq, 1),
+        (
+            &[0xC4, 0xE2, 0x69, 0x38, 0xCB],
+            Opcode::V128VpminsbVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x38, 0xCB],
+            Opcode::V256VpminsbVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x39, 0xCB],
+            Opcode::V128VpminsdVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x39, 0xCB],
+            Opcode::V256VpminsdVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x3A, 0xCB],
+            Opcode::V128VpminuwVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x3A, 0xCB],
+            Opcode::V256VpminuwVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x3B, 0xCB],
+            Opcode::V128VpminudVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x3B, 0xCB],
+            Opcode::V256VpminudVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x3C, 0xCB],
+            Opcode::V128VpmaxsbVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x3C, 0xCB],
+            Opcode::V256VpmaxsbVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x3D, 0xCB],
+            Opcode::V128VpmaxsdVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x3D, 0xCB],
+            Opcode::V256VpmaxsdVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x3E, 0xCB],
+            Opcode::V128VpmaxuwVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x3E, 0xCB],
+            Opcode::V256VpmaxuwVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x3F, 0xCB],
+            Opcode::V128VpmaxudVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x3F, 0xCB],
+            Opcode::V256VpmaxudVdqHdqWdq,
+            1,
+        ),
+    ];
+
+    for (bytes, expected_opcode, expected_vl) in cases {
+        let instr = fetch_decode64(bytes).unwrap();
+        assert_eq!(
+            instr.get_ia_opcode(),
+            *expected_opcode,
+            "bytes {bytes:02X?}"
+        );
+        assert_eq!(instr.get_vl(), *expected_vl, "bytes {bytes:02X?}");
+    }
+}
+
+#[test]
 fn test_group_error_table_entry_is_illegal_opcode() {
     let result32 = fetch_decode32(&[0x0F, 0x3A, 0x00, 0xC0, 0x00], true);
     assert!(

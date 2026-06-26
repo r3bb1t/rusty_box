@@ -781,9 +781,42 @@ impl AtaDrive {
         self.disk_data_ref = Some(data);
     }
 
-    /// Read a single CD-ROM block (2048 bytes) at the given LBA.
+    /// Read a single 2048-byte CD-ROM data block at the given LBA.
     /// Prefers in-memory data if available, falls back to file I/O.
     fn read_cdrom_block(&mut self, lba: u32, buf: &mut [u8]) -> bool {
+        self.read_cdrom_block_sized(lba, buf, CDROM_SECTOR_SIZE)
+    }
+
+    /// Read a CD-ROM block using Bochs `cdrom_base_c::read_block` sizing.
+    ///
+    /// `block_size == 2048` returns the ISO data frame. `block_size == 2352`
+    /// synthesizes a raw sector header/sync area and places the 2048-byte ISO
+    /// data frame at byte 16, matching `cpp_orig/bochs/iodev/hdimage/cdrom.cc`.
+    fn read_cdrom_block_sized(&mut self, lba: u32, buf: &mut [u8], block_size: usize) -> bool {
+        let payload_offset = match block_size {
+            CDROM_SECTOR_SIZE => {
+                if buf.len() < CDROM_SECTOR_SIZE {
+                    return false;
+                }
+                0
+            }
+            2352 => {
+                if buf.len() < 2352 {
+                    return false;
+                }
+                buf[..2352].fill(0);
+                buf[1..11].fill(0xff);
+                let raw_block = lba.wrapping_add(150);
+                buf[12] = ((raw_block / 75) / 60) as u8;
+                buf[13] = ((raw_block / 75) % 60) as u8;
+                buf[14] = (raw_block % 75) as u8;
+                buf[15] = 0x01;
+                16
+            }
+            _ => return false,
+        };
+        let payload_end = payload_offset + CDROM_SECTOR_SIZE;
+
         // In-memory path (UEFI, WASM, or attach_cdrom_data)
         if let Some(data) = self.disk_slice() {
             let offset = lba as usize * CDROM_SECTOR_SIZE;
@@ -791,7 +824,7 @@ impl AtaDrive {
             if end > data.len() {
                 return false;
             }
-            buf[..CDROM_SECTOR_SIZE].copy_from_slice(&data[offset..end]);
+            buf[payload_offset..payload_end].copy_from_slice(&data[offset..end]);
             return true;
         }
         // File I/O path
@@ -805,7 +838,10 @@ impl AtaDrive {
             if file.seek(SeekFrom::Start(offset)).is_err() {
                 return false;
             }
-            if file.read_exact(&mut buf[..CDROM_SECTOR_SIZE]).is_err() {
+            if file
+                .read_exact(&mut buf[payload_offset..payload_end])
+                .is_err()
+            {
                 return false;
             }
             return true;
@@ -1808,7 +1844,7 @@ impl BxHardDriveC {
                     if buf_size > buffer.len() {
                         return false;
                     }
-                    if !drive.read_cdrom_block(next_lba, buffer) {
+                    if !drive.read_cdrom_block_sized(next_lba, buffer, buf_size) {
                         tracing::warn!("ATAPI: DMA read block {} failed", next_lba);
                         return false;
                     }
@@ -2008,14 +2044,16 @@ impl BxHardDriveC {
                                 return 0;
                             }
                             let next_lba = drive.cdrom.next_lba;
+                            let block_size = drive.controller.buffer_size;
                             // Use temp buffer to avoid borrow conflict
-                            // (read_cdrom_block needs &mut self for file I/O)
-                            let mut temp = [0u8; CDROM_SECTOR_SIZE];
-                            if !drive.read_cdrom_block(next_lba, &mut temp) {
+                            // (read_cdrom_block_sized needs &mut self for file I/O)
+                            let mut temp = [0u8; 2352];
+                            if !drive.read_cdrom_block_sized(next_lba, &mut temp, block_size) {
                                 tracing::warn!("ATAPI: read block {} failed", next_lba);
                                 return 0;
                             }
-                            drive.controller.buffer[..CDROM_SECTOR_SIZE].copy_from_slice(&temp);
+                            drive.controller.buffer[..block_size]
+                                .copy_from_slice(&temp[..block_size]);
                             drive.cdrom.next_lba += 1;
                             drive.cdrom.remaining_blocks -= 1;
                             if drive.cdrom.remaining_blocks <= 0 {
@@ -2281,12 +2319,14 @@ impl BxHardDriveC {
                     0x28 | 0xa8 | 0xbe => {
                         if drive.cdrom.remaining_blocks > 0 {
                             let next_lba = drive.cdrom.next_lba;
-                            let mut temp = [0u8; CDROM_SECTOR_SIZE];
-                            if !drive.read_cdrom_block(next_lba, &mut temp) {
+                            let block_size = drive.controller.buffer_size;
+                            let mut temp = [0u8; 2352];
+                            if !drive.read_cdrom_block_sized(next_lba, &mut temp, block_size) {
                                 break;
                             }
-                            drive.controller.buffer[..CDROM_SECTOR_SIZE].copy_from_slice(&temp);
-                            drive.controller.buffer_size = CDROM_SECTOR_SIZE;
+                            drive.controller.buffer[..block_size]
+                                .copy_from_slice(&temp[..block_size]);
+                            drive.controller.buffer_size = block_size;
                             drive.cdrom.next_lba += 1;
                             drive.cdrom.remaining_blocks -= 1;
                             if drive.cdrom.remaining_blocks <= 0 {
@@ -3744,6 +3784,10 @@ impl BxHardDriveC {
                 } else {
                     2048
                 };
+                self.channels[channel_num]
+                    .selected_drive_mut()
+                    .controller
+                    .buffer_size = sector_size as usize;
                 let total_bytes = transfer_length * sector_size;
                 self.init_send_atapi_command(
                     channel_num,
@@ -3753,7 +3797,6 @@ impl BxHardDriveC {
                     true,
                 );
                 let drive = self.channels[channel_num].selected_drive_mut();
-                drive.controller.buffer_size = sector_size as usize;
                 drive.cdrom.remaining_blocks = transfer_length;
                 drive.cdrom.next_lba = lba;
                 // Bochs: start_seek(channel) defers via timer
@@ -4535,5 +4578,55 @@ mod tests {
         assert_eq!(drive.controller.head_no, 1);
         assert_eq!(drive.controller.cylinder_no, 0);
         assert_eq!(drive.controller.num_sectors, 1);
+    }
+
+    #[test]
+    fn atapi_read_cd_raw_sector_returns_bochs_header_and_payload() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut hd = BxHardDriveC::new();
+                let mut pic = crate::iodev::pic::BxPicC::new();
+                let mut pci_ide = crate::iodev::pci_ide::BxPciIde::new();
+
+                let mut iso = vec![0u8; CDROM_SECTOR_SIZE * 2];
+                for (i, byte) in iso[..CDROM_SECTOR_SIZE].iter_mut().enumerate() {
+                    *byte = (i & 0xff) as u8;
+                }
+                hd.attach_cdrom_data(1, 0, iso);
+
+                hd.write(0x177, ATA_CMD_PACKET as u32, 1, &mut pic, &mut pci_ide);
+                let packet = [0xbe, 0, 0, 0, 0, 0, 0, 0, 1, 0xf8, 0, 0];
+                for word in packet.chunks_exact(2) {
+                    let value = u16::from_le_bytes([word[0], word[1]]) as u32;
+                    hd.write(0x170, value, 2, &mut pic, &mut pci_ide);
+                }
+
+                assert!(hd.seek_complete_pending[1]);
+                hd.seek_complete_pending[1] = false;
+                hd.ready_to_send_atapi(1, &mut pic, &mut pci_ide);
+
+                let mut out = [0u8; 32];
+                for word_index in 0..16 {
+                    let value = hd.read(0x170, 2, &mut pic, &mut pci_ide);
+                    out[word_index * 2] = value as u8;
+                    out[word_index * 2 + 1] = (value >> 8) as u8;
+                }
+
+                assert_eq!(out[0], 0x00);
+                assert_eq!(&out[1..11], &[0xff; 10]);
+                assert_eq!(out[11], 0x00);
+                assert_eq!(&out[12..16], &[0x00, 0x02, 0x00, 0x01]);
+                assert_eq!(
+                    &out[16..32],
+                    &[
+                        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+                        0x0c, 0x0d, 0x0e, 0x0f,
+                    ]
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

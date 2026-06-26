@@ -110,6 +110,47 @@ impl SharedDisplay {
         self.framebuffer.fill(0);
     }
 
+    /// Resize the framebuffer for packed RGBA graphics dimensions.
+    pub fn resize_pixels(&mut self, width: u32, height: u32) {
+        self.screen_cols = width;
+        self.screen_rows = height;
+        self.font_width = 1;
+        self.font_height = 1;
+        self.fb_width = width;
+        self.fb_height = height;
+        let size = (width * height * 4) as usize;
+        self.framebuffer.resize(size, 0);
+        self.framebuffer.fill(0);
+        self.fb_dirty = true;
+    }
+
+    /// Copy row-major RGBA pixels into the framebuffer, clipping at the edges.
+    pub fn blit_rgba_tile(&mut self, x: u32, y: u32, width: u32, height: u32, rgba: &[u8]) {
+        if x >= self.fb_width || y >= self.fb_height || width == 0 || height == 0 {
+            return;
+        }
+
+        let copy_width = width.min(self.fb_width - x);
+        let copy_height = height.min(self.fb_height - y);
+        let mut copied = false;
+
+        for row in 0..copy_height {
+            for col in 0..copy_width {
+                let src = ((row * width + col) * 4) as usize;
+                if src + 4 > rgba.len() {
+                    break;
+                }
+                let dst = (((y + row) * self.fb_width + x + col) * 4) as usize;
+                self.framebuffer[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+                copied = true;
+            }
+        }
+
+        if copied {
+            self.fb_dirty = true;
+        }
+    }
+
     /// Render VGA text buffer (char+attr pairs) into the RGBA framebuffer.
     ///
     /// Algorithm matches Bochs `draw_char_common()` from gui.cc.
@@ -311,6 +352,43 @@ mod tests {
 
         assert_eq!(shared.drain_serial_input(), b"boot\n");
         assert!(shared.drain_serial_input().is_empty());
+    }
+
+    #[test]
+    fn resize_pixels_sets_exact_graphics_dimensions() {
+        let mut shared = SharedDisplay::new();
+
+        shared.resize_pixels(3, 2);
+
+        assert_eq!(shared.fb_width, 3);
+        assert_eq!(shared.fb_height, 2);
+        assert_eq!(shared.framebuffer.len(), 24);
+        assert!(shared.fb_dirty);
+        assert_eq!(shared.font_width, 1);
+        assert_eq!(shared.font_height, 1);
+    }
+
+    #[test]
+    fn blit_rgba_tile_clips_to_framebuffer() {
+        let mut shared = SharedDisplay::new();
+        shared.resize_pixels(3, 2);
+
+        shared.blit_rgba_tile(
+            2,
+            1,
+            2,
+            2,
+            &[
+                0xAA, 0xBB, 0xCC, 0xFF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
+                0x0B, 0x0C,
+            ],
+        );
+
+        let pixel = ((1 * shared.fb_width + 2) * 4) as usize;
+        assert_eq!(
+            &shared.framebuffer[pixel..pixel + 4],
+            &[0xAA, 0xBB, 0xCC, 0xFF]
+        );
     }
 
     #[test]

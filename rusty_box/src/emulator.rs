@@ -9,6 +9,8 @@
 
 #[cfg(feature = "alloc")]
 use crate::gui::BxGui;
+#[cfg(feature = "alloc")]
+use crate::iodev::vga::VgaDisplayUpdate;
 use crate::{
     cpu::{BxCpuC, BxCpuIdTrait, ResetReason},
     iodev::{
@@ -726,51 +728,68 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Uses VGA update() function to process text mode and get update data
     pub fn update_gui(&mut self) {
         if let Some(ref mut gui) = self.gui {
-            // Call VGA update() to process text mode (matching vgacore.cc)
             if let Some(update_result) = self.device_manager.vga.update() {
-                // Calculate cursor position from cursor address
-                let cursor_x = if update_result.cursor_address < 0x7fff {
-                    // Cursor address is byte offset, convert to column
-                    let offset_from_start = update_result
-                        .cursor_address
-                        .saturating_sub(update_result.tm_info.start_address);
-                    (offset_from_start % update_result.tm_info.line_offset) / 2
-                } else {
-                    0xffff
-                };
+                match update_result {
+                    VgaDisplayUpdate::Text(update_result) => {
+                        let cursor_x = if update_result.cursor_address < 0x7fff {
+                            let offset_from_start = update_result
+                                .cursor_address
+                                .saturating_sub(update_result.tm_info.start_address);
+                            (offset_from_start % update_result.tm_info.line_offset) / 2
+                        } else {
+                            0xffff
+                        };
 
-                let cursor_y = if update_result.cursor_address < 0x7fff {
-                    // Cursor address is byte offset, convert to row
-                    let offset_from_start = update_result
-                        .cursor_address
-                        .saturating_sub(update_result.tm_info.start_address);
-                    (offset_from_start / update_result.tm_info.line_offset) as u32
-                } else {
-                    0xffff
-                };
+                        let cursor_y = if update_result.cursor_address < 0x7fff {
+                            let offset_from_start = update_result
+                                .cursor_address
+                                .saturating_sub(update_result.tm_info.start_address);
+                            (offset_from_start / update_result.tm_info.line_offset) as u32
+                        } else {
+                            0xffff
+                        };
 
-                // Notify GUI of dimension changes (matching vgacore.cc)
-                if update_result.dimension_changed {
-                    gui.dimension_update(
-                        update_result.iwidth,
-                        update_result.iheight,
-                        update_result.fheight,
-                        update_result.fwidth,
-                        8, // bpp for text mode
-                    );
+                        if update_result.dimension_changed {
+                            gui.dimension_update(
+                                update_result.iwidth,
+                                update_result.iheight,
+                                update_result.fheight,
+                                update_result.fwidth,
+                                8,
+                            );
+                        }
+
+                        gui.text_update(
+                            &update_result.text_snapshot,
+                            &update_result.text_buffer,
+                            cursor_x as u32,
+                            cursor_y,
+                            &update_result.tm_info,
+                        );
+                    }
+                    VgaDisplayUpdate::Graphics(update_result) => {
+                        if update_result.dimension_changed {
+                            gui.dimension_update(
+                                update_result.width,
+                                update_result.height,
+                                0,
+                                0,
+                                update_result.bpp as u32,
+                            );
+                        }
+                        for tile in update_result.tiles {
+                            gui.graphics_tile_update_rgba(
+                                &tile.rgba,
+                                tile.x,
+                                tile.y,
+                                tile.width,
+                                tile.height,
+                            );
+                        }
+                    }
                 }
-
-                // Call GUI text_update with old snapshot and new buffer (matching vgacore.cc)
-                gui.text_update(
-                    &update_result.text_snapshot,
-                    &update_result.text_buffer,
-                    cursor_x as u32,
-                    cursor_y,
-                    &update_result.tm_info,
-                );
             }
 
-            // Flush display (matching vgacore.cc)
             gui.flush();
         }
     }
@@ -2993,68 +3012,80 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         };
 
         if let Some(update_result) = self.device_manager.vga.update() {
-            #[cfg(debug_assertions)]
-            if dbg % 300 == 1 {
-                let non_zero = update_result
-                    .text_buffer
-                    .iter()
-                    .filter(|&&b| b != 0)
-                    .count();
-                let first_16: Vec<u8> =
-                    update_result.text_buffer.iter().take(32).copied().collect();
-                tracing::trace!(
-                    "VGA update: dim_changed={}, needs_update={}, buf_non_zero={}, first_32={:02x?}, start_addr={}",
-                    update_result.dimension_changed,
-                    update_result.needs_update,
-                    non_zero,
-                    first_16,
-                    update_result.tm_info.start_address,
-                );
+            match update_result {
+                VgaDisplayUpdate::Text(update_result) => {
+                    #[cfg(debug_assertions)]
+                    if dbg % 300 == 1 {
+                        let non_zero = update_result
+                            .text_buffer
+                            .iter()
+                            .filter(|&&b| b != 0)
+                            .count();
+                        let first_16: Vec<u8> =
+                            update_result.text_buffer.iter().take(32).copied().collect();
+                        tracing::trace!(
+                            "VGA update: dim_changed={}, needs_update={}, buf_non_zero={}, first_32={:02x?}, start_addr={}",
+                            update_result.dimension_changed,
+                            update_result.needs_update,
+                            non_zero,
+                            first_16,
+                            update_result.tm_info.start_address,
+                        );
+                    }
+                    let cursor_x = if update_result.cursor_address < 0x7fff {
+                        let offset_from_start = update_result
+                            .cursor_address
+                            .saturating_sub(update_result.tm_info.start_address);
+                        (offset_from_start % update_result.tm_info.line_offset) / 2
+                    } else {
+                        0xffff
+                    };
+
+                    let cursor_y = if update_result.cursor_address < 0x7fff {
+                        let offset_from_start = update_result
+                            .cursor_address
+                            .saturating_sub(update_result.tm_info.start_address);
+                        (offset_from_start / update_result.tm_info.line_offset) as u32
+                    } else {
+                        0xffff
+                    };
+
+                    if update_result.dimension_changed {
+                        display.resize(
+                            update_result
+                                .iwidth
+                                .checked_div(update_result.fwidth)
+                                .unwrap_or(update_result.iwidth),
+                            update_result
+                                .iheight
+                                .checked_div(update_result.fheight)
+                                .unwrap_or(update_result.iheight),
+                            update_result.fwidth,
+                            update_result.fheight,
+                        );
+                    }
+
+                    display.render_text_to_framebuffer(
+                        &update_result.text_buffer,
+                        cursor_x as u32,
+                        cursor_y,
+                        update_result.tm_info.cs_start,
+                        update_result.tm_info.cs_end,
+                        update_result.tm_info.line_graphics,
+                        update_result.tm_info.start_address as u32,
+                        update_result.tm_info.line_offset as u32,
+                        &update_result.tm_info.actl_palette,
+                    );
+                }
+                VgaDisplayUpdate::Graphics(update_result) => {
+                    if update_result.dimension_changed {
+                        display.resize_pixels(update_result.width, update_result.height);
+                    }
+                    for tile in update_result.tiles {
+                        display.blit_rgba_tile(tile.x, tile.y, tile.width, tile.height, &tile.rgba);
+                    }
+                }
             }
-            let cursor_x = if update_result.cursor_address < 0x7fff {
-                let offset_from_start = update_result
-                    .cursor_address
-                    .saturating_sub(update_result.tm_info.start_address);
-                (offset_from_start % update_result.tm_info.line_offset) / 2
-            } else {
-                0xffff
-            };
-
-            let cursor_y = if update_result.cursor_address < 0x7fff {
-                let offset_from_start = update_result
-                    .cursor_address
-                    .saturating_sub(update_result.tm_info.start_address);
-                (offset_from_start / update_result.tm_info.line_offset) as u32
-            } else {
-                0xffff
-            };
-
-            if update_result.dimension_changed {
-                display.resize(
-                    update_result
-                        .iwidth
-                        .checked_div(update_result.fwidth)
-                        .unwrap_or(update_result.iwidth),
-                    update_result
-                        .iheight
-                        .checked_div(update_result.fheight)
-                        .unwrap_or(update_result.iheight),
-                    update_result.fwidth,
-                    update_result.fheight,
-                );
-            }
-
-            display.render_text_to_framebuffer(
-                &update_result.text_buffer,
-                cursor_x as u32,
-                cursor_y,
-                update_result.tm_info.cs_start,
-                update_result.tm_info.cs_end,
-                update_result.tm_info.line_graphics,
-                update_result.tm_info.start_address as u32,
-                update_result.tm_info.line_offset as u32,
-                &update_result.tm_info.actl_palette,
-            );
         }
     }
 

@@ -3809,7 +3809,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vextracti128WdqVdqIb => self.vextracti128(instr),
-            Opcode::V256Vperm2i128VdqHdqWdqIb => self.vperm2i128(instr),
+            Opcode::V256Vperm2f128VdqHdqWdqIb | Opcode::V256Vperm2i128VdqHdqWdqIb => {
+                self.vperm2f128(instr)
+            }
 
             // AVX1/AVX2 VBROADCAST (F128/I128 share handler, SS reuses D, SD reuses Q)
             Opcode::V256Vbroadcastf128VdqMdq | Opcode::V256Vbroadcasti128VdqMdq => {
@@ -3869,6 +3871,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::V128VpmulhrswVdqHdqWdq | Opcode::V256VpmulhrswVdqHdqWdq => {
                 self.vpmulhrsw(instr)
             }
+
+            // =====================================================================
+            // VEX-encoded integer min/max
+            // =====================================================================
+            Opcode::V128VpminsbVdqHdqWdq | Opcode::V256VpminsbVdqHdqWdq => self.vpminsb(instr),
+            Opcode::V128VpminswVdqHdqWdq | Opcode::V256VpminswVdqHdqWdq => self.vpminsw(instr),
+            Opcode::V128VpminsdVdqHdqWdq | Opcode::V256VpminsdVdqHdqWdq => self.vpminsd(instr),
+            Opcode::V128VpminubVdqHdqWdq | Opcode::V256VpminubVdqHdqWdq => self.vpminub(instr),
+            Opcode::V128VpminuwVdqHdqWdq | Opcode::V256VpminuwVdqHdqWdq => self.vpminuw(instr),
+            Opcode::V128VpminudVdqHdqWdq | Opcode::V256VpminudVdqHdqWdq => self.vpminud(instr),
+            Opcode::V128VpmaxsbVdqHdqWdq | Opcode::V256VpmaxsbVdqHdqWdq => self.vpmaxsb(instr),
+            Opcode::V128VpmaxswVdqHdqWdq | Opcode::V256VpmaxswVdqHdqWdq => self.vpmaxsw(instr),
+            Opcode::V128VpmaxsdVdqHdqWdq | Opcode::V256VpmaxsdVdqHdqWdq => self.vpmaxsd(instr),
+            Opcode::V128VpmaxubVdqHdqWdq | Opcode::V256VpmaxubVdqHdqWdq => self.vpmaxub(instr),
+            Opcode::V128VpmaxuwVdqHdqWdq | Opcode::V256VpmaxuwVdqHdqWdq => self.vpmaxuw(instr),
+            Opcode::V128VpmaxudVdqHdqWdq | Opcode::V256VpmaxudVdqHdqWdq => self.vpmaxud(instr),
 
             // =====================================================================
             // VEX-encoded integer compare
@@ -4123,6 +4141,451 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 Err(crate::cpu::CpuError::UnimplementedOpcode {
                     opcode: "unimplemented opcode",
                 })
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::crregs::BxCr4;
+    use crate::cpu::decoder::BxSegregs;
+
+    #[derive(Clone, Copy)]
+    enum LaneWidth {
+        Byte,
+        Word,
+        Dword,
+    }
+
+    #[derive(Clone, Copy)]
+    struct VpminmaxCase {
+        opcode: Opcode,
+        vl: u8,
+        width: LaneWidth,
+        signed: bool,
+        take_max: bool,
+    }
+
+    fn make_vpminmax_instr(opcode: Opcode, vl: u8) -> Instruction {
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(opcode);
+        instr.set_vex(true);
+        instr.set_vl(vl);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(1, 3);
+        instr.set_src_reg(2, 2);
+        instr.set_seg(BxSegregs::Ds);
+        instr
+    }
+
+    fn enable_sse<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+    ) {
+        cpu.cr4.insert(BxCr4::OSFXSR);
+    }
+
+    #[test]
+    fn vex_vpminub_ymm_register_regression_for_ubuntu_opcode() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        let instr = make_vpminmax_instr(Opcode::V256VpminubVdqHdqWdq, 1);
+
+        for i in 0..64 {
+            cpu.vmm[1].set_zmmubyte(i, 0xA5);
+        }
+        for i in 0..32 {
+            let src1 = [0x80, 0xFF, 0x00, 0x7F][i % 4];
+            let src2 = [0xFF, 0x00, 0x7F, 0x80][i % 4];
+            cpu.vmm[2].set_zmmubyte(i, src1);
+            cpu.vmm[3].set_zmmubyte(i, src2);
+        }
+
+        cpu.execute_instruction(&instr).unwrap();
+
+        for i in 0..32 {
+            let expected = core::cmp::min(cpu.vmm[2].zmmubyte(i), cpu.vmm[3].zmmubyte(i));
+            assert_eq!(cpu.vmm[1].zmmubyte(i), expected, "byte lane {i}");
+        }
+        for i in 32..64 {
+            assert_eq!(cpu.vmm[1].zmmubyte(i), 0, "upper byte lane {i}");
+        }
+    }
+
+    fn all_vpminmax_cases() -> [VpminmaxCase; 24] {
+        [
+            VpminmaxCase {
+                opcode: Opcode::V128VpminsbVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Byte,
+                signed: true,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpminsbVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Byte,
+                signed: true,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpminswVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Word,
+                signed: true,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpminswVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Word,
+                signed: true,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpminsdVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Dword,
+                signed: true,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpminsdVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Dword,
+                signed: true,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpminubVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Byte,
+                signed: false,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpminubVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Byte,
+                signed: false,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpminuwVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Word,
+                signed: false,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpminuwVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Word,
+                signed: false,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpminudVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Dword,
+                signed: false,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpminudVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Dword,
+                signed: false,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpmaxsbVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Byte,
+                signed: true,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpmaxsbVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Byte,
+                signed: true,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpmaxswVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Word,
+                signed: true,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpmaxswVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Word,
+                signed: true,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpmaxsdVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Dword,
+                signed: true,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpmaxsdVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Dword,
+                signed: true,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpmaxubVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Byte,
+                signed: false,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpmaxubVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Byte,
+                signed: false,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpmaxuwVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Word,
+                signed: false,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpmaxuwVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Word,
+                signed: false,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpmaxudVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Dword,
+                signed: false,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpmaxudVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Dword,
+                signed: false,
+                take_max: true,
+            },
+        ]
+    }
+
+    fn expected_u8(src1: u8, src2: u8, signed: bool, take_max: bool) -> u8 {
+        let select_src2 = if signed {
+            let a = src1 as i8;
+            let b = src2 as i8;
+            if take_max {
+                b > a
+            } else {
+                b < a
+            }
+        } else if take_max {
+            src2 > src1
+        } else {
+            src2 < src1
+        };
+        if select_src2 {
+            src2
+        } else {
+            src1
+        }
+    }
+
+    fn expected_u16(src1: u16, src2: u16, signed: bool, take_max: bool) -> u16 {
+        let select_src2 = if signed {
+            let a = src1 as i16;
+            let b = src2 as i16;
+            if take_max {
+                b > a
+            } else {
+                b < a
+            }
+        } else if take_max {
+            src2 > src1
+        } else {
+            src2 < src1
+        };
+        if select_src2 {
+            src2
+        } else {
+            src1
+        }
+    }
+
+    fn expected_u32(src1: u32, src2: u32, signed: bool, take_max: bool) -> u32 {
+        let select_src2 = if signed {
+            let a = src1 as i32;
+            let b = src2 as i32;
+            if take_max {
+                b > a
+            } else {
+                b < a
+            }
+        } else if take_max {
+            src2 > src1
+        } else {
+            src2 < src1
+        };
+        if select_src2 {
+            src2
+        } else {
+            src1
+        }
+    }
+
+    #[test]
+    fn vex_vpmin_vpmax_family_register_semantics() {
+        for case in all_vpminmax_cases() {
+            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            enable_sse(&mut cpu);
+            let instr = make_vpminmax_instr(case.opcode, case.vl);
+            for i in 0..64 {
+                cpu.vmm[1].set_zmmubyte(i, 0xA5);
+            }
+
+            match case.width {
+                LaneWidth::Byte => {
+                    let src1_vals = if case.signed {
+                        [0x80, 0x7F, 0xFF, 0x01, 0x80, 0x7F]
+                    } else {
+                        [0x80, 0xFF, 0x00, 0x7F, 0x80, 0xFF]
+                    };
+                    let src2_vals = if case.signed {
+                        [0x7F, 0x80, 0x01, 0xFF, 0x80, 0x7F]
+                    } else {
+                        [0xFF, 0x00, 0x7F, 0x80, 0x80, 0xFF]
+                    };
+                    let lanes = if case.vl == 0 { 16 } else { 32 };
+                    for i in 0..lanes {
+                        cpu.vmm[2].set_zmmubyte(i, src1_vals[i % src1_vals.len()]);
+                        cpu.vmm[3].set_zmmubyte(i, src2_vals[i % src2_vals.len()]);
+                    }
+                    cpu.execute_instruction(&instr).unwrap();
+                    for i in 0..lanes {
+                        let src1 = src1_vals[i % src1_vals.len()];
+                        let src2 = src2_vals[i % src2_vals.len()];
+                        assert_eq!(
+                            cpu.vmm[1].zmmubyte(i),
+                            expected_u8(src1, src2, case.signed, case.take_max),
+                            "{:?} byte lane {i}",
+                            case.opcode
+                        );
+                    }
+                }
+                LaneWidth::Word => {
+                    let src1_vals = if case.signed {
+                        [0x8000, 0x7FFF, 0xFFFF, 0x0001, 0x8000, 0x7FFF]
+                    } else {
+                        [0x8000, 0xFFFF, 0x0000, 0x7FFF, 0x8000, 0xFFFF]
+                    };
+                    let src2_vals = if case.signed {
+                        [0x7FFF, 0x8000, 0x0001, 0xFFFF, 0x8000, 0x7FFF]
+                    } else {
+                        [0xFFFF, 0x0000, 0x7FFF, 0x8000, 0x8000, 0xFFFF]
+                    };
+                    let lanes = if case.vl == 0 { 8 } else { 16 };
+                    for i in 0..lanes {
+                        cpu.vmm[2].set_zmm16u(i, src1_vals[i % src1_vals.len()]);
+                        cpu.vmm[3].set_zmm16u(i, src2_vals[i % src2_vals.len()]);
+                    }
+                    cpu.execute_instruction(&instr).unwrap();
+                    for i in 0..lanes {
+                        let src1 = src1_vals[i % src1_vals.len()];
+                        let src2 = src2_vals[i % src2_vals.len()];
+                        assert_eq!(
+                            cpu.vmm[1].zmm16u(i),
+                            expected_u16(src1, src2, case.signed, case.take_max),
+                            "{:?} word lane {i}",
+                            case.opcode
+                        );
+                    }
+                }
+                LaneWidth::Dword => {
+                    let src1_vals = if case.signed {
+                        [
+                            0x8000_0000,
+                            0x7FFF_FFFF,
+                            0xFFFF_FFFF,
+                            0x0000_0001,
+                            0x8000_0000,
+                            0x7FFF_FFFF,
+                        ]
+                    } else {
+                        [
+                            0x8000_0000,
+                            0xFFFF_FFFF,
+                            0x0000_0000,
+                            0x7FFF_FFFF,
+                            0x8000_0000,
+                            0xFFFF_FFFF,
+                        ]
+                    };
+                    let src2_vals = if case.signed {
+                        [
+                            0x7FFF_FFFF,
+                            0x8000_0000,
+                            0x0000_0001,
+                            0xFFFF_FFFF,
+                            0x8000_0000,
+                            0x7FFF_FFFF,
+                        ]
+                    } else {
+                        [
+                            0xFFFF_FFFF,
+                            0x0000_0000,
+                            0x7FFF_FFFF,
+                            0x8000_0000,
+                            0x8000_0000,
+                            0xFFFF_FFFF,
+                        ]
+                    };
+                    let lanes = if case.vl == 0 { 4 } else { 8 };
+                    for i in 0..lanes {
+                        cpu.vmm[2].set_zmm32u(i, src1_vals[i % src1_vals.len()]);
+                        cpu.vmm[3].set_zmm32u(i, src2_vals[i % src2_vals.len()]);
+                    }
+                    cpu.execute_instruction(&instr).unwrap();
+                    for i in 0..lanes {
+                        let src1 = src1_vals[i % src1_vals.len()];
+                        let src2 = src2_vals[i % src2_vals.len()];
+                        assert_eq!(
+                            cpu.vmm[1].zmm32u(i),
+                            expected_u32(src1, src2, case.signed, case.take_max),
+                            "{:?} dword lane {i}",
+                            case.opcode
+                        );
+                    }
+                }
+            }
+
+            let first_upper_byte = if case.vl == 0 { 16 } else { 32 };
+            for i in first_upper_byte..64 {
+                assert_eq!(
+                    cpu.vmm[1].zmmubyte(i),
+                    0,
+                    "{:?} upper byte lane {i}",
+                    case.opcode
+                );
             }
         }
     }

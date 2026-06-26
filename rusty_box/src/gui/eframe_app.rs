@@ -60,6 +60,10 @@ impl RustyBoxApp {
         self.fit_to_available = fit_to_available;
     }
 
+    fn should_request_repaint(&self) -> bool {
+        self.cached_emu_running || self.texture.is_none()
+    }
+
     fn shared_emu_running(&self) -> bool {
         self.shared
             .lock()
@@ -448,8 +452,9 @@ impl RustyBoxApp {
                 }
             });
 
-        // Request continuous repaint while emulator is running
-        if self.cached_emu_running {
+        // Request continuous repaint while the emulator is running, and while waiting
+        // for the first texture so a fast VM stop cannot strand the surface on the placeholder.
+        if self.should_request_repaint() {
             ctx.request_repaint();
         }
     }
@@ -617,5 +622,13 @@ mod tests {
     fn serial_panel_uses_compact_default_size() {
         assert!(SERIAL_PANEL_DEFAULT_HEIGHT <= 96.0);
         assert!(SERIAL_PANEL_MAX_HEIGHT <= 220.0);
+    }
+
+    #[test]
+    fn stopped_app_repaints_until_first_texture_exists() {
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        let app = RustyBoxApp::new_embedded(shared);
+
+        assert!(app.should_request_repaint());
     }
 }

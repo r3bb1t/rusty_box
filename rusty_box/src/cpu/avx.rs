@@ -973,14 +973,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// VPERM2I128 — Permute 128-bit integer values from two 256-bit sources
-    /// VEX.256.66.0F3A.W0 46 /r ib
-    /// Matches Bochs VPERM2F128_VdqHdqWdqIbR (avx.cc)
-    /// For each 128-bit half (n=0,1): select from imm8 bits [n*4+3:n*4]
-    ///   bit 3: zero that half
-    ///   bit 1: select op2 (else op1)
-    ///   bit 0: select which 128-bit half of chosen source
-    pub(super) fn vperm2i128(&mut self, instr: &Instruction) -> super::Result<()> {
+    /// VPERM2F128 — Permute 128-bit lanes from two 256-bit sources.
+    ///
+    /// Bochs `VPERM2F128_VdqHdqWdqIbR` implements both:
+    /// - VEX.256.66.0F3A.W0 06 /r ib (`VPERM2F128`, AVX)
+    /// - VEX.256.66.0F3A.W0 46 /r ib (`VPERM2I128`, AVX2)
+    ///
+    /// For each 128-bit half (n=0,1): select from imm8 bits [n*4+3:n*4].
+    /// bit 3 zeros that half; bit 1 selects op2 instead of op1; bit 0 selects
+    /// the 128-bit half of the chosen source.
+    pub(super) fn vperm2f128(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_ymm_reg(instr.src2()); // VEX.vvvv
         let op2 = if instr.mod_c0() {
@@ -2202,6 +2204,250 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_xmm_reg(dst_idx, result);
         }
         Ok(())
+    }
+
+    #[inline]
+    fn vex_read_src2_xmm(&mut self, instr: &Instruction) -> super::Result<BxPackedXmmRegister> {
+        if instr.mod_c0() {
+            Ok(self.read_xmm_reg(instr.src1()))
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_xmmword(seg, eaddr)
+        }
+    }
+
+    #[inline]
+    fn vex_read_src2_ymm(&mut self, instr: &Instruction) -> super::Result<BxPackedYmmRegister> {
+        if instr.mod_c0() {
+            Ok(self.read_ymm_reg(instr.src1()))
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_ymmword(seg, eaddr)
+        }
+    }
+
+    fn vpminmax_bytes(
+        &mut self,
+        instr: &Instruction,
+        signed: bool,
+        take_max: bool,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(instr.src2());
+            let src2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..32 {
+                let src1_raw = src1.ymmubyte(i);
+                let src2_raw = src2.ymmubyte(i);
+                let take_src2 = if signed {
+                    let a = src1.ymm_sbyte(i);
+                    let b = src2.ymm_sbyte(i);
+                    if take_max {
+                        b > a
+                    } else {
+                        b < a
+                    }
+                } else if take_max {
+                    src2_raw > src1_raw
+                } else {
+                    src2_raw < src1_raw
+                };
+                result.set_ymmubyte(i, if take_src2 { src2_raw } else { src1_raw });
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(instr.src2());
+            let src2 = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..16 {
+                let src1_raw = src1.xmmubyte(i);
+                let src2_raw = src2.xmmubyte(i);
+                let take_src2 = if signed {
+                    let a = src1.xmm_sbyte(i);
+                    let b = src2.xmm_sbyte(i);
+                    if take_max {
+                        b > a
+                    } else {
+                        b < a
+                    }
+                } else if take_max {
+                    src2_raw > src1_raw
+                } else {
+                    src2_raw < src1_raw
+                };
+                result.set_xmmubyte(i, if take_src2 { src2_raw } else { src1_raw });
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    fn vpminmax_words(
+        &mut self,
+        instr: &Instruction,
+        signed: bool,
+        take_max: bool,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(instr.src2());
+            let src2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..16 {
+                let src1_raw = src1.ymm16u(i);
+                let src2_raw = src2.ymm16u(i);
+                let take_src2 = if signed {
+                    let a = src1.ymm16s(i);
+                    let b = src2.ymm16s(i);
+                    if take_max {
+                        b > a
+                    } else {
+                        b < a
+                    }
+                } else if take_max {
+                    src2_raw > src1_raw
+                } else {
+                    src2_raw < src1_raw
+                };
+                result.set_ymm16u(i, if take_src2 { src2_raw } else { src1_raw });
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(instr.src2());
+            let src2 = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..8 {
+                let src1_raw = src1.xmm16u(i);
+                let src2_raw = src2.xmm16u(i);
+                let take_src2 = if signed {
+                    let a = src1.xmm16s(i);
+                    let b = src2.xmm16s(i);
+                    if take_max {
+                        b > a
+                    } else {
+                        b < a
+                    }
+                } else if take_max {
+                    src2_raw > src1_raw
+                } else {
+                    src2_raw < src1_raw
+                };
+                result.set_xmm16u(i, if take_src2 { src2_raw } else { src1_raw });
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    fn vpminmax_dwords(
+        &mut self,
+        instr: &Instruction,
+        signed: bool,
+        take_max: bool,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(instr.src2());
+            let src2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..8 {
+                let src1_raw = src1.ymm32u(i);
+                let src2_raw = src2.ymm32u(i);
+                let take_src2 = if signed {
+                    let a = src1.ymm32s(i);
+                    let b = src2.ymm32s(i);
+                    if take_max {
+                        b > a
+                    } else {
+                        b < a
+                    }
+                } else if take_max {
+                    src2_raw > src1_raw
+                } else {
+                    src2_raw < src1_raw
+                };
+                result.set_ymm32u(i, if take_src2 { src2_raw } else { src1_raw });
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(instr.src2());
+            let src2 = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..4 {
+                let src1_raw = src1.xmm32u(i);
+                let src2_raw = src2.xmm32u(i);
+                let take_src2 = if signed {
+                    let a = src1.xmm32s(i);
+                    let b = src2.xmm32s(i);
+                    if take_max {
+                        b > a
+                    } else {
+                        b < a
+                    }
+                } else if take_max {
+                    src2_raw > src1_raw
+                } else {
+                    src2_raw < src1_raw
+                };
+                result.set_xmm32u(i, if take_src2 { src2_raw } else { src1_raw });
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    pub(super) fn vpminsb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vpminmax_bytes(instr, true, false)
+    }
+
+    pub(super) fn vpminsw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vpminmax_words(instr, true, false)
+    }
+
+    pub(super) fn vpminsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vpminmax_dwords(instr, true, false)
+    }
+
+    pub(super) fn vpminub(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vpminmax_bytes(instr, false, false)
+    }
+
+    pub(super) fn vpminuw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vpminmax_words(instr, false, false)
+    }
+
+    pub(super) fn vpminud(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vpminmax_dwords(instr, false, false)
+    }
+
+    pub(super) fn vpmaxsb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vpminmax_bytes(instr, true, true)
+    }
+
+    pub(super) fn vpmaxsw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vpminmax_words(instr, true, true)
+    }
+
+    pub(super) fn vpmaxsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vpminmax_dwords(instr, true, true)
+    }
+
+    pub(super) fn vpmaxub(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vpminmax_bytes(instr, false, true)
+    }
+
+    pub(super) fn vpmaxuw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vpminmax_words(instr, false, true)
+    }
+
+    pub(super) fn vpmaxud(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vpminmax_dwords(instr, false, true)
     }
 
     // ========================================================================

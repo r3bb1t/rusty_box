@@ -1832,7 +1832,12 @@ impl NativeShellApp {
                     } else {
                         "Stopped"
                     };
-                    ui.label(RichText::new(state).monospace().size(11.0).color(TEXT_PRIMARY));
+                    ui.label(
+                        RichText::new(state)
+                            .monospace()
+                            .size(11.0)
+                            .color(TEXT_PRIMARY),
+                    );
                     ui.separator();
                     ui.label(
                         RichText::new(format_ips_u32(status.ips))

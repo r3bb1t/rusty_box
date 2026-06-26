@@ -274,16 +274,21 @@ const LEAF7_EBX_BASE: CpuIdStd7Ebx = CpuIdStd7Ebx::FSGSBASE
     .union(CpuIdStd7Ebx::ERMS) // extra
     .union(CpuIdStd7Ebx::INVPCID)
     .union(CpuIdStd7Ebx::DEPRECATE_FCS_FDS)
-    .union(CpuIdStd7Ebx::AVX512F) // enabled: foundation handlers + opmask implemented
-    // .union(CpuIdStd7Ebx::AVX512DQ)  // disabled: DQ-specific handlers not implemented
+    // FIXME(AVX512 parity): Re-enable AVX512F/DQ/CD/BW/VL and leaf 0xD
+    // OPMASK/ZMM XSAVE state together, after the EVEX executor covers the full
+    // guest-visible Skylake-X AVX-512 surface: mask/merge/zero semantics,
+    // upper-ZMM lanes, byte/word/dword/qword ops, memory forms, and exceptions.
+    // Ubuntu/glibc IFUNC smoke coverage must prove those optimized paths run.
+    // Advertising AVX512F/VL alone made Linux userspace select libc IFUNCs that
+    // exercised unimplemented EVEX lanes.
+    // .union(CpuIdStd7Ebx::AVX512F)
+    // .union(CpuIdStd7Ebx::AVX512DQ)
     .union(CpuIdStd7Ebx::RDSEED)
     .union(CpuIdStd7Ebx::ADX)
     .union(CpuIdStd7Ebx::SMAP)
     .union(CpuIdStd7Ebx::CLFLUSHOPT)
-    .union(CpuIdStd7Ebx::CLWB)
-    // .union(CpuIdStd7Ebx::AVX512CD)  // disabled: CD-specific handlers not implemented
-    // .union(CpuIdStd7Ebx::AVX512BW)  // disabled: BW-specific handlers not implemented
-    .union(CpuIdStd7Ebx::AVX512VL); // enabled: EVEX 128/256 with opmask
+    // AVX512CD/BW/VL also remain disabled.
+    .union(CpuIdStd7Ebx::CLWB);
 
 /// Extended leaf 0x80000001 ECX:
 ///   LAHF_SAHF | LZCNT | PREFETCHW
@@ -410,10 +415,12 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         enable_extension(&mut b, X86Feature::IsaAdx);
         enable_extension(&mut b, X86Feature::IsaSmap);
         enable_extension(&mut b, X86Feature::IsaFdpDeprecation);
-        enable_extension(&mut b, X86Feature::IsaAvx512); // foundation handlers implemented
-                                                         // enable_extension(&mut b, X86Feature::IsaAvx512Dq);  // disabled: DQ handlers not implemented
-                                                         // enable_extension(&mut b, X86Feature::IsaAvx512Cd);  // disabled: CD handlers not implemented
-                                                         // enable_extension(&mut b, X86Feature::IsaAvx512Bw);  // disabled: BW handlers not implemented
+        // See the AVX512 parity FIXME above. Keep the internal ISA bitmask,
+        // leaf 7 feature bits, and leaf 0xD XSAVE state in lockstep.
+        // enable_extension(&mut b, X86Feature::IsaAvx512);
+        // enable_extension(&mut b, X86Feature::IsaAvx512Dq);
+        // enable_extension(&mut b, X86Feature::IsaAvx512Cd);
+        // enable_extension(&mut b, X86Feature::IsaAvx512Bw);
         enable_extension(&mut b, X86Feature::IsaClflushopt);
         enable_extension(&mut b, X86Feature::IsaClwb);
         if no_avx_mode() {
@@ -469,7 +476,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                         .difference(CpuIdStd1Ecx::FMA)
                         .difference(CpuIdStd1Ecx::AVX_F16C);
                 }
-                (0x00050654, 0x00010800, ecx.bits(), LEAF1_EDX_BASE.bits())
+                (0x00050654, 0x00100800, ecx.bits(), LEAF1_EDX_BASE.bits())
             }
 
             // ── Leaf 2: Cache/TLB descriptors ───────────────────────────
@@ -541,13 +548,13 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                 match ecx {
                     0 => (
                         0x00000001, // EAX: bits to shift for SMT
-                        0x00000001, // EBX: logical procs at this level
+                        0x00000002, // EBX: logical threads at SMT level
                         0x00000100, // ECX: level=0, type=SMT(1)
                         0x00000000, // EDX: x2APIC ID
                     ),
                     1 => (
-                        0x00000000, // EAX: bits to shift
-                        0x00000001, // EBX: logical procs at this level
+                        0x00000004, // EAX: bits to shift for core/package level
+                        0x0000000C, // EBX: logical procs at this level
                         0x00000201, // ECX: level=1, type=Core(2)
                         0x00000000, // EDX: x2APIC ID
                     ),
@@ -560,12 +567,15 @@ impl BxCpuIdTrait for Corei7SkylakeX {
 
             // ── Leaf D: XSAVE state ─────────────────────────────────────
             // Bochs cpuid.cc — dynamically patched in cpuid() handler
+            // Keep in lockstep with the AVX512 parity FIXME above: do not expose
+            // OPMASK/ZMM XSAVE bits or subleaves 5-7 until the guest-visible EVEX
+            // executor surface is complete.
             0x0000000D => {
                 match ecx {
                     0 => (
-                        0x000000E7, // EAX: xcr0_suppmask (overridden dynamically)
+                        0x00000007, // EAX: x87/SSE/YMM xcr0_suppmask (overridden dynamically)
                         0x00000240, // EBX: size for current xcr0 (overridden dynamically)
-                        0x00000A80, // ECX: max size for all features = 2688
+                        0x00000340, // ECX: max size for x87/SSE/YMM features = 832
                         0x00000000, // EDX: xcr0 upper 32 bits
                     ),
                     1 => (
@@ -575,10 +585,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                         0x00000000, // EDX: IA32_XSS upper supported bits
                     ),
                     // Per-component sub-leaves: (len, offset, flags, 0)
-                    2 => (256, 576, 0, 0),   // YMM state
-                    5 => (64, 1088, 0, 0),   // OPMASK
-                    6 => (512, 1152, 0, 0),  // ZMM_HI256
-                    7 => (1024, 1664, 0, 0), // HI_ZMM
+                    2 => (256, 576, 0, 0), // YMM state
                     _ => (0, 0, 0, 0),
                 }
             }
@@ -657,5 +664,49 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skylake_x_extended_topology_matches_bochs() {
+        let cpuid = Corei7SkylakeX {};
+
+        assert_eq!(
+            cpuid.get_cpuid_leaf(0x0000_0001, 0).1,
+            0x0010_0800,
+            "leaf 1 EBX must advertise the Bochs Skylake-X logical-processor count"
+        );
+
+        assert_eq!(
+            cpuid.get_cpuid_leaf(0x0000_000B, 0),
+            (0x0000_0001, 0x0000_0002, 0x0000_0100, 0x0000_0000)
+        );
+        assert_eq!(
+            cpuid.get_cpuid_leaf(0x0000_000B, 1),
+            (0x0000_0004, 0x0000_000C, 0x0000_0201, 0x0000_0000)
+        );
+    }
+
+    #[test]
+    fn skylake_x_does_not_advertise_incomplete_avx512() {
+        let cpuid = Corei7SkylakeX {};
+        let (_, leaf7_ebx, _, _) = cpuid.get_cpuid_leaf(0x0000_0007, 0);
+        assert_eq!(leaf7_ebx & CpuIdStd7Ebx::AVX512F.bits(), 0);
+        assert_eq!(leaf7_ebx & CpuIdStd7Ebx::AVX512VL.bits(), 0);
+
+        let bitmask = cpuid.get_isa_extensions_bitmask();
+        let idx = X86Feature::IsaAvx512 as usize;
+        assert_eq!(bitmask[idx / 32] & (1 << (idx % 32)), 0);
+
+        let (leaf_d0_eax, _, leaf_d0_ecx, _) = cpuid.get_cpuid_leaf(0x0000_000D, 0);
+        assert_eq!(leaf_d0_eax & 0x0000_00E0, 0);
+        assert_eq!(leaf_d0_ecx, 0x0000_0340);
+        assert_eq!(cpuid.get_cpuid_leaf(0x0000_000D, 5), (0, 0, 0, 0));
+        assert_eq!(cpuid.get_cpuid_leaf(0x0000_000D, 6), (0, 0, 0, 0));
+        assert_eq!(cpuid.get_cpuid_leaf(0x0000_000D, 7), (0, 0, 0, 0));
     }
 }

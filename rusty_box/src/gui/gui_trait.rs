@@ -37,6 +37,12 @@ pub trait BxGui: Send + Sync {
     /// Update a graphics tile
     fn graphics_tile_update(&mut self, tile: &[u8], x: u32, y: u32);
 
+    /// Update a graphics tile with explicit RGBA dimensions.
+    fn graphics_tile_update_rgba(&mut self, tile: &[u8], x: u32, y: u32, width: u32, height: u32) {
+        let _ = (width, height);
+        self.graphics_tile_update(tile, x, y);
+    }
+
     /// Handle GUI events (keyboard, mouse, etc.)
     fn handle_events(&mut self);
 
