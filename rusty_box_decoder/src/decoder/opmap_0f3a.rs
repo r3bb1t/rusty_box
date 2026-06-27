@@ -122,6 +122,12 @@ pub(super) const BxOpcodeTable0F3ADF: [u64; 1] = [form_opcode(
     Opcode::AeskeygenassistVdqWdqIb,
 )];
 
+// VPERMQ — VEX.256.66.0F3A.W1 00 /r ib
+pub(super) const BxOpcodeTable0F3A00: [u64; 1] = [form_opcode(
+    attrs!(SSE_PREFIX_66 | VL256 | VEX_W1),
+    Opcode::V256VpermqVdqWdqIb,
+)];
+
 // VPERM2F128 — VEX.256.66.0F3A.W0 06 /r ib
 pub(super) const BxOpcodeTable0F3A06: [u64; 1] = [form_opcode(
     attrs!(SSE_PREFIX_66 | VL256 | VEX_W0),
@@ -198,7 +204,7 @@ pub(super) const BxOpcodeTable0F3A33: [u64; 2] = [
 
 pub(super) const BxOpcodeTable0F3A: [&[u64]; 256] = [
     // 3-byte opcode 0x0F 0x3A
-    /* 0F 3A 00 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 3A 00 */ &BxOpcodeTable0F3A00,
     /* 0F 3A 01 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 02 */ &BxOpcodeTable0F3A02,
     /* 0F 3A 03 */ &BX_OPCODE_GROUP_ERR,

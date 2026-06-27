@@ -104,6 +104,10 @@ pub struct Emulator<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrum
     pub device_manager: DeviceManager,
     /// PC system (timers, A20, etc.)
     pub pc_system: BxPcSystemC,
+    /// Last device-visible virtual time in microseconds. Devices advance by
+    /// deltas of total `pc_system.time_usec()`, matching Bochs' unified virtual
+    /// clock instead of per-batch truncation/floors.
+    last_device_time_usec: u64,
     /// Configuration
     config: EmulatorConfig,
     /// Whether the emulator has been initialized
@@ -157,6 +161,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Same invariants as `borrow_memory_for_cpu`: caller must hold `&mut self`
     /// and no other code path may access memory/devices during the batch.
     pub unsafe fn run_cpu_batch(&mut self, batch_size: u64) -> crate::cpu::Result<u64> {
+        let batch_size = self.active_batch_step_ticks(batch_size);
         let mem_extended = self.borrow_memory_for_cpu();
         let io_ptr = core::ptr::NonNull::from(&mut self.devices);
         let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
@@ -262,6 +267,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             core::ptr::addr_of_mut!((*ptr).devices).write(devices);
             core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
             core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
+            core::ptr::addr_of_mut!((*ptr).last_device_time_usec).write(0);
             core::ptr::addr_of_mut!((*ptr).config).write(config);
             core::ptr::addr_of_mut!((*ptr).initialized).write(false);
             core::ptr::addr_of_mut!((*ptr).gui).write(None);
@@ -302,6 +308,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         core::ptr::addr_of_mut!((*ptr).devices).write(devices);
         core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
         core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
+        core::ptr::addr_of_mut!((*ptr).last_device_time_usec).write(0);
         core::ptr::addr_of_mut!((*ptr).config).write(config);
         core::ptr::addr_of_mut!((*ptr).exit_set).write(crate::cpu::instrumentation::ExitSet::new());
         core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
@@ -342,6 +349,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
         // Step 1: Initialize PC system with IPS (line 1201)
         self.pc_system.initialize(self.config.ips);
+        self.last_device_time_usec = 0;
         tracing::trace!("PC system initialized with {} IPS", self.config.ips);
 
         // Step 2: Memory initialization (line 1312)
@@ -507,6 +515,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
         // Step 1: Initialize PC system with IPS (line 1201)
         self.pc_system.initialize(self.config.ips);
+        self.last_device_time_usec = 0;
         tracing::trace!("PC system initialized with {} IPS", self.config.ips);
 
         // Step 2: Memory initialization (line 1312)
@@ -529,6 +538,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// initialized externally (e.g. via `init_at`).
     pub fn init_pc_system(&mut self) {
         self.pc_system.initialize(self.config.ips);
+        self.last_device_time_usec = 0;
         self.memory.set_a20_mask(self.pc_system.a20_mask());
     }
 
@@ -931,6 +941,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             self.device_manager
                 .pit
                 .init_icount_sync(self.cpu.icount, ips);
+            self.device_manager
+                .acpi
+                .init_icount_sync(self.cpu.icount, ips);
+            #[cfg(feature = "std")]
+            {
+                self.device_manager.pit.enable_realtime_sync();
+                self.device_manager.acpi.enable_realtime_sync();
+            }
         }
 
         // Initialize VGA icount-based timing for retrace computation.
@@ -939,6 +957,11 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             self.device_manager.vga.set_icount_sync(ips);
         }
 
+        self.last_device_time_usec = if self.config.ips == 0 {
+            0
+        } else {
+            self.pc_system.time_usec()
+        };
         self.start();
     }
 
@@ -1156,6 +1179,78 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         self.device_manager
             .process_pci_deferred(&mut self.devices, &mut self.memory);
     }
+    /// Advance devices to the current Bochs virtual time.
+    #[inline]
+    pub fn advance_devices_to_pc_time(&mut self) {
+        if self.config.ips == 0 {
+            return;
+        }
+        let now = self.pc_system.time_usec();
+        let delta = now.wrapping_sub(self.last_device_time_usec);
+        #[cfg(feature = "std")]
+        let realtime_timer_due = self.device_manager.pit.realtime_sync_enabled()
+            || self.device_manager.acpi.realtime_sync_enabled();
+        #[cfg(not(feature = "std"))]
+        let realtime_timer_due = false;
+
+        if delta == 0 && !realtime_timer_due {
+            return;
+        }
+        if realtime_timer_due || delta >= 1_000 || self.device_manager.keyboard.needs_fast_service()
+        {
+            self.tick_devices(delta);
+            self.last_device_time_usec = now;
+        }
+    }
+
+    #[inline]
+    fn millisecond_timer_quantum_ticks(&self) -> Option<u64> {
+        const BOCHS_WAIT_STEP_TICKS: u64 = 10;
+        const DEVICE_QUANTUM_USEC: u64 = 1_000;
+
+        let ips = self.config.ips as u64;
+        if ips == 0 {
+            return None;
+        }
+
+        Some((ips * DEVICE_QUANTUM_USEC / 1_000_000).clamp(BOCHS_WAIT_STEP_TICKS, u32::MAX as u64))
+    }
+
+    /// Active CPU batches yield every ~1 ms so pc_system timer fires, LAPIC
+    /// events, GUI status, and device time are serviced promptly. Unlike HLT
+    /// waits, this deliberately does not clamp to the next pc_system countdown:
+    /// a one-tick LAPIC timer would otherwise collapse throughput to trace-sized
+    /// batches.
+    #[inline]
+    fn active_batch_step_ticks(&self, requested: u64) -> u64 {
+        const BIOS_POLL_SAFE_ACTIVE_BATCH_TICKS: u64 = 4_096;
+
+        match self.millisecond_timer_quantum_ticks() {
+            Some(quantum) => requested
+                .min(quantum)
+                .min(BIOS_POLL_SAFE_ACTIVE_BATCH_TICKS),
+            None => requested,
+        }
+    }
+
+    /// HLT/MWAIT wait-loop tick quantum.
+    ///
+    /// Bochs advances halted CPUs with repeated `BX_TICKN(10)`, but our
+    /// usec-driven devices are outside `pc_system` and are expensive to tick
+    /// hundreds of thousands of times per virtual second. Advance up to a
+    /// 1 ms quantum, while still stopping at the next `pc_system` timer so
+    /// LAPIC and other registered timers fire at their exact tick boundary.
+    #[inline]
+    fn hlt_wait_step_ticks(&self) -> u32 {
+        const BOCHS_WAIT_STEP_TICKS: u32 = 10;
+
+        let ticks_until_pc_event = self.pc_system.get_num_cpu_ticks_left_next_event().max(1);
+        let Some(quantum_ticks) = self.millisecond_timer_quantum_ticks() else {
+            return BOCHS_WAIT_STEP_TICKS.min(ticks_until_pc_event);
+        };
+
+        (quantum_ticks as u32).min(ticks_until_pc_event)
+    }
 
     /// Dispatch timer fires accumulated by `pc_system.tickn()`.
     ///
@@ -1312,18 +1407,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     ) -> Result<()> {
         // Validate bzImage header
         if bzimage.len() < 0x264 {
-            return Err(crate::Error::Cpu(
-                crate::cpu::CpuError::UnimplementedOpcode {
-                    opcode: "bzImage too small".into(),
-                },
-            ));
+            return Err(crate::Error::Cpu(crate::cpu::CpuError::InvalidBootImage {
+                reason: "bzImage too small",
+            }));
         }
         if bzimage[0x1FE] != 0x55 || bzimage[0x1FF] != 0xAA {
-            return Err(crate::Error::Cpu(
-                crate::cpu::CpuError::UnimplementedOpcode {
-                    opcode: "Invalid bzImage boot signature".into(),
-                },
-            ));
+            return Err(crate::Error::Cpu(crate::cpu::CpuError::InvalidBootImage {
+                reason: "Invalid bzImage boot signature",
+            }));
         }
         let header_magic = u32::from_le_bytes([
             bzimage[0x202],
@@ -1333,19 +1424,15 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         ]);
         if header_magic != 0x53726448 {
             // "HdrS"
-            return Err(crate::Error::Cpu(
-                crate::cpu::CpuError::UnimplementedOpcode {
-                    opcode: "Invalid bzImage header magic".into(),
-                },
-            ));
+            return Err(crate::Error::Cpu(crate::cpu::CpuError::InvalidBootImage {
+                reason: "Invalid bzImage header magic",
+            }));
         }
         let boot_version = u16::from_le_bytes([bzimage[0x206], bzimage[0x207]]);
         if boot_version < 0x0204 {
-            return Err(crate::Error::Cpu(
-                crate::cpu::CpuError::UnimplementedOpcode {
-                    opcode: "boot protocol too old (need >= 2.04)",
-                },
-            ));
+            return Err(crate::Error::Cpu(crate::cpu::CpuError::InvalidBootImage {
+                reason: "boot protocol too old (need >= 2.04)",
+            }));
         }
 
         // Parse bzImage header
@@ -1791,10 +1878,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         #[cfg(feature = "std")]
         let mut last_ips_update = std::time::Instant::now();
         #[cfg(feature = "std")]
-        let mut last_ips_instructions = self.cpu.icount; // Bochs-compatible: track icount for IPS
-                                                         // MIPS terminal log: separate tracker fired every 5M instructions.
-                                                         // At 20 MIPS (active) fires every 250ms; at 40K IPS (idle) fires every ~125s.
-                                                         // This prevents flooding the terminal with "0.04 MIPS" lines during HLT idle.
+        let mut last_ips_instructions = self.cpu.icount;
+        // MIPS terminal log: separate tracker fired every 5M retired instructions.
+        // At 20 MIPS (active) fires every 250ms; at 40K IPS (idle) fires every ~125s.
+        // This prevents flooding the terminal with "0.04 MIPS" lines during HLT idle.
         #[cfg(feature = "std")]
         let mut last_mips_log_update = std::time::Instant::now();
         #[cfg(feature = "std")]
@@ -2107,8 +2194,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                 | crate::cpu::cpu::CpuActivityState::Mwait
                                 | crate::cpu::cpu::CpuActivityState::MwaitIf
                         ) {
-                            // CPU is halted/mwait: advance virtual clock in 10-usec steps until an
-                            // interrupt is pending. Matches Bochs handleWaitForEvent + BX_TICKN.
+                            // CPU is halted/mwait: advance virtual clock in 10-tick steps until an
+                            // interrupt is pending. Matches Bochs handleWaitForEvent + BX_TICKN(10).
                             //
                             // When a GUI is attached AND the CPU is in protected mode: sleep once
                             // after the batch to synchronise virtual time to wall-clock time.
@@ -2187,26 +2274,20 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                         break;
                                     }
                                 }
-                                // 2. Now get accurate countdown and advance
-                                let step = self
-                                    .pc_system
-                                    .get_num_ticks_left_next_event()
-                                    .clamp(1, 100_000);
+                                // 2. Advance halted virtual time in a device-friendly quantum.
+                                let step = self.hlt_wait_step_ticks();
                                 self.pc_system.tickn(step);
                                 self.dispatch_timer_fires();
                                 hlt_budget += step as u64;
-                                let dev_usec = (step as u64 * 1_000_000
-                                    / (self.config.ips as u64).max(1))
-                                .max(1);
-                                self.tick_devices(dev_usec);
-                                self.sync_event_flags();
+                                self.advance_devices_to_pc_time();
                                 // Wall-clock throttle: sleep if virtual time races ahead
                                 #[cfg(feature = "std")]
                                 {
                                     let virtual_usec =
                                         hlt_budget * 1_000_000 / (self.config.ips as u64).max(1);
                                     let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
-                                    if virtual_usec > wall_usec + 1_000 {
+                                    if self.config.sync_slowdown && virtual_usec > wall_usec + 1_000
+                                    {
                                         let sleep_usec = (virtual_usec - wall_usec).min(15_000);
                                         std::thread::sleep(std::time::Duration::from_micros(
                                             sleep_usec,
@@ -2262,15 +2343,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                 let r2 = unsafe { self.run_cpu_batch(batch2) };
                                 if let Ok(ex2) = r2 {
                                     instructions_executed += ex2;
-                                    let u2 = if self.config.ips != 0 {
-                                        (ex2 * 1_000_000 / (self.config.ips as u64)).max(10)
-                                    } else {
-                                        10
-                                    };
-                                    self.tick_devices(u2);
-                                    self.sync_event_flags();
                                     self.pc_system.tickn(ex2 as u32);
                                     self.dispatch_timer_fires();
+                                    self.advance_devices_to_pc_time();
                                     self.sync_event_flags();
                                     // LAPIC sync
                                     {
@@ -2320,7 +2395,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                 ) {
                                     break; // CPU is active — return to outer loop
                                 }
-                                // HLT loop: advance time to next interrupt
+                                // HLT loop: Bochs handleWaitForEvent advances BX_TICKN(10).
                                 let mwait_if2 = matches!(
                                     self.cpu.activity_state,
                                     crate::cpu::cpu::CpuActivityState::MwaitIf
@@ -2366,36 +2441,23 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                             break;
                                         }
                                     }
-                                    let s = self
-                                        .pc_system
-                                        .get_num_ticks_left_next_event()
-                                        .clamp(1, 100_000);
+                                    let s = self.hlt_wait_step_ticks();
                                     self.pc_system.tickn(s);
                                     self.dispatch_timer_fires();
                                     hlt2 += s as u64;
-                                    let du = (s as u64 * 1_000_000
-                                        / (self.config.ips as u64).max(1))
-                                    .max(1);
-                                    self.tick_devices(du);
-                                    self.sync_event_flags();
+                                    self.advance_devices_to_pc_time();
                                 }
                                 if self.cpu.lapic_has_intr() {
                                     self.cpu.signal_event(1 << 2);
                                 }
                             }
-                        } else {
-                            let usec_from_instr =
-                                (executed.saturating_mul(1_000_000)) / (self.config.ips as u64);
-                            // min 10 usec to prevent timer starvation at low instruction counts.
-                            let usec = usec_from_instr.max(10);
-                            self.tick_devices(usec);
-                            self.sync_event_flags();
                         }
                     }
 
                     // Drive pc_system timers via Bochs-exact tickn() mechanism.
                     self.pc_system.tickn(executed as u32);
                     self.dispatch_timer_fires();
+                    self.advance_devices_to_pc_time();
                     self.sync_event_flags();
 
                     // Handle LAPIC timer fires. With small batches (500 ticks) and
@@ -2629,14 +2691,16 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             #[cfg(feature = "std")]
             {
                 // Update IPS: show_ips() every 1 real second (keeps egui status bar responsive).
-                // Uses icount delta (Bochs-compatible: counts REP iterations as separate ticks).
-                // Bochs main.cc — ips_count = bx_pc_system.time_ticks() delta
+                // This is retired CPU instructions per real second. HLT/timer wait ticks are not
+                // CPU throughput and can sprint during firmware idle loops, so they are not shown.
                 let ips_elapsed = last_ips_update.elapsed();
                 if ips_elapsed >= IPS_SHOW_INTERVAL {
                     let current_icount = self.cpu.icount;
-                    let delta_ticks = current_icount - last_ips_instructions;
-                    let mips = (delta_ticks as f64 / ips_elapsed.as_secs_f64()) / 1_000_000.0;
-                    let ips = (mips * 1_000_000.0) as u32;
+                    let ips = status_ips_from_retired_instructions(
+                        last_ips_instructions,
+                        current_icount,
+                        ips_elapsed,
+                    );
                     last_ips_instructions = current_icount;
                     last_ips_update = std::time::Instant::now();
                     if let Some(ref mut gui) = self.gui {
@@ -2762,11 +2826,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             total_executed += executed;
 
             // --- Tick devices + pc_system ---
-            let usec = (executed * 1_000_000).checked_div(ips).unwrap_or(0).max(10);
-            self.tick_devices(usec);
-            self.sync_event_flags();
             self.pc_system.tickn(executed as u32);
             self.dispatch_timer_fires();
+            self.advance_devices_to_pc_time();
             self.sync_event_flags();
 
             // --- LAPIC timer catchup ---
@@ -2865,22 +2927,17 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                             break;
                         }
                     }
-                    let step = self
-                        .pc_system
-                        .get_num_ticks_left_next_event()
-                        .clamp(1, 100_000);
+                    let step = self.hlt_wait_step_ticks();
                     self.pc_system.tickn(step);
                     self.dispatch_timer_fires();
                     hlt_budget += step as u64;
-                    let dev_usec = (step as u64 * 1_000_000 / ips.max(1)).max(1);
-                    self.tick_devices(dev_usec);
-                    self.sync_event_flags();
+                    self.advance_devices_to_pc_time();
                     // Wall-clock throttle: sleep if virtual time races ahead
                     #[cfg(feature = "std")]
                     {
                         let virtual_usec = hlt_budget * 1_000_000 / ips.max(1);
                         let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
-                        if virtual_usec > wall_usec + 1_000 {
+                        if self.config.sync_slowdown && virtual_usec > wall_usec + 1_000 {
                             let sleep_usec = (virtual_usec - wall_usec).min(15_000);
                             std::thread::sleep(std::time::Duration::from_micros(sleep_usec));
                         }
@@ -3580,6 +3637,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
     }
 }
 
+#[cfg(feature = "std")]
+#[inline]
+fn status_ips_from_retired_instructions(
+    last_instructions: u64,
+    current_instructions: u64,
+    elapsed: std::time::Duration,
+) -> u32 {
+    if elapsed.is_zero() {
+        return 0;
+    }
+
+    let ips = current_instructions.saturating_sub(last_instructions) as f64 / elapsed.as_secs_f64();
+    ips.clamp(0.0, u32::MAX as f64) as u32
+}
+
 // Ensure Emulator is Send (can be moved between threads)
 // Each instance is fully independent with no shared state
 unsafe impl<I: BxCpuIdTrait + Send, T: crate::cpu::instrumentation::Instrumentation + Send> Send
@@ -3591,6 +3663,8 @@ unsafe impl<I: BxCpuIdTrait + Send, T: crate::cpu::instrumentation::Instrumentat
 mod tests {
     use super::*;
     use crate::cpu::core_i7_skylake::Corei7SkylakeX;
+    use crate::cpu::instrumentation::{CpuSetupMode, X86Reg};
+    use crate::pc_system::TimerOwner;
 
     #[test]
     fn test_emulator_creation() {
@@ -3646,6 +3720,227 @@ mod tests {
                 emu1.pc_system.tickn(1000);
                 assert_eq!(emu1.ticks(), 1000);
                 assert_eq!(emu2.ticks(), 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn hlt_wait_batches_device_ticks_even_when_pc_timer_is_due_each_tick() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.pc_system.initialize(emu.config.ips);
+                emu.pc_system
+                    .register_timer(TimerOwner::NullTimer, 1, true, true, "one_tick")
+                    .unwrap();
+
+                let mut hlt_budget = 0u64;
+                while hlt_budget < emu.config.ips as u64 / 1_000 {
+                    let step = emu.hlt_wait_step_ticks();
+                    emu.pc_system.tickn(step);
+                    emu.dispatch_timer_fires();
+                    hlt_budget += step as u64;
+                    emu.advance_devices_to_pc_time();
+                }
+
+                assert_eq!(emu.device_manager.diag_total_usec, 1_000);
+                assert!(
+                    emu.device_manager.diag_tick_count <= 1,
+                    "device ticks should be batched to 1ms, got {} calls",
+                    emu.device_manager.diag_tick_count
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn realtime_pit_service_runs_before_virtual_millisecond_delta() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.ips = 300_000_000;
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.pc_system.initialize(emu.config.ips);
+                emu.device_manager
+                    .pit
+                    .init_icount_sync(emu.cpu.icount, emu.config.ips as u64);
+                emu.device_manager.pit.enable_realtime_sync();
+
+                let before = emu.device_manager.pit.total_ticks;
+                emu.pc_system.tickn(4_096);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                emu.advance_devices_to_pc_time();
+
+                assert!(
+                    emu.device_manager.pit.total_ticks > before,
+                    "realtime PIT must be serviced even when configured IPS keeps virtual delta below 1 ms"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn run_cpu_batch_does_not_collapse_to_trace_sized_batches_when_timer_is_due_each_tick() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                let code = [0x90u8; 8192];
+                emu.virt_write(0x1000, &code).unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+                emu.pc_system
+                    .register_timer(TimerOwner::NullTimer, 1, true, true, "one_tick")
+                    .unwrap();
+
+                let executed = unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                assert!(
+                    executed >= 1024,
+                    "near timer collapsed CPU batch to {executed} instructions"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn active_cpu_batch_returns_at_millisecond_quantum_for_timer_service() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                let code = vec![0x90u8; 131_072];
+                emu.virt_write(0x1000, &code).unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+
+                let executed = unsafe { emu.run_cpu_batch(100_000) }.unwrap();
+                assert!(
+                    (1_024..10_000).contains(&executed),
+                    "active batch should yield near the 1ms timer-service quantum, got {executed}"
+                );
+
+                let mut high_ips_config = EmulatorConfig::default();
+                high_ips_config.ips = 300_000_000;
+                let mut high_ips_emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    high_ips_config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                high_ips_emu.virt_write(0x1000, &code).unwrap();
+                high_ips_emu.reg_write(X86Reg::Rip, 0x1000);
+
+                assert_eq!(high_ips_emu.active_batch_step_ticks(100_000), 4_096);
+
+                let executed = unsafe { high_ips_emu.run_cpu_batch(100_000) }.unwrap();
+                assert!(
+                    (1_024..=8_192).contains(&executed),
+                    "high-IPS active batch should still yield before BIOS poll loops can time out, got {executed}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn keyboard_reset_ack_reaches_bios_poll_before_timeout_at_high_configured_ips() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.ips = 300_000_000;
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                let code = [
+                    0xB0, 0xFF, 0xE6, 0x60, 0xB9, 0xFF, 0xFF, 0x00, 0x00, 0xE4, 0x64, 0xA8, 0x01,
+                    0x75, 0x0B, 0xE2, 0xF8, 0xC6, 0x05, 0x00, 0x20, 0x00, 0x00, 0xEE, 0xEB, 0x09,
+                    0xE4, 0x60, 0xC6, 0x05, 0x00, 0x20, 0x00, 0x00, 0xAA, 0xF4,
+                ];
+                emu.virt_write(0x1000, &code).unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+
+                for _ in 0..16 {
+                    let executed = unsafe { emu.run_cpu_batch(100_000) }.unwrap();
+                    emu.pc_system.tickn(executed as u32);
+                    emu.dispatch_timer_fires();
+                    emu.advance_devices_to_pc_time();
+                    emu.sync_event_flags();
+
+                    if emu.virt_read_u8(0x2000).unwrap() != 0 {
+                        break;
+                    }
+                }
+
+                assert_eq!(
+                    emu.virt_read_u8(0x2000).unwrap(),
+                    0xaa,
+                    "BIOS-style keyboard reset poll timed out before OBF/ACK reached port 0x64"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn status_ips_uses_retired_instructions_not_virtual_wait_ticks() {
+        let elapsed = std::time::Duration::from_secs(1);
+
+        assert_eq!(
+            status_ips_from_retired_instructions(1_000, 1_081, elapsed),
+            81
+        );
+    }
+    #[test]
+    fn hlt_wait_step_uses_millisecond_quantum_without_near_pc_timer() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig::default();
+                let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+
+                assert_eq!(emu.hlt_wait_step_ticks(), 4_000);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn hlt_wait_step_respects_near_pc_system_timer() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.pc_system.initialize(emu.config.ips);
+                emu.pc_system
+                    .register_timer(TimerOwner::Lapic, 37, false, true, "near_timer")
+                    .unwrap();
+
+                assert_eq!(emu.hlt_wait_step_ticks(), 37);
             })
             .unwrap()
             .join()

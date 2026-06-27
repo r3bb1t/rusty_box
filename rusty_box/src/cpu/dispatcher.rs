@@ -2591,6 +2591,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::MaxpdVpdWpd => self.maxpd_vpd_wpd(instr),
             Opcode::MaxssVssWss => self.maxss_vss_wss(instr),
             Opcode::MaxsdVsdWsd => self.maxsd_vsd_wsd(instr),
+            Opcode::RoundpsVpsWpsIb => self.roundps_vps_wps_ib(instr),
+            Opcode::RoundpdVpdWpdIb => self.roundpd_vpd_wpd_ib(instr),
+            Opcode::RoundssVssWssIb => self.roundss_vss_wss_ib(instr),
+            Opcode::RoundsdVsdWsdIb => self.roundsd_vsd_wsd_ib(instr),
 
             // SSE/SSE2 Reciprocal & Reciprocal Square Root (sse_rcp.rs)
             Opcode::RcppsVpsWps => self.rcpps_vps_wps(instr),
@@ -3409,6 +3413,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.evex_vcvttps2udq(instr)
             }
 
+            // --- VEX FMA 132 (avx.rs) ---
+            Opcode::Vfmadd132psVpsHpsWps => self.vfmadd132ps(instr),
+            Opcode::Vfmadd132pdVpdHpdWpd => self.vfmadd132pd(instr),
+            Opcode::Vfmadd132ssVpsHssWss => self.vfmadd132ss(instr),
+            Opcode::Vfmadd132sdVpdHsdWsd => self.vfmadd132sd(instr),
+
             // --- EVEX FMA (avx512_fma.rs) ---
             Opcode::EvexVfmadd132psVpsHpsWps | Opcode::EvexVfmadd132psVpsHpsWpsKmask => {
                 self.evex_vfmadd132ps(instr)
@@ -3806,6 +3816,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.evex_vpxord(instr)
             }
 
+            // --- VEX FP logical (Bochs HANDLE_AVX_2OP<xmm_*ps>) ---
+            Opcode::VandpsVpsHpsWps | Opcode::VandpdVpdHpdWpd => self.vandps(instr),
+            Opcode::VandnpsVpsHpsWps | Opcode::VandnpdVpdHpdWpd => self.vandnps(instr),
+            Opcode::VorpsVpsHpsWps | Opcode::VorpdVpdHpdWpd => self.vorps(instr),
+            Opcode::VxorpsVpsHpsWps | Opcode::VxorpdVpdHpdWpd => self.vxorps(instr),
+
             Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vextracti128WdqVdqIb => self.vextracti128(instr),
@@ -3826,8 +3842,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::VpbroadcastwVdqWw => self.vpbroadcastw(instr),
             Opcode::VpbroadcastdVdqWd => self.vpbroadcastd(instr),
             Opcode::VpbroadcastqVdqWq => self.vpbroadcastq(instr),
-            // AVX2 VPERMD
+            // AVX2 VPERMD/VPERMQ
             Opcode::V256VpermdVdqHdqWdq => self.vpermd(instr),
+            Opcode::V256VpermqVdqWdqIb => self.vpermq(instr),
 
             // =====================================================================
             // VEX-encoded (V128/V256) integer arithmetic
@@ -3871,6 +3888,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::V128VpmulhrswVdqHdqWdq | Opcode::V256VpmulhrswVdqHdqWdq => {
                 self.vpmulhrsw(instr)
             }
+
+            Opcode::V128VpsadbwVdqHdqWdq | Opcode::V256VpsadbwVdqHdqWdq => self.vpsadbw(instr),
 
             // =====================================================================
             // VEX-encoded integer min/max
@@ -4139,7 +4158,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     self.prev_rip
                 );
                 Err(crate::cpu::CpuError::UnimplementedOpcode {
-                    opcode: "unimplemented opcode",
+                    opcode: instr.get_ia_opcode(),
                 })
             }
         }
@@ -4150,9 +4169,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 mod tests {
     use super::*;
     use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpu::CpuMode;
     use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::crregs::BxCr4;
     use crate::cpu::decoder::BxSegregs;
+    use crate::memory::{BxMemC, BxMemoryStubC};
+    use std::ptr::NonNull;
 
     #[derive(Clone, Copy)]
     enum LaneWidth {
@@ -4184,10 +4206,134 @@ mod tests {
         instr
     }
 
+    fn make_vpsadbw_instr(opcode: Opcode, vl: u8) -> Instruction {
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(opcode);
+        instr.set_vex(true);
+        instr.set_vl(vl);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(1, 3);
+        instr.set_src_reg(2, 2);
+        instr.set_seg(BxSegregs::Ds);
+        instr
+    }
+
+    fn make_vex_fp_logical_instr(opcode: Opcode, vl: u8) -> Instruction {
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(opcode);
+        instr.set_vex(true);
+        instr.set_vl(vl);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(1, 3);
+        instr.set_src_reg(2, 2);
+        instr.set_seg(BxSegregs::Ds);
+        instr
+    }
+
     fn enable_sse<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         cpu: &mut BxCpuC<'_, I, T>,
     ) {
         cpu.cr4.insert(BxCr4::OSFXSR);
+    }
+
+    fn make_legacy_round_instr(opcode: Opcode, dst: u8, src: u8, imm: u8) -> Instruction {
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(opcode);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, dst);
+        instr.set_src_reg(1, src);
+        instr.set_iq(imm as u64);
+        instr.set_seg(BxSegregs::Ds);
+        instr
+    }
+    #[test]
+    fn unimplemented_opcode_error_reports_exact_opcode() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::PminsbVdqWdq);
+
+        let error = cpu.execute_instruction(&instr).unwrap_err();
+
+        assert_eq!(error.to_string(), "Unimplemented opcode: PminsbVdqWdq");
+        match error {
+            crate::cpu::CpuError::UnimplementedOpcode { opcode } => {
+                assert_eq!(format!("{opcode:?}"), "PminsbVdqWdq");
+            }
+            other => panic!("expected unimplemented opcode error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn roundsd_legacy_regression_for_ubuntu_guest_userspace() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        let instr = make_legacy_round_instr(Opcode::RoundsdVsdWsdIb, 1, 3, 3);
+
+        for i in 0..8 {
+            cpu.vmm[1].set_zmm64u(i, 0xA5A5_0000_0000_0000 | i as u64);
+        }
+        cpu.vmm[3].set_zmm64u(0, 1.75f64.to_bits());
+
+        cpu.execute_instruction(&instr).unwrap();
+
+        assert_eq!(cpu.vmm[1].zmm64u(0), 1.0f64.to_bits());
+        for i in 1..8 {
+            assert_eq!(cpu.vmm[1].zmm64u(i), 0xA5A5_0000_0000_0000 | i as u64);
+        }
+    }
+
+    #[test]
+    fn legacy_sse41_round_family_register_semantics() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+
+        for i in 0..8 {
+            cpu.vmm[1].set_zmm64u(i, 0x5A5A_0000_0000_0000 | i as u64);
+        }
+        cpu.vmm[3].set_zmm32u(0, 1.25f32.to_bits());
+        cpu.vmm[3].set_zmm32u(1, 1.75f32.to_bits());
+        cpu.vmm[3].set_zmm32u(2, (-1.25f32).to_bits());
+        cpu.vmm[3].set_zmm32u(3, (-1.75f32).to_bits());
+        let instr = make_legacy_round_instr(Opcode::RoundpsVpsWpsIb, 1, 3, 1);
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(cpu.vmm[1].zmm32u(0), 1.0f32.to_bits());
+        assert_eq!(cpu.vmm[1].zmm32u(1), 1.0f32.to_bits());
+        assert_eq!(cpu.vmm[1].zmm32u(2), (-2.0f32).to_bits());
+        assert_eq!(cpu.vmm[1].zmm32u(3), (-2.0f32).to_bits());
+        assert_eq!(cpu.vmm[1].zmm64u(2), 0x5A5A_0000_0000_0000 | 2);
+
+        cpu.vmm[3].set_zmm64u(0, 1.25f64.to_bits());
+        cpu.vmm[3].set_zmm64u(1, (-1.25f64).to_bits());
+        let instr = make_legacy_round_instr(Opcode::RoundpdVpdWpdIb, 1, 3, 2);
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(cpu.vmm[1].zmm64u(0), 2.0f64.to_bits());
+        assert_eq!(cpu.vmm[1].zmm64u(1), (-1.0f64).to_bits());
+        assert_eq!(cpu.vmm[1].zmm64u(2), 0x5A5A_0000_0000_0000 | 2);
+
+        cpu.vmm[1].set_zmm32u(0, 0xDEAD_BEEF);
+        cpu.vmm[1].set_zmm32u(1, 0xCAFE_BABE);
+        cpu.vmm[1].set_zmm32u(2, 0xFEED_FACE);
+        cpu.vmm[1].set_zmm32u(3, 0x8BAD_F00D);
+        cpu.vmm[3].set_zmm32u(0, (-1.75f32).to_bits());
+        let instr = make_legacy_round_instr(Opcode::RoundssVssWssIb, 1, 3, 3);
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(cpu.vmm[1].zmm32u(0), (-1.0f32).to_bits());
+        assert_eq!(cpu.vmm[1].zmm32u(1), 0xCAFE_BABE);
+        assert_eq!(cpu.vmm[1].zmm32u(2), 0xFEED_FACE);
+        assert_eq!(cpu.vmm[1].zmm32u(3), 0x8BAD_F00D);
+
+        cpu.vmm[1].set_zmm64u(0, 0xDEAD_BEEF_DEAD_BEEF);
+        cpu.vmm[1].set_zmm64u(1, 0xCAFE_BABE_CAFE_BABE);
+        cpu.vmm[3].set_zmm64u(0, (-2.5f64).to_bits());
+        let instr = make_legacy_round_instr(Opcode::RoundsdVsdWsdIb, 1, 3, 0);
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(cpu.vmm[1].zmm64u(0), (-2.0f64).to_bits());
+        assert_eq!(cpu.vmm[1].zmm64u(1), 0xCAFE_BABE_CAFE_BABE);
     }
 
     #[test]
@@ -4214,6 +4360,554 @@ mod tests {
         }
         for i in 32..64 {
             assert_eq!(cpu.vmm[1].zmmubyte(i), 0, "upper byte lane {i}");
+        }
+    }
+
+    #[test]
+    fn vex_vpsadbw_register_semantics_cover_v128_v256() {
+        for (opcode, vl, qword_count) in [
+            (Opcode::V128VpsadbwVdqHdqWdq, 0, 2),
+            (Opcode::V256VpsadbwVdqHdqWdq, 1, 4),
+        ] {
+            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            enable_sse(&mut cpu);
+            let instr = make_vpsadbw_instr(opcode, vl);
+
+            for i in 0..64 {
+                cpu.vmm[1].set_zmmubyte(i, 0xA5);
+            }
+            for i in 0..(qword_count * 8) {
+                let src1 = [0, 1, 127, 128, 254, 255, 42, 200][i % 8];
+                let src2 = [255, 254, 128, 127, 1, 0, 200, 42][i % 8];
+                cpu.vmm[2].set_zmmubyte(i, src1);
+                cpu.vmm[3].set_zmmubyte(i, src2);
+            }
+
+            cpu.execute_instruction(&instr).unwrap();
+
+            for qword in 0..qword_count {
+                let expected = (0..8)
+                    .map(|j| {
+                        let byte = qword * 8 + j;
+                        (cpu.vmm[2].zmmubyte(byte) as i16 - cpu.vmm[3].zmmubyte(byte) as i16)
+                            .unsigned_abs() as u64
+                    })
+                    .sum::<u64>();
+                assert_eq!(
+                    cpu.vmm[1].zmm64u(qword),
+                    expected,
+                    "{opcode:?} qword {qword}"
+                );
+            }
+            for qword in qword_count..8 {
+                assert_eq!(
+                    cpu.vmm[1].zmm64u(qword),
+                    0,
+                    "{opcode:?} upper qword {qword}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vex_vpsadbw_memory_source_uses_rm_operand() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+
+        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(mem_stub, false);
+        cpu.a20_mask = mem.a20_mask();
+        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
+        cpu.mem_ptr = Some(mem_vector);
+        cpu.mem_len = mem_len;
+        let (host_base, host_len) = mem.get_ram_base_ptr();
+        cpu.mem_host_base = host_base;
+        cpu.mem_host_len = host_len;
+        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::V256VpsadbwVdqHdqWdq);
+        instr.set_vex(true);
+        instr.set_vl(1);
+        instr.init(0, 0, 1, 1);
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(2, 2);
+        instr.set_sib_base(rusty_box_decoder::instruction::GprIndex::Rbx as usize as u8);
+        instr.set_sib_index(4);
+        instr.set_sib_scale(0);
+        instr.set_displ32(0);
+        instr.set_seg(BxSegregs::Ds);
+
+        cpu.set_gpr64(
+            rusty_box_decoder::instruction::GprIndex::Rbx as usize,
+            0x4000,
+        );
+        let mut rm_bytes = [0u8; 32];
+        for (i, byte) in rm_bytes.iter_mut().enumerate() {
+            *byte = [255, 0, 128, 127, 1, 254, 64, 192][i % 8];
+            cpu.write_virtual_byte_64(BxSegregs::Ds, 0x4000 + i as u64, *byte)
+                .unwrap();
+            cpu.vmm[2].set_zmmubyte(i, [0, 255, 127, 128, 254, 1, 192, 64][i % 8]);
+        }
+        for i in 0..64 {
+            cpu.vmm[1].set_zmmubyte(i, 0xA5);
+        }
+
+        cpu.execute_instruction(&instr).unwrap();
+
+        for qword in 0..4 {
+            let expected = (0..8)
+                .map(|j| {
+                    let byte = qword * 8 + j;
+                    (cpu.vmm[2].zmmubyte(byte) as i16 - rm_bytes[byte] as i16).unsigned_abs() as u64
+                })
+                .sum::<u64>();
+            assert_eq!(cpu.vmm[1].zmm64u(qword), expected, "qword {qword}");
+        }
+        for qword in 4..8 {
+            assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
+        }
+    }
+
+    #[test]
+    fn bts_ed_gd_memory_keeps_64_bit_effective_address() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(mem_stub, false);
+        cpu.a20_mask = mem.a20_mask();
+        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
+        cpu.mem_ptr = Some(mem_vector);
+        cpu.mem_len = mem_len;
+        let (host_base, host_len) = mem.get_ram_base_ptr();
+        cpu.mem_host_base = host_base;
+        cpu.mem_host_len = host_len;
+        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+        cpu.cpu_mode = CpuMode::Long64;
+
+        cpu.linaddr_width = 48;
+        const LOW_ADDR: u64 = 0x4000;
+        const HIGH_ADDR: u64 = 0x1_0000_4000;
+        cpu.write_virtual_dword_64(BxSegregs::Ds, LOW_ADDR, 0x1234_0000)
+            .unwrap();
+        cpu.set_rbx(HIGH_ADDR);
+        cpu.set_r14(1);
+
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::BtsEdGd);
+        instr.init(1, 0, 0, 1);
+        instr.set_src_reg(
+            1,
+            rusty_box_decoder::instruction::GprIndex::R14 as usize as u8,
+        );
+        instr.set_sib_base(rusty_box_decoder::instruction::GprIndex::Rbx as usize as u8);
+        instr.set_sib_index(4);
+        instr.set_sib_scale(0);
+        instr.set_displ32(0);
+        instr.set_seg(BxSegregs::Ds);
+
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(
+            cpu.read_virtual_dword_64(BxSegregs::Ds, LOW_ADDR).unwrap(),
+            0x1234_0000,
+            "BTS Ed,Gd in 64-bit address mode must not truncate the memory address"
+        );
+    }
+
+    #[test]
+    fn bts_ew_gw_memory_keeps_64_bit_effective_address() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(mem_stub, false);
+        cpu.a20_mask = mem.a20_mask();
+        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
+        cpu.mem_ptr = Some(mem_vector);
+        cpu.mem_len = mem_len;
+        let (host_base, host_len) = mem.get_ram_base_ptr();
+        cpu.mem_host_base = host_base;
+        cpu.mem_host_len = host_len;
+        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+        cpu.cpu_mode = CpuMode::Long64;
+        cpu.linaddr_width = 48;
+
+        const LOW_ADDR: u64 = 0x5000;
+        const HIGH_ADDR: u64 = 0x1_0000_5000;
+        cpu.write_virtual_word_64(BxSegregs::Ds, LOW_ADDR, 0x1200)
+            .unwrap();
+        cpu.set_rbx(HIGH_ADDR);
+        cpu.set_r14(1);
+
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::BtsEwGw);
+        instr.init(0, 0, 0, 1);
+        instr.set_src_reg(
+            1,
+            rusty_box_decoder::instruction::GprIndex::R14 as usize as u8,
+        );
+        instr.set_sib_base(rusty_box_decoder::instruction::GprIndex::Rbx as usize as u8);
+        instr.set_sib_index(4);
+        instr.set_sib_scale(0);
+        instr.set_displ32(0);
+        instr.set_seg(BxSegregs::Ds);
+
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(
+            cpu.read_virtual_word_64(BxSegregs::Ds, LOW_ADDR).unwrap(),
+            0x1200,
+            "BTS Ew,Gw in 64-bit address mode must not truncate the memory address"
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum VexLogicalOp {
+        And,
+        AndNot,
+        Or,
+        Xor,
+    }
+
+    fn expected_vex_logical(src1: u64, src2: u64, op: VexLogicalOp) -> u64 {
+        match op {
+            VexLogicalOp::And => src1 & src2,
+            VexLogicalOp::AndNot => !src1 & src2,
+            VexLogicalOp::Or => src1 | src2,
+            VexLogicalOp::Xor => src1 ^ src2,
+        }
+    }
+
+    #[test]
+    fn vex_fp_logical_family_register_semantics_cover_vl128_vl256() {
+        for (opcode, op) in [
+            (Opcode::VandpsVpsHpsWps, VexLogicalOp::And),
+            (Opcode::VandpdVpdHpdWpd, VexLogicalOp::And),
+            (Opcode::VandnpsVpsHpsWps, VexLogicalOp::AndNot),
+            (Opcode::VandnpdVpdHpdWpd, VexLogicalOp::AndNot),
+            (Opcode::VorpsVpsHpsWps, VexLogicalOp::Or),
+            (Opcode::VorpdVpdHpdWpd, VexLogicalOp::Or),
+            (Opcode::VxorpsVpsHpsWps, VexLogicalOp::Xor),
+            (Opcode::VxorpdVpdHpdWpd, VexLogicalOp::Xor),
+        ] {
+            for (vl, qword_count) in [(0, 2), (1, 4)] {
+                let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                enable_sse(&mut cpu);
+                let instr = make_vex_fp_logical_instr(opcode, vl);
+                for qword in 0..8 {
+                    cpu.vmm[1].set_zmm64u(qword, 0xA5A5_A5A5_A5A5_A5A5);
+                    cpu.vmm[2].set_zmm64u(
+                        qword,
+                        0xF0F0_0000_1234_5678u64.rotate_left((qword * 7) as u32),
+                    );
+                    cpu.vmm[3].set_zmm64u(
+                        qword,
+                        0x0F0F_FFFF_8765_4321u64.rotate_right((qword * 5) as u32),
+                    );
+                }
+
+                cpu.execute_instruction(&instr).unwrap();
+
+                for qword in 0..qword_count {
+                    assert_eq!(
+                        cpu.vmm[1].zmm64u(qword),
+                        expected_vex_logical(
+                            cpu.vmm[2].zmm64u(qword),
+                            cpu.vmm[3].zmm64u(qword),
+                            op
+                        ),
+                        "{opcode:?} VL{vl} qword {qword}"
+                    );
+                }
+                for qword in qword_count..8 {
+                    assert_eq!(
+                        cpu.vmm[1].zmm64u(qword),
+                        0,
+                        "{opcode:?} VL{vl} upper qword {qword}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vex_vxorps_memory_source_uses_rm_operand() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+
+        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(mem_stub, false);
+        cpu.a20_mask = mem.a20_mask();
+        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
+        cpu.mem_ptr = Some(mem_vector);
+        cpu.mem_len = mem_len;
+        let (host_base, host_len) = mem.get_ram_base_ptr();
+        cpu.mem_host_base = host_base;
+        cpu.mem_host_len = host_len;
+        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::VxorpsVpsHpsWps);
+        instr.set_vex(true);
+        instr.set_vl(1);
+        instr.init(0, 0, 1, 1);
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(2, 2);
+        instr.set_sib_base(rusty_box_decoder::instruction::GprIndex::Rbx as usize as u8);
+        instr.set_sib_index(4);
+        instr.set_sib_scale(0);
+        instr.set_displ32(0);
+        instr.set_seg(BxSegregs::Ds);
+
+        cpu.set_rbx(0x6000);
+        let mut rm_qwords = [0u64; 4];
+        for qword in 0..4 {
+            let src1 = 0x0123_4567_89AB_CDEFu64.rotate_left((qword * 11) as u32);
+            let src2 = 0xFEDC_BA98_7654_3210u64.rotate_right((qword * 13) as u32);
+            rm_qwords[qword] = src2;
+            cpu.vmm[2].set_zmm64u(qword, src1);
+            cpu.write_virtual_qword_64(BxSegregs::Ds, 0x6000 + (qword * 8) as u64, src2)
+                .unwrap();
+        }
+        for qword in 0..8 {
+            cpu.vmm[1].set_zmm64u(qword, 0x5A5A_5A5A_5A5A_5A5A);
+        }
+
+        cpu.execute_instruction(&instr).unwrap();
+
+        for qword in 0..4 {
+            assert_eq!(
+                cpu.vmm[1].zmm64u(qword),
+                cpu.vmm[2].zmm64u(qword) ^ rm_qwords[qword],
+                "memory qword {qword}"
+            );
+        }
+        for qword in 4..8 {
+            assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
+        }
+    }
+
+    #[test]
+    fn vex_vpermq_register_semantics_match_bochs() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::V256VpermqVdqWdqIb);
+        instr.set_vex(true);
+        instr.set_vl(1);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(1, 3);
+        instr.set_iq(0b11_00_10_01);
+        instr.set_seg(BxSegregs::Ds);
+
+        let source = [
+            0x1111_1111_1111_1111,
+            0x2222_2222_2222_2222,
+            0x3333_3333_3333_3333,
+            0x4444_4444_4444_4444,
+        ];
+        for qword in 0..4 {
+            cpu.vmm[3].set_zmm64u(qword, source[qword]);
+        }
+        for qword in 0..8 {
+            cpu.vmm[1].set_zmm64u(qword, 0xA5A5_A5A5_A5A5_A5A5);
+        }
+
+        cpu.execute_instruction(&instr).unwrap();
+
+        assert_eq!(cpu.vmm[1].zmm64u(0), source[1]);
+        assert_eq!(cpu.vmm[1].zmm64u(1), source[2]);
+        assert_eq!(cpu.vmm[1].zmm64u(2), source[0]);
+        assert_eq!(cpu.vmm[1].zmm64u(3), source[3]);
+        for qword in 4..8 {
+            assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
+        }
+    }
+
+    #[test]
+    fn vex_vfmadd132_packed_register_semantics_match_bochs() {
+        for (opcode, is_double, vl, lanes) in [
+            (Opcode::Vfmadd132psVpsHpsWps, false, 0, 4),
+            (Opcode::Vfmadd132psVpsHpsWps, false, 1, 8),
+            (Opcode::Vfmadd132pdVpdHpdWpd, true, 0, 2),
+            (Opcode::Vfmadd132pdVpdHpdWpd, true, 1, 4),
+        ] {
+            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            enable_sse(&mut cpu);
+
+            let mut instr = Instruction::default();
+            instr.set_ia_opcode(opcode);
+            instr.set_vex(true);
+            instr.set_vl(vl);
+            instr.init(0, 0, 1, 1);
+            instr.assert_mod_c0();
+            instr.set_src_reg(0, 1);
+            instr.set_src_reg(1, 3);
+            instr.set_src_reg(2, 2);
+            instr.set_seg(BxSegregs::Ds);
+
+            for qword in 0..8 {
+                cpu.vmm[1].set_zmm64u(qword, 0xA5A5_A5A5_A5A5_A5A5);
+                cpu.vmm[2].set_zmm64u(qword, 0);
+                cpu.vmm[3].set_zmm64u(qword, 0);
+            }
+
+            if is_double {
+                for lane in 0..lanes {
+                    cpu.vmm[1].set_zmm64u(lane, (lane as f64 + 1.0).to_bits());
+                    cpu.vmm[2].set_zmm64u(lane, (lane as f64 + 10.0).to_bits());
+                    cpu.vmm[3].set_zmm64u(lane, (lane as f64 + 2.0).to_bits());
+                }
+            } else {
+                for lane in 0..lanes {
+                    cpu.vmm[1].set_zmm32u(lane, (lane as f32 + 1.0).to_bits());
+                    cpu.vmm[2].set_zmm32u(lane, (lane as f32 + 10.0).to_bits());
+                    cpu.vmm[3].set_zmm32u(lane, (lane as f32 + 2.0).to_bits());
+                }
+            }
+
+            cpu.execute_instruction(&instr).unwrap();
+
+            if is_double {
+                for lane in 0..lanes {
+                    let expected =
+                        (lane as f64 + 1.0).mul_add(lane as f64 + 2.0, lane as f64 + 10.0);
+                    assert_eq!(
+                        cpu.vmm[1].zmm64u(lane),
+                        expected.to_bits(),
+                        "{opcode:?} lane {lane}"
+                    );
+                }
+            } else {
+                for lane in 0..lanes {
+                    let expected =
+                        (lane as f32 + 1.0).mul_add(lane as f32 + 2.0, lane as f32 + 10.0);
+                    assert_eq!(
+                        cpu.vmm[1].zmm32u(lane),
+                        expected.to_bits(),
+                        "{opcode:?} lane {lane}"
+                    );
+                }
+            }
+
+            let first_upper_qword = if vl == 0 { 2 } else { 4 };
+            for qword in first_upper_qword..8 {
+                assert_eq!(
+                    cpu.vmm[1].zmm64u(qword),
+                    0,
+                    "{opcode:?} upper qword {qword}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn vex_vfmadd132_scalar_register_semantics_match_bochs() {
+        for (opcode, is_double) in [
+            (Opcode::Vfmadd132ssVpsHssWss, false),
+            (Opcode::Vfmadd132sdVpdHsdWsd, true),
+        ] {
+            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            enable_sse(&mut cpu);
+
+            let mut instr = Instruction::default();
+            instr.set_ia_opcode(opcode);
+            instr.set_vex(true);
+            instr.set_vl(0);
+            instr.init(0, 0, 1, 1);
+            instr.assert_mod_c0();
+            instr.set_src_reg(0, 1);
+            instr.set_src_reg(1, 3);
+            instr.set_src_reg(2, 2);
+            instr.set_seg(BxSegregs::Ds);
+
+            for qword in 0..8 {
+                cpu.vmm[1].set_zmm64u(qword, 0xDEAD_BEEF_DEAD_BEEF);
+                cpu.vmm[2].set_zmm64u(qword, 0x2222_2222_2222_2222);
+                cpu.vmm[3].set_zmm64u(qword, 0x3333_3333_3333_3333);
+            }
+
+            if is_double {
+                cpu.vmm[1].set_zmm64u(0, 1.5f64.to_bits());
+                cpu.vmm[1].set_zmm64u(1, 0xCAFE_BABE_CAFE_BABE);
+                cpu.vmm[2].set_zmm64u(0, 4.0f64.to_bits());
+                cpu.vmm[3].set_zmm64u(0, 2.0f64.to_bits());
+            } else {
+                cpu.vmm[1].set_zmm32u(0, 1.5f32.to_bits());
+                cpu.vmm[1].set_zmm32u(1, 0xCAFE_BABE);
+                cpu.vmm[2].set_zmm32u(0, 4.0f32.to_bits());
+                cpu.vmm[3].set_zmm32u(0, 2.0f32.to_bits());
+            }
+
+            cpu.execute_instruction(&instr).unwrap();
+
+            if is_double {
+                assert_eq!(cpu.vmm[1].zmm64u(0), 1.5f64.mul_add(2.0, 4.0).to_bits());
+                assert_eq!(cpu.vmm[1].zmm64u(1), 0xCAFE_BABE_CAFE_BABE);
+                for qword in 2..8 {
+                    assert_eq!(
+                        cpu.vmm[1].zmm64u(qword),
+                        0,
+                        "{opcode:?} upper qword {qword}"
+                    );
+                }
+            } else {
+                assert_eq!(cpu.vmm[1].zmm32u(0), 1.5f32.mul_add(2.0, 4.0).to_bits());
+                assert_eq!(cpu.vmm[1].zmm32u(1), 0xCAFE_BABE);
+                assert_eq!(cpu.vmm[1].zmm64u(1), 0xDEAD_BEEF_DEAD_BEEF);
+                for qword in 2..8 {
+                    assert_eq!(
+                        cpu.vmm[1].zmm64u(qword),
+                        0,
+                        "{opcode:?} upper qword {qword}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vex_vfmadd132sd_memory_source_uses_rm_operand() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        cpu.cpu_mode = CpuMode::Long64;
+        cpu.linaddr_width = 48;
+
+        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(mem_stub, false);
+        cpu.a20_mask = mem.a20_mask();
+        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
+        cpu.mem_ptr = Some(mem_vector);
+        cpu.mem_len = mem_len;
+        let (host_base, host_len) = mem.get_ram_base_ptr();
+        cpu.mem_host_base = host_base;
+        cpu.mem_host_len = host_len;
+        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::Vfmadd132sdVpdHsdWsd);
+        instr.set_vex(true);
+        instr.set_vl(0);
+        instr.init(0, 0, 1, 1);
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(2, 2);
+        instr.set_sib_base(rusty_box_decoder::instruction::GprIndex::Rbx as usize as u8);
+        instr.set_sib_index(4);
+        instr.set_sib_scale(0);
+        instr.set_displ32(0);
+        instr.set_seg(BxSegregs::Ds);
+
+        cpu.set_rbx(0x7000);
+        cpu.vmm[1].set_zmm64u(0, 3.0f64.to_bits());
+        cpu.vmm[1].set_zmm64u(1, 0x1234_5678_9ABC_DEF0);
+        cpu.vmm[2].set_zmm64u(0, 5.0f64.to_bits());
+        cpu.write_virtual_qword_64(BxSegregs::Ds, 0x7000, 7.0f64.to_bits())
+            .unwrap();
+
+        cpu.execute_instruction(&instr).unwrap();
+
+        assert_eq!(cpu.vmm[1].zmm64u(0), 3.0f64.mul_add(7.0, 5.0).to_bits());
+        assert_eq!(cpu.vmm[1].zmm64u(1), 0x1234_5678_9ABC_DEF0);
+        for qword in 2..8 {
+            assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
         }
     }
 

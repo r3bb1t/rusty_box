@@ -312,7 +312,7 @@ impl BxDevicesC {
 
     /// Write to an I/O port
     #[inline]
-    pub fn outp(&mut self, port: u16, value: u32, io_len: u8) {
+    pub fn outp(&mut self, port: u16, value: u32, io_len: u8, icount: u64) {
         self.diag_io_writes += 1;
         let entry = &self.write_handlers[port as usize];
         let device_id = entry.device_id;
@@ -323,7 +323,7 @@ impl BxDevicesC {
         let mut pic_cleared = false;
         if has_handler {
             let dispatched = if let Some(dm) = self.device_manager_mut() {
-                Self::dispatch_write(dm, device_id, port, value, io_len);
+                Self::dispatch_write(dm, device_id, port, value, io_len, icount);
                 // Drain PIC IOAPIC forwarding queue after device handler
                 {
                     let (fwds, count) = dm.pic.take_ioapic_forwards();
@@ -557,7 +557,7 @@ impl BxDevicesC {
             DeviceId::Vga => dm.vga.read_port(port, io_len, icount),
             DeviceId::Port92 => dm.port92_read(port, io_len),
             DeviceId::Pci => dm.pci_read(port, io_len),
-            DeviceId::Acpi => dm.acpi_read(port, io_len),
+            DeviceId::Acpi => dm.acpi_read(port, io_len, icount),
             DeviceId::PciIde => dm.pci_ide_read(port, io_len),
             DeviceId::FwCfg => dm.fw_cfg.read_port_mut(port, io_len),
             DeviceId::Ioapic => 0xFF, // IOAPIC uses MMIO, not port I/O
@@ -573,6 +573,7 @@ impl BxDevicesC {
         port: u16,
         value: u32,
         io_len: u8,
+        icount: u64,
     ) {
         match id {
             DeviceId::Pic => dm.pic.write(port, value, io_len),
@@ -600,7 +601,7 @@ impl BxDevicesC {
             DeviceId::Vga => dm.vga.write_port(port, value, io_len),
             DeviceId::Port92 => dm.port92_write(port, value, io_len),
             DeviceId::Pci => dm.pci_write(port, value, io_len),
-            DeviceId::Acpi => dm.acpi_write(port, value, io_len),
+            DeviceId::Acpi => dm.acpi_write(port, value, io_len, icount),
             DeviceId::PciIde => dm.pci_ide_write(port, value, io_len),
             DeviceId::FwCfg => dm.fw_cfg_write(port, value, io_len),
             DeviceId::Ioapic | DeviceId::None => {}

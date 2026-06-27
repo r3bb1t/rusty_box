@@ -272,7 +272,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     #[inline]
     pub(crate) fn tsc_for_api(&self) -> u64 {
-        self.get_tsc(self.system_ticks())
+        self.get_virtual_tsc(self.system_ticks())
     }
     #[inline]
     pub(crate) fn set_tsc_for_api(&mut self, v: u64) {
@@ -313,7 +313,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         use super::msr::*;
         let apicbase = self.msr.apicbase as u64;
         let v = match msr {
-            BX_MSR_TSC => self.get_tsc(self.system_ticks()),
+            BX_MSR_TSC => self.get_virtual_tsc(self.system_ticks()),
             BX_MSR_APICBASE => apicbase,
             BX_MSR_PLATFORM_ID => 0,
             BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => self.get_tsc(self.system_ticks()),

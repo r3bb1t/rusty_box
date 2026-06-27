@@ -769,6 +769,13 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// Optional PC system pointer for timer queries (getNumCpuTicksLeftNextEvent).
     /// Wired by the emulator during execution, cleared afterwards.
     pub(super) pc_system_ptr: Option<NonNull<crate::pc_system::BxPcSystemC>>,
+    /// `pc_system.time_ticks()` at the point the emulator wired the CPU for a
+    /// batch. Bochs advances `bx_pc_system` from the CPU loop via `BX_TICK1`;
+    /// Rust batches that work in the emulator, so mid-batch time reads add the
+    /// instruction-count delta to this base.
+    pub(super) pc_system_ticks_at_sync: u64,
+    /// CPU icount corresponding to `pc_system_ticks_at_sync`.
+    pub(super) pc_system_icount_at_sync: u64,
 
     /// Debug flags for one-time boot diagnostics (no globals).
     ///
@@ -1533,6 +1540,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     #[inline]
     pub fn set_pc_system_ptr(&mut self, ps: NonNull<crate::pc_system::BxPcSystemC>) {
         self.pc_system_ptr = Some(ps);
+        // SAFETY: PcSystem pointer is valid for the duration of the CPU batch.
+        self.pc_system_ticks_at_sync = unsafe { ps.as_ref().time_ticks() };
+        self.pc_system_icount_at_sync = self.icount;
     }
 
     #[inline]
@@ -1665,8 +1675,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
     #[inline]
     pub(crate) fn debug_putc(&mut self, ch: u8) {
+        let icount = self.icount;
         if let Some(io) = self.io_bus_mut() {
-            io.outp(0x00E9, ch as u32, 1);
+            io.outp(0x00E9, ch as u32, 1, icount);
         }
     }
 
@@ -2197,7 +2208,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 };
                 let ilen = instr.ilen() as usize;
                 tracing::error!(
-                    "UNIMPLEMENTED OPCODE: {} at RIP={:#x} CS:IP={:#x}:{:#x} laddr={:#x} bytes={:02x?}",
+                    "UNIMPLEMENTED OPCODE: {:?} at RIP={:#x} CS:IP={:#x}:{:#x} laddr={:#x} bytes={:02x?}",
                     opcode, rip, cs_value, rip, laddr, &instr_bytes[..ilen.min(16)]
                 );
             }

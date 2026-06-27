@@ -1788,6 +1788,14 @@ impl BxKeyboardC {
         }
     }
 
+    pub(crate) fn needs_fast_service(&self) -> bool {
+        self.kbd_controller.timer_pending != 0
+            || self.kbd_controller.irq1_requested
+            || self.kbd_controller.irq12_requested
+            || self.irq1_lower_pending
+            || self.irq12_lower_pending
+    }
+
     /// Get A20 gate state
     pub fn get_a20_enabled(&self) -> bool {
         self.a20_enabled

@@ -1,7 +1,9 @@
 use thiserror::Error;
 
-use crate::{config::BxPhyAddress, cpu::cpu::Exception};
-
+use crate::{
+    config::BxPhyAddress,
+    cpu::{cpu::Exception, decoder::Opcode},
+};
 pub type Result<T> = core::result::Result<T, CpuError>;
 
 #[derive(Error, Debug)]
@@ -40,8 +42,14 @@ pub enum CpuError {
     #[error("Unimplemented instruction or feature")]
     UnimplementedInstruction,
 
-    #[error("Unimplemented opcode: {opcode}")]
-    UnimplementedOpcode { opcode: &'static str },
+    #[error("Unimplemented opcode: {opcode:?}")]
+    UnimplementedOpcode { opcode: Opcode },
+
+    #[error("Invalid boot image: {reason}")]
+    InvalidBootImage { reason: &'static str },
+
+    #[error("Unsupported CPU operation: {operation}")]
+    UnsupportedCpuOperation { operation: &'static str },
 
     /// Bochs-style control flow: exceptions/interrupt delivery longjmp back to the
     /// main decode loop. We model that by unwinding the current instruction/trace

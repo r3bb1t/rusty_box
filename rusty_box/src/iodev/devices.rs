@@ -598,7 +598,7 @@ impl DeviceManager {
 
         // ACPI PM timer: tick and sync IRQ 9 (SCI) to PIC
         {
-            self.acpi.tick(usec);
+            self.acpi.tick(usec, icount);
             if self.acpi.irq9_level {
                 self.pic.raise_irq(9);
             } else {
@@ -808,16 +808,16 @@ impl DeviceManager {
     }
 
     /// ACPI I/O read dispatch
-    pub(crate) fn acpi_read(&mut self, address: u16, io_len: u8) -> u32 {
-        self.acpi.read(address, io_len)
+    pub(crate) fn acpi_read(&mut self, address: u16, io_len: u8, icount: u64) -> u32 {
+        self.acpi.read(address, io_len, icount)
     }
 
     /// ACPI I/O write dispatch
-    pub(crate) fn acpi_write(&mut self, address: u16, value: u32, io_len: u8) {
+    pub(crate) fn acpi_write(&mut self, address: u16, value: u32, io_len: u8, icount: u64) {
         if address == 0x00B2 {
             self.acpi.generate_smi(value as u8);
         } else {
-            self.acpi.write(address, value, io_len);
+            self.acpi.write(address, value, io_len, icount);
         }
     }
 

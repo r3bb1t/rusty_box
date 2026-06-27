@@ -175,6 +175,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         (system_ticks.wrapping_mul(Self::TSC_SCALE)).wrapping_add(self.tsc_adjust as u64)
     }
 
+    /// Bochs `get_Virtual_TSC()`: guest-visible TSC starts from physical
+    /// `get_TSC()`, then applies VMX/SVM virtualization adjustments. Rusty Box
+    /// currently implements offset adjustment; VMX scaling stays absent until
+    /// the VMCS multiplier field is implemented.
+    pub fn get_virtual_tsc(&self, system_ticks: u64) -> u64 {
+        self.get_tsc(system_ticks)
+            .wrapping_add(self.tsc_offset as u64)
+    }
+
     /// Set the Time Stamp Counter to a specific value
     pub fn set_tsc(&mut self, newval: u64, system_ticks: u64) {
         self.tsc_adjust = newval.wrapping_sub(system_ticks.wrapping_mul(Self::TSC_SCALE)) as i64
@@ -184,9 +193,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Falls back to icount when pc_system is not wired (unit tests).
     #[inline]
     pub(crate) fn system_ticks(&self) -> u64 {
-        if let Some(ps) = self.pc_system_ptr {
-            // SAFETY: PcSystem pointer valid for emulator lifetime; single-threaded access
-            unsafe { ps.as_ref().time_ticks() }
+        if self.pc_system_ptr.is_some() {
+            self.pc_system_ticks_at_sync
+                .wrapping_add(self.icount.wrapping_sub(self.pc_system_icount_at_sync))
         } else {
             self.icount
         }
@@ -782,7 +791,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return Ok(());
         }
 
-        let ticks = self.get_tsc(self.system_ticks());
+        let ticks = self.get_virtual_tsc(self.system_ticks());
         self.set_rax(ticks & 0xFFFF_FFFF);
         self.set_rdx(ticks >> 32);
         // ECX = IA32_TSC_AUX MSR (processor ID) — Bochs proc_ctrl.cc
@@ -818,7 +827,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Use system_ticks (pc_system.time_ticks) as time source.
         // time_ticks advances during HLT via tickn(), matching Bochs behavior.
-        let ticks = self.get_tsc(self.system_ticks());
+        let ticks = self.get_virtual_tsc(self.system_ticks());
 
         self.set_rax(ticks & 0xFFFF_FFFF);
         self.set_rdx(ticks >> 32);
@@ -906,10 +915,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn rdmsr_value(&mut self, msr: u32) -> crate::cpu::Result<u64> {
         use super::msr::*;
         let val: u64 = match msr {
-            BX_MSR_TSC => self.get_tsc(self.system_ticks()),
+            BX_MSR_TSC => self.get_virtual_tsc(self.system_ticks()),
             BX_MSR_APICBASE => self.msr.apicbase,
             BX_MSR_PLATFORM_ID => 0, // read-only, returns 0
-            BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => self.get_tsc(self.system_ticks()), // stub: return TSC
+            BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => self.get_tsc(self.system_ticks()), // Bochs: physical/system TSC
             // Bochs msr.cc — WAITPKG umwait max-delay control.
             BX_MSR_IA32_UMWAIT_CONTROL => self.msr.ia32_umwait_ctrl as u64,
             // Bochs msr.cc — CET control + shadow-stack pointers.
@@ -4027,8 +4036,11 @@ mod tests {
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::crregs::BxEfer;
-    use crate::cpu::msr::BX_MSR_EFER;
+    use crate::cpu::decoder::Instruction;
+    use crate::cpu::msr::{BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_MPERF, BX_MSR_TSC};
     use crate::cpu::svm::BX_VM_CR_MSR_SVMDIS_MASK;
+    use crate::pc_system::BxPcSystemC;
+    use core::ptr::NonNull;
 
     /// Bochs `SetEFER` (cpu/crregs.cc:1490-1494): a write that tries to set
     /// `EFER.SVME` while `VM_CR.SVMDIS` is locked must #GP(0) and leave the
@@ -4087,5 +4099,52 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn wired_system_ticks_include_live_icount_delta() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut pc_system = BxPcSystemC::new();
+        pc_system.initialize(1_000_000);
+        pc_system.tickn(1_234);
+
+        cpu.icount = 500;
+        cpu.set_pc_system_ptr(NonNull::from(&mut pc_system));
+        assert_eq!(cpu.system_ticks(), 1_234);
+
+        cpu.icount = 777;
+        assert_eq!(cpu.system_ticks(), 1_511);
+        cpu.clear_pc_system();
+    }
+
+    #[test]
+    fn guest_tsc_paths_use_virtual_offset_but_aperf_mperf_stay_physical() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.icount = 77;
+        cpu.set_tsc(1_000, cpu.system_ticks());
+        cpu.tsc_offset = 55;
+        cpu.msr.tsc_aux = 0xCAFE_BABE;
+
+        let instr = Instruction::default();
+        let expected_virtual = 1_055;
+        let expected_physical = 1_000;
+
+        cpu.rdtsc(&instr).unwrap();
+        assert_eq!(cpu.rax() | (cpu.rdx() << 32), expected_virtual);
+
+        cpu.rdtscp(&instr).unwrap();
+        assert_eq!(cpu.rax() | (cpu.rdx() << 32), expected_virtual);
+        assert_eq!(cpu.rcx(), 0xCAFE_BABE);
+
+        assert_eq!(cpu.rdmsr_value(BX_MSR_TSC).unwrap(), expected_virtual);
+        assert_eq!(cpu.read_msr_for_api(BX_MSR_TSC).unwrap(), expected_virtual);
+        assert_eq!(
+            cpu.rdmsr_value(BX_MSR_IA32_APERF).unwrap(),
+            expected_physical
+        );
+        assert_eq!(
+            cpu.rdmsr_value(BX_MSR_IA32_MPERF).unwrap(),
+            expected_physical
+        );
     }
 }

@@ -194,6 +194,24 @@ pub const BxOpcodeTable0F388B: [u64; 3] = [
     ),
 ];
 
+// VFMADD132PS/PD — VEX.128/256.66.0F38.W0/W1 98 /r
+pub const BxOpcodeTable0F3898: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmadd132psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmadd132pdVpdHpdWpd,
+    ),
+];
+
+// VFMADD132SS/SD — VEX.LIG.66.0F38.W0/W1 99 /r
+pub const BxOpcodeTable0F3899: [u64; 2] = [
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W0), Opcode::Vfmadd132ssVpsHssWss),
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W1), Opcode::Vfmadd132sdVpdHsdWsd),
+];
+
 pub const BxOpcodeTable0F38C8: [u64; 1] =
     [form_opcode(attrs!(SSE_NO_PREFIX), Opcode::Sha1nexteVdqWdq)];
 pub const BxOpcodeTable0F38C9: [u64; 1] =
@@ -616,8 +634,8 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 95 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 96 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 97 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 98 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 99 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 98 */ &BxOpcodeTable0F3898,
+    /* 0F 38 99 */ &BxOpcodeTable0F3899,
     /* 0F 38 9A */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 9B */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 9C */ &BX_OPCODE_GROUP_ERR,

@@ -627,6 +627,41 @@ fn test_vex_vperm2f128_decode_ubuntu_sha512_sequence() {
 }
 
 #[test]
+fn test_vex_vpermq_decode_runtime_sequence() {
+    // Captured from Ubuntu userspace boot: VEX.256.66.0F3A.W1 00 /r ib.
+    let instr = fetch_decode64(&[0xC4, 0xE3, 0xFD, 0x00, 0xD8, 0xFF]).unwrap();
+    assert_eq!(instr.ilen(), 6);
+    assert_eq!(instr.get_ia_opcode(), Opcode::V256VpermqVdqWdqIb);
+    assert_eq!(instr.dst(), 3);
+    assert_eq!(instr.src1(), 0);
+    assert_eq!(instr.ib(), 0xFF);
+    assert_eq!(instr.get_vl(), 1);
+}
+
+#[test]
+fn test_vex_vfmadd132sd_decode_runtime_sequence() {
+    // Captured from Ubuntu userspace boot: VEX.128.66.0F38.W1 99 /r m64.
+    let instr = fetch_decode64(&[0xC4, 0xE2, 0xE9, 0x99, 0x0D, 0xF6, 0x54, 0x04, 0x00]).unwrap();
+    assert_eq!(instr.ilen(), 9);
+    assert_eq!(instr.get_ia_opcode(), Opcode::Vfmadd132sdVpdHsdWsd);
+    assert_eq!(instr.dst(), 1);
+    assert_eq!(instr.src2(), 2);
+    assert!(!instr.mod_c0());
+    assert_eq!(instr.get_vl(), 0);
+}
+
+#[test]
+fn test_vex_vfmadd132_packed_decode() {
+    let ps128 = fetch_decode64(&[0xC4, 0xE2, 0x69, 0x98, 0xCB]).unwrap();
+    assert_eq!(ps128.get_ia_opcode(), Opcode::Vfmadd132psVpsHpsWps);
+    assert_eq!(ps128.get_vl(), 0);
+
+    let pd256 = fetch_decode64(&[0xC4, 0xE2, 0xED, 0x98, 0xCB]).unwrap();
+    assert_eq!(pd256.get_ia_opcode(), Opcode::Vfmadd132pdVpdHpdWpd);
+    assert_eq!(pd256.get_vl(), 1);
+}
+
+#[test]
 fn test_vex_vpmin_vpmax_family_decode() {
     let cases: &[(&[u8], Opcode, u8)] = &[
         (&[0xC5, 0xE9, 0xDA, 0xCB], Opcode::V128VpminubVdqHdqWdq, 0),

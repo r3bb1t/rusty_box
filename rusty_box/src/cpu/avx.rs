@@ -14,6 +14,14 @@ use super::{
     xmm::{BxPackedXmmRegister, BxPackedYmmRegister},
 };
 
+#[derive(Clone, Copy)]
+enum VexFpLogicalOp {
+    And,
+    AndNot,
+    Or,
+    Xor,
+}
+
 // AMX architectural state — Bochs avx/amx.h BxPackedAmxRegister + amx.cc.
 //
 // 8 tiles × 16 rows × 64 bytes = 8192 bytes of tile storage (BX_TILE_REGISTERS
@@ -1380,6 +1388,130 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// VPERMQ — Permute qwords in YMM by immediate (AVX2)
+    /// Bochs: avx2.cc VPERMQ_VdqWdqIbR / simd_int.h ymm_vpermq.
+    /// Operand W is the ModRM r/m source; VEX.vvvv is unused for this form.
+    pub(super) fn vpermq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let src = if instr.mod_c0() {
+            self.read_ymm_reg(instr.src1())
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_ymmword(seg, eaddr)?
+        };
+        let imm = instr.ib();
+        let mut result = BxPackedYmmRegister::default();
+        for qword in 0..4 {
+            let sel = ((imm >> (qword * 2)) & 0x03) as usize;
+            result.set_ymm64u(qword, src.ymm64u(sel));
+        }
+        self.write_ymm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// VFMADD132PS — V * W + H, packed single-precision (VEX FMA)
+    pub(super) fn vfmadd132ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        if instr.get_vl() >= 1 {
+            let v = self.read_ymm_reg(dst_idx);
+            let h = self.read_ymm_reg(instr.src2());
+            let w = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..8 {
+                let vf = f32::from_bits(v.ymm32u(lane));
+                let wf = f32::from_bits(w.ymm32u(lane));
+                let hf = f32::from_bits(h.ymm32u(lane));
+                result.set_ymm32u(lane, vf.mul_add(wf, hf).to_bits());
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let v = self.read_xmm_reg(dst_idx);
+            let h = self.read_xmm_reg(instr.src2());
+            let w = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            for lane in 0..4 {
+                let vf = f32::from_bits(v.xmm32u(lane));
+                let wf = f32::from_bits(w.xmm32u(lane));
+                let hf = f32::from_bits(h.xmm32u(lane));
+                result.set_xmm32u(lane, vf.mul_add(wf, hf).to_bits());
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VFMADD132PD — V * W + H, packed double-precision (VEX FMA)
+    pub(super) fn vfmadd132pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        if instr.get_vl() >= 1 {
+            let v = self.read_ymm_reg(dst_idx);
+            let h = self.read_ymm_reg(instr.src2());
+            let w = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..4 {
+                let vf = f64::from_bits(v.ymm64u(lane));
+                let wf = f64::from_bits(w.ymm64u(lane));
+                let hf = f64::from_bits(h.ymm64u(lane));
+                result.set_ymm64u(lane, vf.mul_add(wf, hf).to_bits());
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let v = self.read_xmm_reg(dst_idx);
+            let h = self.read_xmm_reg(instr.src2());
+            let w = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            for lane in 0..2 {
+                let vf = f64::from_bits(v.xmm64u(lane));
+                let wf = f64::from_bits(w.xmm64u(lane));
+                let hf = f64::from_bits(h.xmm64u(lane));
+                result.set_xmm64u(lane, vf.mul_add(wf, hf).to_bits());
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VFMADD132SS — scalar single: low f32 = V * W + H.
+    pub(super) fn vfmadd132ss(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let mut result = self.read_xmm_reg(dst_idx);
+        let v = result.xmm32f(0);
+        let h = self.read_xmm_reg(instr.src2()).xmm32f(0);
+        let w = if instr.mod_c0() {
+            self.read_xmm_reg(instr.src1()).xmm32f(0)
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            f32::from_bits(self.v_read_dword(seg, eaddr)?)
+        };
+        result.set_xmm32u(0, v.mul_add(w, h).to_bits());
+        self.write_xmm_reg(dst_idx, result);
+        Ok(())
+    }
+
+    /// VFMADD132SD — scalar double: low f64 = V * W + H.
+    pub(super) fn vfmadd132sd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let mut result = self.read_xmm_reg(dst_idx);
+        let v = result.xmm64f(0);
+        let h = self.read_xmm_reg(instr.src2()).xmm64f(0);
+        let w = if instr.mod_c0() {
+            self.read_xmm_reg(instr.src1()).xmm64f(0)
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            f64::from_bits(self.v_read_qword(seg, eaddr)?)
+        };
+        result.set_xmm64u(0, v.mul_add(w, h).to_bits());
+        self.write_xmm_reg(dst_idx, result);
+        Ok(())
+    }
+
     // ========================================================================
     // Unpack byte/word/qword variants
     // ========================================================================
@@ -2226,6 +2358,98 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let eaddr = self.resolve_addr(instr);
             self.v_read_ymmword(seg, eaddr)
         }
+    }
+
+    #[inline]
+    fn vex_fp_logical_qword(src1: u64, src2: u64, op: VexFpLogicalOp) -> u64 {
+        match op {
+            VexFpLogicalOp::And => src1 & src2,
+            VexFpLogicalOp::AndNot => !src1 & src2,
+            VexFpLogicalOp::Or => src1 | src2,
+            VexFpLogicalOp::Xor => src1 ^ src2,
+        }
+    }
+
+    fn vex_fp_logical(&mut self, instr: &Instruction, op: VexFpLogicalOp) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        // Bochs HANDLE_AVX_2OP<xmm_{andps,andnps,orps,xorps}>.
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(instr.src2());
+            let src2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for qword in 0..4 {
+                result.set_ymm64u(
+                    qword,
+                    Self::vex_fp_logical_qword(src1.ymm64u(qword), src2.ymm64u(qword), op),
+                );
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(instr.src2());
+            let src2 = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            for qword in 0..2 {
+                result.set_xmm64u(
+                    qword,
+                    Self::vex_fp_logical_qword(src1.xmm64u(qword), src2.xmm64u(qword), op),
+                );
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    pub(super) fn vandps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vex_fp_logical(instr, VexFpLogicalOp::And)
+    }
+
+    pub(super) fn vandnps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vex_fp_logical(instr, VexFpLogicalOp::AndNot)
+    }
+
+    pub(super) fn vorps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vex_fp_logical(instr, VexFpLogicalOp::Or)
+    }
+
+    pub(super) fn vxorps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vex_fp_logical(instr, VexFpLogicalOp::Xor)
+    }
+
+    pub(super) fn vpsadbw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        // Bochs simd_int.h xmm_psadbw.
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(instr.src2());
+            let src2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for qword in 0..4 {
+                let base = qword * 8;
+                let mut sum = 0u64;
+                for j in 0..8 {
+                    sum += (src1.ymmubyte(base + j) as i16 - src2.ymmubyte(base + j) as i16)
+                        .unsigned_abs() as u64;
+                }
+                result.set_ymm64u(qword, sum);
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(instr.src2());
+            let src2 = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            for qword in 0..2 {
+                let base = qword * 8;
+                let mut sum = 0u64;
+                for j in 0..8 {
+                    sum += (src1.xmmubyte(base + j) as i16 - src2.xmmubyte(base + j) as i16)
+                        .unsigned_abs() as u64;
+                }
+                result.set_xmm64u(qword, sum);
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
     }
 
     fn vpminmax_bytes(

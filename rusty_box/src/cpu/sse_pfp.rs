@@ -120,6 +120,41 @@ fn sse_compare_f64(op1: f64, op2: f64, predicate: u8) -> bool {
     }
 }
 
+#[inline]
+fn sse_round_mode(imm8: u8, mxcsr_rc: u8) -> u8 {
+    if (imm8 & 0x04) == 0 {
+        imm8 & 0x03
+    } else {
+        mxcsr_rc & 0x03
+    }
+}
+
+#[inline]
+fn sse_round_f32(val: f32, imm8: u8, mxcsr_rc: u8) -> f32 {
+    if val.is_nan() || val.is_infinite() {
+        return val;
+    }
+    match sse_round_mode(imm8, mxcsr_rc) {
+        0 => val.round_ties_even(),
+        1 => val.floor(),
+        2 => val.ceil(),
+        _ => val.trunc(),
+    }
+}
+
+#[inline]
+fn sse_round_f64(val: f64, imm8: u8, mxcsr_rc: u8) -> f64 {
+    if val.is_nan() || val.is_infinite() {
+        return val;
+    }
+    match sse_round_mode(imm8, mxcsr_rc) {
+        0 => val.round_ties_even(),
+        1 => val.floor(),
+        2 => val.ceil(),
+        _ => val.trunc(),
+    }
+}
+
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // SSE FP helpers: read source operand (register or memory)
@@ -447,6 +482,63 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
         result.set_xmm64f(0, op2.sqrt());
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    // ========================================================================
+    // Rounding: ROUNDPS/PD/SS/SD (SSE4.1)
+    // Bochs: ROUNDPS_VpsWpsIb, ROUNDPD_VpdWpdIb, ROUNDSS_VssWssIb,
+    //        ROUNDSD_VsdWsdIb
+    // imm8[1:0] = rounding mode when imm8[2] is clear; imm8[2] = use MXCSR.RC.
+    // imm8[3] suppresses precision exceptions in Bochs; existing SSE FP handlers
+    // do not model MXCSR sticky exception updates, so this has no extra state here.
+    // ========================================================================
+
+    pub(super) fn roundps_vps_wps_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_xmm(instr)?;
+        let imm8 = instr.ib();
+        let mxcsr_rc = self.mxcsr.rounding_mode();
+        let mut result = BxPackedXmmRegister::default();
+        for i in 0..4 {
+            result.set_xmm32f(i, sse_round_f32(op.xmm32f(i), imm8, mxcsr_rc));
+        }
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    pub(super) fn roundpd_vpd_wpd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_xmm(instr)?;
+        let imm8 = instr.ib();
+        let mxcsr_rc = self.mxcsr.rounding_mode();
+        let mut result = BxPackedXmmRegister::default();
+        for i in 0..2 {
+            result.set_xmm64f(i, sse_round_f64(op.xmm64f(i), imm8, mxcsr_rc));
+        }
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    pub(super) fn roundss_vss_wss_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_ss(instr)?;
+        let imm8 = instr.ib();
+        let mxcsr_rc = self.mxcsr.rounding_mode();
+        let mut result = self.read_xmm_reg(instr.dst());
+        result.set_xmm32f(0, sse_round_f32(op, imm8, mxcsr_rc));
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    pub(super) fn roundsd_vsd_wsd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_sd(instr)?;
+        let imm8 = instr.ib();
+        let mxcsr_rc = self.mxcsr.rounding_mode();
+        let mut result = self.read_xmm_reg(instr.dst());
+        result.set_xmm64f(0, sse_round_f64(op, imm8, mxcsr_rc));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }

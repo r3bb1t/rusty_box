@@ -186,8 +186,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Don't allow loading CS directly (would need special handling)
         if dst_seg == BxSegregs::Cs as usize {
             tracing::warn!("MOV to CS not allowed");
-            return Err(super::error::CpuError::UnimplementedOpcode {
-                opcode: "MOV CS, reg (use far jump/call instead)",
+            return Err(super::error::CpuError::UnsupportedCpuOperation {
+                operation: "MOV CS, reg (use far jump/call instead)",
             });
         }
 
