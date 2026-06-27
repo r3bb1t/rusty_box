@@ -13,6 +13,8 @@ use super::{
     decoder::{BxSegregs, Instruction},
     xmm::{BxPackedXmmRegister, BxPackedYmmRegister},
 };
+#[cfg(not(feature = "std"))]
+use crate::cpu::float::FloatExt;
 
 #[derive(Clone, Copy)]
 enum VexFpLogicalOp {
