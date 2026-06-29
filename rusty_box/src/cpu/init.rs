@@ -47,6 +47,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Populate ISA extensions bitmask from CPUID model — matches Bochs init.cc
         self.ia_extensions_bitmask = self.cpuid.get_isa_extensions_bitmask();
+        let tsc_deadline_supported =
+            self.bx_cpuid_support_isa_extension(X86Feature::IsaTscDeadline);
+        self.lapic
+            .set_tsc_deadline_supported(tsc_deadline_supported);
+        self.cpu_topology = _config.cpu_topology();
 
         // Populate VMX/SVM bitmasks — matches Bochs init.cc
         self.vmx_extensions_bitmask = self.cpuid.get_vmx_extensions_bitmask();
@@ -89,8 +94,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn reset(&mut self, source: ResetReason) {
         match source {
-            ResetReason::Software => info!("cpu software reset"),
-            ResetReason::Hardware => info!("cpu hardware reset"),
+            ResetReason::Software if self.bx_cpuid == 0 => {
+                info!("cpu 0 software reset")
+            }
+            ResetReason::Software => tracing::debug!("cpu {} software reset", self.bx_cpuid),
+            ResetReason::Hardware => info!("cpu {} hardware reset", self.bx_cpuid),
         }
 
         for i in 0..BX_GENERAL_REGISTERS {
@@ -116,6 +124,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.activity_state = CpuActivityState::Active;
         self.debug_trap = 0;
+        self.async_event = 0;
 
         self.prev_rip = 0x0000FFF0;
         self.set_rip(0x0000FFF0);
@@ -232,6 +241,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.pending_event = 0;
         self.event_mask = 0;
+        self.handle_interrupt_mask_change();
 
         if source == ResetReason::Hardware {
             self.smbase = 0x30000; // do not change SMBASE on INIT
@@ -284,9 +294,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         /* initialise MSR registers to defaults */
         self.msr.apicbase = BX_LAPIC_BASE_ADDR;
         self.lapic.reset(source as u8);
-        self.msr.apicbase |= 0x900;
+        self.msr.apicbase |= 0x800;
+        if self.bx_cpuid == 0 {
+            self.msr.apicbase |= 0x100;
+        }
         self.lapic.set_base(self.msr.apicbase);
         self.lapic.enable_xapic_extensions();
+        if self.bx_cpuid != 0 {
+            // Bochs init.cc: every non-bootstrap CPU is an application
+            // processor and halts in WAIT_FOR_SIPI after RESET/INIT. Do not
+            // gate this on the current topology value; no-alloc callers may
+            // provide fixed AP storage before deciding how many APs to expose.
+            self.mask_event(Self::BX_EVENT_INIT | Self::BX_EVENT_SMI | Self::BX_EVENT_NMI);
+            self.eflags.remove(EFlags::IF_);
+            self.activity_state = CpuActivityState::WaitForSipi;
+            self.async_event |= Self::BX_ASYNC_EVENT_SLEEP;
+        }
 
         self.efer.set32(0);
         self.efer_suppmask = self.get_efer_allow_mask();

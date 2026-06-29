@@ -13,6 +13,26 @@ use super::{
     segment_ctrl_pro::parse_selector,
 };
 
+const CPUID_LEAF_FEATURE_INFO: u32 = 0x0000_0001;
+const CPUID_LEAF_EXTENDED_TOPOLOGY: u32 = 0x0000_000B;
+const CPUID_OSXSAVE_ECX_BIT: u32 = 1 << 27;
+const CPUID_APIC_EDX_BIT: u32 = 1 << 9;
+const CPUID_LEAF1_EBX_LOW_FIELDS_MASK: u32 = 0x0000_FFFF;
+const CPUID_LEAF1_LOGICAL_COUNT_SHIFT: u32 = 16;
+const CPUID_LEAF1_APIC_ID_SHIFT: u32 = 24;
+const CPUID_APIC_ID_BYTE_MASK: u32 = 0xFF;
+const CPUID_TOPOLOGY_SUBLEAF_SMT: u32 = 0;
+const CPUID_TOPOLOGY_SUBLEAF_CORE: u32 = 1;
+const CPUID_TOPOLOGY_SUBLEAF_PACKAGE: u32 = 2;
+const CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT: u32 = 8;
+const CPUID_TOPOLOGY_LEVEL_TYPE_SMT: u32 = 1;
+const CPUID_TOPOLOGY_LEVEL_TYPE_CORE: u32 = 2;
+
+#[inline]
+fn topology_level_ecx(subleaf: u32, level_type: u32) -> u32 {
+    subleaf | (level_type << CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT)
+}
+
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // =========================================================================
     // Unified interrupt dispatch — matches Bochs interrupt() in exception.cc
@@ -1107,6 +1127,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// XSAVE state component sizes and offsets (Bochs crregs.h)
     /// Index: XCR0 bit number. (len, offset) for each component.
+    pub(crate) fn bochs_topology_shift(logical_count: u32) -> u32 {
+        if logical_count <= 1 {
+            0
+        } else {
+            u32::BITS - (logical_count - 1).leading_zeros()
+        }
+    }
+
     const XSAVE_COMPONENTS: [(u32, u32); 10] = [
         (160, 0),     // 0: FPU (x87)
         (256, 160),   // 1: SSE (XMM)
@@ -1185,17 +1213,51 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Dynamic fixups — Bochs computes these from CPU state at runtime.
         // Our static trait returns base values; we patch them here.
         match function {
-            0x00000001 => {
+            CPUID_LEAF_FEATURE_INFO => {
                 // ECX bit 27 (OSXSAVE): set only when CR4.OSXSAVE is enabled
                 // Bochs cpuid.cc — base value does NOT include this bit
                 if self.cr4.osxsave() {
-                    ecx |= 1 << 27; // set OSXSAVE
+                    ecx |= CPUID_OSXSAVE_ECX_BIT;
                 }
 
                 // EDX bit 9 (APIC): cleared when APIC is globally disabled
                 // Bochs cpuid.cc
                 if self.lapic.get_mode() == super::apic::ApicMode::GloballyDisabled {
-                    edx &= !(1 << 9); // clear APIC feature bit
+                    edx &= !CPUID_APIC_EDX_BIT;
+                }
+
+                let topology = self.cpu_topology();
+                ebx = (ebx & CPUID_LEAF1_EBX_LOW_FIELDS_MASK)
+                    | ((topology.package_logical_count() & CPUID_APIC_ID_BYTE_MASK)
+                        << CPUID_LEAF1_LOGICAL_COUNT_SHIFT)
+                    | ((self.bx_cpuid & CPUID_APIC_ID_BYTE_MASK) << CPUID_LEAF1_APIC_ID_SHIFT);
+            }
+            CPUID_LEAF_EXTENDED_TOPOLOGY => {
+                let topology = self.cpu_topology();
+                edx = self.bx_cpuid;
+                match sub_function {
+                    CPUID_TOPOLOGY_SUBLEAF_SMT => {
+                        eax = Self::bochs_topology_shift(topology.n_threads());
+                        ebx = topology.n_threads();
+                        ecx = topology_level_ecx(
+                            CPUID_TOPOLOGY_SUBLEAF_SMT,
+                            CPUID_TOPOLOGY_LEVEL_TYPE_SMT,
+                        );
+                    }
+                    CPUID_TOPOLOGY_SUBLEAF_CORE => {
+                        eax = Self::bochs_topology_shift(topology.package_logical_count());
+                        ebx = topology.package_logical_count();
+                        ecx = topology_level_ecx(
+                            CPUID_TOPOLOGY_SUBLEAF_CORE,
+                            CPUID_TOPOLOGY_LEVEL_TYPE_CORE,
+                        );
+                    }
+                    _ => {
+                        eax = 0;
+                        ebx = 0;
+                        ecx = 0;
+                        edx = 0;
+                    }
                 }
             }
             0x00000007 if sub_function == 0 => {}
@@ -1257,5 +1319,87 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_rbx(ebx as u64);
         self.set_rcx(ecx as u64);
         self.set_rdx(edx as u64);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
+    use crate::params::BxParams;
+
+    const CONFIGURED_APIC_ID: u32 = 5;
+    const LEAF1_TEST_APIC_ID: u32 = 7;
+
+    #[test]
+    fn cpuid_leaf_b_uses_configured_topology_and_apic_id() {
+        let topology = BxParams::default()
+            .with_topology(2, 4, 2)
+            .unwrap()
+            .cpu_topology();
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.configure_smp(CONFIGURED_APIC_ID, topology);
+        let instr = Instruction::default();
+
+        cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+        cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_SMT);
+        cpu.cpuid(&instr);
+        assert_eq!(cpu.eax(), 1);
+        assert_eq!(cpu.ebx(), 2);
+        assert_eq!(
+            cpu.ecx(),
+            topology_level_ecx(CPUID_TOPOLOGY_SUBLEAF_SMT, CPUID_TOPOLOGY_LEVEL_TYPE_SMT)
+        );
+        assert_eq!(cpu.edx(), CONFIGURED_APIC_ID);
+
+        cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+        cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_CORE);
+        cpu.cpuid(&instr);
+        assert_eq!(
+            cpu.eax(),
+            BxCpuC::<Corei7SkylakeX>::bochs_topology_shift(topology.package_logical_count())
+        );
+        assert_eq!(cpu.ebx(), 8);
+        assert_eq!(
+            cpu.ecx(),
+            topology_level_ecx(CPUID_TOPOLOGY_SUBLEAF_CORE, CPUID_TOPOLOGY_LEVEL_TYPE_CORE)
+        );
+        assert_eq!(cpu.edx(), CONFIGURED_APIC_ID);
+
+        cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+        cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_PACKAGE);
+        cpu.cpuid(&instr);
+        assert_eq!(cpu.eax(), 0);
+        assert_eq!(cpu.ebx(), 0);
+        assert_eq!(cpu.ecx(), 0);
+        assert_eq!(cpu.edx(), 0);
+    }
+
+    #[test]
+    fn cpuid_leaf_1_reports_package_logical_count_and_apic_id() {
+        let topology = BxParams::default()
+            .with_topology(2, 2, 2)
+            .unwrap()
+            .cpu_topology();
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.initialize(BxParams::default()).unwrap();
+        cpu.configure_smp(LEAF1_TEST_APIC_ID, topology);
+        cpu.reset(crate::cpu::ResetReason::Hardware);
+        let instr = Instruction::default();
+
+        cpu.set_eax(CPUID_LEAF_FEATURE_INFO);
+        cpu.set_ecx(0);
+        cpu.cpuid(&instr);
+
+        assert_eq!(
+            (cpu.ebx() >> CPUID_LEAF1_LOGICAL_COUNT_SHIFT) & CPUID_APIC_ID_BYTE_MASK,
+            topology.package_logical_count()
+        );
+        assert_eq!(
+            (cpu.ebx() >> CPUID_LEAF1_APIC_ID_SHIFT) & CPUID_APIC_ID_BYTE_MASK,
+            LEAF1_TEST_APIC_ID
+        );
+        assert_eq!(cpu.edx() & CPUID_APIC_EDX_BIT, CPUID_APIC_EDX_BIT);
     }
 }

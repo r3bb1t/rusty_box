@@ -16,6 +16,7 @@ use crate::{
     },
     impl_eflag,
     memory::BxMemC,
+    params::CpuTopology,
 };
 
 use super::{
@@ -327,6 +328,7 @@ impl From<CpuActivityState> for u8 {
 //#[derive(Debug)]
 pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentation = ()> {
     pub(super) bx_cpuid: u32,
+    pub(super) cpu_topology: CpuTopology,
 
     pub(super) cpuid: I,
 
@@ -770,12 +772,16 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// Wired by the emulator during execution, cleared afterwards.
     pub(super) pc_system_ptr: Option<NonNull<crate::pc_system::BxPcSystemC>>,
     /// `pc_system.time_ticks()` at the point the emulator wired the CPU for a
-    /// batch. Bochs advances `bx_pc_system` from the CPU loop via `BX_TICK1`;
-    /// Rust batches that work in the emulator, so mid-batch time reads add the
-    /// instruction-count delta to this base.
+    /// batch. Single-CPU batches expose live instruction-count deltas so tight
+    /// PIT/TSC calibration loops can make progress mid-batch. SMP batches scale
+    /// that live delta by the scheduler's participating CPU count, matching
+    /// Bochs `BX_TICKN(executed / BX_SMP_PROCESSORS)` time advancement.
     pub(super) pc_system_ticks_at_sync: u64,
     /// CPU icount corresponding to `pc_system_ticks_at_sync`.
     pub(super) pc_system_icount_at_sync: u64,
+    /// Divisor applied to live icount deltas before adding them to
+    /// `pc_system_ticks_at_sync`.
+    pub(super) pc_system_tick_denominator: u64,
 
     /// Debug flags for one-time boot diagnostics (no globals).
     ///
@@ -791,6 +797,37 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `&= ~STOP_TRACE` clearing so handle_async_event is called next
     /// outer-loop iteration to check for wake conditions.
     pub(super) const BX_ASYNC_EVENT_SLEEP: u32 = 1;
+
+    #[inline]
+    pub fn configure_smp(&mut self, cpu_id: u32, topology: CpuTopology) {
+        self.bx_cpuid = cpu_id;
+        self.cpu_topology = topology;
+        self.lapic.set_id(cpu_id);
+        self.lapic.set_bus_cpu_count(topology.cpu_count());
+    }
+
+    #[inline]
+    pub(crate) fn mark_icount_sync(&mut self) {
+        self.icount_last_sync = self.icount;
+    }
+
+    #[inline]
+    pub(crate) fn icount_delta_since_sync(&self) -> u64 {
+        self.icount.saturating_sub(self.icount_last_sync)
+    }
+
+    #[inline]
+    pub(crate) fn sync_lapic_intr_event(&mut self) {
+        if self.lapic.intr_pending {
+            self.signal_event(Self::BX_EVENT_PENDING_LAPIC_INTR);
+            self.lapic.intr_pending = false;
+        }
+    }
+
+    #[inline]
+    pub fn cpu_topology(&self) -> CpuTopology {
+        self.cpu_topology
+    }
 
     // Event bit layout — matches Bochs `cpu.h:1193-1208` exactly.
     // Each bit identifies a single asynchronous event in the
@@ -1539,10 +1576,31 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
     #[inline]
     pub fn set_pc_system_ptr(&mut self, ps: NonNull<crate::pc_system::BxPcSystemC>) {
+        self.set_pc_system_ptr_with_tick_denominator(ps, 1);
+    }
+
+    #[inline]
+    pub fn set_pc_system_ptr_with_tick_denominator(
+        &mut self,
+        ps: NonNull<crate::pc_system::BxPcSystemC>,
+        tick_denominator: u64,
+    ) {
+        self.set_pc_system_ptr_with_tick_offset(ps, tick_denominator, 0);
+    }
+
+    #[inline]
+    pub fn set_pc_system_ptr_with_tick_offset(
+        &mut self,
+        ps: NonNull<crate::pc_system::BxPcSystemC>,
+        tick_denominator: u64,
+        tick_offset: u64,
+    ) {
         self.pc_system_ptr = Some(ps);
         // SAFETY: PcSystem pointer is valid for the duration of the CPU batch.
-        self.pc_system_ticks_at_sync = unsafe { ps.as_ref().time_ticks() };
+        self.pc_system_ticks_at_sync =
+            unsafe { ps.as_ref().time_ticks() }.wrapping_add(tick_offset);
         self.pc_system_icount_at_sync = self.icount;
+        self.pc_system_tick_denominator = tick_denominator.max(1);
     }
 
     #[inline]
@@ -1614,11 +1672,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             }
             // io borrow ends here (NLL); safe to mutate self fields
             if pending {
-                self.pending_event |= Self::BX_EVENT_PENDING_INTR;
-                self.async_event = 1;
+                self.signal_event(Self::BX_EVENT_PENDING_INTR);
             }
             if cleared {
-                self.pending_event &= !Self::BX_EVENT_PENDING_INTR;
+                self.clear_event(Self::BX_EVENT_PENDING_INTR);
             }
         }
     }
@@ -1646,18 +1703,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
     }
 
-    /// Advance pc_system countdown during FastRep bulk operations.
-    /// Matches Bochs `BX_TICKN(byteCount)` inside `faststring.cc`.
-    /// When countdown expires, sets STOP_TRACE to force trace break
-    /// so the outer emulator loop can fire `countdown_event()`.
-    /// Must use STOP_TRACE (bit 31), NOT bit 0 — the CPU loop fast path
-    /// only clears `async_event` when it equals exactly STOP_TRACE.
-    /// Bit 0 would persist and poison all subsequent instructions.
+    /// Probe pc_system countdown during FastRep bulk operations.
+    ///
+    /// When countdown would expire, sets STOP_TRACE to force a trace break so
+    /// the outer emulator loop can advance pc_system time exactly once and fire
+    /// `countdown_event()`.
     #[inline]
     pub(super) fn tickn_fastrep(&mut self, n: usize) {
-        if let Some(ps) = self.pc_system_mut() {
-            let expired = ps.sub_countdown(n as u32);
-            if expired {
+        if let Some(ps) = self.pc_system_ref() {
+            if ps.countdown_would_expire_after(n as u32) {
                 self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
             }
         }
@@ -1802,13 +1856,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
         max_instructions: u64,
+        pc_tick_denominator: u64,
+        pc_tick_offset: u64,
         io: NonNull<crate::iodev::BxDevicesC>,
         pc_system: NonNull<crate::pc_system::BxPcSystemC>,
         pic: Option<&mut crate::pic::BxPicC>,
         dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
         self.set_io_bus_ptr(io);
-        self.set_pc_system_ptr(pc_system);
+        self.set_pc_system_ptr_with_tick_offset(pc_system, pc_tick_denominator, pc_tick_offset);
         let result = self.cpu_loop_n(mem, cpus, max_instructions, pic, dma);
         self.clear_io_bus();
         self.clear_pc_system();
@@ -2107,6 +2163,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 self.perf_instructions += 1;
 
                 iteration += 1;
+                self.sync_lapic_intr_event();
 
                 // Check async events (matching C++ line 215: if (async_event) break;)
                 // When async_event is set (branch taken, exception, HLT, etc.), we MUST
@@ -3309,5 +3366,36 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         // Return handler for execution
         Ok((false, selected_handler))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
+    use crate::params::BxParams;
+    use crate::pc_system::{BxPcSystemC, TimerOwner};
+
+    #[test]
+    fn smp_fastrep_uses_pc_system_deadline_probes() {
+        let topology = BxParams::default()
+            .with_topology(1, 2, 1)
+            .unwrap()
+            .cpu_topology();
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.configure_smp(1, topology);
+
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(1_000_000);
+        pc.register_timer(TimerOwner::PciIdeCh0, 1000, false, true, "fastrep")
+            .unwrap();
+        cpu.set_pc_system_ptr_with_tick_denominator(NonNull::from(&mut pc), 2);
+
+        assert_eq!(cpu.ticks_left_next_event(), 1000);
+
+        cpu.tickn_fastrep(1000);
+
+        assert_ne!(cpu.async_event & BX_ASYNC_EVENT_STOP_TRACE, 0);
     }
 }

@@ -17,7 +17,18 @@ pub enum BootError {
     InvalidHeaderMagic,
     BootProtocolTooOld,
     MemoryLoadFailed,
+    InvalidCpuCount,
 }
+
+const DIRECT_BOOT_MAX_CPUS: u32 = 254;
+const MADT_HEADER_LEN: usize = 44;
+const MADT_LAPIC_ENTRY_LEN: usize = 8;
+const MADT_IOAPIC_ENTRY_LEN: usize = 12;
+const MADT_ISO_ENTRY_LEN: usize = 10;
+const MADT_MAX_LEN: usize = MADT_HEADER_LEN
+    + (MADT_LAPIC_ENTRY_LEN * DIRECT_BOOT_MAX_CPUS as usize)
+    + MADT_IOAPIC_ENTRY_LEN
+    + MADT_ISO_ENTRY_LEN;
 
 /// Set up direct Linux kernel boot, bypassing BIOS entirely.
 ///
@@ -34,6 +45,7 @@ pub enum BootError {
 /// * `initramfs` - Optional initramfs/initrd file contents
 /// * `cmdline` - Kernel command line (ASCII, max 2047 bytes)
 /// * `ram_size` - Total guest RAM in bytes
+/// * `cpu_count` - Logical CPU count to advertise in the no-alloc MADT
 pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     memory: &mut BxMemC<'_>,
@@ -41,7 +53,12 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
     initramfs: Option<&[u8]>,
     cmdline: &[u8],
     ram_size: u64,
+    cpu_count: u32,
 ) -> Result<(), BootError> {
+    if cpu_count == 0 || cpu_count > DIRECT_BOOT_MAX_CPUS {
+        return Err(BootError::InvalidCpuCount);
+    }
+
     // Validate bzImage header
     if bzimage.len() < 0x264 {
         return Err(BootError::BzImageTooSmall);
@@ -175,7 +192,7 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
         .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // ACPI tables (all stack-allocated)
-    write_acpi_tables(memory)?;
+    write_acpi_tables(memory, cpu_count)?;
 
     // Load protected-mode kernel
     memory
@@ -191,57 +208,71 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
     Ok(())
 }
 
-/// Write minimal ACPI tables (RSDP → XSDT → MADT) to guest memory.
-/// All buffers are stack-allocated.
-fn write_acpi_tables(memory: &mut BxMemC<'_>) -> Result<(), BootError> {
-    const RSDP_ADDR: u64 = 0x40000;
-    const XSDT_ADDR: u64 = 0x40100;
-    const MADT_ADDR: u64 = 0x40200;
+fn build_madt(cpu_count: u32) -> Result<([u8; MADT_MAX_LEN], usize), BootError> {
+    if cpu_count == 0 || cpu_count > DIRECT_BOOT_MAX_CPUS {
+        return Err(BootError::InvalidCpuCount);
+    }
 
-    // MADT: 44 header + 8 (local APIC) + 12 (IO APIC) + 10 (ISO) = 74
-    const MADT_LEN: usize = 74;
-    let mut madt = [0u8; MADT_LEN];
+    let madt_len = MADT_HEADER_LEN
+        + (cpu_count as usize * MADT_LAPIC_ENTRY_LEN)
+        + MADT_IOAPIC_ENTRY_LEN
+        + MADT_ISO_ENTRY_LEN;
+    let mut madt = [0u8; MADT_MAX_LEN];
+
     madt[0..4].copy_from_slice(b"APIC");
-    madt[4..8].copy_from_slice(&(MADT_LEN as u32).to_le_bytes());
+    madt[4..8].copy_from_slice(&(madt_len as u32).to_le_bytes());
     madt[8] = 3;
     madt[10..16].copy_from_slice(b"RUSTYB");
     madt[16..24].copy_from_slice(b"BXMADT  ");
     madt[24..28].copy_from_slice(&1u32.to_le_bytes());
     madt[28..32].copy_from_slice(b"RBOX");
     madt[32..36].copy_from_slice(&1u32.to_le_bytes());
-    madt[36..40].copy_from_slice(&0xFEE00000u32.to_le_bytes());
+    madt[36..40].copy_from_slice(&0xFEE0_0000u32.to_le_bytes());
     madt[40..44].copy_from_slice(&1u32.to_le_bytes());
 
-    // Local APIC entry
-    let e = 44;
-    madt[e] = 0;
-    madt[e + 1] = 8;
-    madt[e + 2] = 0;
-    madt[e + 3] = 0;
-    madt[e + 4..e + 8].copy_from_slice(&1u32.to_le_bytes());
+    let mut offset = MADT_HEADER_LEN;
+    for cpu_id in 0..cpu_count {
+        madt[offset] = 0;
+        madt[offset + 1] = MADT_LAPIC_ENTRY_LEN as u8;
+        madt[offset + 2] = cpu_id as u8;
+        madt[offset + 3] = cpu_id as u8;
+        madt[offset + 4..offset + 8].copy_from_slice(&1u32.to_le_bytes());
+        offset += MADT_LAPIC_ENTRY_LEN;
+    }
 
-    // I/O APIC entry
-    let e = 52;
-    madt[e] = 1;
-    madt[e + 1] = 12;
-    madt[e + 2] = 1;
-    madt[e + 3] = 0;
-    madt[e + 4..e + 8].copy_from_slice(&0xFEC00000u32.to_le_bytes());
-    madt[e + 8..e + 12].copy_from_slice(&0u32.to_le_bytes());
+    madt[offset] = 1;
+    madt[offset + 1] = MADT_IOAPIC_ENTRY_LEN as u8;
+    madt[offset + 2] = cpu_count as u8;
+    madt[offset + 3] = 0;
+    madt[offset + 4..offset + 8].copy_from_slice(&0xFEC0_0000u32.to_le_bytes());
+    madt[offset + 8..offset + 12].copy_from_slice(&0u32.to_le_bytes());
+    offset += MADT_IOAPIC_ENTRY_LEN;
 
-    // Interrupt Source Override
-    let e = 64;
-    madt[e] = 2;
-    madt[e + 1] = 10;
-    madt[e + 2] = 0;
-    madt[e + 3] = 0;
-    madt[e + 4..e + 8].copy_from_slice(&2u32.to_le_bytes());
-    madt[e + 8..e + 10].copy_from_slice(&0u16.to_le_bytes());
+    madt[offset] = 2;
+    madt[offset + 1] = MADT_ISO_ENTRY_LEN as u8;
+    madt[offset + 2] = 0;
+    madt[offset + 3] = 0;
+    madt[offset + 4..offset + 8].copy_from_slice(&2u32.to_le_bytes());
+    madt[offset + 8..offset + 10].copy_from_slice(&0u16.to_le_bytes());
 
-    let sum: u8 = madt.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+    let sum: u8 = madt[..madt_len]
+        .iter()
+        .fold(0u8, |acc, byte| acc.wrapping_add(*byte));
     madt[9] = 0u8.wrapping_sub(sum);
+
+    Ok((madt, madt_len))
+}
+
+/// Write minimal ACPI tables (RSDP → XSDT → MADT) to guest memory.
+/// All buffers are stack-allocated.
+fn write_acpi_tables(memory: &mut BxMemC<'_>, cpu_count: u32) -> Result<(), BootError> {
+    const RSDP_ADDR: u64 = 0x40000;
+    const XSDT_ADDR: u64 = 0x40100;
+    const MADT_ADDR: u64 = 0x40200;
+
+    let (madt, madt_len) = build_madt(cpu_count)?;
     memory
-        .load_RAM(&madt, MADT_ADDR)
+        .load_RAM(&madt[..madt_len], MADT_ADDR)
         .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // XSDT: 36 header + 8 pointer = 44
@@ -411,4 +442,52 @@ fn entry_name_matches(entry: &[u8], target: &[u8]) -> bool {
     entry_trimmed.len() == target.len()
         || entry_trimmed[target.len()] == b'_'
         || entry_trimmed[target.len()] == b'.'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_CPU_COUNT: u32 = 3;
+    const ACPI_CHECKSUM_VALID_SUM: u8 = 0;
+    const UNSET_APIC_ID: u8 = 0xFF;
+
+    #[test]
+    fn dynamic_madt_builder_emits_configured_cpus() {
+        let (madt, madt_len) = build_madt(TEST_CPU_COUNT).unwrap();
+        let madt = &madt[..madt_len];
+        let mut offset = 44usize;
+        let mut lapic_ids = [UNSET_APIC_ID; TEST_CPU_COUNT as usize];
+        let mut lapic_count = 0usize;
+        let mut ioapic_id = None;
+
+        while offset < madt.len() {
+            let entry_type = madt[offset];
+            let entry_len = madt[offset + 1] as usize;
+            match entry_type {
+                0 => {
+                    lapic_ids[lapic_count] = madt[offset + 3];
+                    lapic_count += 1;
+                }
+                1 => {
+                    ioapic_id = Some(madt[offset + 2]);
+                }
+                _ => {}
+            }
+            offset += entry_len;
+        }
+
+        assert_eq!(lapic_count, TEST_CPU_COUNT as usize);
+        assert_eq!(lapic_ids, [0, 1, 2]);
+        assert_eq!(ioapic_id, Some(TEST_CPU_COUNT as u8));
+        assert_eq!(
+            madt.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
+            ACPI_CHECKSUM_VALID_SUM
+        );
+    }
+
+    #[test]
+    fn dynamic_madt_builder_rejects_zero_cpus() {
+        assert!(matches!(build_madt(0), Err(BootError::InvalidCpuCount)));
+    }
 }

@@ -11,16 +11,25 @@
 use crate::gui::BxGui;
 #[cfg(feature = "alloc")]
 use crate::iodev::vga::VgaDisplayUpdate;
+#[cfg(feature = "alloc")]
 use crate::{
-    cpu::{BxCpuC, BxCpuIdTrait, ResetReason},
+    cpu::builder::BxCpuBuilder, iodev::acpi_tables::AcpiTableGenerator, memory::MemoryError,
+};
+use crate::{
+    cpu::{
+        apic::{LocalApicCpuEvent, LocalApicTimerActivation, PendingIpi},
+        cpu::CpuActivityState,
+        instrumentation::{ExitSet, Instrumentation},
+        BxCpuC, BxCpuIdTrait, CpuError, ResetReason, Result as CpuResult,
+    },
     iodev::{
         devices::{DeviceManager, SystemControlPort},
         BxDevicesC,
     },
     memory::{BxMemC, BxMemoryStubC},
     params::BxParams,
-    pc_system::BxPcSystemC,
-    Result,
+    pc_system::{BxPcSystemC, TimerOwner},
+    Error, Result,
 };
 
 #[cfg(feature = "alloc")]
@@ -28,6 +37,114 @@ use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::AtomicBool;
 #[cfg(feature = "alloc")]
 use core::sync::atomic::Ordering;
+
+const BZIMAGE_MIN_HEADER_LEN: usize = 0x264;
+#[cfg(not(feature = "alloc"))]
+const NO_ALLOC_MAX_AP_CPUS: usize = (crate::params::BX_MAX_SMP_THREADS_SUPPORTED as usize) - 1;
+const BOCHS_SMP_QUANTUM_TICKS: u64 = 16;
+const BOCHS_APIC_BUS_ID_MASK: u32 = 0xFF;
+const BZIMAGE_BOOT_SIGNATURE_OFFSET: usize = 0x1FE;
+const BZIMAGE_BOOT_SIGNATURE_LO: u8 = 0x55;
+const BZIMAGE_BOOT_SIGNATURE_HI: u8 = 0xAA;
+const BZIMAGE_HEADER_MAGIC_OFFSET: usize = 0x202;
+const BZIMAGE_HEADER_MAGIC: u32 = u32::from_le_bytes(*b"HdrS");
+const BZIMAGE_BOOT_VERSION_OFFSET: usize = 0x206;
+const BZIMAGE_MIN_BOOT_PROTOCOL: u16 = 0x0204;
+
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_HEADER_SIZE: usize = 44;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_LAPIC_ENTRY_SIZE: usize = 8;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_IOAPIC_ENTRY_SIZE: usize = 12;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_ISO_ENTRY_SIZE: usize = 10;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_SIGNATURE: &[u8; 4] = b"APIC";
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_REVISION: u8 = 3;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_OEM_ID: &[u8; 6] = b"RUSTYB";
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_OEM_TABLE_ID: &[u8; 8] = b"BXMADT  ";
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_CREATOR_ID: &[u8; 4] = b"RBOX";
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_REVISION_ID: u32 = 1;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_LOCAL_APIC_ADDR: u32 = 0xFEE0_0000;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_IOAPIC_ADDR: u32 = 0xFEC0_0000;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_PCAT_COMPAT: u32 = 1;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_LAPIC_ENABLED: u32 = 1;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_IOAPIC_GSI_BASE: u32 = 0;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_ISA_BUS: u8 = 0;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_TIMER_IRQ: u8 = 0;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_TIMER_GSI: u32 = 2;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_ISO_CONFORMING_FLAGS: u16 = 0;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_ENTRY_TYPE_LAPIC: u8 = 0;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_ENTRY_TYPE_IOAPIC: u8 = 1;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_ENTRY_TYPE_ISO: u8 = 2;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_RESERVED: u8 = 0;
+#[cfg(feature = "alloc")]
+const ACPI_TABLE_SIGNATURE_OFFSET: usize = 0;
+#[cfg(feature = "alloc")]
+const ACPI_TABLE_LENGTH_OFFSET: usize = 4;
+#[cfg(feature = "alloc")]
+const ACPI_TABLE_REVISION_OFFSET: usize = 8;
+#[cfg(feature = "alloc")]
+const ACPI_TABLE_CHECKSUM_OFFSET: usize = 9;
+#[cfg(feature = "alloc")]
+const ACPI_TABLE_OEM_ID_OFFSET: usize = 10;
+#[cfg(feature = "alloc")]
+const ACPI_TABLE_OEM_TABLE_ID_OFFSET: usize = 16;
+#[cfg(feature = "alloc")]
+const ACPI_TABLE_OEM_REVISION_OFFSET: usize = 24;
+#[cfg(feature = "alloc")]
+const ACPI_TABLE_CREATOR_ID_OFFSET: usize = 28;
+#[cfg(feature = "alloc")]
+const ACPI_TABLE_CREATOR_REVISION_OFFSET: usize = 32;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_LOCAL_APIC_ADDR_OFFSET: usize = 36;
+#[cfg(feature = "alloc")]
+const DIRECT_MADT_FLAGS_OFFSET: usize = 40;
+#[cfg(feature = "alloc")]
+const MADT_ENTRY_TYPE_OFFSET: usize = 0;
+#[cfg(feature = "alloc")]
+const MADT_ENTRY_LENGTH_OFFSET: usize = 1;
+#[cfg(feature = "alloc")]
+const MADT_LAPIC_PROCESSOR_ID_OFFSET: usize = 2;
+#[cfg(feature = "alloc")]
+const MADT_LAPIC_APIC_ID_OFFSET: usize = 3;
+#[cfg(feature = "alloc")]
+const MADT_LAPIC_FLAGS_OFFSET: usize = 4;
+#[cfg(feature = "alloc")]
+const MADT_IOAPIC_ID_OFFSET: usize = 2;
+#[cfg(feature = "alloc")]
+const MADT_IOAPIC_RESERVED_OFFSET: usize = 3;
+#[cfg(feature = "alloc")]
+const MADT_IOAPIC_ADDR_OFFSET: usize = 4;
+#[cfg(feature = "alloc")]
+const MADT_IOAPIC_GSI_BASE_OFFSET: usize = 8;
+#[cfg(feature = "alloc")]
+const MADT_ISO_BUS_OFFSET: usize = 2;
+#[cfg(feature = "alloc")]
+const MADT_ISO_SOURCE_OFFSET: usize = 3;
+#[cfg(feature = "alloc")]
+const MADT_ISO_GSI_OFFSET: usize = 4;
+#[cfg(feature = "alloc")]
+const MADT_ISO_FLAGS_OFFSET: usize = 8;
 
 /// Emulator configuration
 #[derive(Debug, Clone)]
@@ -65,6 +182,77 @@ impl Default for EmulatorConfig {
     }
 }
 
+#[cfg(feature = "alloc")]
+fn build_direct_boot_madt(num_cpus: u32) -> Vec<u8> {
+    let madt_len = DIRECT_MADT_HEADER_SIZE
+        + (num_cpus as usize * DIRECT_MADT_LAPIC_ENTRY_SIZE)
+        + DIRECT_MADT_IOAPIC_ENTRY_SIZE
+        + DIRECT_MADT_ISO_ENTRY_SIZE;
+    let mut madt = alloc::vec![0u8; madt_len];
+
+    madt[ACPI_TABLE_SIGNATURE_OFFSET..ACPI_TABLE_SIGNATURE_OFFSET + DIRECT_MADT_SIGNATURE.len()]
+        .copy_from_slice(DIRECT_MADT_SIGNATURE);
+    madt[ACPI_TABLE_LENGTH_OFFSET..ACPI_TABLE_LENGTH_OFFSET + core::mem::size_of::<u32>()]
+        .copy_from_slice(&(madt_len as u32).to_le_bytes());
+    madt[ACPI_TABLE_REVISION_OFFSET] = DIRECT_MADT_REVISION;
+    madt[ACPI_TABLE_OEM_ID_OFFSET..ACPI_TABLE_OEM_ID_OFFSET + DIRECT_MADT_OEM_ID.len()]
+        .copy_from_slice(DIRECT_MADT_OEM_ID);
+    madt[ACPI_TABLE_OEM_TABLE_ID_OFFSET
+        ..ACPI_TABLE_OEM_TABLE_ID_OFFSET + DIRECT_MADT_OEM_TABLE_ID.len()]
+        .copy_from_slice(DIRECT_MADT_OEM_TABLE_ID);
+    madt[ACPI_TABLE_OEM_REVISION_OFFSET
+        ..ACPI_TABLE_OEM_REVISION_OFFSET + core::mem::size_of::<u32>()]
+        .copy_from_slice(&DIRECT_MADT_REVISION_ID.to_le_bytes());
+    madt[ACPI_TABLE_CREATOR_ID_OFFSET..ACPI_TABLE_CREATOR_ID_OFFSET + DIRECT_MADT_CREATOR_ID.len()]
+        .copy_from_slice(DIRECT_MADT_CREATOR_ID);
+    madt[ACPI_TABLE_CREATOR_REVISION_OFFSET
+        ..ACPI_TABLE_CREATOR_REVISION_OFFSET + core::mem::size_of::<u32>()]
+        .copy_from_slice(&DIRECT_MADT_REVISION_ID.to_le_bytes());
+    madt[DIRECT_MADT_LOCAL_APIC_ADDR_OFFSET
+        ..DIRECT_MADT_LOCAL_APIC_ADDR_OFFSET + core::mem::size_of::<u32>()]
+        .copy_from_slice(&DIRECT_MADT_LOCAL_APIC_ADDR.to_le_bytes());
+    madt[DIRECT_MADT_FLAGS_OFFSET..DIRECT_MADT_FLAGS_OFFSET + core::mem::size_of::<u32>()]
+        .copy_from_slice(&DIRECT_MADT_PCAT_COMPAT.to_le_bytes());
+
+    let mut offset = DIRECT_MADT_HEADER_SIZE;
+    for cpu_id in 0..num_cpus {
+        madt[offset + MADT_ENTRY_TYPE_OFFSET] = DIRECT_MADT_ENTRY_TYPE_LAPIC;
+        madt[offset + MADT_ENTRY_LENGTH_OFFSET] = DIRECT_MADT_LAPIC_ENTRY_SIZE as u8;
+        madt[offset + MADT_LAPIC_PROCESSOR_ID_OFFSET] = cpu_id as u8;
+        madt[offset + MADT_LAPIC_APIC_ID_OFFSET] = cpu_id as u8;
+        madt[offset + MADT_LAPIC_FLAGS_OFFSET
+            ..offset + MADT_LAPIC_FLAGS_OFFSET + core::mem::size_of::<u32>()]
+            .copy_from_slice(&DIRECT_MADT_LAPIC_ENABLED.to_le_bytes());
+        offset += DIRECT_MADT_LAPIC_ENTRY_SIZE;
+    }
+
+    madt[offset + MADT_ENTRY_TYPE_OFFSET] = DIRECT_MADT_ENTRY_TYPE_IOAPIC;
+    madt[offset + MADT_ENTRY_LENGTH_OFFSET] = DIRECT_MADT_IOAPIC_ENTRY_SIZE as u8;
+    madt[offset + MADT_IOAPIC_ID_OFFSET] = num_cpus as u8;
+    madt[offset + MADT_IOAPIC_RESERVED_OFFSET] = DIRECT_MADT_RESERVED;
+    madt[offset + MADT_IOAPIC_ADDR_OFFSET
+        ..offset + MADT_IOAPIC_ADDR_OFFSET + core::mem::size_of::<u32>()]
+        .copy_from_slice(&DIRECT_MADT_IOAPIC_ADDR.to_le_bytes());
+    madt[offset + MADT_IOAPIC_GSI_BASE_OFFSET
+        ..offset + MADT_IOAPIC_GSI_BASE_OFFSET + core::mem::size_of::<u32>()]
+        .copy_from_slice(&DIRECT_MADT_IOAPIC_GSI_BASE.to_le_bytes());
+    offset += DIRECT_MADT_IOAPIC_ENTRY_SIZE;
+
+    madt[offset + MADT_ENTRY_TYPE_OFFSET] = DIRECT_MADT_ENTRY_TYPE_ISO;
+    madt[offset + MADT_ENTRY_LENGTH_OFFSET] = DIRECT_MADT_ISO_ENTRY_SIZE as u8;
+    madt[offset + MADT_ISO_BUS_OFFSET] = DIRECT_MADT_ISA_BUS;
+    madt[offset + MADT_ISO_SOURCE_OFFSET] = DIRECT_MADT_TIMER_IRQ;
+    madt[offset + MADT_ISO_GSI_OFFSET..offset + MADT_ISO_GSI_OFFSET + core::mem::size_of::<u32>()]
+        .copy_from_slice(&DIRECT_MADT_TIMER_GSI.to_le_bytes());
+    madt[offset + MADT_ISO_FLAGS_OFFSET
+        ..offset + MADT_ISO_FLAGS_OFFSET + core::mem::size_of::<u16>()]
+        .copy_from_slice(&DIRECT_MADT_ISO_CONFORMING_FLAGS.to_le_bytes());
+
+    let sum: u8 = madt.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+    madt[ACPI_TABLE_CHECKSUM_OFFSET] = 0u8.wrapping_sub(sum);
+    madt
+}
+
 /// Emulator instance containing all hardware components
 ///
 /// This struct owns the CPU, Memory, Devices, and PC System, providing
@@ -89,13 +277,26 @@ impl Default for EmulatorConfig {
 /// // Access components directly for cpu_loop:
 /// // emu.cpu.cpu_loop(&mut emu.memory, &[]);
 /// ```
-pub struct Emulator<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation = ()> {
+pub struct Emulator<'a, I: BxCpuIdTrait, T: Instrumentation = ()> {
     /// CPU instance (boxed because BxICache contains ~19MB fixed arrays)
     #[cfg(feature = "alloc")]
     pub cpu: alloc::boxed::Box<BxCpuC<'a, I, T>>,
+    /// Application processors (CPU IDs/APIC IDs 1..N-1).
+    #[cfg(feature = "alloc")]
+    pub(crate) ap_cpus: Vec<alloc::boxed::Box<BxCpuC<'a, I, T>>>,
     /// CPU instance (reference for no-alloc environments)
     #[cfg(not(feature = "alloc"))]
     pub cpu: &'a mut BxCpuC<'a, I, T>,
+    /// Application processor pointers supplied by no-alloc callers.
+    ///
+    /// no_std/no-alloc targets can place `BxCpuC` objects in a static, stack,
+    /// firmware, or bootloader-provided array and pass those references through
+    /// `init_at_with_ap_cpus()`. The emulator stores raw pointers so it does not
+    /// need `alloc` or `std` to support SMP scheduling.
+    #[cfg(not(feature = "alloc"))]
+    ap_cpu_ptrs: [*mut BxCpuC<'a, I, T>; NO_ALLOC_MAX_AP_CPUS],
+    #[cfg(not(feature = "alloc"))]
+    ap_cpu_count: usize,
     /// Memory subsystem
     pub memory: BxMemC<'a>,
     /// Device controller (I/O port handlers)
@@ -108,6 +309,13 @@ pub struct Emulator<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrum
     /// deltas of total `pc_system.time_usec()`, matching Bochs' unified virtual
     /// clock instead of per-batch truncation/floors.
     last_device_time_usec: u64,
+    /// Bochs SMP scheduler remainder from `executed %= BX_SMP_PROCESSORS`.
+    smp_tick_remainder: u64,
+    /// True when the last `run_cpu_batch` advanced `pc_system` internally.
+    /// SMP batches tick at Bochs round boundaries so LAPIC/pc-system timers
+    /// fire before the next virtual CPU slice; outer loops must not tick them
+    /// a second time.
+    batch_advanced_pc_system: bool,
     /// Configuration
     config: EmulatorConfig,
     /// Whether the emulator has been initialized
@@ -119,7 +327,7 @@ pub struct Emulator<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrum
     #[cfg(feature = "std")]
     bios_output_file: Option<std::fs::File>,
     /// Exit addresses for emu_start.
-    pub(crate) exit_set: crate::cpu::instrumentation::ExitSet,
+    pub(crate) exit_set: ExitSet,
     /// Shared stop flag: when set to true by the GUI thread, run_interactive exits the loop
     #[cfg(feature = "alloc")]
     pub stop_flag: Arc<AtomicBool>,
@@ -127,7 +335,7 @@ pub struct Emulator<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrum
     pub stop_flag: AtomicBool,
 }
 
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// Extend the borrow of memory owned by this Emulator to match lifetime 'a.
     ///
     /// # Safety
@@ -152,6 +360,109 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         core::mem::transmute(core::ptr::NonNull::from(&mut self.memory))
     }
 
+    #[cfg(feature = "alloc")]
+    pub(crate) fn cpu_count(&self) -> usize {
+        1 + self.ap_cpus.len()
+    }
+
+    #[cfg(not(feature = "alloc"))]
+    pub(crate) fn cpu_count(&self) -> usize {
+        1 + self.ap_cpu_count
+    }
+
+    #[cfg(feature = "alloc")]
+    pub(crate) fn cpu_ref(&self, index: usize) -> &BxCpuC<'a, I, T> {
+        if index == 0 {
+            &self.cpu
+        } else {
+            &self.ap_cpus[index - 1]
+        }
+    }
+
+    #[cfg(not(feature = "alloc"))]
+    pub(crate) fn cpu_ref(&self, index: usize) -> &BxCpuC<'a, I, T> {
+        if index == 0 {
+            &*self.cpu
+        } else {
+            assert!(index <= self.ap_cpu_count);
+            // SAFETY: init_at_with_ap_cpus copies caller-provided AP pointers
+            // whose allocations must outlive the emulator.
+            unsafe { &*self.ap_cpu_ptrs[index - 1] }
+        }
+    }
+
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
+    fn total_cpu_icount(&self) -> u64 {
+        (0..self.cpu_count()).fold(0u64, |total, cpu_index| {
+            total.saturating_add(self.cpu_ref(cpu_index).icount)
+        })
+    }
+
+    #[cfg(feature = "alloc")]
+    fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<'a, I, T> {
+        if index == 0 {
+            &mut self.cpu
+        } else {
+            &mut self.ap_cpus[index - 1]
+        }
+    }
+
+    #[cfg(not(feature = "alloc"))]
+    fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<'a, I, T> {
+        if index == 0 {
+            self.cpu
+        } else {
+            assert!(index <= self.ap_cpu_count);
+            // SAFETY: &mut self guarantees no other emulator method can
+            // concurrently borrow the AP CPU through this pointer.
+            unsafe { &mut *self.ap_cpu_ptrs[index - 1] }
+        }
+    }
+
+    fn cpu_runnable_for_batch(&self, index: usize) -> bool {
+        let cpu = self.cpu_ref(index);
+        match cpu.activity_state {
+            CpuActivityState::WaitForSipi | CpuActivityState::Shutdown => false,
+            CpuActivityState::Active => true,
+            CpuActivityState::MwaitIf => {
+                cpu.is_unmasked_event_pending(u32::MAX)
+                    || cpu.lapic.intr
+                    || (cpu.pending_event
+                        & (BxCpuC::<I>::BX_EVENT_PENDING_INTR
+                            | BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR))
+                        != 0
+            }
+            _ => {
+                cpu.is_unmasked_event_pending(u32::MAX)
+                    || (cpu.lapic.intr && cpu.interrupts_enabled())
+            }
+        }
+    }
+
+    fn cpu_participates_in_smp_time(&self, index: usize) -> bool {
+        !matches!(
+            self.cpu_ref(index).activity_state,
+            CpuActivityState::WaitForSipi | CpuActivityState::Shutdown
+        )
+    }
+
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
+    fn can_fast_forward_bsp_hlt(&self) -> bool {
+        // CPUs that have not received SIPI, shut down, or are halted with no
+        // runnable event do not require round-robin slices. Keep CPU0's
+        // single-CPU HLT/MWAIT pacing path available in those states; otherwise
+        // idle APs make the emulator bounce through trace-sized batches.
+        (1..self.cpu_count()).all(|cpu_index| {
+            matches!(
+                self.cpu_ref(cpu_index).activity_state,
+                CpuActivityState::WaitForSipi | CpuActivityState::Shutdown
+            ) || (matches!(
+                self.cpu_ref(cpu_index).activity_state,
+                CpuActivityState::Hlt | CpuActivityState::Mwait | CpuActivityState::MwaitIf
+            ) && !self.cpu_runnable_for_batch(cpu_index))
+        })
+    }
+
     /// Run a CPU batch with full I/O wiring.
     ///
     /// Sets up all the NonNull pointers that `cpu_loop_n_with_io` needs,
@@ -160,9 +471,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// # Safety
     /// Same invariants as `borrow_memory_for_cpu`: caller must hold `&mut self`
     /// and no other code path may access memory/devices during the batch.
-    pub unsafe fn run_cpu_batch(&mut self, batch_size: u64) -> crate::cpu::Result<u64> {
+    pub unsafe fn run_cpu_batch(&mut self, batch_size: u64) -> CpuResult<u64> {
+        self.batch_advanced_pc_system = false;
+        self.drain_lapic_bus();
         let batch_size = self.active_batch_step_ticks(batch_size);
-        let mem_extended = self.borrow_memory_for_cpu();
+        let cpu_count = self.cpu_count();
+        let has_ap_cpus = cpu_count > 1;
+
+        let mem_ptr: *mut BxMemC<'a> = &mut self.memory;
         let io_ptr = core::ptr::NonNull::from(&mut self.devices);
         let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
         let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
@@ -178,21 +494,156 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             .unwrap_unchecked()
             .set_mem_ptr(mem_static);
         (*dm_ptr.as_ptr()).mem_ptr = Some(mem_static);
+
         let pic_ref: *mut _ = &mut self.device_manager.pic;
         let dma_ref: *mut _ = &mut self.device_manager.dma;
-        let r = self.cpu.cpu_loop_n_with_io(
-            mem_extended,
-            &[],
-            batch_size,
-            io_ptr,
-            ps_ptr,
-            Some(&mut *pic_ref),
-            Some(&mut *dma_ref),
-        );
+        let mut total_elapsed_ticks = 0u64;
+        let mut result: CpuResult<()> = Ok(());
+
+        loop {
+            if total_elapsed_ticks >= batch_size {
+                break;
+            }
+
+            let mut runnable_count = 0usize;
+            for cpu_index in 0..cpu_count {
+                if self.cpu_runnable_for_batch(cpu_index) {
+                    runnable_count += 1;
+                }
+            }
+
+            if runnable_count == 0 {
+                break;
+            }
+
+            // Only runnable CPUs need one-trace round-robin slices, but every
+            // CPU that has left WAIT_FOR_SIPI participates in Bochs SMP time.
+            // A halted peer with no runnable event contributes the SMP quantum
+            // below so active peers do not advance guest time as a single CPU.
+            let time_cpu_count = if has_ap_cpus {
+                (0..cpu_count)
+                    .filter(|&cpu_index| self.cpu_participates_in_smp_time(cpu_index))
+                    .count()
+            } else {
+                1
+            };
+            let smp = time_cpu_count > 1;
+            let pc_tick_denominator = time_cpu_count.max(1) as u64;
+
+            let remaining = batch_size.saturating_sub(total_elapsed_ticks);
+            let per_cpu_batch = if smp {
+                // Bochs SMP main.cc runs exactly one trace per CPU, and
+                // icache.cc caps each SMP trace by the configured quantum.
+                // The default Bochs quantum is 16; using 1 here was much
+                // stricter than Bochs and collapsed host throughput.
+                BOCHS_SMP_QUANTUM_TICKS.min(remaining.max(1))
+            } else {
+                (remaining / runnable_count as u64).max(1)
+            };
+
+            let mut round_ticks = 0u64;
+            for cpu_index in 0..cpu_count {
+                if !self.cpu_runnable_for_batch(cpu_index) {
+                    if smp && self.cpu_participates_in_smp_time(cpu_index) {
+                        // Bochs main.cc:1138-1145 substitutes the SMP quantum
+                        // when a participating CPU produces no instructions,
+                        // then advances time by the participating-CPU round
+                        // average. APs still in WAIT_FOR_SIPI are not executing
+                        // yet and must not speed the guest-visible clock.
+                        round_ticks = round_ticks.saturating_add(BOCHS_SMP_QUANTUM_TICKS);
+                    }
+                    continue;
+                }
+                let pc_tick_offset = if smp && time_cpu_count != 0 {
+                    total_elapsed_ticks.saturating_add(
+                        self.smp_tick_remainder.saturating_add(round_ticks) / time_cpu_count as u64,
+                    )
+                } else {
+                    0
+                };
+                if smp {
+                    self.cpu_mut_at(cpu_index).mark_icount_sync();
+                }
+                let mem_extended: &'a mut BxMemC<'a> =
+                    core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut *mem_ptr);
+                match self.cpu_mut_at(cpu_index).cpu_loop_n_with_io(
+                    mem_extended,
+                    &[],
+                    per_cpu_batch,
+                    pc_tick_denominator,
+                    pc_tick_offset,
+                    io_ptr,
+                    ps_ptr,
+                    Some(&mut *pic_ref),
+                    Some(&mut *dma_ref),
+                ) {
+                    Ok(executed) => {
+                        let elapsed = if smp {
+                            let delta = self.cpu_ref(cpu_index).icount_delta_since_sync();
+                            if delta == 0 {
+                                BOCHS_SMP_QUANTUM_TICKS
+                            } else {
+                                delta
+                            }
+                        } else {
+                            executed
+                        };
+                        round_ticks = if smp {
+                            round_ticks.saturating_add(elapsed)
+                        } else {
+                            round_ticks.max(elapsed)
+                        };
+                        self.drain_lapic_bus();
+                    }
+                    Err(err) => {
+                        result = Err(err);
+                        break;
+                    }
+                }
+            }
+
+            if result.is_err() {
+                break;
+            }
+
+            let elapsed_ticks = if smp {
+                if time_cpu_count == 0 {
+                    0
+                } else {
+                    let total_ticks = self.smp_tick_remainder.saturating_add(round_ticks);
+                    let elapsed = total_ticks / time_cpu_count as u64;
+                    self.smp_tick_remainder = total_ticks % time_cpu_count as u64;
+                    elapsed
+                }
+            } else {
+                round_ticks
+            };
+
+            if elapsed_ticks == 0 {
+                if round_ticks == 0 {
+                    break;
+                }
+                continue;
+            }
+            total_elapsed_ticks = total_elapsed_ticks.saturating_add(elapsed_ticks);
+            if smp {
+                // Bochs advances `bx_pc_system` after every SMP processor
+                // round. Keep the Rust batch loop large for host throughput,
+                // but fire pc-system/LAPIC timers at the same virtual-time
+                // boundary before another CPU slice can run.
+                self.advance_pc_system_after_cpu_ticks(elapsed_ticks);
+                self.batch_advanced_pc_system = true;
+            }
+
+            if !smp {
+                break;
+            }
+        }
+
         self.devices.clear_device_manager();
         self.devices.clear_mem_ptr();
         self.device_manager.mem_ptr = None;
-        r
+        result.map(|_| total_elapsed_ticks)
     }
 
     /// Inject an external interrupt with temporary memory bus wiring.
@@ -206,7 +657,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     ///
     /// # Safety
     /// Same invariants as `borrow_memory_for_cpu`.
-    pub unsafe fn inject_interrupt(&mut self, vector: u8) -> crate::cpu::Result<()> {
+    pub unsafe fn inject_interrupt(&mut self, vector: u8) -> CpuResult<()> {
         let mem_extended = self.borrow_memory_for_cpu();
         self.cpu
             .set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
@@ -222,25 +673,52 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
     ///
     /// Returns `Box<Self>` because Emulator is ~1.4 MB.
     pub fn new(config: EmulatorConfig) -> Result<Box<Self>> {
-        let cpu = crate::cpu::builder::BxCpuBuilder::<I>::new().build()?;
-        Self::new_inner(config, cpu)
+        Self::new_inner(config, || Ok(BxCpuBuilder::<I>::new().build()?))
     }
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// Create a new emulator with a monomorphized tracer.
     ///
     /// The tracer type `T` is baked in at construction and cannot be changed.
     /// All tracer dispatch is inlined — zero overhead.
     pub fn new_with_instrumentation(config: EmulatorConfig, tracer: T) -> Result<Box<Self>> {
-        let cpu = crate::cpu::builder::BxCpuBuilder::<I>::new().build_with_tracer(tracer)?;
-        Self::new_inner(config, cpu)
+        if config.cpu_params.cpu_count() > 1 {
+            return Err(CpuError::UnsupportedCpuOperation {
+                operation: "instrumented SMP construction requires a per-CPU tracer factory",
+            }
+            .into());
+        }
+
+        let topology = config.cpu_params.cpu_topology();
+        let mut cpu = BxCpuBuilder::<I>::new().build_with_tracer(tracer)?;
+        cpu.configure_smp(0, topology);
+        Self::new_from_parts(config, cpu, Vec::new())
     }
 
-    fn new_inner(
+    fn new_inner<F>(config: EmulatorConfig, mut build_cpu: F) -> Result<Box<Self>>
+    where
+        F: FnMut() -> Result<alloc::boxed::Box<BxCpuC<'static, I, T>>>,
+    {
+        let topology = config.cpu_params.cpu_topology();
+        let cpu_count = config.cpu_params.cpu_count();
+        let mut cpu = build_cpu()?;
+        cpu.configure_smp(0, topology);
+
+        let mut ap_cpus = Vec::with_capacity(cpu_count.saturating_sub(1) as usize);
+        for cpu_id in 1..cpu_count {
+            let mut ap_cpu = build_cpu()?;
+            ap_cpu.configure_smp(cpu_id, topology);
+            ap_cpus.push(ap_cpu);
+        }
+        Self::new_from_parts(config, cpu, ap_cpus)
+    }
+
+    fn new_from_parts(
         config: EmulatorConfig,
         cpu: alloc::boxed::Box<BxCpuC<'static, I, T>>,
+        ap_cpus: Vec<alloc::boxed::Box<BxCpuC<'static, I, T>>>,
     ) -> Result<Box<Self>> {
         let pc_system = BxPcSystemC::new();
         let mem_stub = BxMemoryStubC::create_and_init(
@@ -257,31 +735,31 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         let layout = alloc::alloc::Layout::new::<Self>();
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut Self;
         if ptr.is_null() {
-            return Err(
-                crate::memory::MemoryError::UnableToAllocateGuestMemory(layout.size()).into(),
-            );
+            return Err(MemoryError::UnableToAllocateGuestMemory(layout.size()).into());
         }
         unsafe {
             core::ptr::addr_of_mut!((*ptr).cpu).write(cpu);
+            core::ptr::addr_of_mut!((*ptr).ap_cpus).write(ap_cpus);
             core::ptr::addr_of_mut!((*ptr).memory).write(memory);
             core::ptr::addr_of_mut!((*ptr).devices).write(devices);
             core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
             core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
             core::ptr::addr_of_mut!((*ptr).last_device_time_usec).write(0);
+            core::ptr::addr_of_mut!((*ptr).smp_tick_remainder).write(0);
+            core::ptr::addr_of_mut!((*ptr).batch_advanced_pc_system).write(false);
             core::ptr::addr_of_mut!((*ptr).config).write(config);
             core::ptr::addr_of_mut!((*ptr).initialized).write(false);
             core::ptr::addr_of_mut!((*ptr).gui).write(None);
             #[cfg(feature = "std")]
             core::ptr::addr_of_mut!((*ptr).bios_output_file).write(None);
-            core::ptr::addr_of_mut!((*ptr).exit_set)
-                .write(crate::cpu::instrumentation::ExitSet::new());
+            core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
             core::ptr::addr_of_mut!((*ptr).stop_flag).write(Arc::new(AtomicBool::new(false)));
             Ok(alloc::boxed::Box::from_raw(ptr))
         }
     }
 }
 
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     #[cfg(not(feature = "alloc"))]
     /// Initialize an Emulator at a caller-provided memory location.
     ///
@@ -299,18 +777,65 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         mem_stub: BxMemoryStubC,
         config: EmulatorConfig,
     ) -> Result<&'a mut Self> {
+        Self::init_at_with_ap_cpus(ptr, cpu, &mut [], mem_stub, config)
+    }
+
+    #[cfg(not(feature = "alloc"))]
+    /// Initialize an Emulator at a caller-provided memory location with
+    /// caller-provided application processors.
+    ///
+    /// This keeps SMP available to no_std/no-alloc targets: callers can define
+    /// a fixed array of `BxCpuC` storage, initialize each CPU with
+    /// `BxCpuBuilder::init_cpu_at()`, then pass the AP references here. The
+    /// emulator stores raw pointers to the APs and never allocates.
+    ///
+    /// # Safety
+    /// - `ptr` must point to a valid, zeroed, properly aligned allocation of `size_of::<Self>()` bytes
+    /// - `cpu` and every entry in `ap_cpus` must point to valid, initialized BxCpuC instances
+    /// - `mem_stub` must be a fully initialized memory stub
+    /// - All allocations must outlive the returned emulator reference
+    pub unsafe fn init_at_with_ap_cpus(
+        ptr: *mut Self,
+        cpu: &'a mut BxCpuC<'a, I, T>,
+        ap_cpus: &mut [&'a mut BxCpuC<'a, I, T>],
+        mem_stub: BxMemoryStubC,
+        config: EmulatorConfig,
+    ) -> Result<&'a mut Self> {
+        let topology = config.cpu_params.cpu_topology();
+        let configured_cpu_count = config.cpu_params.cpu_count() as usize;
+        let required_ap_count = configured_cpu_count.saturating_sub(1);
+        if ap_cpus.len() < required_ap_count {
+            return Err(CpuError::UnsupportedCpuOperation {
+                operation: "no-alloc SMP requires caller-provided AP CPU storage",
+            }
+            .into());
+        }
+
         let memory = BxMemC::new_from_stub(mem_stub, config.pci_enabled);
         let devices = BxDevicesC::new();
         let device_manager = DeviceManager::new();
         let pc_system = BxPcSystemC::new();
+        let mut ap_cpu_ptrs = [core::ptr::null_mut(); NO_ALLOC_MAX_AP_CPUS];
+        cpu.configure_smp(0, topology);
+        for (index, ap_cpu_slot) in ap_cpus.iter_mut().take(required_ap_count).enumerate() {
+            let ap_cpu: &mut BxCpuC<'a, I, T> = &mut **ap_cpu_slot;
+            ap_cpu.configure_smp((index + 1) as u32, topology);
+            ap_cpu_ptrs[index] = ap_cpu as *mut BxCpuC<'a, I, T>;
+        }
+
         core::ptr::addr_of_mut!((*ptr).cpu).write(cpu);
+        core::ptr::addr_of_mut!((*ptr).ap_cpu_ptrs).write(ap_cpu_ptrs);
+        core::ptr::addr_of_mut!((*ptr).ap_cpu_count).write(required_ap_count);
         core::ptr::addr_of_mut!((*ptr).memory).write(memory);
         core::ptr::addr_of_mut!((*ptr).devices).write(devices);
         core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
         core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
         core::ptr::addr_of_mut!((*ptr).last_device_time_usec).write(0);
+        core::ptr::addr_of_mut!((*ptr).smp_tick_remainder).write(0);
+        core::ptr::addr_of_mut!((*ptr).batch_advanced_pc_system).write(false);
         core::ptr::addr_of_mut!((*ptr).config).write(config);
-        core::ptr::addr_of_mut!((*ptr).exit_set).write(crate::cpu::instrumentation::ExitSet::new());
+        core::ptr::addr_of_mut!((*ptr).initialized).write(false);
+        core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
         core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
         Ok(&mut *ptr)
     }
@@ -350,6 +875,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         // Step 1: Initialize PC system with IPS (line 1201)
         self.pc_system.initialize(self.config.ips);
         self.last_device_time_usec = 0;
+        self.smp_tick_remainder = 0;
+        self.batch_advanced_pc_system = false;
         tracing::trace!("PC system initialized with {} IPS", self.config.ips);
 
         // Step 2: Memory initialization (line 1312)
@@ -368,16 +895,22 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         // But since this method doesn't have BIOS data, it's loaded separately after this call.
         // For correct initialization, use init_memory() + load_bios() + init_cpu_and_devices()
 
-        // Step 6: Initialize CPU (line 1337)
-        self.cpu.initialize(self.config.cpu_params.clone())?;
-        tracing::trace!("CPU initialized");
+        let cpu_params = self.config.cpu_params.clone();
+        for cpu_index in 0..self.cpu_count() {
+            self.cpu_mut_at(cpu_index).initialize(cpu_params.clone())?;
+        }
+        tracing::trace!("CPUs initialized");
 
         // Step 7: CPU sanity checks (line 1338) - separate call to match original
-        self.cpu.sanity_checks()?;
+        for cpu_index in 0..self.cpu_count() {
+            self.cpu_mut_at(cpu_index).sanity_checks()?;
+        }
         tracing::trace!("CPU sanity checks passed");
 
         // Step 8: Register CPU state (line 1339)
-        self.cpu.register_state();
+        for cpu_index in 0..self.cpu_count() {
+            self.cpu_ref(cpu_index).register_state();
+        }
         tracing::trace!("CPU state registered");
 
         // Note: BX_INSTR_INITIALIZE(0) at line 1340 is instrumentation initialization
@@ -396,10 +929,18 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             self.device_manager.pci_bridge.init_dram(ramsize_mb);
             tracing::trace!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
         }
-        // Initialize fw_cfg device (QEMU-compatible firmware configuration)
+        // Initialize fw_cfg device and ACPI CPU/APIC tables.
         {
             let ram_size = self.config.guest_memory_size as u64;
-            self.device_manager.fw_cfg.init(ram_size, 1); // single CPU
+            let cpu_count = self.config.cpu_params.cpu_count();
+            self.device_manager.ioapic.set_id(cpu_count);
+            self.device_manager.fw_cfg.init(ram_size, cpu_count);
+            let acpi = AcpiTableGenerator::generate(ram_size, cpu_count);
+            self.device_manager.fw_cfg.add_acpi_tables(
+                acpi.tables_blob(),
+                acpi.rsdp_blob(),
+                acpi.loader_blob(),
+            );
         }
         tracing::trace!("Devices initialized");
 
@@ -411,7 +952,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         {
             // Channel 0 timer
             match self.pc_system.register_timer(
-                crate::pc_system::TimerOwner::PciIdeCh0,
+                TimerOwner::PciIdeCh0,
                 0,
                 false,
                 false,
@@ -427,7 +968,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             }
             // Channel 1 timer
             match self.pc_system.register_timer(
-                crate::pc_system::TimerOwner::PciIdeCh1,
+                TimerOwner::PciIdeCh1,
                 0,
                 false,
                 false,
@@ -451,11 +992,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         // as parameters to service_ioapic/set_irq_level/write_aligned.
         // The MMIO callback path uses fallback stubs (no PIC/LAPIC available).
 
-        // Register LAPIC timer with pc_system (matches Bochs apic.cc)
-        // Timer is registered inactive; activated when LAPIC timer ICR is written.
-        {
+        // Register one LAPIC timer per CPU (matches Bochs per-local-APIC timers).
+        for cpu_index in 0..self.cpu_count() {
             let timer_handle = self.pc_system.register_timer(
-                crate::pc_system::TimerOwner::Lapic,
+                TimerOwner::Lapic(cpu_index),
                 0,     // period=0 (inactive)
                 false, // continuous=false (one-shot, re-armed by periodic())
                 false, // active=false
@@ -463,11 +1003,19 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             );
             match timer_handle {
                 Ok(handle) => {
-                    self.cpu.lapic.timer_handle = Some(handle);
-                    tracing::trace!("LAPIC timer registered with handle {}", handle);
+                    self.cpu_mut_at(cpu_index).lapic.timer_handle = Some(handle);
+                    tracing::trace!(
+                        "LAPIC timer registered for CPU {} with handle {}",
+                        cpu_index,
+                        handle
+                    );
                 }
                 Err(e) => {
-                    tracing::error!("Failed to register LAPIC timer: {}", e);
+                    tracing::error!(
+                        "Failed to register LAPIC timer for CPU {}: {}",
+                        cpu_index,
+                        e
+                    );
                 }
             }
         }
@@ -516,6 +1064,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         // Step 1: Initialize PC system with IPS (line 1201)
         self.pc_system.initialize(self.config.ips);
         self.last_device_time_usec = 0;
+        self.smp_tick_remainder = 0;
+        self.batch_advanced_pc_system = false;
         tracing::trace!("PC system initialized with {} IPS", self.config.ips);
 
         // Step 2: Memory initialization (line 1312)
@@ -539,6 +1089,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     pub fn init_pc_system(&mut self) {
         self.pc_system.initialize(self.config.ips);
         self.last_device_time_usec = 0;
+        self.smp_tick_remainder = 0;
         self.memory.set_a20_mask(self.pc_system.a20_mask());
     }
 
@@ -554,16 +1105,22 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     ///
     /// Call this AFTER `init_memory_and_pc_system()` and `load_bios()`.
     pub fn init_cpu_and_devices(&mut self) -> Result<()> {
-        // Step 6: Initialize CPU (line 1337)
-        self.cpu.initialize(self.config.cpu_params.clone())?;
-        tracing::trace!("CPU initialized");
+        let cpu_params = self.config.cpu_params.clone();
+        for cpu_index in 0..self.cpu_count() {
+            self.cpu_mut_at(cpu_index).initialize(cpu_params.clone())?;
+        }
+        tracing::trace!("CPUs initialized");
 
         // Step 7: CPU sanity checks (line 1338) - separate call to match original
-        self.cpu.sanity_checks()?;
+        for cpu_index in 0..self.cpu_count() {
+            self.cpu_mut_at(cpu_index).sanity_checks()?;
+        }
         tracing::trace!("CPU sanity checks passed");
 
         // Step 8: Register CPU state (line 1339)
-        self.cpu.register_state();
+        for cpu_index in 0..self.cpu_count() {
+            self.cpu_ref(cpu_index).register_state();
+        }
         tracing::trace!("CPU state registered");
 
         // Note: BX_INSTR_INITIALIZE(0) at line 1340 is instrumentation initialization
@@ -582,10 +1139,21 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             self.device_manager.pci_bridge.init_dram(ramsize_mb);
             tracing::trace!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
         }
-        // Initialize fw_cfg device (QEMU-compatible firmware configuration)
+        // Initialize fw_cfg device and ACPI CPU/APIC tables.
         {
             let ram_size = self.config.guest_memory_size as u64;
-            self.device_manager.fw_cfg.init(ram_size, 1);
+            let cpu_count = self.config.cpu_params.cpu_count();
+            self.device_manager.ioapic.set_id(cpu_count);
+            self.device_manager.fw_cfg.init(ram_size, cpu_count);
+            #[cfg(feature = "alloc")]
+            {
+                let acpi = AcpiTableGenerator::generate(ram_size, cpu_count);
+                self.device_manager.fw_cfg.add_acpi_tables(
+                    acpi.tables_blob(),
+                    acpi.rsdp_blob(),
+                    acpi.loader_blob(),
+                );
+            }
         }
         tracing::debug!("Device initialization complete");
 
@@ -597,7 +1165,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         {
             // Channel 0 timer
             match self.pc_system.register_timer(
-                crate::pc_system::TimerOwner::PciIdeCh0,
+                TimerOwner::PciIdeCh0,
                 0,
                 false,
                 false,
@@ -613,7 +1181,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             }
             // Channel 1 timer
             match self.pc_system.register_timer(
-                crate::pc_system::TimerOwner::PciIdeCh1,
+                TimerOwner::PciIdeCh1,
                 0,
                 false,
                 false,
@@ -632,11 +1200,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         // PIC→IOAPIC, IOAPIC→PIC, IOAPIC→LAPIC: pointer wiring removed.
         // Forwarding is now done via parameters at call sites.
 
-        // Register LAPIC timer with pc_system (matches Bochs apic.cc)
-        // Timer is registered inactive; activated when LAPIC timer ICR is written.
-        {
+        // Register one LAPIC timer per CPU (matches Bochs per-local-APIC timers).
+        for cpu_index in 0..self.cpu_count() {
             let timer_handle = self.pc_system.register_timer(
-                crate::pc_system::TimerOwner::Lapic,
+                TimerOwner::Lapic(cpu_index),
                 0,     // period=0 (inactive)
                 false, // continuous=false (one-shot, re-armed by periodic())
                 false, // active=false
@@ -644,11 +1211,19 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             );
             match timer_handle {
                 Ok(handle) => {
-                    self.cpu.lapic.timer_handle = Some(handle);
-                    tracing::trace!("LAPIC timer registered with handle {}", handle);
+                    self.cpu_mut_at(cpu_index).lapic.timer_handle = Some(handle);
+                    tracing::trace!(
+                        "LAPIC timer registered for CPU {} with handle {}",
+                        cpu_index,
+                        handle
+                    );
                 }
                 Err(e) => {
-                    tracing::error!("Failed to register LAPIC timer: {}", e);
+                    tracing::error!(
+                        "Failed to register LAPIC timer for CPU {}: {}",
+                        cpu_index,
+                        e
+                    );
                 }
             }
         }
@@ -727,7 +1302,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 
     /// Get mutable reference to CPU for instrumentation setup.
-    pub fn cpu_mut(&mut self) -> &mut crate::cpu::cpu::BxCpuC<'a, I, T> {
+    pub fn cpu_mut(&mut self) -> &mut BxCpuC<'a, I, T> {
         &mut *self.cpu
     }
 
@@ -862,8 +1437,24 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         // Sync A20 mask to memory
         self.memory.set_a20_mask(self.pc_system.a20_mask());
 
-        // Reset CPU
-        self.cpu.reset(reset_type);
+        // Reset all CPUs. CPU 0 is BSP; APs enter WAIT_FOR_SIPI in BxCpuC::reset.
+        for cpu_index in 0..self.cpu_count() {
+            self.cpu_mut_at(cpu_index).reset(reset_type);
+        }
+
+        for cpu_index in 0..self.cpu_count() {
+            let timer_handle = {
+                let cpu = self.cpu_mut_at(cpu_index);
+                let timer_handle = cpu.lapic.timer_handle;
+                cpu.lapic.timer_deactivate_request = false;
+                cpu.lapic.timer_activate_request = None;
+                cpu.lapic.timer_fired = false;
+                timer_handle
+            };
+            if let Some(handle) = timer_handle {
+                let _ = self.pc_system.deactivate_timer(handle);
+            }
+        }
 
         // Reset devices (only on hardware reset)
         // Matches original: DEV_reset_devices(type) at pc_system.cc
@@ -889,9 +1480,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             // Note: release_keys() at line 407 and paste.stop at line 409 not yet implemented
         }
 
-        // Reset system control port and keyboard reset flag
-        self.device_manager.port92 = SystemControlPort::new();
-        self.device_manager.keyboard.reset_requested = false;
+        // Clear reset request latches. Port 92h is device state, so only a
+        // hardware reset reinitializes its value/A20 latch.
+        if matches!(reset_type, ResetReason::Hardware) {
+            self.device_manager.port92 = SystemControlPort::new();
+        } else {
+            self.device_manager.port92.reset_request = None;
+        }
+        self.device_manager.keyboard.reset_requested = None;
 
         // Note: start_timers() is called separately after GUI signal handlers
         // to match original Bochs order: reset -> init_signal_handlers -> start_timers
@@ -923,7 +1519,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Call this before accessing `cpu.cpu_loop()`.
     pub fn ready_to_run(&self) -> Result<()> {
         if !self.initialized {
-            return Err(crate::Error::Cpu(crate::cpu::CpuError::CpuNotInitialized));
+            return Err(Error::Cpu(CpuError::CpuNotInitialized));
         }
         Ok(())
     }
@@ -962,6 +1558,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         } else {
             self.pc_system.time_usec()
         };
+        self.smp_tick_remainder = 0;
+        self.batch_advanced_pc_system = false;
         self.start();
     }
 
@@ -1050,7 +1648,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             self.sync_a20_state();
         }
 
-        self.device_manager.port92.reset_request
+        self.device_manager.port92.reset_request.is_some()
     }
 
     /// Read Port 92h value
@@ -1059,17 +1657,26 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 
     /// Check for pending reset requests (keyboard 0xFE, port 92h, PCI CF9).
-    /// If a reset is pending, clears the request flags and performs a hardware reset.
+    /// If a reset is pending, clears the request flags and performs that reset type.
     /// Returns true if a reset was performed.
     pub fn check_and_handle_resets(&mut self) -> Result<bool> {
+        let port92_reset = self.device_manager.port92.reset_request.take();
+        let keyboard_reset = self.device_manager.keyboard.reset_requested.take();
         let pci_reset = self.device_manager.pci2isa.reset_request.take();
-        if self.device_manager.port92.reset_request
-            || self.device_manager.keyboard.reset_requested
-            || pci_reset.is_some()
+
+        let reset_type = if matches!(port92_reset, Some(ResetReason::Hardware))
+            || matches!(keyboard_reset, Some(ResetReason::Hardware))
+            || matches!(pci_reset, Some(ResetReason::Hardware))
         {
-            self.device_manager.port92.reset_request = false;
-            self.device_manager.keyboard.reset_requested = false;
-            self.reset(ResetReason::Hardware)?;
+            Some(ResetReason::Hardware)
+        } else if port92_reset.is_some() || keyboard_reset.is_some() || pci_reset.is_some() {
+            Some(ResetReason::Software)
+        } else {
+            None
+        };
+
+        if let Some(reset_type) = reset_type {
+            self.reset(reset_type)?;
             Ok(true)
         } else {
             Ok(false)
@@ -1153,8 +1760,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Simulate time passing (for timer-based devices)
     pub fn tick_devices(&mut self, usec: u64) {
         let icount = self.cpu.icount;
-        self.device_manager
-            .tick(usec, icount, Some(&mut self.cpu.lapic));
+        self.device_manager.tick(usec, icount, None);
         // Process deferred ATAPI seek completion (Bochs seek_timer pattern).
         // In Bochs, start_seek() activates a timer that fires after a seek
         // delay and calls ready_to_send_atapi(). We process it here during
@@ -1201,6 +1807,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             self.tick_devices(delta);
             self.last_device_time_usec = now;
         }
+    }
+
+    #[inline]
+    fn advance_pc_system_after_cpu_ticks(&mut self, ticks: u64) {
+        self.pc_system.tickn(ticks as u32);
+        self.dispatch_timer_fires();
+        self.advance_devices_to_pc_time();
+        self.sync_event_flags();
     }
 
     #[inline]
@@ -1257,23 +1871,355 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// `countdown_event` records fired timer owners instead of calling fn ptrs.
     /// This method drains them and performs the device-specific action.
     pub fn dispatch_timer_fires(&mut self) {
-        let (owners, count) = self.pc_system.take_fired_timers();
-        for &owner in &owners[..count] {
-            match owner {
-                crate::pc_system::TimerOwner::NullTimer => {}
-                crate::pc_system::TimerOwner::PciIdeCh0 => {
-                    self.device_manager.pci_ide.timer(0);
+        let (owners, counts, count) = self.pc_system.take_fired_timers();
+        for entry in 0..count {
+            match owners[entry] {
+                TimerOwner::NullTimer => {}
+                TimerOwner::PciIdeCh0 => {
+                    for _ in 0..counts[entry] {
+                        self.device_manager.pci_ide.timer(0);
+                    }
                 }
-                crate::pc_system::TimerOwner::PciIdeCh1 => {
-                    self.device_manager.pci_ide.timer(1);
+                TimerOwner::PciIdeCh1 => {
+                    for _ in 0..counts[entry] {
+                        self.device_manager.pci_ide.timer(1);
+                    }
                 }
-                crate::pc_system::TimerOwner::Lapic => {
-                    self.cpu.lapic.timer_fired = true;
+                TimerOwner::Lapic(cpu_index) => {
+                    if cpu_index < self.cpu_count() {
+                        self.cpu_mut_at(cpu_index).lapic.timer_fired = true;
+                    }
                 }
             }
         }
     }
 
+    #[cfg(feature = "alloc")]
+    fn drain_lapic_bus(&mut self) {
+        let cpu_count = self.cpu_count();
+        for src in 0..cpu_count {
+            while let Some(ipi) = { self.cpu_mut_at(src).lapic.take_pending_ipi() } {
+                self.deliver_pending_ipi(cpu_count, src, ipi);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "alloc"))]
+    fn drain_lapic_bus(&mut self) {
+        let cpu_count = self.cpu_count();
+        for src in 0..cpu_count {
+            while let Some(ipi) = { self.cpu_mut_at(src).lapic.take_pending_ipi() } {
+                self.deliver_pending_ipi(cpu_count, src, ipi);
+            }
+        }
+    }
+
+    fn deliver_lapic_bus_interrupt(
+        &mut self,
+        target: usize,
+        vector: u8,
+        delivery_mode: u8,
+        trigger_mode: u8,
+    ) {
+        let (cpu_event, signal_lapic_intr) = {
+            let cpu = self.cpu_mut_at(target);
+            cpu.lapic.deliver(vector, delivery_mode, trigger_mode);
+            let cpu_event = cpu.lapic.take_pending_cpu_event();
+            let signal_lapic_intr = cpu.lapic.intr_pending;
+            if signal_lapic_intr {
+                cpu.lapic.intr_pending = false;
+            }
+            (cpu_event, signal_lapic_intr)
+        };
+        self.apply_lapic_cpu_event(target, cpu_event);
+        if signal_lapic_intr {
+            self.cpu_mut_at(target)
+                .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+        }
+    }
+
+    fn deliver_pending_ipi(&mut self, cpu_count: usize, src: usize, ipi: PendingIpi) {
+        let mut accepted = ipi.accepted;
+        let vector = (ipi.lo_cmd & 0xFF) as u8;
+        let delivery_mode = ((ipi.lo_cmd >> 8) & 7) as u8;
+        let trigger_mode = ((ipi.lo_cmd >> 15) & 1) as u8;
+
+        if delivery_mode == 1 {
+            if !self.cpu_ref(0).lapic.is_xapic() {
+                let mut focus_target = None;
+                for target in 0..cpu_count {
+                    if self.cpu_ref(target).lapic.is_focus(vector) {
+                        focus_target = Some(target);
+                        break;
+                    }
+                }
+                if let Some(target) = focus_target {
+                    self.deliver_lapic_bus_interrupt(target, vector, delivery_mode, trigger_mode);
+                    accepted = true;
+                }
+            }
+
+            if !accepted {
+                let mut selected = None;
+                for target in 0..cpu_count {
+                    if !self.ipi_targets_cpu(src, ipi, target) {
+                        continue;
+                    }
+                    let priority = {
+                        let lapic = &self.cpu_ref(target).lapic;
+                        if lapic.is_xapic() {
+                            lapic.get_tpr()
+                        } else {
+                            lapic.get_apr()
+                        }
+                    };
+                    if selected
+                        .map(|(_, best_priority)| priority < best_priority)
+                        .unwrap_or(true)
+                    {
+                        selected = Some((target, priority));
+                    }
+                }
+                if let Some((target, _)) = selected {
+                    self.deliver_lapic_bus_interrupt(target, vector, delivery_mode, trigger_mode);
+                    accepted = true;
+                }
+            }
+
+            if !accepted {
+                self.cpu_mut_at(src).lapic.record_tx_accept_error();
+            }
+            return;
+        }
+
+        for target in 0..cpu_count {
+            if !self.ipi_targets_cpu(src, ipi, target) {
+                continue;
+            }
+            self.deliver_lapic_bus_interrupt(target, vector, delivery_mode, trigger_mode);
+            accepted = true;
+        }
+        if !accepted {
+            self.cpu_mut_at(src).lapic.record_tx_accept_error();
+        }
+    }
+
+    fn ipi_targets_cpu(&self, src: usize, ipi: PendingIpi, target: usize) -> bool {
+        if ipi.exclude_source && target == src {
+            return false;
+        }
+
+        match ipi.shorthand {
+            0 => {
+                let target_lapic = &self.cpu_ref(target).lapic;
+                let logical_dest = (ipi.lo_cmd >> 11) & 1 != 0;
+                if logical_dest {
+                    target_lapic.matches_logical_dest(ipi.dest)
+                } else {
+                    ipi.dest == target_lapic.get_id()
+                        || (ipi.dest & BOCHS_APIC_BUS_ID_MASK) == BOCHS_APIC_BUS_ID_MASK
+                }
+            }
+            2 => true,
+            3 => target != src,
+            _ => false,
+        }
+    }
+
+    fn ioapic_targets_cpu(
+        &self,
+        delivery: crate::iodev::ioapic::PendingIoApicDelivery,
+        target: usize,
+    ) -> bool {
+        let target_lapic = &self.cpu_ref(target).lapic;
+        if delivery.dest_mode != 0 {
+            target_lapic.matches_logical_dest(delivery.dest)
+        } else {
+            delivery.dest == target_lapic.get_id()
+                || (delivery.dest & BOCHS_APIC_BUS_ID_MASK) == BOCHS_APIC_BUS_ID_MASK
+        }
+    }
+
+    fn deliver_ioapic_to_lapic(
+        &mut self,
+        delivery: crate::iodev::ioapic::PendingIoApicDelivery,
+        target: usize,
+    ) {
+        self.deliver_lapic_bus_interrupt(
+            target,
+            delivery.vector,
+            delivery.delivery_mode,
+            delivery.trigger_mode,
+        );
+    }
+
+    fn deliver_ioapic_to_lapics(
+        &mut self,
+        delivery: crate::iodev::ioapic::PendingIoApicDelivery,
+    ) -> bool {
+        let cpu_count = self.cpu_count();
+        if delivery.delivery_mode == 1 {
+            if delivery.dest_mode == 0 {
+                return false;
+            }
+
+            if !self.cpu_ref(0).lapic.is_xapic() {
+                let mut focus_target = None;
+                for target in 0..cpu_count {
+                    if self.cpu_ref(target).lapic.is_focus(delivery.vector) {
+                        focus_target = Some(target);
+                        break;
+                    }
+                }
+                if let Some(target) = focus_target {
+                    self.deliver_ioapic_to_lapic(delivery, target);
+                    return true;
+                }
+            }
+
+            let mut selected = None;
+            for target in 0..cpu_count {
+                if !self.ioapic_targets_cpu(delivery, target) {
+                    continue;
+                }
+                let priority = {
+                    let lapic = &self.cpu_ref(target).lapic;
+                    if lapic.is_xapic() {
+                        lapic.get_tpr()
+                    } else {
+                        lapic.get_apr()
+                    }
+                };
+                if selected
+                    .map(|(_, best_priority)| priority < best_priority)
+                    .unwrap_or(true)
+                {
+                    selected = Some((target, priority));
+                }
+            }
+            if let Some((target, _)) = selected {
+                self.deliver_ioapic_to_lapic(delivery, target);
+                return true;
+            }
+            return false;
+        }
+
+        let mut delivered = false;
+        for target in 0..cpu_count {
+            if self.ioapic_targets_cpu(delivery, target) {
+                self.deliver_ioapic_to_lapic(delivery, target);
+                delivered = true;
+            }
+        }
+        delivered
+    }
+
+    fn apply_lapic_timer_request(
+        &mut self,
+        cpu_index: usize,
+        timer_handle: Option<usize>,
+        deactivate: bool,
+        activate: Option<LocalApicTimerActivation>,
+        reactivate_from_previous_fire: bool,
+    ) {
+        if deactivate {
+            if let Some(handle) = timer_handle {
+                let _ = self.pc_system.deactivate_timer(handle);
+            }
+        }
+
+        if let Some(activation) = activate {
+            if let Some(handle) = timer_handle {
+                let _ = if reactivate_from_previous_fire {
+                    self.pc_system
+                        .reactivate_timer_relative(handle, activation.delay_ticks)
+                } else {
+                    self.pc_system
+                        .activate_timer(handle, activation.delay_ticks, false)
+                };
+            }
+            if activation.update_ticks_initial {
+                let ticks_now = self.pc_system.time_ticks();
+                self.cpu_mut_at(cpu_index)
+                    .lapic
+                    .set_ticks_initial(ticks_now);
+            }
+        }
+    }
+
+    fn service_lapic_local_events(&mut self) {
+        for cpu_index in 0..self.cpu_count() {
+            while let Some(cpu_event) = self.cpu_mut_at(cpu_index).lapic.take_pending_cpu_event() {
+                self.apply_lapic_cpu_event(cpu_index, Some(cpu_event));
+            }
+
+            while self.cpu_ref(cpu_index).lapic.timer_fired {
+                let ticks_now = self.pc_system.time_ticks();
+                let (timer_handle, deactivate, activate) = {
+                    let cpu = self.cpu_mut_at(cpu_index);
+                    cpu.lapic.current_ticks = ticks_now;
+                    cpu.lapic.ticks_at_sync = ticks_now;
+                    cpu.lapic.icount_at_sync = cpu.icount;
+                    cpu.lapic.timer_fired = false;
+                    cpu.lapic.diag_timer_fires += 1;
+                    cpu.lapic.periodic(ticks_now);
+
+                    if cpu.lapic.intr {
+                        cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                    }
+
+                    let timer_handle = cpu.lapic.timer_handle;
+                    let deactivate = cpu.lapic.timer_deactivate_request;
+                    cpu.lapic.timer_deactivate_request = false;
+                    let activate = cpu.lapic.timer_activate_request.take();
+                    (timer_handle, deactivate, activate)
+                };
+
+                self.apply_lapic_timer_request(cpu_index, timer_handle, deactivate, activate, true);
+
+                self.pc_system.tickn(0);
+                self.dispatch_timer_fires();
+            }
+
+            let ticks_now = self.pc_system.time_ticks();
+            let (timer_handle, deactivate, activate, eoi_vector) = {
+                let cpu = self.cpu_mut_at(cpu_index);
+                cpu.lapic.current_ticks = ticks_now;
+                cpu.lapic.ticks_at_sync = ticks_now;
+                cpu.lapic.icount_at_sync = cpu.icount;
+
+                if cpu.lapic.intr {
+                    cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                }
+
+                let timer_handle = cpu.lapic.timer_handle;
+                let deactivate = cpu.lapic.timer_deactivate_request;
+                cpu.lapic.timer_deactivate_request = false;
+                let activate = cpu.lapic.timer_activate_request.take();
+                let eoi_vector = cpu.lapic.pending_eoi_vector.take();
+                (timer_handle, deactivate, activate, eoi_vector)
+            };
+
+            self.apply_lapic_timer_request(cpu_index, timer_handle, deactivate, activate, false);
+
+            if let Some(vector) = eoi_vector {
+                self.device_manager.ioapic.receive_eoi(vector);
+            }
+        }
+    }
+
+    fn apply_lapic_cpu_event(&mut self, target: usize, event: Option<LocalApicCpuEvent>) {
+        let Some(event) = event else {
+            return;
+        };
+        let cpu = self.cpu_mut_at(target);
+        match event {
+            LocalApicCpuEvent::Smi => cpu.deliver_smi(),
+            LocalApicCpuEvent::Nmi => cpu.deliver_nmi(),
+            LocalApicCpuEvent::Init => cpu.deliver_init_immediately(),
+            LocalApicCpuEvent::Sipi(vector) => cpu.deliver_sipi(vector),
+        }
+    }
     /// Synchronize device event flags to CPU event fields.
     ///
     /// PIC, LAPIC, and pc_system set boolean flags when they need to
@@ -1281,41 +2227,53 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// corresponding bits to `cpu.pending_event` / `cpu.async_event`,
     /// and clears the flags.
     pub fn sync_event_flags(&mut self) {
+        self.drain_lapic_bus();
+        self.service_lapic_local_events();
         // PIC: BX_RAISE_INTR
         if self.device_manager.pic.irq_pending {
-            self.cpu.pending_event |= BxCpuC::<I>::BX_EVENT_PENDING_INTR;
-            self.cpu.async_event = 1;
+            self.cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
             self.device_manager.pic.irq_pending = false;
         }
         // PIC: BX_CLEAR_INTR
         if self.device_manager.pic.irq_cleared {
-            self.cpu.pending_event &= !BxCpuC::<I>::BX_EVENT_PENDING_INTR;
+            self.cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
             self.device_manager.pic.irq_cleared = false;
         }
-        // LAPIC: BX_EVENT_PENDING_LAPIC_INTR
-        if self.cpu.lapic.intr_pending {
-            self.cpu.pending_event |= BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR;
-            self.cpu.async_event = 1;
-            self.cpu.lapic.intr_pending = false;
-        }
-        // IOAPIC: drain pending deliveries to LAPIC
+        // IOAPIC: drain pending deliveries to LAPICs
         {
             let (deliveries, count) = self.device_manager.ioapic.take_pending_deliveries();
             if count > 0 {
-                for &(vector, delivery_mode, trigger_mode) in &deliveries[..count] {
-                    self.cpu.lapic.deliver(vector, delivery_mode, trigger_mode);
+                for &delivery in &deliveries[..count] {
+                    let mut delivery = delivery;
+                    if delivery.needs_pic_iac {
+                        delivery.vector = self.device_manager.pic.iac();
+                        delivery.needs_pic_iac = false;
+                    }
+                    let done = self.deliver_ioapic_to_lapics(delivery);
+                    self.device_manager
+                        .ioapic
+                        .complete_deferred_delivery(delivery, done);
                 }
+            }
+        }
+        self.drain_lapic_bus();
+        self.service_lapic_local_events();
+        // LAPIC: BX_EVENT_PENDING_LAPIC_INTR
+        for cpu_index in 0..self.cpu_count() {
+            let cpu = self.cpu_mut_at(cpu_index);
+            if cpu.lapic.intr_pending {
+                cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                cpu.lapic.intr_pending = false;
             }
         }
         // pc_system: raise_intr
         if self.pc_system.intr_raised {
-            self.cpu.pending_event |= BxCpuC::<I>::BX_EVENT_PENDING_INTR;
-            self.cpu.async_event = 1;
+            self.cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
             self.pc_system.intr_raised = false;
         }
         // pc_system: clear_intr
         if self.pc_system.intr_cleared {
-            self.cpu.pending_event &= !BxCpuC::<I>::BX_EVENT_PENDING_INTR;
+            self.cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
             self.pc_system.intr_cleared = false;
         }
         // pc_system: async_event (HRQ/timer)
@@ -1406,31 +2364,35 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         cmdline: &str,
     ) -> Result<()> {
         // Validate bzImage header
-        if bzimage.len() < 0x264 {
-            return Err(crate::Error::Cpu(crate::cpu::CpuError::InvalidBootImage {
+        if bzimage.len() < BZIMAGE_MIN_HEADER_LEN {
+            return Err(Error::Cpu(CpuError::InvalidBootImage {
                 reason: "bzImage too small",
             }));
         }
-        if bzimage[0x1FE] != 0x55 || bzimage[0x1FF] != 0xAA {
-            return Err(crate::Error::Cpu(crate::cpu::CpuError::InvalidBootImage {
+        if bzimage[BZIMAGE_BOOT_SIGNATURE_OFFSET] != BZIMAGE_BOOT_SIGNATURE_LO
+            || bzimage[BZIMAGE_BOOT_SIGNATURE_OFFSET + 1] != BZIMAGE_BOOT_SIGNATURE_HI
+        {
+            return Err(Error::Cpu(CpuError::InvalidBootImage {
                 reason: "Invalid bzImage boot signature",
             }));
         }
         let header_magic = u32::from_le_bytes([
-            bzimage[0x202],
-            bzimage[0x203],
-            bzimage[0x204],
-            bzimage[0x205],
+            bzimage[BZIMAGE_HEADER_MAGIC_OFFSET],
+            bzimage[BZIMAGE_HEADER_MAGIC_OFFSET + 1],
+            bzimage[BZIMAGE_HEADER_MAGIC_OFFSET + 2],
+            bzimage[BZIMAGE_HEADER_MAGIC_OFFSET + 3],
         ]);
-        if header_magic != 0x53726448 {
-            // "HdrS"
-            return Err(crate::Error::Cpu(crate::cpu::CpuError::InvalidBootImage {
+        if header_magic != BZIMAGE_HEADER_MAGIC {
+            return Err(Error::Cpu(CpuError::InvalidBootImage {
                 reason: "Invalid bzImage header magic",
             }));
         }
-        let boot_version = u16::from_le_bytes([bzimage[0x206], bzimage[0x207]]);
-        if boot_version < 0x0204 {
-            return Err(crate::Error::Cpu(crate::cpu::CpuError::InvalidBootImage {
+        let boot_version = u16::from_le_bytes([
+            bzimage[BZIMAGE_BOOT_VERSION_OFFSET],
+            bzimage[BZIMAGE_BOOT_VERSION_OFFSET + 1],
+        ]);
+        if boot_version < BZIMAGE_MIN_BOOT_PROTOCOL {
+            return Err(Error::Cpu(CpuError::InvalidBootImage {
                 reason: "boot protocol too old (need >= 2.04)",
             }));
         }
@@ -1654,64 +2616,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             const XSDT_ADDR: u64 = 0x40100;
             const MADT_ADDR: u64 = 0x40200;
 
-            // --- MADT (Multiple APIC Description Table) ---
-            // Header: 44 bytes
-            // + Local APIC entry: 8 bytes (type 0)
-            // + I/O APIC entry: 12 bytes (type 1)
-            // + Interrupt Source Override: 10 bytes (type 2) — IRQ0 → GSI2
-            let madt_len: u32 = 44 + 8 + 12 + 10;
-            let mut madt = alloc::vec![0u8; madt_len as usize];
-            // Signature "APIC"
-            madt[0..4].copy_from_slice(b"APIC");
-            // Length
-            madt[4..8].copy_from_slice(&madt_len.to_le_bytes());
-            // Revision
-            madt[8] = 3; // ACPI 2.0 revision
-                         // Checksum (byte 9) — filled later
-                         // OEM ID
-            madt[10..16].copy_from_slice(b"RUSTYB");
-            // OEM Table ID
-            madt[16..24].copy_from_slice(b"BXMADT  ");
-            // OEM Revision
-            madt[24..28].copy_from_slice(&1u32.to_le_bytes());
-            // Creator ID
-            madt[28..32].copy_from_slice(b"RBOX");
-            // Creator Revision
-            madt[32..36].copy_from_slice(&1u32.to_le_bytes());
-            // Local APIC Address (offset 36)
-            madt[36..40].copy_from_slice(&0xFEE00000u32.to_le_bytes());
-            // Flags (offset 40): bit 0 = PCAT_COMPAT (dual 8259 present)
-            madt[40..44].copy_from_slice(&1u32.to_le_bytes());
-
-            // Entry: Local APIC (type 0, len 8)
-            let e = 44;
-            madt[e] = 0; // type
-            madt[e + 1] = 8; // length
-            madt[e + 2] = 0; // ACPI Processor ID
-            madt[e + 3] = 0; // APIC ID
-            madt[e + 4..e + 8].copy_from_slice(&1u32.to_le_bytes()); // flags: enabled
-
-            // Entry: I/O APIC (type 1, len 12)
-            let e = 44 + 8;
-            madt[e] = 1; // type
-            madt[e + 1] = 12; // length
-            madt[e + 2] = 1; // I/O APIC ID
-            madt[e + 3] = 0; // reserved
-            madt[e + 4..e + 8].copy_from_slice(&0xFEC00000u32.to_le_bytes()); // address
-            madt[e + 8..e + 12].copy_from_slice(&0u32.to_le_bytes()); // GSI base
-
-            // Entry: Interrupt Source Override (type 2, len 10) — IRQ0 → GSI 2
-            let e = 44 + 8 + 12;
-            madt[e] = 2; // type
-            madt[e + 1] = 10; // length
-            madt[e + 2] = 0; // bus (ISA)
-            madt[e + 3] = 0; // source (IRQ0)
-            madt[e + 4..e + 8].copy_from_slice(&2u32.to_le_bytes()); // GSI 2
-            madt[e + 8..e + 10].copy_from_slice(&0u16.to_le_bytes()); // flags (conforming)
-
-            // Checksum
-            let sum: u8 = madt.iter().fold(0u8, |a, &b| a.wrapping_add(b));
-            madt[9] = 0u8.wrapping_sub(sum);
+            let madt = build_direct_boot_madt(self.config.cpu_params.cpu_count());
+            let madt_len = madt.len();
             self.memory.load_RAM(&madt, MADT_ADDR)?;
 
             // --- XSDT (Extended System Description Table) ---
@@ -1878,7 +2784,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         #[cfg(feature = "std")]
         let mut last_ips_update = std::time::Instant::now();
         #[cfg(feature = "std")]
-        let mut last_ips_instructions = self.cpu.icount;
+        let mut last_ips_instructions = self.total_cpu_icount();
         // MIPS terminal log: separate tracker fired every 5M retired instructions.
         // At 20 MIPS (active) fires every 250ms; at 40K IPS (idle) fires every ~125s.
         // This prevents flooding the terminal with "0.04 MIPS" lines during HLT idle.
@@ -1971,9 +2877,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                         // (e.g. kernel cli/hlt sequences before init scripts) to recover.
                         if matches!(
                             self.cpu.activity_state,
-                            crate::cpu::cpu::CpuActivityState::Hlt
-                                | crate::cpu::cpu::CpuActivityState::Mwait
-                                | crate::cpu::cpu::CpuActivityState::MwaitIf
+                            CpuActivityState::Hlt
+                                | CpuActivityState::Mwait
+                                | CpuActivityState::MwaitIf
                         ) && !self.cpu.interrupts_enabled()
                         {
                             hlt_if0_count += 1;
@@ -2029,39 +2935,51 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                     }
 
                     // Check for reset requests: Port 92h, keyboard 0xFE, or PCI CF9
+                    let port92_reset = self.device_manager.port92.reset_request.take();
+                    let keyboard_reset = self.device_manager.keyboard.reset_requested.take();
                     let pci_reset = self.device_manager.pci2isa.reset_request.take();
-                    if self.device_manager.port92.reset_request
-                        || self.device_manager.keyboard.reset_requested
+                    let reset_type = if matches!(port92_reset, Some(ResetReason::Hardware))
+                        || matches!(keyboard_reset, Some(ResetReason::Hardware))
+                        || matches!(pci_reset, Some(ResetReason::Hardware))
+                    {
+                        Some(ResetReason::Hardware)
+                    } else if port92_reset.is_some()
+                        || keyboard_reset.is_some()
                         || pci_reset.is_some()
                     {
-                        if self.device_manager.port92.reset_request {
+                        Some(ResetReason::Software)
+                    } else {
+                        None
+                    };
+                    if let Some(reset_type) = reset_type {
+                        if port92_reset.is_some() {
                             #[cfg(feature = "std")]
                             log_reset(&format!(
-                                "PORT 92h FAST RESET at RIP={:#x} icount={}",
+                                "PORT 92h FAST {:?} RESET at RIP={:#x} icount={}",
+                                reset_type,
                                 self.cpu.rip(),
                                 self.cpu.icount
                             ));
                         }
-                        if self.device_manager.keyboard.reset_requested {
+                        if keyboard_reset.is_some() {
                             #[cfg(feature = "std")]
                             log_reset(&format!(
-                                "KEYBOARD 0xFE RESET at RIP={:#x} icount={}",
+                                "KEYBOARD {:?} RESET at RIP={:#x} icount={}",
+                                reset_type,
                                 self.cpu.rip(),
                                 self.cpu.icount
                             ));
                         }
-                        if let Some(hw) = pci_reset {
+                        if let Some(pci_reset) = pci_reset {
                             #[cfg(feature = "std")]
                             log_reset(&format!(
-                                "PCI CF9 {} RESET at RIP={:#x} icount={}",
-                                if hw { "HARDWARE" } else { "SOFTWARE" },
+                                "PCI CF9 {:?} RESET at RIP={:#x} icount={}",
+                                pci_reset,
                                 self.cpu.rip(),
                                 self.cpu.icount
                             ));
                         }
-                        self.device_manager.port92.reset_request = false;
-                        self.device_manager.keyboard.reset_requested = false;
-                        self.reset(ResetReason::Hardware)?;
+                        self.reset(reset_type)?;
                         last_port92_value = self.device_manager.port92.value;
                         continue;
                     }
@@ -2190,10 +3108,11 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                     if self.config.ips != 0 {
                         if matches!(
                             self.cpu.activity_state,
-                            crate::cpu::cpu::CpuActivityState::Hlt
-                                | crate::cpu::cpu::CpuActivityState::Mwait
-                                | crate::cpu::cpu::CpuActivityState::MwaitIf
-                        ) {
+                            CpuActivityState::Hlt
+                                | CpuActivityState::Mwait
+                                | CpuActivityState::MwaitIf
+                        ) && self.can_fast_forward_bsp_hlt()
+                        {
                             // CPU is halted/mwait: advance virtual clock in 10-tick steps until an
                             // interrupt is pending. Matches Bochs handleWaitForEvent + BX_TICKN(10).
                             //
@@ -2219,10 +3138,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                             // We cap at 100M ticks to yield for max_instructions/GUI checks.
                             // No icount inflation — TSC reads pc_system.time_ticks() directly.
                             // MwaitIf: wake on interrupt even when IF=0 (ECX[0]=1).
-                            let mwait_if = matches!(
-                                self.cpu.activity_state,
-                                crate::cpu::cpu::CpuActivityState::MwaitIf
-                            );
+                            let mwait_if =
+                                matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
                             let mut hlt_budget = 0u64;
                             #[cfg(feature = "std")]
                             let hlt_wall_start = std::time::Instant::now();
@@ -2235,44 +3152,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                 if self.stop_flag.load(core::sync::atomic::Ordering::Relaxed) {
                                     break;
                                 }
-                                // 1. Process pending LAPIC requests FIRST so timers are active
+                                self.service_lapic_local_events();
+                                if self.cpu.lapic.intr
+                                    && (self.cpu.interrupts_enabled() || mwait_if)
                                 {
-                                    if self.cpu.lapic.timer_fired {
-                                        self.cpu.lapic.timer_fired = false;
-                                        let ticks = self.pc_system.time_ticks();
-                                        self.cpu.lapic.periodic(ticks);
-                                    }
-                                    if self.cpu.lapic.timer_deactivate_request {
-                                        self.cpu.lapic.timer_deactivate_request = false;
-                                        if let Some(h) = self.cpu.lapic.timer_handle {
-                                            if let Err(e) = self.pc_system.deactivate_timer(h) {
-                                                tracing::error!("LAPIC deactivate: {}", e);
-                                            }
-                                        }
-                                    }
-                                    if let Some(period) =
-                                        self.cpu.lapic.timer_activate_request.take()
-                                    {
-                                        if let Some(h) = self.cpu.lapic.timer_handle {
-                                            if let Err(e) =
-                                                self.pc_system.activate_timer(h, period, false)
-                                            {
-                                                tracing::error!("LAPIC activate: {}", e);
-                                            }
-                                        }
-                                        let ticks = self.pc_system.time_ticks();
-                                        self.cpu.lapic.set_ticks_initial(ticks);
-                                    }
-                                    if let Some(eoi_vec) = self.cpu.lapic.pending_eoi_vector.take()
-                                    {
-                                        self.device_manager.ioapic.receive_eoi(eoi_vec);
-                                    }
-                                    if self.cpu.lapic.intr
-                                        && (self.cpu.interrupts_enabled() || mwait_if)
-                                    {
-                                        self.cpu.signal_event(1 << 2);
-                                        break;
-                                    }
+                                    self.cpu
+                                        .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                                    break;
                                 }
                                 // 2. Advance halted virtual time in a device-friendly quantum.
                                 let step = self.hlt_wait_step_ticks();
@@ -2280,6 +3166,10 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                 self.dispatch_timer_fires();
                                 hlt_budget += step as u64;
                                 self.advance_devices_to_pc_time();
+                                self.sync_event_flags();
+                                if !self.can_fast_forward_bsp_hlt() {
+                                    break;
+                                }
                                 // Wall-clock throttle: sleep if virtual time races ahead
                                 #[cfg(feature = "std")]
                                 {
@@ -2298,7 +3188,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
                             // If LAPIC has a pending interrupt, signal CPU
                             if self.cpu.lapic_has_intr() {
-                                self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
+                                self.cpu
+                                    .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
                             }
 
                             // Tight MWAIT loop: process multiple wake→execute→MWAIT
@@ -2343,45 +3234,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                 let r2 = unsafe { self.run_cpu_batch(batch2) };
                                 if let Ok(ex2) = r2 {
                                     instructions_executed += ex2;
-                                    self.pc_system.tickn(ex2 as u32);
-                                    self.dispatch_timer_fires();
-                                    self.advance_devices_to_pc_time();
-                                    self.sync_event_flags();
-                                    // LAPIC sync
-                                    {
-                                        let tn = self.pc_system.time_ticks();
-                                        self.cpu.lapic.current_ticks = tn;
-                                        self.cpu.lapic.ticks_at_sync = tn;
-                                        self.cpu.lapic.icount_at_sync = self.cpu.icount;
-                                        if self.cpu.lapic.timer_fired {
-                                            self.cpu.lapic.timer_fired = false;
-                                            self.cpu.lapic.periodic(tn);
-                                        }
-                                        if self.cpu.lapic.timer_deactivate_request {
-                                            self.cpu.lapic.timer_deactivate_request = false;
-                                            if let Some(h) = self.cpu.lapic.timer_handle {
-                                                let _ = self.pc_system.deactivate_timer(h);
-                                            }
-                                        }
-                                        if let Some(period) =
-                                            self.cpu.lapic.timer_activate_request.take()
-                                        {
-                                            if let Some(h) = self.cpu.lapic.timer_handle {
-                                                let _ = self
-                                                    .pc_system
-                                                    .reactivate_timer_relative(h, period);
-                                            }
-                                            let ticks = self.pc_system.time_ticks();
-                                            self.cpu.lapic.set_ticks_initial(ticks);
-                                        }
-                                        if let Some(eoi_vec) =
-                                            self.cpu.lapic.pending_eoi_vector.take()
-                                        {
-                                            self.device_manager.ioapic.receive_eoi(eoi_vec);
-                                        }
-                                        if self.cpu.lapic.intr {
-                                            self.cpu.signal_event(1 << 2);
-                                        }
+                                    if !self.batch_advanced_pc_system {
+                                        self.advance_pc_system_after_cpu_ticks(ex2);
                                     }
                                 } else {
                                     break;
@@ -2389,17 +3243,15 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                 // If CPU re-entered MWAIT, advance time again
                                 if !matches!(
                                     self.cpu.activity_state,
-                                    crate::cpu::cpu::CpuActivityState::Hlt
-                                        | crate::cpu::cpu::CpuActivityState::Mwait
-                                        | crate::cpu::cpu::CpuActivityState::MwaitIf
+                                    CpuActivityState::Hlt
+                                        | CpuActivityState::Mwait
+                                        | CpuActivityState::MwaitIf
                                 ) {
                                     break; // CPU is active — return to outer loop
                                 }
                                 // HLT loop: Bochs handleWaitForEvent advances BX_TICKN(10).
-                                let mwait_if2 = matches!(
-                                    self.cpu.activity_state,
-                                    crate::cpu::cpu::CpuActivityState::MwaitIf
-                                );
+                                let mwait_if2 =
+                                    matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
                                 let mut hlt2 = 0u64;
                                 while hlt2 < 100_000_000 {
                                     if self.has_interrupt()
@@ -2407,143 +3259,35 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                                     {
                                         break;
                                     }
+                                    self.service_lapic_local_events();
+                                    if self.cpu.lapic.intr
+                                        && (self.cpu.interrupts_enabled() || mwait_if2)
                                     {
-                                        if self.cpu.lapic.timer_fired {
-                                            self.cpu.lapic.timer_fired = false;
-                                            let t = self.pc_system.time_ticks();
-                                            self.cpu.lapic.periodic(t);
-                                        }
-                                        if self.cpu.lapic.timer_deactivate_request {
-                                            self.cpu.lapic.timer_deactivate_request = false;
-                                            if let Some(h) = self.cpu.lapic.timer_handle {
-                                                let _ = self.pc_system.deactivate_timer(h);
-                                            }
-                                        }
-                                        if let Some(period) =
-                                            self.cpu.lapic.timer_activate_request.take()
-                                        {
-                                            if let Some(h) = self.cpu.lapic.timer_handle {
-                                                let _ =
-                                                    self.pc_system.activate_timer(h, period, false);
-                                            }
-                                            let t = self.pc_system.time_ticks();
-                                            self.cpu.lapic.set_ticks_initial(t);
-                                        }
-                                        if let Some(eoi_vec) =
-                                            self.cpu.lapic.pending_eoi_vector.take()
-                                        {
-                                            self.device_manager.ioapic.receive_eoi(eoi_vec);
-                                        }
-                                        if self.cpu.lapic.intr
-                                            && (self.cpu.interrupts_enabled() || mwait_if2)
-                                        {
-                                            self.cpu.signal_event(1 << 2);
-                                            break;
-                                        }
+                                        self.cpu
+                                            .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                                        break;
                                     }
                                     let s = self.hlt_wait_step_ticks();
                                     self.pc_system.tickn(s);
                                     self.dispatch_timer_fires();
                                     hlt2 += s as u64;
                                     self.advance_devices_to_pc_time();
+                                    self.sync_event_flags();
+                                    if !self.can_fast_forward_bsp_hlt() {
+                                        break;
+                                    }
                                 }
                                 if self.cpu.lapic_has_intr() {
-                                    self.cpu.signal_event(1 << 2);
+                                    self.cpu
+                                        .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
                                 }
                             }
                         }
                     }
 
                     // Drive pc_system timers via Bochs-exact tickn() mechanism.
-                    self.pc_system.tickn(executed as u32);
-                    self.dispatch_timer_fires();
-                    self.advance_devices_to_pc_time();
-                    self.sync_event_flags();
-
-                    // Handle LAPIC timer fires. With small batches (500 ticks) and
-                    // typical LAPIC period (~24K ticks), at most 1 fire per batch.
-                    // The catch-up loop is retained as a safety net.
-                    //
-                    // IMPORTANT: The lapic borrow must not be held across calls to
-                    // check_timers() / dispatch_timer_fires() / sync_event_flags(),
-                    // because the timer callback also accesses BxLocalApic.
-                    {
-                        // Sync LAPIC tick tracking for live timer reads
-                        let ticks_now = self.pc_system.time_ticks();
-                        self.cpu.lapic.current_ticks = ticks_now;
-                        self.cpu.lapic.ticks_at_sync = ticks_now;
-                        self.cpu.lapic.icount_at_sync = self.cpu.icount;
-
-                        // Catch-up loop: fire timer for each missed period in this batch.
-                        // Each iteration: borrow lapic → process fire → drop lapic →
-                        // check_timers (may set timer_fired via callback) → re-check.
-                        let mut catchup_count = 0u32;
-                        let max_catchup = 1000u32; // safety limit
-                        loop {
-                            if !self.cpu.lapic.timer_fired || catchup_count >= max_catchup {
-                                break;
-                            }
-                            self.cpu.lapic.timer_fired = false;
-                            self.cpu.lapic.diag_timer_fires += 1;
-                            let ticks_now = self.pc_system.time_ticks();
-                            self.cpu.lapic.periodic(ticks_now);
-
-                            // Process pending timer deactivation
-                            if self.cpu.lapic.timer_deactivate_request {
-                                self.cpu.lapic.timer_deactivate_request = false;
-                                if let Some(handle) = self.cpu.lapic.timer_handle {
-                                    let _ = self.pc_system.deactivate_timer(handle);
-                                }
-                            }
-
-                            // Process pending timer reactivation (periodic catch-up)
-                            if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
-                                if let Some(handle) = self.cpu.lapic.timer_handle {
-                                    let _ =
-                                        self.pc_system.reactivate_timer_relative(handle, period);
-                                }
-                                let t = self.pc_system.time_ticks();
-                                self.cpu.lapic.set_ticks_initial(t);
-                            }
-
-                            catchup_count += 1;
-
-                            // Trigger any timers due at exactly the current tick.
-                            // tickn(0) fires countdown_event() only if curr_countdown==0,
-                            // which happens when reactivate_timer_relative set it to 0.
-                            self.pc_system.tickn(0);
-                            self.dispatch_timer_fires();
-                            self.sync_event_flags();
-                        }
-
-                        // Handle non-fire deactivate/activate requests (from
-                        // set_initial_timer_count during instruction execution)
-                        // Handle non-fire deactivate/activate requests (from
-                        // set_initial_timer_count during instruction execution)
-                        if self.cpu.lapic.timer_deactivate_request {
-                            self.cpu.lapic.timer_deactivate_request = false;
-                            if let Some(handle) = self.cpu.lapic.timer_handle {
-                                let _ = self.pc_system.deactivate_timer(handle);
-                            }
-                        }
-                        if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
-                            if let Some(handle) = self.cpu.lapic.timer_handle {
-                                // Fresh activation — use absolute time_to_fire
-                                let _ = self.pc_system.activate_timer(handle, period, false);
-                            }
-                            let t = self.pc_system.time_ticks();
-                            self.cpu.lapic.set_ticks_initial(t);
-                        }
-
-                        // Forward EOI broadcast from LAPIC to I/O APIC
-                        if let Some(eoi_vec) = self.cpu.lapic.pending_eoi_vector.take() {
-                            self.device_manager.ioapic.receive_eoi(eoi_vec);
-                        }
-
-                        // Signal pending LAPIC interrupt to CPU event system
-                        if self.cpu.lapic.intr {
-                            self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
-                        }
+                    if !self.batch_advanced_pc_system {
+                        self.advance_pc_system_after_cpu_ticks(executed);
                     }
 
                     // Propagate A20 gate changes from keyboard controller to memory system
@@ -2631,7 +3375,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                             }
                             Err(e) => {
                                 tracing::error!("INT-INJECT: FAILED: {:?}", e);
-                                return Err(crate::Error::Cpu(inject_result.unwrap_err()));
+                                return Err(Error::Cpu(inject_result.unwrap_err()));
                             }
                         }
                     }
@@ -2659,7 +3403,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                 Err(e) => {
                     tracing::error!("CPU execution error: {:?}", e);
                     tracing::trace!("[Emulator] ERROR: {:?}", e);
-                    return Err(crate::Error::Cpu(e));
+                    return Err(Error::Cpu(e));
                 }
             };
 
@@ -2691,11 +3435,12 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             #[cfg(feature = "std")]
             {
                 // Update IPS: show_ips() every 1 real second (keeps egui status bar responsive).
-                // This is retired CPU instructions per real second. HLT/timer wait ticks are not
-                // CPU throughput and can sprint during firmware idle loops, so they are not shown.
+                // This is retired CPU instructions per real second across all configured CPUs.
+                // HLT/timer wait ticks are not CPU throughput and can sprint during firmware idle
+                // loops, so they are not shown.
                 let ips_elapsed = last_ips_update.elapsed();
                 if ips_elapsed >= IPS_SHOW_INTERVAL {
-                    let current_icount = self.cpu.icount;
+                    let current_icount = self.total_cpu_icount();
                     let ips = status_ips_from_retired_instructions(
                         last_ips_instructions,
                         current_icount,
@@ -2826,73 +3571,17 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             total_executed += executed;
 
             // --- Tick devices + pc_system ---
-            self.pc_system.tickn(executed as u32);
-            self.dispatch_timer_fires();
-            self.advance_devices_to_pc_time();
-            self.sync_event_flags();
-
-            // --- LAPIC timer catchup ---
-            {
-                let ticks_now = self.pc_system.time_ticks();
-                self.cpu.lapic.current_ticks = ticks_now;
-                self.cpu.lapic.ticks_at_sync = ticks_now;
-                self.cpu.lapic.icount_at_sync = self.cpu.icount;
-                let mut catchup_count = 0u32;
-                loop {
-                    if !self.cpu.lapic.timer_fired || catchup_count >= 1000 {
-                        break;
-                    }
-                    self.cpu.lapic.timer_fired = false;
-                    self.cpu.lapic.diag_timer_fires += 1;
-                    let t = self.pc_system.time_ticks();
-                    self.cpu.lapic.periodic(t);
-                    if self.cpu.lapic.timer_deactivate_request {
-                        self.cpu.lapic.timer_deactivate_request = false;
-                        if let Some(h) = self.cpu.lapic.timer_handle {
-                            let _ = self.pc_system.deactivate_timer(h);
-                        }
-                    }
-                    if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
-                        if let Some(h) = self.cpu.lapic.timer_handle {
-                            let _ = self.pc_system.reactivate_timer_relative(h, period);
-                        }
-                        let t = self.pc_system.time_ticks();
-                        self.cpu.lapic.set_ticks_initial(t);
-                    }
-                    catchup_count += 1;
-                    self.pc_system.tickn(0);
-                    self.dispatch_timer_fires();
-                    self.sync_event_flags();
-                }
-                if self.cpu.lapic.timer_deactivate_request {
-                    self.cpu.lapic.timer_deactivate_request = false;
-                    if let Some(h) = self.cpu.lapic.timer_handle {
-                        let _ = self.pc_system.deactivate_timer(h);
-                    }
-                }
-                if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
-                    if let Some(h) = self.cpu.lapic.timer_handle {
-                        let _ = self.pc_system.activate_timer(h, period, false);
-                    }
-                    let t = self.pc_system.time_ticks();
-                    self.cpu.lapic.set_ticks_initial(t);
-                }
-                if self.cpu.lapic.intr {
-                    self.cpu.signal_event(1 << 2);
-                }
+            if !self.batch_advanced_pc_system {
+                self.advance_pc_system_after_cpu_ticks(executed);
             }
 
             // --- HLT/MWAIT: advance time until interrupt ---
             if matches!(
                 self.cpu.activity_state,
-                crate::cpu::cpu::CpuActivityState::Hlt
-                    | crate::cpu::cpu::CpuActivityState::Mwait
-                    | crate::cpu::cpu::CpuActivityState::MwaitIf
-            ) {
-                let mwait_if = matches!(
-                    self.cpu.activity_state,
-                    crate::cpu::cpu::CpuActivityState::MwaitIf
-                );
+                CpuActivityState::Hlt | CpuActivityState::Mwait | CpuActivityState::MwaitIf
+            ) && self.can_fast_forward_bsp_hlt()
+            {
+                let mwait_if = matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
                 let mut hlt_budget = 0u64;
                 #[cfg(feature = "std")]
                 let hlt_wall_start = std::time::Instant::now();
@@ -2900,38 +3589,21 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                     if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) {
                         break;
                     }
-                    {
-                        if self.cpu.lapic.timer_fired {
-                            self.cpu.lapic.timer_fired = false;
-                            let t = self.pc_system.time_ticks();
-                            self.cpu.lapic.periodic(t);
-                        }
-                        if self.cpu.lapic.timer_deactivate_request {
-                            self.cpu.lapic.timer_deactivate_request = false;
-                            if let Some(h) = self.cpu.lapic.timer_handle {
-                                let _ = self.pc_system.deactivate_timer(h);
-                            }
-                        }
-                        if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
-                            if let Some(h) = self.cpu.lapic.timer_handle {
-                                let _ = self.pc_system.activate_timer(h, period, false);
-                            }
-                            let t = self.pc_system.time_ticks();
-                            self.cpu.lapic.set_ticks_initial(t);
-                        }
-                        if let Some(eoi_vec) = self.cpu.lapic.pending_eoi_vector.take() {
-                            self.device_manager.ioapic.receive_eoi(eoi_vec);
-                        }
-                        if self.cpu.lapic.intr && (self.cpu.interrupts_enabled() || mwait_if) {
-                            self.cpu.signal_event(1 << 2);
-                            break;
-                        }
+                    self.service_lapic_local_events();
+                    if self.cpu.lapic.intr && (self.cpu.interrupts_enabled() || mwait_if) {
+                        self.cpu
+                            .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                        break;
                     }
                     let step = self.hlt_wait_step_ticks();
                     self.pc_system.tickn(step);
                     self.dispatch_timer_fires();
                     hlt_budget += step as u64;
                     self.advance_devices_to_pc_time();
+                    self.sync_event_flags();
+                    if !self.can_fast_forward_bsp_hlt() {
+                        break;
+                    }
                     // Wall-clock throttle: sleep if virtual time races ahead
                     #[cfg(feature = "std")]
                     {
@@ -2944,7 +3616,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
                     }
                 }
                 if self.cpu.lapic_has_intr() {
-                    self.cpu.signal_event(1 << 2);
+                    self.cpu
+                        .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
                 }
             }
 
@@ -2963,10 +3636,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             // --- Tight loop: if CPU was woken from MWAIT and wall budget remains,
             // run another cycle instead of returning to egui event loop.
             // This matches Bochs's dedicated CPU thread which never yields to GUI.
-            if matches!(
-                self.cpu.activity_state,
-                crate::cpu::cpu::CpuActivityState::Active
-            ) && {
+            if matches!(self.cpu.activity_state, CpuActivityState::Active) && {
                 #[cfg(feature = "std")]
                 {
                     wall_start.elapsed() < wall_budget
@@ -3306,9 +3976,9 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Get the activity state string.
     pub fn get_activity_str(&self) -> &'static str {
         match self.cpu.activity_state {
-            crate::cpu::cpu::CpuActivityState::Active => "active",
-            crate::cpu::cpu::CpuActivityState::Hlt => "hlt",
-            crate::cpu::cpu::CpuActivityState::Shutdown => "shutdown",
+            CpuActivityState::Active => "active",
+            CpuActivityState::Hlt => "hlt",
+            CpuActivityState::Shutdown => "shutdown",
             _ => "other",
         }
     }
@@ -3356,7 +4026,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'_, I, T> {
+impl<I: BxCpuIdTrait, T: Instrumentation> Emulator<'_, I, T> {
     /// Dump comprehensive diagnostic state (for Alpine debugging).
     #[cfg(all(feature = "std", debug_assertions))]
     pub fn dump_alpine_diag(&mut self) {
@@ -3542,6 +4212,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
                     return 0;
                 }
                 let pdpte = safe_read((pml4e & 0xFFFFF_FFFFF000) + pdpt_idx * 8);
+
                 if pdpte & 1 == 0 {
                     return 0;
                 }
@@ -3654,17 +4325,137 @@ fn status_ips_from_retired_instructions(
 
 // Ensure Emulator is Send (can be moved between threads)
 // Each instance is fully independent with no shared state
-unsafe impl<I: BxCpuIdTrait + Send, T: crate::cpu::instrumentation::Instrumentation + Send> Send
-    for Emulator<'_, I, T>
-{
-}
+unsafe impl<I: BxCpuIdTrait + Send, T: Instrumentation + Send> Send for Emulator<'_, I, T> {}
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use crate::cpu::core_i7_skylake::Corei7SkylakeX;
+    use crate::cpu::decoder::Instruction;
     use crate::cpu::instrumentation::{CpuSetupMode, X86Reg};
     use crate::pc_system::TimerOwner;
+    const TEST_SMP_PACKAGES: u32 = 2;
+    const TEST_SMP_CORES: u32 = 1;
+    const TEST_SMP_THREADS: u32 = 1;
+    const BSP_INDEX: usize = 0;
+    const AP_INDEX: usize = 1;
+    const AP_TRAMPOLINE_VECTOR: u8 = 0x08;
+    const AP_TRAMPOLINE_ADDR: u64 = (AP_TRAMPOLINE_VECTOR as u64) << 12;
+    const AP_TRAMPOLINE_OPCODE: u8 = 0x90;
+    const AP_TRAMPOLINE_LEN: usize = 32;
+    const AP_BATCH_INSTRUCTIONS: u64 = 16;
+    const DIRECT_BOOT_MADT_TEST_CPUS: u32 = 3;
+    const UNSET_APIC_ID: u8 = 0xFF;
+    const ACPI_CHECKSUM_VALID_SUM: u8 = 0;
+    const EXPECTED_DIRECT_BOOT_LAPIC_IDS: [u8; DIRECT_BOOT_MADT_TEST_CPUS as usize] = [0, 1, 2];
+    const TEST_LAPIC_TIMER_VECTOR: u32 = 0x40;
+    const LVT_TIMER_PERIODIC_MODE: u32 = 1 << 17;
+    const TEST_LAPIC_TIMER_PERIOD_TICKS: u64 = 10;
+    const TEST_LAPIC_TIMER_ELAPSED_TICKS: u32 = 50;
+    const FW_CFG_IO_BASE: u16 = 0x510;
+    const FW_CFG_DATA_PORT: u16 = 0x511;
+    const FW_CFG_NB_CPUS_KEY: u16 = 0x05;
+    const FW_CFG_MAX_CPUS_KEY: u16 = 0x0F;
+    const FW_CFG_SELECTOR_WRITE_BYTES: u8 = 2;
+    const FW_CFG_DATA_READ_BYTES: u8 = 1;
+    const NONFLAT_TOPOLOGY_CPUS: u32 = 8;
+    const MAX_SUPPORTED_TEST_CPUS: u32 = 254;
+    const CPUID_LEAF_FEATURE_INFO: u32 = 0x0000_0001;
+    const CPUID_LEAF_EXTENDED_TOPOLOGY: u32 = 0x0000_000B;
+    const CPUID_LEAF1_LOGICAL_COUNT_SHIFT: u32 = 16;
+    const CPUID_LEAF1_APIC_ID_SHIFT: u32 = 24;
+    const CPUID_APIC_ID_BYTE_MASK: u32 = 0xFF;
+    const CPUID_TOPOLOGY_SUBLEAF_SMT: u32 = 0;
+    const CPUID_TOPOLOGY_SUBLEAF_CORE: u32 = 1;
+    const CPUID_TOPOLOGY_SUBLEAF_PACKAGE: u32 = 2;
+    const CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT: u32 = 8;
+    const CPUID_TOPOLOGY_LEVEL_TYPE_SMT: u32 = 1;
+    const CPUID_TOPOLOGY_LEVEL_TYPE_CORE: u32 = 2;
+
+    fn topology_level_ecx(subleaf: u32, level_type: u32) -> u32 {
+        subleaf | (level_type << CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT)
+    }
+
+    fn send_bsp_icr_init_sipi(emu: &mut Emulator<'_, Corei7SkylakeX, ()>, vector: u8) {
+        const ICR_LOW: u64 = 0x300;
+        const ICR_HIGH: u64 = 0x310;
+        const TARGET_APIC_ID: u32 = 1;
+        const ICR_LEVEL_ASSERT: u32 = 1 << 14;
+        const ICR_TRIGGER_LEVEL: u32 = 1 << 15;
+
+        let bsp = emu.cpu_mut_at(BSP_INDEX);
+        bsp.lapic.write_aligned(ICR_HIGH, TARGET_APIC_ID << 24);
+        bsp.lapic.write_aligned(
+            ICR_LOW,
+            ((crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8)
+                | ICR_LEVEL_ASSERT
+                | ICR_TRIGGER_LEVEL,
+        );
+        bsp.lapic.write_aligned(
+            ICR_LOW,
+            (crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8 | ICR_TRIGGER_LEVEL,
+        );
+        bsp.lapic.write_aligned(ICR_HIGH, TARGET_APIC_ID << 24);
+        bsp.lapic.write_aligned(
+            ICR_LOW,
+            vector as u32
+                | ((crate::cpu::apic::ApicDeliveryMode::Sipi as u32) << 8)
+                | ICR_LEVEL_ASSERT,
+        );
+    }
+
+    fn read_fw_cfg_u16(fw_cfg: &mut crate::iodev::fw_cfg::BxFwCfg, key: u16) -> u16 {
+        fw_cfg.write_port(
+            FW_CFG_IO_BASE,
+            key as u32,
+            FW_CFG_SELECTOR_WRITE_BYTES,
+            None,
+        );
+        let lo = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, FW_CFG_DATA_READ_BYTES) as u16;
+        let hi = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, FW_CFG_DATA_READ_BYTES) as u16;
+        lo | (hi << 8)
+    }
+
+    fn acpi_madt_from_tables(tables: &[u8]) -> &[u8] {
+        let offset = tables
+            .windows(DIRECT_MADT_SIGNATURE.len())
+            .position(|window| window == DIRECT_MADT_SIGNATURE)
+            .expect("MADT signature missing from ACPI tables");
+        let len = u32::from_le_bytes(
+            tables[offset + ACPI_TABLE_LENGTH_OFFSET
+                ..offset + ACPI_TABLE_LENGTH_OFFSET + core::mem::size_of::<u32>()]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        &tables[offset..offset + len]
+    }
+
+    fn parse_madt_ids<const N: usize>(madt: &[u8]) -> ([u8; N], usize, Option<u8>) {
+        let mut offset = DIRECT_MADT_HEADER_SIZE;
+        let mut lapic_ids = [UNSET_APIC_ID; N];
+        let mut lapic_count = 0usize;
+        let mut ioapic_id = None;
+
+        while offset < madt.len() {
+            let entry_type = madt[offset + MADT_ENTRY_TYPE_OFFSET];
+            let entry_len = madt[offset + MADT_ENTRY_LENGTH_OFFSET] as usize;
+            match entry_type {
+                DIRECT_MADT_ENTRY_TYPE_LAPIC => {
+                    if lapic_count < N {
+                        lapic_ids[lapic_count] = madt[offset + MADT_LAPIC_APIC_ID_OFFSET];
+                    }
+                    lapic_count += 1;
+                }
+                DIRECT_MADT_ENTRY_TYPE_IOAPIC => {
+                    ioapic_id = Some(madt[offset + MADT_IOAPIC_ID_OFFSET]);
+                }
+                _ => {}
+            }
+            offset += entry_len;
+        }
+
+        (lapic_ids, lapic_count, ioapic_id)
+    }
 
     #[test]
     fn test_emulator_creation() {
@@ -3818,6 +4609,124 @@ mod tests {
     }
 
     #[test]
+    fn smp_batch_with_parked_application_processors_reaches_timer_quantum() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(8, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                let code = vec![0x90u8; 131_072];
+                emu.virt_write(0x1000, &code).unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+
+                let before = emu.cpu_ref(BSP_INDEX).icount;
+                let executed = unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                let retired = emu.cpu_ref(BSP_INDEX).icount - before;
+
+                assert!(
+                    executed >= 1024,
+                    "SMP batch with parked APs collapsed to trace-sized elapsed ticks: {executed}"
+                );
+                assert!(
+                    retired >= 1024,
+                    "SMP batch with parked APs collapsed to trace-sized BSP retirement: {retired}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn halted_application_processors_do_not_force_trace_sized_batches() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(8, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                let code = vec![0x90u8; 131_072];
+                emu.virt_write(0x1000, &code).unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+                for cpu_index in 1..emu.cpu_count() {
+                    let cpu = emu.cpu_mut_at(cpu_index);
+                    cpu.activity_state = CpuActivityState::Hlt;
+                    cpu.async_event = 1;
+                }
+
+                let before = emu.cpu_ref(BSP_INDEX).icount;
+                let executed = unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                let retired = emu.cpu_ref(BSP_INDEX).icount - before;
+
+                assert!(
+                    executed >= 1024,
+                    "halted APs collapsed elapsed ticks to {executed}"
+                );
+                assert!(
+                    retired >= 1024,
+                    "halted APs forced trace-sized BSP retirement: {retired}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn parked_application_processor_ipi_breaks_bsp_batch_for_delivery() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(2, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                let code = [
+                    0xC7, 0x05, 0x10, 0x03, 0xE0, 0xFE, 0x00, 0x00, 0x00,
+                    0x01, // ICR high: APIC ID 1
+                    0xC7, 0x05, 0x00, 0x03, 0xE0, 0xFE, 0x09, 0x06, 0x00,
+                    0x00, // ICR low: SIPI vector 0x09
+                    0x90, 0x90, 0x90, 0x90,
+                ];
+                emu.virt_write(0x1000, &code).unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+
+                let executed = unsafe { emu.run_cpu_batch(4096) }.unwrap();
+
+                assert!(
+                    executed < 4096,
+                    "parked-AP fast path must return after IPI write, got full batch {executed}"
+                );
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).activity_state,
+                    CpuActivityState::Active,
+                    "SIPI delivery to parked AP was delayed past the BSP batch"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn active_cpu_batch_returns_at_millisecond_quantum_for_timer_service() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
@@ -3882,10 +4791,9 @@ mod tests {
 
                 for _ in 0..16 {
                     let executed = unsafe { emu.run_cpu_batch(100_000) }.unwrap();
-                    emu.pc_system.tickn(executed as u32);
-                    emu.dispatch_timer_fires();
-                    emu.advance_devices_to_pc_time();
-                    emu.sync_event_flags();
+                    if !emu.batch_advanced_pc_system {
+                        emu.advance_pc_system_after_cpu_ticks(executed);
+                    }
 
                     if emu.virt_read_u8(0x2000).unwrap() != 0 {
                         break;
@@ -3937,7 +4845,7 @@ mod tests {
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
                 emu.pc_system.initialize(emu.config.ips);
                 emu.pc_system
-                    .register_timer(TimerOwner::Lapic, 37, false, true, "near_timer")
+                    .register_timer(TimerOwner::Lapic(0), 37, false, true, "near_timer")
                     .unwrap();
 
                 assert_eq!(emu.hlt_wait_step_ticks(), 37);
@@ -3945,5 +4853,963 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn software_reset_requests_preserve_device_state() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.device_manager.pic.master.imr = 0x00;
+
+                assert!(emu.write_port_92h(0x03));
+                assert!(emu.check_and_handle_resets().unwrap());
+
+                assert_eq!(
+                    emu.device_manager.pic.master.imr, 0x00,
+                    "Bochs software reset must not reset devices"
+                );
+                assert!(emu.device_manager.port92.reset_request.is_none());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn pci_cf9_hardware_reset_resets_device_state() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.device_manager.pic.master.imr = 0x00;
+                emu.device_manager.pci2isa.reset_request = Some(ResetReason::Hardware);
+
+                assert!(emu.check_and_handle_resets().unwrap());
+
+                assert_eq!(
+                    emu.device_manager.pic.master.imr, 0xFF,
+                    "Bochs hardware reset resets devices"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn emulator_new_builds_and_resets_all_configured_cpus() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+
+                assert_eq!(emu.cpu_count(), TEST_SMP_PACKAGES as usize);
+                assert_eq!(emu.cpu_ref(BSP_INDEX).lapic.get_id(), BSP_INDEX as u32);
+                assert_eq!(emu.cpu_ref(AP_INDEX).lapic.get_id(), AP_INDEX as u32);
+
+                emu.reset(ResetReason::Hardware).unwrap();
+
+                assert_eq!(
+                    emu.cpu_ref(BSP_INDEX).activity_state,
+                    CpuActivityState::Active
+                );
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).activity_state,
+                    CpuActivityState::WaitForSipi
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn nonflat_topology_reports_bochs_compatible_guest_tables() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default().with_topology(2, 2, 2).unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let instr = Instruction::default();
+
+                assert_eq!(emu.cpu_count(), NONFLAT_TOPOLOGY_CPUS as usize);
+                for cpu_index in 0..NONFLAT_TOPOLOGY_CPUS as usize {
+                    assert_eq!(emu.cpu_ref(cpu_index).lapic.get_id(), cpu_index as u32);
+
+                    let cpu = emu.cpu_mut_at(cpu_index);
+                    cpu.set_eax(CPUID_LEAF_FEATURE_INFO);
+                    cpu.set_ecx(0);
+                    cpu.cpuid(&instr);
+                    assert_eq!(
+                        (cpu.ebx() >> CPUID_LEAF1_LOGICAL_COUNT_SHIFT) & CPUID_APIC_ID_BYTE_MASK,
+                        4
+                    );
+                    assert_eq!(
+                        (cpu.ebx() >> CPUID_LEAF1_APIC_ID_SHIFT) & CPUID_APIC_ID_BYTE_MASK,
+                        cpu_index as u32
+                    );
+
+                    cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+                    cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_SMT);
+                    cpu.cpuid(&instr);
+                    assert_eq!(cpu.eax(), 1);
+                    assert_eq!(cpu.ebx(), 2);
+                    assert_eq!(
+                        cpu.ecx(),
+                        topology_level_ecx(
+                            CPUID_TOPOLOGY_SUBLEAF_SMT,
+                            CPUID_TOPOLOGY_LEVEL_TYPE_SMT
+                        )
+                    );
+                    assert_eq!(cpu.edx(), cpu_index as u32);
+
+                    cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+                    cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_CORE);
+                    cpu.cpuid(&instr);
+                    assert_eq!(cpu.eax(), BxCpuC::<Corei7SkylakeX>::bochs_topology_shift(4));
+                    assert_eq!(cpu.ebx(), 4);
+                    assert_eq!(
+                        cpu.ecx(),
+                        topology_level_ecx(
+                            CPUID_TOPOLOGY_SUBLEAF_CORE,
+                            CPUID_TOPOLOGY_LEVEL_TYPE_CORE
+                        )
+                    );
+                    assert_eq!(cpu.edx(), cpu_index as u32);
+
+                    cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
+                    cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_PACKAGE);
+                    cpu.cpuid(&instr);
+                    assert_eq!((cpu.eax(), cpu.ebx(), cpu.ecx(), cpu.edx()), (0, 0, 0, 0));
+                }
+
+                emu.initialize().unwrap();
+
+                assert_eq!(emu.device_manager.ioapic.apic_id(), NONFLAT_TOPOLOGY_CPUS);
+                assert_eq!(
+                    read_fw_cfg_u16(&mut emu.device_manager.fw_cfg, FW_CFG_NB_CPUS_KEY),
+                    NONFLAT_TOPOLOGY_CPUS as u16
+                );
+                assert_eq!(
+                    read_fw_cfg_u16(&mut emu.device_manager.fw_cfg, FW_CFG_MAX_CPUS_KEY),
+                    NONFLAT_TOPOLOGY_CPUS as u16
+                );
+
+                let acpi = AcpiTableGenerator::generate(
+                    emu.config.guest_memory_size as u64,
+                    NONFLAT_TOPOLOGY_CPUS,
+                );
+                let madt = acpi_madt_from_tables(acpi.tables_blob());
+                let (lapic_ids, lapic_count, ioapic_id) =
+                    parse_madt_ids::<{ NONFLAT_TOPOLOGY_CPUS as usize }>(madt);
+
+                assert_eq!(lapic_count, NONFLAT_TOPOLOGY_CPUS as usize);
+                for (expected_id, actual_id) in lapic_ids.iter().copied().enumerate() {
+                    assert_eq!(actual_id, expected_id as u8);
+                }
+                assert_eq!(ioapic_id, Some(NONFLAT_TOPOLOGY_CPUS as u8));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn topology_254_generates_non_wrapping_firmware_ids() {
+        let params = BxParams::default().with_topology(127, 2, 1).unwrap();
+        let cpu_count = params.cpu_count();
+        assert_eq!(cpu_count, MAX_SUPPORTED_TEST_CPUS);
+
+        let mut fw_cfg = crate::iodev::fw_cfg::BxFwCfg::new();
+        fw_cfg.init(
+            EmulatorConfig::default().guest_memory_size as u64,
+            cpu_count,
+        );
+        assert_eq!(
+            read_fw_cfg_u16(&mut fw_cfg, FW_CFG_NB_CPUS_KEY),
+            MAX_SUPPORTED_TEST_CPUS as u16
+        );
+        assert_eq!(
+            read_fw_cfg_u16(&mut fw_cfg, FW_CFG_MAX_CPUS_KEY),
+            MAX_SUPPORTED_TEST_CPUS as u16
+        );
+
+        let acpi = AcpiTableGenerator::generate(
+            EmulatorConfig::default().guest_memory_size as u64,
+            cpu_count,
+        );
+        let madt = acpi_madt_from_tables(acpi.tables_blob());
+        let (lapic_ids, lapic_count, ioapic_id) =
+            parse_madt_ids::<{ MAX_SUPPORTED_TEST_CPUS as usize }>(madt);
+
+        assert_eq!(lapic_count, MAX_SUPPORTED_TEST_CPUS as usize);
+        assert_eq!(
+            lapic_ids[(MAX_SUPPORTED_TEST_CPUS - 1) as usize],
+            (MAX_SUPPORTED_TEST_CPUS - 1) as u8
+        );
+        assert_eq!(ioapic_id, Some(MAX_SUPPORTED_TEST_CPUS as u8));
+        assert_eq!(
+            madt.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
+            ACPI_CHECKSUM_VALID_SUM
+        );
+    }
+
+    #[test]
+    fn run_cpu_batch_executes_application_processor_after_sipi() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.memory
+                    .load_RAM(
+                        &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
+                        AP_TRAMPOLINE_ADDR,
+                    )
+                    .unwrap();
+
+                emu.cpu.activity_state = CpuActivityState::WaitForSipi;
+                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                let before = emu.cpu_ref(AP_INDEX).icount;
+
+                let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
+
+                assert!(executed > 0);
+                assert!(
+                    emu.cpu_ref(AP_INDEX).icount > before,
+                    "active AP did not receive a CPU batch"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn bsp_icr_init_sipi_wakes_and_runs_application_processor() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const ICR_LOW: u64 = 0x300;
+                const ICR_HIGH: u64 = 0x310;
+                const TARGET_APIC_ID: u32 = 1;
+                const ICR_LEVEL_ASSERT: u32 = 1 << 14;
+                const ICR_TRIGGER_LEVEL: u32 = 1 << 15;
+
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.memory
+                    .load_RAM(
+                        &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
+                        AP_TRAMPOLINE_ADDR,
+                    )
+                    .unwrap();
+
+                let before = emu.cpu_ref(AP_INDEX).icount;
+
+                {
+                    let bsp = emu.cpu_mut_at(BSP_INDEX);
+                    bsp.lapic.write_aligned(ICR_HIGH, TARGET_APIC_ID << 24);
+                    bsp.lapic.write_aligned(
+                        ICR_LOW,
+                        ((crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8)
+                            | ICR_LEVEL_ASSERT
+                            | ICR_TRIGGER_LEVEL,
+                    );
+                    bsp.lapic.write_aligned(
+                        ICR_LOW,
+                        (crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8 | ICR_TRIGGER_LEVEL,
+                    );
+                    bsp.lapic.write_aligned(ICR_HIGH, TARGET_APIC_ID << 24);
+                    bsp.lapic.write_aligned(
+                        ICR_LOW,
+                        AP_TRAMPOLINE_VECTOR as u32
+                            | ((crate::cpu::apic::ApicDeliveryMode::Sipi as u32) << 8)
+                            | ICR_LEVEL_ASSERT,
+                    );
+                }
+
+                let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
+
+                assert!(executed > 0);
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).activity_state,
+                    CpuActivityState::Active
+                );
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).get_cs_selector(),
+                    (AP_TRAMPOLINE_VECTOR as u16) << 8
+                );
+                assert!(emu.cpu_ref(AP_INDEX).rip() > 0);
+                assert!(emu.cpu_ref(AP_INDEX).icount > before);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn bsp_icr_init_sipi_restarts_active_application_processor() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const SECOND_TRAMPOLINE_VECTOR: u8 = AP_TRAMPOLINE_VECTOR + 1;
+                const SECOND_TRAMPOLINE_ADDR: u64 = (SECOND_TRAMPOLINE_VECTOR as u64) << 12;
+
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.memory
+                    .load_RAM(
+                        &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
+                        AP_TRAMPOLINE_ADDR,
+                    )
+                    .unwrap();
+                emu.memory
+                    .load_RAM(
+                        &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
+                        SECOND_TRAMPOLINE_ADDR,
+                    )
+                    .unwrap();
+
+                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).activity_state,
+                    CpuActivityState::Active
+                );
+
+                send_bsp_icr_init_sipi(&mut emu, SECOND_TRAMPOLINE_VECTOR);
+                let before = emu.cpu_ref(AP_INDEX).icount;
+
+                let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
+
+                assert!(executed > 0);
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).activity_state,
+                    CpuActivityState::Active
+                );
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).get_cs_selector(),
+                    (SECOND_TRAMPOLINE_VECTOR as u16) << 8
+                );
+                assert!(emu.cpu_ref(AP_INDEX).rip() > 0);
+                assert!(emu.cpu_ref(AP_INDEX).icount > before);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn bsp_init_sipi_discards_stale_ipis_queued_by_reset_ap() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const STALE_VECTOR: u32 = 0x44;
+
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+
+                {
+                    let ap = emu.cpu_mut_at(AP_INDEX);
+                    ap.lapic.write_aligned(0x310, (BSP_INDEX as u32) << 24);
+                    ap.lapic.write_aligned(0x300, STALE_VECTOR);
+                }
+                assert!(!emu.cpu_ref(BSP_INDEX).lapic.intr);
+
+                send_bsp_icr_init_sipi(&mut emu, AP_TRAMPOLINE_VECTOR);
+                emu.drain_lapic_bus();
+
+                assert!(
+                    !emu.cpu_ref(BSP_INDEX).lapic.intr,
+                    "stale AP IPI survived the INIT reset and interrupted the BSP"
+                );
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).activity_state,
+                    CpuActivityState::Active
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn run_cpu_batch_uses_smp_time_when_peer_is_started_but_halted() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.memory
+                    .load_RAM(
+                        &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
+                        AP_TRAMPOLINE_ADDR,
+                    )
+                    .unwrap();
+
+                emu.cpu.activity_state = CpuActivityState::Hlt;
+                emu.cpu.pending_event = 0;
+                emu.cpu.async_event = 0;
+                emu.cpu.lapic.intr = false;
+                emu.cpu.lapic.intr_pending = false;
+                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+
+                assert!(
+                    !emu.cpu_runnable_for_batch(BSP_INDEX),
+                    "test requires a started halted peer with no runnable event"
+                );
+                assert!(emu.cpu_runnable_for_batch(AP_INDEX));
+
+                let before = emu.cpu_ref(AP_INDEX).icount;
+                let elapsed = unsafe { emu.run_cpu_batch(BOCHS_SMP_QUANTUM_TICKS) }.unwrap();
+                let ap_delta = emu.cpu_ref(AP_INDEX).icount - before;
+
+                assert!(elapsed >= BOCHS_SMP_QUANTUM_TICKS);
+                assert!(
+                    elapsed < ap_delta,
+                    "elapsed ticks {elapsed} were not averaged with the halted peer quantum; AP delta was {ap_delta}"
+                );
+                assert_eq!(
+                    emu.smp_tick_remainder,
+                    (BOCHS_SMP_QUANTUM_TICKS + ap_delta) % 2
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn smp_batch_exposes_elapsed_peer_quantum_to_guest_time_reads() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.memory
+                    .load_RAM(&[0x0F, 0x31, 0xF4], AP_TRAMPOLINE_ADDR)
+                    .unwrap();
+
+                emu.cpu.activity_state = CpuActivityState::Hlt;
+                emu.cpu.pending_event = 0;
+                emu.cpu.async_event = 0;
+                emu.cpu.lapic.intr = false;
+                emu.cpu.lapic.intr_pending = false;
+                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+
+                let _elapsed = unsafe { emu.run_cpu_batch(BOCHS_SMP_QUANTUM_TICKS) }.unwrap();
+                assert!(
+                    emu.cpu_ref(AP_INDEX).rax() > 0,
+                    "AP RDTSC did not observe halted peer quantum elapsed earlier in the SMP round"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn smp_batch_services_lapic_timer_at_round_boundary() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.memory
+                    .load_RAM(
+                        &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
+                        AP_TRAMPOLINE_ADDR,
+                    )
+                    .unwrap();
+
+                let handle = emu
+                    .pc_system
+                    .register_timer(TimerOwner::Lapic(AP_INDEX), 1, false, false, "ap_lapic")
+                    .unwrap();
+
+                emu.cpu.activity_state = CpuActivityState::Hlt;
+                emu.cpu.pending_event = 0;
+                emu.cpu.async_event = 0;
+                emu.cpu.lapic.intr = false;
+                emu.cpu.lapic.intr_pending = false;
+
+                {
+                    let ap = emu.cpu_mut_at(AP_INDEX);
+                    ap.lapic.timer_handle = Some(handle);
+                    ap.lapic.write_aligned(0xF0, 0x1FF);
+                    ap.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR);
+                    ap.lapic.set_initial_timer_count(1);
+                    ap.deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                }
+                emu.service_lapic_local_events();
+
+                let elapsed = unsafe { emu.run_cpu_batch(BOCHS_SMP_QUANTUM_TICKS) }.unwrap();
+
+                assert!(elapsed > 0);
+                assert!(
+                    emu.pc_system.time_ticks() > 0,
+                    "SMP batch did not advance pc_system at the Bochs round boundary"
+                );
+                assert!(
+                    emu.cpu_ref(AP_INDEX).lapic.intr,
+                    "AP LAPIC timer did not interrupt during the SMP batch"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn bsp_hlt_fast_forward_stays_available_until_application_processors_start() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(8, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+
+                assert!(
+                    emu.can_fast_forward_bsp_hlt(),
+                    "APs waiting for SIPI must not disable the BSP HLT real-time pacing path"
+                );
+
+                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+
+                assert!(
+                    !emu.can_fast_forward_bsp_hlt(),
+                    "once an AP is active, the SMP scheduler must own HLT progress"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn all_but_self_fixed_ipi_wakes_halted_application_processors() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const FIXED_IPI_VECTOR: u32 = 0xF1;
+                const ICR_ALL_BUT_SELF: u32 = 3 << 18;
+
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default().with_topology(2, 2, 2).unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+
+                for cpu_index in 0..emu.cpu_count() {
+                    let cpu = emu.cpu_mut_at(cpu_index);
+                    cpu.lapic.write_aligned(0xF0, 0x1FF);
+                    if cpu_index != BSP_INDEX {
+                        cpu.activity_state = CpuActivityState::Hlt;
+                        cpu.set_rflags_for_api(0x202);
+                        cpu.pending_event = 0;
+                        cpu.async_event = 0;
+                        cpu.lapic.intr = false;
+                        cpu.lapic.intr_pending = false;
+                    }
+                }
+
+                emu.cpu_mut_at(BSP_INDEX)
+                    .lapic
+                    .write_aligned(0x300, ICR_ALL_BUT_SELF | FIXED_IPI_VECTOR);
+                emu.drain_lapic_bus();
+
+                for cpu_index in 1..emu.cpu_count() {
+                    assert!(
+                        emu.cpu_ref(cpu_index).lapic.intr,
+                        "AP {cpu_index} did not receive fixed IPI in LAPIC IRR/INTR"
+                    );
+                    assert!(
+                        emu.cpu_ref(cpu_index).pending_event
+                            & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_LAPIC_INTR
+                            != 0,
+                        "AP {cpu_index} did not get a CPU LAPIC event bit"
+                    );
+                    assert!(
+                        emu.cpu_runnable_for_batch(cpu_index),
+                        "halted AP {cpu_index} was not made runnable by fixed IPI"
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn halted_application_processor_lapic_timer_disables_bsp_hlt_fast_forward() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.cpu.activity_state = CpuActivityState::Hlt;
+
+                {
+                    let ap = emu.cpu_mut_at(AP_INDEX);
+                    ap.activity_state = CpuActivityState::Hlt;
+                    ap.set_rflags_for_api(0x202);
+                    ap.lapic.write_aligned(0xF0, 0x1FF);
+                    ap.lapic.write_aligned(0x320, 0x30);
+                    ap.lapic.set_initial_timer_count(1);
+                    ap.lapic.timer_fired = true;
+                }
+
+                emu.sync_event_flags();
+
+                assert!(
+                    !emu.can_fast_forward_bsp_hlt(),
+                    "a halted AP with a pending LAPIC timer interrupt must re-enter SMP scheduling"
+                );
+                assert!(
+                    emu.cpu_runnable_for_batch(AP_INDEX),
+                    "AP LAPIC timer interrupt was not surfaced as a runnable CPU event"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn service_lapic_local_events_catches_up_overdue_periodic_ap_timers() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                let handle = emu
+                    .pc_system
+                    .register_timer(
+                        TimerOwner::Lapic(AP_INDEX),
+                        TEST_LAPIC_TIMER_PERIOD_TICKS,
+                        false,
+                        false,
+                        "ap_lapic",
+                    )
+                    .unwrap();
+
+                {
+                    let ap = emu.cpu_mut_at(AP_INDEX);
+                    ap.lapic.timer_handle = Some(handle);
+                    ap.lapic.write_aligned(0xF0, 0x1FF);
+                    ap.lapic
+                        .write_aligned(0x320, LVT_TIMER_PERIODIC_MODE | TEST_LAPIC_TIMER_VECTOR);
+                    ap.lapic
+                        .set_initial_timer_count(TEST_LAPIC_TIMER_PERIOD_TICKS as u32);
+                }
+
+                emu.service_lapic_local_events();
+                emu.pc_system.tickn(TEST_LAPIC_TIMER_ELAPSED_TICKS);
+                emu.dispatch_timer_fires();
+                emu.service_lapic_local_events();
+
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).lapic.diag_timer_fires,
+                    TEST_LAPIC_TIMER_ELAPSED_TICKS as u64 / TEST_LAPIC_TIMER_PERIOD_TICKS
+                );
+                assert_eq!(
+                    emu.pc_system.timers[handle].time_to_fire,
+                    TEST_LAPIC_TIMER_ELAPSED_TICKS as u64 + TEST_LAPIC_TIMER_PERIOD_TICKS
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn service_lapic_local_events_catches_up_overdue_periodic_ap_timers_beyond_previous_cap() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const ELAPSED_TICKS: u32 = 10_050;
+                const EXPECTED_FIRES: u64 = 1005;
+                const EXPECTED_NEXT_FIRE: u64 = 10_060;
+
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                let handle = emu
+                    .pc_system
+                    .register_timer(
+                        TimerOwner::Lapic(AP_INDEX),
+                        TEST_LAPIC_TIMER_PERIOD_TICKS,
+                        false,
+                        false,
+                        "ap_lapic",
+                    )
+                    .unwrap();
+
+                {
+                    let ap = emu.cpu_mut_at(AP_INDEX);
+                    ap.lapic.timer_handle = Some(handle);
+                    ap.lapic.write_aligned(0xF0, 0x1FF);
+                    ap.lapic
+                        .write_aligned(0x320, LVT_TIMER_PERIODIC_MODE | TEST_LAPIC_TIMER_VECTOR);
+                    ap.lapic
+                        .set_initial_timer_count(TEST_LAPIC_TIMER_PERIOD_TICKS as u32);
+                }
+
+                emu.service_lapic_local_events();
+                emu.pc_system.tickn(ELAPSED_TICKS);
+                emu.dispatch_timer_fires();
+                emu.service_lapic_local_events();
+
+                assert_eq!(emu.cpu_ref(AP_INDEX).lapic.diag_timer_fires, EXPECTED_FIRES);
+                assert_eq!(
+                    emu.pc_system.timers[handle].time_to_fire,
+                    EXPECTED_NEXT_FIRE
+                );
+                assert!(emu.cpu_ref(AP_INDEX).lapic.intr);
+                assert_ne!(
+                    emu.cpu_ref(AP_INDEX).pending_event
+                        & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_LAPIC_INTR,
+                    0
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn reset_deactivates_lapic_pc_timer_before_next_tick() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                let handle = emu
+                    .pc_system
+                    .register_timer(
+                        TimerOwner::Lapic(BSP_INDEX),
+                        TEST_LAPIC_TIMER_PERIOD_TICKS,
+                        false,
+                        false,
+                        "bsp_lapic",
+                    )
+                    .unwrap();
+
+                {
+                    let bsp = emu.cpu_mut_at(BSP_INDEX);
+                    bsp.lapic.timer_handle = Some(handle);
+                    bsp.lapic.write_aligned(0xF0, 0x1FF);
+                    bsp.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR);
+                    bsp.lapic
+                        .set_initial_timer_count(TEST_LAPIC_TIMER_PERIOD_TICKS as u32);
+                }
+
+                emu.service_lapic_local_events();
+                assert!(emu.pc_system.is_timer_active(handle));
+
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.pc_system
+                    .tickn((TEST_LAPIC_TIMER_PERIOD_TICKS as u32) + 1);
+                emu.dispatch_timer_fires();
+
+                assert!(!emu.cpu_ref(BSP_INDEX).lapic.timer_fired);
+                assert_eq!(emu.cpu_ref(BSP_INDEX).lapic.diag_timer_fires, 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn service_lapic_local_events_drains_level_triggered_eoi() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const VECTOR: u8 = 0x40;
+                const VECTOR_BIT: u32 = 1;
+
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+
+                {
+                    let lapic = &mut emu.cpu_mut_at(BSP_INDEX).lapic;
+                    lapic.write_aligned(0xF0, 0x1FF);
+                    lapic.deliver(VECTOR, 0, crate::cpu::apic::APIC_LEVEL_TRIGGERED);
+                    assert_eq!(lapic.read_aligned(0x220, 0) & VECTOR_BIT, VECTOR_BIT);
+                    assert_eq!(lapic.read_aligned(0x1A0, 0) & VECTOR_BIT, VECTOR_BIT);
+
+                    let acknowledged = lapic.acknowledge_int();
+                    assert_eq!(acknowledged, VECTOR);
+                    assert_eq!(lapic.read_aligned(0x220, 0) & VECTOR_BIT, 0);
+                    assert_eq!(lapic.read_aligned(0x120, 0) & VECTOR_BIT, VECTOR_BIT);
+                    assert_eq!(lapic.read_aligned(0x1A0, 0) & VECTOR_BIT, VECTOR_BIT);
+
+                    lapic.receive_eoi(0);
+                    assert_eq!(lapic.read_aligned(0x120, 0) & VECTOR_BIT, 0);
+                    assert_eq!(lapic.read_aligned(0x1A0, 0) & VECTOR_BIT, 0);
+                    assert_eq!(lapic.pending_eoi_vector, Some(VECTOR));
+                }
+
+                emu.service_lapic_local_events();
+
+                assert_eq!(emu.cpu_ref(BSP_INDEX).lapic.pending_eoi_vector, None);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn wait_for_sipi_application_processors_do_not_advance_bsp_time() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(8, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.virt_write(0x1000, &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN])
+                    .unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+
+                let before = emu.cpu_ref(BSP_INDEX).icount;
+                let elapsed = unsafe { emu.run_cpu_batch(1) }.unwrap();
+
+                let retired = emu.cpu_ref(BSP_INDEX).icount - before;
+                assert_eq!(
+                    elapsed, retired,
+                    "WAIT_FOR_SIPI APs must not add synthetic AP ticks to {retired} retired BSP ticks"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn direct_boot_madt_uses_configured_cpu_count() {
+        let madt = build_direct_boot_madt(DIRECT_BOOT_MADT_TEST_CPUS);
+        let mut offset = DIRECT_MADT_HEADER_SIZE;
+        let mut lapic_ids = [UNSET_APIC_ID; DIRECT_BOOT_MADT_TEST_CPUS as usize];
+        let mut lapic_count = 0usize;
+        let mut ioapic_id = None;
+
+        while offset < madt.len() {
+            let entry_type = madt[offset + MADT_ENTRY_TYPE_OFFSET];
+            let entry_len = madt[offset + MADT_ENTRY_LENGTH_OFFSET] as usize;
+            match entry_type {
+                DIRECT_MADT_ENTRY_TYPE_LAPIC => {
+                    lapic_ids[lapic_count] = madt[offset + MADT_LAPIC_APIC_ID_OFFSET];
+                    lapic_count += 1;
+                }
+                DIRECT_MADT_ENTRY_TYPE_IOAPIC => {
+                    ioapic_id = Some(madt[offset + MADT_IOAPIC_ID_OFFSET]);
+                }
+                _ => {}
+            }
+            offset += entry_len;
+        }
+
+        assert_eq!(lapic_count, DIRECT_BOOT_MADT_TEST_CPUS as usize);
+        assert_eq!(lapic_ids, EXPECTED_DIRECT_BOOT_LAPIC_IDS);
+        assert_eq!(ioapic_id, Some(DIRECT_BOOT_MADT_TEST_CPUS as u8));
+        assert_eq!(
+            madt.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
+            ACPI_CHECKSUM_VALID_SUM
+        );
     }
 }

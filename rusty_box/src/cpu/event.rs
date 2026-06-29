@@ -1,4 +1,6 @@
-use super::{cpu::CpuActivityState, cpuid::BxCpuIdTrait, eflags::EFlags, BxCpuC};
+use super::{
+    cpu::CpuActivityState, cpuid::BxCpuIdTrait, decoder::BxSegregs, eflags::EFlags, BxCpuC,
+};
 
 impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
     /// Handle async events - matches Bochs event.cc handleAsyncEvent()
@@ -37,23 +39,30 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Priority 3: External Hardware Interventions (Bochs event.cc)
         //   FLUSH, STOPCLK, SMI, INIT
 
-        // SMI (Bochs event.cc): enter System Management Mode.
-        // Not implemented — single-CPU DLX/Alpine don't trigger SMI.
-        // Bochs: clear_event(BX_EVENT_SMI); enter_system_management_mode();
+        // SMI (Bochs event.cc): clear event and enter System Management Mode.
         if self.is_unmasked_event_pending(Self::BX_EVENT_SMI) {
             self.clear_event(Self::BX_EVENT_SMI);
-            tracing::trace!("SMI event cleared (SMM not implemented)");
+            self.enter_system_management_mode();
         }
 
         // INIT (Bochs event.cc): reset CPU via reset(BX_RESET_SOFTWARE).
         // Used by multiprocessor startup (INIT-SIPI-SIPI sequence).
-        // Not implemented — single-CPU emulation only.
         // Bochs: clear_event(BX_EVENT_INIT); reset(BX_RESET_SOFTWARE);
         if self.is_unmasked_event_pending(Self::BX_EVENT_INIT) {
             self.clear_event(Self::BX_EVENT_INIT);
-            tracing::trace!("INIT event cleared (SMP not implemented)");
+            if self.bx_cpuid == 0 {
+                tracing::warn!("CPU 0 INIT event delivered; software-resetting BSP");
+            } else {
+                tracing::debug!(
+                    "CPU {} INIT event delivered; software-resetting AP",
+                    self.bx_cpuid
+                );
+            }
+            self.reset(super::ResetReason::Software);
+            if !matches!(self.activity_state, CpuActivityState::Active) {
+                return true;
+            }
         }
-
         // VMX Monitor-Trap-Flag — Bochs event.cc handleAsyncEvent runs
         // this in Priority 3 (between INIT and the Priority-4 debug-trap
         // check), gated only on the event being pending; the unmasked
@@ -261,6 +270,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // service_local_apic() which may re-signal if more IRQs pending.
                 self.clear_event(Self::BX_EVENT_PENDING_LAPIC_INTR);
                 let vector = self.lapic.acknowledge_int();
+                self.sync_lapic_intr_event();
                 if vector > 0 {
                     #[cfg(debug_assertions)]
                     {
@@ -416,6 +426,58 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         false // Continue execution
     }
 
+    /// Bochs `deliver_SMI`: signal SMI if unmasked.
+    #[inline]
+    pub(crate) fn deliver_smi(&mut self) {
+        self.signal_event(Self::BX_EVENT_SMI);
+    }
+
+    /// Bochs `deliver_NMI`: signal NMI.
+    #[inline]
+    pub(crate) fn deliver_nmi(&mut self) {
+        self.signal_event(Self::BX_EVENT_NMI);
+    }
+
+    /// Bochs `deliver_INIT`: signal a software reset if INIT is unmasked.
+    #[inline]
+    pub(crate) fn deliver_init(&mut self) {
+        if (Self::BX_EVENT_INIT & self.event_mask) == 0 {
+            self.signal_event(Self::BX_EVENT_INIT);
+        }
+    }
+
+    pub(crate) fn deliver_init_immediately(&mut self) {
+        self.deliver_init();
+        if self.is_unmasked_event_pending(Self::BX_EVENT_INIT) {
+            self.clear_event(Self::BX_EVENT_INIT);
+            self.reset(super::ResetReason::Software);
+        }
+    }
+
+    /// Bochs `deliver_SIPI`: start a CPU waiting for SIPI at `vector * 0x100`.
+    pub(crate) fn deliver_sipi(&mut self, vector: u8) {
+        if !matches!(self.activity_state, CpuActivityState::WaitForSipi) {
+            tracing::info!(
+                "CPU {} started by APIC, but was not halted at that time",
+                self.bx_cpuid
+            );
+            return;
+        }
+
+        self.unmask_event(Self::BX_EVENT_INIT | Self::BX_EVENT_SMI | Self::BX_EVENT_NMI);
+        self.activity_state = CpuActivityState::Active;
+        self.async_event &= !Self::BX_ASYNC_EVENT_SLEEP;
+        self.inhibit_mask = 0;
+        self.set_rip(0);
+        self.load_seg_reg_real_mode(BxSegregs::Cs, (vector as u16) << 8);
+        tracing::info!(
+            "CPU {} started up at {:04X}:{:08X} by APIC",
+            self.bx_cpuid,
+            (vector as u16) << 8,
+            self.eip()
+        );
+    }
+
     /// Handle wait for event - matches Bochs event.cc:handleWaitForEvent()
     /// Called when CPU is halted (HLT) or waiting (MWAIT)
     /// Returns true if should return from cpu_loop
@@ -444,8 +506,19 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             CpuActivityState::Mwait | CpuActivityState::MwaitIf
         );
 
-        // NMI can always wake from HLT (Bochs event.cc)
-        if self.pending_event & Self::BX_EVENT_NMI != 0 {
+        // SMI/INIT wake HLT/MWAIT regardless of IF (Bochs event.cc
+        // handleWaitForEvent checks unmasked BX_EVENT_SMI | BX_EVENT_INIT).
+        if self.is_unmasked_event_pending(Self::BX_EVENT_SMI | Self::BX_EVENT_INIT) {
+            if in_mwait {
+                self.monitor.reset_monitor();
+            }
+            self.activity_state = CpuActivityState::Active;
+            self.inhibit_mask = 0;
+            return false; // Continue to SMI/INIT delivery
+        }
+
+        // NMI can wake from HLT/MWAIT only when unmasked (Bochs event.cc).
+        if self.is_unmasked_event_pending(Self::BX_EVENT_NMI) {
             // Bochs event.cc: reset monitor when waking from MWAIT
             if in_mwait {
                 self.monitor.reset_monitor();
@@ -506,5 +579,93 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// supported yet. Returns 0 (no breakpoints configured).
     fn code_breakpoint_match(&self, _laddr: u64) -> u32 {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::core_i7_skylake::Corei7SkylakeX;
+    use crate::cpu::ResetReason;
+    use crate::params::{BxParams, CpuTopology};
+
+    const IA32_APIC_BASE_BSP_FLAG: u64 = 0x100;
+    const TEST_SIPI_VECTOR: u8 = 0x08;
+    const TEST_SIPI_CS_SELECTOR: u16 = (TEST_SIPI_VECTOR as u16) << 8;
+    const TEST_SIPI_CS_BASE: u64 = (TEST_SIPI_CS_SELECTOR as u64) << 4;
+    const NONZERO_RAX_SENTINEL: u64 = 0xFEED_BEEF;
+    const TEST_SMP_PACKAGES: u32 = 2;
+    const TEST_SMP_CORES: u32 = 1;
+    const TEST_SMP_THREADS: u32 = 1;
+
+    fn smp_topology() -> CpuTopology {
+        BxParams::default()
+            .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+            .unwrap()
+            .cpu_topology()
+    }
+
+    fn make_cpu(cpu_id: u32) -> alloc::boxed::Box<BxCpuC<'static, Corei7SkylakeX>> {
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.configure_smp(cpu_id, smp_topology());
+        cpu
+    }
+
+    #[test]
+    fn hardware_reset_puts_application_processor_in_wait_for_sipi() {
+        let mut bsp = make_cpu(0);
+        let mut ap = make_cpu(1);
+
+        bsp.reset(ResetReason::Hardware);
+        ap.reset(ResetReason::Hardware);
+
+        assert_eq!(bsp.activity_state, CpuActivityState::Active);
+        assert_ne!(
+            bsp.msr.apicbase & IA32_APIC_BASE_BSP_FLAG,
+            0,
+            "BSP bit must be set on CPU 0"
+        );
+        assert_eq!(ap.activity_state, CpuActivityState::WaitForSipi);
+        assert_eq!(
+            ap.msr.apicbase & IA32_APIC_BASE_BSP_FLAG,
+            0,
+            "AP must not advertise BSP bit"
+        );
+        assert_ne!(
+            ap.async_event & BxCpuC::<Corei7SkylakeX>::BX_ASYNC_EVENT_SLEEP,
+            0
+        );
+    }
+
+    #[test]
+    fn sipi_starts_only_waiting_application_processor_at_vector_segment() {
+        let mut ap = make_cpu(1);
+        ap.reset(ResetReason::Hardware);
+
+        ap.deliver_sipi(TEST_SIPI_VECTOR);
+
+        assert_eq!(ap.activity_state, CpuActivityState::Active);
+        assert_eq!(ap.get_cs_selector(), TEST_SIPI_CS_SELECTOR);
+        assert_eq!(ap.get_cs_base(), TEST_SIPI_CS_BASE);
+        assert_eq!(ap.rip(), 0);
+    }
+
+    #[test]
+    fn init_event_software_resets_active_ap_back_to_wait_for_sipi() {
+        let mut ap = make_cpu(1);
+        ap.reset(ResetReason::Hardware);
+        ap.deliver_sipi(TEST_SIPI_VECTOR);
+        ap.set_rax(NONZERO_RAX_SENTINEL);
+
+        ap.deliver_init();
+        assert_ne!(
+            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT,
+            0
+        );
+        let _ = ap.handle_async_event(None, None);
+
+        assert_eq!(ap.rax(), 0);
+        assert_eq!(ap.activity_state, CpuActivityState::WaitForSipi);
     }
 }
