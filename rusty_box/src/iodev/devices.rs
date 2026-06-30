@@ -618,9 +618,13 @@ impl DeviceManager {
         // Drain all IOAPIC forwards accumulated during device ticking
         {
             let (fwds, count) = self.pic.take_ioapic_forwards();
+            let DeviceManager {
+                ref mut pic,
+                ref mut ioapic,
+                ..
+            } = *self;
             for &(irq, level) in &fwds[..count] {
-                self.ioapic
-                    .set_irq_level(irq, level, None, lapic.as_deref_mut());
+                ioapic.set_irq_level(irq, level, Some(&mut *pic), lapic.as_deref_mut());
             }
         }
 
@@ -909,8 +913,8 @@ pub struct SystemControlPort {
     pub value: u8,
     /// A20 gate state from port 92h
     pub a20_gate: bool,
-    /// Reset request flag
-    pub reset_request: bool,
+    /// Reset request type from port 92h bit 0 (Bochs treats it as software reset).
+    pub reset_request: Option<ResetReason>,
 }
 
 impl SystemControlPort {
@@ -919,7 +923,7 @@ impl SystemControlPort {
         Self {
             value: 0,
             a20_gate: true, // A20 enabled by default on modern systems
-            reset_request: false,
+            reset_request: None,
         }
     }
 
@@ -930,7 +934,11 @@ impl SystemControlPort {
         self.value = value;
         // Bochs devices.cc: bit 1 = A20 gate, bit 0 = fast reset
         self.a20_gate = (value & 0x02) != 0;
-        self.reset_request = (value & 0x01) != 0;
+        self.reset_request = if (value & 0x01) != 0 {
+            Some(ResetReason::Software)
+        } else {
+            None
+        };
 
         // Return true if A20 state changed
         old_a20 != self.a20_gate
@@ -958,7 +966,7 @@ mod tests {
 
         // Initially A20 is enabled
         assert!(port.a20_gate);
-        assert!(!port.reset_request);
+        assert!(port.reset_request.is_none());
 
         // Disable A20 (bit 1 = 0)
         let changed = port.write(0x00);
@@ -976,6 +984,6 @@ mod tests {
 
         // Trigger reset (bit 0 = 1)
         port.write(0x01);
-        assert!(port.reset_request);
+        assert_eq!(port.reset_request, Some(ResetReason::Software));
     }
 }

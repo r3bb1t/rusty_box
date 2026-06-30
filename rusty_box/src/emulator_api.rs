@@ -970,8 +970,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
         )?;
         emu.memory.set_a20_mask(emu.pc_system.a20_mask());
         emu.pc_system.initialize(cfg.ips);
-        // Bring the CPU to its reset state before applying the mode.
-        emu.cpu.reset(ResetReason::Hardware);
+        // Bring every configured CPU to reset state before applying the mode to the BSP.
+        emu.reset(ResetReason::Hardware)?;
         emu.setup_cpu_mode(mode)?;
         Ok(emu)
     }
@@ -995,7 +995,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         )?;
         emu.memory.set_a20_mask(emu.pc_system.a20_mask());
         emu.pc_system.initialize(cfg.ips);
-        emu.cpu.reset(crate::cpu::ResetReason::Hardware);
+        emu.reset(crate::cpu::ResetReason::Hardware)?;
         emu.setup_cpu_mode(mode)?;
         Ok(emu)
     }

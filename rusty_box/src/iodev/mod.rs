@@ -278,8 +278,13 @@ impl BxDevicesC {
                 // Drain PIC IOAPIC forwarding queue after device handler
                 {
                     let (fwds, count) = dm.pic.take_ioapic_forwards();
+                    let devices::DeviceManager {
+                        ref mut pic,
+                        ref mut ioapic,
+                        ..
+                    } = *dm;
                     for &(irq, level) in &fwds[..count] {
-                        dm.ioapic.set_irq_level(irq, level, None, None);
+                        ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
                     }
                 }
                 // Consume PIC interrupt flags; propagated to io_bus below
@@ -327,8 +332,13 @@ impl BxDevicesC {
                 // Drain PIC IOAPIC forwarding queue after device handler
                 {
                     let (fwds, count) = dm.pic.take_ioapic_forwards();
+                    let devices::DeviceManager {
+                        ref mut pic,
+                        ref mut ioapic,
+                        ..
+                    } = *dm;
                     for &(irq, level) in &fwds[..count] {
-                        dm.ioapic.set_irq_level(irq, level, None, None);
+                        ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
                     }
                 }
                 // Consume PIC interrupt flags; propagated to io_bus below

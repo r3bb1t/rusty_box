@@ -191,11 +191,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Get current system ticks from pc_system (Bochs: bx_pc_system.time_ticks()).
     /// Falls back to icount when pc_system is not wired (unit tests).
+    ///
+    /// Single-CPU batches expose live icount deltas. SMP scales those deltas by
+    /// the scheduler's participating CPU count; Bochs only advances global time
+    /// by `executed / BX_SMP_PROCESSORS` after a full SMP round.
     #[inline]
     pub(crate) fn system_ticks(&self) -> u64 {
         if self.pc_system_ptr.is_some() {
+            let delta = self.icount.wrapping_sub(self.pc_system_icount_at_sync);
             self.pc_system_ticks_at_sync
-                .wrapping_add(self.icount.wrapping_sub(self.pc_system_icount_at_sync))
+                .wrapping_add(delta / self.pc_system_tick_denominator.max(1))
         } else {
             self.icount
         }
@@ -914,11 +919,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VMX MSR-store list helper) own those gates.
     pub(super) fn rdmsr_value(&mut self, msr: u32) -> crate::cpu::Result<u64> {
         use super::msr::*;
+        if (0x800..=0x8FF).contains(&msr) {
+            if self.lapic.get_mode() != super::apic::ApicMode::X2apicMode {
+                self.exception(super::cpu::Exception::Gp, 0)?;
+                return Ok(0);
+            }
+            let index = (msr - 0x800) << 4;
+            if let Some(val) = self.lapic.read_x2apic(index, self.system_ticks()) {
+                return Ok(val);
+            }
+            self.exception(super::cpu::Exception::Gp, 0)?;
+            return Ok(0);
+        }
         let val: u64 = match msr {
             BX_MSR_TSC => self.get_virtual_tsc(self.system_ticks()),
             BX_MSR_APICBASE => self.msr.apicbase,
             BX_MSR_PLATFORM_ID => 0, // read-only, returns 0
             BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => self.get_tsc(self.system_ticks()), // Bochs: physical/system TSC
+            BX_MSR_TSC_DEADLINE => self.lapic.get_tsc_deadline(),
             // Bochs msr.cc — WAITPKG umwait max-delay control.
             BX_MSR_IA32_UMWAIT_CONTROL => self.msr.ia32_umwait_ctrl as u64,
             // Bochs msr.cc — CET control + shadow-stack pointers.
@@ -1077,15 +1095,36 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// perform CPL or VMX/SVM intercept checks; callers own those gates.
     pub(super) fn wrmsr_value(&mut self, msr: u32, val: u64) -> crate::cpu::Result<()> {
         use super::msr::*;
+        if (0x800..=0x8FF).contains(&msr) {
+            if self.lapic.get_mode() != super::apic::ApicMode::X2apicMode {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            let index = (msr - 0x800) << 4;
+            if self.lapic.write_x2apic(index, val) {
+                if index == 0x300 {
+                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                    self.instrumentation.stop_request = true;
+                }
+                return Ok(());
+            }
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         match msr {
             BX_MSR_TSC => self.set_tsc(val, self.system_ticks()),
-            BX_MSR_APICBASE => self.msr.apicbase = val as _,
+            BX_MSR_APICBASE => {
+                self.msr.apicbase = val as _;
+                self.lapic.set_base(self.msr.apicbase);
+            }
             BX_MSR_PLATFORM_ID => {
                 tracing::trace!("WRMSR: PLATFORM_ID is read-only");
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
             BX_MSR_IA32_APERF => { /* ignore write */ }
             BX_MSR_IA32_MPERF => { /* ignore write */ }
+            BX_MSR_TSC_DEADLINE => {
+                let current_ticks = self.system_ticks();
+                self.lapic.set_tsc_deadline(val, current_ticks);
+            }
             // Bochs msr.cc — stores low 32 bits of value.
             BX_MSR_IA32_UMWAIT_CONTROL => self.msr.ia32_umwait_ctrl = val as u32,
             // Bochs msr.cc — CET writes validate canonical address +
@@ -1153,15 +1192,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_pkeys(self.pkru, val as u32);
             }
             // Bochs msr.cc IA32_FEATURE_CONTROL write — once the LOCK bit
-            // (bit 0) is set, further writes raise #GP. Only the low bits
-            // (LOCK + VMX_ENABLE_IN_SMX + VMX_ENABLE_OUTSIDE_SMX + senter
-            // control bits) are writable.
+            // (bit 0) is set, changing the MSR raises #GP. Firmware can rerun
+            // the same `rdmsr; or 5; wrmsr` path after an APIC INIT/software
+            // reset, where the lock bit intentionally survives. Treat an
+            // idempotent write as a no-op so a second firmware pass does not
+            // triple-fault at the WRMSR instruction.
             BX_MSR_IA32_FEATURE_CONTROL => {
+                let value = val as u32;
                 if (self.msr.ia32_feature_ctrl & super::vmx::BX_IA32_FEATURE_CONTROL_LOCK_BIT) != 0
                 {
+                    if value == self.msr.ia32_feature_ctrl {
+                        return Ok(());
+                    }
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
-                self.msr.ia32_feature_ctrl = val as u32;
+                self.msr.ia32_feature_ctrl = value;
             }
             // Bochs msr.cc: the IA32_VMX_* capability MSRs (0x480..0x492) are
             // read-only; writes raise #GP(0). Fall into the catch-all.
@@ -4035,10 +4080,15 @@ mod tests {
 
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::crregs::BxEfer;
     use crate::cpu::decoder::Instruction;
-    use crate::cpu::msr::{BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_MPERF, BX_MSR_TSC};
+    use crate::cpu::msr::{
+        BX_MSR_APICBASE, BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_FEATURE_CONTROL,
+        BX_MSR_IA32_MPERF, BX_MSR_TSC, BX_MSR_TSC_DEADLINE,
+    };
     use crate::cpu::svm::BX_VM_CR_MSR_SVMDIS_MASK;
+    use crate::params::BxParams;
     use crate::pc_system::BxPcSystemC;
     use core::ptr::NonNull;
 
@@ -4118,6 +4168,44 @@ mod tests {
     }
 
     #[test]
+    fn wired_system_ticks_scale_live_icount_delta_for_smp() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut pc_system = BxPcSystemC::new();
+        pc_system.initialize(1_000_000);
+        pc_system.tickn(1_234);
+
+        cpu.icount = 500;
+        cpu.set_pc_system_ptr_with_tick_denominator(NonNull::from(&mut pc_system), 8);
+        assert_eq!(cpu.system_ticks(), 1_234);
+
+        cpu.icount = 780;
+        assert_eq!(cpu.system_ticks(), 1_269);
+        cpu.clear_pc_system();
+    }
+
+    #[test]
+    fn tsc_deadline_msr_arms_local_apic_timer() {
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut pc_system = BxPcSystemC::new();
+        pc_system.initialize(1_000_000);
+        pc_system.tickn(2_000);
+        cpu.set_pc_system_ptr(NonNull::from(&mut pc_system));
+
+        assert!(cpu.lapic.write_x2apic(0x320, 0x0004_0030));
+        let deadline = cpu.system_ticks() + 123;
+
+        cpu.wrmsr_value(BX_MSR_TSC_DEADLINE, deadline).unwrap();
+
+        assert_eq!(cpu.rdmsr_value(BX_MSR_TSC_DEADLINE).unwrap(), deadline);
+        let (active, _initial, _period, vector, activate_pending, _deactivate_pending) =
+            cpu.lapic.hlt_timer_diag();
+        assert!(active);
+        assert_eq!(vector, 0x30);
+        assert!(activate_pending);
+        cpu.clear_pc_system();
+    }
+
+    #[test]
     fn guest_tsc_paths_use_virtual_offset_but_aperf_mperf_stay_physical() {
         let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
         cpu.icount = 77;
@@ -4146,5 +4234,87 @@ mod tests {
             cpu.rdmsr_value(BX_MSR_IA32_MPERF).unwrap(),
             expected_physical
         );
+    }
+
+    #[test]
+    fn feature_control_allows_idempotent_locked_firmware_write() {
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.reset(crate::cpu::ResetReason::Hardware);
+
+        cpu.wrmsr_value(BX_MSR_IA32_FEATURE_CONTROL, 0x5).unwrap();
+        cpu.reset(crate::cpu::ResetReason::Software);
+
+        cpu.wrmsr_value(BX_MSR_IA32_FEATURE_CONTROL, 0x5)
+            .expect("firmware can rerun rdmsr/or/wrmsr after APIC INIT");
+        assert_eq!(cpu.rdmsr_value(BX_MSR_IA32_FEATURE_CONTROL).unwrap(), 0x5);
+        assert!(
+            cpu.wrmsr_value(BX_MSR_IA32_FEATURE_CONTROL, 0x7).is_err(),
+            "locked IA32_FEATURE_CONTROL must still reject changes"
+        );
+    }
+
+    #[test]
+    fn wrmsr_apicbase_updates_lapic_base_and_mode() {
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.reset(crate::cpu::ResetReason::Hardware);
+
+        let relocated_xapic_base = 0xfee1_0800u64;
+        cpu.wrmsr_value(BX_MSR_APICBASE, relocated_xapic_base)
+            .unwrap();
+
+        assert_eq!(cpu.msr.apicbase, relocated_xapic_base);
+        assert_eq!(cpu.lapic.get_base(), 0xfee1_0000);
+        assert_eq!(cpu.lapic.get_mode(), crate::cpu::apic::ApicMode::XapicMode);
+        assert!(
+            cpu.lapic.is_selected(0xfee1_0030),
+            "LAPIC MMIO decode must follow MSR_APICBASE writes"
+        );
+
+        let x2apic_base = relocated_xapic_base | 0x400;
+        cpu.wrmsr_value(BX_MSR_APICBASE, x2apic_base).unwrap();
+
+        assert_eq!(cpu.msr.apicbase, x2apic_base);
+        assert_eq!(cpu.lapic.get_mode(), crate::cpu::apic::ApicMode::X2apicMode);
+        assert!(
+            !cpu.lapic.is_selected(0xfee1_0030),
+            "x2APIC mode must disable xAPIC MMIO decode"
+        );
+    }
+
+    #[test]
+    fn x2apic_msrs_use_enabled_lapic_registers() {
+        const X2APIC_ID_MSR: u32 = 0x802;
+        const X2APIC_ICR_MSR: u32 = 0x830;
+        const SOURCE_APIC_ID: u32 = 5;
+        const TARGET_APIC_ID: u32 = 7;
+        const FIXED_VECTOR: u64 = 0x40;
+
+        let topology = BxParams::default()
+            .with_topology(8, 1, 1)
+            .unwrap()
+            .cpu_topology();
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.configure_smp(SOURCE_APIC_ID, topology);
+        cpu.reset(crate::cpu::ResetReason::Hardware);
+        cpu.configure_smp(SOURCE_APIC_ID, topology);
+        cpu.wrmsr_value(BX_MSR_APICBASE, 0xfee0_0c00).unwrap();
+
+        assert_eq!(
+            cpu.rdmsr_value(X2APIC_ID_MSR).unwrap(),
+            SOURCE_APIC_ID as u64
+        );
+
+        cpu.wrmsr_value(
+            X2APIC_ICR_MSR,
+            ((TARGET_APIC_ID as u64) << 32) | FIXED_VECTOR,
+        )
+        .unwrap();
+
+        let pending = cpu
+            .lapic
+            .take_pending_ipi()
+            .expect("x2APIC ICR write must queue the destination from the high dword");
+        assert_eq!(pending.dest, TARGET_APIC_ID);
+        assert_eq!(pending.lo_cmd as u64 & 0xff, FIXED_VECTOR);
     }
 }

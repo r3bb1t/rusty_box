@@ -317,6 +317,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_APICBASE => apicbase,
             BX_MSR_PLATFORM_ID => 0,
             BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => self.get_tsc(self.system_ticks()),
+            BX_MSR_TSC_DEADLINE => self.lapic.get_tsc_deadline(),
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr as u64,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr,
             BX_MSR_SYSENTER_EIP => self.msr.sysenter_eip_msr,
@@ -348,6 +349,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             BX_MSR_PLATFORM_ID => return Err(super::CpuError::UnimplementedInstruction), // read-only
             BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => { /* ignore write */ }
+            BX_MSR_TSC_DEADLINE => {
+                let current_ticks = self.system_ticks();
+                self.lapic.set_tsc_deadline(val, current_ticks);
+            }
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr = val as u32,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr = val,
             BX_MSR_SYSENTER_EIP => self.msr.sysenter_eip_msr = val,

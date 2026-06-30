@@ -558,9 +558,9 @@ pub struct BxKeyboardC {
     /// 0x80 to produce the set 1 break code. Matches Bochs gen_scancode() logic
     /// (keyboard.cc).
     scancode_escaped: bool,
-    /// System reset requested via controller command 0xFE.
-    /// Checked by emulator loop to trigger hardware reset.
-    pub(crate) reset_requested: bool,
+    /// System software reset requested via controller command 0xFE or output-port reset.
+    /// Checked by emulator loop to trigger Bochs-compatible software reset.
+    pub(crate) reset_requested: Option<crate::cpu::ResetReason>,
 }
 
 impl Default for BxKeyboardC {
@@ -644,7 +644,7 @@ impl BxKeyboardC {
             irq12_lower_pending: false,
             kbd_initialized: false,
             scancode_escaped: false,
-            reset_requested: false,
+            reset_requested: None,
         }
     }
 
@@ -921,6 +921,7 @@ impl BxKeyboardC {
                     }
                     if (value & OUT_PORT_CPU_RESET) == 0 {
                         tracing::warn!("Keyboard: Processor reset requested via output port!");
+                        self.reset_requested = Some(crate::cpu::ResetReason::Software);
                     }
                 }
                 CTRL_CMD_WRITE_TO_MOUSE => {
@@ -1099,7 +1100,7 @@ impl BxKeyboardC {
             CTRL_CMD_SYSTEM_RESET => {
                 // System reset — keyboard.cc
                 tracing::warn!("Keyboard: System reset via 0xFE");
-                self.reset_requested = true;
+                self.reset_requested = Some(crate::cpu::ResetReason::Software);
             }
             _ => {
                 if value == 0xFF || (0xF0..=0xFD).contains(&value) {
@@ -1966,5 +1967,18 @@ mod tests {
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_GET_CCB as u32, 1, None);
         let ccb = kbd.read(KBD_DATA_PORT, 1, 0, None);
         assert_eq!(ccb, 0x65);
+    }
+
+    #[test]
+    fn controller_reset_commands_request_software_reset() {
+        let mut kbd = BxKeyboardC::new();
+
+        kbd.write(KBD_COMMAND_PORT, CTRL_CMD_SYSTEM_RESET as u32, 1, None);
+        assert_eq!(kbd.reset_requested, Some(crate::cpu::ResetReason::Software));
+
+        let mut kbd = BxKeyboardC::new();
+        kbd.write(KBD_COMMAND_PORT, CTRL_CMD_WRITE_OUTPUT_PORT as u32, 1, None);
+        kbd.write(KBD_DATA_PORT, 0x00, 1, None);
+        assert_eq!(kbd.reset_requested, Some(crate::cpu::ResetReason::Software));
     }
 }

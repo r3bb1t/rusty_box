@@ -3,6 +3,7 @@ use rusty_box::{
     cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
     emulator::{Emulator, EmulatorConfig},
     gui::{shared_display::SharedDisplay, BxGui, DisplayMode, VgaTextModeInfo},
+    params::BxParams,
 };
 use rusty_box_gui::{
     app::{NativeEmulatorCommand, NativeShellApp},
@@ -297,6 +298,7 @@ fn android_gui_config() -> ResolvedConfig {
         pci: true,
         sync_slowdown: false,
         max_instructions: u64::MAX,
+        cpu_params: BxParams::default(),
         display: DisplayBackend::Egui,
         bios: PathBuf::from("embedded://bochs-bios"),
         vga_bios: Some(PathBuf::from("embedded://vgabios")),

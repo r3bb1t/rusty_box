@@ -1,5 +1,6 @@
 use crate::args::{Args, BootDevice, DiskGeometry, DisplayBackend, LogLevel};
 use crate::error::RunError;
+use rusty_box::params::BxParams;
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
@@ -25,6 +26,7 @@ pub struct EmulatorToml {
     pub memory_mib: Option<u32>,
     pub host_memory_mib: Option<u32>,
     pub memory_block_kib: Option<u32>,
+    pub cpus: Option<u32>,
     pub ips: Option<u32>,
     pub pci: Option<bool>,
     pub sync_slowdown: Option<bool>,
@@ -91,6 +93,7 @@ pub struct ResolvedConfig {
     pub pci: bool,
     pub sync_slowdown: bool,
     pub max_instructions: u64,
+    pub cpu_params: BxParams,
     pub display: DisplayBackend,
     pub bios: PathBuf,
     pub vga_bios: Option<PathBuf>,
@@ -200,6 +203,12 @@ fn resolve_config_with_base(
         .max_instructions
         .or(file.emulator.max_instructions)
         .unwrap_or(u64::MAX);
+    let cpu_count = args.cpus.or(file.emulator.cpus).unwrap_or(1);
+    ensure_nonzero("cpus", cpu_count)?;
+    let cpu_params = BxParams::default()
+        .with_topology(cpu_count, 1, 1)
+        .map_err(|_| RunError::ValueOverflow { field: "cpus" })?;
+
     let display = args
         .display
         .or(file.display.backend)
@@ -239,6 +248,7 @@ fn resolve_config_with_base(
         pci,
         sync_slowdown,
         max_instructions,
+        cpu_params,
         display,
         bios,
         vga_bios,

@@ -64,6 +64,8 @@ pub struct Args {
 
     #[arg(long = "max-instructions", value_name = "N")]
     pub max_instructions: Option<u64>,
+    #[arg(long = "cpus", value_name = "N")]
+    pub cpus: Option<u32>,
 
     #[arg(long = "pci", action = ArgAction::SetTrue, conflicts_with = "no_pci")]
     pub pci: bool,
