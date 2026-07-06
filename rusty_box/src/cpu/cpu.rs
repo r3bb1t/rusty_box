@@ -985,9 +985,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // ── Debug trap bits (DR6 bits set by CPU) ──
-    // Bochs cpu.h
+    // Bochs crregs.h
+    pub(super) const BX_DEBUG_TRAP_HIT: u32 = 1 << 12; // internal "a breakpoint fired" flag
     pub(super) const BX_DEBUG_SINGLE_STEP_BIT: u32 = 1 << 14; // BS flag in DR6 (bit 14)
     pub(super) const BX_DEBUG_TRAP_TASK_SWITCH_BIT: u32 = 0x8000; // BT flag in DR6
+
+    // ── Hardware debug (DR7 R/W field) breakpoint type ──
+    // Bochs cpu.h enum: instruction-execution breakpoint (R/W == 00b).
+    // Data (01b/11b) and I/O watchpoints are not wired into the memory
+    // access paths yet, so only the instruction type is defined here.
+    pub(super) const BX_HW_DEBUG_INSTRUCTION: u32 = 0x00;
 
     // ── DR7 local breakpoint enable bits mask ──
     // Bits L0(0), L1(2), L2(4), L3(6), LE(8) = 0x155

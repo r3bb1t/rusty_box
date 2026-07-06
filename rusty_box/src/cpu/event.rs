@@ -481,7 +481,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         false // Continue execution
     }
 
-    /// Bochs `deliver_SMI`: signal SMI if unmasked.
+    /// Bochs `deliver_SMI`: signal SMI unconditionally; masking is
+    /// checked when the event is processed in `handle_async_event`.
     #[inline]
     pub(crate) fn deliver_smi(&mut self) {
         self.signal_event(Self::BX_EVENT_SMI);
@@ -517,9 +518,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // VMexit(VMX_VMEXIT_SIPI, vector) — the exit unwinds (Bochs longjmp),
         // so the real-mode activation below is skipped;
         // vmexit_load_host_state already sets ACTIVE and clears inhibits.
-        // This may fire from emulator context (apply_lapic_cpu_event) where
-        // memory is unwired: vmx_vmexit mutates only CPU-local state so that
-        // is safe, but VMEXIT MSR store/load lists are not walked there.
+        // Callers that invoke this from emulator context wire the memory bus
+        // first (apply_lapic_cpu_event), so the VMEXIT MSR lists resolve.
         if self.in_vmx_guest {
             self.async_event &= !Self::BX_ASYNC_EVENT_SLEEP;
             match self.vmexit_unconditional(VmxVmexitReason::Sipi, vector as u64) {
@@ -530,7 +530,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
         self.activity_state = CpuActivityState::Active;
         self.async_event &= !Self::BX_ASYNC_EVENT_SLEEP;
-        self.inhibit_mask = 0;
         self.set_rip(0);
         self.load_seg_reg_real_mode(BxSegregs::Cs, (vector as u16) << 8);
         tracing::info!(
@@ -617,31 +616,80 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             return false; // Continue to LAPIC interrupt delivery
         }
 
-        // Monitor triggered by a write (wakeup_monitor set activity_state to Active)
+        // Monitor triggered by a write (wakeup_monitor set activity_state to
+        // Active). Bochs event.cc breaks out here without touching
+        // inhibit_mask — only the interrupt-wake branch clears it.
         if matches!(self.activity_state, CpuActivityState::Active) {
             tracing::trace!("CPU activity_state became ACTIVE, waking up");
-            self.inhibit_mask = 0;
             return false;
         }
 
-        // Return from cpu_loop to allow other processing (matches single-CPU behavior)
-        // In Bochs, BX_TICKN(10) advances time, then loops again
-        // For our emulator, we return to allow GUI updates and device processing
-
-        // Bochs event.cc: clear inhibit_mask when waking from HLT
-        self.inhibit_mask = 0;
+        // HALT condition remains: return from cpu_loop so other CPUs (or the
+        // emulator scheduler) get a chance, leaving inhibit_mask untouched
+        // exactly like Bochs event.cc handleWaitForEvent's return-1 path.
         true
     }
 
-    /// Check code breakpoints at the given linear address (Bochs event.cc).
-    /// Returns bitmap of matching breakpoints to OR into debug_trap.
-    /// In Bochs, this checks DR0-DR3 against laddr when DR7 L/G bits enable
-    /// execution breakpoints (R/W field = 0b00). Each match sets the
-    /// corresponding B0-B3 bit in the returned value.
-    /// Not implemented — hardware debug breakpoints (DR0-DR3 + DR7) not fully
-    /// supported yet. Returns 0 (no breakpoints configured).
-    fn code_breakpoint_match(&self, _laddr: u64) -> u32 {
+    /// Check code (instruction-execution) breakpoints at `laddr`.
+    /// Bochs crregs.cc `code_breakpoint_match`.
+    fn code_breakpoint_match(&self, laddr: u64) -> u32 {
+        // RF suppresses instruction breakpoints for exactly one instruction.
+        if self.eflags.contains(EFlags::RF) {
+            return 0;
+        }
+        if self.dr7.bp_enabled() != 0 {
+            return self.hwdebug_compare(
+                laddr,
+                1,
+                Self::BX_HW_DEBUG_INSTRUCTION,
+                Self::BX_HW_DEBUG_INSTRUCTION,
+            );
+        }
         0
+    }
+
+    /// Compare a linear-address range against DR0-DR3 under DR7.
+    /// Bochs crregs.cc `hwdebug_compare`. `opa`/`opb` are the accepted DR7
+    /// R/W field values (instruction, memory-write, or memory-read/write).
+    /// Returns the DR6 status bits to OR into `debug_trap`: B0-B3 for each
+    /// matching register, plus `BX_DEBUG_TRAP_HIT` if any matching register
+    /// was actually enabled in DR7.
+    fn hwdebug_compare(&self, laddr_0: u64, size: u64, opa: u32, opb: u32) -> u32 {
+        // Indexed by the 2-bit LEN field: 00b=1, 01b=2, 10b=undef(8), 11b=4.
+        const ALIGNMENT_MASK: [u64; 4] = [0x0, 0x1, 0x7, 0x3];
+
+        let dr7 = self.dr7.get32();
+        let laddr_n = laddr_0 + (size - 1);
+
+        let dr_len = [
+            self.dr7.len0(),
+            self.dr7.len1(),
+            self.dr7.len2(),
+            self.dr7.len3(),
+        ];
+        let dr_op = [
+            self.dr7.r_w0(),
+            self.dr7.r_w1(),
+            self.dr7.r_w2(),
+            self.dr7.r_w3(),
+        ];
+
+        let mut dr6_mask = 0u32;
+        for n in 0..4 {
+            let mask = ALIGNMENT_MASK[dr_len[n] as usize];
+            let dr_start = self.dr[n] & !mask;
+            let dr_end = dr_start + mask;
+
+            if (dr_op[n] == opa || dr_op[n] == opb) && laddr_0 <= dr_end && laddr_n >= dr_start {
+                dr6_mask |= 1 << n;
+                // Report HIT only if this breakpoint was enabled (L/G pair).
+                if dr7 & (3 << (n * 2)) != 0 {
+                    dr6_mask |= Self::BX_DEBUG_TRAP_HIT;
+                }
+            }
+        }
+
+        dr6_mask
     }
 }
 
@@ -821,6 +869,59 @@ mod tests {
             ap.activity_state,
             CpuActivityState::Active,
             "INIT intercept must preempt the CPU reset"
+        );
+    }
+
+    #[test]
+    fn code_breakpoint_matches_enabled_instruction_register() {
+        use crate::cpu::crregs::BxDr7;
+
+        let mut cpu = make_cpu(0);
+        cpu.reset(ResetReason::Hardware);
+
+        // DR0 = target laddr; DR7: L0=1 (bit 0), R/W0=00b (instruction),
+        // LEN0=00b (1 byte).
+        cpu.dr[0] = 0x1234;
+        cpu.dr7 = BxDr7::from_bits_retain(0x1);
+        cpu.eflags.remove(crate::cpu::eflags::EFlags::RF);
+
+        let bits = cpu.code_breakpoint_match(0x1234);
+        assert_ne!(bits & 0x1, 0, "B0 status bit must be set on a match");
+        assert_ne!(
+            bits & BxCpuC::<Corei7SkylakeX>::BX_DEBUG_TRAP_HIT,
+            0,
+            "HIT must be set because DR0 is enabled in DR7"
+        );
+
+        // A different address does not match.
+        assert_eq!(cpu.code_breakpoint_match(0x5678), 0);
+
+        // RF suppresses instruction breakpoints for one instruction.
+        cpu.eflags.insert(crate::cpu::eflags::EFlags::RF);
+        assert_eq!(cpu.code_breakpoint_match(0x1234), 0);
+    }
+
+    #[test]
+    fn disabled_instruction_register_matches_without_hit() {
+        use crate::cpu::crregs::BxDr7;
+
+        let mut cpu = make_cpu(0);
+        cpu.reset(ResetReason::Hardware);
+
+        // DR0 armed at the address but with a *different* enabled breakpoint
+        // (L1 for DR1) — Bochs still sets B0 (status), but HIT only when the
+        // matching register itself is enabled.
+        cpu.dr[0] = 0x2000;
+        cpu.dr[1] = 0x9999;
+        cpu.dr7 = BxDr7::from_bits_retain(1 << 2); // L1 enabled, L0 disabled
+        cpu.eflags.remove(crate::cpu::eflags::EFlags::RF);
+
+        let bits = cpu.code_breakpoint_match(0x2000);
+        assert_ne!(bits & 0x1, 0, "B0 status bit still reported for a match");
+        assert_eq!(
+            bits & BxCpuC::<Corei7SkylakeX>::BX_DEBUG_TRAP_HIT,
+            0,
+            "HIT must NOT be set: DR0 is not enabled in DR7"
         );
     }
 

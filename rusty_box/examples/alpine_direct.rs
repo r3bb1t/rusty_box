@@ -240,9 +240,9 @@ fn run_alpine() -> Result<()> {
         let workspace_root = std::env::current_dir().unwrap_or_default();
         let ws = workspace_root.to_string_lossy();
         let bios_candidates = [
-            format!("{}/cpp_orig/bochs/bios/BIOS-bochs-latest", ws),
-            format!("{}/../cpp_orig/bochs/bios/BIOS-bochs-latest", ws),
-            "cpp_orig/bochs/bios/BIOS-bochs-latest".to_string(),
+            format!("{}/cpp_orig/bochs/bochs/bios/BIOS-bochs-latest", ws),
+            format!("{}/../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest", ws),
+            "cpp_orig/bochs/bochs/bios/BIOS-bochs-latest".to_string(),
         ];
         let bios_strs: Vec<&str> = bios_candidates.iter().map(|s| s.as_str()).collect();
         let (bios_path, bios_data) = find_file(&bios_strs)

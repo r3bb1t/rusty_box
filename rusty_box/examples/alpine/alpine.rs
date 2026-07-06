@@ -134,15 +134,15 @@ fn run_alpine() -> Result<()> {
 
     // BIOS paths (same as dlxlinux)
     let bios_paths = [
-        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-latest"),
-        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-legacy"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/BIOS-bochs-legacy"),
         workspace_root.join("BIOS-bochs-latest"),
         std::path::PathBuf::from("BIOS-bochs-latest"),
     ];
 
     let vga_bios_paths = [
         workspace_root.join("binaries/bios/VGABIOS-lgpl-latest.bin"),
-        workspace_root.join("cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin"),
         workspace_root.join("VGABIOS-lgpl-latest.bin"),
         std::path::PathBuf::from("VGABIOS-lgpl-latest.bin"),
     ];

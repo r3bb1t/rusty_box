@@ -1470,7 +1470,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 timer_handle
             };
             if let Some(handle) = timer_handle {
-                let _ = self.pc_system.deactivate_timer(handle);
+                if let Err(e) = self.pc_system.deactivate_timer(handle) {
+                    tracing::error!(
+                        "CPU {cpu_index} LAPIC timer deactivate on reset (handle {handle}) failed: {e:?}"
+                    );
+                }
             }
         }
 
@@ -2142,19 +2146,28 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     ) {
         if deactivate {
             if let Some(handle) = timer_handle {
-                let _ = self.pc_system.deactivate_timer(handle);
+                if let Err(e) = self.pc_system.deactivate_timer(handle) {
+                    tracing::error!(
+                        "CPU {cpu_index} LAPIC timer deactivate (handle {handle}) failed: {e:?}"
+                    );
+                }
             }
         }
 
         if let Some(activation) = activate {
             if let Some(handle) = timer_handle {
-                let _ = if reactivate_from_previous_fire {
+                let result = if reactivate_from_previous_fire {
                     self.pc_system
                         .reactivate_timer_relative(handle, activation.delay_ticks)
                 } else {
                     self.pc_system
                         .activate_timer(handle, activation.delay_ticks, false)
                 };
+                if let Err(e) = result {
+                    tracing::error!(
+                        "CPU {cpu_index} LAPIC timer activate (handle {handle}) failed: {e:?}"
+                    );
+                }
             }
             if activation.update_ticks_initial {
                 let ticks_now = self.pc_system.time_ticks();
@@ -2230,15 +2243,25 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         let Some(event) = event else {
             return;
         };
-        let cpu = self.cpu_mut_at(target);
         match event {
-            LocalApicCpuEvent::Smi => cpu.deliver_smi(),
-            LocalApicCpuEvent::Nmi => cpu.deliver_nmi(),
-            // Bochs apic.cc deliver: INIT only signals the (mask-checked)
-            // event; the target resets at its next instruction boundary in
-            // handle_async_event, after SMI and with the VMX/SVM gates.
-            LocalApicCpuEvent::Init => cpu.deliver_init(),
-            LocalApicCpuEvent::Sipi(vector) => cpu.deliver_sipi(vector),
+            // SMI / NMI / INIT only set an event bit — no memory access here;
+            // the actual delivery happens at the target's next instruction
+            // boundary in handle_async_event.
+            LocalApicCpuEvent::Smi => self.cpu_mut_at(target).deliver_smi(),
+            LocalApicCpuEvent::Nmi => self.cpu_mut_at(target).deliver_nmi(),
+            LocalApicCpuEvent::Init => self.cpu_mut_at(target).deliver_init(),
+            LocalApicCpuEvent::Sipi(vector) => {
+                // deliver_sipi VMexits when the target is in VMX non-root
+                // operation, and the exit can walk the VMEXIT MSR store/load
+                // lists. Wire the memory bus for the call so those guest-memory
+                // accesses resolve, then clear it (mirrors inject_interrupt).
+                let mem_ptr =
+                    core::ptr::NonNull::from(&mut *unsafe { self.borrow_memory_for_cpu() });
+                let cpu = self.cpu_mut_at(target);
+                cpu.set_mem_bus_ptr(mem_ptr);
+                cpu.deliver_sipi(vector);
+                cpu.clear_mem_bus();
+            }
         }
     }
     /// Synchronize device event flags to CPU event fields.
@@ -3236,9 +3259,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 {
                                     let vec = self.iac();
                                     // SAFETY: see borrow_memory_for_cpu / inject_interrupt
-                                    unsafe {
-                                        let _ = self.inject_interrupt(vec);
-                                    };
+                                    if let Err(e) = unsafe { self.inject_interrupt(vec) } {
+                                        tracing::warn!(
+                                            "PIC interrupt injection (vector {vec:#04x}) failed: {e:?}"
+                                        );
+                                    }
                                 }
                                 // Run CPU batch — handle_async_event inside cpu_loop_n
                                 // will process LAPIC events and wake from MWAIT.
@@ -3649,9 +3674,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             {
                 let vector = self.iac();
                 // SAFETY: see borrow_memory_for_cpu / inject_interrupt
-                unsafe {
-                    let _ = self.inject_interrupt(vector);
-                };
+                if let Err(e) = unsafe { self.inject_interrupt(vector) } {
+                    tracing::warn!(
+                        "PIC interrupt injection (vector {vector:#04x}) failed: {e:?}"
+                    );
+                }
             }
 
             // --- Tight loop: if CPU was woken from MWAIT and wall budget remains,

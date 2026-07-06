@@ -254,9 +254,9 @@ fn run() -> Result<()> {
         let ws = std::env::current_dir().unwrap_or_default();
         let ws = ws.to_string_lossy();
         let bios = [
-            format!("{ws}/cpp_orig/bochs/bios/BIOS-bochs-latest"),
-            format!("{ws}/../cpp_orig/bochs/bios/BIOS-bochs-latest"),
-            "cpp_orig/bochs/bios/BIOS-bochs-latest".into(),
+            format!("{ws}/cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
+            format!("{ws}/../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
+            "cpp_orig/bochs/bochs/bios/BIOS-bochs-latest".into(),
         ]
         .iter()
         .find_map(|p| std::fs::read(p).ok())
