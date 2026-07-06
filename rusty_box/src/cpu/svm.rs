@@ -352,6 +352,7 @@ pub fn svm_exception_intercepted(ctrls: &SvmControls, vector: u32) -> bool {
 //  VM_CR MSR bitmasks
 // ========================
 
+pub const BX_VM_CR_MSR_INIT_REDIRECT_MASK: u32 = 1 << 1;
 pub const BX_VM_CR_MSR_LOCK_MASK: u32 = 1 << 3;
 pub const BX_VM_CR_MSR_SVMDIS_MASK: u32 = 1 << 4;
 

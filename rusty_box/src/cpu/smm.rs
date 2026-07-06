@@ -246,12 +246,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_RSM) {
             return self.svm_vmexit(super::svm::SvmVmexit::Rsm as i32, 0, 0);
         }
-        // Bochs vmx.cc VMexit_RSM — unconditional when in VMX guest.
+        // Bochs smm.cc RSM: VMexit when in VMX guest, #UD in VMX root
+        // operation.
         if self.in_vmx_guest {
             return self.vmx_vmexit(super::vmx::VmxVmexitReason::Rsm, 0);
         }
+        if self.in_vmx {
+            tracing::error!("RSM in VMX root operation !");
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
 
         tracing::trace!("RSM: resuming from SMM (smbase={:#010x})", self.smbase);
+
+        // Bochs smm.cc RSM: release the events held while in SMM.
+        self.unmask_event(
+            Self::BX_EVENT_SMI | Self::BX_EVENT_NMI | Self::BX_EVENT_VMX_VIRTUAL_NMI,
+        );
 
         // Read 128 dwords from SMRAM at smbase + 0x10000 (counting down)
         let mut saved_state = [0u32; SMRAM_STATE_SIZE];
@@ -282,8 +292,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn enter_system_management_mode(&mut self) {
         tracing::trace!("enter_system_management_mode: smbase={:#010x}", self.smbase);
 
+        // Bochs smm.cc enter_system_management_mode: SMI delivery leaves VMX
+        // operation — CR4.VMXE is cleared and the root/non-root indication is
+        // parked in in_smm_vmx / in_smm_vmx_guest until RSM restores it.
+        self.cr4.remove(super::crregs::BxCr4::VMXE);
+        self.in_smm_vmx = self.in_vmx;
+        self.in_smm_vmx_guest = self.in_vmx_guest;
+        self.in_vmx = false;
+        self.in_vmx_guest = false;
+
         // Set SMM active
         self.in_smm = true;
+
+        // Bochs smm.cc enter_system_management_mode: SMI, NMI, and VMX
+        // virtual-NMI are held pending for the duration of SMM; RSM
+        // unmasks them again.
+        self.mask_event(
+            Self::BX_EVENT_SMI | Self::BX_EVENT_NMI | Self::BX_EVENT_VMX_VIRTUAL_NMI,
+        );
 
         // Save CPU state to SMRAM
         let mut saved_state = [0u32; SMRAM_STATE_SIZE];
@@ -551,15 +577,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.dr7.set32(smram_get!(SMRAM_FIELD_DR7));
 
         // Restore CR0, CR4, EFER, CR3
-        let saved_cr0 = smram_get!(SMRAM_FIELD_CR0);
+        let mut saved_cr0 = smram_get!(SMRAM_FIELD_CR0);
         let saved_cr4_hi = smram_get!(SMRAM_FIELD_CR4_HI32);
         let saved_cr4 = smram_get!(SMRAM_FIELD_CR4);
         let saved_efer = smram_get!(SMRAM_FIELD_EFER);
         let saved_cr3 = smram_get!(SMRAM_FIELD_CR3);
 
+        let mut saved_cr4_full = ((saved_cr4_hi as u64) << 32) | saved_cr4 as u64;
+        // Bochs smm.cc resume_from_system_management_mode: when the processor
+        // returns to VMX operation, the restored state gets CR0.PE/NE/PG and
+        // CR4.VMXE forced on, and in_vmx / in_vmx_guest come back from the
+        // parked in_smm_vmx / in_smm_vmx_guest flags.
+        if self.in_smm_vmx {
+            self.in_vmx = true;
+            self.in_vmx_guest = self.in_smm_vmx_guest;
+            tracing::info!(
+                "SMM Restore: enable VMX {} mode",
+                if self.in_vmx_guest { "guest" } else { "host" }
+            );
+            saved_cr0 |= (super::crregs::BxCr0::PG
+                | super::crregs::BxCr0::NE
+                | super::crregs::BxCr0::PE)
+                .bits();
+            saved_cr4_full |= super::crregs::BxCr4::VMXE.bits();
+        }
+
         self.cr0.set32(saved_cr0);
-        self.cr4
-            .set_val(((saved_cr4_hi as u64) << 32) | saved_cr4 as u64);
+        self.cr4.set_val(saved_cr4_full);
         self.efer.set32(saved_efer);
         self.cr3 = saved_cr3 as u64;
 

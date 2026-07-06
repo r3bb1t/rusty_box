@@ -1,5 +1,13 @@
 use super::{
-    cpu::CpuActivityState, cpuid::BxCpuIdTrait, decoder::BxSegregs, eflags::EFlags, BxCpuC,
+    cpu::CpuActivityState,
+    cpuid::BxCpuIdTrait,
+    decoder::BxSegregs,
+    eflags::EFlags,
+    svm::{
+        SvmVmexit, BX_VM_CR_MSR_INIT_REDIRECT_MASK, SVM_INTERCEPT0_INIT, SVM_INTERCEPT0_SMI,
+    },
+    vmx::VmxVmexitReason,
+    BxCpuC,
 };
 
 impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
@@ -39,17 +47,64 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Priority 3: External Hardware Interventions (Bochs event.cc)
         //   FLUSH, STOPCLK, SMI, INIT
 
-        // SMI (Bochs event.cc): clear event and enter System Management Mode.
-        if self.is_unmasked_event_pending(Self::BX_EVENT_SMI) {
+        // SMI (Bochs event.cc): gated on SVM GIF; an SVM guest with the SMI
+        // intercept set exits instead (Svm_Vmexit longjmps, so the SMI stays
+        // pending and GIF=0 after the exit holds it until STGI).
+        if self.is_unmasked_event_pending(Self::BX_EVENT_SMI) && self.svm_gif {
+            if self.in_svm_guest && self.svm_intercept_check(SVM_INTERCEPT0_SMI) {
+                match self.svm_vmexit(SvmVmexit::Smi as i32, 0, 0) {
+                    Err(super::error::CpuError::CpuLoopRestart) => {
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Err(e) => tracing::warn!("SVM SMI vmexit failed: {:?}", e),
+                    Ok(()) => {}
+                }
+            }
             self.clear_event(Self::BX_EVENT_SMI);
             self.enter_system_management_mode();
         }
 
         // INIT (Bochs event.cc): reset CPU via reset(BX_RESET_SOFTWARE).
         // Used by multiprocessor startup (INIT-SIPI-SIPI sequence).
-        // Bochs: clear_event(BX_EVENT_INIT); reset(BX_RESET_SOFTWARE);
-        if self.is_unmasked_event_pending(Self::BX_EVENT_INIT) {
+        // Gated on SVM GIF like SMI.
+        if self.is_unmasked_event_pending(Self::BX_EVENT_INIT) && self.svm_gif {
+            // Bochs event.cc: SVM INIT intercept exits with INIT still pending.
+            if self.in_svm_guest && self.svm_intercept_check(SVM_INTERCEPT0_INIT) {
+                match self.svm_vmexit(SvmVmexit::Init as i32, 0, 0) {
+                    Err(super::error::CpuError::CpuLoopRestart) => {
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Err(e) => tracing::warn!("SVM INIT vmexit failed: {:?}", e),
+                    Ok(()) => {}
+                }
+            }
+            // Bochs event.cc: VM_CR.R_INIT redirects INIT to #SX; the only
+            // error code is 1 and indicates redirection of INIT.
+            if self.msr.svm_vm_cr & BX_VM_CR_MSR_INIT_REDIRECT_MASK != 0 {
+                self.clear_event(Self::BX_EVENT_INIT);
+                tracing::info!("SVM INIT Redirect to #SX");
+                match self.exception(super::cpu::Exception::Sx, 1) {
+                    Ok(()) | Err(super::error::CpuError::CpuLoopRestart) => {}
+                    Err(e) => tracing::warn!("#SX INIT redirect failed: {:?}", e),
+                }
+                return false;
+            }
             self.clear_event(Self::BX_EVENT_INIT);
+            // Bochs event.cc: INIT in VMX non-root operation causes
+            // VMexit(VMX_VMEXIT_INIT) — the exit unwinds (Bochs longjmp),
+            // so the CPU reset below is skipped.
+            if self.in_vmx_guest {
+                match self.vmexit_unconditional(VmxVmexitReason::Init, 0) {
+                    Ok(true) | Err(super::error::CpuError::CpuLoopRestart) => {
+                        self.prev_rip = self.rip();
+                        return false;
+                    }
+                    Err(e) => tracing::warn!("VMX INIT vmexit failed: {:?}", e),
+                    Ok(false) => {}
+                }
+            }
             if self.bx_cpuid == 0 {
                 tracing::warn!("CPU 0 INIT event delivered; software-resetting BSP");
             } else {
@@ -446,14 +501,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
     }
 
-    pub(crate) fn deliver_init_immediately(&mut self) {
-        self.deliver_init();
-        if self.is_unmasked_event_pending(Self::BX_EVENT_INIT) {
-            self.clear_event(Self::BX_EVENT_INIT);
-            self.reset(super::ResetReason::Software);
-        }
-    }
-
     /// Bochs `deliver_SIPI`: start a CPU waiting for SIPI at `vector * 0x100`.
     pub(crate) fn deliver_sipi(&mut self, vector: u8) {
         if !matches!(self.activity_state, CpuActivityState::WaitForSipi) {
@@ -465,6 +512,22 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
 
         self.unmask_event(Self::BX_EVENT_INIT | Self::BX_EVENT_SMI | Self::BX_EVENT_NMI);
+        // Bochs event.cc deliver_SIPI: SIPI arriving while in VMX non-root
+        // operation (guest activity state wait-for-SIPI) causes
+        // VMexit(VMX_VMEXIT_SIPI, vector) — the exit unwinds (Bochs longjmp),
+        // so the real-mode activation below is skipped;
+        // vmexit_load_host_state already sets ACTIVE and clears inhibits.
+        // This may fire from emulator context (apply_lapic_cpu_event) where
+        // memory is unwired: vmx_vmexit mutates only CPU-local state so that
+        // is safe, but VMEXIT MSR store/load lists are not walked there.
+        if self.in_vmx_guest {
+            self.async_event &= !Self::BX_ASYNC_EVENT_SLEEP;
+            match self.vmexit_unconditional(VmxVmexitReason::Sipi, vector as u64) {
+                Ok(_) | Err(super::error::CpuError::CpuLoopRestart) => {}
+                Err(e) => tracing::warn!("VMX SIPI vmexit failed: {:?}", e),
+            }
+            return;
+        }
         self.activity_state = CpuActivityState::Active;
         self.async_event &= !Self::BX_ASYNC_EVENT_SLEEP;
         self.inhibit_mask = 0;
@@ -663,9 +726,245 @@ mod tests {
             ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT,
             0
         );
-        let _ = ap.handle_async_event(None, None);
+        let exited = ap.handle_async_event(None, None);
 
+        assert!(exited, "AP entering WAIT_FOR_SIPI must exit the cpu loop");
         assert_eq!(ap.rax(), 0);
         assert_eq!(ap.activity_state, CpuActivityState::WaitForSipi);
+    }
+
+    #[test]
+    fn svm_gif_false_holds_smi_and_init_pending() {
+        let mut ap = make_cpu(1);
+        ap.reset(ResetReason::Hardware);
+        ap.deliver_sipi(TEST_SIPI_VECTOR);
+        ap.set_rax(NONZERO_RAX_SENTINEL);
+
+        // Bochs event.cc handleAsyncEvent: SMI and INIT checks are gated on
+        // SVM_GIF; with GIF clear both stay pending and nothing happens.
+        ap.svm_gif = false;
+        ap.deliver_smi();
+        ap.deliver_init();
+        let exited = ap.handle_async_event(None, None);
+
+        assert!(!exited);
+        assert!(ap.is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI));
+        assert!(ap.is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT));
+        assert!(!ap.in_smm, "SMI must not enter SMM while GIF=0");
+        assert_eq!(ap.activity_state, CpuActivityState::Active);
+        assert_eq!(ap.rax(), NONZERO_RAX_SENTINEL, "INIT must not reset while GIF=0");
+
+        // STGI: with GIF set again, the held INIT is processed. Drop the SMI
+        // first so this test does not depend on SMM entry machinery.
+        ap.clear_event(BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI);
+        ap.svm_gif = true;
+        let exited = ap.handle_async_event(None, None);
+
+        assert!(exited, "AP entering WAIT_FOR_SIPI must exit the cpu loop");
+        assert_eq!(ap.rax(), 0);
+        assert_eq!(ap.activity_state, CpuActivityState::WaitForSipi);
+    }
+
+    #[test]
+    fn svm_smi_intercept_takes_vmexit_and_keeps_smi_pending() {
+        let mut ap = make_cpu(1);
+        ap.reset(ResetReason::Hardware);
+        ap.deliver_sipi(TEST_SIPI_VECTOR);
+
+        ap.in_svm_guest = true;
+        let mut vmcb = crate::cpu::svm::VmcbCache::default();
+        vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_SMI;
+        ap.vmcb = Some(vmcb);
+
+        ap.deliver_smi();
+        let exited = ap.handle_async_event(None, None);
+
+        // Bochs event.cc: Svm_Vmexit(SVM_VMEXIT_SMI) fires instead of SMM
+        // entry, and the SMI stays pending (held by GIF=0 after the exit).
+        assert!(!exited);
+        assert!(!ap.in_svm_guest, "SMI intercept must exit SVM guest mode");
+        assert!(!ap.svm_gif, "GIF must be clear after SVM VMEXIT");
+        assert!(
+            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI != 0,
+            "intercepted SMI must stay pending"
+        );
+        assert!(!ap.in_smm, "SMI intercept must preempt SMM entry");
+    }
+
+    #[test]
+    fn svm_init_intercept_takes_vmexit_and_keeps_init_pending() {
+        let mut ap = make_cpu(1);
+        ap.reset(ResetReason::Hardware);
+        ap.deliver_sipi(TEST_SIPI_VECTOR);
+
+        ap.in_svm_guest = true;
+        let mut vmcb = crate::cpu::svm::VmcbCache::default();
+        vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_INIT;
+        ap.vmcb = Some(vmcb);
+
+        ap.deliver_init();
+        let exited = ap.handle_async_event(None, None);
+
+        // Bochs event.cc: Svm_Vmexit(SVM_VMEXIT_INIT) fires with INIT still
+        // pending; the CPU reset is skipped.
+        assert!(!exited);
+        assert!(!ap.in_svm_guest, "INIT intercept must exit SVM guest mode");
+        assert!(!ap.svm_gif, "GIF must be clear after SVM VMEXIT");
+        assert!(
+            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT != 0,
+            "intercepted INIT must stay pending"
+        );
+        // An INIT reset would park the AP in WAIT_FOR_SIPI; the intercept
+        // must preempt it. (RAX is not usable as a reset probe here: SVM
+        // VMEXIT legitimately restores host RAX from the VMCB host state.)
+        assert_eq!(
+            ap.activity_state,
+            CpuActivityState::Active,
+            "INIT intercept must preempt the CPU reset"
+        );
+    }
+
+    #[test]
+    fn smm_entry_masks_smi_and_nmi_until_rsm() {
+        let mut ap = make_cpu(1);
+        ap.reset(ResetReason::Hardware);
+        ap.deliver_sipi(TEST_SIPI_VECTOR);
+
+        let held = BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI
+            | BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI
+            | BxCpuC::<Corei7SkylakeX>::BX_EVENT_VMX_VIRTUAL_NMI;
+
+        // SMI delivery enters SMM at the next instruction boundary.
+        ap.deliver_smi();
+        let exited = ap.handle_async_event(None, None);
+        assert!(!exited);
+        assert!(ap.in_smm, "SMI must enter System Management Mode");
+        // Bochs smm.cc enter_system_management_mode masks SMI/NMI/virtual-NMI.
+        assert_eq!(
+            ap.event_mask & held,
+            held,
+            "SMM entry must mask SMI, NMI, and VMX virtual-NMI"
+        );
+
+        // An NMI arriving during SMM stays pending and is not dispatched.
+        ap.deliver_nmi();
+        let rip_in_smm = ap.rip();
+        let exited = ap.handle_async_event(None, None);
+        assert!(!exited);
+        assert_ne!(
+            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI,
+            0,
+            "NMI during SMM must stay pending until RSM"
+        );
+        assert_eq!(
+            ap.rip(),
+            rip_in_smm,
+            "a masked NMI must not be dispatched inside SMM"
+        );
+
+        // RSM releases the held events (Bochs smm.cc RSM).
+        ap.rsm(&crate::cpu::decoder::Instruction::default())
+            .expect("RSM must succeed outside VMX/SVM guest mode");
+        assert!(!ap.in_smm);
+        assert_eq!(
+            ap.event_mask & held,
+            0,
+            "RSM must unmask SMI, NMI, and VMX virtual-NMI"
+        );
+        assert_ne!(
+            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI,
+            0,
+            "the held NMI is still pending after RSM for the next boundary"
+        );
+    }
+
+    #[test]
+    fn smi_parks_vmx_mode_and_rsm_restores_it() {
+        use crate::cpu::crregs::{BxCr0, BxCr4};
+
+        let mut ap = make_cpu(1);
+        ap.reset(ResetReason::Hardware);
+        ap.deliver_sipi(TEST_SIPI_VECTOR);
+
+        // Simulate a CPU in VMX non-root operation when the SMI hits.
+        ap.cr4.insert(BxCr4::VMXE);
+        ap.in_vmx = true;
+        ap.in_vmx_guest = true;
+
+        ap.deliver_smi();
+        let exited = ap.handle_async_event(None, None);
+        assert!(!exited);
+        assert!(ap.in_smm, "SMI must enter System Management Mode");
+
+        // Bochs smm.cc enter_system_management_mode: VMX operation is left
+        // and parked for the duration of SMM.
+        assert!(!ap.in_vmx, "SMM entry must leave VMX operation");
+        assert!(!ap.in_vmx_guest, "SMM entry must leave VMX non-root mode");
+        assert!(ap.in_smm_vmx, "SMM entry must park the in_vmx flag");
+        assert!(
+            ap.in_smm_vmx_guest,
+            "SMM entry must park the in_vmx_guest flag"
+        );
+        assert!(
+            !ap.cr4.contains(BxCr4::VMXE),
+            "SMM entry must clear CR4.VMXE"
+        );
+
+        // RSM restores VMX operation and forces CR0.PE/NE/PG + CR4.VMXE
+        // in the restored state (Bochs smm.cc
+        // resume_from_system_management_mode).
+        ap.rsm(&crate::cpu::decoder::Instruction::default())
+            .expect("RSM must succeed outside VMX/SVM guest mode");
+        assert!(!ap.in_smm);
+        assert!(ap.in_vmx, "RSM must restore VMX root operation");
+        assert!(ap.in_vmx_guest, "RSM must restore VMX non-root mode");
+        assert!(
+            ap.cr4.contains(BxCr4::VMXE),
+            "RSM into VMX operation must force CR4.VMXE"
+        );
+        let forced_cr0 = (BxCr0::PG | BxCr0::NE | BxCr0::PE).bits();
+        assert_eq!(
+            ap.cr0.get32() & forced_cr0,
+            forced_cr0,
+            "RSM into VMX operation must force CR0.PE, CR0.NE, and CR0.PG"
+        );
+    }
+
+    #[test]
+    fn vmx_sipi_takes_vmexit_instead_of_starting_ap() {
+        let mut ap = make_cpu(1);
+        ap.reset(ResetReason::Hardware);
+        assert_eq!(ap.activity_state, CpuActivityState::WaitForSipi);
+
+        // VMENTRY with guest activity state 3 leaves the CPU in
+        // WAIT_FOR_SIPI while in VMX non-root operation.
+        ap.in_vmx = true;
+        ap.in_vmx_guest = true;
+
+        ap.deliver_sipi(TEST_SIPI_VECTOR);
+
+        // Bochs event.cc deliver_SIPI: VMexit(VMX_VMEXIT_SIPI, vector) fires
+        // instead of the real-mode activation.
+        assert!(!ap.in_vmx_guest, "SIPI must exit VMX non-root operation");
+        assert_eq!(ap.vmcs.exit_reason, VmxVmexitReason::Sipi as u32);
+        assert_eq!(ap.vmcs.exit_qualification, TEST_SIPI_VECTOR as u64);
+        assert_ne!(
+            ap.get_cs_selector(),
+            TEST_SIPI_CS_SELECTOR,
+            "SIPI VMexit must not load the startup CS"
+        );
+        assert_eq!(
+            ap.event_mask
+                & (BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI
+                    | BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI),
+            0,
+            "SIPI unmasks SMI/NMI before the VMexit (Bochs deliver_SIPI)"
+        );
+        assert_ne!(
+            ap.event_mask & BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT,
+            0,
+            "the VMexit itself re-masks INIT (Bochs vmx.cc: INIT is \
+             disabled in VMX root mode)"
+        );
     }
 }

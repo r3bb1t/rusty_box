@@ -422,7 +422,10 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     fn cpu_runnable_for_batch(&self, index: usize) -> bool {
         let cpu = self.cpu_ref(index);
         match cpu.activity_state {
-            CpuActivityState::WaitForSipi | CpuActivityState::Shutdown => false,
+            // Bochs event.cc handleWaitForEvent: only WAIT_FOR_SIPI returns to
+            // the caller without wake checks. SHUTDOWN shares the HLT wake set
+            // below (unmasked NMI/SMI/INIT, or INTR/LAPIC-INTR with IF).
+            CpuActivityState::WaitForSipi => false,
             CpuActivityState::Active => true,
             CpuActivityState::MwaitIf => {
                 cpu.is_unmasked_event_pending(u32::MAX)
@@ -439,26 +442,32 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         }
     }
 
-    fn cpu_participates_in_smp_time(&self, index: usize) -> bool {
-        !matches!(
-            self.cpu_ref(index).activity_state,
-            CpuActivityState::WaitForSipi | CpuActivityState::Shutdown
-        )
-    }
-
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
     fn can_fast_forward_bsp_hlt(&self) -> bool {
-        // CPUs that have not received SIPI, shut down, or are halted with no
-        // runnable event do not require round-robin slices. Keep CPU0's
+        // CPUs that have not received SIPI, or are shut down / halted with no
+        // runnable event, do not require round-robin slices. Keep CPU0's
         // single-CPU HLT/MWAIT pacing path available in those states; otherwise
         // idle APs make the emulator bounce through trace-sized batches.
+        // SHUTDOWN is runnability-gated like HLT (Bochs event.cc
+        // handleWaitForEvent wakes it on unmasked NMI/SMI/INIT), so a shutdown
+        // AP holding a pending wake event must not be fast-forwarded past.
+        //
+        // Bochs itself never fast-forwards in SMP mode — it grinds empty
+        // rounds crediting each idle CPU one quantum. Jumping straight to the
+        // next pc_system deadline is observationally identical (timers fire
+        // at their exact deadlines inside tickn either way, and a fully idle
+        // machine has no other event source), so this host-side optimization
+        // does not diverge from Bochs guest-visible behavior.
         (1..self.cpu_count()).all(|cpu_index| {
             matches!(
                 self.cpu_ref(cpu_index).activity_state,
-                CpuActivityState::WaitForSipi | CpuActivityState::Shutdown
+                CpuActivityState::WaitForSipi
             ) || (matches!(
                 self.cpu_ref(cpu_index).activity_state,
-                CpuActivityState::Hlt | CpuActivityState::Mwait | CpuActivityState::MwaitIf
+                CpuActivityState::Shutdown
+                    | CpuActivityState::Hlt
+                    | CpuActivityState::Mwait
+                    | CpuActivityState::MwaitIf
             ) && !self.cpu_runnable_for_batch(cpu_index))
         })
     }
@@ -516,26 +525,20 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 break;
             }
 
-            // Only runnable CPUs need one-trace round-robin slices, but every
-            // CPU that has left WAIT_FOR_SIPI participates in Bochs SMP time.
-            // A halted peer with no runnable event contributes the SMP quantum
-            // below so active peers do not advance guest time as a single CPU.
-            let time_cpu_count = if has_ap_cpus {
-                (0..cpu_count)
-                    .filter(|&cpu_index| self.cpu_participates_in_smp_time(cpu_index))
-                    .count()
-            } else {
-                1
-            };
-            let smp = time_cpu_count > 1;
-            let pc_tick_denominator = time_cpu_count.max(1) as u64;
+            // Bochs main.cc bx_begin_simulation: SMP scheduling engages
+            // whenever BX_SMP_PROCESSORS > 1, regardless of activity states.
+            // Every CPU is visited each round, the tick denominator is always
+            // the full CPU count, and a CPU that executes nothing (WAIT_FOR_
+            // SIPI, shutdown, idle HLT) is credited one quantum
+            // ("if (n == 0) n = quantum").
+            let smp = has_ap_cpus;
+            let pc_tick_denominator = if smp { cpu_count as u64 } else { 1 };
 
             let remaining = batch_size.saturating_sub(total_elapsed_ticks);
             let per_cpu_batch = if smp {
                 // Bochs SMP main.cc runs exactly one trace per CPU, and
-                // icache.cc caps each SMP trace by the configured quantum.
-                // The default Bochs quantum is 16; using 1 here was much
-                // stricter than Bochs and collapsed host throughput.
+                // icache.cc caps each SMP trace by the configured quantum
+                // (default 16).
                 BOCHS_SMP_QUANTUM_TICKS.min(remaining.max(1))
             } else {
                 (remaining / runnable_count as u64).max(1)
@@ -544,19 +547,17 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             let mut round_ticks = 0u64;
             for cpu_index in 0..cpu_count {
                 if !self.cpu_runnable_for_batch(cpu_index) {
-                    if smp && self.cpu_participates_in_smp_time(cpu_index) {
-                        // Bochs main.cc:1138-1145 substitutes the SMP quantum
-                        // when a participating CPU produces no instructions,
-                        // then advances time by the participating-CPU round
-                        // average. APs still in WAIT_FOR_SIPI are not executing
-                        // yet and must not speed the guest-visible clock.
+                    if smp {
+                        // Bochs main.cc: a CPU that produced no instructions
+                        // (cpu_run_trace returned immediately) is credited the
+                        // SMP quantum before the round average.
                         round_ticks = round_ticks.saturating_add(BOCHS_SMP_QUANTUM_TICKS);
                     }
                     continue;
                 }
-                let pc_tick_offset = if smp && time_cpu_count != 0 {
+                let pc_tick_offset = if smp {
                     total_elapsed_ticks.saturating_add(
-                        self.smp_tick_remainder.saturating_add(round_ticks) / time_cpu_count as u64,
+                        self.smp_tick_remainder.saturating_add(round_ticks) / cpu_count as u64,
                     )
                 } else {
                     0
@@ -566,17 +567,35 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 }
                 let mem_extended: &'a mut BxMemC<'a> =
                     core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut *mem_ptr);
-                match self.cpu_mut_at(cpu_index).cpu_loop_n_with_io(
-                    mem_extended,
-                    &[],
-                    per_cpu_batch,
-                    pc_tick_denominator,
-                    pc_tick_offset,
-                    io_ptr,
-                    ps_ptr,
-                    Some(&mut *pic_ref),
-                    Some(&mut *dma_ref),
-                ) {
+                // Bochs main.cc bx_begin_simulation: in SMP mode each CPU
+                // runs exactly one trace per turn (cpu_run_trace); a single
+                // CPU runs the whole batch (cpu_loop).
+                let slice_result = if smp {
+                    self.cpu_mut_at(cpu_index).cpu_run_trace_with_io(
+                        mem_extended,
+                        &[],
+                        per_cpu_batch,
+                        pc_tick_denominator,
+                        pc_tick_offset,
+                        io_ptr,
+                        ps_ptr,
+                        Some(&mut *pic_ref),
+                        Some(&mut *dma_ref),
+                    )
+                } else {
+                    self.cpu_mut_at(cpu_index).cpu_loop_n_with_io(
+                        mem_extended,
+                        &[],
+                        per_cpu_batch,
+                        pc_tick_denominator,
+                        pc_tick_offset,
+                        io_ptr,
+                        ps_ptr,
+                        Some(&mut *pic_ref),
+                        Some(&mut *dma_ref),
+                    )
+                };
+                match slice_result {
                     Ok(executed) => {
                         let elapsed = if smp {
                             let delta = self.cpu_ref(cpu_index).icount_delta_since_sync();
@@ -606,15 +625,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 break;
             }
 
+            // Bochs main.cc: BX_TICKN(executed / BX_SMP_PROCESSORS) at the
+            // round-robin wrap, with the sub-CPU remainder carried in
+            // `executed` ("executed %= BX_SMP_PROCESSORS").
             let elapsed_ticks = if smp {
-                if time_cpu_count == 0 {
-                    0
-                } else {
-                    let total_ticks = self.smp_tick_remainder.saturating_add(round_ticks);
-                    let elapsed = total_ticks / time_cpu_count as u64;
-                    self.smp_tick_remainder = total_ticks % time_cpu_count as u64;
-                    elapsed
-                }
+                let total_ticks = self.smp_tick_remainder.saturating_add(round_ticks);
+                let elapsed = total_ticks / cpu_count as u64;
+                self.smp_tick_remainder = total_ticks % cpu_count as u64;
+                elapsed
             } else {
                 round_ticks
             };
@@ -2216,7 +2234,10 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         match event {
             LocalApicCpuEvent::Smi => cpu.deliver_smi(),
             LocalApicCpuEvent::Nmi => cpu.deliver_nmi(),
-            LocalApicCpuEvent::Init => cpu.deliver_init_immediately(),
+            // Bochs apic.cc deliver: INIT only signals the (mask-checked)
+            // event; the target resets at its next instruction boundary in
+            // handle_async_event, after SMI and with the VMX/SVM gates.
+            LocalApicCpuEvent::Init => cpu.deliver_init(),
             LocalApicCpuEvent::Sipi(vector) => cpu.deliver_sipi(vector),
         }
     }
@@ -4376,15 +4397,15 @@ mod tests {
         subleaf | (level_type << CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT)
     }
 
-    fn send_bsp_icr_init_sipi(emu: &mut Emulator<'_, Corei7SkylakeX, ()>, vector: u8) {
-        const ICR_LOW: u64 = 0x300;
-        const ICR_HIGH: u64 = 0x310;
-        const TARGET_APIC_ID: u32 = 1;
-        const ICR_LEVEL_ASSERT: u32 = 1 << 14;
-        const ICR_TRIGGER_LEVEL: u32 = 1 << 15;
+    const ICR_LOW: u64 = 0x300;
+    const ICR_HIGH: u64 = 0x310;
+    const ICR_TARGET_AP: u32 = 1;
+    const ICR_LEVEL_ASSERT: u32 = 1 << 14;
+    const ICR_TRIGGER_LEVEL: u32 = 1 << 15;
 
+    fn send_bsp_icr_init(emu: &mut Emulator<'_, Corei7SkylakeX, ()>) {
         let bsp = emu.cpu_mut_at(BSP_INDEX);
-        bsp.lapic.write_aligned(ICR_HIGH, TARGET_APIC_ID << 24);
+        bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24);
         bsp.lapic.write_aligned(
             ICR_LOW,
             ((crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8)
@@ -4395,7 +4416,11 @@ mod tests {
             ICR_LOW,
             (crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8 | ICR_TRIGGER_LEVEL,
         );
-        bsp.lapic.write_aligned(ICR_HIGH, TARGET_APIC_ID << 24);
+    }
+
+    fn send_bsp_icr_sipi(emu: &mut Emulator<'_, Corei7SkylakeX, ()>, vector: u8) {
+        let bsp = emu.cpu_mut_at(BSP_INDEX);
+        bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24);
         bsp.lapic.write_aligned(
             ICR_LOW,
             vector as u32
@@ -5208,7 +5233,21 @@ mod tests {
                     CpuActivityState::Active
                 );
 
-                send_bsp_icr_init_sipi(&mut emu, SECOND_TRAMPOLINE_VECTOR);
+                // Bochs deliver_INIT only signals the event; the AP resets at
+                // its next instruction boundary. A SIPI sent in the same drain
+                // would be dropped ("was not halted at the time"), exactly as
+                // in Bochs — so the INIT must be processed before the SIPI is
+                // sent, mirroring the MP-spec INIT/SIPI delay.
+                send_bsp_icr_init(&mut emu);
+                let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
+                assert!(executed > 0);
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).activity_state,
+                    CpuActivityState::WaitForSipi,
+                    "INIT must software-reset the AP at its next boundary"
+                );
+
+                send_bsp_icr_sipi(&mut emu, SECOND_TRAMPOLINE_VECTOR);
                 let before = emu.cpu_ref(AP_INDEX).icount;
 
                 let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
@@ -5231,11 +5270,11 @@ mod tests {
     }
 
     #[test]
-    fn bsp_init_sipi_discards_stale_ipis_queued_by_reset_ap() {
+    fn init_does_not_recall_ipis_already_sent_by_active_ap() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
-                const STALE_VECTOR: u32 = 0x44;
+                const IN_FLIGHT_VECTOR: u32 = 0x44;
 
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -5252,21 +5291,125 @@ mod tests {
                 {
                     let ap = emu.cpu_mut_at(AP_INDEX);
                     ap.lapic.write_aligned(0x310, (BSP_INDEX as u32) << 24);
-                    ap.lapic.write_aligned(0x300, STALE_VECTOR);
+                    ap.lapic.write_aligned(0x300, IN_FLIGHT_VECTOR);
                 }
                 assert!(!emu.cpu_ref(BSP_INDEX).lapic.intr);
 
-                send_bsp_icr_init_sipi(&mut emu, AP_TRAMPOLINE_VECTOR);
+                send_bsp_icr_init(&mut emu);
                 emu.drain_lapic_bus();
 
+                // Bochs apic.cc send_ipi delivers the AP's ICR write to the
+                // bus before the INIT is even processed — an INIT does not
+                // recall an IPI that is already in flight.
                 assert!(
-                    !emu.cpu_ref(BSP_INDEX).lapic.intr,
-                    "stale AP IPI survived the INIT reset and interrupted the BSP"
+                    emu.cpu_ref(BSP_INDEX).lapic.intr,
+                    "the AP's in-flight IPI must reach the BSP despite the INIT"
                 );
+                // The INIT itself is only signaled; the AP resets at its next
+                // instruction boundary (Bochs event.cc handleAsyncEvent).
                 assert_eq!(
                     emu.cpu_ref(AP_INDEX).activity_state,
                     CpuActivityState::Active
                 );
+                assert!(emu
+                    .cpu_ref(AP_INDEX)
+                    .is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT));
+
+                let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
+                assert!(executed > 0);
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).activity_state,
+                    CpuActivityState::WaitForSipi
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn init_ipi_to_active_ap_stays_pending_until_instruction_boundary() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+
+                send_bsp_icr_init(&mut emu);
+                emu.drain_lapic_bus();
+
+                // Bochs deliver_INIT: signal only — no reset from the bus.
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).activity_state,
+                    CpuActivityState::Active,
+                    "INIT must not reset the AP before its next boundary"
+                );
+                assert!(emu
+                    .cpu_ref(AP_INDEX)
+                    .is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT));
+
+                let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
+                assert!(executed > 0);
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).activity_state,
+                    CpuActivityState::WaitForSipi
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn smi_then_init_ipis_are_both_signaled_not_collapsed() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+
+                {
+                    let bsp = emu.cpu_mut_at(BSP_INDEX);
+                    bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24);
+                    bsp.lapic.write_aligned(
+                        ICR_LOW,
+                        (crate::cpu::apic::ApicDeliveryMode::Smi as u32) << 8,
+                    );
+                }
+                send_bsp_icr_init(&mut emu);
+                emu.drain_lapic_bus();
+
+                // Bochs signals both events; SMI is processed before INIT at
+                // the AP's next boundary. An eager INIT reset would clear
+                // pending_event and destroy the SMI.
+                let ap = emu.cpu_ref(AP_INDEX);
+                assert!(
+                    ap.is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI),
+                    "SMI queued before INIT must survive the drain"
+                );
+                assert!(
+                    ap.is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT),
+                    "INIT must be pending alongside the SMI"
+                );
+                assert_eq!(ap.activity_state, CpuActivityState::Active);
             })
             .unwrap()
             .join()
@@ -5500,6 +5643,107 @@ mod tests {
                         "halted AP {cpu_index} was not made runnable by fixed IPI"
                     );
                 }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn nmi_ipi_wakes_shutdown_application_processor() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const ICR_DELIVERY_NMI: u32 = 4 << 8;
+                const NMI_HANDLER_SEG: u16 = 0x0500;
+                const NMI_HANDLER_ADDR: u64 = (NMI_HANDLER_SEG as u64) << 4;
+
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+
+                // Real-mode IVT entry 2 (NMI) -> NMI_HANDLER_SEG:0000, handler = HLT.
+                let ivt_entry: [u8; 4] = [
+                    0x00,
+                    0x00,
+                    (NMI_HANDLER_SEG & 0xFF) as u8,
+                    (NMI_HANDLER_SEG >> 8) as u8,
+                ];
+                emu.memory.load_RAM(&ivt_entry, 8).unwrap();
+                emu.memory.load_RAM(&[0xF4], NMI_HANDLER_ADDR).unwrap();
+
+                for cpu_index in 0..emu.cpu_count() {
+                    emu.cpu_mut_at(cpu_index).lapic.write_aligned(0xF0, 0x1FF);
+                }
+
+                // SIPI-start the AP (unmasks NMI per Bochs deliver_SIPI), then
+                // put it into the triple-fault SHUTDOWN state.
+                {
+                    let ap = emu.cpu_mut_at(AP_INDEX);
+                    ap.deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                    ap.activity_state = CpuActivityState::Shutdown;
+                    ap.pending_event = 0;
+                    ap.async_event = 0;
+                }
+                emu.cpu.activity_state = CpuActivityState::Hlt;
+                emu.cpu.pending_event = 0;
+                emu.cpu.async_event = 0;
+
+                assert!(
+                    !emu.cpu_runnable_for_batch(AP_INDEX),
+                    "shutdown AP with no pending event must stay unscheduled"
+                );
+                assert!(
+                    emu.can_fast_forward_bsp_hlt(),
+                    "idle shutdown AP must not disable the BSP HLT pacing path"
+                );
+
+                // BSP sends a physical-destination NMI IPI to the AP.
+                emu.cpu_mut_at(BSP_INDEX)
+                    .lapic
+                    .write_aligned(0x310, (AP_INDEX as u32) << 24);
+                emu.cpu_mut_at(BSP_INDEX)
+                    .lapic
+                    .write_aligned(0x300, ICR_DELIVERY_NMI);
+                emu.drain_lapic_bus();
+
+                assert!(
+                    emu.cpu_ref(AP_INDEX)
+                        .is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI),
+                    "NMI IPI was not signaled on the shutdown AP"
+                );
+                assert!(
+                    emu.cpu_runnable_for_batch(AP_INDEX),
+                    "pending NMI must make a shutdown AP schedulable (Bochs \
+                     event.cc handleWaitForEvent wakes SHUTDOWN like HLT)"
+                );
+                assert!(
+                    !emu.can_fast_forward_bsp_hlt(),
+                    "pending NMI on a shutdown AP must disable BSP HLT fast-forward"
+                );
+
+                let baseline_icount = emu.cpu_ref(AP_INDEX).icount;
+                unsafe { emu.run_cpu_batch(256) }.unwrap();
+
+                let ap = emu.cpu_ref(AP_INDEX);
+                assert!(
+                    !matches!(ap.activity_state, CpuActivityState::Shutdown),
+                    "AP did not leave SHUTDOWN after NMI"
+                );
+                assert!(
+                    ap.icount > baseline_icount,
+                    "AP did not execute the NMI handler"
+                );
+                assert_eq!(
+                    ap.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
+                        .selector
+                        .value,
+                    NMI_HANDLER_SEG,
+                    "AP did not vector through IVT entry 2 to the NMI handler"
+                );
             })
             .unwrap()
             .join()
@@ -5749,7 +5993,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_for_sipi_application_processors_do_not_advance_bsp_time() {
+    fn wait_for_sipi_application_processors_credit_quantum_ticks() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
@@ -5766,13 +6010,23 @@ mod tests {
                     .unwrap();
                 emu.reg_write(X86Reg::Rip, 0x1000);
 
+                let cpu_count = emu.cpu_count() as u64;
                 let before = emu.cpu_ref(BSP_INDEX).icount;
+                // batch_size=1 finishes after the first round: the quantum
+                // credits alone guarantee elapsed >= 1.
                 let elapsed = unsafe { emu.run_cpu_batch(1) }.unwrap();
 
                 let retired = emu.cpu_ref(BSP_INDEX).icount - before;
+                // Bochs main.cc bx_begin_simulation: every CPU that executes
+                // nothing — including APs parked in WAIT_FOR_SIPI — is
+                // credited one SMP quantum ("if (n == 0) n = quantum"), and
+                // time advances by executed / BX_SMP_PROCESSORS.
+                let expected =
+                    (retired + BOCHS_SMP_QUANTUM_TICKS * (cpu_count - 1)) / cpu_count;
                 assert_eq!(
-                    elapsed, retired,
-                    "WAIT_FOR_SIPI APs must not add synthetic AP ticks to {retired} retired BSP ticks"
+                    elapsed, expected,
+                    "SMP round must advance (retired + quantum credits) / cpu_count \
+                     ticks for {retired} retired BSP instructions"
                 );
             })
             .unwrap()

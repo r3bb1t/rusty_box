@@ -116,6 +116,10 @@ const BX_ICACHE_INVALID_PHY_ADDRESS: BxPhyAddress = BxPhyAddress::MAX;
 const BX_ICACHE_ENTRIES: usize = 8192;
 pub(super) const BX_ICACHE_MEM_POOL: usize = 576 * 1024;
 const BX_MAX_TRACE_LENGTH: usize = 32;
+/// Bochs config.cc BXPN_SMP_QUANTUM default: instructions a CPU may execute
+/// before control returns to the SMP scheduler; icache.cc caps trace length
+/// by it when BX_SMP_PROCESSORS > 1.
+const BX_SMP_QUANTUM: usize = 16;
 
 #[derive(Debug, PartialEq, Clone, Default, Copy)]
 pub(crate) enum IcacheAddress {
@@ -661,7 +665,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             .cache
             .u
             .segment_d_b();
-        let quantum = BX_MAX_TRACE_LENGTH;
+        // Bochs icache.cc getICacheEntry: "Don't allow traces longer than
+        // cpu_loop can execute" — with multiple processors the trace is
+        // capped by the SMP quantum (BXPN_SMP_QUANTUM, default 16),
+        // otherwise by BX_MAX_TRACE_LENGTH.
+        let quantum = if self.cpu_topology.cpu_count() > 1 {
+            BX_SMP_QUANTUM
+        } else {
+            BX_MAX_TRACE_LENGTH
+        };
 
         // Matching Bochs: when mpool is nearly full, flush all icache entries and
         // reset mpindex to 0. Without this, once mpindex reaches BX_ICACHE_MEM_POOL,

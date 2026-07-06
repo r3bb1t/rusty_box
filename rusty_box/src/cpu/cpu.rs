@@ -835,17 +835,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Bochs cpu.h `BX_EVENT_NMI`. Masked on NMI delivery, unmasked
     /// on IRET.
-    pub(super) const BX_EVENT_NMI: u32 = 1 << 0;
+    pub(crate) const BX_EVENT_NMI: u32 = 1 << 0;
 
-    /// Bochs cpu.h `BX_EVENT_SMI`. SMI enters System Management Mode
-    /// — not implemented for single-CPU Alpine/DLX.
-    #[allow(dead_code)]
-    pub(super) const BX_EVENT_SMI: u32 = 1 << 1;
+    /// Bochs cpu.h `BX_EVENT_SMI`. SMI enters System Management Mode.
+    pub(crate) const BX_EVENT_SMI: u32 = 1 << 1;
 
     /// Bochs cpu.h `BX_EVENT_INIT`. INIT is used by multiprocessor
-    /// startup (INIT-SIPI-SIPI) — not implemented.
-    #[allow(dead_code)]
-    pub(super) const BX_EVENT_INIT: u32 = 1 << 2;
+    /// startup (INIT-SIPI-SIPI); it software-resets the CPU at the
+    /// next instruction boundary (event.cc handleAsyncEvent).
+    pub(crate) const BX_EVENT_INIT: u32 = 1 << 2;
 
     /// Bochs cpu.h `BX_EVENT_VMX_MONITOR_TRAP_FLAG`. Signalled at
     /// VMENTRY when MONITOR_TRAP_FLAG ctrl is set, or by injected MTF
@@ -1865,7 +1863,36 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     ) -> super::Result<u64> {
         self.set_io_bus_ptr(io);
         self.set_pc_system_ptr_with_tick_offset(pc_system, pc_tick_denominator, pc_tick_offset);
-        let result = self.cpu_loop_n(mem, cpus, max_instructions, pic, dma);
+        let result = self.cpu_loop_n_impl(mem, cpus, max_instructions, pic, dma, false);
+        self.clear_io_bus();
+        self.clear_pc_system();
+        result
+    }
+
+    /// Execute exactly one icache trace with an attached I/O bus, then return.
+    ///
+    /// Bochs cpu.cc `cpu_run_trace`: handle pending async events, execute one
+    /// trace, and return so the SMP scheduler can switch to the next CPU.
+    /// Exceptions also end the slice (Bochs main.cc `bx_begin_simulation`
+    /// setjmp lands back in the scheduler loop). `max_instructions` remains a
+    /// safety cap only — the icache already caps SMP traces at the quantum.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    pub fn cpu_run_trace_with_io(
+        &mut self,
+        mem: &'c mut BxMemC<'c>,
+        cpus: &[&Self],
+        max_instructions: u64,
+        pc_tick_denominator: u64,
+        pc_tick_offset: u64,
+        io: NonNull<crate::iodev::BxDevicesC>,
+        pc_system: NonNull<crate::pc_system::BxPcSystemC>,
+        pic: Option<&mut crate::pic::BxPicC>,
+        dma: Option<&mut crate::dma::BxDmaC>,
+    ) -> super::Result<u64> {
+        self.set_io_bus_ptr(io);
+        self.set_pc_system_ptr_with_tick_offset(pc_system, pc_tick_denominator, pc_tick_offset);
+        let result = self.cpu_loop_n_impl(mem, cpus, max_instructions, pic, dma, true);
         self.clear_io_bus();
         self.clear_pc_system();
         result
@@ -1913,8 +1940,26 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
         max_instructions: u64,
+        pic: Option<&mut crate::pic::BxPicC>,
+        dma: Option<&mut crate::dma::BxDmaC>,
+    ) -> super::Result<u64> {
+        self.cpu_loop_n_impl(mem, cpus, max_instructions, pic, dma, false)
+    }
+
+    /// Shared body of `cpu_loop_n` / `cpu_run_trace_with_io`.
+    ///
+    /// With `stop_after_one_trace` set this behaves like Bochs cpu.cc
+    /// `cpu_run_trace`: the call returns at the first trace boundary, when an
+    /// async event breaks the trace, or when an exception restarts the loop
+    /// (Bochs main.cc setjmp returns control to the SMP scheduler).
+    fn cpu_loop_n_impl(
+        &mut self,
+        mem: &'c mut BxMemC<'c>,
+        cpus: &[&Self],
+        max_instructions: u64,
         mut pic: Option<&mut crate::pic::BxPicC>,
         mut dma: Option<&mut crate::dma::BxDmaC>,
+        stop_after_one_trace: bool,
     ) -> super::Result<u64> {
         // Wire the memory system pointer for the duration of this execution call.
         // This enables Bochs-style "host-pointer-or-fallback" access in mem_read/mem_write.
@@ -2050,6 +2095,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         self.prev_rip = self.rip();
                         self.speculative_rsp = false;
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+                        if stop_after_one_trace {
+                            // Bochs main.cc: the SMP-loop setjmp ends this
+                            // CPU's turn on an exception.
+                            break 'cpu_loop Ok(iteration);
+                        }
                         continue 'cpu_loop;
                     }
                     Err(e) => break 'cpu_loop Err(e),
@@ -2137,6 +2187,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                             break 'cpu_loop Ok(iteration);
                         }
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+                        if stop_after_one_trace {
+                            // Bochs main.cc: the SMP-loop setjmp ends this
+                            // CPU's turn on an exception.
+                            break 'cpu_loop Ok(iteration);
+                        }
                         continue 'cpu_loop;
                     }
                     Err(e) => {
@@ -2177,6 +2232,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // Matching C++ line 217: if (++i == last) { get new trace }
                 instr_idx += 1;
                 if instr_idx >= trace_end {
+                    // Bochs cpu.cc cpu_run_trace executes exactly one trace
+                    // per call — in an SMP slice, return to the scheduler at
+                    // the trace boundary instead of chaining.
+                    if stop_after_one_trace {
+                        break 'cpu_loop Ok(iteration);
+                    }
                     // Check instruction limit at trace boundary (not per-instruction)
                     if iteration >= max_instructions {
                         break 'cpu_loop Ok(iteration);
@@ -2217,6 +2278,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             // Bochs unconditionally clears STOP_TRACE after inner loop break.
             {
                 self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+            }
+            // Bochs cpu.cc cpu_run_trace returns after the trace was broken
+            // by an async event; the SMP scheduler switches CPUs here.
+            if stop_after_one_trace {
+                break 'cpu_loop Ok(iteration);
             }
         };
 
