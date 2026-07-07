@@ -5002,7 +5002,7 @@ mod tests {
                     let cpu = emu.cpu_mut_at(cpu_index);
                     cpu.set_eax(CPUID_LEAF_FEATURE_INFO);
                     cpu.set_ecx(0);
-                    cpu.cpuid(&instr);
+                    cpu.cpuid(&instr).unwrap();
                     assert_eq!(
                         (cpu.ebx() >> CPUID_LEAF1_LOGICAL_COUNT_SHIFT) & CPUID_APIC_ID_BYTE_MASK,
                         4
@@ -5014,7 +5014,7 @@ mod tests {
 
                     cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
                     cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_SMT);
-                    cpu.cpuid(&instr);
+                    cpu.cpuid(&instr).unwrap();
                     assert_eq!(cpu.eax(), 1);
                     assert_eq!(cpu.ebx(), 2);
                     assert_eq!(
@@ -5028,7 +5028,7 @@ mod tests {
 
                     cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
                     cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_CORE);
-                    cpu.cpuid(&instr);
+                    cpu.cpuid(&instr).unwrap();
                     assert_eq!(cpu.eax(), BxCpuC::<Corei7SkylakeX>::bochs_topology_shift(4));
                     assert_eq!(cpu.ebx(), 4);
                     assert_eq!(
@@ -5042,7 +5042,7 @@ mod tests {
 
                     cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
                     cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_PACKAGE);
-                    cpu.cpuid(&instr);
+                    cpu.cpuid(&instr).unwrap();
                     assert_eq!((cpu.eax(), cpu.ebx(), cpu.ecx(), cpu.edx()), (0, 0, 0, 0));
                 }
 
