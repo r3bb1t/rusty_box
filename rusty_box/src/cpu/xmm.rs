@@ -360,6 +360,21 @@ impl BxMxcsr {
         // Mask bits are 7 positions above the exception flag bits
         (self.mxcsr & (exception_bit << 7)) != 0
     }
+
+    /// The 6 exception-mask bits (IM..PM) shifted down to bit 0, matching the
+    /// SoftFloat `softfloat_exceptionMasks` layout (bit0=IE .. bit5=PE).
+    /// Bochs `bx_mxcsr_t::get_exceptions_masks()` (xmm.h).
+    #[inline]
+    pub fn exceptions_masks(&self) -> i32 {
+        ((self.mxcsr & Mxcsr::ALL_MASKS.bits()) >> 7) as i32
+    }
+
+    /// OR the low-6 exception status bits (IE..PE) into MXCSR.
+    /// Bochs `bx_mxcsr_t::set_exceptions()` (xmm.h).
+    #[inline]
+    pub fn set_exceptions(&mut self, flags: i32) {
+        self.mxcsr |= (flags as u32) & MXCSR_EXCEPTIONS;
+    }
 }
 
 // ---- Backward-compat constants (prefer Mxcsr::<NAME> in new code) ----
@@ -378,6 +393,14 @@ pub(super) const MXCSR_UM: u32 = Mxcsr::UM.bits();
 pub(super) const MXCSR_PM: u32 = Mxcsr::PM.bits();
 pub(super) const MXCSR_RC: u32 = Mxcsr::RC_MASK.bits();
 pub(super) const MXCSR_FZ: u32 = Mxcsr::FZ.bits();
+/// All 6 sticky exception status flags (IE|DE|ZE|OE|UE|PE = 0x3F).
+pub(super) const MXCSR_EXCEPTIONS: u32 = Mxcsr::IE
+    .union(Mxcsr::DE)
+    .union(Mxcsr::ZE)
+    .union(Mxcsr::OE)
+    .union(Mxcsr::UE)
+    .union(Mxcsr::PE)
+    .bits();
 
 // ============================================================================
 // CPU helper methods for XMM register access

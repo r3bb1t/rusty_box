@@ -5,7 +5,7 @@ use crate::cpu::decoder::{features::X86Feature, BX_ISA_EXTENSIONS_ARRAY_SIZE};
 
 use bitflags::bitflags;
 
-/// When RUSTY_BOX_NO_AVX is set, strip AVX/AVX2/FMA/BMI1/BMI2/AVX-512 from
+/// When RUSTY_BOX_NO_AVX is set, strip AVX/FMA/AVX2/BMI1/BMI2/AVX-512 from
 /// CPUID and ISA extensions. Forces kernel to SSE2-only code paths for
 /// diagnosing instruction emulation bugs.
 #[cfg(feature = "std")]
@@ -14,7 +14,7 @@ fn no_avx_mode() -> bool {
     *NO_AVX.get_or_init(|| {
         let active = std::env::var("RUSTY_BOX_NO_AVX").is_ok();
         if active {
-            tracing::debug!("[CPUID] RUSTY_BOX_NO_AVX: stripping AVX/AVX2/FMA/BMI1/BMI2/AVX-512");
+            tracing::debug!("[CPUID] RUSTY_BOX_NO_AVX: stripping AVX/FMA/AVX2/BMI1/BMI2/AVX-512");
         }
         active
     })
@@ -429,8 +429,8 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                 b[idx / 32] &= !(1 << (idx % 32));
             };
             disable(&mut b, X86Feature::IsaAvx);
-            disable(&mut b, X86Feature::IsaAvx2);
             disable(&mut b, X86Feature::IsaAvxFma);
+            disable(&mut b, X86Feature::IsaAvx2);
             disable(&mut b, X86Feature::IsaAvxF16c);
             disable(&mut b, X86Feature::IsaBmi1);
             disable(&mut b, X86Feature::IsaBmi2);
@@ -472,8 +472,8 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                 let mut ecx = LEAF1_ECX_BASE;
                 if no_avx_mode() {
                     ecx = ecx
-                        .difference(CpuIdStd1Ecx::AVX)
                         .difference(CpuIdStd1Ecx::FMA)
+                        .difference(CpuIdStd1Ecx::AVX)
                         .difference(CpuIdStd1Ecx::AVX_F16C);
                 }
                 (0x00050654, 0x00100800, ecx.bits(), LEAF1_EDX_BASE.bits())
@@ -708,5 +708,16 @@ mod tests {
         assert_eq!(cpuid.get_cpuid_leaf(0x0000_000D, 5), (0, 0, 0, 0));
         assert_eq!(cpuid.get_cpuid_leaf(0x0000_000D, 6), (0, 0, 0, 0));
         assert_eq!(cpuid.get_cpuid_leaf(0x0000_000D, 7), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn skylake_x_advertises_fma_after_vex_fma3_support() {
+        let cpuid = Corei7SkylakeX {};
+        let (_, _, leaf1_ecx, _) = cpuid.get_cpuid_leaf(0x0000_0001, 0);
+        assert_ne!(leaf1_ecx & CpuIdStd1Ecx::FMA.bits(), 0);
+
+        let bitmask = cpuid.get_isa_extensions_bitmask();
+        let idx = X86Feature::IsaAvxFma as usize;
+        assert_ne!(bitmask[idx / 32] & (1 << (idx % 32)), 0);
     }
 }

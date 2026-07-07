@@ -639,26 +639,190 @@ fn test_vex_vpermq_decode_runtime_sequence() {
 }
 
 #[test]
-fn test_vex_vfmadd132sd_decode_runtime_sequence() {
-    // Captured from Ubuntu userspace boot: VEX.128.66.0F38.W1 99 /r m64.
-    let instr = fetch_decode64(&[0xC4, 0xE2, 0xE9, 0x99, 0x0D, 0xF6, 0x54, 0x04, 0x00]).unwrap();
-    assert_eq!(instr.ilen(), 9);
-    assert_eq!(instr.get_ia_opcode(), Opcode::Vfmadd132sdVpdHsdWsd);
-    assert_eq!(instr.dst(), 1);
-    assert_eq!(instr.src2(), 2);
-    assert!(!instr.mod_c0());
-    assert_eq!(instr.get_vl(), 0);
+fn test_vex_fma3_decode_runtime_sequences() {
+    // Captured from Ubuntu userspace boot: VEX.128.66.0F38.W1 A9 /r m64.
+    let a9 = fetch_decode64(&[0xC4, 0xE2, 0xF9, 0xA9, 0x51, 0x18]).unwrap();
+    assert_eq!(a9.ilen(), 6);
+    assert_eq!(a9.get_ia_opcode(), Opcode::Vfmadd213sdVpdHsdWsd);
+    assert_eq!(a9.dst(), 2);
+    assert_eq!(a9.src2(), 0);
+    assert!(!a9.mod_c0());
+    assert_eq!(a9.get_vl(), 0);
+
+    // Captured from Ubuntu userspace boot: VEX.128.66.0F38.W1 B9 /r m64.
+    let b9 = fetch_decode64(&[0xC4, 0xE2, 0xF1, 0xB9, 0x05, 0xD5, 0x54, 0x04, 0x00]).unwrap();
+    assert_eq!(b9.ilen(), 9);
+    assert_eq!(b9.get_ia_opcode(), Opcode::Vfmadd231sdVpdHsdWsd);
+    assert_eq!(b9.dst(), 0);
+    assert_eq!(b9.src2(), 1);
+    assert!(!b9.mod_c0());
+    assert_eq!(b9.get_vl(), 0);
 }
 
 #[test]
-fn test_vex_vfmadd132_packed_decode() {
-    let ps128 = fetch_decode64(&[0xC4, 0xE2, 0x69, 0x98, 0xCB]).unwrap();
-    assert_eq!(ps128.get_ia_opcode(), Opcode::Vfmadd132psVpsHpsWps);
-    assert_eq!(ps128.get_vl(), 0);
+fn test_vex_fma3_decode_full_opcode_surface() {
+    let cases: &[(u8, Opcode, Opcode)] = &[
+        (
+            0x96,
+            Opcode::Vfmaddsub132psVpsHpsWps,
+            Opcode::Vfmaddsub132pdVpdHpdWpd,
+        ),
+        (
+            0x97,
+            Opcode::Vfmsubadd132psVpsHpsWps,
+            Opcode::Vfmsubadd132pdVpdHpdWpd,
+        ),
+        (
+            0x98,
+            Opcode::Vfmadd132psVpsHpsWps,
+            Opcode::Vfmadd132pdVpdHpdWpd,
+        ),
+        (
+            0x99,
+            Opcode::Vfmadd132ssVpsHssWss,
+            Opcode::Vfmadd132sdVpdHsdWsd,
+        ),
+        (
+            0x9A,
+            Opcode::Vfmsub132psVpsHpsWps,
+            Opcode::Vfmsub132pdVpdHpdWpd,
+        ),
+        (
+            0x9B,
+            Opcode::Vfmsub132ssVpsHssWss,
+            Opcode::Vfmsub132sdVpdHsdWsd,
+        ),
+        (
+            0x9C,
+            Opcode::Vfnmadd132psVpsHpsWps,
+            Opcode::Vfnmadd132pdVpdHpdWpd,
+        ),
+        (
+            0x9D,
+            Opcode::Vfnmadd132ssVpsHssWss,
+            Opcode::Vfnmadd132sdVpdHsdWsd,
+        ),
+        (
+            0x9E,
+            Opcode::Vfnmsub132psVpsHpsWps,
+            Opcode::Vfnmsub132pdVpdHpdWpd,
+        ),
+        (
+            0x9F,
+            Opcode::Vfnmsub132ssVpsHssWss,
+            Opcode::Vfnmsub132sdVpdHsdWsd,
+        ),
+        (
+            0xA6,
+            Opcode::Vfmaddsub213psVpsHpsWps,
+            Opcode::Vfmaddsub213pdVpdHpdWpd,
+        ),
+        (
+            0xA7,
+            Opcode::Vfmsubadd213psVpsHpsWps,
+            Opcode::Vfmsubadd213pdVpdHpdWpd,
+        ),
+        (
+            0xA8,
+            Opcode::Vfmadd213psVpsHpsWps,
+            Opcode::Vfmadd213pdVpdHpdWpd,
+        ),
+        (
+            0xA9,
+            Opcode::Vfmadd213ssVpsHssWss,
+            Opcode::Vfmadd213sdVpdHsdWsd,
+        ),
+        (
+            0xAA,
+            Opcode::Vfmsub213psVpsHpsWps,
+            Opcode::Vfmsub213pdVpdHpdWpd,
+        ),
+        (
+            0xAB,
+            Opcode::Vfmsub213ssVpsHssWss,
+            Opcode::Vfmsub213sdVpdHsdWsd,
+        ),
+        (
+            0xAC,
+            Opcode::Vfnmadd213psVpsHpsWps,
+            Opcode::Vfnmadd213pdVpdHpdWpd,
+        ),
+        (
+            0xAD,
+            Opcode::Vfnmadd213ssVpsHssWss,
+            Opcode::Vfnmadd213sdVpdHsdWsd,
+        ),
+        (
+            0xAE,
+            Opcode::Vfnmsub213psVpsHpsWps,
+            Opcode::Vfnmsub213pdVpdHpdWpd,
+        ),
+        (
+            0xAF,
+            Opcode::Vfnmsub213ssVpsHssWss,
+            Opcode::Vfnmsub213sdVpdHsdWsd,
+        ),
+        (
+            0xB6,
+            Opcode::Vfmaddsub231psVpsHpsWps,
+            Opcode::Vfmaddsub231pdVpdHpdWpd,
+        ),
+        (
+            0xB7,
+            Opcode::Vfmsubadd231psVpsHpsWps,
+            Opcode::Vfmsubadd231pdVpdHpdWpd,
+        ),
+        (
+            0xB8,
+            Opcode::Vfmadd231psVpsHpsWps,
+            Opcode::Vfmadd231pdVpdHpdWpd,
+        ),
+        (
+            0xB9,
+            Opcode::Vfmadd231ssVpsHssWss,
+            Opcode::Vfmadd231sdVpdHsdWsd,
+        ),
+        (
+            0xBA,
+            Opcode::Vfmsub231psVpsHpsWps,
+            Opcode::Vfmsub231pdVpdHpdWpd,
+        ),
+        (
+            0xBB,
+            Opcode::Vfmsub231ssVpsHssWss,
+            Opcode::Vfmsub231sdVpdHsdWsd,
+        ),
+        (
+            0xBC,
+            Opcode::Vfnmadd231psVpsHpsWps,
+            Opcode::Vfnmadd231pdVpdHpdWpd,
+        ),
+        (
+            0xBD,
+            Opcode::Vfnmadd231ssVpsHssWss,
+            Opcode::Vfnmadd231sdVpdHsdWsd,
+        ),
+        (
+            0xBE,
+            Opcode::Vfnmsub231psVpsHpsWps,
+            Opcode::Vfnmsub231pdVpdHpdWpd,
+        ),
+        (
+            0xBF,
+            Opcode::Vfnmsub231ssVpsHssWss,
+            Opcode::Vfnmsub231sdVpdHsdWsd,
+        ),
+    ];
 
-    let pd256 = fetch_decode64(&[0xC4, 0xE2, 0xED, 0x98, 0xCB]).unwrap();
-    assert_eq!(pd256.get_ia_opcode(), Opcode::Vfmadd132pdVpdHpdWpd);
-    assert_eq!(pd256.get_vl(), 1);
+    for &(opcode, w0_opcode, w1_opcode) in cases {
+        let w0 = fetch_decode64(&[0xC4, 0xE2, 0x69, opcode, 0xCB]).unwrap();
+        assert_eq!(w0.get_ia_opcode(), w0_opcode, "W0 opcode {opcode:02X}");
+        assert_eq!(w0.get_vl(), 0, "W0 opcode {opcode:02X}");
+
+        let w1 = fetch_decode64(&[0xC4, 0xE2, 0xE9, opcode, 0xCB]).unwrap();
+        assert_eq!(w1.get_ia_opcode(), w1_opcode, "W1 opcode {opcode:02X}");
+        assert_eq!(w1.get_vl(), 0, "W1 opcode {opcode:02X}");
+    }
 }
 
 #[test]

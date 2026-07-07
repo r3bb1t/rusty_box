@@ -8,13 +8,18 @@
 //! This file handles VEX.L=1 (256-bit) and EVEX-specific instructions.
 
 use super::{
-    cpu::BxCpuC,
+    cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
-    decoder::{BxSegregs, Instruction},
+    decoder::{features::X86Feature, BxSegregs, Instruction},
+    softfloat3e::{
+        f128::{SOFTFLOAT_MULADD_SUB_C, SOFTFLOAT_MULADD_SUB_PROD},
+        f32_mul_add::f32_mul_add,
+        f64_mul_add::f64_mul_add,
+        softfloat::softfloat_getExceptionFlags,
+    },
+    sse_fp::mxcsr_to_softfloat_status_word,
     xmm::{BxPackedXmmRegister, BxPackedYmmRegister},
 };
-#[cfg(not(feature = "std"))]
-use crate::cpu::float::FloatExt;
 
 #[derive(Clone, Copy)]
 enum VexFpLogicalOp {
@@ -22,6 +27,83 @@ enum VexFpLogicalOp {
     AndNot,
     Or,
     Xor,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum VexFmaForm {
+    F132,
+    F213,
+    F231,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum VexPackedFmaOp {
+    Fmadd,
+    Fmsub,
+    Fnmadd,
+    Fnmsub,
+    FmaddSub,
+    FmsubAdd,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum VexScalarFmaOp {
+    Fmadd,
+    Fmsub,
+    Fnmadd,
+    Fnmsub,
+}
+
+/// Permute the three source operands (as raw bits) into softfloat muladd
+/// (a, b, c) order for the given form. Keeping the values as raw bits avoids
+/// any f32 round-trip that would canonicalize a NaN before softfloat sees it.
+/// Bochs encodes this reorder in the opcode operand tuple; here `v`=DEST,
+/// `h`=vvvv, `w`=rm, matching the handler operand sourcing.
+#[inline]
+fn vex_fma_operands_u32(form: VexFmaForm, v: u32, h: u32, w: u32) -> (u32, u32, u32) {
+    match form {
+        VexFmaForm::F132 => (v, w, h),
+        VexFmaForm::F213 => (h, v, w),
+        VexFmaForm::F231 => (h, w, v),
+    }
+}
+
+#[inline]
+fn vex_fma_operands_u64(form: VexFmaForm, v: u64, h: u64, w: u64) -> (u64, u64, u64) {
+    match form {
+        VexFmaForm::F132 => (v, w, h),
+        VexFmaForm::F213 => (h, v, w),
+        VexFmaForm::F231 => (h, w, v),
+    }
+}
+
+/// SoftFloat `f{32,64}_mul_add` op flag for a scalar FMA op.
+/// Bochs softfloat.h f32_fmadd/fmsub/fnmadd/fnmsub.
+#[inline]
+fn scalar_fma_flags(op: VexScalarFmaOp) -> u8 {
+    match op {
+        VexScalarFmaOp::Fmadd => 0,
+        VexScalarFmaOp::Fmsub => SOFTFLOAT_MULADD_SUB_C,
+        VexScalarFmaOp::Fnmadd => SOFTFLOAT_MULADD_SUB_PROD,
+        VexScalarFmaOp::Fnmsub => SOFTFLOAT_MULADD_SUB_C | SOFTFLOAT_MULADD_SUB_PROD,
+    }
+}
+
+/// SoftFloat `f{32,64}_mul_add` op flag for a packed FMA op at a given lane.
+/// FMADDSUB subtracts on even lanes / adds on odd; FMSUBADD is the inverse
+/// (Bochs simd_pfp.h xmm_fmaddsubps / xmm_fmsubaddps).
+#[inline]
+fn packed_fma_flags(op: VexPackedFmaOp, lane: usize) -> u8 {
+    match op {
+        VexPackedFmaOp::Fmadd => 0,
+        VexPackedFmaOp::Fmsub => SOFTFLOAT_MULADD_SUB_C,
+        VexPackedFmaOp::Fnmadd => SOFTFLOAT_MULADD_SUB_PROD,
+        VexPackedFmaOp::Fnmsub => SOFTFLOAT_MULADD_SUB_C | SOFTFLOAT_MULADD_SUB_PROD,
+        VexPackedFmaOp::FmaddSub if lane & 1 == 0 => SOFTFLOAT_MULADD_SUB_C,
+        VexPackedFmaOp::FmaddSub => 0,
+        VexPackedFmaOp::FmsubAdd if lane & 1 == 0 => 0,
+        VexPackedFmaOp::FmsubAdd => SOFTFLOAT_MULADD_SUB_C,
+    }
 }
 
 // AMX architectural state — Bochs avx/amx.h BxPackedAmxRegister + amx.cc.
@@ -1412,9 +1494,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// VFMADD132PS — V * W + H, packed single-precision (VEX FMA)
-    pub(super) fn vfmadd132ps(&mut self, instr: &Instruction) -> super::Result<()> {
+    /// VEX FMA packed single-precision helper.
+    pub(super) fn vex_fma_packed_ps(
+        &mut self,
+        instr: &Instruction,
+        form: VexFmaForm,
+        op: VexPackedFmaOp,
+    ) -> super::Result<()> {
         self.prepare_sse()?;
+        self.require_fma()?;
+        let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
         let dst_idx = instr.dst();
         if instr.get_vl() >= 1 {
             let v = self.read_ymm_reg(dst_idx);
@@ -1422,10 +1511,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let w = self.vex_read_src2_ymm(instr)?;
             let mut result = BxPackedYmmRegister::default();
             for lane in 0..8 {
-                let vf = f32::from_bits(v.ymm32u(lane));
-                let wf = f32::from_bits(w.ymm32u(lane));
-                let hf = f32::from_bits(h.ymm32u(lane));
-                result.set_ymm32u(lane, vf.mul_add(wf, hf).to_bits());
+                let (a, b, c) =
+                    vex_fma_operands_u32(form, v.ymm32u(lane), h.ymm32u(lane), w.ymm32u(lane));
+                result.set_ymm32u(lane, f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status));
             }
             self.write_ymm_reg(dst_idx, result);
         } else {
@@ -1434,19 +1522,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let w = self.vex_read_src2_xmm(instr)?;
             let mut result = BxPackedXmmRegister::default();
             for lane in 0..4 {
-                let vf = f32::from_bits(v.xmm32u(lane));
-                let wf = f32::from_bits(w.xmm32u(lane));
-                let hf = f32::from_bits(h.xmm32u(lane));
-                result.set_xmm32u(lane, vf.mul_add(wf, hf).to_bits());
+                let (a, b, c) =
+                    vex_fma_operands_u32(form, v.xmm32u(lane), h.xmm32u(lane), w.xmm32u(lane));
+                result.set_xmm32u(lane, f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status));
             }
             self.write_xmm_reg(dst_idx, result);
         }
-        Ok(())
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
     }
 
-    /// VFMADD132PD — V * W + H, packed double-precision (VEX FMA)
-    pub(super) fn vfmadd132pd(&mut self, instr: &Instruction) -> super::Result<()> {
+    /// VEX FMA packed double-precision helper.
+    pub(super) fn vex_fma_packed_pd(
+        &mut self,
+        instr: &Instruction,
+        form: VexFmaForm,
+        op: VexPackedFmaOp,
+    ) -> super::Result<()> {
         self.prepare_sse()?;
+        self.require_fma()?;
+        let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
         let dst_idx = instr.dst();
         if instr.get_vl() >= 1 {
             let v = self.read_ymm_reg(dst_idx);
@@ -1454,10 +1548,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let w = self.vex_read_src2_ymm(instr)?;
             let mut result = BxPackedYmmRegister::default();
             for lane in 0..4 {
-                let vf = f64::from_bits(v.ymm64u(lane));
-                let wf = f64::from_bits(w.ymm64u(lane));
-                let hf = f64::from_bits(h.ymm64u(lane));
-                result.set_ymm64u(lane, vf.mul_add(wf, hf).to_bits());
+                let (a, b, c) =
+                    vex_fma_operands_u64(form, v.ymm64u(lane), h.ymm64u(lane), w.ymm64u(lane));
+                result.set_ymm64u(lane, f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status));
             }
             self.write_ymm_reg(dst_idx, result);
         } else {
@@ -1466,52 +1559,96 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let w = self.vex_read_src2_xmm(instr)?;
             let mut result = BxPackedXmmRegister::default();
             for lane in 0..2 {
-                let vf = f64::from_bits(v.xmm64u(lane));
-                let wf = f64::from_bits(w.xmm64u(lane));
-                let hf = f64::from_bits(h.xmm64u(lane));
-                result.set_xmm64u(lane, vf.mul_add(wf, hf).to_bits());
+                let (a, b, c) =
+                    vex_fma_operands_u64(form, v.xmm64u(lane), h.xmm64u(lane), w.xmm64u(lane));
+                result.set_xmm64u(lane, f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status));
             }
             self.write_xmm_reg(dst_idx, result);
+        }
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+    }
+
+    /// VEX FMA scalar single-precision helper.
+    pub(super) fn vex_fma_scalar_ss(
+        &mut self,
+        instr: &Instruction,
+        form: VexFmaForm,
+        op: VexScalarFmaOp,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        self.require_fma()?;
+        let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
+        let dst_idx = instr.dst();
+        let mut result = self.read_xmm_reg(dst_idx);
+        let v = result.xmm32u(0);
+        let h = self.read_xmm_reg(instr.src2()).xmm32u(0);
+        let w = if instr.mod_c0() {
+            self.read_xmm_reg(instr.src1()).xmm32u(0)
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_dword(seg, eaddr)?
+        };
+        let (a, b, c) = vex_fma_operands_u32(form, v, h, w);
+        result.set_xmm32u(0, f32_mul_add(a, b, c, scalar_fma_flags(op), &mut status));
+        self.write_xmm_reg(dst_idx, result);
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+    }
+
+    /// VEX FMA scalar double-precision helper.
+    pub(super) fn vex_fma_scalar_sd(
+        &mut self,
+        instr: &Instruction,
+        form: VexFmaForm,
+        op: VexScalarFmaOp,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        self.require_fma()?;
+        let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
+        let dst_idx = instr.dst();
+        let mut result = self.read_xmm_reg(dst_idx);
+        let v = result.xmm64u(0);
+        let h = self.read_xmm_reg(instr.src2()).xmm64u(0);
+        let w = if instr.mod_c0() {
+            self.read_xmm_reg(instr.src1()).xmm64u(0)
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(seg, eaddr)?
+        };
+        let (a, b, c) = vex_fma_operands_u64(form, v, h, w);
+        result.set_xmm64u(0, f64_mul_add(a, b, c, scalar_fma_flags(op), &mut status));
+        self.write_xmm_reg(dst_idx, result);
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+    }
+
+    /// #UD when the CPU model does not advertise FMA (Bochs `BX_ISA_AVX_FMA`).
+    #[inline]
+    fn require_fma(&mut self) -> super::Result<()> {
+        if !self.bx_cpuid_support_isa_extension(X86Feature::IsaAvxFma) {
+            return self.exception(Exception::Ud, 0);
         }
         Ok(())
     }
 
+    /// VFMADD132PS — V * W + H, packed single-precision (VEX FMA)
+    pub(super) fn vfmadd132ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::Fmadd)
+    }
+
+    /// VFMADD132PD — V * W + H, packed double-precision (VEX FMA)
+    pub(super) fn vfmadd132pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.vex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::Fmadd)
+    }
+
     /// VFMADD132SS — scalar single: low f32 = V * W + H.
     pub(super) fn vfmadd132ss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let dst_idx = instr.dst();
-        let mut result = self.read_xmm_reg(dst_idx);
-        let v = result.xmm32f(0);
-        let h = self.read_xmm_reg(instr.src2()).xmm32f(0);
-        let w = if instr.mod_c0() {
-            self.read_xmm_reg(instr.src1()).xmm32f(0)
-        } else {
-            let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr(instr);
-            f32::from_bits(self.v_read_dword(seg, eaddr)?)
-        };
-        result.set_xmm32u(0, v.mul_add(w, h).to_bits());
-        self.write_xmm_reg(dst_idx, result);
-        Ok(())
+        self.vex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fmadd)
     }
 
     /// VFMADD132SD — scalar double: low f64 = V * W + H.
     pub(super) fn vfmadd132sd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let dst_idx = instr.dst();
-        let mut result = self.read_xmm_reg(dst_idx);
-        let v = result.xmm64f(0);
-        let h = self.read_xmm_reg(instr.src2()).xmm64f(0);
-        let w = if instr.mod_c0() {
-            self.read_xmm_reg(instr.src1()).xmm64f(0)
-        } else {
-            let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr(instr);
-            f64::from_bits(self.v_read_qword(seg, eaddr)?)
-        };
-        result.set_xmm64u(0, v.mul_add(w, h).to_bits());
-        self.write_xmm_reg(dst_idx, result);
-        Ok(())
+        self.vex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fmadd)
     }
 
     // ========================================================================
