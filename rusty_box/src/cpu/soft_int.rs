@@ -1185,7 +1185,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Original: bochs/cpu/proc_ctrl.cc
     /// Returns CPU identification and feature information in EAX, EBX, ECX, EDX
     /// Input: EAX = function number, ECX = sub-function (for some functions)
-    pub fn cpuid(&mut self, _instr: &Instruction) {
+    pub fn cpuid(&mut self, _instr: &Instruction) -> super::Result<()> {
         // BOCHS BX_INSTR_CPUID(cpu_id)
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_cpuid_msr() {
@@ -1193,15 +1193,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
 
         // Bochs svm.cc SVM_INTERCEPT0_CPUID — delivered before reading any
-        // registers so the guest sees the original RAX/RCX on re-entry.
+        // registers so the guest sees the original RAX/RCX on re-entry. The
+        // VMEXIT unwinds via Err(CpuLoopRestart), which MUST propagate so the
+        // CPU loop restarts decode at the host RIP.
         if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_CPUID) {
-            let _ = self.svm_vmexit(super::svm::SvmVmexit::Cpuid as i32, 0, 0);
-            return;
+            self.svm_vmexit(super::svm::SvmVmexit::Cpuid as i32, 0, 0)?;
+            return Ok(());
         }
         // Bochs vmx.cc VMexit_CPUID — unconditional when in VMX guest.
         if self.in_vmx_guest {
-            let _ = self.vmx_vmexit(super::vmx::VmxVmexitReason::Cpuid, 0);
-            return;
+            self.vmx_vmexit(super::vmx::VmxVmexitReason::Cpuid, 0)?;
+            return Ok(());
         }
 
         let function = self.eax();
@@ -1319,6 +1321,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_rbx(ebx as u64);
         self.set_rcx(ecx as u64);
         self.set_rdx(edx as u64);
+        Ok(())
     }
 }
 
@@ -1344,7 +1347,7 @@ mod tests {
 
         cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
         cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_SMT);
-        cpu.cpuid(&instr);
+        cpu.cpuid(&instr).unwrap();
         assert_eq!(cpu.eax(), 1);
         assert_eq!(cpu.ebx(), 2);
         assert_eq!(
@@ -1355,7 +1358,7 @@ mod tests {
 
         cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
         cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_CORE);
-        cpu.cpuid(&instr);
+        cpu.cpuid(&instr).unwrap();
         assert_eq!(
             cpu.eax(),
             BxCpuC::<Corei7SkylakeX>::bochs_topology_shift(topology.package_logical_count())
@@ -1369,7 +1372,7 @@ mod tests {
 
         cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
         cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_PACKAGE);
-        cpu.cpuid(&instr);
+        cpu.cpuid(&instr).unwrap();
         assert_eq!(cpu.eax(), 0);
         assert_eq!(cpu.ebx(), 0);
         assert_eq!(cpu.ecx(), 0);
@@ -1390,7 +1393,7 @@ mod tests {
 
         cpu.set_eax(CPUID_LEAF_FEATURE_INFO);
         cpu.set_ecx(0);
-        cpu.cpuid(&instr);
+        cpu.cpuid(&instr).unwrap();
 
         assert_eq!(
             (cpu.ebx() >> CPUID_LEAF1_LOGICAL_COUNT_SHIFT) & CPUID_APIC_ID_BYTE_MASK,

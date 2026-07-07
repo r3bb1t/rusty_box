@@ -1467,10 +1467,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::LfsGqMp => self.lfs_gq_mp(instr),
             Opcode::LgsGqMp => self.lgs_gq_mp(instr),
 
-            Opcode::Cpuid => {
-                self.cpuid(instr);
-                Ok(())
-            }
+            Opcode::Cpuid => self.cpuid(instr),
             Opcode::Rdtsc => self.rdtsc(instr),
             Opcode::Rdpmc => self.rdpmc(instr),
             Opcode::Rdmsr => self.rdmsr(instr),
