@@ -23,6 +23,10 @@ const CPUID_LEAF1_APIC_ID_SHIFT: u32 = 24;
 const CPUID_APIC_ID_BYTE_MASK: u32 = 0xFF;
 const CPUID_TOPOLOGY_SUBLEAF_SMT: u32 = 0;
 const CPUID_TOPOLOGY_SUBLEAF_CORE: u32 = 1;
+// Leaf 0x0B exposes only SMT (0) and Core (1) levels; subleaf >= 2 is the
+// invalid level handled by the default arm. This named index is used only by
+// the test that asserts subleaf 2 returns all zeros.
+#[cfg(test)]
 const CPUID_TOPOLOGY_SUBLEAF_PACKAGE: u32 = 2;
 const CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT: u32 = 8;
 const CPUID_TOPOLOGY_LEVEL_TYPE_SMT: u32 = 1;
