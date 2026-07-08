@@ -123,6 +123,8 @@ pub const PIC_SLAVE_DATA: u16 = 0x00A1;
 pub const PIC_ELCR1: u16 = 0x04D0;
 pub const PIC_ELCR2: u16 = 0x04D1;
 
+const PIC_IOAPIC_FORWARD_CAPACITY: usize = 256;
+
 /// Action returned by `Pic8259State::service()`.
 ///
 /// Separates the PIC's internal state changes from external side effects,
@@ -347,7 +349,7 @@ pub struct BxPicC {
     pub(crate) irq_cleared: bool,
     /// IOAPIC forwarding queue: (irq, level) pairs from raise_irq/lower_irq.
     /// Drained by I/O dispatch and DeviceManager::tick() to forward to IOAPIC.
-    pub(crate) ioapic_forwards: [(u8, bool); 8],
+    pub(crate) ioapic_forwards: [(u8, bool); PIC_IOAPIC_FORWARD_CAPACITY],
     /// Number of pending IOAPIC forwarding entries.
     pub(crate) num_ioapic_forwards: usize,
 }
@@ -381,7 +383,7 @@ impl BxPicC {
             elcr: [0, 0],
             irq_pending: false,
             irq_cleared: false,
-            ioapic_forwards: [(0, false); 8],
+            ioapic_forwards: [(0, false); PIC_IOAPIC_FORWARD_CAPACITY],
             num_ioapic_forwards: 0,
         }
     }
@@ -405,7 +407,7 @@ impl BxPicC {
         self.irq_cleared = true;
     }
 
-    /// Enqueue an IOAPIC forward. Silently drops if the queue is full.
+    /// Enqueue an IOAPIC forward.
     #[inline]
     fn enqueue_ioapic_forward(&mut self, irq: u8, level: bool) {
         if self.num_ioapic_forwards < self.ioapic_forwards.len() {
@@ -416,7 +418,9 @@ impl BxPicC {
 
     /// Drain all pending IOAPIC forwards, returning a copy of the queue.
     /// Resets the internal queue to empty.
-    pub(crate) fn take_ioapic_forwards(&mut self) -> ([(u8, bool); 8], usize) {
+    pub(crate) fn take_ioapic_forwards(
+        &mut self,
+    ) -> ([(u8, bool); PIC_IOAPIC_FORWARD_CAPACITY], usize) {
         let result = (self.ioapic_forwards, self.num_ioapic_forwards);
         self.num_ioapic_forwards = 0;
         result

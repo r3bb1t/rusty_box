@@ -60,6 +60,10 @@ impl RustyBoxApp {
         self.fit_to_available = fit_to_available;
     }
 
+    fn should_request_repaint(&self) -> bool {
+        self.cached_emu_running || self.texture.is_none()
+    }
+
     fn shared_emu_running(&self) -> bool {
         self.shared
             .lock()
@@ -149,52 +153,59 @@ impl RustyBoxApp {
 
     /// Update the egui texture from the shared framebuffer.
     fn update_texture(&mut self, ctx: &egui::Context, update_title: bool) {
-        let Ok(mut display) = self.shared.lock() else {
+        let Some((w, h, framebuffer)) = ({
+            let Ok(mut display) = self.shared.lock() else {
+                return;
+            };
+
+            // Always cache status for the status bar.
+            self.cached_emu_running = display.emu_running;
+            self.cached_ips = display.ips;
+
+            // Sync serial log if it changed.
+            if display.serial_log.len() != self.serial_log_len {
+                self.cached_serial_log.clone_from(&display.serial_log);
+                self.serial_log_len = display.serial_log.len();
+            }
+
+            if !display.fb_dirty && self.texture.is_some() {
+                return;
+            }
+
+            let w = display.fb_width as usize;
+            let h = display.fb_height as usize;
+
+            if w == 0 || h == 0 {
+                return;
+            }
+
+            // Copy bytes while holding the shared lock, then do the expensive
+            // RGBA→Color32 conversion and texture upload after unlocking. This
+            // keeps the emulator thread from blocking on egui's per-pixel work.
+            let framebuffer = display.framebuffer.clone();
+            display.fb_dirty = false;
+            Some((w, h, framebuffer))
+        }) else {
             return;
         };
 
-        // Always cache status for the status bar
-        self.cached_emu_running = display.emu_running;
-        self.cached_ips = display.ips;
-
-        // Sync serial log if it changed
-        if display.serial_log.len() != self.serial_log_len {
-            self.cached_serial_log.clone_from(&display.serial_log);
-            self.serial_log_len = display.serial_log.len();
-        }
-
-        if !display.fb_dirty && self.texture.is_some() {
-            return;
-        }
-
-        let w = display.fb_width as usize;
-        let h = display.fb_height as usize;
-
-        if w == 0 || h == 0 {
-            return;
-        }
-
-        // Convert RGBA bytes to egui ColorImage
-        let pixels: Vec<egui::Color32> = display
-            .framebuffer
+        // Convert RGBA bytes to egui ColorImage outside the shared-display lock.
+        let pixels: Vec<egui::Color32> = framebuffer
             .chunks_exact(4)
             .map(|rgba| egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]))
             .collect();
 
-        // Pad or truncate if framebuffer size doesn't match exactly
+        // Pad or truncate if framebuffer size doesn't match exactly.
         let expected = w * h;
         let image = if pixels.len() == expected {
             egui::ColorImage::new([w, h], pixels)
         } else {
-            // Safety fallback: create correct-sized image
+            // Safety fallback: create correct-sized image.
             let mut padded = vec![egui::Color32::BLACK; expected];
             let copy_len = pixels.len().min(expected);
             padded[..copy_len].copy_from_slice(&pixels[..copy_len]);
             egui::ColorImage::new([w, h], padded)
         };
-
-        display.fb_dirty = false;
-        drop(display);
 
         let options = egui::TextureOptions::NEAREST; // Pixel-perfect rendering
 
@@ -448,8 +459,9 @@ impl RustyBoxApp {
                 }
             });
 
-        // Request continuous repaint while emulator is running
-        if self.cached_emu_running {
+        // Request continuous repaint while the emulator is running, and while waiting
+        // for the first texture so a fast VM stop cannot strand the surface on the placeholder.
+        if self.should_request_repaint() {
             ctx.request_repaint();
         }
     }
@@ -617,5 +629,13 @@ mod tests {
     fn serial_panel_uses_compact_default_size() {
         assert!(SERIAL_PANEL_DEFAULT_HEIGHT <= 96.0);
         assert!(SERIAL_PANEL_MAX_HEIGHT <= 220.0);
+    }
+
+    #[test]
+    fn stopped_app_repaints_until_first_texture_exists() {
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        let app = RustyBoxApp::new_embedded(shared);
+
+        assert!(app.should_request_repaint());
     }
 }

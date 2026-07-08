@@ -677,17 +677,30 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    #[inline]
+    fn bit_test_ew_gw_addr(&self, instr: &Instruction, op2: u16) -> u64 {
+        let eaddr = self.resolve_addr(instr);
+        // Bochs bit16.cc BTS_EwGwM: op1_addr = eaddr + 2 * (((s16)(op2 & ~15)) / 16),
+        // then mask by the instruction address size.
+        let displacement = (((op2 & !0x0F) as i16) / 16) as i64 * 2;
+        let addr = eaddr.wrapping_add(displacement as u64);
+        let asize_mask = if instr.as64_l() != 0 {
+            u64::MAX
+        } else if instr.as32_l() != 0 {
+            u32::MAX as u64
+        } else {
+            u16::MAX as u64
+        };
+        addr & asize_mask
+    }
+
     /// BT r/m16, r16 — Bit Test (0F A3, 66h prefix)
     pub fn bt_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = self.get_gpr16(instr.src() as usize);
         let op1 = if instr.mod_c0() {
             self.get_gpr16(instr.dst() as usize)
         } else {
-            let eaddr = self.resolve_addr(instr);
-            // For memory form, bit offset is full op2 (not masked to 15).
-            // Bochs bit16.cc: displacement = ((Bit16s)(op2 & 0xfff0)) / 16 * 2
-            let displacement = ((op2 as i16) >> 4) << 1;
-            let addr = (eaddr as i32).wrapping_add(displacement as i32) as u32;
+            let addr = self.bit_test_ew_gw_addr(instr, op2);
             let seg = BxSegregs::from(instr.seg());
             self.v_read_word(seg, addr)?
         };
@@ -708,9 +721,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_cf(cf != 0);
             self.set_gpr16(dst, op1 | (1 << bit));
         } else {
-            let eaddr = self.resolve_addr(instr);
-            let displacement = ((op2 as i16) >> 4) << 1;
-            let addr = (eaddr as i32).wrapping_add(displacement as i32) as u32;
+            let addr = self.bit_test_ew_gw_addr(instr, op2);
             let seg = BxSegregs::from(instr.seg());
             let op1 = self.v_read_rmw_word(seg, addr)?;
             let cf = (op1 >> bit) & 1;
@@ -731,9 +742,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_cf(cf != 0);
             self.set_gpr16(dst, op1 & !(1 << bit));
         } else {
-            let eaddr = self.resolve_addr(instr);
-            let displacement = ((op2 as i16) >> 4) << 1;
-            let addr = (eaddr as i32).wrapping_add(displacement as i32) as u32;
+            let addr = self.bit_test_ew_gw_addr(instr, op2);
             let seg = BxSegregs::from(instr.seg());
             let op1 = self.v_read_rmw_word(seg, addr)?;
             let cf = (op1 >> bit) & 1;
@@ -754,9 +763,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_cf(cf != 0);
             self.set_gpr16(dst, op1 ^ (1 << bit));
         } else {
-            let eaddr = self.resolve_addr(instr);
-            let displacement = ((op2 as i16) >> 4) << 1;
-            let addr = (eaddr as i32).wrapping_add(displacement as i32) as u32;
+            let addr = self.bit_test_ew_gw_addr(instr, op2);
             let seg = BxSegregs::from(instr.seg());
             let op1 = self.v_read_rmw_word(seg, addr)?;
             let cf = (op1 >> bit) & 1;

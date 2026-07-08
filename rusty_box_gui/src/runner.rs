@@ -90,6 +90,7 @@ where
         ips: config.ips,
         pci_enabled: config.pci,
         sync_slowdown: config.sync_slowdown,
+        cpu_params: config.cpu_params.clone(),
         ..EmulatorConfig::default()
     };
 
@@ -437,6 +438,7 @@ mod tests {
     use super::*;
     use crate::args::DiskGeometry;
     use crate::config::ResolvedDiskCreation;
+    use rusty_box::params::BxParams;
     use rusty_box_bximage::ImageSize;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -460,6 +462,7 @@ mod tests {
             pci: true,
             sync_slowdown: false,
             max_instructions: 0,
+            cpu_params: BxParams::default(),
             display: DisplayBackend::Headless,
             bios: bios.clone(),
             vga_bios: Some(vga.clone()),
@@ -504,6 +507,7 @@ mod tests {
             pci: true,
             sync_slowdown: false,
             max_instructions: 0,
+            cpu_params: BxParams::default(),
             display: DisplayBackend::Headless,
             bios: unique_temp_path("rusty-box-gui-bios"),
             vga_bios: None,
@@ -630,6 +634,7 @@ mod tests {
                 pci: true,
                 sync_slowdown: false,
                 max_instructions: 0,
+                cpu_params: BxParams::default(),
                 display: DisplayBackend::Egui,
                 bios: missing_bios,
                 vga_bios: None,

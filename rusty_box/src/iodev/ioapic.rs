@@ -40,6 +40,9 @@ const IOAPIC_BASE_ADDR: u32 = 0xFEC0_0000;
 /// Number of interrupt input pins on the 82093AA.
 /// Bochs: `#define BX_IOAPIC_NUM_PINS (0x18)` (ioapic.h)
 pub const IOAPIC_NUM_PINS: usize = 0x18; // 24
+/// Deferred APIC-bus deliveries only exist because the Rust device path cannot
+/// always hold LAPIC references when Bochs would call the bus synchronously.
+const IOAPIC_PENDING_DELIVERY_CAPACITY: usize = 256;
 
 /// Version register value.
 /// Low byte = APIC version (0x11 for 82093AA).
@@ -53,10 +56,10 @@ const IOAPIC_VERSION_ID: u32 = ((IOAPIC_NUM_PINS as u32 - 1) << 16) | 0x11;
 /// For a single-processor system, the I/O APIC gets ID 1.
 const IOAPIC_DEFAULT_ID: u32 = 1;
 
-/// APIC ID mask — determines the width of the APIC ID field.
-/// In XAPIC mode (Bochs main.cc): `apic_id_mask = simulate_xapic ? 0xFF : 0xF`.
-/// We default to legacy (4-bit) for compatibility; XAPIC extends to 8-bit.
-const APIC_ID_MASK: u32 = 0x0F;
+/// APIC ID mask.
+/// Rusty Box enables xAPIC-style IDs for SMP, matching Bochs
+/// `apic_id_mask = 0xff` when `simulate_xapic` is true.
+const APIC_ID_MASK: u32 = 0xFF;
 
 /// MMIO region size (4KB page).
 const IOAPIC_MMIO_SIZE: u32 = 0x1000;
@@ -292,6 +295,27 @@ impl IoRedirectEntry {
 /// interrupt input pin.
 ///
 /// Bochs: `class bx_ioapic_c` (ioapic.h)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PendingIoApicDelivery {
+    pub(crate) pin: u8,
+    pub(crate) vector: u8,
+    pub(crate) delivery_mode: u8,
+    pub(crate) trigger_mode: u8,
+    pub(crate) dest: u32,
+    pub(crate) dest_mode: u8,
+    pub(crate) needs_pic_iac: bool,
+}
+
+const EMPTY_PENDING_DELIVERY: PendingIoApicDelivery = PendingIoApicDelivery {
+    pin: 0,
+    vector: 0,
+    delivery_mode: 0,
+    trigger_mode: 0,
+    dest: 0,
+    dest_mode: 0,
+    needs_pic_iac: false,
+};
+
 #[derive(Debug)]
 pub struct BxIoApic {
     /// Whether the I/O APIC MMIO is enabled.
@@ -327,9 +351,10 @@ pub struct BxIoApic {
     /// Bochs: `static unsigned int stuck` (ioapic.cc) — moved to instance field.
     stuck_count: u32,
 
-    /// Pending interrupt deliveries queued when LAPIC is not available (MMIO path).
-    /// Drained by the emulator after each tick/sync cycle.
-    pub(crate) pending_deliveries: [(u8, u8, u8); 8],
+    /// Pending interrupt deliveries queued when LAPIC is not available.
+    /// Bochs delivers synchronously; the fixed queue preserves those bus calls
+    /// until the emulator can route them without allocating in no_std builds.
+    pub(crate) pending_deliveries: [PendingIoApicDelivery; IOAPIC_PENDING_DELIVERY_CAPACITY],
     pub(crate) num_pending_deliveries: usize,
 }
 
@@ -353,9 +378,14 @@ impl BxIoApic {
             irr: 0,
             ioredtbl: [IoRedirectEntry::default(); IOAPIC_NUM_PINS],
             stuck_count: 0,
-            pending_deliveries: [(0, 0, 0); 8],
+            pending_deliveries: [EMPTY_PENDING_DELIVERY; IOAPIC_PENDING_DELIVERY_CAPACITY],
             num_pending_deliveries: 0,
         }
+    }
+
+    #[inline]
+    pub(crate) fn set_id(&mut self, id: u32) {
+        self.id = id & APIC_ID_MASK;
     }
 
     /// Initialize the I/O APIC and register its MMIO handlers.
@@ -387,6 +417,7 @@ impl BxIoApic {
         self.irr = 0;
         self.ioregsel = 0;
         self.stuck_count = 0;
+        self.num_pending_deliveries = 0;
     }
 
     /// Get redirect entry state for diagnostics.
@@ -746,6 +777,7 @@ impl BxIoApic {
             // Determine vector
             // Bochs: if (entry->delivery_mode() == 7) vector = DEV_pic_iac();
             // else vector = entry->vector(); (ioapic.cc)
+            let mut needs_pic_iac = false;
             let vector = if entry.delivery_mode() == IoApicDeliveryMode::ExtInt as u8 {
                 // ExtINT: Bochs calls DEV_pic_iac() for the vector (ioapic.cc).
                 if let Some(pic) = pic.as_deref_mut() {
@@ -757,30 +789,57 @@ impl BxIoApic {
                     );
                     v
                 } else {
-                    // Fallback: no PIC reference, use entry vector
-                    tracing::trace!(
-                        "IOAPIC: ExtINT mode on pin {} — no PIC, using entry vector {:#04x}",
-                        pin,
-                        entry.vector()
-                    );
-                    entry.vector()
+                    // The emulator will resolve DEV_pic_iac() when it drains
+                    // this deferred delivery with DeviceManager access.
+                    needs_pic_iac = true;
+                    0
                 }
             } else {
                 entry.vector()
             };
 
             // Attempt delivery via APIC bus → Local APIC
-            let done = if let Some(lapic) = lapic.as_deref_mut() {
-                // Single-CPU: deliver directly to the LAPIC.
-                let trigger = entry.trigger_mode();
-                lapic.deliver(vector, entry.delivery_mode(), trigger);
-                true
+            let trigger = entry.trigger_mode();
+            let delivery_mode = entry.delivery_mode();
+            let dest = entry.destination() as u32;
+            let dest_mode = entry.destination_mode();
+            let mut queued = false;
+            let done = if delivery_mode == IoApicDeliveryMode::LowPriority as u8 && dest_mode == 0 {
+                // Bochs apic_bus_deliver_interrupt rejects lowest-priority
+                // delivery in physical destination mode.
+                false
+            } else if let Some(lapic) = lapic.as_deref_mut() {
+                let accepts = if dest_mode != 0 {
+                    lapic.matches_logical_dest(dest)
+                } else {
+                    dest == lapic.get_id() || (dest & APIC_ID_MASK) == APIC_ID_MASK
+                };
+                if accepts {
+                    lapic.deliver(vector, delivery_mode, trigger);
+                }
+                accepts
+            } else if self.enqueue_delivery(
+                pin as u8,
+                vector,
+                delivery_mode,
+                trigger,
+                dest,
+                dest_mode,
+                needs_pic_iac,
+            ) {
+                if trigger == 0 {
+                    self.irr &= !mask;
+                }
+                queued = true;
+                false
             } else {
-                // No LAPIC available (MMIO path) — enqueue for later delivery
-                let trigger = entry.trigger_mode();
-                self.enqueue_delivery(vector, entry.delivery_mode(), trigger);
-                true
+                false
             };
+
+            if queued {
+                self.ioredtbl[pin].set_delivery_status();
+                continue;
+            }
 
             // Bochs: (ioapic.cc)
             let entry = &mut self.ioredtbl[pin];
@@ -807,19 +866,73 @@ impl BxIoApic {
     }
 
     /// Enqueue an interrupt delivery for later drain by the emulator.
-    fn enqueue_delivery(&mut self, vector: u8, delivery_mode: u8, trigger_mode: u8) {
+    fn enqueue_delivery(
+        &mut self,
+        pin: u8,
+        vector: u8,
+        delivery_mode: u8,
+        trigger_mode: u8,
+        dest: u32,
+        dest_mode: u8,
+        needs_pic_iac: bool,
+    ) -> bool {
         if self.num_pending_deliveries < self.pending_deliveries.len() {
-            self.pending_deliveries[self.num_pending_deliveries] =
-                (vector, delivery_mode, trigger_mode);
+            self.pending_deliveries[self.num_pending_deliveries] = PendingIoApicDelivery {
+                pin,
+                vector,
+                delivery_mode,
+                trigger_mode,
+                dest,
+                dest_mode,
+                needs_pic_iac,
+            };
             self.num_pending_deliveries += 1;
+            true
+        } else {
+            false
         }
     }
 
     /// Take all pending deliveries, resetting the queue.
-    pub(crate) fn take_pending_deliveries(&mut self) -> ([(u8, u8, u8); 8], usize) {
+    pub(crate) fn take_pending_deliveries(
+        &mut self,
+    ) -> (
+        [PendingIoApicDelivery; IOAPIC_PENDING_DELIVERY_CAPACITY],
+        usize,
+    ) {
         let result = (self.pending_deliveries, self.num_pending_deliveries);
         self.num_pending_deliveries = 0;
         result
+    }
+
+    pub(crate) fn complete_deferred_delivery(
+        &mut self,
+        delivery: PendingIoApicDelivery,
+        done: bool,
+    ) {
+        let pin = delivery.pin as usize;
+        if pin >= IOAPIC_NUM_PINS {
+            return;
+        }
+
+        let mask = 1u32 << pin;
+        let entry = &mut self.ioredtbl[pin];
+        if done {
+            if delivery.trigger_mode == 0 {
+                self.irr &= !mask;
+            }
+            entry.clear_delivery_status();
+            self.stuck_count = 0;
+        } else {
+            if delivery.trigger_mode == 0 {
+                self.irr |= mask;
+            }
+            entry.set_delivery_status();
+            self.stuck_count += 1;
+            if self.stuck_count > 5 {
+                tracing::debug!("IOAPIC: vector {:#04x} stuck?", delivery.vector);
+            }
+        }
     }
 
     /// Dump IOAPIC state for HLT diagnostics.

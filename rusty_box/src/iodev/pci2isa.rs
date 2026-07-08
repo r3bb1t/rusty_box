@@ -14,6 +14,7 @@
 //! based on PIRQ routing registers. Each PIRQ can be mapped to any
 //! ISA IRQ or disabled (bit 7 = 1).
 
+use crate::cpu::ResetReason;
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
 
@@ -67,7 +68,7 @@ pub struct BxPiix3 {
     /// Flag: ELCR2 changed — emulator should call pic.set_mode()
     pub elcr2_changed: bool,
     /// Flag: reset requested — emulator should handle CPU reset
-    pub reset_request: Option<bool>, // Some(true) = hardware, Some(false) = software
+    pub reset_request: Option<ResetReason>,
 }
 
 impl Default for BxPiix3 {
@@ -227,9 +228,9 @@ impl BxPiix3 {
                 self.pci_reset = (value as u8) & 0x02;
                 if (value as u8) & 0x04 != 0 {
                     if self.pci_reset != 0 {
-                        self.reset_request = Some(true); // hardware reset
+                        self.reset_request = Some(ResetReason::Hardware);
                     } else {
-                        self.reset_request = Some(false); // software reset
+                        self.reset_request = Some(ResetReason::Software);
                     }
                 }
             }
@@ -478,6 +479,6 @@ mod tests {
         assert!(bridge.reset_request.is_none());
         bridge.write(0x0CF9, 0x06, 1); // Set type + trigger
         assert!(bridge.reset_request.is_some());
-        assert_eq!(bridge.reset_request, Some(true)); // hardware reset
+        assert_eq!(bridge.reset_request, Some(ResetReason::Hardware));
     }
 }

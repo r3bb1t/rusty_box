@@ -20,7 +20,9 @@ use crate::cpu::cpuid::BxCpuIdTrait;
 use crate::emulator::Emulator;
 
 const SNAPSHOT_MAGIC: &[u8; 8] = b"RBXSNAP1";
-const SNAPSHOT_VERSION: u32 = 1;
+// Version 2: CPU section gained VMX/SVM virtualization state (mode flags,
+// VMCS/VMCB pointers, SVM MSRs, and the full VMCS/VMCB caches).
+const SNAPSHOT_VERSION: u32 = 2;
 
 // Section IDs — matching Bochs siminterface.cc section layout
 const SEC_CPU: u32 = 1;

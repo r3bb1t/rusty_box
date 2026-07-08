@@ -11,6 +11,7 @@ use std::sync::{
 };
 
 use egui::{Color32, RichText, Stroke};
+use rusty_box::params::{BxParams, BX_MAX_SMP_THREADS_SUPPORTED};
 use rusty_box_bximage::{
     calculate_hard_disk_geometry, CreatedImage as BxCreatedImage, FloppyFormat, ImageSize,
     SectorSize,
@@ -116,7 +117,9 @@ pub struct NativeShellApp {
 pub(crate) struct NativeVmInfo {
     pub name: String,
     pub memory_mib: u32,
+    #[allow(dead_code)]
     pub ips: u32,
+    pub cpus: u32,
     pub boot: String,
     pub disk: Option<PathBuf>,
     pub cdrom: Option<PathBuf>,
@@ -135,6 +138,7 @@ impl NativeVmInfo {
             name: name.to_owned(),
             memory_mib: config.memory_mib,
             ips: config.ips,
+            cpus: config.cpu_params.cpu_count(),
             boot: config
                 .boot_order
                 .iter()
@@ -156,6 +160,7 @@ struct NativeVmSettings {
     host_memory_mib: u32,
     memory_block_kib: u32,
     ips: u32,
+    cpus: u32,
     boot_device: crate::args::BootDevice,
     pci: bool,
     sync_slowdown: bool,
@@ -184,6 +189,7 @@ impl NativeVmSettings {
             host_memory_mib: config.host_memory_mib,
             memory_block_kib: config.memory_block_kib,
             ips: config.ips,
+            cpus: config.cpu_params.cpu_count(),
             boot_device: config
                 .boot_order
                 .first()
@@ -219,6 +225,11 @@ impl NativeVmSettings {
         config.host_memory_mib = self.host_memory_mib.max(1);
         config.memory_block_kib = self.memory_block_kib.max(1);
         config.ips = self.ips.max(1);
+        config.cpu_params = BxParams::default()
+            .with_topology(self.cpus.max(1), 1, 1)
+            .map_err(|_| {
+                format!("CPU count must be between 1 and {BX_MAX_SMP_THREADS_SUPPORTED}")
+            })?;
         config.pci = self.pci;
         config.sync_slowdown = self.sync_slowdown;
         config.max_instructions = if self.max_instructions == 0 {
@@ -579,6 +590,12 @@ const WEB_DEFAULT_MEMORY_MIB: usize = 128;
 const WEB_MAX_MEMORY_MIB: usize = 4096;
 #[cfg(any(test, target_arch = "wasm32"))]
 const WEB_MEMORY_DRAG_SPEED_MIB: f64 = 1.0;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_MIN_CPU_COUNT: u32 = 1;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_DEFAULT_CPU_COUNT: u32 = 1;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_MAX_CPU_COUNT: u32 = BX_MAX_SMP_THREADS_SUPPORTED;
 
 #[cfg(any(test, target_arch = "wasm32"))]
 fn web_primary_action_label(has_vm: bool) -> &'static str {
@@ -724,15 +741,21 @@ impl NativeShellApp {
         let vm_info = profile.vm_info();
         let settings = profile.settings.clone();
         let config = profile.config.clone();
-        let mut chrome = ShellChrome::with_library(vec![profile.library_entry()]);
+        let chrome = ShellChrome::with_library(vec![profile.library_entry()]);
         #[cfg(target_os = "android")]
-        {
+        let chrome = {
+            let mut chrome = chrome;
             chrome.show_library = false;
             chrome.show_serial = false;
-        }
-        let mut emulator = rusty_box::gui::RustyBoxApp::new(cc, Arc::clone(&shared));
+            chrome
+        };
+        let emulator = rusty_box::gui::RustyBoxApp::new(cc, Arc::clone(&shared));
         #[cfg(target_os = "android")]
-        emulator.set_fit_to_available(true);
+        let emulator = {
+            let mut emulator = emulator;
+            emulator.set_fit_to_available(true);
+            emulator
+        };
         Self {
             emulator,
             chrome,
@@ -1308,10 +1331,27 @@ impl NativeShellApp {
                 hardware_intro(
                     ui,
                     "Virtual CPU",
-                    "The IPS target controls pacing. Max instructions of 0 means unlimited.",
+                    "Select virtual processors and pacing before power-on. Max instructions of 0 means unlimited.",
                 );
-                detail_row(ui, "Virtual processors", "1");
+                detail_row(ui, "Virtual processors", &self.vm_info.cpus.to_string());
                 ui.add_enabled_ui(editable, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Virtual processors")
+                                .strong()
+                                .color(TEXT_PRIMARY),
+                        );
+                        changed |= draw_u32_field(
+                            ui,
+                            &mut self.settings.cpus,
+                            1,
+                            BX_MAX_SMP_THREADS_SUPPORTED,
+                            "",
+                            editable,
+                            1,
+                            None,
+                        );
+                    });
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("IPS target").strong().color(TEXT_PRIMARY));
                         changed |= draw_u32_field(
@@ -1832,7 +1872,12 @@ impl NativeShellApp {
                     } else {
                         "Stopped"
                     };
-                    ui.label(RichText::new(state).monospace().size(11.0).color(TEXT_PRIMARY));
+                    ui.label(
+                        RichText::new(state)
+                            .monospace()
+                            .size(11.0)
+                            .color(TEXT_PRIMARY),
+                    );
                     ui.separator();
                     ui.label(
                         RichText::new(format_ips_u32(status.ips))
@@ -2112,6 +2157,7 @@ pub struct WebShellApp {
     uploaded_media_name: Option<String>,
     uploaded_media_bytes: Option<usize>,
     web_memory_mib: usize,
+    web_cpu_count: u32,
     total_instructions: u64,
     last_ips_time: web_time::Instant,
     last_ips_instructions: u64,
@@ -2163,16 +2209,18 @@ struct WebStartupState {
     emulator: Option<WebEmulator>,
     iso_data: Option<Vec<u8>>,
     memory_mib: usize,
+    cpu_count: u32,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl WebStartupState {
-    fn new(iso_data: Vec<u8>, memory_mib: usize) -> Self {
+    fn new(iso_data: Vec<u8>, memory_mib: usize, cpu_count: u32) -> Self {
         Self {
             stage: WebStartupStage::CreateEmulator,
             emulator: None,
             iso_data: Some(iso_data),
             memory_mib,
+            cpu_count,
         }
     }
 }
@@ -2260,6 +2308,16 @@ fn web_can_edit_memory(has_vm: bool) -> bool {
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
+fn web_cpu_count_is_supported(cpu_count: u32) -> bool {
+    (WEB_MIN_CPU_COUNT..=WEB_MAX_CPU_COUNT).contains(&cpu_count)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_can_edit_cpu_count(has_vm: bool) -> bool {
+    !has_vm
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
 fn web_runtime_state(
     has_error: bool,
     startup_pending: bool,
@@ -2310,8 +2368,11 @@ fn web_should_continue_emulator_frame(frame_executed: u64, elapsed: core::time::
         && elapsed < core::time::Duration::from_millis(WEB_FRAME_TIME_BUDGET_MS)
 }
 
-#[cfg(target_arch = "wasm32")]
-fn web_uploaded_media_config(memory_mib: usize) -> rusty_box::emulator::EmulatorConfig {
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_uploaded_media_config(
+    memory_mib: usize,
+    cpu_count: u32,
+) -> rusty_box::emulator::EmulatorConfig {
     let ram_size = memory_mib * 1024 * 1024;
     rusty_box::emulator::EmulatorConfig {
         guest_memory_size: ram_size,
@@ -2319,6 +2380,9 @@ fn web_uploaded_media_config(memory_mib: usize) -> rusty_box::emulator::Emulator
         memory_block_size: 128 * 1024,
         ips: 300_000_000,
         pci_enabled: true,
+        cpu_params: BxParams::default()
+            .with_topology(cpu_count, 1, 1)
+            .expect("web CPU count is range-checked by the launcher"),
         ..Default::default()
     }
 }
@@ -2355,6 +2419,7 @@ impl WebShellApp {
             uploaded_media_name: None,
             uploaded_media_bytes: None,
             web_memory_mib: WEB_DEFAULT_MEMORY_MIB,
+            web_cpu_count: WEB_DEFAULT_CPU_COUNT,
             total_instructions: 0,
             last_ips_time: web_time::Instant::now(),
             last_ips_instructions: 0,
@@ -2365,7 +2430,11 @@ impl WebShellApp {
 
     fn begin_uploaded_media_startup(&mut self, upload: WebUploadedMedia) {
         self.record_uploaded_media_metadata(&upload.name, upload.data.len());
-        self.startup = Some(WebStartupState::new(upload.data, self.web_memory_mib));
+        self.startup = Some(WebStartupState::new(
+            upload.data,
+            self.web_memory_mib,
+            self.web_cpu_count,
+        ));
         self.boot_mode = WebBootMode::UploadedMedia;
         self.chrome.selected_page = ShellPage::Console;
         self.initialized = false;
@@ -2413,7 +2482,10 @@ impl WebShellApp {
             WebStartupStage::CreateEmulator => {
                 let emu = rusty_box::emulator::Emulator::<
                     rusty_box::cpu::core_i7_skylake::Corei7SkylakeX,
-                >::new(web_uploaded_media_config(startup.memory_mib))
+                >::new(web_uploaded_media_config(
+                    startup.memory_mib,
+                    startup.cpu_count,
+                ))
                 .map_err(|error| format!("{error:?}"))?;
                 startup.emulator = Some(emu);
             }
@@ -2536,6 +2608,13 @@ impl WebShellApp {
         if let Some(entry) = self.chrome.vm_library.get_mut(0) {
             entry.memory = web_memory_label(memory_mib);
         }
+    }
+
+    fn set_web_cpu_count(&mut self, cpu_count: u32) {
+        if !web_cpu_count_is_supported(cpu_count) || !web_can_edit_cpu_count(self.web_has_vm()) {
+            return;
+        }
+        self.web_cpu_count = cpu_count;
     }
 
     fn open_file_picker(&mut self) {
@@ -3113,10 +3192,37 @@ impl WebShellApp {
                 hardware_intro(
                     ui,
                     "Cooperative CPU",
-                    "Browser execution runs in frame-sized batches to keep the UI responsive while the emulator advances.",
+                    "Select virtual processors before boot. Browser execution still uses frame-sized batches to keep the UI responsive.",
                 );
-                detail_row(ui, "Virtual processors", "1");
+                detail_row(ui, "Virtual processors", &self.web_cpu_count.to_string());
                 detail_row(ui, "Execution", "Cooperative frame batches");
+                let can_edit = web_can_edit_cpu_count(self.web_has_vm());
+                let mut cpu_count = self.web_cpu_count;
+                ui.add_enabled_ui(can_edit, |ui| {
+                    let changed = ui
+                        .add(
+                            egui::DragValue::new(&mut cpu_count)
+                                .range(WEB_MIN_CPU_COUNT..=WEB_MAX_CPU_COUNT)
+                                .speed(1.0),
+                        )
+                        .changed();
+                    ui.label(
+                        RichText::new(format!(
+                            "Range: {} – {}",
+                            WEB_MIN_CPU_COUNT, WEB_MAX_CPU_COUNT
+                        ))
+                        .color(TEXT_MUTED),
+                    );
+                    if changed {
+                        self.set_web_cpu_count(cpu_count);
+                    }
+                });
+                if !can_edit {
+                    ui.label(
+                        RichText::new("Reset the browser VM before changing processors.")
+                            .color(TEXT_MUTED),
+                    );
+                }
             }
             HardwareDevice::Devices => {
                 hardware_intro(
@@ -3635,6 +3741,7 @@ mod tests {
                 channel: 1,
                 drive: 0,
             }),
+            cpu_params: BxParams::default(),
             log_level: crate::args::LogLevel::Warn,
         }
     }
@@ -3753,6 +3860,22 @@ mod tests {
         assert!(!web_memory_mib_is_supported(4097));
         assert!(web_can_edit_memory(false));
         assert!(!web_can_edit_memory(true));
+    }
+
+    #[test]
+    fn web_cpu_profiles_are_user_selectable() {
+        assert_eq!(WEB_DEFAULT_CPU_COUNT, 1);
+        assert_eq!(WEB_MAX_CPU_COUNT, BX_MAX_SMP_THREADS_SUPPORTED);
+        assert!(web_cpu_count_is_supported(1));
+        assert!(web_cpu_count_is_supported(8));
+        assert!(web_cpu_count_is_supported(BX_MAX_SMP_THREADS_SUPPORTED));
+        assert!(!web_cpu_count_is_supported(0));
+        assert!(!web_cpu_count_is_supported(
+            BX_MAX_SMP_THREADS_SUPPORTED + 1
+        ));
+        assert_eq!(web_uploaded_media_config(128, 8).cpu_params.cpu_count(), 8);
+        assert!(web_can_edit_cpu_count(false));
+        assert!(!web_can_edit_cpu_count(true));
     }
 
     #[test]

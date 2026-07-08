@@ -48,10 +48,10 @@ fn main() {
     let bios_data = find_file(
         &workspace_root,
         &[
-            "cpp_orig/bochs/bios/BIOS-bochs-latest",
-            "cpp_orig/bochs/bios/BIOS-bochs-legacy",
+            "cpp_orig/bochs/bochs/bios/BIOS-bochs-latest",
+            "cpp_orig/bochs/bochs/bios/BIOS-bochs-legacy",
             "BIOS-bochs-latest",
-            "../cpp_orig/bochs/bios/BIOS-bochs-latest",
+            "../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest",
         ],
     )
     .expect("Could not find BIOS file");
@@ -61,9 +61,9 @@ fn main() {
         &workspace_root,
         &[
             "binaries/bios/VGABIOS-lgpl-latest.bin",
-            "cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin",
+            "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin",
             "VGABIOS-lgpl-latest.bin",
-            "../cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin",
+            "../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin",
         ],
         |data| data.len() % 512 == 0,
     );

@@ -7,6 +7,7 @@
 //! BX_CPU_C::cpu_loop() switch statement.
 
 use super::{
+    avx::{VexFmaForm, VexPackedFmaOp, VexScalarFmaOp},
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, Opcode},
@@ -1467,10 +1468,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::LfsGqMp => self.lfs_gq_mp(instr),
             Opcode::LgsGqMp => self.lgs_gq_mp(instr),
 
-            Opcode::Cpuid => {
-                self.cpuid(instr);
-                Ok(())
-            }
+            Opcode::Cpuid => self.cpuid(instr),
             Opcode::Rdtsc => self.rdtsc(instr),
             Opcode::Rdpmc => self.rdpmc(instr),
             Opcode::Rdmsr => self.rdmsr(instr),
@@ -2591,6 +2589,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::MaxpdVpdWpd => self.maxpd_vpd_wpd(instr),
             Opcode::MaxssVssWss => self.maxss_vss_wss(instr),
             Opcode::MaxsdVsdWsd => self.maxsd_vsd_wsd(instr),
+            Opcode::RoundpsVpsWpsIb => self.roundps_vps_wps_ib(instr),
+            Opcode::RoundpdVpdWpdIb => self.roundpd_vpd_wpd_ib(instr),
+            Opcode::RoundssVssWssIb => self.roundss_vss_wss_ib(instr),
+            Opcode::RoundsdVsdWsdIb => self.roundsd_vsd_wsd_ib(instr),
 
             // SSE/SSE2 Reciprocal & Reciprocal Square Root (sse_rcp.rs)
             Opcode::RcppsVpsWps => self.rcpps_vps_wps(instr),
@@ -3409,6 +3411,188 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.evex_vcvttps2udq(instr)
             }
 
+            // --- VEX FMA3 (avx.rs) ---
+            Opcode::Vfmaddsub132psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::FmaddSub)
+            }
+            Opcode::Vfmaddsub132pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::FmaddSub)
+            }
+            Opcode::Vfmsubadd132psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::FmsubAdd)
+            }
+            Opcode::Vfmsubadd132pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::FmsubAdd)
+            }
+            Opcode::Vfmadd132psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::Fmadd)
+            }
+            Opcode::Vfmadd132pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::Fmadd)
+            }
+            Opcode::Vfmadd132ssVpsHssWss => {
+                self.vex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::Vfmadd132sdVpdHsdWsd => {
+                self.vex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::Vfmsub132psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::Fmsub)
+            }
+            Opcode::Vfmsub132pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::Fmsub)
+            }
+            Opcode::Vfmsub132ssVpsHssWss => {
+                self.vex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::Vfmsub132sdVpdHsdWsd => {
+                self.vex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::Vfnmadd132psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::Fnmadd)
+            }
+            Opcode::Vfnmadd132pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::Fnmadd)
+            }
+            Opcode::Vfnmadd132ssVpsHssWss => {
+                self.vex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::Vfnmadd132sdVpdHsdWsd => {
+                self.vex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::Vfnmsub132psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::Fnmsub)
+            }
+            Opcode::Vfnmsub132pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::Fnmsub)
+            }
+            Opcode::Vfnmsub132ssVpsHssWss => {
+                self.vex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::Vfnmsub132sdVpdHsdWsd => {
+                self.vex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::Vfmaddsub213psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F213, VexPackedFmaOp::FmaddSub)
+            }
+            Opcode::Vfmaddsub213pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F213, VexPackedFmaOp::FmaddSub)
+            }
+            Opcode::Vfmsubadd213psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F213, VexPackedFmaOp::FmsubAdd)
+            }
+            Opcode::Vfmsubadd213pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F213, VexPackedFmaOp::FmsubAdd)
+            }
+            Opcode::Vfmadd213psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F213, VexPackedFmaOp::Fmadd)
+            }
+            Opcode::Vfmadd213pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F213, VexPackedFmaOp::Fmadd)
+            }
+            Opcode::Vfmadd213ssVpsHssWss => {
+                self.vex_fma_scalar_ss(instr, VexFmaForm::F213, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::Vfmadd213sdVpdHsdWsd => {
+                self.vex_fma_scalar_sd(instr, VexFmaForm::F213, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::Vfmsub213psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F213, VexPackedFmaOp::Fmsub)
+            }
+            Opcode::Vfmsub213pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F213, VexPackedFmaOp::Fmsub)
+            }
+            Opcode::Vfmsub213ssVpsHssWss => {
+                self.vex_fma_scalar_ss(instr, VexFmaForm::F213, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::Vfmsub213sdVpdHsdWsd => {
+                self.vex_fma_scalar_sd(instr, VexFmaForm::F213, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::Vfnmadd213psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F213, VexPackedFmaOp::Fnmadd)
+            }
+            Opcode::Vfnmadd213pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F213, VexPackedFmaOp::Fnmadd)
+            }
+            Opcode::Vfnmadd213ssVpsHssWss => {
+                self.vex_fma_scalar_ss(instr, VexFmaForm::F213, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::Vfnmadd213sdVpdHsdWsd => {
+                self.vex_fma_scalar_sd(instr, VexFmaForm::F213, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::Vfnmsub213psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F213, VexPackedFmaOp::Fnmsub)
+            }
+            Opcode::Vfnmsub213pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F213, VexPackedFmaOp::Fnmsub)
+            }
+            Opcode::Vfnmsub213ssVpsHssWss => {
+                self.vex_fma_scalar_ss(instr, VexFmaForm::F213, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::Vfnmsub213sdVpdHsdWsd => {
+                self.vex_fma_scalar_sd(instr, VexFmaForm::F213, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::Vfmaddsub231psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F231, VexPackedFmaOp::FmaddSub)
+            }
+            Opcode::Vfmaddsub231pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::FmaddSub)
+            }
+            Opcode::Vfmsubadd231psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F231, VexPackedFmaOp::FmsubAdd)
+            }
+            Opcode::Vfmsubadd231pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::FmsubAdd)
+            }
+            Opcode::Vfmadd231psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F231, VexPackedFmaOp::Fmadd)
+            }
+            Opcode::Vfmadd231pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::Fmadd)
+            }
+            Opcode::Vfmadd231ssVpsHssWss => {
+                self.vex_fma_scalar_ss(instr, VexFmaForm::F231, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::Vfmadd231sdVpdHsdWsd => {
+                self.vex_fma_scalar_sd(instr, VexFmaForm::F231, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::Vfmsub231psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F231, VexPackedFmaOp::Fmsub)
+            }
+            Opcode::Vfmsub231pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::Fmsub)
+            }
+            Opcode::Vfmsub231ssVpsHssWss => {
+                self.vex_fma_scalar_ss(instr, VexFmaForm::F231, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::Vfmsub231sdVpdHsdWsd => {
+                self.vex_fma_scalar_sd(instr, VexFmaForm::F231, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::Vfnmadd231psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F231, VexPackedFmaOp::Fnmadd)
+            }
+            Opcode::Vfnmadd231pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::Fnmadd)
+            }
+            Opcode::Vfnmadd231ssVpsHssWss => {
+                self.vex_fma_scalar_ss(instr, VexFmaForm::F231, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::Vfnmadd231sdVpdHsdWsd => {
+                self.vex_fma_scalar_sd(instr, VexFmaForm::F231, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::Vfnmsub231psVpsHpsWps => {
+                self.vex_fma_packed_ps(instr, VexFmaForm::F231, VexPackedFmaOp::Fnmsub)
+            }
+            Opcode::Vfnmsub231pdVpdHpdWpd => {
+                self.vex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::Fnmsub)
+            }
+            Opcode::Vfnmsub231ssVpsHssWss => {
+                self.vex_fma_scalar_ss(instr, VexFmaForm::F231, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::Vfnmsub231sdVpdHsdWsd => {
+                self.vex_fma_scalar_sd(instr, VexFmaForm::F231, VexScalarFmaOp::Fnmsub)
+            }
+
             // --- EVEX FMA (avx512_fma.rs) ---
             Opcode::EvexVfmadd132psVpsHpsWps | Opcode::EvexVfmadd132psVpsHpsWpsKmask => {
                 self.evex_vfmadd132ps(instr)
@@ -3806,10 +3990,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.evex_vpxord(instr)
             }
 
+            // --- VEX FP logical (Bochs HANDLE_AVX_2OP<xmm_*ps>) ---
+            Opcode::VandpsVpsHpsWps | Opcode::VandpdVpdHpdWpd => self.vandps(instr),
+            Opcode::VandnpsVpsHpsWps | Opcode::VandnpdVpdHpdWpd => self.vandnps(instr),
+            Opcode::VorpsVpsHpsWps | Opcode::VorpdVpdHpdWpd => self.vorps(instr),
+            Opcode::VxorpsVpsHpsWps | Opcode::VxorpdVpdHpdWpd => self.vxorps(instr),
+
             Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vextracti128WdqVdqIb => self.vextracti128(instr),
-            Opcode::V256Vperm2i128VdqHdqWdqIb => self.vperm2i128(instr),
+            Opcode::V256Vperm2f128VdqHdqWdqIb | Opcode::V256Vperm2i128VdqHdqWdqIb => {
+                self.vperm2f128(instr)
+            }
 
             // AVX1/AVX2 VBROADCAST (F128/I128 share handler, SS reuses D, SD reuses Q)
             Opcode::V256Vbroadcastf128VdqMdq | Opcode::V256Vbroadcasti128VdqMdq => {
@@ -3824,8 +4016,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::VpbroadcastwVdqWw => self.vpbroadcastw(instr),
             Opcode::VpbroadcastdVdqWd => self.vpbroadcastd(instr),
             Opcode::VpbroadcastqVdqWq => self.vpbroadcastq(instr),
-            // AVX2 VPERMD
+            // AVX2 VPERMD/VPERMQ
             Opcode::V256VpermdVdqHdqWdq => self.vpermd(instr),
+            Opcode::V256VpermqVdqWdqIb => self.vpermq(instr),
 
             // =====================================================================
             // VEX-encoded (V128/V256) integer arithmetic
@@ -3869,6 +4062,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::V128VpmulhrswVdqHdqWdq | Opcode::V256VpmulhrswVdqHdqWdq => {
                 self.vpmulhrsw(instr)
             }
+
+            Opcode::V128VpsadbwVdqHdqWdq | Opcode::V256VpsadbwVdqHdqWdq => self.vpsadbw(instr),
+
+            // =====================================================================
+            // VEX-encoded integer min/max
+            // =====================================================================
+            Opcode::V128VpminsbVdqHdqWdq | Opcode::V256VpminsbVdqHdqWdq => self.vpminsb(instr),
+            Opcode::V128VpminswVdqHdqWdq | Opcode::V256VpminswVdqHdqWdq => self.vpminsw(instr),
+            Opcode::V128VpminsdVdqHdqWdq | Opcode::V256VpminsdVdqHdqWdq => self.vpminsd(instr),
+            Opcode::V128VpminubVdqHdqWdq | Opcode::V256VpminubVdqHdqWdq => self.vpminub(instr),
+            Opcode::V128VpminuwVdqHdqWdq | Opcode::V256VpminuwVdqHdqWdq => self.vpminuw(instr),
+            Opcode::V128VpminudVdqHdqWdq | Opcode::V256VpminudVdqHdqWdq => self.vpminud(instr),
+            Opcode::V128VpmaxsbVdqHdqWdq | Opcode::V256VpmaxsbVdqHdqWdq => self.vpmaxsb(instr),
+            Opcode::V128VpmaxswVdqHdqWdq | Opcode::V256VpmaxswVdqHdqWdq => self.vpmaxsw(instr),
+            Opcode::V128VpmaxsdVdqHdqWdq | Opcode::V256VpmaxsdVdqHdqWdq => self.vpmaxsd(instr),
+            Opcode::V128VpmaxubVdqHdqWdq | Opcode::V256VpmaxubVdqHdqWdq => self.vpmaxub(instr),
+            Opcode::V128VpmaxuwVdqHdqWdq | Opcode::V256VpmaxuwVdqHdqWdq => self.vpmaxuw(instr),
+            Opcode::V128VpmaxudVdqHdqWdq | Opcode::V256VpmaxudVdqHdqWdq => self.vpmaxud(instr),
 
             // =====================================================================
             // VEX-encoded integer compare
@@ -4121,8 +4332,1494 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     self.prev_rip
                 );
                 Err(crate::cpu::CpuError::UnimplementedOpcode {
-                    opcode: "unimplemented opcode",
+                    opcode: instr.get_ia_opcode(),
                 })
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpu::CpuMode;
+    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::crregs::BxCr4;
+    use crate::cpu::decoder::BxSegregs;
+    use crate::memory::{BxMemC, BxMemoryStubC};
+    use std::ptr::NonNull;
+
+    #[derive(Clone, Copy)]
+    enum LaneWidth {
+        Byte,
+        Word,
+        Dword,
+    }
+
+    #[derive(Clone, Copy)]
+    struct VpminmaxCase {
+        opcode: Opcode,
+        vl: u8,
+        width: LaneWidth,
+        signed: bool,
+        take_max: bool,
+    }
+
+    fn make_vpminmax_instr(opcode: Opcode, vl: u8) -> Instruction {
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(opcode);
+        instr.set_vex(true);
+        instr.set_vl(vl);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(1, 3);
+        instr.set_src_reg(2, 2);
+        instr.set_seg(BxSegregs::Ds);
+        instr
+    }
+
+    fn make_vpsadbw_instr(opcode: Opcode, vl: u8) -> Instruction {
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(opcode);
+        instr.set_vex(true);
+        instr.set_vl(vl);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(1, 3);
+        instr.set_src_reg(2, 2);
+        instr.set_seg(BxSegregs::Ds);
+        instr
+    }
+
+    fn make_vex_fp_logical_instr(opcode: Opcode, vl: u8) -> Instruction {
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(opcode);
+        instr.set_vex(true);
+        instr.set_vl(vl);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(1, 3);
+        instr.set_src_reg(2, 2);
+        instr.set_seg(BxSegregs::Ds);
+        instr
+    }
+
+    fn enable_sse<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+    ) {
+        cpu.cr4.insert(BxCr4::OSFXSR);
+    }
+
+    fn make_legacy_round_instr(opcode: Opcode, dst: u8, src: u8, imm: u8) -> Instruction {
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(opcode);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, dst);
+        instr.set_src_reg(1, src);
+        instr.set_iq(imm as u64);
+        instr.set_seg(BxSegregs::Ds);
+        instr
+    }
+    #[test]
+    fn unimplemented_opcode_error_reports_exact_opcode() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::PminsbVdqWdq);
+
+        let error = cpu.execute_instruction(&instr).unwrap_err();
+
+        assert_eq!(error.to_string(), "Unimplemented opcode: PminsbVdqWdq");
+        match error {
+            crate::cpu::CpuError::UnimplementedOpcode { opcode } => {
+                assert_eq!(format!("{opcode:?}"), "PminsbVdqWdq");
+            }
+            other => panic!("expected unimplemented opcode error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn roundsd_legacy_regression_for_ubuntu_guest_userspace() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        let instr = make_legacy_round_instr(Opcode::RoundsdVsdWsdIb, 1, 3, 3);
+
+        for i in 0..8 {
+            cpu.vmm[1].set_zmm64u(i, 0xA5A5_0000_0000_0000 | i as u64);
+        }
+        cpu.vmm[3].set_zmm64u(0, 1.75f64.to_bits());
+
+        cpu.execute_instruction(&instr).unwrap();
+
+        assert_eq!(cpu.vmm[1].zmm64u(0), 1.0f64.to_bits());
+        for i in 1..8 {
+            assert_eq!(cpu.vmm[1].zmm64u(i), 0xA5A5_0000_0000_0000 | i as u64);
+        }
+    }
+
+    #[test]
+    fn legacy_sse41_round_family_register_semantics() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+
+        for i in 0..8 {
+            cpu.vmm[1].set_zmm64u(i, 0x5A5A_0000_0000_0000 | i as u64);
+        }
+        cpu.vmm[3].set_zmm32u(0, 1.25f32.to_bits());
+        cpu.vmm[3].set_zmm32u(1, 1.75f32.to_bits());
+        cpu.vmm[3].set_zmm32u(2, (-1.25f32).to_bits());
+        cpu.vmm[3].set_zmm32u(3, (-1.75f32).to_bits());
+        let instr = make_legacy_round_instr(Opcode::RoundpsVpsWpsIb, 1, 3, 1);
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(cpu.vmm[1].zmm32u(0), 1.0f32.to_bits());
+        assert_eq!(cpu.vmm[1].zmm32u(1), 1.0f32.to_bits());
+        assert_eq!(cpu.vmm[1].zmm32u(2), (-2.0f32).to_bits());
+        assert_eq!(cpu.vmm[1].zmm32u(3), (-2.0f32).to_bits());
+        assert_eq!(cpu.vmm[1].zmm64u(2), 0x5A5A_0000_0000_0000 | 2);
+
+        cpu.vmm[3].set_zmm64u(0, 1.25f64.to_bits());
+        cpu.vmm[3].set_zmm64u(1, (-1.25f64).to_bits());
+        let instr = make_legacy_round_instr(Opcode::RoundpdVpdWpdIb, 1, 3, 2);
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(cpu.vmm[1].zmm64u(0), 2.0f64.to_bits());
+        assert_eq!(cpu.vmm[1].zmm64u(1), (-1.0f64).to_bits());
+        assert_eq!(cpu.vmm[1].zmm64u(2), 0x5A5A_0000_0000_0000 | 2);
+
+        cpu.vmm[1].set_zmm32u(0, 0xDEAD_BEEF);
+        cpu.vmm[1].set_zmm32u(1, 0xCAFE_BABE);
+        cpu.vmm[1].set_zmm32u(2, 0xFEED_FACE);
+        cpu.vmm[1].set_zmm32u(3, 0x8BAD_F00D);
+        cpu.vmm[3].set_zmm32u(0, (-1.75f32).to_bits());
+        let instr = make_legacy_round_instr(Opcode::RoundssVssWssIb, 1, 3, 3);
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(cpu.vmm[1].zmm32u(0), (-1.0f32).to_bits());
+        assert_eq!(cpu.vmm[1].zmm32u(1), 0xCAFE_BABE);
+        assert_eq!(cpu.vmm[1].zmm32u(2), 0xFEED_FACE);
+        assert_eq!(cpu.vmm[1].zmm32u(3), 0x8BAD_F00D);
+
+        cpu.vmm[1].set_zmm64u(0, 0xDEAD_BEEF_DEAD_BEEF);
+        cpu.vmm[1].set_zmm64u(1, 0xCAFE_BABE_CAFE_BABE);
+        cpu.vmm[3].set_zmm64u(0, (-2.5f64).to_bits());
+        let instr = make_legacy_round_instr(Opcode::RoundsdVsdWsdIb, 1, 3, 0);
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(cpu.vmm[1].zmm64u(0), (-2.0f64).to_bits());
+        assert_eq!(cpu.vmm[1].zmm64u(1), 0xCAFE_BABE_CAFE_BABE);
+    }
+
+    #[test]
+    fn vex_vpminub_ymm_register_regression_for_ubuntu_opcode() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        let instr = make_vpminmax_instr(Opcode::V256VpminubVdqHdqWdq, 1);
+
+        for i in 0..64 {
+            cpu.vmm[1].set_zmmubyte(i, 0xA5);
+        }
+        for i in 0..32 {
+            let src1 = [0x80, 0xFF, 0x00, 0x7F][i % 4];
+            let src2 = [0xFF, 0x00, 0x7F, 0x80][i % 4];
+            cpu.vmm[2].set_zmmubyte(i, src1);
+            cpu.vmm[3].set_zmmubyte(i, src2);
+        }
+
+        cpu.execute_instruction(&instr).unwrap();
+
+        for i in 0..32 {
+            let expected = core::cmp::min(cpu.vmm[2].zmmubyte(i), cpu.vmm[3].zmmubyte(i));
+            assert_eq!(cpu.vmm[1].zmmubyte(i), expected, "byte lane {i}");
+        }
+        for i in 32..64 {
+            assert_eq!(cpu.vmm[1].zmmubyte(i), 0, "upper byte lane {i}");
+        }
+    }
+
+    #[test]
+    fn vex_vpsadbw_register_semantics_cover_v128_v256() {
+        for (opcode, vl, qword_count) in [
+            (Opcode::V128VpsadbwVdqHdqWdq, 0, 2),
+            (Opcode::V256VpsadbwVdqHdqWdq, 1, 4),
+        ] {
+            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            enable_sse(&mut cpu);
+            let instr = make_vpsadbw_instr(opcode, vl);
+
+            for i in 0..64 {
+                cpu.vmm[1].set_zmmubyte(i, 0xA5);
+            }
+            for i in 0..(qword_count * 8) {
+                let src1 = [0, 1, 127, 128, 254, 255, 42, 200][i % 8];
+                let src2 = [255, 254, 128, 127, 1, 0, 200, 42][i % 8];
+                cpu.vmm[2].set_zmmubyte(i, src1);
+                cpu.vmm[3].set_zmmubyte(i, src2);
+            }
+
+            cpu.execute_instruction(&instr).unwrap();
+
+            for qword in 0..qword_count {
+                let expected = (0..8)
+                    .map(|j| {
+                        let byte = qword * 8 + j;
+                        (cpu.vmm[2].zmmubyte(byte) as i16 - cpu.vmm[3].zmmubyte(byte) as i16)
+                            .unsigned_abs() as u64
+                    })
+                    .sum::<u64>();
+                assert_eq!(
+                    cpu.vmm[1].zmm64u(qword),
+                    expected,
+                    "{opcode:?} qword {qword}"
+                );
+            }
+            for qword in qword_count..8 {
+                assert_eq!(
+                    cpu.vmm[1].zmm64u(qword),
+                    0,
+                    "{opcode:?} upper qword {qword}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vex_vpsadbw_memory_source_uses_rm_operand() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+
+        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(mem_stub, false);
+        cpu.a20_mask = mem.a20_mask();
+        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
+        cpu.mem_ptr = Some(mem_vector);
+        cpu.mem_len = mem_len;
+        let (host_base, host_len) = mem.get_ram_base_ptr();
+        cpu.mem_host_base = host_base;
+        cpu.mem_host_len = host_len;
+        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::V256VpsadbwVdqHdqWdq);
+        instr.set_vex(true);
+        instr.set_vl(1);
+        instr.init(0, 0, 1, 1);
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(2, 2);
+        instr.set_sib_base(rusty_box_decoder::instruction::GprIndex::Rbx as usize as u8);
+        instr.set_sib_index(4);
+        instr.set_sib_scale(0);
+        instr.set_displ32(0);
+        instr.set_seg(BxSegregs::Ds);
+
+        cpu.set_gpr64(
+            rusty_box_decoder::instruction::GprIndex::Rbx as usize,
+            0x4000,
+        );
+        let mut rm_bytes = [0u8; 32];
+        for (i, byte) in rm_bytes.iter_mut().enumerate() {
+            *byte = [255, 0, 128, 127, 1, 254, 64, 192][i % 8];
+            cpu.write_virtual_byte_64(BxSegregs::Ds, 0x4000 + i as u64, *byte)
+                .unwrap();
+            cpu.vmm[2].set_zmmubyte(i, [0, 255, 127, 128, 254, 1, 192, 64][i % 8]);
+        }
+        for i in 0..64 {
+            cpu.vmm[1].set_zmmubyte(i, 0xA5);
+        }
+
+        cpu.execute_instruction(&instr).unwrap();
+
+        for qword in 0..4 {
+            let expected = (0..8)
+                .map(|j| {
+                    let byte = qword * 8 + j;
+                    (cpu.vmm[2].zmmubyte(byte) as i16 - rm_bytes[byte] as i16).unsigned_abs() as u64
+                })
+                .sum::<u64>();
+            assert_eq!(cpu.vmm[1].zmm64u(qword), expected, "qword {qword}");
+        }
+        for qword in 4..8 {
+            assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
+        }
+    }
+
+    #[test]
+    fn bts_ed_gd_memory_keeps_64_bit_effective_address() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(mem_stub, false);
+        cpu.a20_mask = mem.a20_mask();
+        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
+        cpu.mem_ptr = Some(mem_vector);
+        cpu.mem_len = mem_len;
+        let (host_base, host_len) = mem.get_ram_base_ptr();
+        cpu.mem_host_base = host_base;
+        cpu.mem_host_len = host_len;
+        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+        cpu.cpu_mode = CpuMode::Long64;
+
+        cpu.linaddr_width = 48;
+        const LOW_ADDR: u64 = 0x4000;
+        const HIGH_ADDR: u64 = 0x1_0000_4000;
+        cpu.write_virtual_dword_64(BxSegregs::Ds, LOW_ADDR, 0x1234_0000)
+            .unwrap();
+        cpu.set_rbx(HIGH_ADDR);
+        cpu.set_r14(1);
+
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::BtsEdGd);
+        instr.init(1, 0, 0, 1);
+        instr.set_src_reg(
+            1,
+            rusty_box_decoder::instruction::GprIndex::R14 as usize as u8,
+        );
+        instr.set_sib_base(rusty_box_decoder::instruction::GprIndex::Rbx as usize as u8);
+        instr.set_sib_index(4);
+        instr.set_sib_scale(0);
+        instr.set_displ32(0);
+        instr.set_seg(BxSegregs::Ds);
+
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(
+            cpu.read_virtual_dword_64(BxSegregs::Ds, LOW_ADDR).unwrap(),
+            0x1234_0000,
+            "BTS Ed,Gd in 64-bit address mode must not truncate the memory address"
+        );
+    }
+
+    #[test]
+    fn bts_ew_gw_memory_keeps_64_bit_effective_address() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(mem_stub, false);
+        cpu.a20_mask = mem.a20_mask();
+        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
+        cpu.mem_ptr = Some(mem_vector);
+        cpu.mem_len = mem_len;
+        let (host_base, host_len) = mem.get_ram_base_ptr();
+        cpu.mem_host_base = host_base;
+        cpu.mem_host_len = host_len;
+        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+        cpu.cpu_mode = CpuMode::Long64;
+        cpu.linaddr_width = 48;
+
+        const LOW_ADDR: u64 = 0x5000;
+        const HIGH_ADDR: u64 = 0x1_0000_5000;
+        cpu.write_virtual_word_64(BxSegregs::Ds, LOW_ADDR, 0x1200)
+            .unwrap();
+        cpu.set_rbx(HIGH_ADDR);
+        cpu.set_r14(1);
+
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::BtsEwGw);
+        instr.init(0, 0, 0, 1);
+        instr.set_src_reg(
+            1,
+            rusty_box_decoder::instruction::GprIndex::R14 as usize as u8,
+        );
+        instr.set_sib_base(rusty_box_decoder::instruction::GprIndex::Rbx as usize as u8);
+        instr.set_sib_index(4);
+        instr.set_sib_scale(0);
+        instr.set_displ32(0);
+        instr.set_seg(BxSegregs::Ds);
+
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(
+            cpu.read_virtual_word_64(BxSegregs::Ds, LOW_ADDR).unwrap(),
+            0x1200,
+            "BTS Ew,Gw in 64-bit address mode must not truncate the memory address"
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum VexLogicalOp {
+        And,
+        AndNot,
+        Or,
+        Xor,
+    }
+
+    fn expected_vex_logical(src1: u64, src2: u64, op: VexLogicalOp) -> u64 {
+        match op {
+            VexLogicalOp::And => src1 & src2,
+            VexLogicalOp::AndNot => !src1 & src2,
+            VexLogicalOp::Or => src1 | src2,
+            VexLogicalOp::Xor => src1 ^ src2,
+        }
+    }
+
+    #[test]
+    fn vex_fp_logical_family_register_semantics_cover_vl128_vl256() {
+        for (opcode, op) in [
+            (Opcode::VandpsVpsHpsWps, VexLogicalOp::And),
+            (Opcode::VandpdVpdHpdWpd, VexLogicalOp::And),
+            (Opcode::VandnpsVpsHpsWps, VexLogicalOp::AndNot),
+            (Opcode::VandnpdVpdHpdWpd, VexLogicalOp::AndNot),
+            (Opcode::VorpsVpsHpsWps, VexLogicalOp::Or),
+            (Opcode::VorpdVpdHpdWpd, VexLogicalOp::Or),
+            (Opcode::VxorpsVpsHpsWps, VexLogicalOp::Xor),
+            (Opcode::VxorpdVpdHpdWpd, VexLogicalOp::Xor),
+        ] {
+            for (vl, qword_count) in [(0, 2), (1, 4)] {
+                let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                enable_sse(&mut cpu);
+                let instr = make_vex_fp_logical_instr(opcode, vl);
+                for qword in 0..8 {
+                    cpu.vmm[1].set_zmm64u(qword, 0xA5A5_A5A5_A5A5_A5A5);
+                    cpu.vmm[2].set_zmm64u(
+                        qword,
+                        0xF0F0_0000_1234_5678u64.rotate_left((qword * 7) as u32),
+                    );
+                    cpu.vmm[3].set_zmm64u(
+                        qword,
+                        0x0F0F_FFFF_8765_4321u64.rotate_right((qword * 5) as u32),
+                    );
+                }
+
+                cpu.execute_instruction(&instr).unwrap();
+
+                for qword in 0..qword_count {
+                    assert_eq!(
+                        cpu.vmm[1].zmm64u(qword),
+                        expected_vex_logical(
+                            cpu.vmm[2].zmm64u(qword),
+                            cpu.vmm[3].zmm64u(qword),
+                            op
+                        ),
+                        "{opcode:?} VL{vl} qword {qword}"
+                    );
+                }
+                for qword in qword_count..8 {
+                    assert_eq!(
+                        cpu.vmm[1].zmm64u(qword),
+                        0,
+                        "{opcode:?} VL{vl} upper qword {qword}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vex_vxorps_memory_source_uses_rm_operand() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+
+        let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(mem_stub, false);
+        cpu.a20_mask = mem.a20_mask();
+        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
+        cpu.mem_ptr = Some(mem_vector);
+        cpu.mem_len = mem_len;
+        let (host_base, host_len) = mem.get_ram_base_ptr();
+        cpu.mem_host_base = host_base;
+        cpu.mem_host_len = host_len;
+        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::VxorpsVpsHpsWps);
+        instr.set_vex(true);
+        instr.set_vl(1);
+        instr.init(0, 0, 1, 1);
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(2, 2);
+        instr.set_sib_base(rusty_box_decoder::instruction::GprIndex::Rbx as usize as u8);
+        instr.set_sib_index(4);
+        instr.set_sib_scale(0);
+        instr.set_displ32(0);
+        instr.set_seg(BxSegregs::Ds);
+
+        cpu.set_rbx(0x6000);
+        let mut rm_qwords = [0u64; 4];
+        for qword in 0..4 {
+            let src1 = 0x0123_4567_89AB_CDEFu64.rotate_left((qword * 11) as u32);
+            let src2 = 0xFEDC_BA98_7654_3210u64.rotate_right((qword * 13) as u32);
+            rm_qwords[qword] = src2;
+            cpu.vmm[2].set_zmm64u(qword, src1);
+            cpu.write_virtual_qword_64(BxSegregs::Ds, 0x6000 + (qword * 8) as u64, src2)
+                .unwrap();
+        }
+        for qword in 0..8 {
+            cpu.vmm[1].set_zmm64u(qword, 0x5A5A_5A5A_5A5A_5A5A);
+        }
+
+        cpu.execute_instruction(&instr).unwrap();
+
+        for qword in 0..4 {
+            assert_eq!(
+                cpu.vmm[1].zmm64u(qword),
+                cpu.vmm[2].zmm64u(qword) ^ rm_qwords[qword],
+                "memory qword {qword}"
+            );
+        }
+        for qword in 4..8 {
+            assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
+        }
+    }
+
+    #[test]
+    fn vex_vpermq_register_semantics_match_bochs() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::V256VpermqVdqWdqIb);
+        instr.set_vex(true);
+        instr.set_vl(1);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, 1);
+        instr.set_src_reg(1, 3);
+        instr.set_iq(0b11_00_10_01);
+        instr.set_seg(BxSegregs::Ds);
+
+        let source = [
+            0x1111_1111_1111_1111,
+            0x2222_2222_2222_2222,
+            0x3333_3333_3333_3333,
+            0x4444_4444_4444_4444,
+        ];
+        for qword in 0..4 {
+            cpu.vmm[3].set_zmm64u(qword, source[qword]);
+        }
+        for qword in 0..8 {
+            cpu.vmm[1].set_zmm64u(qword, 0xA5A5_A5A5_A5A5_A5A5);
+        }
+
+        cpu.execute_instruction(&instr).unwrap();
+
+        assert_eq!(cpu.vmm[1].zmm64u(0), source[1]);
+        assert_eq!(cpu.vmm[1].zmm64u(1), source[2]);
+        assert_eq!(cpu.vmm[1].zmm64u(2), source[0]);
+        assert_eq!(cpu.vmm[1].zmm64u(3), source[3]);
+        for qword in 4..8 {
+            assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum VexFmaForm {
+        F132,
+        F213,
+        F231,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum VexPackedFmaOp {
+        Fmadd,
+        Fmsub,
+        Fnmadd,
+        Fnmsub,
+        FmaddSub,
+        FmsubAdd,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum VexScalarFmaOp {
+        Fmadd,
+        Fmsub,
+        Fnmadd,
+        Fnmsub,
+    }
+
+    fn vex_packed_fma_opcode(form: VexFmaForm, op: VexPackedFmaOp, is_double: bool) -> Opcode {
+        match (form, op, is_double) {
+            (VexFmaForm::F132, VexPackedFmaOp::Fmadd, false) => Opcode::Vfmadd132psVpsHpsWps,
+            (VexFmaForm::F132, VexPackedFmaOp::Fmadd, true) => Opcode::Vfmadd132pdVpdHpdWpd,
+            (VexFmaForm::F132, VexPackedFmaOp::Fmsub, false) => Opcode::Vfmsub132psVpsHpsWps,
+            (VexFmaForm::F132, VexPackedFmaOp::Fmsub, true) => Opcode::Vfmsub132pdVpdHpdWpd,
+            (VexFmaForm::F132, VexPackedFmaOp::Fnmadd, false) => Opcode::Vfnmadd132psVpsHpsWps,
+            (VexFmaForm::F132, VexPackedFmaOp::Fnmadd, true) => Opcode::Vfnmadd132pdVpdHpdWpd,
+            (VexFmaForm::F132, VexPackedFmaOp::Fnmsub, false) => Opcode::Vfnmsub132psVpsHpsWps,
+            (VexFmaForm::F132, VexPackedFmaOp::Fnmsub, true) => Opcode::Vfnmsub132pdVpdHpdWpd,
+            (VexFmaForm::F132, VexPackedFmaOp::FmaddSub, false) => Opcode::Vfmaddsub132psVpsHpsWps,
+            (VexFmaForm::F132, VexPackedFmaOp::FmaddSub, true) => Opcode::Vfmaddsub132pdVpdHpdWpd,
+            (VexFmaForm::F132, VexPackedFmaOp::FmsubAdd, false) => Opcode::Vfmsubadd132psVpsHpsWps,
+            (VexFmaForm::F132, VexPackedFmaOp::FmsubAdd, true) => Opcode::Vfmsubadd132pdVpdHpdWpd,
+
+            (VexFmaForm::F213, VexPackedFmaOp::Fmadd, false) => Opcode::Vfmadd213psVpsHpsWps,
+            (VexFmaForm::F213, VexPackedFmaOp::Fmadd, true) => Opcode::Vfmadd213pdVpdHpdWpd,
+            (VexFmaForm::F213, VexPackedFmaOp::Fmsub, false) => Opcode::Vfmsub213psVpsHpsWps,
+            (VexFmaForm::F213, VexPackedFmaOp::Fmsub, true) => Opcode::Vfmsub213pdVpdHpdWpd,
+            (VexFmaForm::F213, VexPackedFmaOp::Fnmadd, false) => Opcode::Vfnmadd213psVpsHpsWps,
+            (VexFmaForm::F213, VexPackedFmaOp::Fnmadd, true) => Opcode::Vfnmadd213pdVpdHpdWpd,
+            (VexFmaForm::F213, VexPackedFmaOp::Fnmsub, false) => Opcode::Vfnmsub213psVpsHpsWps,
+            (VexFmaForm::F213, VexPackedFmaOp::Fnmsub, true) => Opcode::Vfnmsub213pdVpdHpdWpd,
+            (VexFmaForm::F213, VexPackedFmaOp::FmaddSub, false) => Opcode::Vfmaddsub213psVpsHpsWps,
+            (VexFmaForm::F213, VexPackedFmaOp::FmaddSub, true) => Opcode::Vfmaddsub213pdVpdHpdWpd,
+            (VexFmaForm::F213, VexPackedFmaOp::FmsubAdd, false) => Opcode::Vfmsubadd213psVpsHpsWps,
+            (VexFmaForm::F213, VexPackedFmaOp::FmsubAdd, true) => Opcode::Vfmsubadd213pdVpdHpdWpd,
+
+            (VexFmaForm::F231, VexPackedFmaOp::Fmadd, false) => Opcode::Vfmadd231psVpsHpsWps,
+            (VexFmaForm::F231, VexPackedFmaOp::Fmadd, true) => Opcode::Vfmadd231pdVpdHpdWpd,
+            (VexFmaForm::F231, VexPackedFmaOp::Fmsub, false) => Opcode::Vfmsub231psVpsHpsWps,
+            (VexFmaForm::F231, VexPackedFmaOp::Fmsub, true) => Opcode::Vfmsub231pdVpdHpdWpd,
+            (VexFmaForm::F231, VexPackedFmaOp::Fnmadd, false) => Opcode::Vfnmadd231psVpsHpsWps,
+            (VexFmaForm::F231, VexPackedFmaOp::Fnmadd, true) => Opcode::Vfnmadd231pdVpdHpdWpd,
+            (VexFmaForm::F231, VexPackedFmaOp::Fnmsub, false) => Opcode::Vfnmsub231psVpsHpsWps,
+            (VexFmaForm::F231, VexPackedFmaOp::Fnmsub, true) => Opcode::Vfnmsub231pdVpdHpdWpd,
+            (VexFmaForm::F231, VexPackedFmaOp::FmaddSub, false) => Opcode::Vfmaddsub231psVpsHpsWps,
+            (VexFmaForm::F231, VexPackedFmaOp::FmaddSub, true) => Opcode::Vfmaddsub231pdVpdHpdWpd,
+            (VexFmaForm::F231, VexPackedFmaOp::FmsubAdd, false) => Opcode::Vfmsubadd231psVpsHpsWps,
+            (VexFmaForm::F231, VexPackedFmaOp::FmsubAdd, true) => Opcode::Vfmsubadd231pdVpdHpdWpd,
+        }
+    }
+
+    fn vex_scalar_fma_opcode(form: VexFmaForm, op: VexScalarFmaOp, is_double: bool) -> Opcode {
+        match (form, op, is_double) {
+            (VexFmaForm::F132, VexScalarFmaOp::Fmadd, false) => Opcode::Vfmadd132ssVpsHssWss,
+            (VexFmaForm::F132, VexScalarFmaOp::Fmadd, true) => Opcode::Vfmadd132sdVpdHsdWsd,
+            (VexFmaForm::F132, VexScalarFmaOp::Fmsub, false) => Opcode::Vfmsub132ssVpsHssWss,
+            (VexFmaForm::F132, VexScalarFmaOp::Fmsub, true) => Opcode::Vfmsub132sdVpdHsdWsd,
+            (VexFmaForm::F132, VexScalarFmaOp::Fnmadd, false) => Opcode::Vfnmadd132ssVpsHssWss,
+            (VexFmaForm::F132, VexScalarFmaOp::Fnmadd, true) => Opcode::Vfnmadd132sdVpdHsdWsd,
+            (VexFmaForm::F132, VexScalarFmaOp::Fnmsub, false) => Opcode::Vfnmsub132ssVpsHssWss,
+            (VexFmaForm::F132, VexScalarFmaOp::Fnmsub, true) => Opcode::Vfnmsub132sdVpdHsdWsd,
+
+            (VexFmaForm::F213, VexScalarFmaOp::Fmadd, false) => Opcode::Vfmadd213ssVpsHssWss,
+            (VexFmaForm::F213, VexScalarFmaOp::Fmadd, true) => Opcode::Vfmadd213sdVpdHsdWsd,
+            (VexFmaForm::F213, VexScalarFmaOp::Fmsub, false) => Opcode::Vfmsub213ssVpsHssWss,
+            (VexFmaForm::F213, VexScalarFmaOp::Fmsub, true) => Opcode::Vfmsub213sdVpdHsdWsd,
+            (VexFmaForm::F213, VexScalarFmaOp::Fnmadd, false) => Opcode::Vfnmadd213ssVpsHssWss,
+            (VexFmaForm::F213, VexScalarFmaOp::Fnmadd, true) => Opcode::Vfnmadd213sdVpdHsdWsd,
+            (VexFmaForm::F213, VexScalarFmaOp::Fnmsub, false) => Opcode::Vfnmsub213ssVpsHssWss,
+            (VexFmaForm::F213, VexScalarFmaOp::Fnmsub, true) => Opcode::Vfnmsub213sdVpdHsdWsd,
+
+            (VexFmaForm::F231, VexScalarFmaOp::Fmadd, false) => Opcode::Vfmadd231ssVpsHssWss,
+            (VexFmaForm::F231, VexScalarFmaOp::Fmadd, true) => Opcode::Vfmadd231sdVpdHsdWsd,
+            (VexFmaForm::F231, VexScalarFmaOp::Fmsub, false) => Opcode::Vfmsub231ssVpsHssWss,
+            (VexFmaForm::F231, VexScalarFmaOp::Fmsub, true) => Opcode::Vfmsub231sdVpdHsdWsd,
+            (VexFmaForm::F231, VexScalarFmaOp::Fnmadd, false) => Opcode::Vfnmadd231ssVpsHssWss,
+            (VexFmaForm::F231, VexScalarFmaOp::Fnmadd, true) => Opcode::Vfnmadd231sdVpdHsdWsd,
+            (VexFmaForm::F231, VexScalarFmaOp::Fnmsub, false) => Opcode::Vfnmsub231ssVpsHssWss,
+            (VexFmaForm::F231, VexScalarFmaOp::Fnmsub, true) => Opcode::Vfnmsub231sdVpdHsdWsd,
+        }
+    }
+
+    fn vex_fma_order_f32(form: VexFmaForm, v: f32, h: f32, w: f32) -> (f32, f32, f32) {
+        match form {
+            VexFmaForm::F132 => (v, w, h),
+            VexFmaForm::F213 => (h, v, w),
+            VexFmaForm::F231 => (h, w, v),
+        }
+    }
+
+    fn vex_fma_order_f64(form: VexFmaForm, v: f64, h: f64, w: f64) -> (f64, f64, f64) {
+        match form {
+            VexFmaForm::F132 => (v, w, h),
+            VexFmaForm::F213 => (h, v, w),
+            VexFmaForm::F231 => (h, w, v),
+        }
+    }
+
+    fn vex_packed_fma_result_f32(op: VexPackedFmaOp, lane: usize, a: f32, b: f32, c: f32) -> f32 {
+        match op {
+            VexPackedFmaOp::Fmadd => a.mul_add(b, c),
+            VexPackedFmaOp::Fmsub => a.mul_add(b, -c),
+            VexPackedFmaOp::Fnmadd => (-a).mul_add(b, c),
+            VexPackedFmaOp::Fnmsub => (-a).mul_add(b, -c),
+            VexPackedFmaOp::FmaddSub => {
+                if lane % 2 == 0 {
+                    a.mul_add(b, -c)
+                } else {
+                    a.mul_add(b, c)
+                }
+            }
+            VexPackedFmaOp::FmsubAdd => {
+                if lane % 2 == 0 {
+                    a.mul_add(b, c)
+                } else {
+                    a.mul_add(b, -c)
+                }
+            }
+        }
+    }
+
+    fn vex_packed_fma_result_f64(op: VexPackedFmaOp, lane: usize, a: f64, b: f64, c: f64) -> f64 {
+        match op {
+            VexPackedFmaOp::Fmadd => a.mul_add(b, c),
+            VexPackedFmaOp::Fmsub => a.mul_add(b, -c),
+            VexPackedFmaOp::Fnmadd => (-a).mul_add(b, c),
+            VexPackedFmaOp::Fnmsub => (-a).mul_add(b, -c),
+            VexPackedFmaOp::FmaddSub => {
+                if lane % 2 == 0 {
+                    a.mul_add(b, -c)
+                } else {
+                    a.mul_add(b, c)
+                }
+            }
+            VexPackedFmaOp::FmsubAdd => {
+                if lane % 2 == 0 {
+                    a.mul_add(b, c)
+                } else {
+                    a.mul_add(b, -c)
+                }
+            }
+        }
+    }
+
+    fn vex_scalar_fma_result_f32(op: VexScalarFmaOp, a: f32, b: f32, c: f32) -> f32 {
+        match op {
+            VexScalarFmaOp::Fmadd => a.mul_add(b, c),
+            VexScalarFmaOp::Fmsub => a.mul_add(b, -c),
+            VexScalarFmaOp::Fnmadd => (-a).mul_add(b, c),
+            VexScalarFmaOp::Fnmsub => (-a).mul_add(b, -c),
+        }
+    }
+
+    fn vex_scalar_fma_result_f64(op: VexScalarFmaOp, a: f64, b: f64, c: f64) -> f64 {
+        match op {
+            VexScalarFmaOp::Fmadd => a.mul_add(b, c),
+            VexScalarFmaOp::Fmsub => a.mul_add(b, -c),
+            VexScalarFmaOp::Fnmadd => (-a).mul_add(b, c),
+            VexScalarFmaOp::Fnmsub => (-a).mul_add(b, -c),
+        }
+    }
+
+    #[test]
+    fn vex_fma3_packed_register_semantics_match_bochs() {
+        for form in [VexFmaForm::F132, VexFmaForm::F213, VexFmaForm::F231] {
+            for op in [
+                VexPackedFmaOp::Fmadd,
+                VexPackedFmaOp::Fmsub,
+                VexPackedFmaOp::Fnmadd,
+                VexPackedFmaOp::Fnmsub,
+                VexPackedFmaOp::FmaddSub,
+                VexPackedFmaOp::FmsubAdd,
+            ] {
+                for is_double in [false, true] {
+                    for vl in [0, 1] {
+                        let lanes = match (is_double, vl) {
+                            (false, 0) => 4,
+                            (false, 1) => 8,
+                            (true, 0) => 2,
+                            (true, 1) => 4,
+                            _ => unreachable!(),
+                        };
+                        let opcode = vex_packed_fma_opcode(form, op, is_double);
+                        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                        enable_sse(&mut cpu);
+
+                        let mut instr = Instruction::default();
+                        instr.set_ia_opcode(opcode);
+                        instr.set_vex(true);
+                        instr.set_vl(vl);
+                        instr.init(0, 0, 1, 1);
+                        instr.assert_mod_c0();
+                        instr.set_src_reg(0, 1);
+                        instr.set_src_reg(1, 3);
+                        instr.set_src_reg(2, 2);
+                        instr.set_seg(BxSegregs::Ds);
+
+                        for qword in 0..8 {
+                            cpu.vmm[1].set_zmm64u(qword, 0xA5A5_A5A5_A5A5_A5A5);
+                            cpu.vmm[2].set_zmm64u(qword, 0);
+                            cpu.vmm[3].set_zmm64u(qword, 0);
+                        }
+
+                        if is_double {
+                            for lane in 0..lanes {
+                                cpu.vmm[1].set_zmm64u(lane, (lane as f64 + 1.0).to_bits());
+                                cpu.vmm[2].set_zmm64u(lane, (lane as f64 + 10.0).to_bits());
+                                cpu.vmm[3].set_zmm64u(lane, (lane as f64 + 2.0).to_bits());
+                            }
+                        } else {
+                            for lane in 0..lanes {
+                                cpu.vmm[1].set_zmm32u(lane, (lane as f32 + 1.0).to_bits());
+                                cpu.vmm[2].set_zmm32u(lane, (lane as f32 + 10.0).to_bits());
+                                cpu.vmm[3].set_zmm32u(lane, (lane as f32 + 2.0).to_bits());
+                            }
+                        }
+
+                        cpu.execute_instruction(&instr).unwrap();
+
+                        if is_double {
+                            for lane in 0..lanes {
+                                let v = lane as f64 + 1.0;
+                                let h = lane as f64 + 10.0;
+                                let w = lane as f64 + 2.0;
+                                let (a, b, c) = vex_fma_order_f64(form, v, h, w);
+                                let expected = vex_packed_fma_result_f64(op, lane, a, b, c);
+                                assert_eq!(
+                                    cpu.vmm[1].zmm64u(lane),
+                                    expected.to_bits(),
+                                    "{opcode:?} {form:?} {op:?} lane {lane}"
+                                );
+                            }
+                        } else {
+                            for lane in 0..lanes {
+                                let v = lane as f32 + 1.0;
+                                let h = lane as f32 + 10.0;
+                                let w = lane as f32 + 2.0;
+                                let (a, b, c) = vex_fma_order_f32(form, v, h, w);
+                                let expected = vex_packed_fma_result_f32(op, lane, a, b, c);
+                                assert_eq!(
+                                    cpu.vmm[1].zmm32u(lane),
+                                    expected.to_bits(),
+                                    "{opcode:?} {form:?} {op:?} lane {lane}"
+                                );
+                            }
+                        }
+
+                        let first_upper_qword = if vl == 0 { 2 } else { 4 };
+                        for qword in first_upper_qword..8 {
+                            assert_eq!(
+                                cpu.vmm[1].zmm64u(qword),
+                                0,
+                                "{opcode:?} {form:?} {op:?} upper qword {qword}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vex_fma3_scalar_register_semantics_match_bochs() {
+        for form in [VexFmaForm::F132, VexFmaForm::F213, VexFmaForm::F231] {
+            for op in [
+                VexScalarFmaOp::Fmadd,
+                VexScalarFmaOp::Fmsub,
+                VexScalarFmaOp::Fnmadd,
+                VexScalarFmaOp::Fnmsub,
+            ] {
+                for is_double in [false, true] {
+                    let opcode = vex_scalar_fma_opcode(form, op, is_double);
+                    let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                    enable_sse(&mut cpu);
+
+                    let mut instr = Instruction::default();
+                    instr.set_ia_opcode(opcode);
+                    instr.set_vex(true);
+                    instr.set_vl(0);
+                    instr.init(0, 0, 1, 1);
+                    instr.assert_mod_c0();
+                    instr.set_src_reg(0, 1);
+                    instr.set_src_reg(1, 3);
+                    instr.set_src_reg(2, 2);
+                    instr.set_seg(BxSegregs::Ds);
+
+                    for qword in 0..8 {
+                        cpu.vmm[1].set_zmm64u(qword, 0xDEAD_BEEF_DEAD_BEEF);
+                        cpu.vmm[2].set_zmm64u(qword, 0x2222_2222_2222_2222);
+                        cpu.vmm[3].set_zmm64u(qword, 0x3333_3333_3333_3333);
+                    }
+
+                    if is_double {
+                        cpu.vmm[1].set_zmm64u(0, 1.5f64.to_bits());
+                        cpu.vmm[1].set_zmm64u(1, 0xCAFE_BABE_CAFE_BABE);
+                        cpu.vmm[2].set_zmm64u(0, 4.0f64.to_bits());
+                        cpu.vmm[3].set_zmm64u(0, 2.0f64.to_bits());
+                    } else {
+                        cpu.vmm[1].set_zmm32u(0, 1.5f32.to_bits());
+                        cpu.vmm[1].set_zmm32u(1, 0xCAFE_BABE);
+                        cpu.vmm[2].set_zmm32u(0, 4.0f32.to_bits());
+                        cpu.vmm[3].set_zmm32u(0, 2.0f32.to_bits());
+                    }
+
+                    cpu.execute_instruction(&instr).unwrap();
+
+                    if is_double {
+                        let (a, b, c) = vex_fma_order_f64(form, 1.5, 4.0, 2.0);
+                        let expected = vex_scalar_fma_result_f64(op, a, b, c);
+                        assert_eq!(
+                            cpu.vmm[1].zmm64u(0),
+                            expected.to_bits(),
+                            "{opcode:?} {form:?} {op:?} lane 0"
+                        );
+                        assert_eq!(cpu.vmm[1].zmm64u(1), 0xCAFE_BABE_CAFE_BABE);
+                        for qword in 2..8 {
+                            assert_eq!(
+                                cpu.vmm[1].zmm64u(qword),
+                                0,
+                                "{opcode:?} {form:?} {op:?} upper qword {qword}"
+                            );
+                        }
+                    } else {
+                        let (a, b, c) = vex_fma_order_f32(form, 1.5, 4.0, 2.0);
+                        let expected = vex_scalar_fma_result_f32(op, a, b, c);
+                        assert_eq!(
+                            cpu.vmm[1].zmm32u(0),
+                            expected.to_bits(),
+                            "{opcode:?} {form:?} {op:?} lane 0"
+                        );
+                        assert_eq!(cpu.vmm[1].zmm32u(1), 0xCAFE_BABE);
+                        assert_eq!(cpu.vmm[1].zmm64u(1), 0xDEAD_BEEF_DEAD_BEEF);
+                        for qword in 2..8 {
+                            assert_eq!(
+                                cpu.vmm[1].zmm64u(qword),
+                                0,
+                                "{opcode:?} {form:?} {op:?} upper qword {qword}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vex_fma3_scalar_memory_runtime_sequences_use_rm_operand() {
+        for (opcode, form, expected) in [
+            (
+                Opcode::Vfmadd213sdVpdHsdWsd,
+                VexFmaForm::F213,
+                5.0f64.mul_add(3.0, 7.0),
+            ),
+            (
+                Opcode::Vfmadd231sdVpdHsdWsd,
+                VexFmaForm::F231,
+                5.0f64.mul_add(7.0, 3.0),
+            ),
+        ] {
+            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            enable_sse(&mut cpu);
+            cpu.cpu_mode = CpuMode::Long64;
+            cpu.linaddr_width = 48;
+
+            let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+            let mut mem = BxMemC::new(mem_stub, false);
+            cpu.a20_mask = mem.a20_mask();
+            let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
+            cpu.mem_ptr = Some(mem_vector);
+            cpu.mem_len = mem_len;
+            let (host_base, host_len) = mem.get_ram_base_ptr();
+            cpu.mem_host_base = host_base;
+            cpu.mem_host_len = host_len;
+            cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+
+            let mut instr = Instruction::default();
+            instr.set_ia_opcode(opcode);
+            instr.set_vex(true);
+            instr.set_vl(0);
+            instr.init(0, 0, 1, 1);
+            instr.set_src_reg(0, 1);
+            instr.set_src_reg(2, 2);
+            instr.set_sib_base(rusty_box_decoder::instruction::GprIndex::Rbx as usize as u8);
+            instr.set_sib_index(4);
+            instr.set_sib_scale(0);
+            instr.set_displ32(0);
+            instr.set_seg(BxSegregs::Ds);
+
+            cpu.set_rbx(0x7000);
+            cpu.vmm[1].set_zmm64u(0, 3.0f64.to_bits());
+            cpu.vmm[1].set_zmm64u(1, 0x1234_5678_9ABC_DEF0);
+            cpu.vmm[2].set_zmm64u(0, 5.0f64.to_bits());
+            cpu.write_virtual_qword_64(BxSegregs::Ds, 0x7000, 7.0f64.to_bits())
+                .unwrap();
+
+            cpu.execute_instruction(&instr).unwrap();
+
+            assert_eq!(
+                cpu.vmm[1].zmm64u(0),
+                expected.to_bits(),
+                "{opcode:?} {form:?} must use the memory RM operand as W"
+            );
+            assert_eq!(cpu.vmm[1].zmm64u(1), 0x1234_5678_9ABC_DEF0);
+            for qword in 2..8 {
+                assert_eq!(
+                    cpu.vmm[1].zmm64u(qword),
+                    0,
+                    "{opcode:?} {form:?} upper qword {qword}"
+                );
+            }
+        }
+    }
+
+    // Build a scalar-ss FMA instruction: dst=vmm1, src1(rm)=vmm3, src2(vvvv)=vmm2.
+    fn build_fma_scalar_ss(opcode: Opcode) -> Instruction {
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(opcode);
+        instr.set_vex(true);
+        instr.set_vl(0);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, 1); // dst  = vmm1  → handler `v`
+        instr.set_src_reg(1, 3); // src1 = vmm3  → handler `w` (rm)
+        instr.set_src_reg(2, 2); // src2 = vmm2  → handler `h` (vvvv)
+        instr.set_seg(BxSegregs::Ds);
+        instr
+    }
+
+    #[test]
+    fn vex_fma_scalar_honors_mxcsr_rounding_mode() {
+        use crate::cpu::softfloat3e::f32_mul_add::f32_mul_add;
+        use crate::cpu::softfloat3e::softfloat::{SoftFloatStatus, ROUND_NEAR_EVEN, ROUND_TO_ZERO};
+
+        // VFMADD213SS: result = h*v + w. With h=3, v=1, w=2^24 the fused sum
+        // 3 + 2^24 = 16_777_219 is inexact and rounds differently: nearest →
+        // 16_777_220, toward-zero → 16_777_218. Native f32::mul_add (nearest
+        // only) would ignore MXCSR.RC and fail this test.
+        let v = 1.0f32.to_bits(); // dst  → handler v
+        let h = 3.0f32.to_bits(); // vvvv → handler h
+        let w = 16_777_216.0f32.to_bits(); // rm → handler w  (= 2^24)
+        // Form 213 permutation → (a,b,c) = (h, v, w).
+        let (a, b, c) = (h, v, w);
+
+        let mut st_rne = SoftFloatStatus::default();
+        st_rne.softfloat_roundingMode = ROUND_NEAR_EVEN;
+        let expect_rne = f32_mul_add(a, b, c, 0, &mut st_rne);
+        let mut st_rtz = SoftFloatStatus::default();
+        st_rtz.softfloat_roundingMode = ROUND_TO_ZERO;
+        let expect_rtz = f32_mul_add(a, b, c, 0, &mut st_rtz);
+        assert_ne!(
+            expect_rne, expect_rtz,
+            "test inputs must actually discriminate the rounding mode"
+        );
+
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        cpu.mxcsr.mxcsr = 0x1F80 | 0x6000; // all masked, RC = toward-zero
+
+        let instr = build_fma_scalar_ss(Opcode::Vfmadd213ssVpsHssWss);
+        cpu.vmm[1].set_zmm32u(0, v);
+        cpu.vmm[2].set_zmm32u(0, h);
+        cpu.vmm[3].set_zmm32u(0, w);
+
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(
+            cpu.vmm[1].zmm32u(0),
+            expect_rtz,
+            "FMA must round per MXCSR.RC (toward-zero)"
+        );
+        assert_ne!(cpu.vmm[1].zmm32u(0), expect_rne);
+    }
+
+    #[test]
+    fn vex_fma_scalar_sets_mxcsr_inexact_flag() {
+        use crate::cpu::xmm::Mxcsr;
+
+        // Same inexact case as above; default MXCSR (all masked, RC nearest)
+        // so no #XM — only the sticky PE (inexact) status bit is set.
+        let v = 1.0f32.to_bits();
+        let h = 3.0f32.to_bits();
+        let w = 16_777_216.0f32.to_bits();
+
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        cpu.mxcsr.mxcsr = 0x1F80; // architectural reset: all exceptions masked
+        assert!(!cpu.mxcsr.flags().contains(Mxcsr::PE));
+
+        let instr = build_fma_scalar_ss(Opcode::Vfmadd213ssVpsHssWss);
+        cpu.vmm[1].set_zmm32u(0, v);
+        cpu.vmm[2].set_zmm32u(0, h);
+        cpu.vmm[3].set_zmm32u(0, w);
+
+        cpu.execute_instruction(&instr).unwrap(); // masked → Ok, no fault
+        assert!(
+            cpu.mxcsr.flags().contains(Mxcsr::PE),
+            "inexact FMA result must set MXCSR.PE (native path never would)"
+        );
+    }
+
+    #[test]
+    fn vex_fma_scalar_honors_mxcsr_daz() {
+        use crate::cpu::softfloat3e::f32_mul_add::f32_mul_add;
+        use crate::cpu::softfloat3e::softfloat::SoftFloatStatus;
+        use crate::cpu::sse_fp::mxcsr_to_softfloat_status_word;
+
+        // VFMADD213SS: result = h*v + w. h = smallest positive subnormal,
+        // v = 1.0, w = 0.0 → result is the subnormal itself, unless DAZ
+        // flushes the subnormal input to +0 (→ result 0).
+        let v = 1.0f32.to_bits();
+        let h = 0x0000_0001u32; // smallest positive subnormal
+        let w = 0.0f32.to_bits();
+        let (a, b, c) = (h, v, w); // form 213 → (h, v, w)
+
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        cpu.mxcsr.mxcsr = 0x1F80 | 0x0040; // all masked + DAZ (bit 6)
+
+        let mut st_daz = mxcsr_to_softfloat_status_word(cpu.mxcsr);
+        let expect_daz = f32_mul_add(a, b, c, 0, &mut st_daz);
+        let mut st_off = SoftFloatStatus::default();
+        let expect_off = f32_mul_add(a, b, c, 0, &mut st_off);
+        assert_ne!(expect_daz, expect_off, "DAZ must change the result here");
+        assert_eq!(expect_daz, 0, "DAZ flushes the subnormal input → +0 result");
+
+        let instr = build_fma_scalar_ss(Opcode::Vfmadd213ssVpsHssWss);
+        cpu.vmm[1].set_zmm32u(0, v);
+        cpu.vmm[2].set_zmm32u(0, h);
+        cpu.vmm[3].set_zmm32u(0, w);
+
+        cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(
+            cpu.vmm[1].zmm32u(0),
+            expect_daz,
+            "FMA must honor MXCSR.DAZ (flush subnormal input)"
+        );
+    }
+
+    fn all_vpminmax_cases() -> [VpminmaxCase; 24] {
+        [
+            VpminmaxCase {
+                opcode: Opcode::V128VpminsbVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Byte,
+                signed: true,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpminsbVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Byte,
+                signed: true,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpminswVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Word,
+                signed: true,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpminswVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Word,
+                signed: true,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpminsdVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Dword,
+                signed: true,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpminsdVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Dword,
+                signed: true,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpminubVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Byte,
+                signed: false,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpminubVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Byte,
+                signed: false,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpminuwVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Word,
+                signed: false,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpminuwVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Word,
+                signed: false,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpminudVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Dword,
+                signed: false,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpminudVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Dword,
+                signed: false,
+                take_max: false,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpmaxsbVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Byte,
+                signed: true,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpmaxsbVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Byte,
+                signed: true,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpmaxswVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Word,
+                signed: true,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpmaxswVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Word,
+                signed: true,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpmaxsdVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Dword,
+                signed: true,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpmaxsdVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Dword,
+                signed: true,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpmaxubVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Byte,
+                signed: false,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpmaxubVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Byte,
+                signed: false,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpmaxuwVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Word,
+                signed: false,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpmaxuwVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Word,
+                signed: false,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V128VpmaxudVdqHdqWdq,
+                vl: 0,
+                width: LaneWidth::Dword,
+                signed: false,
+                take_max: true,
+            },
+            VpminmaxCase {
+                opcode: Opcode::V256VpmaxudVdqHdqWdq,
+                vl: 1,
+                width: LaneWidth::Dword,
+                signed: false,
+                take_max: true,
+            },
+        ]
+    }
+
+    fn expected_u8(src1: u8, src2: u8, signed: bool, take_max: bool) -> u8 {
+        let select_src2 = if signed {
+            let a = src1 as i8;
+            let b = src2 as i8;
+            if take_max {
+                b > a
+            } else {
+                b < a
+            }
+        } else if take_max {
+            src2 > src1
+        } else {
+            src2 < src1
+        };
+        if select_src2 {
+            src2
+        } else {
+            src1
+        }
+    }
+
+    fn expected_u16(src1: u16, src2: u16, signed: bool, take_max: bool) -> u16 {
+        let select_src2 = if signed {
+            let a = src1 as i16;
+            let b = src2 as i16;
+            if take_max {
+                b > a
+            } else {
+                b < a
+            }
+        } else if take_max {
+            src2 > src1
+        } else {
+            src2 < src1
+        };
+        if select_src2 {
+            src2
+        } else {
+            src1
+        }
+    }
+
+    fn expected_u32(src1: u32, src2: u32, signed: bool, take_max: bool) -> u32 {
+        let select_src2 = if signed {
+            let a = src1 as i32;
+            let b = src2 as i32;
+            if take_max {
+                b > a
+            } else {
+                b < a
+            }
+        } else if take_max {
+            src2 > src1
+        } else {
+            src2 < src1
+        };
+        if select_src2 {
+            src2
+        } else {
+            src1
+        }
+    }
+
+    #[test]
+    fn vex_vpmin_vpmax_family_register_semantics() {
+        for case in all_vpminmax_cases() {
+            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            enable_sse(&mut cpu);
+            let instr = make_vpminmax_instr(case.opcode, case.vl);
+            for i in 0..64 {
+                cpu.vmm[1].set_zmmubyte(i, 0xA5);
+            }
+
+            match case.width {
+                LaneWidth::Byte => {
+                    let src1_vals = if case.signed {
+                        [0x80, 0x7F, 0xFF, 0x01, 0x80, 0x7F]
+                    } else {
+                        [0x80, 0xFF, 0x00, 0x7F, 0x80, 0xFF]
+                    };
+                    let src2_vals = if case.signed {
+                        [0x7F, 0x80, 0x01, 0xFF, 0x80, 0x7F]
+                    } else {
+                        [0xFF, 0x00, 0x7F, 0x80, 0x80, 0xFF]
+                    };
+                    let lanes = if case.vl == 0 { 16 } else { 32 };
+                    for i in 0..lanes {
+                        cpu.vmm[2].set_zmmubyte(i, src1_vals[i % src1_vals.len()]);
+                        cpu.vmm[3].set_zmmubyte(i, src2_vals[i % src2_vals.len()]);
+                    }
+                    cpu.execute_instruction(&instr).unwrap();
+                    for i in 0..lanes {
+                        let src1 = src1_vals[i % src1_vals.len()];
+                        let src2 = src2_vals[i % src2_vals.len()];
+                        assert_eq!(
+                            cpu.vmm[1].zmmubyte(i),
+                            expected_u8(src1, src2, case.signed, case.take_max),
+                            "{:?} byte lane {i}",
+                            case.opcode
+                        );
+                    }
+                }
+                LaneWidth::Word => {
+                    let src1_vals = if case.signed {
+                        [0x8000, 0x7FFF, 0xFFFF, 0x0001, 0x8000, 0x7FFF]
+                    } else {
+                        [0x8000, 0xFFFF, 0x0000, 0x7FFF, 0x8000, 0xFFFF]
+                    };
+                    let src2_vals = if case.signed {
+                        [0x7FFF, 0x8000, 0x0001, 0xFFFF, 0x8000, 0x7FFF]
+                    } else {
+                        [0xFFFF, 0x0000, 0x7FFF, 0x8000, 0x8000, 0xFFFF]
+                    };
+                    let lanes = if case.vl == 0 { 8 } else { 16 };
+                    for i in 0..lanes {
+                        cpu.vmm[2].set_zmm16u(i, src1_vals[i % src1_vals.len()]);
+                        cpu.vmm[3].set_zmm16u(i, src2_vals[i % src2_vals.len()]);
+                    }
+                    cpu.execute_instruction(&instr).unwrap();
+                    for i in 0..lanes {
+                        let src1 = src1_vals[i % src1_vals.len()];
+                        let src2 = src2_vals[i % src2_vals.len()];
+                        assert_eq!(
+                            cpu.vmm[1].zmm16u(i),
+                            expected_u16(src1, src2, case.signed, case.take_max),
+                            "{:?} word lane {i}",
+                            case.opcode
+                        );
+                    }
+                }
+                LaneWidth::Dword => {
+                    let src1_vals = if case.signed {
+                        [
+                            0x8000_0000,
+                            0x7FFF_FFFF,
+                            0xFFFF_FFFF,
+                            0x0000_0001,
+                            0x8000_0000,
+                            0x7FFF_FFFF,
+                        ]
+                    } else {
+                        [
+                            0x8000_0000,
+                            0xFFFF_FFFF,
+                            0x0000_0000,
+                            0x7FFF_FFFF,
+                            0x8000_0000,
+                            0xFFFF_FFFF,
+                        ]
+                    };
+                    let src2_vals = if case.signed {
+                        [
+                            0x7FFF_FFFF,
+                            0x8000_0000,
+                            0x0000_0001,
+                            0xFFFF_FFFF,
+                            0x8000_0000,
+                            0x7FFF_FFFF,
+                        ]
+                    } else {
+                        [
+                            0xFFFF_FFFF,
+                            0x0000_0000,
+                            0x7FFF_FFFF,
+                            0x8000_0000,
+                            0x8000_0000,
+                            0xFFFF_FFFF,
+                        ]
+                    };
+                    let lanes = if case.vl == 0 { 4 } else { 8 };
+                    for i in 0..lanes {
+                        cpu.vmm[2].set_zmm32u(i, src1_vals[i % src1_vals.len()]);
+                        cpu.vmm[3].set_zmm32u(i, src2_vals[i % src2_vals.len()]);
+                    }
+                    cpu.execute_instruction(&instr).unwrap();
+                    for i in 0..lanes {
+                        let src1 = src1_vals[i % src1_vals.len()];
+                        let src2 = src2_vals[i % src2_vals.len()];
+                        assert_eq!(
+                            cpu.vmm[1].zmm32u(i),
+                            expected_u32(src1, src2, case.signed, case.take_max),
+                            "{:?} dword lane {i}",
+                            case.opcode
+                        );
+                    }
+                }
+            }
+
+            let first_upper_byte = if case.vl == 0 { 16 } else { 32 };
+            for i in first_upper_byte..64 {
+                assert_eq!(
+                    cpu.vmm[1].zmmubyte(i),
+                    0,
+                    "{:?} upper byte lane {i}",
+                    case.opcode
+                );
             }
         }
     }

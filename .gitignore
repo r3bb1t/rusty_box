@@ -74,3 +74,11 @@ examples/rusty_box_uefi/alpine.iso
 /rusty_box_android/assets/alpine.iso
 /rustybox_*.png
 /xtask_android.png
+
+# Local disk images and profiling artifacts (never commit)
+/*.iso
+/*.img
+/*.json.gz
+/c.img
+/.clangd
+/compile_commands.json

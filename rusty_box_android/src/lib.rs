@@ -3,6 +3,7 @@ use rusty_box::{
     cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
     emulator::{Emulator, EmulatorConfig},
     gui::{shared_display::SharedDisplay, BxGui, DisplayMode, VgaTextModeInfo},
+    params::BxParams,
 };
 use rusty_box_gui::{
     app::{NativeEmulatorCommand, NativeShellApp},
@@ -297,6 +298,7 @@ fn android_gui_config() -> ResolvedConfig {
         pci: true,
         sync_slowdown: false,
         max_instructions: u64::MAX,
+        cpu_params: BxParams::default(),
         display: DisplayBackend::Egui,
         bios: PathBuf::from("embedded://bochs-bios"),
         vga_bios: Some(PathBuf::from("embedded://vgabios")),
@@ -342,8 +344,9 @@ fn set_android_game_mode_flags(app: &winit::platform::android::activity::Android
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
     if let Err(error) = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
-        let activity =
-            unsafe { env.as_cast_raw::<jni::objects::Global<jni::objects::JObject>>(&raw_activity)? };
+        let activity = unsafe {
+            env.as_cast_raw::<jni::objects::Global<jni::objects::JObject>>(&raw_activity)?
+        };
         let window = env
             .call_method(
                 activity.as_ref(),
@@ -444,23 +447,19 @@ impl RustyBoxAndroidApp {
             iso_browser_loaded: false,
             show_keypad: false,
             show_iso_picker: false,
-        #[cfg(target_os = "android")]
-        storage_permission_prompted_at: None,
-        #[cfg(target_os = "android")]
-        android_app: None,
-        #[cfg(target_os = "android")]
-        android_game_ui_applied: false,
+            #[cfg(target_os = "android")]
+            storage_permission_prompted_at: None,
+            #[cfg(target_os = "android")]
+            android_app: None,
+            #[cfg(target_os = "android")]
+            android_game_ui_applied: false,
         }
     }
     #[cfg(target_os = "android")]
-    pub fn with_android_app(
-        mut self,
-        app: winit::platform::android::activity::AndroidApp,
-    ) -> Self {
+    pub fn with_android_app(mut self, app: winit::platform::android::activity::AndroidApp) -> Self {
         self.android_app = Some(app);
         self
     }
-
 
     #[cfg(target_os = "android")]
     fn ensure_android_game_mode(&mut self) {

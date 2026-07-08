@@ -16,6 +16,7 @@ use crate::{
     },
     impl_eflag,
     memory::BxMemC,
+    params::CpuTopology,
 };
 
 use super::{
@@ -327,6 +328,7 @@ impl From<CpuActivityState> for u8 {
 //#[derive(Debug)]
 pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentation = ()> {
     pub(super) bx_cpuid: u32,
+    pub(super) cpu_topology: CpuTopology,
 
     pub(super) cpuid: I,
 
@@ -769,6 +771,17 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// Optional PC system pointer for timer queries (getNumCpuTicksLeftNextEvent).
     /// Wired by the emulator during execution, cleared afterwards.
     pub(super) pc_system_ptr: Option<NonNull<crate::pc_system::BxPcSystemC>>,
+    /// `pc_system.time_ticks()` at the point the emulator wired the CPU for a
+    /// batch. Single-CPU batches expose live instruction-count deltas so tight
+    /// PIT/TSC calibration loops can make progress mid-batch. SMP batches scale
+    /// that live delta by the scheduler's participating CPU count, matching
+    /// Bochs `BX_TICKN(executed / BX_SMP_PROCESSORS)` time advancement.
+    pub(super) pc_system_ticks_at_sync: u64,
+    /// CPU icount corresponding to `pc_system_ticks_at_sync`.
+    pub(super) pc_system_icount_at_sync: u64,
+    /// Divisor applied to live icount deltas before adding them to
+    /// `pc_system_ticks_at_sync`.
+    pub(super) pc_system_tick_denominator: u64,
 
     /// Debug flags for one-time boot diagnostics (no globals).
     ///
@@ -785,23 +798,52 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// outer-loop iteration to check for wake conditions.
     pub(super) const BX_ASYNC_EVENT_SLEEP: u32 = 1;
 
+    #[inline]
+    pub fn configure_smp(&mut self, cpu_id: u32, topology: CpuTopology) {
+        self.bx_cpuid = cpu_id;
+        self.cpu_topology = topology;
+        self.lapic.set_id(cpu_id);
+        self.lapic.set_bus_cpu_count(topology.cpu_count());
+    }
+
+    #[inline]
+    pub(crate) fn mark_icount_sync(&mut self) {
+        self.icount_last_sync = self.icount;
+    }
+
+    #[inline]
+    pub(crate) fn icount_delta_since_sync(&self) -> u64 {
+        self.icount.saturating_sub(self.icount_last_sync)
+    }
+
+    #[inline]
+    pub(crate) fn sync_lapic_intr_event(&mut self) {
+        if self.lapic.intr_pending {
+            self.signal_event(Self::BX_EVENT_PENDING_LAPIC_INTR);
+            self.lapic.intr_pending = false;
+        }
+    }
+
+    #[inline]
+    pub fn cpu_topology(&self) -> CpuTopology {
+        self.cpu_topology
+    }
+
     // Event bit layout — matches Bochs `cpu.h:1193-1208` exactly.
     // Each bit identifies a single asynchronous event in the
     // `pending_event` / `event_mask` bitmaps the cpu maintains.
 
     /// Bochs cpu.h `BX_EVENT_NMI`. Masked on NMI delivery, unmasked
     /// on IRET.
-    pub(super) const BX_EVENT_NMI: u32 = 1 << 0;
+    pub(crate) const BX_EVENT_NMI: u32 = 1 << 0;
 
-    /// Bochs cpu.h `BX_EVENT_SMI`. SMI enters System Management Mode
-    /// — not implemented for single-CPU Alpine/DLX.
-    #[allow(dead_code)]
-    pub(super) const BX_EVENT_SMI: u32 = 1 << 1;
+    /// Bochs cpu.h `BX_EVENT_SMI`. SMI enters System Management Mode.
+    pub(crate) const BX_EVENT_SMI: u32 = 1 << 1;
 
     /// Bochs cpu.h `BX_EVENT_INIT`. INIT is used by multiprocessor
-    /// startup (INIT-SIPI-SIPI) — not implemented.
-    #[allow(dead_code)]
-    pub(super) const BX_EVENT_INIT: u32 = 1 << 2;
+    /// startup (INIT-SIPI-SIPI); it software-resets the CPU at the
+    /// next instruction boundary (event.cc handleAsyncEvent).
+    pub(crate) const BX_EVENT_INIT: u32 = 1 << 2;
 
     /// Bochs cpu.h `BX_EVENT_VMX_MONITOR_TRAP_FLAG`. Signalled at
     /// VMENTRY when MONITOR_TRAP_FLAG ctrl is set, or by injected MTF
@@ -943,9 +985,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // ── Debug trap bits (DR6 bits set by CPU) ──
-    // Bochs cpu.h
+    // Bochs crregs.h
+    pub(super) const BX_DEBUG_TRAP_HIT: u32 = 1 << 12; // internal "a breakpoint fired" flag
     pub(super) const BX_DEBUG_SINGLE_STEP_BIT: u32 = 1 << 14; // BS flag in DR6 (bit 14)
     pub(super) const BX_DEBUG_TRAP_TASK_SWITCH_BIT: u32 = 0x8000; // BT flag in DR6
+
+    // ── Hardware debug (DR7 R/W field) breakpoint type ──
+    // Bochs cpu.h enum: instruction-execution breakpoint (R/W == 00b).
+    // Data (01b/11b) and I/O watchpoints are not wired into the memory
+    // access paths yet, so only the instruction type is defined here.
+    pub(super) const BX_HW_DEBUG_INSTRUCTION: u32 = 0x00;
 
     // ── DR7 local breakpoint enable bits mask ──
     // Bits L0(0), L1(2), L2(4), L3(6), LE(8) = 0x155
@@ -1532,7 +1581,31 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
     #[inline]
     pub fn set_pc_system_ptr(&mut self, ps: NonNull<crate::pc_system::BxPcSystemC>) {
+        self.set_pc_system_ptr_with_tick_denominator(ps, 1);
+    }
+
+    #[inline]
+    pub fn set_pc_system_ptr_with_tick_denominator(
+        &mut self,
+        ps: NonNull<crate::pc_system::BxPcSystemC>,
+        tick_denominator: u64,
+    ) {
+        self.set_pc_system_ptr_with_tick_offset(ps, tick_denominator, 0);
+    }
+
+    #[inline]
+    pub fn set_pc_system_ptr_with_tick_offset(
+        &mut self,
+        ps: NonNull<crate::pc_system::BxPcSystemC>,
+        tick_denominator: u64,
+        tick_offset: u64,
+    ) {
         self.pc_system_ptr = Some(ps);
+        // SAFETY: PcSystem pointer is valid for the duration of the CPU batch.
+        self.pc_system_ticks_at_sync =
+            unsafe { ps.as_ref().time_ticks() }.wrapping_add(tick_offset);
+        self.pc_system_icount_at_sync = self.icount;
+        self.pc_system_tick_denominator = tick_denominator.max(1);
     }
 
     #[inline]
@@ -1604,11 +1677,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             }
             // io borrow ends here (NLL); safe to mutate self fields
             if pending {
-                self.pending_event |= Self::BX_EVENT_PENDING_INTR;
-                self.async_event = 1;
+                self.signal_event(Self::BX_EVENT_PENDING_INTR);
             }
             if cleared {
-                self.pending_event &= !Self::BX_EVENT_PENDING_INTR;
+                self.clear_event(Self::BX_EVENT_PENDING_INTR);
             }
         }
     }
@@ -1636,18 +1708,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
     }
 
-    /// Advance pc_system countdown during FastRep bulk operations.
-    /// Matches Bochs `BX_TICKN(byteCount)` inside `faststring.cc`.
-    /// When countdown expires, sets STOP_TRACE to force trace break
-    /// so the outer emulator loop can fire `countdown_event()`.
-    /// Must use STOP_TRACE (bit 31), NOT bit 0 — the CPU loop fast path
-    /// only clears `async_event` when it equals exactly STOP_TRACE.
-    /// Bit 0 would persist and poison all subsequent instructions.
+    /// Probe pc_system countdown during FastRep bulk operations.
+    ///
+    /// When countdown would expire, sets STOP_TRACE to force a trace break so
+    /// the outer emulator loop can advance pc_system time exactly once and fire
+    /// `countdown_event()`.
     #[inline]
     pub(super) fn tickn_fastrep(&mut self, n: usize) {
-        if let Some(ps) = self.pc_system_mut() {
-            let expired = ps.sub_countdown(n as u32);
-            if expired {
+        if let Some(ps) = self.pc_system_ref() {
+            if ps.countdown_would_expire_after(n as u32) {
                 self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
             }
         }
@@ -1665,8 +1734,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
     #[inline]
     pub(crate) fn debug_putc(&mut self, ch: u8) {
+        let icount = self.icount;
         if let Some(io) = self.io_bus_mut() {
-            io.outp(0x00E9, ch as u32, 1);
+            io.outp(0x00E9, ch as u32, 1, icount);
         }
     }
 
@@ -1791,14 +1861,45 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
         max_instructions: u64,
+        pc_tick_denominator: u64,
+        pc_tick_offset: u64,
         io: NonNull<crate::iodev::BxDevicesC>,
         pc_system: NonNull<crate::pc_system::BxPcSystemC>,
         pic: Option<&mut crate::pic::BxPicC>,
         dma: Option<&mut crate::dma::BxDmaC>,
     ) -> super::Result<u64> {
         self.set_io_bus_ptr(io);
-        self.set_pc_system_ptr(pc_system);
-        let result = self.cpu_loop_n(mem, cpus, max_instructions, pic, dma);
+        self.set_pc_system_ptr_with_tick_offset(pc_system, pc_tick_denominator, pc_tick_offset);
+        let result = self.cpu_loop_n_impl(mem, cpus, max_instructions, pic, dma, false);
+        self.clear_io_bus();
+        self.clear_pc_system();
+        result
+    }
+
+    /// Execute exactly one icache trace with an attached I/O bus, then return.
+    ///
+    /// Bochs cpu.cc `cpu_run_trace`: handle pending async events, execute one
+    /// trace, and return so the SMP scheduler can switch to the next CPU.
+    /// Exceptions also end the slice (Bochs main.cc `bx_begin_simulation`
+    /// setjmp lands back in the scheduler loop). `max_instructions` remains a
+    /// safety cap only — the icache already caps SMP traces at the quantum.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    pub fn cpu_run_trace_with_io(
+        &mut self,
+        mem: &'c mut BxMemC<'c>,
+        cpus: &[&Self],
+        max_instructions: u64,
+        pc_tick_denominator: u64,
+        pc_tick_offset: u64,
+        io: NonNull<crate::iodev::BxDevicesC>,
+        pc_system: NonNull<crate::pc_system::BxPcSystemC>,
+        pic: Option<&mut crate::pic::BxPicC>,
+        dma: Option<&mut crate::dma::BxDmaC>,
+    ) -> super::Result<u64> {
+        self.set_io_bus_ptr(io);
+        self.set_pc_system_ptr_with_tick_offset(pc_system, pc_tick_denominator, pc_tick_offset);
+        let result = self.cpu_loop_n_impl(mem, cpus, max_instructions, pic, dma, true);
         self.clear_io_bus();
         self.clear_pc_system();
         result
@@ -1846,8 +1947,26 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
         max_instructions: u64,
+        pic: Option<&mut crate::pic::BxPicC>,
+        dma: Option<&mut crate::dma::BxDmaC>,
+    ) -> super::Result<u64> {
+        self.cpu_loop_n_impl(mem, cpus, max_instructions, pic, dma, false)
+    }
+
+    /// Shared body of `cpu_loop_n` / `cpu_run_trace_with_io`.
+    ///
+    /// With `stop_after_one_trace` set this behaves like Bochs cpu.cc
+    /// `cpu_run_trace`: the call returns at the first trace boundary, when an
+    /// async event breaks the trace, or when an exception restarts the loop
+    /// (Bochs main.cc setjmp returns control to the SMP scheduler).
+    fn cpu_loop_n_impl(
+        &mut self,
+        mem: &'c mut BxMemC<'c>,
+        cpus: &[&Self],
+        max_instructions: u64,
         mut pic: Option<&mut crate::pic::BxPicC>,
         mut dma: Option<&mut crate::dma::BxDmaC>,
+        stop_after_one_trace: bool,
     ) -> super::Result<u64> {
         // Wire the memory system pointer for the duration of this execution call.
         // This enables Bochs-style "host-pointer-or-fallback" access in mem_read/mem_write.
@@ -1983,6 +2102,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         self.prev_rip = self.rip();
                         self.speculative_rsp = false;
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+                        if stop_after_one_trace {
+                            // Bochs main.cc: the SMP-loop setjmp ends this
+                            // CPU's turn on an exception.
+                            break 'cpu_loop Ok(iteration);
+                        }
                         continue 'cpu_loop;
                     }
                     Err(e) => break 'cpu_loop Err(e),
@@ -2002,14 +2126,16 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 self.instrumentation.fire_block_start(block_rip, block_len);
             }
 
-            let mut trace_iter = 0u64;
             'trace: loop {
-                trace_iter += 1;
                 // Bochs-style: pointer to mpool slot — no 24-byte copy per instruction.
                 // SAFETY: execute_instruction never writes to i_cache.mpool (only CPU registers
                 // and memory). serve_icache_miss is only called from get_icache_entry, not during
                 // instruction execution. So the mpool slot is stable for the duration of this call.
-                let i_ptr: *const Instruction = &raw const self.i_cache.mpool[instr_idx];
+                // instr_idx is always in-bounds: it starts at a get_icache_entry mpool_start_idx
+                // and advances only within [start, start+tlen), and serve_icache_miss guarantees
+                // start + BX_MAX_TRACE_LENGTH + 1 <= mpool length. Skips a per-instruction
+                // bounds-check branch.
+                let i_ptr: *const Instruction = unsafe { self.i_cache.mpool.as_ptr().add(instr_idx) };
                 // SAFETY: i_ptr points into self.i_cache.mpool which is stable for this
                 // iteration — execute_instruction never writes to mpool, and serve_icache_miss
                 // is only called from get_icache_entry, not during execution.
@@ -2021,7 +2147,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
                 // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
                 let ilen_val = instr_ref().ilen();
-                // ilen=0 is valid ONLY for InsertedOpcode (trace boundary marker)
+                // ilen=0 is valid ONLY for InsertedOpcode (trace boundary marker).
+                // Debug-only sanity check — Bochs does not validate ilen in the hot loop,
+                // and the decoder already guarantees 1..=15 (or 0 for InsertedOpcode).
+                #[cfg(debug_assertions)]
                 if ilen_val == 0 || ilen_val > 15 {
                     let oc = instr_ref().get_ia_opcode();
                     assert!(
@@ -2070,6 +2199,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                             break 'cpu_loop Ok(iteration);
                         }
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+                        if stop_after_one_trace {
+                            // Bochs main.cc: the SMP-loop setjmp ends this
+                            // CPU's turn on an exception.
+                            break 'cpu_loop Ok(iteration);
+                        }
                         continue 'cpu_loop;
                     }
                     Err(e) => {
@@ -2093,9 +2227,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 self.prev_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
                 // Bochs cpu.cc — icount++
                 self.icount += 1;
-                self.perf_instructions += 1;
+                #[cfg(feature = "profiling")]
+                {
+                    self.perf_instructions += 1;
+                }
 
                 iteration += 1;
+                self.sync_lapic_intr_event();
 
                 // Check async events (matching C++ line 215: if (async_event) break;)
                 // When async_event is set (branch taken, exception, HLT, etc.), we MUST
@@ -2109,6 +2247,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // Matching C++ line 217: if (++i == last) { get new trace }
                 instr_idx += 1;
                 if instr_idx >= trace_end {
+                    // Bochs cpu.cc cpu_run_trace executes exactly one trace
+                    // per call — in an SMP slice, return to the scheduler at
+                    // the trace boundary instead of chaining.
+                    if stop_after_one_trace {
+                        break 'cpu_loop Ok(iteration);
+                    }
                     // Check instruction limit at trace boundary (not per-instruction)
                     if iteration >= max_instructions {
                         break 'cpu_loop Ok(iteration);
@@ -2149,6 +2293,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             // Bochs unconditionally clears STOP_TRACE after inner loop break.
             {
                 self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+            }
+            // Bochs cpu.cc cpu_run_trace returns after the trace was broken
+            // by an async event; the SMP scheduler switches CPUs here.
+            if stop_after_one_trace {
+                break 'cpu_loop Ok(iteration);
             }
         };
 
@@ -2197,7 +2346,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 };
                 let ilen = instr.ilen() as usize;
                 tracing::error!(
-                    "UNIMPLEMENTED OPCODE: {} at RIP={:#x} CS:IP={:#x}:{:#x} laddr={:#x} bytes={:02x?}",
+                    "UNIMPLEMENTED OPCODE: {:?} at RIP={:#x} CS:IP={:#x}:{:#x} laddr={:#x} bytes={:02x?}",
                     opcode, rip, cs_value, rip, laddr, &instr_bytes[..ilen.min(16)]
                 );
             }
@@ -3298,5 +3447,36 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         // Return handler for execution
         Ok((false, selected_handler))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
+    use crate::params::BxParams;
+    use crate::pc_system::{BxPcSystemC, TimerOwner};
+
+    #[test]
+    fn smp_fastrep_uses_pc_system_deadline_probes() {
+        let topology = BxParams::default()
+            .with_topology(1, 2, 1)
+            .unwrap()
+            .cpu_topology();
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.configure_smp(1, topology);
+
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(1_000_000);
+        pc.register_timer(TimerOwner::PciIdeCh0, 1000, false, true, "fastrep")
+            .unwrap();
+        cpu.set_pc_system_ptr_with_tick_denominator(NonNull::from(&mut pc), 2);
+
+        assert_eq!(cpu.ticks_left_next_event(), 1000);
+
+        cpu.tickn_fastrep(1000);
+
+        assert_ne!(cpu.async_event & BX_ASYNC_EVENT_STOP_TRACE, 0);
     }
 }

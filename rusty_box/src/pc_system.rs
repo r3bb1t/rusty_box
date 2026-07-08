@@ -77,8 +77,8 @@ pub enum TimerOwner {
     PciIdeCh0,
     /// PCI IDE BM-DMA channel 1.
     PciIdeCh1,
-    /// Local APIC timer.
-    Lapic,
+    /// Local APIC timer for the CPU index.
+    Lapic(usize),
 }
 
 /// Individual timer structure
@@ -155,7 +155,9 @@ pub struct BxPcSystemC {
     /// Buffer of timer owners whose timers fired during the last tickn/tick1.
     /// Drained by the emulator via `take_fired_timers()`.
     fired_owners: [TimerOwner; BX_MAX_TIMERS],
-    /// Number of entries in `fired_owners`.
+    /// Fire counts for each distinct buffered owner in `fired_owners`.
+    fired_owner_counts: [u32; BX_MAX_TIMERS],
+    /// Number of distinct entries in `fired_owners`.
     num_fired: usize,
 }
 
@@ -192,6 +194,7 @@ impl BxPcSystemC {
             intr_cleared: false,
             kill_bochs_request: false,
             fired_owners: [TimerOwner::NullTimer; BX_MAX_TIMERS],
+            fired_owner_counts: [0; BX_MAX_TIMERS],
             num_fired: 0,
         };
 
@@ -325,13 +328,31 @@ impl BxPcSystemC {
                 if triggered_flag {
                     self.triggered_timer = i;
                     let owner = self.timers[i].owner;
-                    if owner != TimerOwner::NullTimer {
-                        self.fired_owners[self.num_fired] = owner;
-                        self.num_fired += 1;
-                    }
+                    self.record_fired_owner(owner);
                     self.triggered_timer = 0;
                 }
             }
+        }
+    }
+
+    fn record_fired_owner(&mut self, owner: TimerOwner) {
+        if owner == TimerOwner::NullTimer {
+            return;
+        }
+
+        for entry in 0..self.num_fired {
+            if self.fired_owners[entry] == owner {
+                self.fired_owner_counts[entry] = self.fired_owner_counts[entry].saturating_add(1);
+                return;
+            }
+        }
+
+        if self.num_fired < BX_MAX_TIMERS {
+            self.fired_owners[self.num_fired] = owner;
+            self.fired_owner_counts[self.num_fired] = 1;
+            self.num_fired += 1;
+        } else {
+            tracing::error!("timer fire owner buffer full; dropping owner {:?}", owner);
         }
     }
 
@@ -514,11 +535,7 @@ impl BxPcSystemC {
                 self.timers[i].period = period;
                 // Bochs pc_system.cc:
                 // timeToFire = (ticksTotal + Bit64u(currCountdownPeriod-currCountdown)) + ticks
-                self.timers[i].time_to_fire = if active {
-                    self.time_ticks() + period
-                } else {
-                    0
-                };
+                self.timers[i].time_to_fire = self.time_ticks() + period;
                 self.timers[i].owner = owner;
 
                 // Copy ID string
@@ -646,6 +663,10 @@ impl BxPcSystemC {
         period: u64,
     ) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
+        debug_assert_ne!(
+            self.timers[timer_index].time_to_fire, 0,
+            "relative timer reactivation requires an established deadline"
+        );
         let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
         self.timers[timer_index].period = period;
         self.timers[timer_index].time_to_fire += period;
@@ -703,20 +724,13 @@ impl BxPcSystemC {
         self.curr_countdown
     }
 
-    /// Decrement countdown without firing events.
-    /// Used by FastRep (CPU instruction handlers) to track tick consumption
-    /// matching Bochs `BX_TICKN()` inside `faststring.cc`.
-    /// Returns true if countdown expired (caller should set async_event).
-    /// The actual `countdown_event()` fires later via the outer `tickn()` call.
+    /// Probe whether a FastRep batch would reach the next countdown event.
+    ///
+    /// This does not mutate `curr_countdown`; the outer emulator loop advances
+    /// pc_system time exactly once with `tickn(executed)`.
     #[inline]
-    pub fn sub_countdown(&mut self, n: u32) -> bool {
-        if self.curr_countdown > n {
-            self.curr_countdown -= n;
-            false
-        } else {
-            self.curr_countdown = 0;
-            true
-        }
+    pub fn countdown_would_expire_after(&self, n: u32) -> bool {
+        n >= self.curr_countdown
     }
 
     /// Get the number of registered timers.
@@ -782,11 +796,18 @@ impl BxPcSystemC {
     }
 
     /// Drain the buffer of timer owners that fired since the last drain.
-    /// Returns `(owners, count)` — iterate `owners[..count]` and dispatch.
-    pub fn take_fired_timers(&mut self) -> ([TimerOwner; BX_MAX_TIMERS], usize) {
-        let result = (self.fired_owners, self.num_fired);
+    /// Returns `(owners, counts, count)` — iterate entries `0..count`.
+    pub fn take_fired_timers(
+        &mut self,
+    ) -> ([TimerOwner; BX_MAX_TIMERS], [u32; BX_MAX_TIMERS], usize) {
+        let owners = self.fired_owners;
+        let counts = self.fired_owner_counts;
+        let count = self.num_fired;
+        for entry in 0..count {
+            self.fired_owner_counts[entry] = 0;
+        }
         self.num_fired = 0;
-        result
+        (owners, counts, count)
     }
 }
 
@@ -875,6 +896,20 @@ mod tests {
     }
 
     #[test]
+    fn inactive_timer_registration_records_future_deadline() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(1_000_000);
+        pc.tickn(25);
+
+        let idx = pc
+            .register_timer(TimerOwner::PciIdeCh0, 1000, false, false, "inactive")
+            .unwrap();
+
+        assert!(!pc.timers[idx].flags.contains(TimerFlags::ACTIVE));
+        assert_eq!(pc.timers[idx].time_to_fire, 1025);
+    }
+
+    #[test]
     fn test_time_ticks_partial() {
         let mut pc = BxPcSystemC::new();
         pc.initialize(10_000_000); // 10 MIPS
@@ -943,11 +978,47 @@ mod tests {
 
         // Advance 500 ticks — should fire 5 times (at 100, 200, 300, 400, 500)
         pc.tickn(500);
-        let (owners, count) = pc.take_fired_timers();
-        assert_eq!(count, 5);
-        for &owner in &owners[..count] {
-            assert_eq!(owner, TimerOwner::PciIdeCh0);
-        }
+        let (owners, counts, count) = pc.take_fired_timers();
+        assert_eq!(count, 1);
+        assert_eq!(owners[0], TimerOwner::PciIdeCh0);
+        assert_eq!(counts[0], 5);
+    }
+
+    #[test]
+    fn continuous_timer_many_fires_coalesces_without_overflow() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(1_000_000);
+
+        pc.register_timer(TimerOwner::PciIdeCh0, 1, true, true, "continuous")
+            .unwrap();
+
+        pc.tickn(65);
+        let (owners, counts, count) = pc.take_fired_timers();
+        assert_eq!(count, 1);
+        assert_eq!(owners[0], TimerOwner::PciIdeCh0);
+        assert_eq!(counts[0], 65);
+    }
+
+    #[test]
+    fn fastrep_countdown_probe_does_not_mutate_before_outer_tick() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(1_000_000);
+
+        pc.register_timer(TimerOwner::PciIdeCh0, 1000, false, true, "oneshot")
+            .unwrap();
+
+        assert!(!pc.countdown_would_expire_after(500));
+        assert_eq!(pc.curr_countdown, 1000);
+
+        pc.tickn(500);
+        let (_, _, count) = pc.take_fired_timers();
+        assert_eq!(count, 0);
+
+        pc.tickn(500);
+        let (owners, counts, count) = pc.take_fired_timers();
+        assert_eq!(count, 1);
+        assert_eq!(owners[0], TimerOwner::PciIdeCh0);
+        assert_eq!(counts[0], 1);
     }
 
     #[test]

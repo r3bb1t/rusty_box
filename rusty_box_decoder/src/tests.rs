@@ -617,6 +617,319 @@ fn test_final_entry_0f3a_sse66_lookup() {
 }
 
 #[test]
+fn test_vex_vperm2f128_decode_ubuntu_sha512_sequence() {
+    // Ubuntu 26.04 kernel sha512_transform_rorx uses this AVX2 sequence when
+    // CPUID advertises AVX2/BMI2. It must decode as VPERM2F128, not #UD.
+    let instr = fetch_decode64(&[0xC4, 0xE3, 0x45, 0x06, 0xC6, 0x03]).unwrap();
+    assert_eq!(instr.ilen(), 6);
+    assert_eq!(instr.get_ia_opcode(), Opcode::V256Vperm2f128VdqHdqWdqIb);
+    assert_eq!(instr.ib(), 0x03);
+}
+
+#[test]
+fn test_vex_vpermq_decode_runtime_sequence() {
+    // Captured from Ubuntu userspace boot: VEX.256.66.0F3A.W1 00 /r ib.
+    let instr = fetch_decode64(&[0xC4, 0xE3, 0xFD, 0x00, 0xD8, 0xFF]).unwrap();
+    assert_eq!(instr.ilen(), 6);
+    assert_eq!(instr.get_ia_opcode(), Opcode::V256VpermqVdqWdqIb);
+    assert_eq!(instr.dst(), 3);
+    assert_eq!(instr.src1(), 0);
+    assert_eq!(instr.ib(), 0xFF);
+    assert_eq!(instr.get_vl(), 1);
+}
+
+#[test]
+fn test_vex_fma3_decode_runtime_sequences() {
+    // Captured from Ubuntu userspace boot: VEX.128.66.0F38.W1 A9 /r m64.
+    let a9 = fetch_decode64(&[0xC4, 0xE2, 0xF9, 0xA9, 0x51, 0x18]).unwrap();
+    assert_eq!(a9.ilen(), 6);
+    assert_eq!(a9.get_ia_opcode(), Opcode::Vfmadd213sdVpdHsdWsd);
+    assert_eq!(a9.dst(), 2);
+    assert_eq!(a9.src2(), 0);
+    assert!(!a9.mod_c0());
+    assert_eq!(a9.get_vl(), 0);
+
+    // Captured from Ubuntu userspace boot: VEX.128.66.0F38.W1 B9 /r m64.
+    let b9 = fetch_decode64(&[0xC4, 0xE2, 0xF1, 0xB9, 0x05, 0xD5, 0x54, 0x04, 0x00]).unwrap();
+    assert_eq!(b9.ilen(), 9);
+    assert_eq!(b9.get_ia_opcode(), Opcode::Vfmadd231sdVpdHsdWsd);
+    assert_eq!(b9.dst(), 0);
+    assert_eq!(b9.src2(), 1);
+    assert!(!b9.mod_c0());
+    assert_eq!(b9.get_vl(), 0);
+}
+
+#[test]
+fn test_vex_fma3_decode_full_opcode_surface() {
+    let cases: &[(u8, Opcode, Opcode)] = &[
+        (
+            0x96,
+            Opcode::Vfmaddsub132psVpsHpsWps,
+            Opcode::Vfmaddsub132pdVpdHpdWpd,
+        ),
+        (
+            0x97,
+            Opcode::Vfmsubadd132psVpsHpsWps,
+            Opcode::Vfmsubadd132pdVpdHpdWpd,
+        ),
+        (
+            0x98,
+            Opcode::Vfmadd132psVpsHpsWps,
+            Opcode::Vfmadd132pdVpdHpdWpd,
+        ),
+        (
+            0x99,
+            Opcode::Vfmadd132ssVpsHssWss,
+            Opcode::Vfmadd132sdVpdHsdWsd,
+        ),
+        (
+            0x9A,
+            Opcode::Vfmsub132psVpsHpsWps,
+            Opcode::Vfmsub132pdVpdHpdWpd,
+        ),
+        (
+            0x9B,
+            Opcode::Vfmsub132ssVpsHssWss,
+            Opcode::Vfmsub132sdVpdHsdWsd,
+        ),
+        (
+            0x9C,
+            Opcode::Vfnmadd132psVpsHpsWps,
+            Opcode::Vfnmadd132pdVpdHpdWpd,
+        ),
+        (
+            0x9D,
+            Opcode::Vfnmadd132ssVpsHssWss,
+            Opcode::Vfnmadd132sdVpdHsdWsd,
+        ),
+        (
+            0x9E,
+            Opcode::Vfnmsub132psVpsHpsWps,
+            Opcode::Vfnmsub132pdVpdHpdWpd,
+        ),
+        (
+            0x9F,
+            Opcode::Vfnmsub132ssVpsHssWss,
+            Opcode::Vfnmsub132sdVpdHsdWsd,
+        ),
+        (
+            0xA6,
+            Opcode::Vfmaddsub213psVpsHpsWps,
+            Opcode::Vfmaddsub213pdVpdHpdWpd,
+        ),
+        (
+            0xA7,
+            Opcode::Vfmsubadd213psVpsHpsWps,
+            Opcode::Vfmsubadd213pdVpdHpdWpd,
+        ),
+        (
+            0xA8,
+            Opcode::Vfmadd213psVpsHpsWps,
+            Opcode::Vfmadd213pdVpdHpdWpd,
+        ),
+        (
+            0xA9,
+            Opcode::Vfmadd213ssVpsHssWss,
+            Opcode::Vfmadd213sdVpdHsdWsd,
+        ),
+        (
+            0xAA,
+            Opcode::Vfmsub213psVpsHpsWps,
+            Opcode::Vfmsub213pdVpdHpdWpd,
+        ),
+        (
+            0xAB,
+            Opcode::Vfmsub213ssVpsHssWss,
+            Opcode::Vfmsub213sdVpdHsdWsd,
+        ),
+        (
+            0xAC,
+            Opcode::Vfnmadd213psVpsHpsWps,
+            Opcode::Vfnmadd213pdVpdHpdWpd,
+        ),
+        (
+            0xAD,
+            Opcode::Vfnmadd213ssVpsHssWss,
+            Opcode::Vfnmadd213sdVpdHsdWsd,
+        ),
+        (
+            0xAE,
+            Opcode::Vfnmsub213psVpsHpsWps,
+            Opcode::Vfnmsub213pdVpdHpdWpd,
+        ),
+        (
+            0xAF,
+            Opcode::Vfnmsub213ssVpsHssWss,
+            Opcode::Vfnmsub213sdVpdHsdWsd,
+        ),
+        (
+            0xB6,
+            Opcode::Vfmaddsub231psVpsHpsWps,
+            Opcode::Vfmaddsub231pdVpdHpdWpd,
+        ),
+        (
+            0xB7,
+            Opcode::Vfmsubadd231psVpsHpsWps,
+            Opcode::Vfmsubadd231pdVpdHpdWpd,
+        ),
+        (
+            0xB8,
+            Opcode::Vfmadd231psVpsHpsWps,
+            Opcode::Vfmadd231pdVpdHpdWpd,
+        ),
+        (
+            0xB9,
+            Opcode::Vfmadd231ssVpsHssWss,
+            Opcode::Vfmadd231sdVpdHsdWsd,
+        ),
+        (
+            0xBA,
+            Opcode::Vfmsub231psVpsHpsWps,
+            Opcode::Vfmsub231pdVpdHpdWpd,
+        ),
+        (
+            0xBB,
+            Opcode::Vfmsub231ssVpsHssWss,
+            Opcode::Vfmsub231sdVpdHsdWsd,
+        ),
+        (
+            0xBC,
+            Opcode::Vfnmadd231psVpsHpsWps,
+            Opcode::Vfnmadd231pdVpdHpdWpd,
+        ),
+        (
+            0xBD,
+            Opcode::Vfnmadd231ssVpsHssWss,
+            Opcode::Vfnmadd231sdVpdHsdWsd,
+        ),
+        (
+            0xBE,
+            Opcode::Vfnmsub231psVpsHpsWps,
+            Opcode::Vfnmsub231pdVpdHpdWpd,
+        ),
+        (
+            0xBF,
+            Opcode::Vfnmsub231ssVpsHssWss,
+            Opcode::Vfnmsub231sdVpdHsdWsd,
+        ),
+    ];
+
+    for &(opcode, w0_opcode, w1_opcode) in cases {
+        let w0 = fetch_decode64(&[0xC4, 0xE2, 0x69, opcode, 0xCB]).unwrap();
+        assert_eq!(w0.get_ia_opcode(), w0_opcode, "W0 opcode {opcode:02X}");
+        assert_eq!(w0.get_vl(), 0, "W0 opcode {opcode:02X}");
+
+        let w1 = fetch_decode64(&[0xC4, 0xE2, 0xE9, opcode, 0xCB]).unwrap();
+        assert_eq!(w1.get_ia_opcode(), w1_opcode, "W1 opcode {opcode:02X}");
+        assert_eq!(w1.get_vl(), 0, "W1 opcode {opcode:02X}");
+    }
+}
+
+#[test]
+fn test_vex_vpmin_vpmax_family_decode() {
+    let cases: &[(&[u8], Opcode, u8)] = &[
+        (&[0xC5, 0xE9, 0xDA, 0xCB], Opcode::V128VpminubVdqHdqWdq, 0),
+        (&[0xC5, 0xED, 0xDA, 0xCB], Opcode::V256VpminubVdqHdqWdq, 1),
+        (&[0xC5, 0xE9, 0xDE, 0xCB], Opcode::V128VpmaxubVdqHdqWdq, 0),
+        (&[0xC5, 0xED, 0xDE, 0xCB], Opcode::V256VpmaxubVdqHdqWdq, 1),
+        (&[0xC5, 0xE9, 0xEA, 0xCB], Opcode::V128VpminswVdqHdqWdq, 0),
+        (&[0xC5, 0xED, 0xEA, 0xCB], Opcode::V256VpminswVdqHdqWdq, 1),
+        (&[0xC5, 0xE9, 0xEE, 0xCB], Opcode::V128VpmaxswVdqHdqWdq, 0),
+        (&[0xC5, 0xED, 0xEE, 0xCB], Opcode::V256VpmaxswVdqHdqWdq, 1),
+        (
+            &[0xC4, 0xE2, 0x69, 0x38, 0xCB],
+            Opcode::V128VpminsbVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x38, 0xCB],
+            Opcode::V256VpminsbVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x39, 0xCB],
+            Opcode::V128VpminsdVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x39, 0xCB],
+            Opcode::V256VpminsdVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x3A, 0xCB],
+            Opcode::V128VpminuwVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x3A, 0xCB],
+            Opcode::V256VpminuwVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x3B, 0xCB],
+            Opcode::V128VpminudVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x3B, 0xCB],
+            Opcode::V256VpminudVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x3C, 0xCB],
+            Opcode::V128VpmaxsbVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x3C, 0xCB],
+            Opcode::V256VpmaxsbVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x3D, 0xCB],
+            Opcode::V128VpmaxsdVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x3D, 0xCB],
+            Opcode::V256VpmaxsdVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x3E, 0xCB],
+            Opcode::V128VpmaxuwVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x3E, 0xCB],
+            Opcode::V256VpmaxuwVdqHdqWdq,
+            1,
+        ),
+        (
+            &[0xC4, 0xE2, 0x69, 0x3F, 0xCB],
+            Opcode::V128VpmaxudVdqHdqWdq,
+            0,
+        ),
+        (
+            &[0xC4, 0xE2, 0x6D, 0x3F, 0xCB],
+            Opcode::V256VpmaxudVdqHdqWdq,
+            1,
+        ),
+    ];
+
+    for (bytes, expected_opcode, expected_vl) in cases {
+        let instr = fetch_decode64(bytes).unwrap();
+        assert_eq!(
+            instr.get_ia_opcode(),
+            *expected_opcode,
+            "bytes {bytes:02X?}"
+        );
+        assert_eq!(instr.get_vl(), *expected_vl, "bytes {bytes:02X?}");
+    }
+}
+
+#[test]
 fn test_group_error_table_entry_is_illegal_opcode() {
     let result32 = fetch_decode32(&[0x0F, 0x3A, 0x00, 0xC0, 0x00], true);
     assert!(

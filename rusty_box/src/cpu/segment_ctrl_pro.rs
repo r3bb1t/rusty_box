@@ -983,8 +983,8 @@ impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
                 return Ok(());
             } else {
                 tracing::error!("load_seg_reg(): invalid segment register {:?}", seg);
-                return Err(super::error::CpuError::UnimplementedOpcode {
-                    opcode: "load_seg_reg: unimplemented segment",
+                return Err(super::error::CpuError::UnsupportedCpuOperation {
+                    operation: "load_seg_reg: unimplemented segment",
                 });
             }
         }

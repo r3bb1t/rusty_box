@@ -194,6 +194,330 @@ pub const BxOpcodeTable0F388B: [u64; 3] = [
     ),
 ];
 
+// VFMADDSUB132PS/PD — VEX.128/256.66.0F38.W0/W1 96 /r
+pub const BxOpcodeTable0F3896: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmaddsub132psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmaddsub132pdVpdHpdWpd,
+    ),
+];
+
+// VFMSUBADD132PS/PD — VEX.128/256.66.0F38.W0/W1 97 /r
+pub const BxOpcodeTable0F3897: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmsubadd132psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmsubadd132pdVpdHpdWpd,
+    ),
+];
+
+// VFMADD132PS/PD — VEX.128/256.66.0F38.W0/W1 98 /r
+pub const BxOpcodeTable0F3898: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmadd132psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmadd132pdVpdHpdWpd,
+    ),
+];
+
+// VFMADD132SS/SD — VEX.LIG.66.0F38.W0/W1 99 /r
+pub const BxOpcodeTable0F3899: [u64; 2] = [
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W0), Opcode::Vfmadd132ssVpsHssWss),
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W1), Opcode::Vfmadd132sdVpdHsdWsd),
+];
+
+// VFMSUB132PS/PD — VEX.128/256.66.0F38.W0/W1 9A /r
+pub const BxOpcodeTable0F389A: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmsub132psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmsub132pdVpdHpdWpd,
+    ),
+];
+
+// VFMSUB132SS/SD — VEX.LIG.66.0F38.W0/W1 9B /r
+pub const BxOpcodeTable0F389B: [u64; 2] = [
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W0), Opcode::Vfmsub132ssVpsHssWss),
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W1), Opcode::Vfmsub132sdVpdHsdWsd),
+];
+
+// VFNMADD132PS/PD — VEX.128/256.66.0F38.W0/W1 9C /r
+pub const BxOpcodeTable0F389C: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfnmadd132psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfnmadd132pdVpdHpdWpd,
+    ),
+];
+
+// VFNMADD132SS/SD — VEX.LIG.66.0F38.W0/W1 9D /r
+pub const BxOpcodeTable0F389D: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VEX_W0),
+        Opcode::Vfnmadd132ssVpsHssWss,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VEX_W1),
+        Opcode::Vfnmadd132sdVpdHsdWsd,
+    ),
+];
+
+// VFNMSUB132PS/PD — VEX.128/256.66.0F38.W0/W1 9E /r
+pub const BxOpcodeTable0F389E: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfnmsub132psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfnmsub132pdVpdHpdWpd,
+    ),
+];
+
+// VFNMSUB132SS/SD — VEX.LIG.66.0F38.W0/W1 9F /r
+pub const BxOpcodeTable0F389F: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VEX_W0),
+        Opcode::Vfnmsub132ssVpsHssWss,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VEX_W1),
+        Opcode::Vfnmsub132sdVpdHsdWsd,
+    ),
+];
+
+// VFMADDSUB213PS/PD — VEX.128/256.66.0F38.W0/W1 A6 /r
+pub const BxOpcodeTable0F38A6: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmaddsub213psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmaddsub213pdVpdHpdWpd,
+    ),
+];
+
+// VFMSUBADD213PS/PD — VEX.128/256.66.0F38.W0/W1 A7 /r
+pub const BxOpcodeTable0F38A7: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmsubadd213psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmsubadd213pdVpdHpdWpd,
+    ),
+];
+
+// VFMADD213PS/PD — VEX.128/256.66.0F38.W0/W1 A8 /r
+pub const BxOpcodeTable0F38A8: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmadd213psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmadd213pdVpdHpdWpd,
+    ),
+];
+
+// VFMADD213SS/SD — VEX.LIG.66.0F38.W0/W1 A9 /r
+pub const BxOpcodeTable0F38A9: [u64; 2] = [
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W0), Opcode::Vfmadd213ssVpsHssWss),
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W1), Opcode::Vfmadd213sdVpdHsdWsd),
+];
+
+// VFMSUB213PS/PD — VEX.128/256.66.0F38.W0/W1 AA /r
+pub const BxOpcodeTable0F38AA: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmsub213psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmsub213pdVpdHpdWpd,
+    ),
+];
+
+// VFMSUB213SS/SD — VEX.LIG.66.0F38.W0/W1 AB /r
+pub const BxOpcodeTable0F38AB: [u64; 2] = [
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W0), Opcode::Vfmsub213ssVpsHssWss),
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W1), Opcode::Vfmsub213sdVpdHsdWsd),
+];
+
+// VFNMADD213PS/PD — VEX.128/256.66.0F38.W0/W1 AC /r
+pub const BxOpcodeTable0F38AC: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfnmadd213psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfnmadd213pdVpdHpdWpd,
+    ),
+];
+
+// VFNMADD213SS/SD — VEX.LIG.66.0F38.W0/W1 AD /r
+pub const BxOpcodeTable0F38AD: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VEX_W0),
+        Opcode::Vfnmadd213ssVpsHssWss,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VEX_W1),
+        Opcode::Vfnmadd213sdVpdHsdWsd,
+    ),
+];
+
+// VFNMSUB213PS/PD — VEX.128/256.66.0F38.W0/W1 AE /r
+pub const BxOpcodeTable0F38AE: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfnmsub213psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfnmsub213pdVpdHpdWpd,
+    ),
+];
+
+// VFNMSUB213SS/SD — VEX.LIG.66.0F38.W0/W1 AF /r
+pub const BxOpcodeTable0F38AF: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VEX_W0),
+        Opcode::Vfnmsub213ssVpsHssWss,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VEX_W1),
+        Opcode::Vfnmsub213sdVpdHsdWsd,
+    ),
+];
+
+// VFMADDSUB231PS/PD — VEX.128/256.66.0F38.W0/W1 B6 /r
+pub const BxOpcodeTable0F38B6: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmaddsub231psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmaddsub231pdVpdHpdWpd,
+    ),
+];
+
+// VFMSUBADD231PS/PD — VEX.128/256.66.0F38.W0/W1 B7 /r
+pub const BxOpcodeTable0F38B7: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmsubadd231psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmsubadd231pdVpdHpdWpd,
+    ),
+];
+
+// VFMADD231PS/PD — VEX.128/256.66.0F38.W0/W1 B8 /r
+pub const BxOpcodeTable0F38B8: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmadd231psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmadd231pdVpdHpdWpd,
+    ),
+];
+
+// VFMADD231SS/SD — VEX.LIG.66.0F38.W0/W1 B9 /r
+pub const BxOpcodeTable0F38B9: [u64; 2] = [
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W0), Opcode::Vfmadd231ssVpsHssWss),
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W1), Opcode::Vfmadd231sdVpdHsdWsd),
+];
+
+// VFMSUB231PS/PD — VEX.128/256.66.0F38.W0/W1 BA /r
+pub const BxOpcodeTable0F38BA: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfmsub231psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfmsub231pdVpdHpdWpd,
+    ),
+];
+
+// VFMSUB231SS/SD — VEX.LIG.66.0F38.W0/W1 BB /r
+pub const BxOpcodeTable0F38BB: [u64; 2] = [
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W0), Opcode::Vfmsub231ssVpsHssWss),
+    form_opcode(attrs!(SSE_PREFIX_66 | VEX_W1), Opcode::Vfmsub231sdVpdHsdWsd),
+];
+
+// VFNMADD231PS/PD — VEX.128/256.66.0F38.W0/W1 BC /r
+pub const BxOpcodeTable0F38BC: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfnmadd231psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfnmadd231pdVpdHpdWpd,
+    ),
+];
+
+// VFNMADD231SS/SD — VEX.LIG.66.0F38.W0/W1 BD /r
+pub const BxOpcodeTable0F38BD: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VEX_W0),
+        Opcode::Vfnmadd231ssVpsHssWss,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VEX_W1),
+        Opcode::Vfnmadd231sdVpdHsdWsd,
+    ),
+];
+
+// VFNMSUB231PS/PD — VEX.128/256.66.0F38.W0/W1 BE /r
+pub const BxOpcodeTable0F38BE: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W0),
+        Opcode::Vfnmsub231psVpsHpsWps,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VL128_256 | VEX_W1),
+        Opcode::Vfnmsub231pdVpdHpdWpd,
+    ),
+];
+
+// VFNMSUB231SS/SD — VEX.LIG.66.0F38.W0/W1 BF /r
+pub const BxOpcodeTable0F38BF: [u64; 2] = [
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VEX_W0),
+        Opcode::Vfnmsub231ssVpsHssWss,
+    ),
+    form_opcode(
+        attrs!(SSE_PREFIX_66 | VEX_W1),
+        Opcode::Vfnmsub231sdVpdHsdWsd,
+    ),
+];
+
 pub const BxOpcodeTable0F38C8: [u64; 1] =
     [form_opcode(attrs!(SSE_NO_PREFIX), Opcode::Sha1nexteVdqWdq)];
 pub const BxOpcodeTable0F38C9: [u64; 1] =
@@ -614,48 +938,48 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 93 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 94 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 95 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 96 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 97 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 98 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 99 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 9A */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 9B */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 9C */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 9D */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 9E */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 9F */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 96 */ &BxOpcodeTable0F3896,
+    /* 0F 38 97 */ &BxOpcodeTable0F3897,
+    /* 0F 38 98 */ &BxOpcodeTable0F3898,
+    /* 0F 38 99 */ &BxOpcodeTable0F3899,
+    /* 0F 38 9A */ &BxOpcodeTable0F389A,
+    /* 0F 38 9B */ &BxOpcodeTable0F389B,
+    /* 0F 38 9C */ &BxOpcodeTable0F389C,
+    /* 0F 38 9D */ &BxOpcodeTable0F389D,
+    /* 0F 38 9E */ &BxOpcodeTable0F389E,
+    /* 0F 38 9F */ &BxOpcodeTable0F389F,
     /* 0F 38 A0 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 A1 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 A2 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 A3 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 A4 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 A5 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 A6 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 A7 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 A8 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 A9 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 AA */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 AB */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 AC */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 AD */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 AE */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 AF */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 A6 */ &BxOpcodeTable0F38A6,
+    /* 0F 38 A7 */ &BxOpcodeTable0F38A7,
+    /* 0F 38 A8 */ &BxOpcodeTable0F38A8,
+    /* 0F 38 A9 */ &BxOpcodeTable0F38A9,
+    /* 0F 38 AA */ &BxOpcodeTable0F38AA,
+    /* 0F 38 AB */ &BxOpcodeTable0F38AB,
+    /* 0F 38 AC */ &BxOpcodeTable0F38AC,
+    /* 0F 38 AD */ &BxOpcodeTable0F38AD,
+    /* 0F 38 AE */ &BxOpcodeTable0F38AE,
+    /* 0F 38 AF */ &BxOpcodeTable0F38AF,
     /* 0F 38 B0 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 B1 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 B2 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 B3 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 B4 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 B5 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 B6 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 B7 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 B8 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 B9 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 BA */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 BB */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 BC */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 BD */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 BE */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 BF */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 B6 */ &BxOpcodeTable0F38B6,
+    /* 0F 38 B7 */ &BxOpcodeTable0F38B7,
+    /* 0F 38 B8 */ &BxOpcodeTable0F38B8,
+    /* 0F 38 B9 */ &BxOpcodeTable0F38B9,
+    /* 0F 38 BA */ &BxOpcodeTable0F38BA,
+    /* 0F 38 BB */ &BxOpcodeTable0F38BB,
+    /* 0F 38 BC */ &BxOpcodeTable0F38BC,
+    /* 0F 38 BD */ &BxOpcodeTable0F38BD,
+    /* 0F 38 BE */ &BxOpcodeTable0F38BE,
+    /* 0F 38 BF */ &BxOpcodeTable0F38BF,
     /* 0F 38 C0 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 C1 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 C2 */ &BX_OPCODE_GROUP_ERR,

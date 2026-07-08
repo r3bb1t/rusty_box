@@ -576,3 +576,61 @@ fn write_u32(buf: &mut [u8], offset: usize, val: u32) {
 fn write_u64(buf: &mut [u8], offset: usize, val: u64) {
     buf[offset..offset + 8].copy_from_slice(&val.to_le_bytes());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const TEST_RAM_SIZE: u64 = 128 * 1024 * 1024;
+    const TEST_CPU_COUNT: u32 = 4;
+    const EXPECTED_LAPIC_IDS: [u8; TEST_CPU_COUNT as usize] = [0, 1, 2, 3];
+    const MADT_ENTRY_TYPE_OFFSET: usize = 0;
+    const MADT_ENTRY_LEN_OFFSET: usize = 1;
+    const MADT_LAPIC_APIC_ID_OFFSET: usize = 3;
+    const MADT_IOAPIC_ID_OFFSET: usize = 2;
+    const MADT_ENTRY_TYPE_LAPIC: u8 = 0;
+    const MADT_ENTRY_TYPE_IOAPIC: u8 = 1;
+    const UNSET_APIC_ID: u8 = 0xFF;
+
+    fn find_table<'a>(blob: &'a [u8], signature: &[u8; 4]) -> &'a [u8] {
+        let start = blob
+            .windows(4)
+            .position(|window| window == signature)
+            .expect("ACPI table signature not found");
+        let len = u32::from_le_bytes(blob[start + 4..start + 8].try_into().unwrap()) as usize;
+        &blob[start..start + len]
+    }
+
+    #[test]
+    fn madt_contains_one_lapic_per_configured_cpu() {
+        let acpi = AcpiTableGenerator::generate(TEST_RAM_SIZE, TEST_CPU_COUNT);
+        let madt = find_table(acpi.tables_blob(), b"APIC");
+
+        let mut offset = MADT_HEADER_SIZE;
+        let mut lapic_ids = [UNSET_APIC_ID; TEST_CPU_COUNT as usize];
+        let mut lapic_count = 0usize;
+        let mut ioapic_id = None;
+        while offset < madt.len() {
+            let entry_type = madt[offset + MADT_ENTRY_TYPE_OFFSET];
+            let entry_len = madt[offset + MADT_ENTRY_LEN_OFFSET] as usize;
+            match entry_type {
+                MADT_ENTRY_TYPE_LAPIC => {
+                    lapic_ids[lapic_count] = madt[offset + MADT_LAPIC_APIC_ID_OFFSET];
+                    lapic_count += 1;
+                }
+                MADT_ENTRY_TYPE_IOAPIC => {
+                    ioapic_id = Some(madt[offset + MADT_IOAPIC_ID_OFFSET]);
+                }
+                _ => {}
+            }
+            offset += entry_len;
+        }
+
+        assert_eq!(lapic_count, TEST_CPU_COUNT as usize);
+        assert_eq!(lapic_ids, EXPECTED_LAPIC_IDS);
+        assert_eq!(ioapic_id, Some(TEST_CPU_COUNT as u8));
+        assert_eq!(
+            madt.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
+            0
+        );
+    }
+}

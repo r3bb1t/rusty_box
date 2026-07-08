@@ -67,8 +67,21 @@ mod bridge_impl {
             }
         }
 
-        fn graphics_tile_update(&mut self, _tile: &[u8], _x: u32, _y: u32) {
-            // Graphics mode not yet supported
+        fn graphics_tile_update(&mut self, tile: &[u8], x: u32, y: u32) {
+            self.graphics_tile_update_rgba(tile, x, y, 16, 24);
+        }
+
+        fn graphics_tile_update_rgba(
+            &mut self,
+            tile: &[u8],
+            x: u32,
+            y: u32,
+            width: u32,
+            height: u32,
+        ) {
+            if let Ok(mut display) = self.shared.lock() {
+                display.blit_rgba_tile(x, y, width, height, tile);
+            }
         }
 
         fn handle_events(&mut self) {
@@ -102,9 +115,13 @@ mod bridge_impl {
 
         fn dimension_update(&mut self, x: u32, y: u32, fheight: u32, fwidth: u32, _bpp: u32) {
             if let Ok(mut display) = self.shared.lock() {
-                let cols = x.checked_div(fwidth).unwrap_or(x);
-                let rows = y.checked_div(fheight).unwrap_or(y);
-                display.resize(cols, rows, fwidth, fheight);
+                if fheight > 0 && fwidth > 0 {
+                    let cols = x.checked_div(fwidth).unwrap_or(x);
+                    let rows = y.checked_div(fheight).unwrap_or(y);
+                    display.resize(cols, rows, fwidth, fheight);
+                } else {
+                    display.resize_pixels(x, y);
+                }
             }
         }
 
@@ -173,6 +190,26 @@ mod bridge_impl {
                     display.serial_log.drain(..drain);
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn graphics_tile_update_rgba_writes_shared_framebuffer() {
+            let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+            let mut bridge = BridgeGui::new(shared.clone());
+
+            BxGui::dimension_update(&mut bridge, 2, 2, 0, 0, 32);
+            BxGui::graphics_tile_update_rgba(&mut bridge, &[0x10, 0x20, 0x30, 0xff], 0, 0, 1, 1);
+
+            let display = shared.lock().expect("display lock poisoned");
+            assert_eq!(display.fb_width, 2);
+            assert_eq!(display.fb_height, 2);
+            assert!(display.fb_dirty);
+            assert_eq!(&display.framebuffer[0..4], &[0x10, 0x20, 0x30, 0xff]);
         }
     }
 }

@@ -29,6 +29,7 @@ cargo run -p rusty_box_gui -- `
   --cdrom C:/path/alpine-virt.iso `
   --boot cdrom `
   --memory-mib 256 `
+  --cpus 2 `
   --ips 15000000
 ```
 
@@ -122,6 +123,7 @@ Example native config:
 ```toml
 [emulator]
 memory_mib = 32
+cpus = 2
 ips = 15000000
 pci = true
 sync_slowdown = false
@@ -166,6 +168,7 @@ Defaults:
 | `emulator.memory_mib` | `32` |
 | `emulator.host_memory_mib` | `memory_mib` |
 | `emulator.memory_block_kib` | `128` |
+| `emulator.cpus` | `1` |
 | `emulator.ips` | `4000000` |
 | `emulator.pci` | `true` |
 | `emulator.sync_slowdown` | `false` |
@@ -178,7 +181,7 @@ Defaults:
 Validation highlights:
 
 - BIOS is required for native emulator startup.
-- Memory sizes and IPS must be non-zero.
+- Memory sizes, CPU count, and IPS must be non-zero.
 - Boot order accepts `disk` and `cdrom`, supports at most three entries, and rejects duplicates.
 - Disk boot requires disk media; CD-ROM boot requires CD-ROM media.
 - Disk CHS accepts `CYLINDERS:HEADS:SPT` or `CYLINDERS,HEADS,SPT` on the CLI.

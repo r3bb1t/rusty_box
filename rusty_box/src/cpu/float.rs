@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 pub(crate) trait FloatExt: Sized {
     fn sqrt(self) -> Self;
     fn floor(self) -> Self;

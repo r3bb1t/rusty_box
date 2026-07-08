@@ -1780,9 +1780,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.rip()
             );
         }
+        let icount = self.icount;
         #[cfg(feature = "alloc")]
         if let Some(io) = self.io_bus_mut() {
-            io.outp(port, value, len);
+            io.outp(port, value, len, icount);
             self.sync_pic_flags();
         }
     }

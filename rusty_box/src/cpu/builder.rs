@@ -1,6 +1,9 @@
 #![allow(unused_assignments, dead_code)]
 
-use crate::cpu::{cpuid::BxCpuIdTrait, BxCpuC};
+use crate::{
+    cpu::{cpuid::BxCpuIdTrait, BxCpuC},
+    params::CpuTopology,
+};
 
 use super::Result;
 
@@ -87,6 +90,7 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
     ) {
         core::ptr::addr_of_mut!((*ptr).cpuid).write(cpuid);
         core::ptr::addr_of_mut!((*ptr).ignore_bad_msrs).write(true);
+        core::ptr::addr_of_mut!((*ptr).cpu_topology).write(CpuTopology::default());
         core::ptr::addr_of_mut!((*ptr).a20_mask).write(0xFFFF_FFFF_FFFF_FFFF);
         core::ptr::addr_of_mut!((*ptr).last_exception_type).write(-1);
         core::ptr::addr_of_mut!((*ptr).instrumentation)

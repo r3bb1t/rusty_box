@@ -693,6 +693,11 @@ pub struct BxPitC {
     /// Preserves fractions across calls so that even a few instructions
     /// between reads can accumulate enough for a PIT tick (~13 instr at 15M IPS).
     pit_tick_accumulator: u128,
+    /// Fractional PIT tick accumulator for microsecond-based clock sources.
+    pit_usec_accumulator: u128,
+    /// Last host timestamp for Bochs-style realtime PIT synchronization.
+    #[cfg(feature = "std")]
+    realtime_last: Option<std::time::Instant>,
 }
 
 impl Default for BxPitC {
@@ -712,6 +717,9 @@ impl BxPitC {
             ips: 0,
             icount_at_last_sync: 0,
             pit_tick_accumulator: 0,
+            pit_usec_accumulator: 0,
+            #[cfg(feature = "std")]
+            realtime_last: None,
         }
     }
 
@@ -728,6 +736,11 @@ impl BxPitC {
         self.irq0_pending = false;
         self.icount_at_last_sync = 0;
         self.pit_tick_accumulator = 0;
+        self.pit_usec_accumulator = 0;
+        #[cfg(feature = "std")]
+        if self.realtime_last.is_some() {
+            self.realtime_last = Some(std::time::Instant::now());
+        }
     }
 
     /// Initialize icount synchronization for fine-grained PIT timing.
@@ -738,54 +751,115 @@ impl BxPitC {
         self.icount_at_last_sync = icount;
     }
 
+    /// Enable Bochs-style realtime synchronization for wall-clock PIT users.
+    #[cfg(feature = "std")]
+    pub fn enable_realtime_sync(&mut self) {
+        self.realtime_last = Some(std::time::Instant::now());
+        self.pit_tick_accumulator = 0;
+        self.pit_usec_accumulator = 0;
+    }
+
+    /// Returns true when PIT uses host realtime instead of icount-derived time.
+    #[cfg(feature = "std")]
+    pub(crate) fn realtime_sync_enabled(&self) -> bool {
+        self.realtime_last.is_some()
+    }
+
+    fn clock_pit_ticks(&mut self, pit_ticks: u64) -> bool {
+        let mut irq0 = false;
+        let mut remaining_total = pit_ticks;
+
+        while remaining_total > 0 {
+            // Fast path: skip ticks in bulk when no state change is imminent
+            // (Bochs pit82c54.cc clock_multiple). Then per-tick for remainder.
+            // 5M PIT ticks ≈ 4.2 seconds at 1.193182 MHz.
+            let mut remaining = remaining_total.min(5_000_000) as u32;
+            remaining_total -= remaining as u64;
+
+            while remaining > 0 {
+                let skip = remaining
+                    .min(self.counters[0].next_change_time.saturating_sub(1).max(1))
+                    .min(self.counters[1].next_change_time.saturating_sub(1).max(1))
+                    .min(self.counters[2].next_change_time.saturating_sub(1).max(1));
+                if skip > 1 {
+                    let c0_fired = self.counters[0].clock_multiple(skip);
+                    self.counters[1].clock_multiple(skip);
+                    self.counters[2].clock_multiple(skip);
+                    self.total_ticks += skip as u64;
+                    remaining -= skip;
+                    if c0_fired {
+                        irq0 = true;
+                    }
+                } else {
+                    self.total_ticks += 1;
+                    if self.counters[0].clock() {
+                        irq0 = true;
+                    }
+                    self.counters[1].clock();
+                    self.counters[2].clock();
+                    remaining -= 1;
+                }
+            }
+        }
+
+        if irq0 {
+            self.irq0_pending = true;
+        }
+
+        irq0
+    }
+
+    fn advance_by_usec(&mut self, usec: u64) -> bool {
+        self.pit_usec_accumulator += usec as u128 * TICKS_PER_SECOND as u128;
+        let pit_ticks = (self.pit_usec_accumulator / USEC_PER_SECOND as u128) as u64;
+        self.pit_usec_accumulator %= USEC_PER_SECOND as u128;
+        self.clock_pit_ticks(pit_ticks)
+    }
+
+    #[cfg(feature = "std")]
+    fn sync_to_realtime(&mut self) -> bool {
+        let Some(last) = self.realtime_last else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        let elapsed = now.saturating_duration_since(last).as_micros() as u64;
+        if elapsed == 0 {
+            return false;
+        }
+        self.realtime_last = Some(now);
+        self.advance_by_usec(elapsed)
+    }
+
     /// Synchronize PIT counters to match elapsed CPU time.
     /// Called before counter reads to ensure counters are up-to-date.
     /// Uses a fractional accumulator to avoid losing ticks when only a few
     /// instructions have elapsed between reads (~13 instructions per PIT tick
     /// at 15M IPS).
     pub fn sync_to_icount(&mut self, icount: u64) {
-        if self.ips > 0 {
-            let elapsed_instr = icount.saturating_sub(self.icount_at_last_sync);
-            if elapsed_instr > 0 {
-                // Accumulate fractional PIT ticks
-                self.pit_tick_accumulator += elapsed_instr as u128 * TICKS_PER_SECOND as u128;
-                let pit_ticks = (self.pit_tick_accumulator / self.ips as u128) as u64;
-                self.pit_tick_accumulator %= self.ips as u128;
-
-                // Fast path: skip ticks in bulk when no state change is imminent
-                // (Bochs pit82c54.cc clock_multiple). Then per-tick for remainder.
-                // With clock_multiple bulk skip, we can process more ticks safely.
-                // 5M PIT ticks ≈ 4.2 seconds at 1.193182 MHz.
-                let mut remaining = pit_ticks.min(5_000_000) as u32;
-                while remaining > 0 {
-                    // Try bulk skip on all 3 counters
-                    let skip = remaining
-                        .min(self.counters[0].next_change_time.saturating_sub(1).max(1))
-                        .min(self.counters[1].next_change_time.saturating_sub(1).max(1))
-                        .min(self.counters[2].next_change_time.saturating_sub(1).max(1));
-                    if skip > 1 {
-                        let c0_fired = self.counters[0].clock_multiple(skip);
-                        self.counters[1].clock_multiple(skip);
-                        self.counters[2].clock_multiple(skip);
-                        self.total_ticks += skip as u64;
-                        remaining -= skip;
-                        if c0_fired {
-                            self.irq0_pending = true;
-                        }
-                    } else {
-                        // Per-tick fallback
-                        self.total_ticks += 1;
-                        if self.counters[0].clock() {
-                            self.irq0_pending = true;
-                        }
-                        self.counters[1].clock();
-                        self.counters[2].clock();
-                        remaining -= 1;
-                    }
-                }
-                self.icount_at_last_sync = icount;
-            }
+        #[cfg(feature = "std")]
+        if self.realtime_last.is_some() {
+            let _ = self.sync_to_realtime();
+            self.icount_at_last_sync = icount;
+            self.pit_tick_accumulator = 0;
+            return;
         }
+
+        if self.ips == 0 {
+            return;
+        }
+
+        let elapsed_instr = icount.saturating_sub(self.icount_at_last_sync);
+        if elapsed_instr == 0 {
+            return;
+        }
+
+        // Accumulate fractional PIT ticks.
+        self.pit_tick_accumulator += elapsed_instr as u128 * TICKS_PER_SECOND as u128;
+        let pit_ticks = (self.pit_tick_accumulator / self.ips as u128) as u64;
+        self.pit_tick_accumulator %= self.ips as u128;
+
+        self.clock_pit_ticks(pit_ticks);
+        self.icount_at_last_sync = icount;
     }
 
     /// Read from PIT I/O port
@@ -920,27 +994,17 @@ impl BxPitC {
     /// Simulate time passing (in microseconds)
     #[inline]
     pub fn tick(&mut self, usec: u64, icount: u64) -> bool {
-        let pit_ticks = (usec * TICKS_PER_SECOND as u64) / USEC_PER_SECOND as u64;
-
-        let mut irq0 = false;
-        for _ in 0..pit_ticks {
-            self.total_ticks += 1;
-
-            // Clock counter 0 (system timer)
-            if self.counters[0].clock() {
-                irq0 = true;
+        #[cfg(feature = "std")]
+        if self.realtime_last.is_some() {
+            let irq0 = self.sync_to_realtime();
+            if self.ips > 0 {
+                self.icount_at_last_sync = icount;
+                self.pit_tick_accumulator = 0;
             }
-
-            // Clock counter 1 (DRAM refresh - legacy)
-            self.counters[1].clock();
-
-            // Clock counter 2 (speaker)
-            self.counters[2].clock();
+            return irq0;
         }
 
-        if irq0 {
-            self.irq0_pending = true;
-        }
+        let irq0 = self.advance_by_usec(usec);
 
         // Reset icount baseline and accumulator so that read()-based sync
         // doesn't double-count the ticks we just advanced via usec.
@@ -1055,5 +1119,39 @@ mod tests {
         let old_count = ctr.count;
         ctr.clock();
         assert_eq!(ctr.count, old_count); // Count unchanged
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn realtime_sync_advances_pit_without_icount_progress() {
+        let mut pit = BxPitC::new();
+        pit.init_icount_sync(1_000, 300_000_000);
+        pit.enable_realtime_sync();
+
+        let before = pit.total_ticks;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _ = pit.read(PIT_COUNTER0, 1, 1_000);
+
+        assert!(
+            pit.total_ticks > before,
+            "PIT should advance from host realtime even when icount is unchanged"
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn realtime_sync_preserves_baseline_when_elapsed_truncates_to_zero() {
+        let mut pit = BxPitC::new();
+        pit.enable_realtime_sync();
+
+        let baseline = std::time::Instant::now() + std::time::Duration::from_millis(1);
+        pit.realtime_last = Some(baseline);
+
+        assert!(!pit.sync_to_realtime());
+        assert_eq!(
+            pit.realtime_last,
+            Some(baseline),
+            "zero-elapsed realtime polling must not discard the sub-microsecond baseline"
+        );
     }
 }

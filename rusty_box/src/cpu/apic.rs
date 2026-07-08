@@ -41,6 +41,9 @@ const APIC_ID_MASK_XAPIC: u32 = 0xFF;
 
 /// APIC ID mask for legacy mode (4-bit ID)
 const APIC_ID_MASK_LEGACY: u32 = 0x0F;
+/// Bochs sets `simulate_xapic = true` for APIC builds and uses this global
+/// bus mask for broadcast detection, independent of each LAPIC's version ID.
+const APIC_BUS_ID_MASK: u32 = APIC_ID_MASK_XAPIC;
 
 /// APIC error status constants (Bochs: apic.h)
 const APIC_ERR_ILLEGAL_ADDR: u32 = 0x80;
@@ -251,6 +254,28 @@ pub struct ApicBusMessage {
     pub trigger_mode: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalApicTimerActivation {
+    pub(crate) delay_ticks: u64,
+    pub(crate) update_ticks_initial: bool,
+}
+
+impl LocalApicTimerActivation {
+    const fn reload_from_now(delay_ticks: u64) -> Self {
+        Self {
+            delay_ticks,
+            update_ticks_initial: true,
+        }
+    }
+
+    const fn tsc_deadline(delay_ticks: u64) -> Self {
+        Self {
+            delay_ticks,
+            update_ticks_initial: false,
+        }
+    }
+}
+
 // ─── BxLocalApic struct ──────────────────────────────────────────────────────
 
 /// Local Advanced Programmable Interrupt Controller (LAPIC)
@@ -270,6 +295,8 @@ pub struct BxLocalApic {
     xapic_ext: u32,
     /// APIC ID (4-bit in legacy, 8-bit in XAPIC, 32-bit in X2APIC)
     apic_id: u32,
+    /// Number of local APIC agents on the Bochs APIC bus.
+    bus_cpu_count: u32,
     /// APIC version ID (encodes version + max LVT entry)
     apic_version_id: u32,
     /// Software enable flag (SVR bit 8)
@@ -329,6 +356,8 @@ pub struct BxLocalApic {
     timer_divconf: u32,
     /// Timer divide factor (1, 2, 4, 8, 16, 32, 64, 128)
     timer_divide_factor: u32,
+    /// Whether the CPU model supports LAPIC TSC-deadline timer mode.
+    tsc_deadline_supported: bool,
 
     /// Internal timer state (not accessible from bus)
     timer_active: bool,
@@ -358,9 +387,15 @@ pub struct BxLocalApic {
     /// The CPU event handler checks this to deliver LAPIC interrupts.
     pub(crate) intr: bool,
 
-    /// Queue of pending IPI deliveries that need APIC bus routing.
+    /// FIFO of pending IPI deliveries that need APIC bus routing.
     /// Filled by send_ipi() for shorthand 0/2/3, drained by emulator loop.
-    pub(crate) pending_ipi: Option<PendingIpi>,
+    pub(crate) pending_ipis: [Option<PendingIpi>; PENDING_IPI_CAPACITY],
+    pending_ipi_head: usize,
+    pending_ipi_len: usize,
+    /// FIFO of pending CPU-control events (INIT/SIPI) for the owning CPU.
+    pub(crate) pending_cpu_events: [Option<LocalApicCpuEvent>; PENDING_CPU_EVENT_CAPACITY],
+    pending_cpu_event_head: usize,
+    pending_cpu_event_len: usize,
 
     /// Pending EOI broadcast vector for level-triggered interrupts.
     /// Set by receive_eoi()/receive_seoi() when TMR bit is set.
@@ -371,10 +406,10 @@ pub struct BxLocalApic {
     /// The emulator loop should call periodic() when this is set.
     pub(crate) timer_fired: bool,
 
-    /// Pending timer activation request: Some(period_ticks) means the emulator
-    /// should call pc_system.activate_timer(handle, period, continuous=false).
-    /// Set by set_initial_timer_count() and periodic(), cleared by emulator loop.
-    pub(crate) timer_activate_request: Option<u64>,
+    /// Pending timer activation request. `update_ticks_initial` is false for
+    /// TSC-deadline mode because Bochs stores the absolute deadline in
+    /// `ticksInitial`; delayed Rust activation must not overwrite it with now.
+    pub(crate) timer_activate_request: Option<LocalApicTimerActivation>,
 
     /// Pending timer deactivation request. Set by set_initial_timer_count()
     /// and periodic(), cleared by emulator loop.
@@ -388,12 +423,36 @@ pub struct BxLocalApic {
     pub(crate) diag_timer_masked: u64,
 }
 
+/// Maximum queued LAPIC bus messages between scheduler sync points.
+///
+/// Bochs routes ICR writes synchronously. Rusty Box drains after each SMP CPU
+/// slice; keep this comfortably above one full xAPIC fanout so no normal trace
+/// drops a bus message before the scheduler can route it.
+const PENDING_IPI_CAPACITY: usize = 256;
+
+/// Maximum queued CPU-control events between scheduler sync points.
+///
+/// Bochs applies SMI/NMI/INIT/SIPI synchronously from LAPIC delivery. Rusty Box
+/// defers the owning-CPU state mutation to the emulator scheduler, so preserve
+/// order instead of overwriting INIT with a later SIPI.
+const PENDING_CPU_EVENT_CAPACITY: usize = 32;
+
 /// Pending IPI that needs APIC bus routing (filled by send_ipi shorthand 0/2/3)
 #[derive(Debug, Clone, Copy)]
 pub struct PendingIpi {
     pub dest: ApicDest,
     pub lo_cmd: u32,
     pub shorthand: u8,
+    pub exclude_source: bool,
+    pub accepted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalApicCpuEvent {
+    Smi,
+    Nmi,
+    Init,
+    Sipi(u8),
 }
 
 impl Default for BxLocalApic {
@@ -404,6 +463,7 @@ impl Default for BxLocalApic {
             xapic: false,
             xapic_ext: 0,
             apic_id: 0,
+            bus_cpu_count: 1,
             apic_version_id: 0,
             software_enabled: false,
             spurious_vector: 0xFF,
@@ -429,6 +489,7 @@ impl Default for BxLocalApic {
             intr_pending: false,
             timer_divconf: 0,
             timer_divide_factor: 1,
+            tsc_deadline_supported: false,
             timer_active: false,
             timer_handle: None,
             vmx_timer_handle: None,
@@ -440,7 +501,12 @@ impl Default for BxLocalApic {
             mwaitx_timer_handle: None,
             mwaitx_timer_active: false,
             intr: false,
-            pending_ipi: None,
+            pending_ipis: [None; PENDING_IPI_CAPACITY],
+            pending_ipi_head: 0,
+            pending_ipi_len: 0,
+            pending_cpu_events: [None; PENDING_CPU_EVENT_CAPACITY],
+            pending_cpu_event_head: 0,
+            pending_cpu_event_len: 0,
             pending_eoi_vector: None,
             timer_fired: false,
             timer_activate_request: None,
@@ -455,16 +521,22 @@ impl Default for BxLocalApic {
 // ─── Static helper functions (Bochs: apic.cc) ────────────────────────
 
 impl BxLocalApic {
-    /// Get the live system tick count, accounting for instructions executed
-    /// since the last batch boundary. This allows LAPIC timer current count
-    /// reads to see progress within a CPU batch (critical for calibration loops).
+    /// Get the live system tick count. In Bochs SMP, CPU traces do not advance
+    /// global time; the scheduler advances it only after a full CPU round.
     #[inline]
     fn live_ticks(&self, icount: u64) -> u64 {
+        if self.bus_cpu_count > 1 {
+            return self.current_ticks;
+        }
         if icount >= self.icount_at_sync {
             self.ticks_at_sync + (icount - self.icount_at_sync)
         } else {
             self.current_ticks
         }
+    }
+
+    pub(crate) fn set_tsc_deadline_supported(&mut self, supported: bool) {
+        self.tsc_deadline_supported = supported;
     }
 
     /// Check if a vector bit is set in a 256-bit register array.
@@ -524,6 +596,80 @@ impl BxLocalApic {
     #[inline]
     pub(crate) fn get_id(&self) -> u32 {
         self.apic_id
+    }
+
+    /// Set the APIC ID assigned by the emulator's CPU topology.
+    /// Bochs constructs each LAPIC with the owning CPU/APIC ID.
+    #[inline]
+    pub(crate) fn set_id(&mut self, id: u32) {
+        self.apic_id = id;
+        if self.mode == ApicMode::X2apicMode {
+            self.ldr = ((self.apic_id & 0xFFFF_FFF0) << 16) | (1 << (self.apic_id & 0xF));
+        }
+    }
+
+    /// Set the APIC bus CPU count from the emulator topology.
+    #[inline]
+    pub(crate) fn set_bus_cpu_count(&mut self, cpu_count: u32) {
+        self.bus_cpu_count = cpu_count.max(1);
+    }
+
+    fn enqueue_pending_ipi(&mut self, ipi: PendingIpi) {
+        if self.pending_ipi_len == PENDING_IPI_CAPACITY {
+            self.shadow_error_status |= APIC_ERR_TX_ACCEPT_ERR;
+            error!("APIC IPI queue full; dropping delivery");
+            return;
+        }
+
+        let tail = (self.pending_ipi_head + self.pending_ipi_len) % PENDING_IPI_CAPACITY;
+        self.pending_ipis[tail] = Some(ipi);
+        self.pending_ipi_len += 1;
+    }
+
+    #[inline]
+    pub(crate) fn take_pending_ipi(&mut self) -> Option<PendingIpi> {
+        if self.pending_ipi_len == 0 {
+            return None;
+        }
+
+        let ipi = self.pending_ipis[self.pending_ipi_head].take();
+        self.pending_ipi_head = (self.pending_ipi_head + 1) % PENDING_IPI_CAPACITY;
+        self.pending_ipi_len -= 1;
+        ipi
+    }
+    pub(crate) fn record_tx_accept_error(&mut self) {
+        self.shadow_error_status |= APIC_ERR_TX_ACCEPT_ERR;
+    }
+
+    fn enqueue_pending_cpu_event(&mut self, event: LocalApicCpuEvent) {
+        if self.pending_cpu_event_len == PENDING_CPU_EVENT_CAPACITY {
+            self.shadow_error_status |= APIC_ERR_TX_ACCEPT_ERR;
+            error!("APIC CPU-control event queue full; dropping delivery");
+            return;
+        }
+
+        let tail =
+            (self.pending_cpu_event_head + self.pending_cpu_event_len) % PENDING_CPU_EVENT_CAPACITY;
+        self.pending_cpu_events[tail] = Some(event);
+        self.pending_cpu_event_len += 1;
+    }
+
+    #[inline]
+    pub(crate) fn take_pending_cpu_event(&mut self) -> Option<LocalApicCpuEvent> {
+        if self.pending_cpu_event_len == 0 {
+            return None;
+        }
+
+        let event = self.pending_cpu_events[self.pending_cpu_event_head].take();
+        self.pending_cpu_event_head =
+            (self.pending_cpu_event_head + 1) % PENDING_CPU_EVENT_CAPACITY;
+        self.pending_cpu_event_len -= 1;
+        event
+    }
+
+    #[inline]
+    pub(crate) fn matches_logical_dest(&self, dest: ApicDest) -> bool {
+        self.match_logical_addr(dest)
     }
 
     /// Check if this is an XAPIC.
@@ -665,7 +811,11 @@ impl BxLocalApic {
                     let ticks = self.live_ticks(icount);
                     let delta64 =
                         ticks.saturating_sub(self.ticks_initial) / self.timer_divide_factor as u64;
-                    let delta32 = delta64 as u32;
+                    debug_assert!(
+                        delta64 <= self.timer_initial as u64,
+                        "LAPIC timer current count overdue"
+                    );
+                    let delta32 = delta64.min(u32::MAX as u64) as u32;
                     data = self.timer_initial.saturating_sub(delta32);
                 } else {
                     data = self.timer_current;
@@ -848,11 +998,100 @@ impl BxLocalApic {
         self.write_aligned(addr, value);
     }
 
+    /// Handle a read from the x2APIC MSR register window.
+    /// Bochs: read_x2apic (apic.cc)
+    pub(crate) fn read_x2apic(&self, index: u32, icount: u64) -> Option<u64> {
+        match index {
+            // Full-width x2APIC-only registers.
+            0x020 => Some(self.apic_id as u64),
+            0x0D0 => Some(self.ldr as u64),
+            0x300 => Some(((self.icr_hi as u64) << 32) | self.icr_lo as u64),
+            // Not readable in x2APIC mode.
+            0x090 | 0x0E0 | 0x0B0 | 0x310 | 0x3F0 => None,
+            // Registers compatible with legacy LAPIC reads.
+            0x030 | 0x080 | 0x0A0 | 0x0F0 | 0x100 | 0x110 | 0x120 | 0x130 | 0x140 | 0x150
+            | 0x160 | 0x170 | 0x180 | 0x190 | 0x1A0 | 0x1B0 | 0x1C0 | 0x1D0 | 0x1E0 | 0x1F0
+            | 0x200 | 0x210 | 0x220 | 0x230 | 0x240 | 0x250 | 0x260 | 0x270 | 0x280 | 0x2F0
+            | 0x320 | 0x330 | 0x340 | 0x350 | 0x360 | 0x370 | 0x380 | 0x390 | 0x3E0 => {
+                Some(self.read_aligned(index as BxPhyAddress, icount) as u64)
+            }
+            _ => {
+                error!("read_x2apic: register {:#x} not implemented", index);
+                None
+            }
+        }
+    }
+
+    /// Handle a write to the x2APIC MSR register window.
+    /// Bochs: write_x2apic (apic.cc)
+    pub(crate) fn write_x2apic(&mut self, index: u32, value: u64) -> bool {
+        let value_hi = (value >> 32) as u32;
+        let value_lo = value as u32;
+        if index != 0x300 && value_hi != 0 {
+            return false;
+        }
+
+        match index {
+            // Full 64-bit ICR write: high dword is the x2APIC destination.
+            0x300 => {
+                self.icr_lo = value_lo & !(1 << 12);
+                self.icr_hi = value_hi;
+                self.send_ipi(value_hi, self.icr_lo);
+                true
+            }
+            // x2APIC self-IPI MSR.
+            0x3F0 => {
+                self.trigger_irq((value_lo & 0xFF) as u8, APIC_EDGE_TRIGGERED, false);
+                true
+            }
+            // Legacy-compatible writable registers.
+            0x080 => {
+                if (value_lo & 0xFFFF_FF00) != 0 {
+                    return false;
+                }
+                self.write_aligned(index as BxPhyAddress, value_lo);
+                true
+            }
+            0x0F0 => {
+                if (value_lo & 0xFFFF_FE00) != 0 {
+                    return false;
+                }
+                self.write_aligned(index as BxPhyAddress, value_lo);
+                true
+            }
+            0x0B0 | 0x280 => {
+                if value_lo != 0 {
+                    return false;
+                }
+                self.write_aligned(index as BxPhyAddress, value_lo);
+                true
+            }
+            0x2F0 | 0x320 | 0x330 | 0x340 | 0x350 | 0x360 | 0x370 | 0x380 | 0x3E0 => {
+                self.write_aligned(index as BxPhyAddress, value_lo);
+                true
+            }
+            // Read-only or unavailable in x2APIC mode.
+            0x020 | 0x030 | 0x090 | 0x0A0 | 0x0D0 | 0x0E0 | 0x100 | 0x110 | 0x120 | 0x130
+            | 0x140 | 0x150 | 0x160 | 0x170 | 0x180 | 0x190 | 0x1A0 | 0x1B0 | 0x1C0 | 0x1D0
+            | 0x1E0 | 0x1F0 | 0x200 | 0x210 | 0x220 | 0x230 | 0x240 | 0x250 | 0x260 | 0x270
+            | 0x310 | 0x390 => false,
+            _ => {
+                error!("write_x2apic: register {:#x} not implemented", index);
+                false
+            }
+        }
+    }
+
     // ─── LVT entry write ────────────────────────────────────────────────
 
     /// Write to a Local Vector Table entry with proper masking.
     /// Bochs: set_lvt_entry (apic.cc)
-    fn set_lvt_entry(&mut self, apic_reg: u32, mut value: u32) {
+    fn set_lvt_entry(&mut self, apic_reg: u32, value: u32) {
+        let mut value = value;
+        if apic_reg == 0x320 && !self.tsc_deadline_supported {
+            value &= !0x40000;
+        }
+
         let lvt_entry = if apic_reg == 0x2F0 {
             // CMCI
             LocalVectorTableEntry::Cmci as usize
@@ -860,11 +1099,17 @@ impl BxLocalApic {
             ((apic_reg - 0x320) >> 4) as usize
         };
 
-        // TSC-Deadline mode handling for timer LVT (apic.cc)
         if apic_reg == 0x320 {
-            // Cannot enable TSC-Deadline when not supported (we don't support it)
-            value &= !0x40000;
-            // Trace timer LVT writes
+            // TSC-Deadline mode handling for timer LVT (apic.cc).
+            if ((value ^ self.lvt[lvt_entry].bits()) & 0x40000) != 0 {
+                // Transition between TSC-Deadline and other timer modes disarms the timer.
+                self.timer_activate_request = None;
+                if self.timer_active {
+                    self.timer_active = false;
+                    self.timer_deactivate_request = true;
+                }
+            }
+
             let mode = match (value >> 17) & 3 {
                 0 => "one-shot",
                 1 => "periodic",
@@ -910,35 +1155,63 @@ impl BxLocalApic {
         match dest_shorthand {
             // 0: no shorthand — use real destination value (apic.cc)
             0 => {
-                // For single-CPU: if dest matches our ID (physical) or we match
-                // logical addressing, deliver directly. Otherwise queue for
-                // emulator loop to route (in case of multi-CPU future).
-                let logical_dest = (lo_cmd >> 11) & 1;
-                if logical_dest == 0 {
-                    // Physical destination
-                    if dest == self.apic_id {
-                        self.deliver(vector, delivery_mode, trig_mode);
-                    } else if dest == self.apic_id_mask() {
-                        // Broadcast — for single CPU, deliver to self
-                        self.deliver(vector, delivery_mode, trig_mode);
-                    } else {
-                        // No matching CPU — set TX accept error
-                        debug!(
-                            "IPI to physical dest {:#x} not accepted (no matching APIC)",
-                            dest
-                        );
+                let logical_dest = (lo_cmd >> 11) & 1 != 0;
+                if logical_dest {
+                    if dest == 0 && delivery_mode != ApicDeliveryMode::LowPriority as u8 {
                         self.shadow_error_status |= APIC_ERR_TX_ACCEPT_ERR;
+                    } else {
+                        let local_match = dest != 0 && self.match_logical_addr(dest);
+                        let low_priority = delivery_mode == ApicDeliveryMode::LowPriority as u8;
+                        if self.bus_cpu_count == 1 {
+                            if (!low_priority && local_match)
+                                || (low_priority
+                                    && ((!self.is_xapic() && self.is_focus(vector)) || local_match))
+                            {
+                                self.deliver(vector, delivery_mode, trig_mode);
+                            } else {
+                                self.shadow_error_status |= APIC_ERR_TX_ACCEPT_ERR;
+                            }
+                        } else {
+                            if local_match && !low_priority {
+                                self.deliver(vector, delivery_mode, trig_mode);
+                            }
+                            self.enqueue_pending_ipi(PendingIpi {
+                                dest,
+                                lo_cmd,
+                                shorthand: 0,
+                                exclude_source: local_match && !low_priority,
+                                accepted: local_match && !low_priority,
+                            });
+                        }
                     }
+                } else if delivery_mode == ApicDeliveryMode::LowPriority as u8 {
+                    // Bochs apic_bus_deliver_interrupt rejects lowest-priority
+                    // delivery in physical destination mode.
+                    self.shadow_error_status |= APIC_ERR_TX_ACCEPT_ERR;
+                } else if (dest & APIC_BUS_ID_MASK) == APIC_BUS_ID_MASK {
+                    self.deliver(vector, delivery_mode, trig_mode);
+                    self.enqueue_pending_ipi(PendingIpi {
+                        dest,
+                        lo_cmd,
+                        shorthand: 0,
+                        exclude_source: true,
+                        accepted: true,
+                    });
+                } else if dest == self.apic_id {
+                    self.deliver(vector, delivery_mode, trig_mode);
+                } else if dest >= self.bus_cpu_count {
+                    // Bochs can reject a missing physical APIC ID synchronously
+                    // from send_ipi(); keep ESR-visible TX accept errors at the
+                    // ICR write boundary for impossible CPU IDs.
+                    self.shadow_error_status |= APIC_ERR_TX_ACCEPT_ERR;
                 } else {
-                    // Logical destination
-                    if dest == 0 {
-                        // Logical dest 0 = no target
-                        self.shadow_error_status |= APIC_ERR_TX_ACCEPT_ERR;
-                    } else if self.match_logical_addr(dest) {
-                        self.deliver(vector, delivery_mode, trig_mode);
-                    } else {
-                        self.shadow_error_status |= APIC_ERR_TX_ACCEPT_ERR;
-                    }
+                    self.enqueue_pending_ipi(PendingIpi {
+                        dest,
+                        lo_cmd,
+                        shorthand: 0,
+                        exclude_source: false,
+                        accepted: false,
+                    });
                 }
             }
             // 1: self (apic.cc)
@@ -947,13 +1220,28 @@ impl BxLocalApic {
             }
             // 2: all including self (apic.cc)
             2 => {
-                // Single CPU: just deliver to self
-                self.deliver(vector, delivery_mode, trig_mode);
+                let exclude_source = delivery_mode != ApicDeliveryMode::LowPriority as u8;
+                if exclude_source {
+                    self.deliver(vector, delivery_mode, trig_mode);
+                }
+                self.enqueue_pending_ipi(PendingIpi {
+                    dest,
+                    lo_cmd,
+                    shorthand: 2,
+                    exclude_source,
+                    accepted: exclude_source,
+                });
             }
             // 3: all but self (apic.cc)
             3 => {
-                // Single CPU: nothing to deliver (exclude self)
-                debug!("IPI all-but-self: no other CPUs");
+                let low_priority = delivery_mode == ApicDeliveryMode::LowPriority as u8;
+                self.enqueue_pending_ipi(PendingIpi {
+                    dest,
+                    lo_cmd,
+                    shorthand: if low_priority { 2 } else { 3 },
+                    exclude_source: !low_priority,
+                    accepted: !low_priority,
+                });
             }
             _ => {
                 error!("Invalid destination shorthand {:#x}", dest_shorthand);
@@ -1112,21 +1400,28 @@ impl BxLocalApic {
                 debug!("Deliver fixed/lowpri interrupt vector {:#04x}", vector);
                 self.trigger_irq(vector, trig_mode, false);
             }
-            // SMI (apic.cc) — not implemented
+            // SMI (apic.cc)
             2 => {
-                info!("Deliver SMI (not implemented)");
+                info!("Deliver SMI to APIC id={}", self.apic_id);
+                self.enqueue_pending_cpu_event(LocalApicCpuEvent::Smi);
             }
-            // NMI (apic.cc) — not implemented
+            // NMI (apic.cc)
             4 => {
-                info!("Deliver NMI (not implemented)");
+                info!("Deliver NMI to APIC id={}", self.apic_id);
+                self.enqueue_pending_cpu_event(LocalApicCpuEvent::Nmi);
             }
-            // INIT (apic.cc) — not implemented
+            // INIT (apic.cc)
             5 => {
-                info!("Deliver INIT IPI (not implemented)");
+                info!("Deliver INIT IPI to APIC id={}", self.apic_id);
+                self.enqueue_pending_cpu_event(LocalApicCpuEvent::Init);
             }
-            // SIPI (apic.cc) — not implemented
+            // SIPI (apic.cc)
             6 => {
-                info!("Deliver Start Up IPI (not implemented)");
+                info!(
+                    "Deliver Start Up IPI vector {:#04x} to APIC id={}",
+                    vector, self.apic_id
+                );
+                self.enqueue_pending_cpu_event(LocalApicCpuEvent::Sipi(vector));
             }
             // ExtINT (apic.cc)
             7 => {
@@ -1442,7 +1737,7 @@ impl BxLocalApic {
             // Request re-activation with same period
             // Bochs apic.cc: activate_timer_ticks(handle, Bit64u(initial)*Bit64u(factor), 0)
             let period = self.timer_initial as u64 * self.timer_divide_factor as u64;
-            self.timer_activate_request = Some(period);
+            self.timer_activate_request = Some(LocalApicTimerActivation::reload_from_now(period));
         } else {
             // One-shot mode — timer is done
             self.timer_current = 0;
@@ -1461,7 +1756,7 @@ impl BxLocalApic {
         let combined = ((value & 8) >> 1) | (value & 3);
         // value 0..6 → factor 2,4,8,16,32,64,128; value 7 → factor 1
         self.timer_divide_factor = if combined == 7 { 1 } else { 2 << combined };
-        info!("set timer divide factor to {}", self.timer_divide_factor);
+        debug!("set timer divide factor to {}", self.timer_divide_factor);
     }
 
     /// Write the initial timer count register. Starts or restarts the timer.
@@ -1490,6 +1785,7 @@ impl BxLocalApic {
             self.timer_active = false;
             self.timer_deactivate_request = true;
         }
+        self.timer_activate_request = None;
 
         self.timer_initial = value;
         self.timer_current = 0;
@@ -1513,7 +1809,7 @@ impl BxLocalApic {
             // Request timer activation: period = initial_count * divide_factor ticks
             // Bochs apic.cc: activate_timer_ticks(handle, Bit64u(value) * Bit64u(factor), 0)
             let period = value as u64 * self.timer_divide_factor as u64;
-            self.timer_activate_request = Some(period);
+            self.timer_activate_request = Some(LocalApicTimerActivation::reload_from_now(period));
         }
     }
 
@@ -1533,14 +1829,14 @@ impl BxLocalApic {
         }
 
         // Compute elapsed ticks and remaining count (apic.cc)
-        let delta64 = (current_ticks - self.ticks_initial) / self.timer_divide_factor as u64;
-        let delta32 = delta64 as u32;
-        if delta32 > self.timer_initial {
-            // Timer should have already fired — clamp to 0
-            self.timer_current = 0;
-        } else {
-            self.timer_current = self.timer_initial - delta32;
-        }
+        let delta64 =
+            current_ticks.saturating_sub(self.ticks_initial) / self.timer_divide_factor as u64;
+        debug_assert!(
+            delta64 <= self.timer_initial as u64,
+            "LAPIC timer current count overdue"
+        );
+        let delta32 = delta64.min(u32::MAX as u64) as u32;
+        self.timer_current = self.timer_initial.saturating_sub(delta32);
         self.timer_current
     }
 
@@ -1592,8 +1888,7 @@ impl BxLocalApic {
 
     /// Set the TSC-Deadline timer value.
     /// Bochs: set_tsc_deadline (apic.cc)
-    #[allow(dead_code)]
-    pub(crate) fn set_tsc_deadline(&mut self, deadline: u64) {
+    pub(crate) fn set_tsc_deadline(&mut self, deadline: u64, current_ticks: u64) {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
         if timervec.timer_mode_field() != 2 {
             error!("APIC: TSC-Deadline timer is disabled");
@@ -1605,13 +1900,18 @@ impl BxLocalApic {
             self.timer_deactivate_request = true;
         }
 
+        self.timer_activate_request = None;
         self.ticks_initial = deadline;
         if deadline != 0 {
             debug!("APIC: TSC-Deadline is set to {}", deadline);
             self.timer_active = true;
-            // Bochs apic.cc: activate_timer_ticks(handle, (deadline>currtime) ? (deadline-currtime) : 1, 0)
-            // We don't have currtime here; the emulator loop handles the actual activation
-            self.timer_activate_request = Some(1); // minimal period, emulator will adjust
+            self.timer_activate_request = Some(LocalApicTimerActivation::tsc_deadline(
+                if deadline > current_ticks {
+                    deadline - current_ticks
+                } else {
+                    1
+                },
+            ));
         }
     }
 
@@ -1712,7 +2012,13 @@ impl BxLocalApic {
 
         self.xapic_ext = 0;
         self.intr = false;
-        self.pending_ipi = None;
+        self.intr_pending = false;
+        self.pending_ipis = [None; PENDING_IPI_CAPACITY];
+        self.pending_ipi_head = 0;
+        self.pending_ipi_len = 0;
+        self.pending_cpu_events = [None; PENDING_CPU_EVENT_CAPACITY];
+        self.pending_cpu_event_head = 0;
+        self.pending_cpu_event_len = 0;
         self.pending_eoi_vector = None;
         self.timer_fired = false;
     }
@@ -1867,11 +2173,26 @@ impl BxLocalApic {
 
 #[cfg(test)]
 mod tests {
+    const TEST_LOCAL_APIC_ID: u32 = 3;
+    const SOURCE_APIC_ID: u32 = 0;
+    const TARGET_APIC_ID: u32 = 1;
+    const FIXED_IPI_VECTOR: u32 = 0x45;
+    const ALL_BUT_SELF_IPI_VECTOR: u32 = 0x46;
+    const SIPI_VECTOR: u8 = 0x08;
+    const APIC_ID_REGISTER_OFFSET: u64 = 0x020;
+    const APIC_ID_REGISTER_SHIFT: u32 = 24;
+    const APIC_VECTOR_MASK: u32 = 0xFF;
+    const ICR_DEST_SHORTHAND_SHIFT: u32 = 18;
+    const ICR_ALL_BUT_SELF_SHORTHAND: u8 = 3;
+    const INIT_VECTOR: u8 = 0;
+    const NO_DESTINATION_SHORTHAND: u8 = 0;
+
     use super::*;
 
     fn make_lapic() -> BxLocalApic {
         let mut lapic = BxLocalApic::default();
         lapic.xapic = true;
+        lapic.set_tsc_deadline_supported(true);
         lapic.reset(0);
         lapic
     }
@@ -2080,14 +2401,35 @@ mod tests {
         lapic.software_enabled = true;
 
         // Write timer LVT with all bits set — masked by LVT_MASKS[0].
-        // TSC-Deadline not supported, so bit 18 (0x40000) is cleared first.
-        // Result: 0x000710FF & !0x40000 = 0x000310FF
+        // Bochs Skylake-X supports TSC-Deadline, so bit 18 (0x40000) stays.
+        // Result: 0x000710FF.
         lapic.set_lvt_entry(0x320, 0xFFFF_FFFF);
-        assert_eq!(lapic.lvt[0].bits(), 0x000310FF);
+        assert_eq!(lapic.lvt[0].bits(), 0x000710FF);
 
         // Write LINT0 LVT
         lapic.set_lvt_entry(0x350, 0xFFFF_FFFF);
         assert_eq!(lapic.lvt[3].bits(), 0x0001F7FF);
+    }
+
+    #[test]
+    fn timer_lvt_clears_tsc_deadline_bit_when_unsupported() {
+        let mut lapic = BxLocalApic::default();
+        lapic.write_spurious_interrupt_register(0x1FF);
+
+        lapic.set_lvt_entry(0x320, 0x0004_0030);
+
+        let timer_lvt = lapic.lvt[LocalVectorTableEntry::Timer as usize];
+        assert_ne!(timer_lvt.timer_mode_field(), 2);
+        assert_eq!(timer_lvt.bits() & 0x40000, 0);
+
+        lapic.set_initial_timer_count(4);
+        assert_eq!(
+            lapic.timer_activate_request,
+            Some(LocalApicTimerActivation {
+                delay_ticks: 4,
+                update_ticks_initial: true,
+            })
+        );
     }
 
     #[test]
@@ -2131,6 +2473,79 @@ mod tests {
         // divconf=0b1011 → combined=7 → factor=1
         lapic.set_divide_configuration(0xB);
         assert_eq!(lapic.timer_divide_factor, 1);
+    }
+
+    #[test]
+    fn tsc_deadline_activation_keeps_absolute_deadline_ticks() {
+        const CURRENT_TICKS: u64 = 100;
+        const DEADLINE_TICKS: u64 = 500;
+
+        let mut lapic = make_lapic();
+        lapic.lvt[LocalVectorTableEntry::Timer as usize] = LvtBits::from_raw(0x0004_0030);
+
+        lapic.set_tsc_deadline(DEADLINE_TICKS, CURRENT_TICKS);
+
+        assert_eq!(lapic.get_tsc_deadline(), DEADLINE_TICKS);
+        assert_eq!(
+            lapic.timer_activate_request,
+            Some(LocalApicTimerActivation {
+                delay_ticks: DEADLINE_TICKS - CURRENT_TICKS,
+                update_ticks_initial: false,
+            })
+        );
+
+        lapic.set_tsc_deadline(0, CURRENT_TICKS + 1);
+
+        assert_eq!(lapic.get_tsc_deadline(), 0);
+        assert_eq!(lapic.timer_activate_request, None);
+        assert!(lapic.timer_deactivate_request);
+    }
+
+    #[test]
+    fn zero_initial_timer_count_clears_pending_activation() {
+        let mut lapic = make_lapic();
+
+        lapic.set_initial_timer_count(4);
+        assert_eq!(
+            lapic.timer_activate_request,
+            Some(LocalApicTimerActivation {
+                delay_ticks: 4,
+                update_ticks_initial: true,
+            })
+        );
+
+        lapic.set_initial_timer_count(0);
+
+        assert_eq!(lapic.timer_activate_request, None);
+        assert!(lapic.timer_deactivate_request);
+        assert!(!lapic.timer_active);
+    }
+
+    #[test]
+    #[should_panic(expected = "LAPIC timer current count overdue")]
+    fn current_timer_count_panics_when_active_timer_is_overdue() {
+        let mut lapic = make_lapic();
+
+        lapic.set_initial_timer_count(10);
+        lapic.timer_divide_factor = 1;
+        lapic.ticks_initial = 0;
+
+        let _ = lapic.get_current_timer_count(11);
+    }
+
+    #[test]
+    fn timer_lvt_mode_change_clears_pending_tsc_deadline_activation() {
+        const CURRENT_TICKS: u64 = 100;
+        const DEADLINE_TICKS: u64 = 500;
+
+        let mut lapic = make_lapic();
+        lapic.lvt[LocalVectorTableEntry::Timer as usize] = LvtBits::from_raw(0x0004_0030);
+        lapic.set_tsc_deadline(DEADLINE_TICKS, CURRENT_TICKS);
+
+        lapic.set_lvt_entry(0x320, 0x30);
+
+        assert_eq!(lapic.timer_activate_request, None);
+        assert!(lapic.timer_deactivate_request);
     }
 
     #[test]
@@ -2191,5 +2606,79 @@ mod tests {
 
         assert!(BxLocalApic::get_vector(&lapic.irr, 0x30));
         assert!(lapic.intr);
+    }
+
+    #[test]
+    fn apic_id_is_configurable_and_preserved_by_reset() {
+        let mut lapic = make_lapic();
+
+        lapic.set_id(TEST_LOCAL_APIC_ID);
+        lapic.reset(0);
+
+        assert_eq!(lapic.get_id(), TEST_LOCAL_APIC_ID);
+        assert_eq!(
+            lapic.read_aligned(BX_LAPIC_BASE_ADDR | APIC_ID_REGISTER_OFFSET, 0),
+            TEST_LOCAL_APIC_ID << APIC_ID_REGISTER_SHIFT
+        );
+    }
+
+    #[test]
+    fn physical_ipi_to_another_apic_is_queued_for_bus_delivery() {
+        let mut lapic = make_lapic();
+        lapic.set_id(SOURCE_APIC_ID);
+        lapic.set_bus_cpu_count(TARGET_APIC_ID + 1);
+
+        lapic.send_ipi(TARGET_APIC_ID, FIXED_IPI_VECTOR);
+
+        let pending = lapic
+            .take_pending_ipi()
+            .expect("IPI should need bus routing");
+        assert_eq!(pending.dest, TARGET_APIC_ID);
+        assert_eq!(pending.lo_cmd & APIC_VECTOR_MASK, FIXED_IPI_VECTOR);
+        assert_eq!(pending.shorthand, NO_DESTINATION_SHORTHAND);
+        assert_eq!(lapic.shadow_error_status & APIC_ERR_TX_ACCEPT_ERR, 0);
+    }
+
+    #[test]
+    fn all_but_self_ipi_is_queued_for_bus_delivery() {
+        let mut lapic = make_lapic();
+        lapic.set_id(SOURCE_APIC_ID);
+
+        lapic.send_ipi(
+            SOURCE_APIC_ID,
+            ((ICR_ALL_BUT_SELF_SHORTHAND as u32) << ICR_DEST_SHORTHAND_SHIFT)
+                | ALL_BUT_SELF_IPI_VECTOR,
+        );
+
+        let pending = lapic
+            .take_pending_ipi()
+            .expect("all-but-self IPI should route on bus");
+        assert_eq!(pending.shorthand, ICR_ALL_BUT_SELF_SHORTHAND);
+        assert_eq!(pending.lo_cmd & APIC_VECTOR_MASK, ALL_BUT_SELF_IPI_VECTOR);
+    }
+
+    #[test]
+    fn init_and_sipi_delivery_record_cpu_actions() {
+        let mut lapic = make_lapic();
+
+        assert!(lapic.deliver(
+            INIT_VECTOR,
+            ApicDeliveryMode::Init as u8,
+            APIC_EDGE_TRIGGERED
+        ));
+        assert_eq!(
+            lapic.take_pending_cpu_event(),
+            Some(LocalApicCpuEvent::Init)
+        );
+
+        assert!(lapic.deliver(
+            SIPI_VECTOR,
+            ApicDeliveryMode::Sipi as u8,
+            APIC_EDGE_TRIGGERED
+        ));
+        assert_eq!(
+            lapic.take_pending_cpu_event(),
+            Some(LocalApicCpuEvent::Sipi(SIPI_VECTOR))
+        );
     }
 }

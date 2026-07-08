@@ -13,6 +13,7 @@ use crate::memory::BxMemC;
 // ─── I/O Ports ──────────────────────────────────────────────────────────
 
 const FW_CFG_IO_BASE: u16 = 0x510;
+const FW_CFG_DATA_PORT: u16 = FW_CFG_IO_BASE + 1;
 
 // ─── Selector Keys ──────────────────────────────────────────────────────
 
@@ -323,7 +324,7 @@ impl BxFwCfg {
     pub fn read_port(&self, address: u16, _io_len: u8) -> u32 {
         match address {
             FW_CFG_IO_BASE => 0,
-            0x511 => {
+            FW_CFG_DATA_PORT => {
                 // Reads from the data port. We need &mut self for cur_offset,
                 // but the dispatch gives us &self for reads. Use interior
                 // mutability would be needed for a strict port; for now this
@@ -346,7 +347,7 @@ impl BxFwCfg {
     pub fn read_port_mut(&mut self, address: u16, _io_len: u8) -> u32 {
         match address {
             FW_CFG_IO_BASE => 0,
-            0x511 => {
+            FW_CFG_DATA_PORT => {
                 if self.cur_entry == FW_CFG_INVALID {
                     return 0;
                 }
@@ -390,7 +391,7 @@ impl BxFwCfg {
                     tracing::warn!("fw_cfg: invalid selector write, io_len={}", io_len);
                 }
             }
-            0x511 => {
+            FW_CFG_DATA_PORT => {
                 // Data port write — not used by OVMF
                 tracing::debug!("fw_cfg: write to data port ignored");
             }
@@ -779,5 +780,37 @@ impl BxFwCfg {
 
         self.add_bytes(FW_CFG_HPET, &data[..hpet_size]);
         tracing::info!("fw_cfg: added HPET configuration");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    const SELECTOR_WRITE_BYTES: u8 = 2;
+    const DATA_READ_BYTES: u8 = 1;
+    const TEST_RAM_SIZE: u64 = 64 * 1024 * 1024;
+    const TEST_CPU_COUNT: u32 = 4;
+
+    use super::*;
+
+    fn read_u16_entry(fw_cfg: &mut BxFwCfg, key: u16) -> u16 {
+        fw_cfg.write_port(FW_CFG_IO_BASE, key as u32, SELECTOR_WRITE_BYTES, None);
+        let lo = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES) as u16;
+        let hi = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES) as u16;
+        lo | (hi << 8)
+    }
+
+    #[test]
+    fn init_exposes_configured_cpu_count() {
+        let mut fw_cfg = BxFwCfg::new();
+        fw_cfg.init(TEST_RAM_SIZE, TEST_CPU_COUNT);
+
+        assert_eq!(
+            read_u16_entry(&mut fw_cfg, FW_CFG_NB_CPUS),
+            TEST_CPU_COUNT as u16
+        );
+        assert_eq!(
+            read_u16_entry(&mut fw_cfg, FW_CFG_MAX_CPUS),
+            TEST_CPU_COUNT as u16
+        );
     }
 }

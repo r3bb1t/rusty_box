@@ -12,8 +12,8 @@ use rusty_box::{
 };
 
 // Embedded binary assets (compiled into the WASM)
-const BIOS_DATA: &[u8] = include_bytes!("../../../cpp_orig/bochs/bios/BIOS-bochs-latest");
-const VGA_BIOS_DATA: &[u8] = include_bytes!("../../../cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin");
+const BIOS_DATA: &[u8] = include_bytes!("../../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
+const VGA_BIOS_DATA: &[u8] = include_bytes!("../../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin");
 const DISK_DATA: &[u8] = include_bytes!("../../../dlxlinux/hd10meg.img");
 
 /// DLX Linux disk geometry

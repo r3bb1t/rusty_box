@@ -62,7 +62,7 @@ As of session 52, the following features are enabled/disabled in the Skylake-X C
 | SSE through SSE4.2 | 1 ECX/EDX | Enabled | Full handler coverage |
 | AVX | 1 ECX | Enabled | 128-bit VEX path |
 | AVX2 | 7 EBX | Enabled | 256-bit VEX path, decoder VL fix applied |
-| FMA | 1 ECX | Enabled | |
+| FMA | 1 ECX | Enabled | VEX FMA3 132/213/231 decode and execution implemented; FMA4 remains not advertised |
 | AES-NI | 1 ECX | Enabled | |
 | BMI1/BMI2 | 7 EBX | Enabled | |
 | XSAVE/XSAVEC/XSAVEOPT | 1 ECX / 0xD | Enabled | Compacted format |

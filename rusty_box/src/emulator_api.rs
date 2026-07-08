@@ -970,8 +970,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
         )?;
         emu.memory.set_a20_mask(emu.pc_system.a20_mask());
         emu.pc_system.initialize(cfg.ips);
-        // Bring the CPU to its reset state before applying the mode.
-        emu.cpu.reset(ResetReason::Hardware);
+        // Bring every configured CPU to reset state before applying the mode to the BSP.
+        emu.reset(ResetReason::Hardware)?;
         emu.setup_cpu_mode(mode)?;
         Ok(emu)
     }
@@ -995,7 +995,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         )?;
         emu.memory.set_a20_mask(emu.pc_system.a20_mask());
         emu.pc_system.initialize(cfg.ips);
-        emu.cpu.reset(crate::cpu::ResetReason::Hardware);
+        emu.reset(crate::cpu::ResetReason::Hardware)?;
         emu.setup_cpu_mode(mode)?;
         Ok(emu)
     }
@@ -1357,6 +1357,44 @@ mod tests {
                     val,
                     "YMM3 round-trip failed"
                 );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn vperm2f128_ubuntu_sha512_bytes_execute_bochs_ordering() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cfg = EmulatorConfig::default();
+                let mut emu =
+                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                        .unwrap();
+                let code_addr = 0x20_0000;
+                emu.mem_write(code_addr, &[0xC4, 0xE3, 0x45, 0x06, 0xC6, 0x03])
+                    .unwrap();
+
+                let mut ymm6 = [0u8; 32];
+                let mut ymm7 = [0u8; 32];
+                for i in 0..32 {
+                    ymm6[i] = 0x20 + i as u8;
+                    ymm7[i] = 0xa0 + i as u8;
+                }
+                emu.reg_write_ymm(X86Reg::Ymm6, ymm6);
+                emu.reg_write_ymm(X86Reg::Ymm7, ymm7);
+                emu.reg_write(
+                    X86Reg::Cr4,
+                    emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+                );
+
+                emu.emu_start(code_addr, None, None, Some(1)).unwrap();
+
+                let mut expected = [0u8; 32];
+                expected[..16].copy_from_slice(&ymm6[16..32]);
+                expected[16..32].copy_from_slice(&ymm7[..16]);
+                assert_eq!(emu.reg_read_ymm(X86Reg::Ymm0), expected);
             })
             .unwrap()
             .join()

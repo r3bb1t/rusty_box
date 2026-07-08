@@ -115,18 +115,18 @@ fn run_dlxlinux() -> Result<()> {
 
     let bios_paths = [
         // Prefer BIOS-bochs-latest (128KB) - the modern BIOS
-        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-latest"),
-        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-legacy"),
-        workspace_root.join("cpp_orig/bochs/bios/bios.bin-1.13.0"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/BIOS-bochs-legacy"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/bios.bin-1.13.0"),
         // Fallbacks (if user has BIOS copied elsewhere)
         workspace_root.join("BIOS-bochs-latest"),
         workspace_root.join("BIOS-bochs-legacy"),
         workspace_root.join("bios.bin-1.13.0"),
-        workspace_root.join("../cpp_orig/bochs/bios/BIOS-bochs-latest"),
-        workspace_root.join("../cpp_orig/bochs/bios/BIOS-bochs-legacy"),
+        workspace_root.join("../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
+        workspace_root.join("../cpp_orig/bochs/bochs/bios/BIOS-bochs-legacy"),
         workspace_root.join("../BIOS-bochs-latest"),
         std::path::PathBuf::from("BIOS-bochs-latest"),
-        std::path::PathBuf::from("../cpp_orig/bochs/bios/BIOS-bochs-latest"),
+        std::path::PathBuf::from("../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
     ];
 
     let vga_bios_paths = [
@@ -135,15 +135,15 @@ fn run_dlxlinux() -> Result<()> {
         workspace_root.join("binaries/bios/VGABIOS-lgpl-latest-cirrus.bin"),
         workspace_root.join("binaries/bios/VGABIOS-lgpl-latest-debug.bin"),
         // Mirrored Bochs BIOS directory
-        workspace_root.join("cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin"),
-        workspace_root.join("cpp_orig/bochs/bios/VGABIOS-lgpl-latest-cirrus.bin"),
-        workspace_root.join("cpp_orig/bochs/bios/VGABIOS-lgpl-latest-debug.bin"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest-cirrus.bin"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest-debug.bin"),
         // Fallbacks
         workspace_root.join("VGABIOS-lgpl-latest.bin"),
-        workspace_root.join("../cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin"),
+        workspace_root.join("../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin"),
         workspace_root.join("../VGABIOS-lgpl-latest.bin"),
         std::path::PathBuf::from("VGABIOS-lgpl-latest.bin"),
-        std::path::PathBuf::from("../cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin"),
+        std::path::PathBuf::from("../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin"),
         std::path::PathBuf::from("../VGABIOS-lgpl-latest.bin"),
     ];
 

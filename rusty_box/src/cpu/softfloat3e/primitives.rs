@@ -239,11 +239,27 @@ pub fn approx_recip32_1(a: u32) -> u32 {
 /// Reciprocal square root approximation for sqrt.
 /// Returns approximation to 1/sqrt(A).
 pub fn approx_recip_sqrt32_1(odd_exp: u32, a: u32) -> u32 {
+    // Ported from Berkeley SoftFloat 3e s_approxRecipSqrt32_1.c
     let index = ((a >> 27) & 0xE) as usize + odd_exp as usize;
     let eps = (a >> 12) as u16;
-    let r0 = (APPROX_RECIP_SQRT_1K0S[index] as u32)
-        .wrapping_sub(((APPROX_RECIP_SQRT_1K1S[index] as u32).wrapping_mul(eps as u32)) >> 20);
-    let sigma0 = !(r0.wrapping_mul(r0) as u64).wrapping_mul(a as u64);
-
-    (r0 << 16).wrapping_add(((r0 as u64).wrapping_mul(sigma0 >> 25) >> 25) as u32)
+    // C: uint16_t r0 — compute with 32-bit wrap, then truncate to 16 bits.
+    let r0: u16 = (APPROX_RECIP_SQRT_1K0S[index] as u32)
+        .wrapping_sub((APPROX_RECIP_SQRT_1K1S[index] as u32).wrapping_mul(eps as u32) >> 20)
+        as u16;
+    let mut e_sqr_r0: u32 = (r0 as u32).wrapping_mul(r0 as u32);
+    if odd_exp == 0 {
+        e_sqr_r0 <<= 1;
+    }
+    // C: sigma0 = ~(uint32_t)(((uint32_t) ESqrR0 * (uint64_t) a) >> 23)
+    let sigma0: u32 = !(((e_sqr_r0 as u64).wrapping_mul(a as u64) >> 23) as u32);
+    let mut r: u32 = ((r0 as u32) << 16)
+        .wrapping_add(((r0 as u64).wrapping_mul(sigma0 as u64) >> 25) as u32);
+    let sqr_sigma0: u32 = ((sigma0 as u64).wrapping_mul(sigma0 as u64) >> 32) as u32;
+    // C: r += ((uint32_t)((r>>1)+(r>>3)-((uint32_t)r0<<14)) * (uint64_t)sqrSigma0) >> 48
+    let inner: u32 = (r >> 1).wrapping_add(r >> 3).wrapping_sub((r0 as u32) << 14);
+    r = r.wrapping_add(((inner as u64).wrapping_mul(sqr_sigma0 as u64) >> 48) as u32);
+    if r & 0x8000_0000 == 0 {
+        r = 0x8000_0000;
+    }
+    r
 }
