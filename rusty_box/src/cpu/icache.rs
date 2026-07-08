@@ -113,7 +113,10 @@ fn handle_smc<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
 }
 
 const BX_ICACHE_INVALID_PHY_ADDRESS: BxPhyAddress = BxPhyAddress::MAX;
-const BX_ICACHE_ENTRIES: usize = 8192;
+// Bochs icache.h: BxICacheEntries = (64 * 1024). Must be a power of 2.
+const BX_ICACHE_ENTRIES: usize = 64 * 1024;
+// Bochs icache.h: BX_ICACHE_PAGE_SPLIT_ENTRIES = 8. Must be a power of 2.
+const BX_ICACHE_PAGE_SPLIT_ENTRIES: usize = 8;
 pub(super) const BX_ICACHE_MEM_POOL: usize = 576 * 1024;
 const BX_MAX_TRACE_LENGTH: usize = 32;
 /// Bochs config.cc BXPN_SMP_QUANTUM default: instructions a CPU may execute
@@ -166,7 +169,7 @@ pub struct BxICache {
     pub(crate) mpool: [Instruction; BX_ICACHE_MEM_POOL],
     pub(crate) mpindex: usize,
     next_page_split_index: usize,
-    page_split_index: [PageSplitEntry; BX_ICACHE_ENTRIES],
+    page_split_index: [PageSplitEntry; BX_ICACHE_PAGE_SPLIT_ENTRIES],
     /// Per-page fine-granularity bitmask for SMC (Self-Modifying Code) detection.
     /// Matching Bochs `bxPageWriteStampTable::fineGranularityMapping`.
     ///
@@ -245,7 +248,7 @@ impl BxICache {
         // Store the page split entry
         self.page_split_index[self.next_page_split_index].ppf = p_addr;
         self.page_split_index[self.next_page_split_index].e = e.clone();
-        self.next_page_split_index = (self.next_page_split_index + 1) % BX_ICACHE_ENTRIES;
+        self.next_page_split_index = (self.next_page_split_index + 1) % BX_ICACHE_PAGE_SPLIT_ENTRIES;
     }
 
     pub fn get_entry(&self, p_addr: BxPhyAddress, fetch_mode_mask: u64) -> BxICacheEntry {
@@ -308,7 +311,7 @@ impl BxICache {
 
         // Check page split entries
         let ppf = ppf_of(p_addr);
-        for i in 0..BX_ICACHE_ENTRIES {
+        for i in 0..BX_ICACHE_PAGE_SPLIT_ENTRIES {
             if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS
                 && ppf_of(self.page_split_index[i].ppf) == ppf
             {
@@ -328,7 +331,7 @@ impl BxICache {
         }
 
         // Flush page split entries
-        for i in 0..BX_ICACHE_ENTRIES {
+        for i in 0..BX_ICACHE_PAGE_SPLIT_ENTRIES {
             if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS
                 && ppf_of(self.page_split_index[i].ppf) == ppf
             {
@@ -381,7 +384,7 @@ impl BxICache {
         }
 
         // Invalidate page split entries
-        for i in 0..BX_ICACHE_ENTRIES {
+        for i in 0..BX_ICACHE_PAGE_SPLIT_ENTRIES {
             if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS
                 && ppf_of(self.page_split_index[i].ppf) == ppf
             {

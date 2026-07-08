@@ -2126,14 +2126,16 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 self.instrumentation.fire_block_start(block_rip, block_len);
             }
 
-            let mut trace_iter = 0u64;
             'trace: loop {
-                trace_iter += 1;
                 // Bochs-style: pointer to mpool slot — no 24-byte copy per instruction.
                 // SAFETY: execute_instruction never writes to i_cache.mpool (only CPU registers
                 // and memory). serve_icache_miss is only called from get_icache_entry, not during
                 // instruction execution. So the mpool slot is stable for the duration of this call.
-                let i_ptr: *const Instruction = &raw const self.i_cache.mpool[instr_idx];
+                // instr_idx is always in-bounds: it starts at a get_icache_entry mpool_start_idx
+                // and advances only within [start, start+tlen), and serve_icache_miss guarantees
+                // start + BX_MAX_TRACE_LENGTH + 1 <= mpool length. Skips a per-instruction
+                // bounds-check branch.
+                let i_ptr: *const Instruction = unsafe { self.i_cache.mpool.as_ptr().add(instr_idx) };
                 // SAFETY: i_ptr points into self.i_cache.mpool which is stable for this
                 // iteration — execute_instruction never writes to mpool, and serve_icache_miss
                 // is only called from get_icache_entry, not during execution.
@@ -2145,7 +2147,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
                 // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
                 let ilen_val = instr_ref().ilen();
-                // ilen=0 is valid ONLY for InsertedOpcode (trace boundary marker)
+                // ilen=0 is valid ONLY for InsertedOpcode (trace boundary marker).
+                // Debug-only sanity check — Bochs does not validate ilen in the hot loop,
+                // and the decoder already guarantees 1..=15 (or 0 for InsertedOpcode).
+                #[cfg(debug_assertions)]
                 if ilen_val == 0 || ilen_val > 15 {
                     let oc = instr_ref().get_ia_opcode();
                     assert!(
@@ -2222,7 +2227,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 self.prev_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
                 // Bochs cpu.cc — icount++
                 self.icount += 1;
-                self.perf_instructions += 1;
+                #[cfg(feature = "profiling")]
+                {
+                    self.perf_instructions += 1;
+                }
 
                 iteration += 1;
                 self.sync_lapic_intr_event();
