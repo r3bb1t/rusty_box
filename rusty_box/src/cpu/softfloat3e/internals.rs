@@ -220,7 +220,13 @@ pub fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatS
 // Round-and-pack to float32
 // ============================================================
 
-pub fn round_pack_to_f32(sign: bool, exp: i16, sig: u32, status: &mut SoftFloatStatus) -> float32 {
+pub fn round_pack_to_f32(
+    sign: bool,
+    mut exp: i16,
+    mut sig: u32,
+    status: &mut SoftFloatStatus,
+) -> float32 {
+    // Faithful port of Berkeley SoftFloat 3e s_roundPackToF32.c.
     let rounding_mode = softfloat_getRoundingMode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
     let mut round_increment: u32 = 0x40;
@@ -231,57 +237,53 @@ pub fn round_pack_to_f32(sign: bool, exp: i16, sig: u32, status: &mut SoftFloatS
             0
         };
     }
-    let round_bits = sig & 0x7F;
-    let mut exp = exp;
-    let mut sig = sig;
+    let mut round_bits = sig & 0x7F;
 
     if 0xFD <= (exp as u16) {
         if exp < 0 {
-            let is_tiny = (exp < -1) || (sig.wrapping_add(round_increment) < 0x80000000);
-            sig = shift_right_jam32(sig, (-(exp as i32)) as u16);
-            exp = 0;
-            let round_bits = sig & 0x7F;
-            if round_bits != 0 {
-                softfloat_raiseFlags(status, FLAG_INEXACT);
+            let is_tiny = (exp < -1) || (sig.wrapping_add(round_increment) < 0x8000_0000);
+            if is_tiny && !softfloat_isMaskedException(status, FLAG_UNDERFLOW) {
+                softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                exp += 192;
+            } else {
+                sig = shift_right_jam32(sig, (-exp) as u16);
+                exp = 0;
+                round_bits = sig & 0x7F;
                 if is_tiny {
-                    softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                    if softfloat_flushUnderflowToZero(status) {
+                        softfloat_raiseFlags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
+                        return pack_to_f32(sign, 0, 0);
+                    }
+                    if round_bits != 0 {
+                        softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                    }
                 }
             }
-            sig = sig.wrapping_add(round_increment);
-            exp = ((sig & 0x80000000) != 0) as i16;
-            let ri = round_increment;
-            if round_near_even && ((round_bits ^ 0x40) == 0) {
-                sig &= !(ri);
-            } else {
-                sig >>= 7;
+        } else if 0xFD < exp || 0x8000_0000 <= sig.wrapping_add(round_increment) {
+            softfloat_raiseFlags(status, FLAG_OVERFLOW);
+            if round_bits != 0 || softfloat_isMaskedException(status, FLAG_OVERFLOW) {
+                softfloat_raiseFlags(status, FLAG_INEXACT);
+                if round_increment != 0 {
+                    softfloat_setRoundingUp(status);
+                }
             }
-            return pack_to_f32(sign, exp, sig);
-        }
-        if (0xFD < exp) || (0x80000000 <= sig.wrapping_add(round_increment)) {
-            softfloat_raiseFlags(status, FLAG_OVERFLOW | FLAG_INEXACT);
-            if round_near_even
-                || rounding_mode == ROUND_NEAR_MAXMAG
-                || rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })
-            {
-                return pack_to_f32(sign, 0xFF, 0);
-            } else {
-                return pack_to_f32(sign, 0xFE, 0x007FFFFF);
-            }
+            return pack_to_f32(sign, 0xFF, 0).wrapping_sub((round_increment == 0) as u32);
         }
     }
-    sig = sig.wrapping_add(round_increment);
-    if sig < round_increment {
-        exp += 1;
+
+    let sig_ref = sig;
+    sig = sig.wrapping_add(round_increment) >> 7;
+    if round_near_even && round_bits == 0x40 {
+        sig &= !1u32;
     }
-    if round_near_even && ((round_bits ^ 0x40) == 0) {
-        sig &= !0x7Fu32;
+    if sig == 0 {
+        exp = 0;
     }
     if round_bits != 0 {
         softfloat_raiseFlags(status, FLAG_INEXACT);
-    }
-    sig >>= 7;
-    if sig == 0 {
-        exp = 0;
+        if (sig << 7) > sig_ref {
+            softfloat_setRoundingUp(status);
+        }
     }
     pack_to_f32(sign, exp, sig)
 }
