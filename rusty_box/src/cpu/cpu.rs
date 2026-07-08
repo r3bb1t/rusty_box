@@ -2128,14 +2128,26 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
             'trace: loop {
                 // Bochs-style: pointer to mpool slot — no 24-byte copy per instruction.
-                // SAFETY: execute_instruction never writes to i_cache.mpool (only CPU registers
-                // and memory). serve_icache_miss is only called from get_icache_entry, not during
-                // instruction execution. So the mpool slot is stable for the duration of this call.
-                // instr_idx is always in-bounds: it starts at a get_icache_entry mpool_start_idx
-                // and advances only within [start, start+tlen), and serve_icache_miss guarantees
-                // start + BX_MAX_TRACE_LENGTH + 1 <= mpool length. Skips a per-instruction
-                // bounds-check branch.
-                let i_ptr: *const Instruction = unsafe { self.i_cache.mpool.as_ptr().add(instr_idx) };
+                // The raw pointer decouples the mpool borrow from the `&mut self`
+                // execute_instruction call below (they never alias — see SAFETY).
+                //
+                // instr_idx is always a valid mpool index: it starts at a get_icache_entry
+                // mpool_start_idx and only advances within [start, start+tlen), and
+                // serve_icache_miss guarantees start + BX_MAX_TRACE_LENGTH + 1 <= mpool length.
+                // The debug_assert enforces that invariant in debug/test builds; release keeps
+                // the per-instruction bounds check elided.
+                debug_assert!(
+                    instr_idx < self.i_cache.mpool.len(),
+                    "mpool index {} out of bounds (len {})",
+                    instr_idx,
+                    self.i_cache.mpool.len()
+                );
+                // SAFETY: instr_idx is in-bounds (invariant above, checked in debug builds).
+                // execute_instruction only mutates CPU registers and guest memory, never
+                // i_cache.mpool; serve_icache_miss (the sole mpool writer) runs only inside
+                // get_icache_entry, not during execution — so the slot is stable for this call.
+                let i_ptr: *const Instruction =
+                    unsafe { self.i_cache.mpool.get_unchecked(instr_idx) as *const Instruction };
                 // SAFETY: i_ptr points into self.i_cache.mpool which is stable for this
                 // iteration — execute_instruction never writes to mpool, and serve_icache_miss
                 // is only called from get_icache_entry, not during execution.
