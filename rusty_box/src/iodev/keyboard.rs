@@ -1900,8 +1900,8 @@ mod tests {
         assert_eq!(kbd.kbd_internal_buffer.num_elements, 2);
         assert!(kbd.kbd_controller.bat_in_progress);
 
-        // Transfer ACK
-        let irq = kbd.periodic(10);
+        // Transfer ACK (tick the controller; IRQ state is asserted elsewhere)
+        let _irq = kbd.periodic(10);
         assert!(kbd.kbd_controller.outb);
         let ack = kbd.read(KBD_DATA_PORT, 1, 0, None);
         assert_eq!(ack, KBD_RESP_ACK as u32);
