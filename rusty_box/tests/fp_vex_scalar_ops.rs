@@ -347,6 +347,408 @@ fn run_all_cases() {
 }
 
 // ════════════════════════════════════════════════════════════════════════
+// Go-runtime-critical integer ops: AESENC (map hashing) and 256-bit
+// VPCMPEQB/VPMOVMSKB (bytealg.IndexByte). A deterministic bug here breaks
+// Go map lookups / string searches — snapd's assertion-parser panic.
+// ════════════════════════════════════════════════════════════════════════
+
+fn xmm_from_u128(v: u128) -> [u8; 16] {
+    v.to_le_bytes()
+}
+
+#[test]
+fn go_runtime_integer_ops_aes_and_bytemask() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(run_go_runtime_cases)
+        .expect("spawn test thread")
+        .join()
+        .expect("join test thread");
+}
+
+fn run_go_runtime_cases() {
+    let cfg = EmulatorConfig::default();
+    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+        .expect("new emulator in flat long mode");
+    emu.reg_write(
+        X86Reg::Cr4,
+        emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+    );
+
+    let programs: &[(&str, &[u8], u64)] = &[
+        // AESENC xmm0, xmm1 (66 0F 38 DC /r)
+        ("aesenc xmm0,xmm1", &[0x66, 0x0F, 0x38, 0xDC, 0xC1], 1),
+        // AESENCLAST xmm0, xmm1 (66 0F 38 DD /r)
+        ("aesenclast xmm0,xmm1", &[0x66, 0x0F, 0x38, 0xDD, 0xC1], 1),
+        // VPMOVMSKB eax, ymm1 (VEX.256.66.0F D7 /r)
+        ("vpmovmskb eax,ymm1", &[0xC5, 0xFD, 0xD7, 0xC1], 1),
+        // VPCMPEQB ymm0,ymm1,ymm2 then VPMOVMSKB eax,ymm0
+        (
+            "vpcmpeqb ymm + vpmovmskb",
+            &[0xC5, 0xF5, 0x74, 0xC2, 0xC5, 0xFD, 0xD7, 0xC0],
+            2,
+        ),
+    ];
+    for (i, (_, code, _)) in programs.iter().enumerate() {
+        let addr = CASE_BASE + i as u64 * CASE_STRIDE;
+        emu.mem_write(addr, code).expect("write case code");
+        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+            .expect("write park jump");
+    }
+    fn run(
+        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        programs: &[(&str, &[u8], u64)],
+        idx: usize,
+    ) {
+        let (name, code, insns) = programs[idx];
+        let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
+        let park = addr + code.len() as u64;
+        let stop = emu
+            .emu_start(addr, Some(park), None, Some(insns + 8))
+            .expect("emu_start");
+        assert_eq!(emu.cpu.rip(), park, "{name}: did not park (stop={stop:?})");
+    }
+
+    // Intel AES-NI whitepaper reference vectors (also used by Bochs/QEMU):
+    // state  = 0x7b5b54657374566563746f725d53475d
+    // rndkey = 0x48692853686179295b477565726f6e5d
+    let state = 0x7b5b54657374566563746f725d53475d_u128;
+    let key = 0x48692853686179295b477565726f6e5d_u128;
+
+    // 0: AESENC → 0xa8311c2f9fdba3c58b104b58ded7e595
+    emu.reg_write_xmm(X86Reg::Xmm0, xmm_from_u128(state));
+    emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_u128(key));
+    run(&mut emu, programs, 0);
+    let got = u128::from_le_bytes(emu.reg_read_xmm(X86Reg::Xmm0));
+    assert_eq!(
+        got, 0xa8311c2f9fdba3c58b104b58ded7e595_u128,
+        "AESENC mismatch: got {got:#034x}"
+    );
+
+    // 1: AESENCLAST → 0xc7fb881e938c5964177ec42553fdc611
+    emu.reg_write_xmm(X86Reg::Xmm0, xmm_from_u128(state));
+    emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_u128(key));
+    run(&mut emu, programs, 1);
+    let got = u128::from_le_bytes(emu.reg_read_xmm(X86Reg::Xmm0));
+    assert_eq!(
+        got, 0xc7fb881e938c5964177ec42553fdc611_u128,
+        "AESENCLAST mismatch: got {got:#034x}"
+    );
+
+    // 2: vpmovmskb on ymm with sign bits at byte lanes 0, 15, 16, 31 →
+    // 0x8001_8001, upper 32 bits of rax cleared.
+    let mut m = [0u8; 32];
+    m[0] = 0x80;
+    m[15] = 0xFF;
+    m[16] = 0x80;
+    m[31] = 0xC1;
+    emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF_DEAD_BEEF);
+    emu.reg_write_ymm(X86Reg::Ymm1, m);
+    run(&mut emu, programs, 2);
+    assert_eq!(
+        emu.reg_read(X86Reg::Rax),
+        0x8001_8001,
+        "vpmovmskb ymm mask (upper lanes 16..32 must be included)"
+    );
+
+    // 3: vpcmpeqb ymm: equal only at byte 17 → mask 1<<17.
+    let mut a = [0u8; 32];
+    let mut b = [0xFFu8; 32];
+    a[17] = 0x3A; // ':' — the header separator IndexByte hunts for
+    b[17] = 0x3A;
+    emu.reg_write_ymm(X86Reg::Ymm1, a);
+    emu.reg_write_ymm(X86Reg::Ymm2, b);
+    emu.reg_write(X86Reg::Rax, 0);
+    run(&mut emu, programs, 3);
+    assert_eq!(
+        emu.reg_read(X86Reg::Rax),
+        1u64 << 17,
+        "vpcmpeqb ymm lane 17 (crosses the 16-byte boundary)"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Unaligned vector loads straddling page boundaries — Go's aeshash and
+// memequal issue MOVDQU/VMOVDQU at arbitrary string addresses, so the
+// same bytes are read at different alignments. A split-access bug makes
+// hash(key@A) != hash(key@B) and breaks Go map lookups deterministically.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn unaligned_vector_loads_across_page_boundaries() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(run_split_load_cases)
+        .expect("spawn test thread")
+        .join()
+        .expect("join test thread");
+}
+
+fn run_split_load_cases() {
+    let cfg = EmulatorConfig::default();
+    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+        .expect("new emulator in flat long mode");
+    emu.reg_write(
+        X86Reg::Cr4,
+        emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+    );
+
+    let programs: &[(&str, &[u8], u64)] = &[
+        // movdqu xmm0, [rax] (F3 0F 6F /r)
+        ("movdqu xmm0,[rax]", &[0xF3, 0x0F, 0x6F, 0x00], 1),
+        // vmovdqu ymm0, [rax] (VEX.256.F3.0F 6F /r)
+        ("vmovdqu ymm0,[rax]", &[0xC5, 0xFE, 0x6F, 0x00], 1),
+        // movdqu xmm0, [rax+rcx*1-16] — Go aeshash17to32 tail load
+        // (modrm 44 → SIB, SIB 08 → base=rax index=rcx, disp8 -16)
+        (
+            "movdqu xmm0,[rax+rcx-16]",
+            &[0xF3, 0x0F, 0x6F, 0x44, 0x08, 0xF0],
+            1,
+        ),
+        // aesenc xmm0, xmm1 (distinct registers holding equal values)
+        ("aesenc xmm0,xmm1 equal", &[0x66, 0x0F, 0x38, 0xDC, 0xC1], 1),
+        // aesenc xmm2, xmm2 (self-aliased, Go's AESENC X2, X2)
+        ("aesenc xmm2,xmm2 self", &[0x66, 0x0F, 0x38, 0xDC, 0xD2], 1),
+    ];
+    for (i, (_, code, _)) in programs.iter().enumerate() {
+        let addr = CASE_BASE + i as u64 * CASE_STRIDE;
+        emu.mem_write(addr, code).expect("write case code");
+        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+            .expect("write park jump");
+    }
+    fn run(
+        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        programs: &[(&str, &[u8], u64)],
+        idx: usize,
+    ) {
+        let (name, code, insns) = programs[idx];
+        let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
+        let park = addr + code.len() as u64;
+        let stop = emu
+            .emu_start(addr, Some(park), None, Some(insns + 8))
+            .expect("emu_start");
+        assert_eq!(emu.cpu.rip(), park, "{name}: did not park (stop={stop:?})");
+    }
+
+    // Recognizable 48-byte pattern.
+    let pattern: Vec<u8> = (0u8..48).map(|i| i.wrapping_mul(7) ^ 0x5A).collect();
+
+    // Boundaries to straddle: a 4 KiB page edge and the 2 MiB huge-page
+    // edge the FlatLong64 tables use. Data addresses far from CASE_BASE.
+    for &(name, base) in &[("4K", 0x0060_0FF8u64), ("2M", 0x009F_FFF8u64)] {
+        emu.mem_write(base, &pattern).expect("write pattern");
+
+        // movdqu: 16 bytes starting 8 bytes before the boundary.
+        emu.reg_write(X86Reg::Rax, base);
+        emu.reg_write_xmm(X86Reg::Xmm0, [0u8; 16]);
+        run(&mut emu, programs, 0);
+        let got = emu.reg_read_xmm(X86Reg::Xmm0);
+        assert_eq!(
+            &got[..],
+            &pattern[..16],
+            "movdqu split across {name} boundary at {base:#x}"
+        );
+
+        // vmovdqu ymm: 32 bytes straddling the same boundary.
+        emu.reg_write(X86Reg::Rax, base);
+        emu.reg_write_ymm(X86Reg::Ymm0, [0u8; 32]);
+        run(&mut emu, programs, 1);
+        let got = emu.reg_read_ymm(X86Reg::Ymm0);
+        assert_eq!(
+            &got[..],
+            &pattern[..32],
+            "vmovdqu ymm split across {name} boundary at {base:#x}"
+        );
+    }
+
+    // Go aeshash17to32 tail load: movdqu xmm0,[rax+rcx-16] with rcx=17
+    // reads bytes 1..17 of the buffer (the overlapping tail of a 17-byte
+    // key like "sign-key-sha3-384").
+    let base = 0x0070_0000u64;
+    emu.mem_write(base, &pattern).expect("write pattern");
+    emu.reg_write(X86Reg::Rax, base);
+    emu.reg_write(X86Reg::Rcx, 17);
+    emu.reg_write_xmm(X86Reg::Xmm0, [0u8; 16]);
+    run(&mut emu, programs, 2);
+    let got = emu.reg_read_xmm(X86Reg::Xmm0);
+    assert_eq!(
+        &got[..],
+        &pattern[1..17],
+        "movdqu SIB + disp8(-16) addressing (aeshash tail load)"
+    );
+
+    // AESENC with dst==src must equal AESENC with two registers holding
+    // the same value (Go emits AESENC X2, X2).
+    let s = 0x0011_2233_4455_6677_8899_AABB_CCDD_EEFF_u128;
+    emu.reg_write_xmm(X86Reg::Xmm0, s.to_le_bytes());
+    emu.reg_write_xmm(X86Reg::Xmm1, s.to_le_bytes());
+    run(&mut emu, programs, 3);
+    let two_reg = emu.reg_read_xmm(X86Reg::Xmm0);
+    emu.reg_write_xmm(X86Reg::Xmm2, s.to_le_bytes());
+    run(&mut emu, programs, 4);
+    let self_reg = emu.reg_read_xmm(X86Reg::Xmm2);
+    assert_eq!(
+        two_reg, self_reg,
+        "AESENC self-aliased (dst==src) must match the two-register result"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// bytealg.IndexByte AVX2 ingredients not covered above: VPBROADCASTB and
+// TZCNT. A wrong splat lane or a BSF-like TZCNT breaks newline splitting.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn indexbyte_avx2_ingredients() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| {
+            let cfg = EmulatorConfig::default();
+            let mut emu =
+                Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                    .expect("new emulator");
+            emu.reg_write(
+                X86Reg::Cr4,
+                emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+            );
+
+            // vpbroadcastb ymm3, xmm1 (VEX.256.66.0F38.W0 78 /r); park jump.
+            emu.mem_write(CASE_BASE, &[0xC4, 0xE2, 0x7D, 0x78, 0xD9, 0xEB, 0xFE])
+                .expect("write code");
+            let mut x1 = [0u8; 16];
+            x1[0] = 0x0A; // '\n'
+            x1[1] = 0x77; // garbage that must NOT leak into the splat
+            emu.reg_write_xmm(X86Reg::Xmm1, x1);
+            emu.reg_write_ymm(X86Reg::Ymm3, [0xEE; 32]);
+            let stop = emu
+                .emu_start(CASE_BASE, Some(CASE_BASE + 5), None, Some(9))
+                .expect("emu_start");
+            assert_eq!(
+                emu.cpu.rip(),
+                CASE_BASE + 5,
+                "vpbroadcastb did not park (stop={stop:?})"
+            );
+            assert_eq!(
+                emu.reg_read_ymm(X86Reg::Ymm3),
+                [0x0Au8; 32],
+                "vpbroadcastb must splat the low byte into all 32 lanes"
+            );
+
+            // tzcnt eax, ebx (F3 0F BC /r) — must be 32 for input 0 (not BSF
+            // undefined) and count correctly otherwise.
+            let addr2 = CASE_BASE + 64;
+            emu.mem_write(addr2, &[0xF3, 0x0F, 0xBC, 0xC3, 0xEB, 0xFE])
+                .expect("write code");
+            for (input, want) in [(0x0002_0000u64, 17u64), (0u64, 32u64), (1u64, 0u64)] {
+                emu.reg_write(X86Reg::Rbx, input);
+                emu.reg_write(X86Reg::Rax, 0xFFFF_FFFF_FFFF_FFFF);
+                let stop = emu
+                    .emu_start(addr2, Some(addr2 + 4), None, Some(9))
+                    .expect("emu_start");
+                assert_eq!(emu.cpu.rip(), addr2 + 4, "tzcnt park (stop={stop:?})");
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rax),
+                    want,
+                    "tzcnt eax, ebx with input {input:#x}"
+                );
+            }
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Go runtime aeshash17to32 (runtime/asm_amd64.s aeshashbody), verbatim
+// instruction sequence. Hashing the same 17-byte key at two different
+// addresses must produce identical results — Go maps hash a key at its
+// heap address on insert and at the constant's address on lookup. This is
+// the exact path only ≥17-byte keys like "sign-key-sha3-384" take.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn go_aeshash17to32_is_address_independent() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(run_aeshash_cases)
+        .expect("spawn test thread")
+        .join()
+        .expect("join test thread");
+}
+
+fn run_aeshash_cases() {
+    let cfg = EmulatorConfig::default();
+    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+        .expect("new emulator in flat long mode");
+    emu.reg_write(
+        X86Reg::Cr4,
+        emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+    );
+
+    // Go aeshash17to32 core (seeds preloaded in xmm0/xmm1; ptr=rax len=rcx):
+    //   movdqu xmm2, [rax]
+    //   movdqu xmm3, [rax+rcx*1-16]
+    //   pxor   xmm2, xmm0
+    //   pxor   xmm3, xmm1
+    //   aesenc xmm2, xmm2   (x3, interleaved with xmm3)
+    //   pxor   xmm2, xmm3
+    #[rustfmt::skip]
+    let code: &[u8] = &[
+        0xF3, 0x0F, 0x6F, 0x10,                   // movdqu xmm2, [rax]
+        0xF3, 0x0F, 0x6F, 0x5C, 0x08, 0xF0,       // movdqu xmm3, [rax+rcx-16]
+        0x66, 0x0F, 0xEF, 0xD0,                   // pxor xmm2, xmm0
+        0x66, 0x0F, 0xEF, 0xD9,                   // pxor xmm3, xmm1
+        0x66, 0x0F, 0x38, 0xDC, 0xD2,             // aesenc xmm2, xmm2
+        0x66, 0x0F, 0x38, 0xDC, 0xDB,             // aesenc xmm3, xmm3
+        0x66, 0x0F, 0x38, 0xDC, 0xD2,             // aesenc xmm2, xmm2
+        0x66, 0x0F, 0x38, 0xDC, 0xDB,             // aesenc xmm3, xmm3
+        0x66, 0x0F, 0x38, 0xDC, 0xD2,             // aesenc xmm2, xmm2
+        0x66, 0x0F, 0x38, 0xDC, 0xDB,             // aesenc xmm3, xmm3
+        0x66, 0x0F, 0xEF, 0xD3,                   // pxor xmm2, xmm3
+    ];
+    let insns = 11u64;
+    emu.mem_write(CASE_BASE, code).expect("write code");
+    emu.mem_write(CASE_BASE + code.len() as u64, &[0xEB, 0xFE])
+        .expect("write park");
+    let park = CASE_BASE + code.len() as u64;
+
+    let key = b"sign-key-sha3-384"; // 17 bytes — the only >16-byte header
+    let seed0 = 0x243F_6A88_85A3_08D3_1319_8A2E_0370_7344_u128; // arbitrary
+    let seed1 = 0xA409_3822_299F_31D0_082E_FA98_EC4E_6C89_u128;
+
+    let mut hash_at = |emu: &mut Emulator<'static, Corei7SkylakeX>, addr: u64| -> [u8; 16] {
+        emu.mem_write(addr, key).expect("write key");
+        emu.reg_write(X86Reg::Rax, addr);
+        emu.reg_write(X86Reg::Rcx, key.len() as u64);
+        emu.reg_write_xmm(X86Reg::Xmm0, seed0.to_le_bytes());
+        emu.reg_write_xmm(X86Reg::Xmm1, seed1.to_le_bytes());
+        emu.reg_write_xmm(X86Reg::Xmm2, [0u8; 16]);
+        emu.reg_write_xmm(X86Reg::Xmm3, [0u8; 16]);
+        let stop = emu
+            .emu_start(CASE_BASE, Some(park), None, Some(insns + 8))
+            .expect("emu_start");
+        assert_eq!(emu.cpu.rip(), park, "hash run did not park (stop={stop:?})");
+        emu.reg_read_xmm(X86Reg::Xmm2)
+    };
+
+    // The constant's address analogue: aligned, mid-page.
+    let h_aligned = hash_at(&mut emu, 0x0060_0100);
+    // Heap-copy analogues: odd offsets, page-crossing, hugepage-crossing.
+    for &addr in &[
+        0x0060_0207u64, // odd offset
+        0x0060_0FF9,    // tail load crosses a 4 KiB boundary
+        0x009F_FFF9,    // tail load crosses the 2 MiB hugepage boundary
+        0x0061_0FFF,    // head load crosses, tail load crosses
+    ] {
+        let h = hash_at(&mut emu, addr);
+        assert_eq!(
+            h, h_aligned,
+            "aeshash17to32(key @ {addr:#x}) differs from aligned hash — Go map lookups break"
+        );
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
 // Packed VEX FP, VL=256, upper-lane semantics, and legacy signed-zero
 // min/max behavior.
 // ════════════════════════════════════════════════════════════════════════
