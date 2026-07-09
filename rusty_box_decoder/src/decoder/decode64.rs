@@ -2338,6 +2338,87 @@ const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
         MulpdVpdWpd => VmulpdVpdHpdWpd,
         SubpdVpdWpd => VsubpdVpdHpdWpd,
         DivpdVpdWpd => VdivpdVpdHpdWpd,
+        MinpsVpsWps => VminpsVpsHpsWps,
+        MinpdVpdWpd => VminpdVpdHpdWpd,
+        MaxpsVpsWps => VmaxpsVpsHpsWps,
+        MaxpdVpdWpd => VmaxpdVpdHpdWpd,
+        AddsubpsVpsWps => VaddsubpsVpsHpsWps,
+        AddsubpdVpdWpd => VaddsubpdVpdHpdWpd,
+
+        // ===== Floating-point scalar arithmetic (VEX.vvvv is first source;
+        // the legacy 2-operand SSE handler would destructively use dst) =====
+        AddssVssWss => VaddssVssHpsWss,
+        AddsdVsdWsd => VaddsdVsdHpdWsd,
+        SubssVssWss => VsubssVssHpsWss,
+        SubsdVsdWsd => VsubsdVsdHpdWsd,
+        MulssVssWss => VmulssVssHpsWss,
+        MulsdVsdWsd => VmulsdVsdHpdWsd,
+        DivssVssWss => VdivssVssHpsWss,
+        DivsdVsdWsd => VdivsdVsdHpdWsd,
+        MinssVssWss => VminssVssHpsWss,
+        MinsdVsdWsd => VminsdVsdHpdWsd,
+        MaxssVssWss => VmaxssVssHpsWss,
+        MaxsdVsdWsd => VmaxsdVsdHpdWsd,
+
+        // ===== Square root (scalar forms merge upper elements from vvvv) =====
+        SqrtpsVpsWps => VsqrtpsVpsWps,
+        SqrtpdVpdWpd => VsqrtpdVpdWpd,
+        SqrtssVssWss => VsqrtssVssHpsWss,
+        SqrtsdVsdWsd => VsqrtsdVsdHpdWsd,
+
+        // ===== FP compare (32 AVX predicates; vvvv is first source) =====
+        CmppsVpsWpsIb => VcmppsVpsHpsWpsIb,
+        CmppdVpdWpdIb => VcmppdVpdHpdWpdIb,
+        CmpssVssWssIb => VcmpssVssHpsWssIb,
+        CmpsdVsdWsdIb => VcmpsdVsdHpdWsdIb,
+
+        // ===== FP shuffle / unpack (vvvv is first source) =====
+        ShufpsVpsWpsIb => VshufpsVpsHpsWpsIb,
+        ShufpdVpdWpdIb => VshufpdVpdHpdWpdIb,
+        UnpcklpsVpsWdq => VunpcklpsVpsHpsWps,
+        UnpckhpsVpsWdq => VunpckhpsVpsHpsWps,
+        UnpcklpdVpdWdq => VunpcklpdVpdHpdWpd,
+        UnpckhpdVpdWdq => VunpckhpdVpdHpdWpd,
+
+        // ===== Scalar moves (register forms merge low element into vvvv's
+        // upper elements; the VEX handler splits mod internally) =====
+        MovssVssWss => V128VmovssVssHpsWss,
+        MovsdVsdWsd => V128VmovsdVsdHpdWsd,
+        MovssWssVss => V128VmovssWssHpsVss,
+        MovsdWsdVsd => V128VmovsdWsdHpdVsd,
+        MovlpsVpsMq => V128VmovlpsVpsHpsMq,
+        MovlpdVsdMq => V128VmovlpdVpdHpdMq,
+        MovhpsVpsMq => V128VmovhpsVpsHpsMq,
+        MovhpdVsdMq => V128VmovhpdVpdHpdMq,
+        MovhlpsVpsWps => V128VmovhlpsVpsHpsWps,
+        MovlhpsVpsWps => V128VmovlhpsVpsHpsWps,
+        MovsldupVpsWps => VmovsldupVpsWps,
+        MovshdupVpsWps => VmovshdupVpsWps,
+        MovddupVpdWq => {
+            if vl == 0 {
+                V128VmovddupVpdWpd
+            } else {
+                V256VmovddupVpdWpd
+            }
+        }
+
+        // ===== Scalar conversions (vvvv provides the upper elements) =====
+        Cvtss2sdVsdWss => Vcvtss2sdVsdWss,
+        Cvtsd2ssVssWsd => Vcvtsd2ssVssWsd,
+        Cvtsi2sdVsdEd => Vcvtsi2sdVsdEd,
+        Cvtsi2sdVsdEq => Vcvtsi2sdVsdEq,
+        Cvtsi2ssVssEd => Vcvtsi2ssVssEd,
+        Cvtsi2ssVssEq => Vcvtsi2ssVssEq,
+
+        // ===== Round / reciprocal approximations =====
+        RoundpsVpsWpsIb => VroundpsVpsWpsIb,
+        RoundpdVpdWpdIb => VroundpdVpdWpdIb,
+        RoundssVssWssIb => VroundssVssHpsWssIb,
+        RoundsdVsdWsdIb => VroundsdVsdHpdWsdIb,
+        RcppsVpsWps => VrcppsVpsWps,
+        RcpssVssWss => VrcpssVssHpsWss,
+        RsqrtpsVpsWps => VrsqrtpsVpsWps,
+        RsqrtssVssWss => VrsqrtssVssHpsWss,
 
         // ===== Store-form moves (VEX handler does VL-aware stores + register form) =====
         MovdquWdqVdq => {

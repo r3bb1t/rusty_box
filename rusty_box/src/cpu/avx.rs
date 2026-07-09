@@ -2478,7 +2478,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     #[inline]
-    fn vex_read_src2_xmm(&mut self, instr: &Instruction) -> super::Result<BxPackedXmmRegister> {
+    pub(super) fn vex_read_src2_xmm(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedXmmRegister> {
         if instr.mod_c0() {
             Ok(self.read_xmm_reg(instr.src1()))
         } else {
@@ -2489,7 +2492,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     #[inline]
-    fn vex_read_src2_ymm(&mut self, instr: &Instruction) -> super::Result<BxPackedYmmRegister> {
+    pub(super) fn vex_read_src2_ymm(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedYmmRegister> {
         if instr.mod_c0() {
             Ok(self.read_ymm_reg(instr.src1()))
         } else {

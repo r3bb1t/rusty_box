@@ -33,6 +33,7 @@ pub(super) mod arith32;
 pub(super) mod arith64;
 pub(super) mod arith8;
 pub(super) mod avx;
+pub(super) mod avx_pfp;
 pub(super) mod avx512;
 pub(super) mod avx512_bcast;
 pub(super) mod avx512_bw;

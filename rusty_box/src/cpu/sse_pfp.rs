@@ -74,6 +74,7 @@ fn round_ties_even_f64(val: f64) -> f64 {
 }
 
 use super::{
+    avx_pfp::{sse_max_f32, sse_max_f64, sse_min_f32, sse_min_f64},
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
@@ -130,7 +131,7 @@ fn sse_round_mode(imm8: u8, mxcsr_rc: u8) -> u8 {
 }
 
 #[inline]
-fn sse_round_f32(val: f32, imm8: u8, mxcsr_rc: u8) -> f32 {
+pub(super) fn sse_round_f32(val: f32, imm8: u8, mxcsr_rc: u8) -> f32 {
     if val.is_nan() || val.is_infinite() {
         return val;
     }
@@ -143,7 +144,7 @@ fn sse_round_f32(val: f32, imm8: u8, mxcsr_rc: u8) -> f32 {
 }
 
 #[inline]
-fn sse_round_f64(val: f64, imm8: u8, mxcsr_rc: u8) -> f64 {
+pub(super) fn sse_round_f64(val: f64, imm8: u8, mxcsr_rc: u8) -> f64 {
     if val.is_nan() || val.is_infinite() {
         return val;
     }
@@ -176,7 +177,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Register form: read lowest f32 from XMM src1.
     /// Memory form: read dword from memory, reinterpret as f32.
     #[inline]
-    fn sse_pfp_read_op2_ss(&mut self, instr: &Instruction) -> super::Result<f32> {
+    pub(super) fn sse_pfp_read_op2_ss(&mut self, instr: &Instruction) -> super::Result<f32> {
         if instr.mod_c0() {
             let src = self.read_xmm_reg(instr.src1());
             Ok(src.xmm32f(0))
@@ -192,7 +193,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Register form: read lowest f64 from XMM src1.
     /// Memory form: read qword from memory, reinterpret as f64.
     #[inline]
-    fn sse_pfp_read_op2_sd(&mut self, instr: &Instruction) -> super::Result<f64> {
+    pub(super) fn sse_pfp_read_op2_sd(&mut self, instr: &Instruction) -> super::Result<f64> {
         if instr.mod_c0() {
             let src = self.read_xmm_reg(instr.src1());
             Ok(src.xmm64f(0))
@@ -556,17 +557,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        // SSE MIN: if either is NaN, return op2 (source); else return smaller
         for i in 0..4 {
-            result.set_xmm32f(
-                i,
-                if op1.xmm32f(i).is_nan() || op2.xmm32f(i).is_nan() || op2.xmm32f(i) < op1.xmm32f(i)
-                {
-                    op2.xmm32f(i)
-                } else {
-                    op1.xmm32f(i)
-                },
-            );
+            result.set_xmm32f(i, sse_min_f32(op1.xmm32f(i), op2.xmm32f(i)));
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
@@ -578,17 +570,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        // SSE MIN: if either is NaN, return op2 (source); else return smaller
         for i in 0..2 {
-            result.set_xmm64f(
-                i,
-                if op1.xmm64f(i).is_nan() || op2.xmm64f(i).is_nan() || op2.xmm64f(i) < op1.xmm64f(i)
-                {
-                    op2.xmm64f(i)
-                } else {
-                    op1.xmm64f(i)
-                },
-            );
+            result.set_xmm64f(i, sse_min_f64(op1.xmm64f(i), op2.xmm64f(i)));
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
@@ -599,15 +582,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        // SSE MIN: if either is NaN, return op2 (source); else return smaller
-        result.set_xmm32f(
-            0,
-            if result.xmm32f(0).is_nan() || op2.is_nan() || op2 < result.xmm32f(0) {
-                op2
-            } else {
-                result.xmm32f(0)
-            },
-        );
+        result.set_xmm32f(0, sse_min_f32(result.xmm32f(0), op2));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -617,15 +592,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        // SSE MIN: if either is NaN, return op2 (source); else return smaller
-        result.set_xmm64f(
-            0,
-            if result.xmm64f(0).is_nan() || op2.is_nan() || op2 < result.xmm64f(0) {
-                op2
-            } else {
-                result.xmm64f(0)
-            },
-        );
+        result.set_xmm64f(0, sse_min_f64(result.xmm64f(0), op2));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -643,17 +610,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        // SSE MAX: if either is NaN, return op2 (source); else return larger
         for i in 0..4 {
-            result.set_xmm32f(
-                i,
-                if op1.xmm32f(i).is_nan() || op2.xmm32f(i).is_nan() || op2.xmm32f(i) > op1.xmm32f(i)
-                {
-                    op2.xmm32f(i)
-                } else {
-                    op1.xmm32f(i)
-                },
-            );
+            result.set_xmm32f(i, sse_max_f32(op1.xmm32f(i), op2.xmm32f(i)));
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
@@ -665,17 +623,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        // SSE MAX: if either is NaN, return op2 (source); else return larger
         for i in 0..2 {
-            result.set_xmm64f(
-                i,
-                if op1.xmm64f(i).is_nan() || op2.xmm64f(i).is_nan() || op2.xmm64f(i) > op1.xmm64f(i)
-                {
-                    op2.xmm64f(i)
-                } else {
-                    op1.xmm64f(i)
-                },
-            );
+            result.set_xmm64f(i, sse_max_f64(op1.xmm64f(i), op2.xmm64f(i)));
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
@@ -686,15 +635,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        // SSE MAX: if either is NaN, return op2 (source); else return larger
-        result.set_xmm32f(
-            0,
-            if result.xmm32f(0).is_nan() || op2.is_nan() || op2 > result.xmm32f(0) {
-                op2
-            } else {
-                result.xmm32f(0)
-            },
-        );
+        result.set_xmm32f(0, sse_max_f32(result.xmm32f(0), op2));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -704,15 +645,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        // SSE MAX: if either is NaN, return op2 (source); else return larger
-        result.set_xmm64f(
-            0,
-            if result.xmm64f(0).is_nan() || op2.is_nan() || op2 > result.xmm64f(0) {
-                op2
-            } else {
-                result.xmm64f(0)
-            },
-        );
+        result.set_xmm64f(0, sse_max_f64(result.xmm64f(0), op2));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
