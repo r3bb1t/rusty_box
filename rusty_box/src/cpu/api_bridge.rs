@@ -161,6 +161,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(crate) fn set_cr8_for_api(&mut self, v: u64) {
         {
             self.lapic.set_tpr(((v & 0xF) << 4) as u8);
+            self.sync_lapic_intr_event();
         }
     }
 

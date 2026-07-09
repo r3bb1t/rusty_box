@@ -816,6 +816,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.icount.saturating_sub(self.icount_last_sync)
     }
 
+    /// Bridge for Bochs service_local_apic() -> signal_event() with Rust-owned LAPIC state.
     #[inline]
     pub(crate) fn sync_lapic_intr_event(&mut self) {
         if self.lapic.intr_pending {
@@ -2052,8 +2053,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     prof_assign_ns = 0;
                     prof_exec_ns = 0;
                 }
-                self.perf_icache_miss = 0;
-                self.perf_prefetch = 0;
+                #[cfg(feature = "profiling")]
+                {
+                    self.perf_icache_miss = 0;
+                    self.perf_prefetch = 0;
+                }
                 // Clear STOP_TRACE (trace-boundary hint only; served its purpose).
                 // BX_ASYNC_EVENT_SLEEP (bit 0) intentionally survives: if HLT was the
                 // last instruction in this batch, the next batch sees SLEEP set, calls
@@ -2245,7 +2249,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 }
 
                 iteration += 1;
-                self.sync_lapic_intr_event();
 
                 // Check async events (matching C++ line 215: if (async_event) break;)
                 // When async_event is set (branch taken, exception, HLT, etc.), we MUST
@@ -2412,15 +2415,16 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             let eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
             eip_biased >= self.eip_page_window_size
         };
-
         // Get raw pointer to mem before calling prefetch() to work around borrow checker
         // SAFETY: addr_of_mut avoids creating intermediate reference; pointer valid for fn scope
         let mem_ptr: *mut BxMemC<'c> = unsafe { core::ptr::addr_of_mut!(*mem) };
-
         let mut eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
 
         if needs_prefetch {
-            self.perf_prefetch += 1;
+            #[cfg(feature = "profiling")]
+            {
+                self.perf_prefetch += 1;
+            }
             let mut retry_count = 0;
             loop {
                 // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
@@ -2502,7 +2506,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         }
 
         // Cache miss path
-        self.perf_icache_miss += 1;
+        #[cfg(feature = "profiling")]
+        {
+            self.perf_icache_miss += 1;
+        }
 
         let mut dummy_mapping: [u32; 0] = [];
         let mut dummy_stamp_table = crate::cpu::icache::BxPageWriteStampTable {

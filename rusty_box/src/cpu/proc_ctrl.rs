@@ -1101,6 +1101,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             let index = (msr - 0x800) << 4;
             if self.lapic.write_x2apic(index, val) {
+                self.sync_lapic_intr_event();
                 if index == 0x300 {
                     self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                     self.instrumentation.stop_request = true;

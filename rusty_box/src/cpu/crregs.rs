@@ -1330,6 +1330,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let tpr = ((val as u8) & 0xF) << 4;
         self.lapic.set_tpr(tpr);
+        self.sync_lapic_intr_event();
         Ok(())
     }
 
@@ -1836,5 +1837,34 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.check_cpl0_for_cr_dr()?;
         // Reuse 32-bit handler which already writes DR correctly
         self.mov_dd_rd(instr)
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    use super::super::apic::APIC_EDGE_TRIGGERED;
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
+    use crate::cpu::{BxCpuC, ResetReason};
+
+    #[test]
+    fn write_cr8_lowering_tpr_signals_pending_lapic_event() {
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.reset(ResetReason::Hardware);
+        cpu.lapic.write_aligned(0x0F0, 0x1FF);
+        cpu.lapic.set_tpr(0x40);
+        cpu.lapic.trigger_irq(0x30, APIC_EDGE_TRIGGERED, false);
+        assert!(!cpu.lapic.intr);
+        assert!(!cpu.lapic.intr_pending);
+
+        cpu.pending_event = 0;
+        cpu.async_event = 0;
+        cpu.unmask_event(BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_LAPIC_INTR);
+        cpu.write_cr8(0).unwrap();
+
+        assert!(cpu.lapic.intr);
+        assert!(!cpu.lapic.intr_pending);
+        assert!((cpu.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_LAPIC_INTR) != 0);
+        assert!(cpu.async_event != 0);
     }
 }

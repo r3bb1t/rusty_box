@@ -3194,8 +3194,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                             let mwait_if =
                                 matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
                             let mut hlt_budget = 0u64;
-                            #[cfg(feature = "std")]
-                            let hlt_wall_start = std::time::Instant::now();
                             while hlt_budget < 100_000_000 {
                                 if self.has_interrupt()
                                     && (self.cpu.interrupts_enabled() || mwait_if)
@@ -3222,20 +3220,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 self.sync_event_flags();
                                 if !self.can_fast_forward_bsp_hlt() {
                                     break;
-                                }
-                                // Wall-clock throttle: sleep if virtual time races ahead
-                                #[cfg(feature = "std")]
-                                {
-                                    let virtual_usec =
-                                        hlt_budget * 1_000_000 / (self.config.ips as u64).max(1);
-                                    let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
-                                    if self.config.sync_slowdown && virtual_usec > wall_usec + 1_000
-                                    {
-                                        let sleep_usec = (virtual_usec - wall_usec).min(15_000);
-                                        std::thread::sleep(std::time::Duration::from_micros(
-                                            sleep_usec,
-                                        ));
-                                    }
                                 }
                             }
 
@@ -3570,23 +3554,26 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             instructions_executed
         );
 
-        // Print perf summary to stderr (only for large batches, not sub-batches)
-        if instructions_executed >= 1_000_000 {
-            let pi = self.cpu.perf_instructions;
-            let tlb_h = self.cpu.perf_tlb_hit;
-            let tlb_m = self.cpu.perf_tlb_miss;
-            let pw = self.cpu.perf_page_walk;
-            let ic_m = self.cpu.perf_icache_miss;
-            let pf = self.cpu.perf_prefetch;
-            let tlb_total = tlb_h + tlb_m;
-            let tlb_pct = if tlb_total > 0 {
-                tlb_h as f64 / tlb_total as f64 * 100.0
-            } else {
-                0.0
-            };
-            // icount = instruction count (REP iterations count as separate ticks)
-            let bochs_ticks = self.cpu.icount;
-            tracing::debug!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
+        #[cfg(feature = "profiling")]
+        {
+            // Print perf summary to stderr (only for large batches, not sub-batches)
+            if instructions_executed >= 1_000_000 {
+                let pi = self.cpu.perf_instructions;
+                let tlb_h = self.cpu.perf_tlb_hit;
+                let tlb_m = self.cpu.perf_tlb_miss;
+                let pw = self.cpu.perf_page_walk;
+                let ic_m = self.cpu.perf_icache_miss;
+                let pf = self.cpu.perf_prefetch;
+                let tlb_total = tlb_h + tlb_m;
+                let tlb_pct = if tlb_total > 0 {
+                    tlb_h as f64 / tlb_total as f64 * 100.0
+                } else {
+                    0.0
+                };
+                // icount = instruction count (REP iterations count as separate ticks)
+                let bochs_ticks = self.cpu.icount;
+                tracing::debug!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
+            }
         }
 
         Ok(instructions_executed)
@@ -3638,8 +3625,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             {
                 let mwait_if = matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
                 let mut hlt_budget = 0u64;
-                #[cfg(feature = "std")]
-                let hlt_wall_start = std::time::Instant::now();
                 while hlt_budget < 100_000_000 {
                     if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) {
                         break;
@@ -3659,16 +3644,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     if !self.can_fast_forward_bsp_hlt() {
                         break;
                     }
-                    // Wall-clock throttle: sleep if virtual time races ahead
-                    #[cfg(feature = "std")]
-                    {
-                        let virtual_usec = hlt_budget * 1_000_000 / ips.max(1);
-                        let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
-                        if self.config.sync_slowdown && virtual_usec > wall_usec + 1_000 {
-                            let sleep_usec = (virtual_usec - wall_usec).min(15_000);
-                            std::thread::sleep(std::time::Duration::from_micros(sleep_usec));
-                        }
-                    }
                 }
                 if self.cpu.lapic_has_intr() {
                     self.cpu
@@ -3684,9 +3659,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 let vector = self.iac();
                 // SAFETY: see borrow_memory_for_cpu / inject_interrupt
                 if let Err(e) = unsafe { self.inject_interrupt(vector) } {
-                    tracing::warn!(
-                        "PIC interrupt injection (vector {vector:#04x}) failed: {e:?}"
-                    );
+                    tracing::warn!("PIC interrupt injection (vector {vector:#04x}) failed: {e:?}");
                 }
             }
 
@@ -6075,8 +6048,7 @@ mod tests {
                 // nothing — including APs parked in WAIT_FOR_SIPI — is
                 // credited one SMP quantum ("if (n == 0) n = quantum"), and
                 // time advances by executed / BX_SMP_PROCESSORS.
-                let expected =
-                    (retired + BOCHS_SMP_QUANTUM_TICKS * (cpu_count - 1)) / cpu_count;
+                let expected = (retired + BOCHS_SMP_QUANTUM_TICKS * (cpu_count - 1)) / cpu_count;
                 assert_eq!(
                     elapsed, expected,
                     "SMP round must advance (retired + quantum credits) / cpu_count \

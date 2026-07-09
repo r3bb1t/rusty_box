@@ -348,8 +348,7 @@ pub struct BxLocalApic {
     pub(crate) ticks_at_sync: u64,
     /// CPU instruction count at last sync point.
     pub(crate) icount_at_sync: u64,
-    /// Flag: LAPIC wants to signal BX_EVENT_PENDING_LAPIC_INTR to the CPU.
-    /// Set by service_local_apic(), cleared by emulator after applying to CPU.
+    /// Rust-only bridge for Bochs service_local_apic() -> cpu->signal_event(BX_EVENT_PENDING_LAPIC_INTR). Set by service_local_apic(); consumed by CPU-owned APIC mutation sites or emulator sync points. Not architectural LAPIC state.
     pub(crate) intr_pending: bool,
 
     /// Timer divide configuration register (bits 3,1,0 writable)
