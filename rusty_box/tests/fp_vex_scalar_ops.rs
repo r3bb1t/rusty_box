@@ -604,9 +604,8 @@ fn indexbyte_avx2_ingredients() {
         .stack_size(256 * 1024 * 1024)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu =
-                Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
-                    .expect("new emulator");
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                .expect("new emulator");
             emu.reg_write(
                 X86Reg::Cr4,
                 emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
@@ -807,12 +806,24 @@ fn run_packed_cases() {
         ("vminsd xmm0,xmm1,xmm2", &[0xC5, 0xF3, 0x5D, 0xC2]),
         ("vmaxsd xmm0,xmm1,xmm2 (NaN)", &[0xC5, 0xF3, 0x5F, 0xC2]),
         ("vsqrtsd xmm0,xmm1,xmm2", &[0xC5, 0xF3, 0x51, 0xC2]),
-        ("vcmpsd xmm0,xmm1,xmm2,0x0D", &[0xC5, 0xF3, 0xC2, 0xC2, 0x0D]),
-        ("vshufps xmm0,xmm1,xmm2,0x1B", &[0xC5, 0xF0, 0xC6, 0xC2, 0x1B]),
+        (
+            "vcmpsd xmm0,xmm1,xmm2,0x0D",
+            &[0xC5, 0xF3, 0xC2, 0xC2, 0x0D],
+        ),
+        (
+            "vshufps xmm0,xmm1,xmm2,0x1B",
+            &[0xC5, 0xF0, 0xC6, 0xC2, 0x1B],
+        ),
         ("vunpcklpd xmm0,xmm1,xmm2", &[0xC5, 0xF1, 0x14, 0xC2]),
-        ("minsd xmm0,xmm1 (SSE2 signed zero)", &[0xF2, 0x0F, 0x5D, 0xC1]),
+        (
+            "minsd xmm0,xmm1 (SSE2 signed zero)",
+            &[0xF2, 0x0F, 0x5D, 0xC1],
+        ),
         ("vaddsubpd xmm0,xmm1,xmm2", &[0xC5, 0xF1, 0xD0, 0xC2]),
-        ("vmovsd xmm0,xmm1,xmm2 (reg merge)", &[0xC5, 0xF3, 0x10, 0xC2]),
+        (
+            "vmovsd xmm0,xmm1,xmm2 (reg merge)",
+            &[0xC5, 0xF3, 0x10, 0xC2],
+        ),
         (
             "vroundsd xmm0,xmm1,xmm2,0x09 (floor)",
             &[0xC4, 0xE3, 0x71, 0x0B, 0xC2, 0x09],
@@ -825,11 +836,7 @@ fn run_packed_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park jump");
     }
-    fn run(
-        emu: &mut Emulator<'static, Corei7SkylakeX>,
-        programs: &[(&str, &[u8])],
-        idx: usize,
-    ) {
+    fn run(emu: &mut Emulator<'static, Corei7SkylakeX>, programs: &[(&str, &[u8])], idx: usize) {
         let (name, code) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;
@@ -870,7 +877,11 @@ fn run_packed_cases() {
             "vmulps lane {i}"
         );
     }
-    assert_eq!(&got[16..32], &[0u8; 16], "vmulps must zero ymm bits 255:128");
+    assert_eq!(
+        &got[16..32],
+        &[0u8; 16],
+        "vmulps must zero ymm bits 255:128"
+    );
 
     // 2: vminsd(+0.0, -0.0) must return the SECOND source (-0.0), matching
     // Bochs f64_min / Intel MINSD.
@@ -1117,11 +1128,7 @@ fn run_hadd_blend_dpp_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park jump");
     }
-    fn run(
-        emu: &mut Emulator<'static, Corei7SkylakeX>,
-        programs: &[(&str, &[u8])],
-        idx: usize,
-    ) {
+    fn run(emu: &mut Emulator<'static, Corei7SkylakeX>, programs: &[(&str, &[u8])], idx: usize) {
         let (name, code) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;
@@ -1141,11 +1148,7 @@ fn run_hadd_blend_dpp_cases() {
     let got = emu.reg_read_xmm(X86Reg::Xmm0);
     let want = [a[0] + a[1], a[2] + a[3], b[0] + b[1], b[2] + b[3]];
     for i in 0..4 {
-        assert_eq!(
-            xmm_lane32(&got, i),
-            want[i].to_bits(),
-            "haddps lane {i}"
-        );
+        assert_eq!(xmm_lane32(&got, i), want[i].to_bits(), "haddps lane {i}");
     }
 
     // 1: vhaddps ymm — horizontal add PER 128-BIT LANE:
@@ -1342,11 +1345,7 @@ fn run_vex_integer_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park jump");
     }
-    fn run(
-        emu: &mut Emulator<'static, Corei7SkylakeX>,
-        programs: &[(&str, &[u8])],
-        idx: usize,
-    ) {
+    fn run(emu: &mut Emulator<'static, Corei7SkylakeX>, programs: &[(&str, &[u8])], idx: usize) {
         let (name, code) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;
@@ -1390,8 +1389,8 @@ fn run_vex_integer_cases() {
 
     // 2: vpmovsxbw ymm — all 16 source bytes sign-extend to 16 words.
     let src_bytes: [u8; 16] = [
-        0x80, 0x7F, 0xFF, 0x01, 0xFE, 0x00, 0x05, 0xFB, 0x90, 0x10, 0xC0, 0x40, 0xAA, 0x55,
-        0x02, 0xF0,
+        0x80, 0x7F, 0xFF, 0x01, 0xFE, 0x00, 0x05, 0xFB, 0x90, 0x10, 0xC0, 0x40, 0xAA, 0x55, 0x02,
+        0xF0,
     ];
     emu.reg_write_xmm(X86Reg::Xmm1, src_bytes);
     emu.reg_write_ymm(X86Reg::Ymm0, [0x11; 32]);
@@ -1635,11 +1634,7 @@ fn run_cvt_boundary_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park jump");
     }
-    fn run(
-        emu: &mut Emulator<'static, Corei7SkylakeX>,
-        programs: &[(&str, &[u8])],
-        idx: usize,
-    ) {
+    fn run(emu: &mut Emulator<'static, Corei7SkylakeX>, programs: &[(&str, &[u8])], idx: usize) {
         let (name, code) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;
@@ -1773,7 +1768,11 @@ fn run_remap_gap_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park");
     }
-    fn run(emu: &mut Emulator<'static, Corei7SkylakeX>, programs: &[(&str, &[u8], u64)], idx: usize) {
+    fn run(
+        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        programs: &[(&str, &[u8], u64)],
+        idx: usize,
+    ) {
         let (name, code, insns) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;

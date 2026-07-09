@@ -846,7 +846,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src = self.vex_pmov_read(instr, 16)?;
             let mut result = BxPackedYmmRegister::default();
             for i in 0..4 {
-                let d = u32::from_le_bytes([src[i * 4], src[i * 4 + 1], src[i * 4 + 2], src[i * 4 + 3]]);
+                let d = u32::from_le_bytes([
+                    src[i * 4],
+                    src[i * 4 + 1],
+                    src[i * 4 + 2],
+                    src[i * 4 + 3],
+                ]);
                 result.set_ymm64u(i, d as i32 as i64 as u64);
             }
             self.write_ymm_reg(instr.dst(), result);
@@ -854,7 +859,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src = self.vex_pmov_read(instr, 8)?;
             let mut result = BxPackedXmmRegister::default();
             for i in 0..2 {
-                let d = u32::from_le_bytes([src[i * 4], src[i * 4 + 1], src[i * 4 + 2], src[i * 4 + 3]]);
+                let d = u32::from_le_bytes([
+                    src[i * 4],
+                    src[i * 4 + 1],
+                    src[i * 4 + 2],
+                    src[i * 4 + 3],
+                ]);
                 result.set_xmm64u(i, d as i32 as i64 as u64);
             }
             self.write_xmm_reg(instr.dst(), result);
@@ -978,7 +988,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src = self.vex_pmov_read(instr, 16)?;
             let mut result = BxPackedYmmRegister::default();
             for i in 0..4 {
-                let d = u32::from_le_bytes([src[i * 4], src[i * 4 + 1], src[i * 4 + 2], src[i * 4 + 3]]);
+                let d = u32::from_le_bytes([
+                    src[i * 4],
+                    src[i * 4 + 1],
+                    src[i * 4 + 2],
+                    src[i * 4 + 3],
+                ]);
                 result.set_ymm64u(i, d as u64);
             }
             self.write_ymm_reg(instr.dst(), result);
@@ -986,7 +1001,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src = self.vex_pmov_read(instr, 8)?;
             let mut result = BxPackedXmmRegister::default();
             for i in 0..2 {
-                let d = u32::from_le_bytes([src[i * 4], src[i * 4 + 1], src[i * 4 + 2], src[i * 4 + 3]]);
+                let d = u32::from_le_bytes([
+                    src[i * 4],
+                    src[i * 4 + 1],
+                    src[i * 4 + 2],
+                    src[i * 4 + 3],
+                ]);
                 result.set_xmm64u(i, d as u64);
             }
             self.write_xmm_reg(instr.dst(), result);
@@ -2021,7 +2041,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for lane in 0..8 {
                 let (a, b, c) =
                     vex_fma_operands_u32(form, v.ymm32u(lane), h.ymm32u(lane), w.ymm32u(lane));
-                result.set_ymm32u(lane, f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status));
+                result.set_ymm32u(
+                    lane,
+                    f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
+                );
             }
             self.write_ymm_reg(dst_idx, result);
         } else {
@@ -2032,7 +2055,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for lane in 0..4 {
                 let (a, b, c) =
                     vex_fma_operands_u32(form, v.xmm32u(lane), h.xmm32u(lane), w.xmm32u(lane));
-                result.set_xmm32u(lane, f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status));
+                result.set_xmm32u(
+                    lane,
+                    f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
+                );
             }
             self.write_xmm_reg(dst_idx, result);
         }
@@ -2058,7 +2084,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for lane in 0..4 {
                 let (a, b, c) =
                     vex_fma_operands_u64(form, v.ymm64u(lane), h.ymm64u(lane), w.ymm64u(lane));
-                result.set_ymm64u(lane, f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status));
+                result.set_ymm64u(
+                    lane,
+                    f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
+                );
             }
             self.write_ymm_reg(dst_idx, result);
         } else {
@@ -2069,7 +2098,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for lane in 0..2 {
                 let (a, b, c) =
                     vex_fma_operands_u64(form, v.xmm64u(lane), h.xmm64u(lane), w.xmm64u(lane));
-                result.set_xmm64u(lane, f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status));
+                result.set_xmm64u(
+                    lane,
+                    f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
+                );
             }
             self.write_xmm_reg(dst_idx, result);
         }

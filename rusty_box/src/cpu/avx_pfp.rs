@@ -119,22 +119,22 @@ fn pfp_op_f64(op: VexPfpOp, a: f64, b: f64) -> f64 {
 fn avx_cmp_relation(predicate: u8, lt: bool, eq: bool, unord: bool) -> bool {
     let gt = !unord && !lt && !eq;
     match predicate & 0x0F {
-        0x0 => eq,               // EQ_OQ / EQ_OS
-        0x1 => lt,               // LT_OS / LT_OQ
-        0x2 => lt || eq,         // LE_OS / LE_OQ
-        0x3 => unord,            // UNORD_Q / UNORD_S
-        0x4 => !eq,              // NEQ_UQ / NEQ_US (unordered => true)
-        0x5 => !lt,              // NLT_US / NLT_UQ (unordered => true)
-        0x6 => !(lt || eq),      // NLE_US / NLE_UQ (unordered => true)
-        0x7 => !unord,           // ORD_Q / ORD_S
-        0x8 => eq || unord,      // EQ_UQ / EQ_US
-        0x9 => lt || unord,      // NGE_US / NGE_UQ
-        0xA => !gt,              // NGT_US / NGT_UQ (unordered => true)
-        0xB => false,            // FALSE_OQ / FALSE_OS
-        0xC => !eq && !unord,    // NEQ_OQ / NEQ_OS
-        0xD => gt || eq,         // GE_OS / GE_OQ
-        0xE => gt,               // GT_OS / GT_OQ
-        0xF => true,             // TRUE_UQ / TRUE_US
+        0x0 => eq,            // EQ_OQ / EQ_OS
+        0x1 => lt,            // LT_OS / LT_OQ
+        0x2 => lt || eq,      // LE_OS / LE_OQ
+        0x3 => unord,         // UNORD_Q / UNORD_S
+        0x4 => !eq,           // NEQ_UQ / NEQ_US (unordered => true)
+        0x5 => !lt,           // NLT_US / NLT_UQ (unordered => true)
+        0x6 => !(lt || eq),   // NLE_US / NLE_UQ (unordered => true)
+        0x7 => !unord,        // ORD_Q / ORD_S
+        0x8 => eq || unord,   // EQ_UQ / EQ_US
+        0x9 => lt || unord,   // NGE_US / NGE_UQ
+        0xA => !gt,           // NGT_US / NGT_UQ (unordered => true)
+        0xB => false,         // FALSE_OQ / FALSE_OS
+        0xC => !eq && !unord, // NEQ_OQ / NEQ_OS
+        0xD => gt || eq,      // GE_OS / GE_OQ
+        0xE => gt,            // GT_OS / GT_OQ
+        0xF => true,          // TRUE_UQ / TRUE_US
         _ => unreachable!("predicate & 0x0F cannot exceed 0xF"),
     }
 }

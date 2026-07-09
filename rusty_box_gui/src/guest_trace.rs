@@ -422,7 +422,10 @@ mod tests {
         let gathered = b"<3>snapd[1234]: panic: runtime error";
         assert!(contains_bytes(gathered, b"panic: "));
         assert!(!contains_bytes(gathered, b"fatal error:"));
-        assert!(contains_bytes(b"fatal error: out of memory", b"fatal error:"));
+        assert!(contains_bytes(
+            b"fatal error: out of memory",
+            b"fatal error:"
+        ));
     }
 
     #[test]

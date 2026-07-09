@@ -203,7 +203,10 @@ pub(super) fn sse_round_f64(val: f64, imm8: u8, mxcsr_rc: u8) -> f64 {
 
 /// Bochs simd_pfp.h xmm_haddps
 #[inline]
-pub(super) fn haddps_lane(op1: &BxPackedXmmRegister, op2: &BxPackedXmmRegister) -> BxPackedXmmRegister {
+pub(super) fn haddps_lane(
+    op1: &BxPackedXmmRegister,
+    op2: &BxPackedXmmRegister,
+) -> BxPackedXmmRegister {
     let mut r = BxPackedXmmRegister::default();
     r.set_xmm32f(0, op1.xmm32f(0) + op1.xmm32f(1));
     r.set_xmm32f(1, op1.xmm32f(2) + op1.xmm32f(3));
@@ -214,7 +217,10 @@ pub(super) fn haddps_lane(op1: &BxPackedXmmRegister, op2: &BxPackedXmmRegister) 
 
 /// Bochs simd_pfp.h xmm_haddpd
 #[inline]
-pub(super) fn haddpd_lane(op1: &BxPackedXmmRegister, op2: &BxPackedXmmRegister) -> BxPackedXmmRegister {
+pub(super) fn haddpd_lane(
+    op1: &BxPackedXmmRegister,
+    op2: &BxPackedXmmRegister,
+) -> BxPackedXmmRegister {
     let mut r = BxPackedXmmRegister::default();
     r.set_xmm64f(0, op1.xmm64f(0) + op1.xmm64f(1));
     r.set_xmm64f(1, op2.xmm64f(0) + op2.xmm64f(1));
@@ -223,7 +229,10 @@ pub(super) fn haddpd_lane(op1: &BxPackedXmmRegister, op2: &BxPackedXmmRegister) 
 
 /// Bochs simd_pfp.h xmm_hsubps
 #[inline]
-pub(super) fn hsubps_lane(op1: &BxPackedXmmRegister, op2: &BxPackedXmmRegister) -> BxPackedXmmRegister {
+pub(super) fn hsubps_lane(
+    op1: &BxPackedXmmRegister,
+    op2: &BxPackedXmmRegister,
+) -> BxPackedXmmRegister {
     let mut r = BxPackedXmmRegister::default();
     r.set_xmm32f(0, op1.xmm32f(0) - op1.xmm32f(1));
     r.set_xmm32f(1, op1.xmm32f(2) - op1.xmm32f(3));
@@ -234,7 +243,10 @@ pub(super) fn hsubps_lane(op1: &BxPackedXmmRegister, op2: &BxPackedXmmRegister) 
 
 /// Bochs simd_pfp.h xmm_hsubpd
 #[inline]
-pub(super) fn hsubpd_lane(op1: &BxPackedXmmRegister, op2: &BxPackedXmmRegister) -> BxPackedXmmRegister {
+pub(super) fn hsubpd_lane(
+    op1: &BxPackedXmmRegister,
+    op2: &BxPackedXmmRegister,
+) -> BxPackedXmmRegister {
     let mut r = BxPackedXmmRegister::default();
     r.set_xmm64f(0, op1.xmm64f(0) - op1.xmm64f(1));
     r.set_xmm64f(1, op2.xmm64f(0) - op2.xmm64f(1));

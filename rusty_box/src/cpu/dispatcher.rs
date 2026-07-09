@@ -5506,7 +5506,7 @@ mod tests {
         let v = 1.0f32.to_bits(); // dst  → handler v
         let h = 3.0f32.to_bits(); // vvvv → handler h
         let w = 16_777_216.0f32.to_bits(); // rm → handler w  (= 2^24)
-        // Form 213 permutation → (a,b,c) = (h, v, w).
+                                           // Form 213 permutation → (a,b,c) = (h, v, w).
         let (a, b, c) = (h, v, w);
 
         let mut st_rne = SoftFloatStatus::default();
