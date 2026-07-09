@@ -2410,6 +2410,16 @@ const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
         Cvtsi2ssVssEd => Vcvtsi2ssVssEd,
         Cvtsi2ssVssEq => Vcvtsi2ssVssEq,
 
+        // ===== Packed conversions (single-source; VL selects lane count) =====
+        Cvtdq2psVpsWdq => Vcvtdq2psVpsWdq,
+        Cvtps2dqVdqWps => Vcvtps2dqVdqWps,
+        Cvttps2dqVdqWps => Vcvttps2dqVdqWps,
+        Cvtdq2pdVpdWq => Vcvtdq2pdVpdWdq,
+        Cvtps2pdVpdWps => Vcvtps2pdVpdWps,
+        Cvtpd2psVpsWpd => Vcvtpd2psVpsWpd,
+        Cvtpd2dqVqWpd => Vcvtpd2dqVdqWpd,
+        Cvttpd2dqVqWpd => Vcvttpd2dqVdqWpd,
+
         // ===== Round / reciprocal approximations =====
         RoundpsVpsWpsIb => VroundpsVpsWpsIb,
         RoundpdVpdWpdIb => VroundpdVpdWpdIb,

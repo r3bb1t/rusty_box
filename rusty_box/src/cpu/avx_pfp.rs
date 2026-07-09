@@ -151,7 +151,206 @@ fn avx_compare_f64(a: f64, b: f64, predicate: u8) -> bool {
     avx_cmp_relation(predicate, !unord && a < b, !unord && a == b, unord)
 }
 
+/// f32 → i32 with x86 integer-indefinite (0x8000_0000) on NaN/overflow.
+/// Round-to-nearest-even matches the default MXCSR mode, like the legacy
+/// SSE cvt handlers.
+#[inline]
+fn cvt_f32_i32(val: f32, truncate: bool) -> i32 {
+    if val.is_nan() || val.is_infinite() || val > i32::MAX as f32 || val < i32::MIN as f32 {
+        return 0x8000_0000u32 as i32;
+    }
+    if truncate {
+        val as i32
+    } else {
+        #[cfg(feature = "std")]
+        {
+            val.round_ties_even() as i32
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            super::sse_pfp::round_ties_even_f32(val) as i32
+        }
+    }
+}
+
+/// f64 → i32 with x86 integer-indefinite on NaN/overflow.
+#[inline]
+fn cvt_f64_i32(val: f64, truncate: bool) -> i32 {
+    if val.is_nan() || val.is_infinite() || val > i32::MAX as f64 || val < i32::MIN as f64 {
+        return 0x8000_0000u32 as i32;
+    }
+    if truncate {
+        val as i32
+    } else {
+        #[cfg(feature = "std")]
+        {
+            val.round_ties_even() as i32
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            super::sse_pfp::round_ties_even_f64(val) as i32
+        }
+    }
+}
+
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+    // ════════════════════════════════════════════════════════════════════
+    // Packed conversions — Bochs avx_cvt.cc. All are single-source (no
+    // vvvv); VL selects lane count and the destination is zeroed above
+    // the result width.
+    // ════════════════════════════════════════════════════════════════════
+
+    /// VCVTDQ2PS — packed i32 → f32 over VL.
+    pub(super) fn vcvtdq2ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..8 {
+                result.set_ymm32f(i, op2.ymm32s(i) as f32);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..4 {
+                result.set_xmm32f(i, op2.xmm32s(i) as f32);
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VCVTPS2DQ / VCVTTPS2DQ — packed f32 → i32 over VL.
+    fn vex_cvt_ps2dq(&mut self, instr: &Instruction, truncate: bool) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..8 {
+                result.set_ymm32s(i, cvt_f32_i32(op2.ymm32f(i), truncate));
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..4 {
+                result.set_xmm32s(i, cvt_f32_i32(op2.xmm32f(i), truncate));
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    pub(super) fn vcvtps2dq(&mut self, i: &Instruction) -> super::Result<()> {
+        self.vex_cvt_ps2dq(i, false)
+    }
+    pub(super) fn vcvttps2dq(&mut self, i: &Instruction) -> super::Result<()> {
+        self.vex_cvt_ps2dq(i, true)
+    }
+
+    /// Widening source read: VL=128 forms read 64 bits (m64 or low half of
+    /// the rm register), VL=256 forms read 128 bits.
+    fn vex_read_widening_src(&mut self, instr: &Instruction) -> super::Result<BxPackedXmmRegister> {
+        if instr.mod_c0() {
+            Ok(self.read_xmm_reg(instr.src1()))
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            if instr.get_vl() >= 1 {
+                self.v_read_xmmword(seg, eaddr)
+            } else {
+                let lo = self.v_read_qword(seg, eaddr)?;
+                let mut tmp = BxPackedXmmRegister::default();
+                tmp.set_xmm64u(0, lo);
+                Ok(tmp)
+            }
+        }
+    }
+
+    /// VCVTDQ2PD — 2 (VL=128) or 4 (VL=256) i32 → f64.
+    pub(super) fn vcvtdq2pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op2 = self.vex_read_widening_src(instr)?;
+        if instr.get_vl() >= 1 {
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..4 {
+                result.set_ymm64f(i, op2.xmm32s(i) as f64);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let mut result = BxPackedXmmRegister::default();
+            result.set_xmm64f(0, op2.xmm32s(0) as f64);
+            result.set_xmm64f(1, op2.xmm32s(1) as f64);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VCVTPS2PD — 2 (VL=128) or 4 (VL=256) f32 → f64.
+    pub(super) fn vcvtps2pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op2 = self.vex_read_widening_src(instr)?;
+        if instr.get_vl() >= 1 {
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..4 {
+                result.set_ymm64f(i, op2.xmm32f(i) as f64);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let mut result = BxPackedXmmRegister::default();
+            result.set_xmm64f(0, op2.xmm32f(0) as f64);
+            result.set_xmm64f(1, op2.xmm32f(1) as f64);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VCVTPD2PS — 2 (VL=128) or 4 (VL=256) f64 → f32 into an xmm result;
+    /// unused upper lanes zeroed.
+    pub(super) fn vcvtpd2ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut result = BxPackedXmmRegister::default();
+        if instr.get_vl() >= 1 {
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            for i in 0..4 {
+                result.set_xmm32f(i, op2.ymm64f(i) as f32);
+            }
+        } else {
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            result.set_xmm32f(0, op2.xmm64f(0) as f32);
+            result.set_xmm32f(1, op2.xmm64f(1) as f32);
+        }
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// VCVTPD2DQ / VCVTTPD2DQ — 2 (VL=128) or 4 (VL=256) f64 → i32 into an
+    /// xmm result; unused upper lanes zeroed.
+    fn vex_cvt_pd2dq(&mut self, instr: &Instruction, truncate: bool) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut result = BxPackedXmmRegister::default();
+        if instr.get_vl() >= 1 {
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            for i in 0..4 {
+                result.set_xmm32s(i, cvt_f64_i32(op2.ymm64f(i), truncate));
+            }
+        } else {
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            result.set_xmm32s(0, cvt_f64_i32(op2.xmm64f(0), truncate));
+            result.set_xmm32s(1, cvt_f64_i32(op2.xmm64f(1), truncate));
+        }
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    pub(super) fn vcvtpd2dq(&mut self, i: &Instruction) -> super::Result<()> {
+        self.vex_cvt_pd2dq(i, false)
+    }
+    pub(super) fn vcvttpd2dq(&mut self, i: &Instruction) -> super::Result<()> {
+        self.vex_cvt_pd2dq(i, true)
+    }
+
     // ════════════════════════════════════════════════════════════════════
     // Scalar arithmetic — VADDSS/VSUBSS/VMULSS/VDIVSS/VMINSS/VMAXSS and
     // the SD twins. Bochs avx_pfp.cc AVX_SCALAR_SINGLE_FP /

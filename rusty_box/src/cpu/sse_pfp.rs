@@ -22,7 +22,7 @@ use crate::cpu::float::FloatExt;
 /// IEEE 754 default rounding: if exactly halfway, round to even.
 #[cfg(not(feature = "std"))]
 #[inline]
-fn round_ties_even_f32(val: f32) -> f32 {
+pub(super) fn round_ties_even_f32(val: f32) -> f32 {
     // Use integer truncation + manual halfway detection
     let trunc = val as i32; // truncate toward zero
     let frac = val - trunc as f32;
@@ -50,7 +50,7 @@ fn round_ties_even_f32(val: f32) -> f32 {
 /// Round-to-nearest-ties-even for f64 (no_std compatible).
 #[cfg(not(feature = "std"))]
 #[inline]
-fn round_ties_even_f64(val: f64) -> f64 {
+pub(super) fn round_ties_even_f64(val: f64) -> f64 {
     let trunc = val as i64;
     let frac = val - trunc as f64;
     let abs_frac = if frac >= 0.0 { frac } else { -frac };
