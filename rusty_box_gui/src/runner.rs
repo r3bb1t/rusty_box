@@ -94,7 +94,26 @@ where
         ..EmulatorConfig::default()
     };
 
+    #[cfg(not(feature = "guest-trace"))]
     let mut emu = Emulator::<Corei7SkylakeX>::new(emulator_config)?;
+    // Diagnostic build: run the CPU with the guest-death tracer installed.
+    // Single-CPU only — new_with_instrumentation rejects SMP configs.
+    #[cfg(feature = "guest-trace")]
+    let mut emu = {
+        let trace_log = crate::guest_trace::GuestTracer::default_log_path();
+        let tracer = crate::guest_trace::GuestTracer::create(&trace_log).map_err(|source| {
+            RunError::FileRead {
+                kind: "guest-trace log",
+                path: PathBuf::from(&trace_log),
+                source,
+            }
+        })?;
+        eprintln!("guest-trace: recording guest evidence to {trace_log}");
+        Emulator::<Corei7SkylakeX, crate::guest_trace::GuestTracer>::new_with_instrumentation(
+            emulator_config,
+            tracer,
+        )?
+    };
     if let Some(stop_flag) = stop_flag {
         emu.stop_flag = stop_flag;
     }

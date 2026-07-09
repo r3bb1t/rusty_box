@@ -18,6 +18,8 @@ pub mod args;
 pub mod config;
 mod disk_images;
 pub mod error;
+#[cfg(all(feature = "guest-trace", not(target_arch = "wasm32")))]
+pub mod guest_trace;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runner;
 
