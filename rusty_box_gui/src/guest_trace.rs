@@ -54,6 +54,13 @@ const VECTOR_NAMES: [&str; 22] = [
 /// (lazy FPU switch), #PF (demand paging).
 const SKIP_VECTORS: u32 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 7) | (1 << 14);
 
+/// Flight-recorder capacity (power of two). At ~10 bytes/entry this holds
+/// the last 256k user-mode instructions — several scheduler quanta, enough
+/// to cover a Go panic's full parse path.
+const FLIGHT_CAP: usize = 1 << 18;
+/// User/kernel split: record only canonical user-half RIPs.
+const USER_RIP_LIMIT: u64 = 1 << 47;
+
 pub struct GuestTracer {
     out: BufWriter<File>,
     /// Retired instruction count — the timestamp for every log line.
@@ -69,6 +76,12 @@ pub struct GuestTracer {
     lines_since_flush: u32,
     /// Set after the first write error so the console warning fires once.
     write_error_reported: bool,
+    /// Flight recorder: ring of (rip, opcode) for user-mode instructions,
+    /// dumped when a guest process writes "panic: " to stderr.
+    flight: Vec<(u64, u16)>,
+    flight_pos: usize,
+    /// Dumps are large; cap how many panics get one per boot.
+    flight_dumps_left: u8,
 }
 
 impl GuestTracer {
@@ -96,7 +109,51 @@ impl GuestTracer {
             tkill_counts: [0; 65],
             lines_since_flush: 0,
             write_error_reported: false,
+            flight: vec![(0, 0); FLIGHT_CAP],
+            flight_pos: 0,
+            flight_dumps_left: 2,
         })
+    }
+
+    /// Dump the flight-recorder ring (oldest → newest) after a guest panic.
+    /// Format: 8 `rip:opcode` hex pairs per line, then a decoded tail of the
+    /// last 64 entries with opcode names for quick reading.
+    fn dump_flight(&mut self) {
+        if self.flight_dumps_left == 0 {
+            return;
+        }
+        self.flight_dumps_left -= 1;
+        let filled = self.flight_pos.min(FLIGHT_CAP);
+        let start = if self.flight_pos > FLIGHT_CAP {
+            self.flight_pos & (FLIGHT_CAP - 1)
+        } else {
+            0
+        };
+        self.emit(
+            true,
+            format_args!("FLIGHT dump: {filled} user-mode instructions, oldest first"),
+        );
+        let mut line = String::with_capacity(200);
+        for i in 0..filled {
+            let (rip, opc) = self.flight[(start + i) & (FLIGHT_CAP - 1)];
+            use core::fmt::Write as _;
+            let res = write!(line, "{rip:x}:{opc:x} ");
+            if let Err(e) = res {
+                // String formatting cannot fail; keep the contract explicit.
+                self.emit(true, format_args!("FLIGHT format error: {e}"));
+                return;
+            }
+            if i % 8 == 7 || i + 1 == filled {
+                self.emit(false, format_args!("F {line}"));
+                line.clear();
+            }
+        }
+        let tail = filled.min(64);
+        for i in (filled - tail)..filled {
+            let (rip, opc) = self.flight[(start + i) & (FLIGHT_CAP - 1)];
+            self.emit(false, format_args!("FTAIL {rip:#x} opc={opc:#x}"));
+        }
+        self.emit(true, format_args!("FLIGHT dump end"));
     }
 
     /// Append one line; flush immediately for rare/critical lines and
@@ -180,7 +237,12 @@ impl GuestTracer {
     /// systemd a service's fd 1/2 is the journal socket, so daemon stderr
     /// (Go panics included) still flows through here.
     fn log_write(&mut self, ctx: &HookCtx, fd: u64, buf_ptr: u64, count: u64) {
-        let data = Self::read_guest(ctx, buf_ptr, count as usize)
+        let raw = Self::read_guest(ctx, buf_ptr, count as usize);
+        let is_panic = fd == 2
+            && raw
+                .as_deref()
+                .is_some_and(|b| b.starts_with(b"panic: ") || b.starts_with(b"fatal error:"));
+        let data = raw
             .map(|b| escape_bytes(&b))
             .unwrap_or_else(|| "<unreadable>".to_owned());
         let cr3 = ctx.cr3();
@@ -188,6 +250,11 @@ impl GuestTracer {
             false,
             format_args!("WRITE cr3={cr3:#012x} fd={fd} len={count} \"{data}\""),
         );
+        // A Go panic is being reported — freeze-frame the instruction trail
+        // that led here.
+        if is_panic {
+            self.dump_flight();
+        }
     }
 
     /// writev(fd, iov, iovcnt) with fd 0..=2 — gather the first iovecs.
@@ -255,7 +322,14 @@ impl Instrumentation for GuestTracer {
     fn before_execution(&mut self, rip: u64, instr: &Instruction) {
         self.icount = self.icount.wrapping_add(1);
         self.last_rip = rip;
-        self.last_opcode = Some(instr.get_ia_opcode());
+        let opcode = instr.get_ia_opcode();
+        self.last_opcode = Some(opcode);
+        // Flight recorder: user-mode instructions only (kernel noise would
+        // drown the trail; the panicking process's last quanta dominate).
+        if rip < USER_RIP_LIMIT {
+            self.flight[self.flight_pos & (FLIGHT_CAP - 1)] = (rip, opcode as u16);
+            self.flight_pos = self.flight_pos.wrapping_add(1);
+        }
     }
 
     fn exception(&mut self, vector: u8, error_code: u32) {
