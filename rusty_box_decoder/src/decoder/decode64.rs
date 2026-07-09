@@ -90,7 +90,7 @@ const SREG_MOD1OR2_BASE32_64: [u8; 16] = [
 // Decoding mask bit offsets
 use super::tables::{
     AS32_OFFSET, AS64_OFFSET, IS64_OFFSET, LOCK_PREFIX_OFFSET, MODC0_OFFSET, NNN_OFFSET,
-    OS32_OFFSET, OS64_OFFSET, RRR_OFFSET, SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET,
+    OS32_OFFSET, OS64_OFFSET, RRR_OFFSET, SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET, VEX_OFFSET,
 };
 use super::{find_opcode_in_table, read_u16_le, read_u32_le};
 
@@ -931,6 +931,13 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         | (if lock_rep_value == LOCK_REP_LOCK { 1 } else { 0 } << LOCK_PREFIX_OFFSET)
         | (if mod_c0 { 1 } else { 0 } << MODC0_OFFSET)
         | (1 << IS64_OFFSET) // 64-bit mode
+        // VEX prefix present — required by VEX-only table entries (e.g.
+        // VBLENDVPS/VBLENDVPD, KSHIFT*) so their legacy encodings #UD.
+        // Bochs uses separate BxOpcodeTableVEX tables instead of a decmask
+        // bit; this port shares tables, so the bit carries the distinction.
+        // EVEX has its own lookup (lookup_evex_opcode) and, like Bochs,
+        // must not match VEX-only entries on its shared-table fallback.
+        | (if is_vex && !is_evex { 1 } else { 0 } << VEX_OFFSET)
         | ((nnn & 0x7) << NNN_OFFSET)
         | ((rm & 0x7) << RRR_OFFSET)
         | ((vex_w as u32) << VEX_W_OFFSET)
@@ -1008,6 +1015,16 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     // is dispatched. EVEX has its own tables and doesn't need this.
     if is_vex && !is_evex {
         instr.opcode = remap_sse_to_vex(instr.opcode, vex_l);
+    }
+
+    // VEX is4 operand: VBLENDVPS/VBLENDVPD encode a fourth (mask) register
+    // in imm8[7:4]; in 64-bit mode all four bits select xmm0-15.
+    // Bochs fetchdecode32.cc BX_SRC_VIB (is_64 branch).
+    if matches!(
+        instr.opcode,
+        Opcode::VblendvpsVpsHpsWpsIb | Opcode::VblendvpdVpdHpdWpdIb
+    ) {
+        instr.operands.src3 = ((instr.immediate >> 4) & 0xF) as u8;
     }
 
     // Check if opcode lookup failed
@@ -2344,6 +2361,30 @@ const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
         MaxpdVpdWpd => VmaxpdVpdHpdWpd,
         AddsubpsVpsWps => VaddsubpsVpsHpsWps,
         AddsubpdVpdWpd => VaddsubpdVpdHpdWpd,
+        HaddpsVpsWps => VhaddpsVpsHpsWps,
+        HaddpdVpdWpd => VhaddpdVpdHpdWpd,
+        HsubpsVpsWps => VhsubpsVpsHpsWps,
+        HsubpdVpdWpd => VhsubpdVpdHpdWpd,
+
+        // ===== SSE4.1 blend / dot-product (vvvv is first source) =====
+        BlendpsVpsWpsIb => VblendpsVpsHpsWpsIb,
+        BlendpdVpdWpdIb => VblendpdVpdHpdWpdIb,
+        DppsVpsWpsIb => VdppsVpsHpsWpsIb,
+        // VDPPD is VL128-only; VEX.256 encodings #UD
+        // (Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A41 ATTR_VL128)
+        DppdVpdWpdIb => {
+            if vl == 0 {
+                VdppdVpdHpdWpdIb
+            } else {
+                IaError
+            }
+        }
+        // VEX-encoded 66 0F 38 10/14/15 do not exist in AVX: the variable
+        // blends moved to VEX.0F3A 4A-4C with an is4 mask register (Bochs
+        // fetchdecode_opmap_avx.cc marks these VEX slots BxOpcodeGroup_ERR).
+        PblendvbVdqWdq => IaError,
+        BlendvpsVpsWps => IaError,
+        BlendvpdVpdWpd => IaError,
 
         // ===== Floating-point scalar arithmetic (VEX.vvvv is first source;
         // the legacy 2-operand SSE handler would destructively use dst) =====

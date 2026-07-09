@@ -2653,6 +2653,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::UnpcklpdVpdWdq => self.unpcklpd_vpd_wpd(instr),
             Opcode::UnpckhpdVpdWdq => self.unpckhpd_vpd_wpd(instr),
 
+            // SSE3 Horizontal Add/Subtract (sse_pfp.rs)
+            Opcode::HaddpsVpsWps => self.haddps_vps_wps(instr),
+            Opcode::HaddpdVpdWpd => self.haddpd_vpd_wpd(instr),
+            Opcode::HsubpsVpsWps => self.hsubps_vps_wps(instr),
+            Opcode::HsubpdVpdWpd => self.hsubpd_vpd_wpd(instr),
+
+            // SSE4.1 Dot Products (sse_pfp.rs)
+            Opcode::DppsVpsWpsIb => self.dpps_vps_wps_ib(instr),
+            Opcode::DppdVpdWpdIb => self.dppd_vpd_wpd_ib(instr),
+
             // =========================================================================
             // SSE2 Packed Integer (sse.rs)
             // =========================================================================
@@ -2774,6 +2784,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::PmaxudVdqWdq => self.pmaxud_vdq_wdq(instr),
             Opcode::PmulldVdqWdq => self.pmulld_vdq_wdq(instr),
             Opcode::PblendwVdqWdqIb => self.pblendw_vdq_wdq_ib(instr),
+
+            // SSE4.1 FP blends (sse.rs)
+            Opcode::BlendpsVpsWpsIb => self.blendps_vps_wps_ib(instr),
+            Opcode::BlendpdVpdWpdIb => self.blendpd_vpd_wpd_ib(instr),
+            Opcode::BlendvpsVpsWps => self.blendvps_vps_wps(instr),
+            Opcode::BlendvpdVpdWpd => self.blendvpd_vpd_wpd(instr),
 
             // SSE4.1 Insert/Extract (PEXTRB/D/Q, PINSRB/D/Q)
             Opcode::PextrbEdVdqIbR => self.pextrb_ed_vdq_ib_r(instr),
@@ -4011,6 +4027,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::VmaxpdVpdHpdWpd => self.vmaxpd(instr),
             Opcode::VaddsubpsVpsHpsWps => self.vaddsubps(instr),
             Opcode::VaddsubpdVpdHpdWpd => self.vaddsubpd(instr),
+            Opcode::VhaddpsVpsHpsWps => self.vhaddps(instr),
+            Opcode::VhaddpdVpdHpdWpd => self.vhaddpd(instr),
+            Opcode::VhsubpsVpsHpsWps => self.vhsubps(instr),
+            Opcode::VhsubpdVpdHpdWpd => self.vhsubpd(instr),
+            Opcode::VblendpsVpsHpsWpsIb => self.vblendps(instr),
+            Opcode::VblendpdVpdHpdWpdIb => self.vblendpd(instr),
+            Opcode::VblendvpsVpsHpsWpsIb => self.vblendvps(instr),
+            Opcode::VblendvpdVpdHpdWpdIb => self.vblendvpd(instr),
+            Opcode::VdppsVpsHpsWpsIb => self.vdpps(instr),
+            Opcode::VdppdVpdHpdWpdIb => self.vdppd(instr),
             Opcode::VaddssVssHpsWss => self.vaddss(instr),
             Opcode::VaddsdVsdHpdWsd => self.vaddsd(instr),
             Opcode::VsubssVssHpsWss => self.vsubss(instr),

@@ -632,3 +632,246 @@ fn run_packed_cases() {
         "vcvtss2sd high from vvvv"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// SSE3 horizontal add, SSE4.1 blend / variable blend / dot product, and
+// their VEX forms (per-128-bit-lane, is4 mask register).
+// ════════════════════════════════════════════════════════════════════════
+
+fn xmm_from_f32x4(v: [f32; 4]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for (i, x) in v.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&x.to_bits().to_le_bytes());
+    }
+    out
+}
+
+fn xmm_from_f64x2(v: [f64; 2]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for (i, x) in v.iter().enumerate() {
+        out[i * 8..i * 8 + 8].copy_from_slice(&x.to_bits().to_le_bytes());
+    }
+    out
+}
+
+fn xmm_lane32(xmm: &[u8; 16], i: usize) -> u32 {
+    u32::from_le_bytes(xmm[i * 4..i * 4 + 4].try_into().unwrap())
+}
+
+#[test]
+fn sse3_sse41_hadd_blend_dpp_families() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(run_hadd_blend_dpp_cases)
+        .expect("spawn test thread")
+        .join()
+        .expect("join test thread");
+}
+
+fn run_hadd_blend_dpp_cases() {
+    let cfg = EmulatorConfig::default();
+    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+        .expect("new emulator in flat long mode");
+    emu.reg_write(
+        X86Reg::Cr4,
+        emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+    );
+
+    let programs: &[(&str, &[u8])] = &[
+        ("haddps xmm0,xmm1 (SSE3)", &[0xF2, 0x0F, 0x7C, 0xC1]),
+        ("vhaddps ymm0,ymm1,ymm2", &[0xC5, 0xF7, 0x7C, 0xC2]),
+        (
+            "blendps xmm0,xmm1,0x0A (SSE4.1)",
+            &[0x66, 0x0F, 0x3A, 0x0C, 0xC1, 0x0A],
+        ),
+        (
+            "blendvps xmm2,xmm1 (implicit xmm0 mask)",
+            &[0x66, 0x0F, 0x38, 0x14, 0xD1],
+        ),
+        (
+            "vblendvps xmm0,xmm1,xmm2,xmm3 (is4)",
+            &[0xC4, 0xE3, 0x71, 0x4A, 0xC2, 0x30],
+        ),
+        (
+            "dpps xmm0,xmm1,0x71 (SSE4.1)",
+            &[0x66, 0x0F, 0x3A, 0x40, 0xC1, 0x71],
+        ),
+        (
+            "vdppd xmm0,xmm1,xmm2,0x31",
+            &[0xC4, 0xE3, 0x71, 0x41, 0xC2, 0x31],
+        ),
+        (
+            "vdpps ymm0,ymm1,ymm2,0xF1",
+            &[0xC4, 0xE3, 0x75, 0x40, 0xC2, 0xF1],
+        ),
+        (
+            "vblendps ymm0,ymm1,ymm2,0xA5",
+            &[0xC4, 0xE3, 0x75, 0x0C, 0xC2, 0xA5],
+        ),
+    ];
+    for (i, (_, code)) in programs.iter().enumerate() {
+        let addr = CASE_BASE + i as u64 * CASE_STRIDE;
+        emu.mem_write(addr, code).expect("write case code");
+        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+            .expect("write park jump");
+    }
+    fn run(
+        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        programs: &[(&str, &[u8])],
+        idx: usize,
+    ) {
+        let (name, code) = programs[idx];
+        let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
+        let park = addr + code.len() as u64;
+        let stop = emu
+            .emu_start(addr, Some(park), None, Some(9))
+            .expect("emu_start");
+        assert_eq!(emu.cpu.rip(), park, "{name}: did not park (stop={stop:?})");
+    }
+
+    // 0: haddps xmm0,xmm1 (legacy):
+    //    result = [a0+a1, a2+a3, b0+b1, b2+b3], upper preserved untouched.
+    let a = [1.5f32, 2.25, -4.0, 10.0];
+    let b = [100.0f32, -1.0, 0.5, 0.25];
+    emu.reg_write_xmm(X86Reg::Xmm0, xmm_from_f32x4(a));
+    emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_f32x4(b));
+    run(&mut emu, programs, 0);
+    let got = emu.reg_read_xmm(X86Reg::Xmm0);
+    let want = [a[0] + a[1], a[2] + a[3], b[0] + b[1], b[2] + b[3]];
+    for i in 0..4 {
+        assert_eq!(
+            xmm_lane32(&got, i),
+            want[i].to_bits(),
+            "haddps lane {i}"
+        );
+    }
+
+    // 1: vhaddps ymm — horizontal add PER 128-BIT LANE:
+    //    dst = [v0+v1, v2+v3, w0+w1, w2+w3 | v4+v5, v6+v7, w4+w5, w6+w7].
+    let va = [1.0f32, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0];
+    let wa = [0.5f32, 0.25, -1.0, 8.0, -2.0, 5.0, 7.0, 9.0];
+    emu.reg_write_ymm(X86Reg::Ymm1, ymm_from_f32x8(va));
+    emu.reg_write_ymm(X86Reg::Ymm2, ymm_from_f32x8(wa));
+    run(&mut emu, programs, 1);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    let want = [
+        va[0] + va[1],
+        va[2] + va[3],
+        wa[0] + wa[1],
+        wa[2] + wa[3],
+        va[4] + va[5],
+        va[6] + va[7],
+        wa[4] + wa[5],
+        wa[6] + wa[7],
+    ];
+    for i in 0..8 {
+        assert_eq!(f32_lane(&got, i), want[i].to_bits(), "vhaddps lane {i}");
+    }
+
+    // 2: blendps xmm0,xmm1,0x0A — lanes 1 and 3 from xmm1, 0 and 2 kept.
+    let d = [1.0f32, 2.0, 3.0, 4.0];
+    let s = [-1.0f32, -2.0, -3.0, -4.0];
+    emu.reg_write_xmm(X86Reg::Xmm0, xmm_from_f32x4(d));
+    emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_f32x4(s));
+    run(&mut emu, programs, 2);
+    let got = emu.reg_read_xmm(X86Reg::Xmm0);
+    let want = [d[0], s[1], d[2], s[3]];
+    for i in 0..4 {
+        assert_eq!(xmm_lane32(&got, i), want[i].to_bits(), "blendps lane {i}");
+    }
+
+    // 3: blendvps xmm2,xmm1 — implicit XMM0 sign-bit mask: lanes whose
+    //    xmm0 element is negative (sign bit set) come from xmm1.
+    let mask = [-1.0f32, 2.0, -0.0, 7.0]; // sign bits: 1,0,1,0
+    let dst = [10.0f32, 11.0, 12.0, 13.0];
+    let src = [20.0f32, 21.0, 22.0, 23.0];
+    emu.reg_write_xmm(X86Reg::Xmm0, xmm_from_f32x4(mask));
+    emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_f32x4(src));
+    emu.reg_write_xmm(X86Reg::Xmm2, xmm_from_f32x4(dst));
+    run(&mut emu, programs, 3);
+    let got = emu.reg_read_xmm(X86Reg::Xmm2);
+    let want = [src[0], dst[1], src[2], dst[3]];
+    for i in 0..4 {
+        assert_eq!(xmm_lane32(&got, i), want[i].to_bits(), "blendvps lane {i}");
+    }
+
+    // 4: vblendvps xmm0,xmm1,xmm2,xmm3 — the mask is the is4 register
+    //    (imm8[7:4] = 3), NOT xmm0. xmm0 is preloaded with garbage that
+    //    must be fully replaced; upper ymm bits must be zeroed.
+    let vmask = [1.0f32, -1.0, 5.0, -5.0]; // sign bits: 0,1,0,1
+    let v1 = [10.0f32, 11.0, 12.0, 13.0]; // vvvv (first source)
+    let v2 = [20.0f32, 21.0, 22.0, 23.0]; // rm (second source)
+    emu.reg_write_ymm(X86Reg::Ymm0, [0xAA; 32]);
+    emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_f32x4(v1));
+    emu.reg_write_xmm(X86Reg::Xmm2, xmm_from_f32x4(v2));
+    emu.reg_write_xmm(X86Reg::Xmm3, xmm_from_f32x4(vmask));
+    run(&mut emu, programs, 4);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    let want = [v1[0], v2[1], v1[2], v2[3]];
+    for i in 0..4 {
+        assert_eq!(f32_lane(&got, i), want[i].to_bits(), "vblendvps lane {i}");
+    }
+    assert_eq!(
+        &got[16..32],
+        &[0u8; 16],
+        "vblendvps must zero ymm bits 255:128"
+    );
+
+    // 5: dpps xmm0,xmm1,0x71 — multiply lanes 0-2 (imm[6:4]=0x7), lane 3
+    //    excluded, sum to lane 0 only (imm[3:0]=0x1). Lane-3 products
+    //    (100*100) must not leak into the dot product.
+    let p1 = [1.5f32, 2.0, 3.0, 100.0];
+    let p2 = [2.0f32, 4.0, 0.5, 100.0];
+    emu.reg_write_xmm(X86Reg::Xmm0, xmm_from_f32x4(p1));
+    emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_f32x4(p2));
+    run(&mut emu, programs, 5);
+    let got = emu.reg_read_xmm(X86Reg::Xmm0);
+    // 1.5*2 + 2*4 + 3*0.5 = 3 + 8 + 1.5 = 12.5 (all exact in f32)
+    let want = [12.5f32, 0.0, 0.0, 0.0];
+    for i in 0..4 {
+        assert_eq!(xmm_lane32(&got, i), want[i].to_bits(), "dpps lane {i}");
+    }
+
+    // 6: vdppd xmm0,xmm1,xmm2,0x31 — both products (imm[5:4]=0x3), sum to
+    //    lane 0 only (imm[1:0]=0x1); upper ymm bits zeroed (VEX.128).
+    let q1 = [1.5f64, 2.5];
+    let q2 = [4.0f64, 8.0];
+    emu.reg_write_ymm(X86Reg::Ymm0, [0xCC; 32]);
+    emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_f64x2(q1));
+    emu.reg_write_xmm(X86Reg::Xmm2, xmm_from_f64x2(q2));
+    run(&mut emu, programs, 6);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    // 1.5*4 + 2.5*8 = 6 + 20 = 26 (exact)
+    assert_eq!(f64_lane(&got, 0), 26.0f64.to_bits(), "vdppd dot product");
+    assert_eq!(f64_lane(&got, 1), 0.0f64.to_bits(), "vdppd masked lane 1");
+    assert_eq!(&got[16..32], &[0u8; 16], "vdppd must zero ymm bits 255:128");
+
+    // 7: vdpps ymm0,ymm1,ymm2,0xF1 — full dot product PER 128-BIT LANE
+    //    (same imm8 for both lanes): result element 0 = lane-0 dot,
+    //    element 4 = lane-1 dot, all other elements 0.
+    let da = [1.0f32, 2.0, 3.0, 4.0, 0.5, 0.25, 8.0, 16.0];
+    let db = [2.0f32, 2.0, 2.0, 2.0, 4.0, 8.0, 0.5, 0.25];
+    emu.reg_write_ymm(X86Reg::Ymm1, ymm_from_f32x8(da));
+    emu.reg_write_ymm(X86Reg::Ymm2, ymm_from_f32x8(db));
+    run(&mut emu, programs, 7);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    // lane 0: 2+4+6+8 = 20; lane 1: 2+2+4+4 = 12 (all exact)
+    let want = [20.0f32, 0.0, 0.0, 0.0, 12.0, 0.0, 0.0, 0.0];
+    for i in 0..8 {
+        assert_eq!(f32_lane(&got, i), want[i].to_bits(), "vdpps lane {i}");
+    }
+
+    // 8: vblendps ymm0,ymm1,ymm2,0xA5 — imm8 consumed 4 bits per 128-bit
+    //    lane: low lane mask 0x5 (elements 0,2), high lane mask 0xA
+    //    (elements 5,7).
+    let ba = [10.0f32, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0];
+    let bb = [20.0f32, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0];
+    emu.reg_write_ymm(X86Reg::Ymm1, ymm_from_f32x8(ba));
+    emu.reg_write_ymm(X86Reg::Ymm2, ymm_from_f32x8(bb));
+    run(&mut emu, programs, 8);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    let want = [bb[0], ba[1], bb[2], ba[3], ba[4], bb[5], ba[6], bb[7]];
+    for i in 0..8 {
+        assert_eq!(f32_lane(&got, i), want[i].to_bits(), "vblendps lane {i}");
+    }
+}

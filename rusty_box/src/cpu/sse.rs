@@ -62,6 +62,63 @@ fn saturate_dword_s_to_word_s(val: i32) -> i16 {
     }
 }
 
+// ============================================================================
+// SSE4.1 blend lane helpers (Bochs simd_int.h xmm_blendps/xmm_blendpd/
+// xmm_blendvps/xmm_blendvpd). Shared by the legacy handlers below and the
+// per-128-bit-lane VEX handlers in avx_pfp.rs.
+// ============================================================================
+
+/// Bochs simd_int.h xmm_blendps: copy op2 dword lanes selected by mask[3:0]
+#[inline]
+pub(super) fn blendps_lane(op1: &mut BxPackedXmmRegister, op2: &BxPackedXmmRegister, mask: u8) {
+    for n in 0..4usize {
+        if mask & (1 << n) != 0 {
+            op1.set_xmm32u(n, op2.xmm32u(n));
+        }
+    }
+}
+
+/// Bochs simd_int.h xmm_blendpd: copy op2 qword lanes selected by mask[1:0]
+#[inline]
+pub(super) fn blendpd_lane(op1: &mut BxPackedXmmRegister, op2: &BxPackedXmmRegister, mask: u8) {
+    for n in 0..2usize {
+        if mask & (1 << n) != 0 {
+            op1.set_xmm64u(n, op2.xmm64u(n));
+        }
+    }
+}
+
+/// Bochs simd_int.h xmm_blendvps: copy op2 dword lanes whose mask-register
+/// lane has the sign bit set
+#[inline]
+pub(super) fn blendvps_lane(
+    op1: &mut BxPackedXmmRegister,
+    op2: &BxPackedXmmRegister,
+    mask: &BxPackedXmmRegister,
+) {
+    for n in 0..4usize {
+        if mask.xmm32s(n) < 0 {
+            op1.set_xmm32u(n, op2.xmm32u(n));
+        }
+    }
+}
+
+/// Bochs simd_int.h xmm_blendvpd: copy op2 qword lanes whose mask-register
+/// lane has the sign bit (bit 63 = sign of the high dword) set
+#[inline]
+pub(super) fn blendvpd_lane(
+    op1: &mut BxPackedXmmRegister,
+    op2: &BxPackedXmmRegister,
+    mask: &BxPackedXmmRegister,
+) {
+    if mask.xmm32s(1) < 0 {
+        op1.set_xmm64u(0, op2.xmm64u(0));
+    }
+    if mask.xmm32s(3) < 0 {
+        op1.set_xmm64u(1, op2.xmm64u(1));
+    }
+}
+
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // SSE helper: read op2 (register or memory)
@@ -1829,6 +1886,54 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             mask >>= 1;
         }
+        self.write_xmm_reg_lo128(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// BLENDPS VpsWpsIb (66 0F 3A 0C) - Blend Packed Single-FP by immediate
+    /// Bochs: BLENDPS_VpsWpsIbR / xmm_blendps (simd_int.h)
+    pub(super) fn blendps_vps_wps_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+        blendps_lane(&mut op1, &op2, instr.ib());
+        self.write_xmm_reg_lo128(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// BLENDPD VpdWpdIb (66 0F 3A 0D) - Blend Packed Double-FP by immediate
+    /// Bochs: BLENDPD_VpdWpdIbR / xmm_blendpd (simd_int.h)
+    pub(super) fn blendpd_vpd_wpd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+        blendpd_lane(&mut op1, &op2, instr.ib());
+        self.write_xmm_reg_lo128(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// BLENDVPS VpsWps (66 0F 38 14) - Variable Blend Packed Single-FP
+    /// Bochs: BLENDVPS_VpsWpsR / xmm_blendvps (simd_int.h)
+    /// Implicit mask register: XMM0 (sign bit of each dword lane)
+    pub(super) fn blendvps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+        let mask = self.read_xmm_reg(0); // XMM0 is implicit mask
+        blendvps_lane(&mut op1, &op2, &mask);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// BLENDVPD VpdWpd (66 0F 38 15) - Variable Blend Packed Double-FP
+    /// Bochs: BLENDVPD_VpdWpdR / xmm_blendvpd (simd_int.h)
+    /// Implicit mask register: XMM0 (sign bit of each qword lane)
+    pub(super) fn blendvpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+        let mask = self.read_xmm_reg(0); // XMM0 is implicit mask
+        blendvpd_lane(&mut op1, &op2, &mask);
         self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }

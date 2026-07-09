@@ -763,6 +763,243 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // ════════════════════════════════════════════════════════════════════
+    // VHADDPS/VHADDPD/VHSUBPS/VHSUBPD — horizontal add/subtract, per
+    // 128-bit lane (Bochs avx_pfp.cc HANDLE_AVX_PFP_2OP<xmm_haddps> via
+    // simd_pfp.h xmm_haddps et al.).
+    // ════════════════════════════════════════════════════════════════════
+
+    pub(super) fn vhaddps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let op1 = self.read_ymm_reg(instr.src2());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..2 {
+                result.set_ymm128(
+                    lane,
+                    super::sse_pfp::haddps_lane(&op1.ymm128(lane), &op2.ymm128(lane)),
+                );
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let op1 = self.read_xmm_reg(instr.src2());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let result = super::sse_pfp::haddps_lane(&op1, &op2);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    pub(super) fn vhaddpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let op1 = self.read_ymm_reg(instr.src2());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..2 {
+                result.set_ymm128(
+                    lane,
+                    super::sse_pfp::haddpd_lane(&op1.ymm128(lane), &op2.ymm128(lane)),
+                );
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let op1 = self.read_xmm_reg(instr.src2());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let result = super::sse_pfp::haddpd_lane(&op1, &op2);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    pub(super) fn vhsubps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let op1 = self.read_ymm_reg(instr.src2());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..2 {
+                result.set_ymm128(
+                    lane,
+                    super::sse_pfp::hsubps_lane(&op1.ymm128(lane), &op2.ymm128(lane)),
+                );
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let op1 = self.read_xmm_reg(instr.src2());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let result = super::sse_pfp::hsubps_lane(&op1, &op2);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    pub(super) fn vhsubpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let op1 = self.read_ymm_reg(instr.src2());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..2 {
+                result.set_ymm128(
+                    lane,
+                    super::sse_pfp::hsubpd_lane(&op1.ymm128(lane), &op2.ymm128(lane)),
+                );
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let op1 = self.read_xmm_reg(instr.src2());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let result = super::sse_pfp::hsubpd_lane(&op1, &op2);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // VBLENDPS/VBLENDPD — immediate blends (Bochs avx.cc
+    // VBLENDPS_VpsHpsWpsIbR via simd_int.h xmm_blendps). The imm8 mask is
+    // consumed 4 (ps) / 2 (pd) bits per 128-bit lane.
+    // ════════════════════════════════════════════════════════════════════
+
+    pub(super) fn vblendps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut mask = instr.ib();
+        if instr.get_vl() >= 1 {
+            let op1 = self.read_ymm_reg(instr.src2());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = op1;
+            for lane in 0..2 {
+                let mut r = result.ymm128(lane);
+                super::sse::blendps_lane(&mut r, &op2.ymm128(lane), mask);
+                result.set_ymm128(lane, r);
+                mask >>= 4;
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let mut result = self.read_xmm_reg(instr.src2());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            super::sse::blendps_lane(&mut result, &op2, mask);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    pub(super) fn vblendpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut mask = instr.ib();
+        if instr.get_vl() >= 1 {
+            let op1 = self.read_ymm_reg(instr.src2());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = op1;
+            for lane in 0..2 {
+                let mut r = result.ymm128(lane);
+                super::sse::blendpd_lane(&mut r, &op2.ymm128(lane), mask);
+                result.set_ymm128(lane, r);
+                mask >>= 2;
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let mut result = self.read_xmm_reg(instr.src2());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            super::sse::blendpd_lane(&mut result, &op2, mask);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // VBLENDVPS/VBLENDVPD — variable blends (Bochs avx.cc
+    // VBLENDVPS_VpsHpsWpsIbR via simd_int.h xmm_blendvps). Unlike the
+    // legacy forms (implicit XMM0), the mask register is is4: imm8[7:4],
+    // extracted into src3 by the decoder.
+    // ════════════════════════════════════════════════════════════════════
+
+    pub(super) fn vblendvps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let op1 = self.read_ymm_reg(instr.src2());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mask = self.read_ymm_reg(instr.src3());
+            let mut result = op1;
+            for lane in 0..2 {
+                let mut r = result.ymm128(lane);
+                super::sse::blendvps_lane(&mut r, &op2.ymm128(lane), &mask.ymm128(lane));
+                result.set_ymm128(lane, r);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let mut result = self.read_xmm_reg(instr.src2());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let mask = self.read_xmm_reg(instr.src3());
+            super::sse::blendvps_lane(&mut result, &op2, &mask);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    pub(super) fn vblendvpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let op1 = self.read_ymm_reg(instr.src2());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mask = self.read_ymm_reg(instr.src3());
+            let mut result = op1;
+            for lane in 0..2 {
+                let mut r = result.ymm128(lane);
+                super::sse::blendvpd_lane(&mut r, &op2.ymm128(lane), &mask.ymm128(lane));
+                result.set_ymm128(lane, r);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let mut result = self.read_xmm_reg(instr.src2());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let mask = self.read_xmm_reg(instr.src3());
+            super::sse::blendvpd_lane(&mut result, &op2, &mask);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // VDPPS/VDPPD — dot products (Bochs avx_pfp.cc VDPPS_VpsHpsWpsIbR,
+    // sse_pfp.cc DPPD_VpdHpdWpdIbR). VDPPS applies the same imm8 to each
+    // 128-bit lane; VDPPD is VL128-only (VEX.256 #UD in the decoder).
+    // ════════════════════════════════════════════════════════════════════
+
+    pub(super) fn vdpps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mask = instr.ib();
+        if instr.get_vl() >= 1 {
+            let op1 = self.read_ymm_reg(instr.src2());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..2 {
+                result.set_ymm128(
+                    lane,
+                    super::sse_pfp::dpps_lane(&op1.ymm128(lane), &op2.ymm128(lane), mask),
+                );
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let op1 = self.read_xmm_reg(instr.src2());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let result = super::sse_pfp::dpps_lane(&op1, &op2, mask);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    pub(super) fn vdppd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.src2());
+        let op2 = self.vex_read_src2_xmm(instr)?;
+        let result = super::sse_pfp::dppd_lane(&op1, &op2, instr.ib());
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    // ════════════════════════════════════════════════════════════════════
     // FP unpack — VUNPCKLPS/VUNPCKHPS/VUNPCKLPD/VUNPCKHPD, per-128-bit
     // lane (Bochs avx.cc VUNPCKLPS_VpsHpsWpsR via xmm_unpcklps).
     // ════════════════════════════════════════════════════════════════════

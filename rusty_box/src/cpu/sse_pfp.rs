@@ -156,6 +156,118 @@ pub(super) fn sse_round_f64(val: f64, imm8: u8, mxcsr_rc: u8) -> f64 {
     }
 }
 
+// ============================================================================
+// SSE3 horizontal add/sub lane helpers (Bochs simd_pfp.h xmm_haddps,
+// xmm_haddpd, xmm_hsubps, xmm_hsubpd). Shared by the legacy handlers below
+// and the per-128-bit-lane VEX handlers in avx_pfp.rs.
+// ============================================================================
+
+/// Bochs simd_pfp.h xmm_haddps
+#[inline]
+pub(super) fn haddps_lane(op1: &BxPackedXmmRegister, op2: &BxPackedXmmRegister) -> BxPackedXmmRegister {
+    let mut r = BxPackedXmmRegister::default();
+    r.set_xmm32f(0, op1.xmm32f(0) + op1.xmm32f(1));
+    r.set_xmm32f(1, op1.xmm32f(2) + op1.xmm32f(3));
+    r.set_xmm32f(2, op2.xmm32f(0) + op2.xmm32f(1));
+    r.set_xmm32f(3, op2.xmm32f(2) + op2.xmm32f(3));
+    r
+}
+
+/// Bochs simd_pfp.h xmm_haddpd
+#[inline]
+pub(super) fn haddpd_lane(op1: &BxPackedXmmRegister, op2: &BxPackedXmmRegister) -> BxPackedXmmRegister {
+    let mut r = BxPackedXmmRegister::default();
+    r.set_xmm64f(0, op1.xmm64f(0) + op1.xmm64f(1));
+    r.set_xmm64f(1, op2.xmm64f(0) + op2.xmm64f(1));
+    r
+}
+
+/// Bochs simd_pfp.h xmm_hsubps
+#[inline]
+pub(super) fn hsubps_lane(op1: &BxPackedXmmRegister, op2: &BxPackedXmmRegister) -> BxPackedXmmRegister {
+    let mut r = BxPackedXmmRegister::default();
+    r.set_xmm32f(0, op1.xmm32f(0) - op1.xmm32f(1));
+    r.set_xmm32f(1, op1.xmm32f(2) - op1.xmm32f(3));
+    r.set_xmm32f(2, op2.xmm32f(0) - op2.xmm32f(1));
+    r.set_xmm32f(3, op2.xmm32f(2) - op2.xmm32f(3));
+    r
+}
+
+/// Bochs simd_pfp.h xmm_hsubpd
+#[inline]
+pub(super) fn hsubpd_lane(op1: &BxPackedXmmRegister, op2: &BxPackedXmmRegister) -> BxPackedXmmRegister {
+    let mut r = BxPackedXmmRegister::default();
+    r.set_xmm64f(0, op1.xmm64f(0) - op1.xmm64f(1));
+    r.set_xmm64f(1, op2.xmm64f(0) - op2.xmm64f(1));
+    r
+}
+
+// ============================================================================
+// SSE4.1 dot-product lane helpers. One 128-bit lane of DPPS/DPPD following
+// Bochs' exact operation order (Bochs sse_pfp.cc DPPS_VpsWpsIbR and
+// DPPD_VpdHpdWpdIbR): masked multiply under imm8[7:4] (unselected products
+// are 0.0), shuffle+add reduction, then store the sum only to the result
+// lanes selected by imm8[3:0] (0.0 elsewhere).
+// ============================================================================
+
+/// Bochs sse_pfp.cc DPPS_VpsWpsIbR / avx_pfp.cc VDPPS_VpsHpsWpsIbR (one lane)
+#[inline]
+pub(super) fn dpps_lane(
+    op1: &BxPackedXmmRegister,
+    op2: &BxPackedXmmRegister,
+    mask: u8,
+) -> BxPackedXmmRegister {
+    // xmm_mulps_mask: prod[n] = op1[n]*op2[n] under imm8[7:4], else 0.0
+    let mut prod = [0.0f32; 4];
+    for (n, p) in prod.iter_mut().enumerate() {
+        if (mask >> 4) & (1 << n) != 0 {
+            *p = op1.xmm32f(n) * op2.xmm32f(n);
+        }
+    }
+    // xmm_shufps(.., prod, prod, 0xB1) then xmm_addps: pairwise sums
+    let sum = [
+        prod[1] + prod[0],
+        prod[0] + prod[1],
+        prod[3] + prod[2],
+        prod[2] + prod[3],
+    ];
+    // xmm_shufpd(.., sum, sum, 0x1) then xmm_addps_mask under imm8[3:0]
+    let swapped = [sum[2], sum[3], sum[0], sum[1]];
+    let mut r = BxPackedXmmRegister::default();
+    for n in 0..4usize {
+        if mask & (1 << n) != 0 {
+            r.set_xmm32f(n, sum[n] + swapped[n]);
+        }
+    }
+    r
+}
+
+/// Bochs sse_pfp.cc DPPD_VpdHpdWpdIbR (one lane; also VDPPD which is
+/// VL128-only)
+#[inline]
+pub(super) fn dppd_lane(
+    op1: &BxPackedXmmRegister,
+    op2: &BxPackedXmmRegister,
+    mask: u8,
+) -> BxPackedXmmRegister {
+    // xmm_mulpd_mask: prod[n] = op1[n]*op2[n] under imm8[5:4], else 0.0
+    let mut prod = [0.0f64; 2];
+    for (n, p) in prod.iter_mut().enumerate() {
+        if (mask >> 4) & (1 << n) != 0 {
+            *p = op1.xmm64f(n) * op2.xmm64f(n);
+        }
+    }
+    // xmm_shufpd(.., prod, prod, 0x1) then xmm_addpd_mask under imm8[1:0]
+    let swapped = [prod[1], prod[0]];
+    let mut r = BxPackedXmmRegister::default();
+    for n in 0..2usize {
+        if mask & (1 << n) != 0 {
+            r.set_xmm64f(n, prod[n] + swapped[n]);
+        }
+    }
+    r
+}
+
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // SSE FP helpers: read source operand (register or memory)
@@ -1458,6 +1570,73 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = BxPackedXmmRegister::default();
         result.set_xmm64u(0, op1.xmm64u(1));
         result.set_xmm64u(1, op2.xmm64u(1));
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    // ========================================================================
+    // SSE3 horizontal add/sub: HADDPS/HADDPD/HSUBPS/HSUBPD
+    // Bochs: HANDLE_SSE_PFP_2OP<xmm_haddps> etc. (ia_opcodes.def) via
+    // simd_pfp.h xmm_haddps/xmm_haddpd/xmm_hsubps/xmm_hsubpd
+    // ========================================================================
+
+    /// HADDPS — Packed Single-FP Horizontal Add (F2 0F 7C)
+    pub(super) fn haddps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
+        self.write_xmm_reg_lo128(instr.dst(), haddps_lane(&op1, &op2));
+        Ok(())
+    }
+
+    /// HADDPD — Packed Double-FP Horizontal Add (66 0F 7C)
+    pub(super) fn haddpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
+        self.write_xmm_reg_lo128(instr.dst(), haddpd_lane(&op1, &op2));
+        Ok(())
+    }
+
+    /// HSUBPS — Packed Single-FP Horizontal Subtract (F2 0F 7D)
+    pub(super) fn hsubps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
+        self.write_xmm_reg_lo128(instr.dst(), hsubps_lane(&op1, &op2));
+        Ok(())
+    }
+
+    /// HSUBPD — Packed Double-FP Horizontal Subtract (66 0F 7D)
+    pub(super) fn hsubpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
+        self.write_xmm_reg_lo128(instr.dst(), hsubpd_lane(&op1, &op2));
+        Ok(())
+    }
+
+    // ========================================================================
+    // SSE4.1 dot products: DPPS/DPPD
+    // Bochs: DPPS_VpsWpsIbR / DPPD_VpdHpdWpdIbR (sse_pfp.cc)
+    // ========================================================================
+
+    /// DPPS — Dot Product of Packed Single-FP (66 0F 3A 40)
+    pub(super) fn dpps_vps_wps_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
+        let result = dpps_lane(&op1, &op2, instr.ib());
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    /// DPPD — Dot Product of Packed Double-FP (66 0F 3A 41)
+    pub(super) fn dppd_vpd_wpd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
+        let result = dppd_lane(&op1, &op2, instr.ib());
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
