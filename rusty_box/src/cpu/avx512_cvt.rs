@@ -173,6 +173,11 @@ const I32_INDEFINITE: i32 = i32::MIN; // 0x80000000
 /// Intel integer indefinite: 0xFFFFFFFF for ALL out-of-range unsigned conversions.
 const U32_INDEFINITE: u32 = u32::MAX; // 0xFFFFFFFF
 
+/// MXCSR RC value for round-toward-zero. VCVTT* instructions truncate
+/// unconditionally (ignoring MXCSR.RC), so their handlers pass this to the
+/// rc-aware helpers rather than reading MXCSR.
+const RC_TRUNCATE: u8 = 3;
+
 fn round_f32_to_i32(val: f32, rc: u8) -> i32 {
     if val.is_nan() {
         return I32_INDEFINITE;
@@ -283,14 +288,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             let v = src.zmm32f(i);
-            result.set_zmm32s(
-                i,
-                if v.is_nan() || v >= (i32::MAX as f32 + 1.0) || v < (i32::MIN as f32) {
-                    I32_INDEFINITE
-                } else {
-                    v as i32
-                },
-            );
+            // Truncate first, THEN range-check the integer: a value in
+            // (-2^31-1, -2^31) truncates to a valid i32::MIN, but a raw-value
+            // check against -2^31 would wrongly report integer-indefinite.
+            // Bochs softfloat3e f32_to_i32_round_to_zero.
+            result.set_zmm32s(i, round_f32_to_i32(v, RC_TRUNCATE));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -370,14 +372,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             let v = src.zmm64f(i);
-            result.set_zmm32s(
-                i,
-                if v.is_nan() || v >= (i32::MAX as f64 + 1.0) || v < (i32::MIN as f64) {
-                    I32_INDEFINITE
-                } else {
-                    v as i32
-                },
-            );
+            // Truncate first, THEN range-check: -2147483648.9 truncates to a
+            // valid i32::MIN; the prior raw-value check reported indefinite.
+            // Bochs softfloat3e f64_to_i32_round_to_zero.
+            result.set_zmm32s(i, round_f64_to_i32(v, RC_TRUNCATE));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -492,18 +490,63 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             let val = src.zmm32f(i);
-            result.set_zmm32u(
-                i,
-                if val.is_nan() || val < 0.0 || val >= (u32::MAX as f32 + 1.0) {
-                    U32_INDEFINITE
-                } else {
-                    val as u32
-                },
-            );
+            // Truncate first, THEN range-check: a value in (-1, 0) truncates
+            // to 0 (valid unsigned), but the raw `val < 0.0` check wrongly
+            // reported indefinite. Bochs softfloat3e f32_to_ui32_round_to_zero
+            // returns 0 for any magnitude < 1 before its sign test.
+            result.set_zmm32u(i, round_f32_to_u32(val, RC_TRUNCATE));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        round_f32_to_i32, round_f32_to_u32, round_f64_to_i32, I32_INDEFINITE, RC_TRUNCATE,
+        U32_INDEFINITE,
+    };
+
+    // Boundary semantics of the truncating (VCVTT*) conversion path, which
+    // the vcvttps2dq / vcvttpd2dq / vcvttps2udq handlers now delegate to.
+    // Ground truth: Bochs softfloat3e f{32,64}_to_{i,ui}32_round_to_zero —
+    // truncate first, then the integer-range check decides indefinite.
+
+    #[test]
+    fn vcvttpd2dq_negative_boundary_truncates_to_i32_min() {
+        // -2147483648.9 truncates to exactly -2^31, which IS representable;
+        // the prior raw-value check returned integer-indefinite here.
+        assert_eq!(round_f64_to_i32(-2147483648.9, RC_TRUNCATE), i32::MIN);
+        // Just past the negative edge: truncates to -2^31-1, out of range.
+        assert_eq!(round_f64_to_i32(-2147483649.0, RC_TRUNCATE), I32_INDEFINITE);
+        // Positive: 2^31 does not fit a signed i32 → indefinite.
+        assert_eq!(round_f64_to_i32(2147483648.0, RC_TRUNCATE), I32_INDEFINITE);
+        // Largest in-range value, fractional part truncated away.
+        assert_eq!(round_f64_to_i32(2147483647.9, RC_TRUNCATE), i32::MAX);
+        assert_eq!(round_f64_to_i32(f64::NAN, RC_TRUNCATE), I32_INDEFINITE);
+    }
+
+    #[test]
+    fn vcvttps2dq_boundary_matches_f32_grid() {
+        // No f32 exists strictly between -2^31-256 and -2^31, so the exact
+        // edge value truncates to i32::MIN and the next lower f32 overflows.
+        assert_eq!(round_f32_to_i32(-2147483648.0, RC_TRUNCATE), i32::MIN);
+        assert_eq!(round_f32_to_i32(-2147483904.0, RC_TRUNCATE), I32_INDEFINITE);
+        assert_eq!(round_f32_to_i32(f32::NAN, RC_TRUNCATE), I32_INDEFINITE);
+    }
+
+    #[test]
+    fn vcvttps2udq_small_negative_truncates_to_zero() {
+        // Magnitude < 1 truncates to 0 (valid unsigned); Bochs returns 0
+        // before its sign test. The prior `val < 0.0` check said indefinite.
+        assert_eq!(round_f32_to_u32(-0.9, RC_TRUNCATE), 0);
+        assert_eq!(round_f32_to_u32(0.9, RC_TRUNCATE), 0);
+        // At/under -1 the truncated magnitude is negative → indefinite.
+        assert_eq!(round_f32_to_u32(-1.5, RC_TRUNCATE), U32_INDEFINITE);
+        // Full unsigned range: 2^32 does not fit → indefinite.
+        assert_eq!(round_f32_to_u32(4294967296.0, RC_TRUNCATE), U32_INDEFINITE);
     }
 }
