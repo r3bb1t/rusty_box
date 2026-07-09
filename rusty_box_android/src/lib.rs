@@ -24,9 +24,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bios/BIOS-bochs-latest");
+const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
 const VGA_BIOS_DATA: &[u8] =
-    include_bytes!("../../cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin");
+    include_bytes!("../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin");
 #[cfg(feature = "embedded-alpine")]
 const ALPINE_ISO: &[u8] = include_bytes!("../assets/alpine.iso");
 
@@ -310,6 +310,7 @@ fn android_gui_config() -> ResolvedConfig {
             drive: 0,
         }),
         log_level: LogLevel::Warn,
+        config_path: None,
     }
 }
 

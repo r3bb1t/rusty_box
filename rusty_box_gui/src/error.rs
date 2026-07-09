@@ -12,6 +12,12 @@ pub enum RunError {
         source: toml::de::Error,
     },
 
+    #[error("failed to write config {}: {source}", path.display())]
+    ConfigWrite { path: PathBuf, source: io::Error },
+
+    #[error("failed to serialize config: {source}")]
+    ConfigSerialize { source: toml::ser::Error },
+
     #[error("BIOS path is required; pass --bios PATH or set rom.bios in TOML")]
     MissingBios,
 
@@ -20,6 +26,9 @@ pub enum RunError {
 
     #[error("{field} is too large for this platform")]
     ValueOverflow { field: &'static str },
+
+    #[error("invalid CPU topology: {message}")]
+    InvalidCpuTopology { message: String },
 
     #[error("boot order cannot be empty; set boot.order or pass --boot disk|cdrom")]
     EmptyBootOrder,

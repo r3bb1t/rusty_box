@@ -1,6 +1,6 @@
 use crate::args::{Args, BootDevice, DiskGeometry, DisplayBackend, LogLevel};
 use crate::error::RunError;
-use rusty_box::params::BxParams;
+use rusty_box::params::{BxParamError, BxParams};
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
@@ -8,7 +8,7 @@ use std::{
 
 pub const DEFAULT_CONFIG_FILE: &str = "rusty_box.toml";
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileConfig {
     pub emulator: EmulatorToml,
@@ -20,49 +20,55 @@ pub struct FileConfig {
     pub logging: LoggingToml,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EmulatorToml {
     pub memory_mib: Option<u32>,
     pub host_memory_mib: Option<u32>,
     pub memory_block_kib: Option<u32>,
     pub cpus: Option<u32>,
+    pub cpu_sockets: Option<u32>,
+    pub cpu_cores: Option<u32>,
+    pub cpu_threads: Option<u32>,
     pub ips: Option<u32>,
     pub pci: Option<bool>,
     pub sync_slowdown: Option<bool>,
     pub max_instructions: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DisplayToml {
     pub backend: Option<DisplayBackend>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RomToml {
     pub bios: Option<PathBuf>,
     pub vga_bios: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BootToml {
     pub order: Vec<BootDevice>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+// NOTE: field order matters for TOML serialization — the `toml` serializer
+// requires scalar values to be emitted before any sub-tables. `chs` (an inline
+// table) and `create` (a sub-table) must therefore follow the scalar fields.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DiskToml {
     pub path: Option<PathBuf>,
-    pub chs: Option<DiskGeometry>,
     pub channel: Option<usize>,
     pub drive: Option<usize>,
+    pub chs: Option<DiskGeometry>,
     pub create: Option<DiskCreateToml>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DiskCreateToml {
     pub path: Option<PathBuf>,
@@ -70,7 +76,7 @@ pub struct DiskCreateToml {
     pub overwrite: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CdromToml {
     pub path: Option<PathBuf>,
@@ -78,7 +84,7 @@ pub struct CdromToml {
     pub drive: Option<usize>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingToml {
     pub level: Option<LogLevel>,
@@ -101,6 +107,10 @@ pub struct ResolvedConfig {
     pub disk: Option<ResolvedDisk>,
     pub cdrom: Option<ResolvedCdrom>,
     pub log_level: LogLevel,
+    /// Where "Save to config" persists these settings. `None` when resolved
+    /// without a file context (tests, `resolve_config`); the native launcher
+    /// fills it in `load_config`.
+    pub config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,25 +137,30 @@ pub struct ResolvedCdrom {
 }
 
 pub fn load_config(args: &Args) -> Result<ResolvedConfig, RunError> {
-    let (file, config_dir) = if args.no_config {
-        (FileConfig::default(), None)
+    let cwd = env::current_dir().ok();
+    let (file, config_dir, config_path) = if args.no_config {
+        // No file was loaded, but "Save to config" should still have a target.
+        let save_path = cwd.as_deref().map(|cwd| cwd.join(DEFAULT_CONFIG_FILE));
+        (FileConfig::default(), None, save_path)
     } else if let Some(path) = &args.config {
-        (load_toml_file(path)?, path.parent().map(Path::to_path_buf))
+        (
+            load_toml_file(path)?,
+            path.parent().map(Path::to_path_buf),
+            Some(path.clone()),
+        )
+    } else if let Some(default_path) = cwd.as_deref().and_then(find_default_config_file) {
+        let config_dir = default_path.parent().map(Path::to_path_buf);
+        (
+            load_toml_file(&default_path)?,
+            config_dir,
+            Some(default_path),
+        )
     } else {
-        if let Some(default_path) = env::current_dir()
-            .ok()
-            .and_then(|cwd| find_default_config_file(&cwd))
-        {
-            (
-                load_toml_file(&default_path)?,
-                default_path.parent().map(Path::to_path_buf),
-            )
-        } else {
-            (FileConfig::default(), None)
-        }
+        let save_path = cwd.as_deref().map(|cwd| cwd.join(DEFAULT_CONFIG_FILE));
+        (FileConfig::default(), None, save_path)
     };
 
-    resolve_config_with_base(file, args, config_dir.as_deref())
+    resolve_config_with_base(file, args, config_dir.as_deref(), config_path)
 }
 
 fn find_default_config_file(start_dir: &Path) -> Option<PathBuf> {
@@ -159,13 +174,14 @@ fn find_default_config_file(start_dir: &Path) -> Option<PathBuf> {
 }
 
 pub fn resolve_config(file: FileConfig, args: &Args) -> Result<ResolvedConfig, RunError> {
-    resolve_config_with_base(file, args, None)
+    resolve_config_with_base(file, args, None, None)
 }
 
 fn resolve_config_with_base(
     file: FileConfig,
     args: &Args,
     config_dir: Option<&Path>,
+    config_path: Option<PathBuf>,
 ) -> Result<ResolvedConfig, RunError> {
     let memory_mib = args.memory_mib.or(file.emulator.memory_mib).unwrap_or(32);
     ensure_nonzero("memory_mib", memory_mib)?;
@@ -203,11 +219,7 @@ fn resolve_config_with_base(
         .max_instructions
         .or(file.emulator.max_instructions)
         .unwrap_or(u64::MAX);
-    let cpu_count = args.cpus.or(file.emulator.cpus).unwrap_or(1);
-    ensure_nonzero("cpus", cpu_count)?;
-    let cpu_params = BxParams::default()
-        .with_topology(cpu_count, 1, 1)
-        .map_err(|_| RunError::ValueOverflow { field: "cpus" })?;
+    let cpu_params = resolve_cpu_topology(&file, args)?;
 
     let display = args
         .display
@@ -256,7 +268,146 @@ fn resolve_config_with_base(
         disk,
         cdrom,
         log_level,
+        config_path,
     })
+}
+
+/// Resolve the CPU topology from CLI flags or TOML. `--cpu-sockets/-cores/-threads`
+/// (or their `[emulator]` keys) take precedence when any is present; otherwise the
+/// legacy flat `cpus` count maps to `(cpus, 1, 1)`.
+fn resolve_cpu_topology(file: &FileConfig, args: &Args) -> Result<BxParams, RunError> {
+    let sockets = args.cpu_sockets.or(file.emulator.cpu_sockets);
+    let cores = args.cpu_cores.or(file.emulator.cpu_cores);
+    let threads = args.cpu_threads.or(file.emulator.cpu_threads);
+
+    let (n_processors, n_cores, n_threads) = if sockets.is_some()
+        || cores.is_some()
+        || threads.is_some()
+    {
+        (
+            sockets.unwrap_or(1),
+            cores.unwrap_or(1),
+            threads.unwrap_or(1),
+        )
+    } else {
+        let cpu_count = args.cpus.or(file.emulator.cpus).unwrap_or(1);
+        (cpu_count, 1, 1)
+    };
+
+    BxParams::default()
+        .with_topology(n_processors, n_cores, n_threads)
+        .map_err(|error| RunError::InvalidCpuTopology {
+            message: topology_error_message(error),
+        })
+}
+
+pub(crate) fn topology_error_message(error: BxParamError) -> String {
+    match error {
+        BxParamError::TopologyComponentOutOfRange {
+            component,
+            value,
+            min,
+            max,
+        } => format!("{component} = {value} is out of range ({min}..={max})"),
+        BxParamError::TooManyLogicalProcessors { count, max } => {
+            format!("{count} logical processors exceeds the SMP limit of {max}")
+        }
+    }
+}
+
+impl ResolvedConfig {
+    /// Reconstruct a serializable [`FileConfig`] snapshot of these settings so the
+    /// GUI can persist edits back to `rusty_box.toml`. Paths are emitted verbatim
+    /// (already resolved to absolute form during loading), so a subsequent load
+    /// resolves to an equal configuration.
+    pub fn to_file_config(&self) -> FileConfig {
+        let topology = self.cpu_params.cpu_topology();
+        let emulator = EmulatorToml {
+            memory_mib: Some(self.memory_mib),
+            host_memory_mib: Some(self.host_memory_mib),
+            memory_block_kib: Some(self.memory_block_kib),
+            cpus: None,
+            cpu_sockets: Some(topology.n_processors()),
+            cpu_cores: Some(topology.n_cores()),
+            cpu_threads: Some(topology.n_threads()),
+            ips: Some(self.ips),
+            pci: Some(self.pci),
+            sync_slowdown: Some(self.sync_slowdown),
+            max_instructions: (self.max_instructions != u64::MAX).then_some(self.max_instructions),
+        };
+        let display = DisplayToml {
+            backend: Some(self.display),
+        };
+        let rom = RomToml {
+            bios: Some(self.bios.clone()),
+            vga_bios: self.vga_bios.clone(),
+        };
+        let boot = BootToml {
+            order: self.boot_order.clone(),
+        };
+        let disk = self.disk.as_ref().map(|disk| match &disk.creation {
+            Some(creation) => DiskToml {
+                path: None,
+                channel: Some(disk.channel),
+                drive: Some(disk.drive),
+                chs: None,
+                create: Some(DiskCreateToml {
+                    path: Some(creation.path.clone()),
+                    size: Some(image_size_to_toml(creation.size)),
+                    overwrite: Some(creation.overwrite),
+                }),
+            },
+            None => DiskToml {
+                path: Some(disk.path.clone()),
+                channel: Some(disk.channel),
+                drive: Some(disk.drive),
+                chs: Some(disk.geometry),
+                create: None,
+            },
+        });
+        let cdrom = self.cdrom.as_ref().map(|cdrom| CdromToml {
+            path: Some(cdrom.path.clone()),
+            channel: Some(cdrom.channel),
+            drive: Some(cdrom.drive),
+        });
+        let logging = LoggingToml {
+            level: Some(self.log_level),
+        };
+        FileConfig {
+            emulator,
+            display,
+            rom,
+            boot,
+            disk,
+            cdrom,
+            logging,
+        }
+    }
+
+    /// Persist these settings to `path` as pretty TOML.
+    pub fn save_to_toml(&self, path: &Path) -> Result<(), RunError> {
+        let file = self.to_file_config();
+        let text = toml::to_string_pretty(&file)
+            .map_err(|source| RunError::ConfigSerialize { source })?;
+        fs::write(path, text).map_err(|source| RunError::ConfigWrite {
+            path: path.to_owned(),
+            source,
+        })
+    }
+}
+
+/// Render an [`ImageSize`](rusty_box_bximage::ImageSize) back into a TOML size
+/// string that `ImageSize::parse` reads to the identical value. Disk-creation
+/// sizes always come from `parse`/`gib`/`mib`, so they are whole MiB multiples.
+fn image_size_to_toml(size: rusty_box_bximage::ImageSize) -> String {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    let bytes = size.bytes();
+    if bytes % GIB == 0 {
+        format!("{}G", bytes / GIB)
+    } else {
+        format!("{}M", bytes / MIB)
+    }
 }
 
 pub fn load_toml_file(path: &Path) -> Result<FileConfig, RunError> {
@@ -1035,5 +1186,174 @@ bios = "bios.bin"
         let error = resolve_config(FileConfig::default(), &args(["rusty_box_gui"])).unwrap_err();
 
         assert!(matches!(error, RunError::MissingBios));
+    }
+
+    #[test]
+    fn resolves_cpu_topology_from_sockets_cores_threads() {
+        let file = config(
+            r#"
+[emulator]
+cpu_sockets = 2
+cpu_cores = 2
+cpu_threads = 2
+
+[rom]
+bios = "bios.bin"
+
+[disk]
+path = "disk.img"
+chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
+"#,
+        );
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        assert_eq!(resolved.cpu_params.cpu_count(), 8);
+        let topology = resolved.cpu_params.cpu_topology();
+        assert_eq!(topology.n_processors(), 2);
+        assert_eq!(topology.n_cores(), 2);
+        assert_eq!(topology.n_threads(), 2);
+    }
+
+    #[test]
+    fn legacy_cpus_maps_to_flat_topology() {
+        let file = config(
+            r#"
+[emulator]
+cpus = 4
+
+[rom]
+bios = "bios.bin"
+
+[disk]
+path = "disk.img"
+chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
+"#,
+        );
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        assert_eq!(resolved.cpu_params.cpu_count(), 4);
+        let topology = resolved.cpu_params.cpu_topology();
+        assert_eq!(topology.n_processors(), 4);
+        assert_eq!(topology.n_cores(), 1);
+        assert_eq!(topology.n_threads(), 1);
+    }
+
+    #[test]
+    fn topology_fields_take_precedence_over_legacy_cpus() {
+        let file = config(
+            r#"
+[emulator]
+cpus = 4
+cpu_cores = 2
+
+[rom]
+bios = "bios.bin"
+
+[disk]
+path = "disk.img"
+chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
+"#,
+        );
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        // Any topology field present ignores the flat count: (1 socket, 2 cores, 1 thread).
+        assert_eq!(resolved.cpu_params.cpu_count(), 2);
+    }
+
+    #[test]
+    fn rejects_out_of_range_topology() {
+        let file = config(
+            r#"
+[emulator]
+cpu_cores = 99
+
+[rom]
+bios = "bios.bin"
+
+[disk]
+path = "disk.img"
+chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
+"#,
+        );
+        let error = resolve_config(file, &args(["rusty_box_gui"])).unwrap_err();
+
+        assert!(matches!(error, RunError::InvalidCpuTopology { .. }));
+    }
+
+    #[test]
+    fn save_round_trip_reparses_equal() {
+        let file = config(
+            r#"
+[emulator]
+memory_mib = 512
+host_memory_mib = 512
+memory_block_kib = 128
+cpu_sockets = 2
+cpu_cores = 2
+cpu_threads = 1
+ips = 100000000
+pci = true
+sync_slowdown = false
+
+[display]
+backend = "headless"
+
+[rom]
+bios = "bios.bin"
+vga_bios = "vgabios.bin"
+
+[boot]
+order = ["cdrom", "disk"]
+
+[disk]
+path = "disk.img"
+chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
+channel = 0
+drive = 0
+
+[cdrom]
+path = "boot.iso"
+channel = 1
+drive = 0
+
+[logging]
+level = "info"
+"#,
+        );
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        let serialized = toml::to_string_pretty(&resolved.to_file_config()).unwrap();
+        let reparsed: FileConfig = toml::from_str(&serialized).unwrap();
+        let round_tripped = resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap();
+
+        assert_eq!(resolved, round_tripped);
+    }
+
+    #[test]
+    fn save_round_trip_preserves_created_disk() {
+        let file = config(
+            r#"
+[rom]
+bios = "bios.bin"
+
+[disk.create]
+path = "c.img"
+size = "12G"
+overwrite = false
+"#,
+        );
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        let serialized = toml::to_string_pretty(&resolved.to_file_config()).unwrap();
+        let reparsed: FileConfig = toml::from_str(&serialized).unwrap();
+        let round_tripped = resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap();
+
+        assert_eq!(resolved, round_tripped);
+        let creation = round_tripped
+            .disk
+            .as_ref()
+            .and_then(|disk| disk.creation.as_ref())
+            .expect("created disk should survive the round trip");
+        assert_eq!(creation.size, rusty_box_bximage::ImageSize::gib(12));
     }
 }

@@ -489,6 +489,7 @@ mod tests {
             disk: None::<ResolvedDisk>,
             cdrom: None::<ResolvedCdrom>,
             log_level: LogLevel::Warn,
+            config_path: None,
         })
         .unwrap_err();
 
@@ -548,6 +549,7 @@ mod tests {
             }),
             cdrom: None::<ResolvedCdrom>,
             log_level: LogLevel::Warn,
+            config_path: None,
         }
     }
 
@@ -661,6 +663,7 @@ mod tests {
                 disk: None::<ResolvedDisk>,
                 cdrom: None::<ResolvedCdrom>,
                 log_level: LogLevel::Warn,
+                config_path: None,
             }))
             .unwrap();
         drop(command_tx);
