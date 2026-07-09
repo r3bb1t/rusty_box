@@ -2863,16 +2863,25 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             // 1. Handle GUI events (keyboard input) - do this first to avoid borrow conflicts
 
             let mut scancodes_to_send = Vec::new();
+            let mut mouse_to_send = Vec::new();
             let mut serial_input = Vec::new();
             if let Some(ref mut gui) = self.gui {
                 gui.handle_events();
                 scancodes_to_send = gui.get_pending_scancodes();
+                mouse_to_send = gui.get_pending_mouse();
                 serial_input = gui.get_pending_serial_input();
             }
 
             // Send scancodes to keyboard device
             for scancode in scancodes_to_send {
                 self.device_manager.keyboard.send_scancode(scancode);
+            }
+
+            // Forward mouse motion/buttons/wheel to the PS/2 aux device
+            for mouse in mouse_to_send {
+                self.device_manager
+                    .keyboard
+                    .mouse_motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons);
             }
 
             // Send serial input to COM1 (ttyS0)
@@ -3705,14 +3714,21 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
 
         // Handle keyboard scancodes and serial input from GUI
         let mut scancodes_to_send = Vec::new();
+        let mut mouse_to_send = Vec::new();
         let mut serial_input = Vec::new();
         if let Some(ref mut gui) = self.gui {
             gui.handle_events();
             scancodes_to_send = gui.get_pending_scancodes();
+            mouse_to_send = gui.get_pending_mouse();
             serial_input = gui.get_pending_serial_input();
         }
         for scancode in scancodes_to_send {
             self.device_manager.keyboard.send_scancode(scancode);
+        }
+        for mouse in mouse_to_send {
+            self.device_manager
+                .keyboard
+                .mouse_motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons);
         }
         for byte in serial_input {
             self.device_manager.serial.receive_byte(0, byte);
@@ -3870,6 +3886,17 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// (e.g. the WASM app processes egui events directly).
     pub fn send_scancode(&mut self, scancode: u8) {
         self.device_manager.keyboard.send_scancode(scancode);
+    }
+
+    /// Send a relative PS/2 mouse update to the aux (mouse) device.
+    ///
+    /// Deltas are in mouse counts; `buttons` is a bitmask (bit 0 = left,
+    /// bit 1 = right, bit 2 = middle). Mirrors [`send_scancode`] for the WASM
+    /// path and the native input pump. Bochs keyboard.cc mouse_motion.
+    pub fn send_mouse_event(&mut self, dx: i32, dy: i32, dz: i32, buttons: u8) {
+        self.device_manager
+            .keyboard
+            .mouse_motion(dx, dy, dz, buttons);
     }
 
     #[cfg(feature = "alloc")]

@@ -925,6 +925,25 @@ impl NativeShellApp {
                             ui.close();
                         }
                     });
+                    ui.menu_button("Input", |ui| {
+                        if ui
+                            .add_enabled(running, egui::Button::new("Send Ctrl+Alt+Del"))
+                            .clicked()
+                        {
+                            self.emulator.send_ctrl_alt_del();
+                            ui.close();
+                        }
+                        let captured = self.emulator.mouse_captured();
+                        let label = if captured {
+                            "Release Mouse"
+                        } else {
+                            "Capture Mouse"
+                        };
+                        if ui.add_enabled(running, egui::Button::new(label)).clicked() {
+                            self.emulator.toggle_mouse_capture();
+                            ui.close();
+                        }
+                    });
                     ui.menu_button("Help", |ui| {
                         if ui.button("About Rusty Box Workstation").clicked() {
                             self.chrome.show_about = true;
@@ -2363,6 +2382,8 @@ pub struct WebShellApp {
     last_ips_instructions: u64,
     cached_ips: f64,
     frame_count: u64,
+    /// Previous PS/2 button bitmask for relative mouse forwarding.
+    web_prev_mouse_buttons: u8,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2625,6 +2646,7 @@ impl WebShellApp {
             last_ips_instructions: 0,
             cached_ips: 0.0,
             frame_count: 0,
+            web_prev_mouse_buttons: 0,
         }
     }
 
@@ -2945,6 +2967,25 @@ impl WebShellApp {
                     _ => {}
                 }
             }
+        });
+    }
+
+    /// Forward relative mouse motion / buttons / wheel to the guest while the
+    /// pointer is over the display. Uses the shared egui→`HostInputSink`
+    /// translator with the `Emulator` acting as the sink (single-threaded wasm
+    /// applies events immediately).
+    fn process_mouse(&mut self, ctx: &egui::Context, image_rect: egui::Rect) {
+        let hovering = ctx
+            .input(|input| input.pointer.hover_pos().is_some_and(|p| image_rect.contains(p)));
+        if !hovering {
+            return;
+        }
+        let Some(emu) = &mut self.emulator else {
+            return;
+        };
+        let prev = self.web_prev_mouse_buttons;
+        self.web_prev_mouse_buttons = ctx.input(|input| {
+            rusty_box::gui::host_input::translate_egui_mouse(input, prev, &mut **emu)
         });
     }
 
@@ -3291,9 +3332,14 @@ impl WebShellApp {
                     let iscale = fit.floor().max(1.0);
                     egui::vec2(tex_w * iscale / ppp, tex_h * iscale / ppp)
                 };
+                let mut image_rect = None;
                 ui.centered_and_justified(|ui| {
-                    ui.image(egui::load::SizedTexture::new(texture.id(), size));
+                    let response = ui.image(egui::load::SizedTexture::new(texture.id(), size));
+                    image_rect = Some(response.rect);
                 });
+                if let Some(rect) = image_rect {
+                    self.process_mouse(ui.ctx(), rect);
+                }
             }
             WebConsoleSurface::Launcher => {
                 ui.centered_and_justified(|ui| {

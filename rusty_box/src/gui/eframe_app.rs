@@ -35,6 +35,13 @@ pub struct RustyBoxApp {
     /// modes such as 720x400 / 320x200 have non-square pixels a CRT shows as 4:3);
     /// when false (default), draw crisp integer-square pixels.
     pixel_aspect_correct: bool,
+    /// Previous PS/2 button bitmask, so a release with no motion is still reported.
+    prev_mouse_buttons: u8,
+    /// Previous modifier-key state, to synthesize make/break scancodes for
+    /// Shift/Ctrl/Alt (egui reports these via `Modifiers`, not `Key` events).
+    prev_ctrl: bool,
+    prev_alt: bool,
+    prev_shift: bool,
 }
 
 impl RustyBoxApp {
@@ -57,6 +64,10 @@ impl RustyBoxApp {
             serial_input: String::new(),
             fit_to_available: false,
             pixel_aspect_correct: false,
+            prev_mouse_buttons: 0,
+            prev_ctrl: false,
+            prev_alt: false,
+            prev_shift: false,
         }
     }
 
@@ -154,11 +165,92 @@ impl RustyBoxApp {
             });
         });
 
+        // Synthesize make/break scancodes for Ctrl and Alt from egui's modifier
+        // state (egui reports these via `Modifiers`, not `Key` events), so guest
+        // chords like Ctrl+C and Alt+F reach the VM. Shift is intentionally NOT
+        // forwarded here: printable characters already carry their own shift in
+        // `char_to_scancode_sequence`, and adding it again would double-shift.
+        let mods = ctx.input(|i| i.modifiers);
+        push_modifier_scancode(&mut scancodes, self.prev_ctrl, mods.ctrl, 0x14);
+        push_modifier_scancode(&mut scancodes, self.prev_alt, mods.alt, 0x11);
+        self.prev_ctrl = mods.ctrl;
+        self.prev_alt = mods.alt;
+        self.prev_shift = mods.shift;
+
         if !scancodes.is_empty() {
             if let Ok(mut display) = self.shared.lock() {
                 display.pending_scancodes.extend_from_slice(&scancodes);
             }
         }
+    }
+
+    /// Queue the PS/2 Set-2 sequence for Ctrl+Alt+Del. Needed because the host OS
+    /// usually intercepts the real chord before egui sees it.
+    pub fn send_ctrl_alt_del(&mut self) {
+        const CTRL_ALT_DEL: [u8; 11] = [
+            0x14, // Ctrl make
+            0x11, // Alt make
+            0xE0, 0x71, // Del make (extended)
+            0xE0, 0xF0, 0x71, // Del break (extended)
+            0xF0, 0x11, // Alt break
+            0xF0, 0x14, // Ctrl break
+        ];
+        if let Ok(mut display) = self.shared.lock() {
+            display
+                .pending_scancodes
+                .extend_from_slice(&CTRL_ALT_DEL);
+        }
+    }
+
+    /// Toggle whether the display captures mouse/keyboard input for the guest.
+    pub fn toggle_mouse_capture(&mut self) {
+        if let Ok(mut display) = self.shared.lock() {
+            display.mouse_captured = !display.mouse_captured;
+        }
+    }
+
+    /// Whether the guest currently captures the mouse.
+    pub fn mouse_captured(&self) -> bool {
+        self.shared
+            .lock()
+            .map(|display| display.mouse_captured)
+            .unwrap_or(false)
+    }
+
+    /// Route pointer activity over the display rectangle to the guest.
+    ///
+    /// While the guest is not captured, a click on the display grabs it. While
+    /// captured, relative motion / buttons / wheel are forwarded to the PS/2 aux
+    /// device (via the shared queue) and the host cursor is hidden; the user
+    /// releases capture from the toolbar toggle.
+    fn handle_display_pointer(&mut self, ui: &egui::Ui, image_rect: egui::Rect) {
+        if !self.shared_emu_running() {
+            return;
+        }
+        if !ui.rect_contains_pointer(image_rect) {
+            return;
+        }
+
+        if !self.mouse_captured() {
+            // Click-to-capture: consume the click that grabs the guest.
+            let clicked = ui
+                .ctx()
+                .input(|input| input.pointer.button_clicked(egui::PointerButton::Primary));
+            if clicked {
+                self.toggle_mouse_capture();
+            }
+            return;
+        }
+
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        let prev = self.prev_mouse_buttons;
+        let new_buttons = if let Ok(mut display) = self.shared.lock() {
+            ui.ctx()
+                .input(|input| super::host_input::translate_egui_mouse(input, prev, &mut *display))
+        } else {
+            prev
+        };
+        self.prev_mouse_buttons = new_buttons;
     }
 
     /// Update the egui texture from the shared framebuffer.
@@ -290,7 +382,12 @@ impl RustyBoxApp {
             ctx.set_visuals(visuals);
         }
 
-        if self.shared_emu_running() && !ctx.egui_wants_keyboard_input() {
+        // Forward the keyboard while the VM runs. When the mouse is captured we
+        // bypass egui's focus gate so chords (Ctrl+C, Alt+Tab in the guest) reach
+        // the VM even if a host widget holds focus.
+        if self.shared_emu_running()
+            && (self.mouse_captured() || !ctx.egui_wants_keyboard_input())
+        {
             self.process_input(&ctx);
         }
         self.update_texture(&ctx, apply_theme);
@@ -446,6 +543,7 @@ impl RustyBoxApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(0x0D, 0x0D, 0x1A)))
             .show_inside(ui, |ui| {
+                let mut image_rect = None;
                 if let Some(tex) = &self.texture {
                     let available = ui.available_size();
                     let tex_w = self.last_width.max(1) as f32;
@@ -489,10 +587,11 @@ impl RustyBoxApp {
                     ui.add_space(offset_y);
                     ui.horizontal(|ui| {
                         ui.add_space(offset_x);
-                        ui.image(egui::load::SizedTexture::new(
+                        let response = ui.image(egui::load::SizedTexture::new(
                             tex.id(),
                             egui::vec2(draw_w, draw_h),
                         ));
+                        image_rect = Some(response.rect);
                     });
                 } else {
                     ui.centered_and_justified(|ui| {
@@ -502,6 +601,9 @@ impl RustyBoxApp {
                                 .size(14.0),
                         );
                     });
+                }
+                if let Some(rect) = image_rect {
+                    self.handle_display_pointer(ui, rect);
                 }
             });
 
@@ -576,6 +678,18 @@ fn egui_key_to_scancodes(key: egui::Key, pressed: bool) -> Vec<u8> {
         seq.push(make_code);
     }
     seq
+}
+
+/// Append a PS/2 Set-2 make (key down) or break (key up) code for a modifier key
+/// when its state changed this frame. `make` is the Set-2 make byte
+/// (e.g. `0x14` = left Ctrl, `0x11` = left Alt, `0x12` = left Shift).
+fn push_modifier_scancode(scancodes: &mut Vec<u8>, was_down: bool, now_down: bool, make: u8) {
+    if now_down && !was_down {
+        scancodes.push(make);
+    } else if !now_down && was_down {
+        scancodes.push(0xF0);
+        scancodes.push(make);
+    }
 }
 
 /// Fallback: convert an egui Key to a lowercase ASCII character.

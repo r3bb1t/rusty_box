@@ -26,6 +26,11 @@ pub struct SharedDisplay {
     pub fb_dirty: bool,
     /// Keyboard scancodes from GUI to emulator (PS/2 set 2)
     pub pending_scancodes: Vec<u8>,
+    /// Relative PS/2 mouse events from GUI to emulator, drained by the pump.
+    pub pending_mouse: Vec<super::host_input::HostMouseEvent>,
+    /// Whether the GUI currently captures the mouse for the guest (forwarding
+    /// motion/buttons and routing chords past egui). Toggled by the frontend.
+    pub mouse_captured: bool,
     /// Text mode columns (e.g. 80)
     pub screen_cols: u32,
     /// Text mode rows (e.g. 25)
@@ -69,6 +74,8 @@ impl SharedDisplay {
             fb_height: h,
             fb_dirty: false,
             pending_scancodes: Vec::new(),
+            pending_mouse: Vec::new(),
+            mouse_captured: false,
             screen_cols: cols,
             screen_rows: rows,
             font_width: fw,
