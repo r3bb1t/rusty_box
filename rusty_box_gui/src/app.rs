@@ -2387,10 +2387,10 @@ fn web_uploaded_media_config(
     }
 }
 #[cfg(target_arch = "wasm32")]
-const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bios/BIOS-bochs-latest");
+const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
 #[cfg(target_arch = "wasm32")]
 const VGA_BIOS_DATA: &[u8] =
-    include_bytes!("../../cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin");
+    include_bytes!("../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin");
 
 #[cfg(target_arch = "wasm32")]
 impl WebShellApp {
@@ -2783,11 +2783,16 @@ impl WebShellApp {
         };
         self.display.fb_dirty = false;
 
+        // Crisp integer upscale (NEAREST magnify), smooth downscale (LINEAR minify).
+        let options = egui::TextureOptions {
+            magnification: egui::TextureFilter::Nearest,
+            minification: egui::TextureFilter::Linear,
+            ..Default::default()
+        };
         match &mut self.texture {
-            Some(texture) => texture.set(image, egui::TextureOptions::NEAREST),
+            Some(texture) => texture.set(image, options),
             None => {
-                self.texture =
-                    Some(ctx.load_texture("vga_display", image, egui::TextureOptions::NEAREST));
+                self.texture = Some(ctx.load_texture("vga_display", image, options));
             }
         }
     }
@@ -3072,12 +3077,20 @@ impl WebShellApp {
                     .as_ref()
                     .expect("display surface requires a texture");
                 let available = ui.available_size();
-                let tex_w = self.display.fb_width as f32;
+                let tex_w = (self.display.fb_width.max(1)) as f32;
                 let tex_h = self.display.fb_height.max(1) as f32;
-                let max_scale_x = (available.x / tex_w).floor().max(1.0);
-                let max_scale_y = (available.y / tex_h).floor().max(1.0);
-                let scale = max_scale_x.min(max_scale_y);
-                let size = egui::vec2(tex_w * scale, tex_h * scale);
+                // Scale in PHYSICAL pixels (see eframe_app.rs): a point-space integer
+                // scale becomes a fractional physical scale on HiDPI -> uneven NEAREST
+                // pixels. Snap upscales to an integer physical multiple; fractional-fit
+                // a guest larger than the panel (LINEAR minify handles it).
+                let ppp = ui.ctx().pixels_per_point().max(f32::EPSILON);
+                let fit = ((available.x * ppp) / tex_w).min((available.y * ppp) / tex_h);
+                let size = if fit < 1.0 {
+                    egui::vec2(tex_w * fit / ppp, tex_h * fit / ppp)
+                } else {
+                    let iscale = fit.floor().max(1.0);
+                    egui::vec2(tex_w * iscale / ppp, tex_h * iscale / ppp)
+                };
                 ui.centered_and_justified(|ui| {
                     ui.image(egui::load::SizedTexture::new(texture.id(), size));
                 });

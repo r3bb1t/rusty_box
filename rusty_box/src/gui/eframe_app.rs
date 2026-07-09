@@ -31,6 +31,10 @@ pub struct RustyBoxApp {
     serial_log_len: usize,
     serial_input: String,
     fit_to_available: bool,
+    /// When true, stretch the framebuffer to a 4:3 display aspect (VGA text/low-res
+    /// modes such as 720x400 / 320x200 have non-square pixels a CRT shows as 4:3);
+    /// when false (default), draw crisp integer-square pixels.
+    pixel_aspect_correct: bool,
 }
 
 impl RustyBoxApp {
@@ -52,12 +56,18 @@ impl RustyBoxApp {
             serial_log_len: 0,
             serial_input: String::new(),
             fit_to_available: false,
+            pixel_aspect_correct: false,
         }
     }
 
     /// Use fractional scaling to fill constrained embedded surfaces.
     pub fn set_fit_to_available(&mut self, fit_to_available: bool) {
         self.fit_to_available = fit_to_available;
+    }
+
+    /// Enable 4:3 pixel-aspect correction for non-square VGA modes.
+    pub fn set_pixel_aspect_correct(&mut self, pixel_aspect_correct: bool) {
+        self.pixel_aspect_correct = pixel_aspect_correct;
     }
 
     fn should_request_repaint(&self) -> bool {
@@ -207,7 +217,18 @@ impl RustyBoxApp {
             egui::ColorImage::new([w, h], padded)
         };
 
-        let options = egui::TextureOptions::NEAREST; // Pixel-perfect rendering
+        // Crisp integer upscale (NEAREST magnify) with smooth downscale (LINEAR
+        // minify) for the default path; fully LINEAR when we deliberately do a
+        // fractional stretch (aspect correction or an embedded fit-to-fill).
+        let options = if self.pixel_aspect_correct || self.fit_to_available {
+            egui::TextureOptions::LINEAR
+        } else {
+            egui::TextureOptions {
+                magnification: egui::TextureFilter::Nearest,
+                minification: egui::TextureFilter::Linear,
+                ..Default::default()
+            }
+        };
 
         match &mut self.texture {
             Some(tex) if self.last_width == w as u32 && self.last_height == h as u32 => {
@@ -427,26 +448,51 @@ impl RustyBoxApp {
             .show_inside(ui, |ui| {
                 if let Some(tex) = &self.texture {
                     let available = ui.available_size();
-                    let tex_w = self.last_width as f32;
+                    let tex_w = self.last_width.max(1) as f32;
                     let tex_h = self.last_height.max(1) as f32;
+                    // Scale in PHYSICAL pixels. egui draws in points and multiplies by
+                    // pixels_per_point, so a point-space integer scale becomes a
+                    // FRACTIONAL physical scale on HiDPI (1.25/1.5x) -> uneven NEAREST
+                    // pixels. Compute the fit in physical px and snap upscales to an
+                    // integer physical multiple, then convert the draw size back to points.
+                    let ppp = ui.ctx().pixels_per_point().max(f32::EPSILON);
+                    let avail_px_x = (available.x * ppp).max(1.0);
+                    let avail_px_y = (available.y * ppp).max(1.0);
 
-                    let scale = if self.fit_to_available {
-                        (available.x / tex_w).min(available.y / tex_h).max(1.0)
+                    let (draw_w, draw_h) = if self.pixel_aspect_correct {
+                        // Present a 4:3 rectangle (VGA pixel aspect), fit to the panel.
+                        let mut w = available.x;
+                        let mut h = available.x * 3.0 / 4.0;
+                        if h > available.y {
+                            h = available.y;
+                            w = available.y * 4.0 / 3.0;
+                        }
+                        (w, h)
                     } else {
-                        // Integer scaling for crisp desktop pixels.
-                        let max_scale_x = (available.x / tex_w).floor().max(1.0);
-                        let max_scale_y = (available.y / tex_h).floor().max(1.0);
-                        max_scale_x.min(max_scale_y)
+                        let fit = (avail_px_x / tex_w).min(avail_px_y / tex_h);
+                        if self.fit_to_available || fit < 1.0 {
+                            // Embedded fill, or guest larger than the panel: fractional
+                            // fit (LINEAR handles the non-integer scale smoothly).
+                            let s = fit.max(f32::EPSILON);
+                            (tex_w * s / ppp, tex_h * s / ppp)
+                        } else {
+                            // Crisp integer upscale: snap to an integer PHYSICAL-pixel
+                            // multiple so NEAREST magnification is even.
+                            let iscale = fit.floor().max(1.0);
+                            (tex_w * iscale / ppp, tex_h * iscale / ppp)
+                        }
                     };
-                    let (w, h) = (tex_w * scale, tex_h * scale);
 
-                    // Center the image
-                    let offset_x = (available.x - w) / 2.0;
-                    let offset_y = (available.y - h) / 2.0;
+                    // Center the image.
+                    let offset_x = ((available.x - draw_w) / 2.0).max(0.0);
+                    let offset_y = ((available.y - draw_h) / 2.0).max(0.0);
                     ui.add_space(offset_y);
                     ui.horizontal(|ui| {
                         ui.add_space(offset_x);
-                        ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(w, h)));
+                        ui.image(egui::load::SizedTexture::new(
+                            tex.id(),
+                            egui::vec2(draw_w, draw_h),
+                        ));
                     });
                 } else {
                     ui.centered_and_justified(|ui| {
