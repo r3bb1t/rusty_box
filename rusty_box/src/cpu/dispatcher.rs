@@ -2773,6 +2773,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::PsignwVdqWdq => self.psignw_vdq_wdq(instr),
             Opcode::PsigndVdqWdq => self.psignd_vdq_wdq(instr),
             Opcode::PalignrVdqWdqIb => self.palignr_vdq_wdq_ib(instr),
+            Opcode::PabsbVdqWdq => self.pabsb_vdq_wdq(instr),
+            Opcode::PabswVdqWdq => self.pabsw_vdq_wdq(instr),
+            Opcode::PabsdVdqWdq => self.pabsd_vdq_wdq(instr),
+
+            // SSE3 LDDQU — unaligned 128-bit load, same semantics as MOVDQU
+            // (Bochs ia_opcodes.def BX_IA_LDDQU_VdqMdq → MOVUPS_VpsWpsM)
+            Opcode::LddquVdqMdq => self.movdqu_load_sse(instr),
 
             // =========================================================================
             // SSE4.1 128-bit Packed Integer (sse.rs)
@@ -2784,6 +2791,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::PmaxudVdqWdq => self.pmaxud_vdq_wdq(instr),
             Opcode::PmulldVdqWdq => self.pmulld_vdq_wdq(instr),
             Opcode::PblendwVdqWdqIb => self.pblendw_vdq_wdq_ib(instr),
+            Opcode::MpsadbwVdqWdqIb => self.mpsadbw_vdq_wdq_ib(instr),
+            Opcode::PhminposuwVdqWdq => self.phminposuw_vdq_wdq(instr),
+            Opcode::InsertpsVpsWssIb => self.insertps_vps_wss_ib(instr),
 
             // SSE4.1 FP blends (sse.rs)
             Opcode::BlendpsVpsWpsIb => self.blendps_vps_wps_ib(instr),
@@ -4279,8 +4289,49 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // VEX-encoded byte mask
             Opcode::V128VpmovmskbGdUdq | Opcode::V256VpmovmskbGdUdq => self.vpmovmskb(instr),
 
-            // VEX-encoded zero/sign extend
+            // VEX-encoded FP sign masks (Bochs avx.cc VMOVMSKPS_GdUps/VMOVMSKPD_GdUpd)
+            Opcode::VmovmskpsGdUps => self.vmovmskps(instr),
+            Opcode::VmovmskpdGdUpd => self.vmovmskpd(instr),
+
+            // VEX-encoded logical compare (Bochs avx.cc VPTEST_VdqWdqR)
+            Opcode::VptestVdqWdq => self.vptest(instr),
+
+            // VEX-encoded zero/sign extend (Bochs avx2.cc VPMOVSX*/VPMOVZX*)
+            Opcode::V128VpmovsxbwVdqWq | Opcode::V256VpmovsxbwVdqWdq => self.vpmovsxbw(instr),
+            Opcode::V128VpmovsxbdVdqWd | Opcode::V256VpmovsxbdVdqWq => self.vpmovsxbd(instr),
+            Opcode::V128VpmovsxbqVdqWw | Opcode::V256VpmovsxbqVdqWd => self.vpmovsxbq(instr),
+            Opcode::V128VpmovsxwdVdqWq | Opcode::V256VpmovsxwdVdqWdq => self.vpmovsxwd(instr),
+            Opcode::V128VpmovsxwqVdqWd | Opcode::V256VpmovsxwqVdqWq => self.vpmovsxwq(instr),
+            Opcode::V128VpmovsxdqVdqWq | Opcode::V256VpmovsxdqVdqWdq => self.vpmovsxdq(instr),
+            Opcode::V128VpmovzxbwVdqWq | Opcode::V256VpmovzxbwVdqWdq => self.vpmovzxbw(instr),
             Opcode::V128VpmovzxbdVdqWd | Opcode::V256VpmovzxbdVdqWq => self.vpmovzxbd(instr),
+            Opcode::V128VpmovzxbqVdqWw | Opcode::V256VpmovzxbqVdqWd => self.vpmovzxbq(instr),
+            Opcode::V128VpmovzxwdVdqWq | Opcode::V256VpmovzxwdVdqWdq => self.vpmovzxwd(instr),
+            Opcode::V128VpmovzxwqVdqWd | Opcode::V256VpmovzxwqVdqWq => self.vpmovzxwq(instr),
+            Opcode::V128VpmovzxdqVdqWq | Opcode::V256VpmovzxdqVdqWdq => self.vpmovzxdq(instr),
+
+            // VEX-encoded packed absolute value (Bochs HANDLE_AVX_1OP<xmm_pabs*>)
+            Opcode::V128VpabsbVdqWdq | Opcode::V256VpabsbVdqWdq => self.vpabsb(instr),
+            Opcode::V128VpabswVdqWdq | Opcode::V256VpabswVdqWdq => self.vpabsw(instr),
+            Opcode::V128VpabsdVdqWdq | Opcode::V256VpabsdVdqWdq => self.vpabsd(instr),
+
+            // VLDDQU — identical to the VL-aware unaligned load (Bochs
+            // ia_opcodes.def BX_IA_VLDDQU_VdqMdq → VMOVUPS_VpsWpsM)
+            Opcode::VlddquVdqMdq => self.vmovdqu_load(instr),
+
+            // VEX-encoded SSE4.1 forms (vvvv-sourced or upper-zeroing)
+            Opcode::V128VinsertpsVpsWssIb => self.vinsertps(instr),
+            Opcode::V128VmpsadbwVdqHdqWdqIb | Opcode::V256VmpsadbwVdqHdqWdqIb => {
+                self.vmpsadbw(instr)
+            }
+            Opcode::V128VphminposuwVdqWdq => self.vphminposuw(instr),
+            Opcode::V128VpblendvbVdqHdqWdqIb | Opcode::V256VpblendvbVdqHdqWdqIb => {
+                self.vpblendvb(instr)
+            }
+
+            // VMOVQ (VEX.128 F3 0F 7E load / 66 0F D6 store; upper-zeroing)
+            Opcode::VmovqVqWq => self.vmovq_vq_wq(instr),
+            Opcode::VmovqWqVq => self.vmovq_wq_vq(instr),
 
             // =========================================================================
             // AVX-512 Opmask (k-register) instructions (avx512_mask.rs)

@@ -119,6 +119,98 @@ pub(super) fn blendvpd_lane(
     }
 }
 
+/// Bochs simd_int.h xmm_pblendvb: copy op2 byte lanes whose mask-register
+/// byte has the sign bit set
+#[inline]
+pub(super) fn pblendvb_lane(
+    op1: &mut BxPackedXmmRegister,
+    op2: &BxPackedXmmRegister,
+    mask: &BxPackedXmmRegister,
+) {
+    for n in 0..16usize {
+        if mask.xmm_sbyte(n) < 0 {
+            op1.set_xmmubyte(n, op2.xmmubyte(n));
+        }
+    }
+}
+
+/// Bochs simd_int.h xmm_pabsb: per-byte absolute value (|-128| stays 0x80)
+#[inline]
+pub(super) fn pabsb_lane(op: &mut BxPackedXmmRegister) {
+    for n in 0..16usize {
+        op.set_xmm_sbyte(n, op.xmm_sbyte(n).wrapping_abs());
+    }
+}
+
+/// Bochs simd_int.h xmm_pabsw: per-word absolute value (|-32768| stays 0x8000)
+#[inline]
+pub(super) fn pabsw_lane(op: &mut BxPackedXmmRegister) {
+    for n in 0..8usize {
+        op.set_xmm16s(n, op.xmm16s(n).wrapping_abs());
+    }
+}
+
+/// Bochs simd_int.h xmm_pabsd: per-dword absolute value
+#[inline]
+pub(super) fn pabsd_lane(op: &mut BxPackedXmmRegister) {
+    for n in 0..4usize {
+        op.set_xmm32s(n, op.xmm32s(n).wrapping_abs());
+    }
+}
+
+/// Bochs simd_int.h xmm_mpsadbw (via sad_quadruple): eight overlapping
+/// 4-byte sums of absolute differences. `control` bits [1:0] select the
+/// op2 quadruple, bit [2] the op1 window base.
+#[inline]
+pub(super) fn mpsadbw_lane(
+    op1: &BxPackedXmmRegister,
+    op2: &BxPackedXmmRegister,
+    control: u8,
+) -> BxPackedXmmRegister {
+    let src_offset = ((control & 0x3) as usize) * 4;
+    let dst_offset = (((control >> 2) & 0x1) as usize) * 4;
+    let mut r = BxPackedXmmRegister::default();
+    for j in 0..8usize {
+        let mut sad = 0u16;
+        for n in 0..4usize {
+            let a = op1.xmmubyte(dst_offset + j + n) as i16;
+            let b = op2.xmmubyte(src_offset + n) as i16;
+            sad = sad.wrapping_add((a - b).unsigned_abs());
+        }
+        r.set_xmm16u(j, sad);
+    }
+    r
+}
+
+/// Bochs sse.cc PHMINPOSUW_VdqWdqR core: find the minimum unsigned word;
+/// result word 0 = minimum value, word 1 = its index, rest zero.
+#[inline]
+pub(super) fn phminposuw_core(op: &BxPackedXmmRegister) -> BxPackedXmmRegister {
+    let mut min_index = 0usize;
+    for j in 1..8usize {
+        if op.xmm16u(j) < op.xmm16u(min_index) {
+            min_index = j;
+        }
+    }
+    let mut r = BxPackedXmmRegister::default();
+    r.set_xmm16u(0, op.xmm16u(min_index));
+    r.set_xmm16u(1, min_index as u16);
+    r
+}
+
+/// Bochs sse.cc INSERTPS core (insert + simd_int.h xmm_zero_blendps):
+/// write `op2` into the dword selected by imm[5:4], then zero every dword
+/// whose imm[3:0] bit is set.
+#[inline]
+pub(super) fn insertps_core(op1: &mut BxPackedXmmRegister, op2: u32, control: u8) {
+    op1.set_xmm32u(((control >> 4) & 3) as usize, op2);
+    for n in 0..4usize {
+        if control & (1 << n) != 0 {
+            op1.set_xmm32u(n, 0);
+        }
+    }
+}
+
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // SSE helper: read op2 (register or memory)
@@ -1784,11 +1876,78 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mask = self.read_xmm_reg(0); // XMM0 is implicit mask
 
-        for n in 0..16usize {
-            if mask.xmm_sbyte(n) < 0 {
-                op1.set_xmmubyte(n, op2.xmmubyte(n));
-            }
-        }
+        pblendvb_lane(&mut op1, &op2, &mask);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PABSB VdqWdq (66 0F 38 1C) — Packed Absolute Value Bytes
+    /// Bochs: HANDLE_SSE_1OP<xmm_pabsb> (simd_int.h)
+    pub(super) fn pabsb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op = self.sse_read_op2_xmm(instr)?;
+        pabsb_lane(&mut op);
+        self.write_xmm_reg_lo128(instr.dst(), op);
+        Ok(())
+    }
+
+    /// PABSW VdqWdq (66 0F 38 1D) — Packed Absolute Value Words
+    /// Bochs: HANDLE_SSE_1OP<xmm_pabsw> (simd_int.h)
+    pub(super) fn pabsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op = self.sse_read_op2_xmm(instr)?;
+        pabsw_lane(&mut op);
+        self.write_xmm_reg_lo128(instr.dst(), op);
+        Ok(())
+    }
+
+    /// PABSD VdqWdq (66 0F 38 1E) — Packed Absolute Value Dwords
+    /// Bochs: HANDLE_SSE_1OP<xmm_pabsd> (simd_int.h)
+    pub(super) fn pabsd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op = self.sse_read_op2_xmm(instr)?;
+        pabsd_lane(&mut op);
+        self.write_xmm_reg_lo128(instr.dst(), op);
+        Ok(())
+    }
+
+    /// MPSADBW VdqWdqIb (66 0F 3A 42) — Multiple Sums of Absolute Differences
+    /// Bochs: MPSADBW_VdqWdqIbR via simd_int.h xmm_mpsadbw
+    pub(super) fn mpsadbw_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+        let result = mpsadbw_lane(&op1, &op2, instr.ib());
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    /// PHMINPOSUW VdqWdq (66 0F 38 41) — Horizontal Minimum of Unsigned Words
+    /// Bochs: PHMINPOSUW_VdqWdqR (sse.cc)
+    pub(super) fn phminposuw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_read_op2_xmm(instr)?;
+        let result = phminposuw_core(&op);
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    /// INSERTPS VpsWssIb (66 0F 3A 21) — Insert Packed Single Precision
+    /// Bochs: INSERTPS_VpsWssIbR / INSERTPS_VpsWssIbM (sse.cc)
+    pub(super) fn insertps_vps_wss_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let control = instr.ib();
+        let op2 = if instr.mod_c0() {
+            // Register form: imm[7:6] selects the source dword
+            self.read_xmm_reg(instr.src1())
+                .xmm32u(((control >> 6) & 3) as usize)
+        } else {
+            let eaddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            self.v_read_dword(seg, eaddr)?
+        };
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        insertps_core(&mut op1, op2, control);
         self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }

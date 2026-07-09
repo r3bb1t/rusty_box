@@ -1277,3 +1277,609 @@ fn run_hadd_blend_dpp_cases() {
         assert_eq!(f32_lane(&got, i), want[i].to_bits(), "vblendps lane {i}");
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// VEX forms that must be VL-aware or 3-operand (previously fell through to
+// the 128-bit legacy handlers): VPTEST, VMOVMSKPS, VPMOVSX/ZX, VPABSB,
+// VINSERTPS, VMPSADBW, VPHMINPOSUW, VPBLENDVB, VMOVQ, VLDDQU, VAESENC.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn vex_vl_aware_and_three_operand_integer_ops() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(run_vex_integer_cases)
+        .expect("spawn test thread")
+        .join()
+        .expect("join test thread");
+}
+
+fn run_vex_integer_cases() {
+    let cfg = EmulatorConfig::default();
+    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+        .expect("new emulator in flat long mode");
+    emu.reg_write(
+        X86Reg::Cr4,
+        emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+    );
+
+    let programs: &[(&str, &[u8])] = &[
+        // vptest ymm0, ymm1; pushfq; pop rax
+        (
+            "vptest ymm0,ymm1 + flags",
+            &[0xC4, 0xE2, 0x7D, 0x17, 0xC1, 0x9C, 0x58],
+        ),
+        ("vmovmskps eax,ymm1", &[0xC5, 0xFC, 0x50, 0xC1]),
+        ("vpmovsxbw ymm0,xmm1", &[0xC4, 0xE2, 0x7D, 0x20, 0xC1]),
+        ("vpmovzxbd ymm0,xmm1", &[0xC4, 0xE2, 0x7D, 0x31, 0xC1]),
+        ("vpabsb ymm0,ymm1", &[0xC4, 0xE2, 0x7D, 0x1C, 0xC1]),
+        (
+            "vinsertps xmm0,xmm1,xmm2,0x61",
+            &[0xC4, 0xE3, 0x71, 0x21, 0xC2, 0x61],
+        ),
+        ("vaesenc xmm0,xmm1,xmm2", &[0xC4, 0xE2, 0x71, 0xDC, 0xC2]),
+        (
+            "vpblendvb xmm0,xmm1,xmm2,xmm3",
+            &[0xC4, 0xE3, 0x71, 0x4C, 0xC2, 0x30],
+        ),
+        (
+            "vpblendvb ymm0,ymm1,ymm2,ymm3",
+            &[0xC4, 0xE3, 0x75, 0x4C, 0xC2, 0x30],
+        ),
+        ("vphminposuw xmm0,xmm1", &[0xC4, 0xE2, 0x79, 0x41, 0xC1]),
+        ("phminposuw xmm0,xmm1", &[0x66, 0x0F, 0x38, 0x41, 0xC1]),
+        (
+            "vmpsadbw ymm0,ymm1,ymm2,0x05",
+            &[0xC4, 0xE3, 0x75, 0x42, 0xC2, 0x05],
+        ),
+        ("vmovq xmm0,xmm1", &[0xC5, 0xFA, 0x7E, 0xC1]),
+        ("vlddqu ymm0,[rax]", &[0xC5, 0xFF, 0xF0, 0x00]),
+        ("lddqu xmm0,[rax]", &[0xF2, 0x0F, 0xF0, 0x00]),
+    ];
+    for (i, (_, code)) in programs.iter().enumerate() {
+        let addr = CASE_BASE + i as u64 * CASE_STRIDE;
+        emu.mem_write(addr, code).expect("write case code");
+        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+            .expect("write park jump");
+    }
+    fn run(
+        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        programs: &[(&str, &[u8])],
+        idx: usize,
+    ) {
+        let (name, code) = programs[idx];
+        let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
+        let park = addr + code.len() as u64;
+        let stop = emu
+            .emu_start(addr, Some(park), None, Some(12))
+            .expect("emu_start");
+        assert_eq!(emu.cpu.rip(), park, "{name}: did not park (stop={stop:?})");
+    }
+
+    // 0: vptest — the only overlapping bits sit in the UPPER 128-bit lane.
+    //    ZF must be 0 (a VL-blind 128-bit PTEST would report ZF=1);
+    //    CF must be 1 (rm AND NOT dst == 0 over all 256 bits).
+    let mut d = [0u8; 32];
+    d[24] = 0xFF; // qword 3 of ymm0
+    let mut r = [0u8; 32];
+    r[24] = 0xFF; // qword 3 of ymm1
+    emu.reg_write_ymm(X86Reg::Ymm0, d);
+    emu.reg_write_ymm(X86Reg::Ymm1, r);
+    emu.reg_write(X86Reg::Rsp, STACK_TOP);
+    run(&mut emu, programs, 0);
+    let flags = emu.reg_read(X86Reg::Rax) & 0x41; // ZF|CF
+    assert_eq!(
+        flags, 0x01,
+        "vptest ymm with upper-lane overlap: want CF=1 ZF=0, got flags {flags:#04x}"
+    );
+
+    // 1: vmovmskps ymm — sign bits in f32 lanes 1, 4, 7 → mask 0x92.
+    //    Lanes 4-7 exist only in the 256-bit form.
+    let mut m = [0u8; 32];
+    m[4 + 3] = 0x80;
+    m[4 * 4 + 3] = 0x80;
+    m[4 * 7 + 3] = 0x80;
+    emu.reg_write_ymm(X86Reg::Ymm1, m);
+    emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF_DEAD_BEEF);
+    run(&mut emu, programs, 1);
+    assert_eq!(
+        emu.reg_read(X86Reg::Rax),
+        0x92,
+        "vmovmskps ymm must include lanes 4-7 and zero-extend"
+    );
+
+    // 2: vpmovsxbw ymm — all 16 source bytes sign-extend to 16 words.
+    let src_bytes: [u8; 16] = [
+        0x80, 0x7F, 0xFF, 0x01, 0xFE, 0x00, 0x05, 0xFB, 0x90, 0x10, 0xC0, 0x40, 0xAA, 0x55,
+        0x02, 0xF0,
+    ];
+    emu.reg_write_xmm(X86Reg::Xmm1, src_bytes);
+    emu.reg_write_ymm(X86Reg::Ymm0, [0x11; 32]);
+    run(&mut emu, programs, 2);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    for (i, &b) in src_bytes.iter().enumerate() {
+        let w = u16::from_le_bytes(got[i * 2..i * 2 + 2].try_into().unwrap());
+        assert_eq!(
+            w, b as i8 as i16 as u16,
+            "vpmovsxbw ymm word {i} (byte {b:#04x})"
+        );
+    }
+
+    // 3: vpmovzxbd ymm — 8 bytes zero-extend to 8 dwords.
+    run(&mut emu, programs, 3);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    for i in 0..8 {
+        assert_eq!(
+            f32_lane(&got, i),
+            src_bytes[i] as u32,
+            "vpmovzxbd ymm dword {i}"
+        );
+    }
+
+    // 4: vpabsb ymm — per-byte |x|, with |-128| staying 0x80, over 32 bytes.
+    let mut abs_src = [0u8; 32];
+    for (i, b) in abs_src.iter_mut().enumerate() {
+        *b = [0x80u8, 0xFF, 0x7F, 0x00, 0xFE, 0x81, 0x01, 0xC0][i % 8];
+    }
+    emu.reg_write_ymm(X86Reg::Ymm1, abs_src);
+    run(&mut emu, programs, 4);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    for i in 0..32 {
+        assert_eq!(
+            got[i],
+            (abs_src[i] as i8).wrapping_abs() as u8,
+            "vpabsb ymm byte {i}"
+        );
+    }
+
+    // 5: vinsertps xmm0,xmm1,xmm2,0x61 — vvvv (xmm1) is the FIRST source:
+    //    result = xmm1 with element 2 := xmm2[1], element 0 zeroed (imm[0]);
+    //    upper ymm bits zeroed. A destructive 2-operand execution would
+    //    build the result from the old xmm0 instead.
+    let v1 = [10.0f32, 11.0, 12.0, 13.0];
+    let v2 = [20.0f32, 21.0, 22.0, 23.0];
+    emu.reg_write_ymm(X86Reg::Ymm0, [0xAB; 32]);
+    emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_f32x4(v1));
+    emu.reg_write_xmm(X86Reg::Xmm2, xmm_from_f32x4(v2));
+    run(&mut emu, programs, 5);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    let want = [0.0f32, v1[1], v2[1], v1[3]];
+    for i in 0..4 {
+        assert_eq!(f32_lane(&got, i), want[i].to_bits(), "vinsertps lane {i}");
+    }
+    assert_eq!(&got[16..32], &[0u8; 16], "vinsertps must zero ymm 255:128");
+
+    // 6: vaesenc xmm0,xmm1,xmm2 — 3-operand: state comes from vvvv (xmm1),
+    //    round key from rm (xmm2), xmm1 stays intact, upper ymm zeroed.
+    //    Intel AES-NI whitepaper reference vector.
+    let state = 0x7b5b54657374566563746f725d53475d_u128;
+    let key = 0x48692853686179295b477565726f6e5d_u128;
+    emu.reg_write_ymm(X86Reg::Ymm0, [0x77; 32]);
+    emu.reg_write_xmm(X86Reg::Xmm1, state.to_le_bytes());
+    emu.reg_write_xmm(X86Reg::Xmm2, key.to_le_bytes());
+    run(&mut emu, programs, 6);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    assert_eq!(
+        u128::from_le_bytes(got[..16].try_into().unwrap()),
+        0xa8311c2f9fdba3c58b104b58ded7e595_u128,
+        "vaesenc must encrypt vvvv state with rm round key"
+    );
+    assert_eq!(&got[16..32], &[0u8; 16], "vaesenc must zero ymm 255:128");
+    assert_eq!(
+        u128::from_le_bytes(emu.reg_read_xmm(X86Reg::Xmm1)),
+        state,
+        "vaesenc must not clobber the vvvv source"
+    );
+
+    // 7: vpblendvb xmm — mask register is is4 (xmm3), per-BYTE sign bits:
+    //    even bytes (mask 0x80) from rm (xmm2), odd bytes from vvvv (xmm1).
+    let mut b1 = [0u8; 16];
+    let mut b2 = [0u8; 16];
+    let mut bm = [0u8; 16];
+    for i in 0..16 {
+        b1[i] = 10 + i as u8;
+        b2[i] = 110 + i as u8;
+        bm[i] = if i % 2 == 0 { 0x80 } else { 0x7F };
+    }
+    emu.reg_write_ymm(X86Reg::Ymm0, [0xEE; 32]);
+    emu.reg_write_xmm(X86Reg::Xmm1, b1);
+    emu.reg_write_xmm(X86Reg::Xmm2, b2);
+    emu.reg_write_xmm(X86Reg::Xmm3, bm);
+    run(&mut emu, programs, 7);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    for i in 0..16 {
+        let want = if i % 2 == 0 { b2[i] } else { b1[i] };
+        assert_eq!(got[i], want, "vpblendvb xmm byte {i}");
+    }
+    assert_eq!(&got[16..32], &[0u8; 16], "vpblendvb must zero ymm 255:128");
+
+    // 8: vpblendvb ymm — mask sign bits only in the UPPER lane: lane 0 from
+    //    vvvv untouched, lane 1 fully from rm.
+    let mut y1 = [0u8; 32];
+    let mut y2 = [0u8; 32];
+    let mut ym = [0u8; 32];
+    for i in 0..32 {
+        y1[i] = i as u8;
+        y2[i] = 0xA0 + i as u8;
+        ym[i] = if i >= 16 { 0x80 } else { 0x00 };
+    }
+    emu.reg_write_ymm(X86Reg::Ymm1, y1);
+    emu.reg_write_ymm(X86Reg::Ymm2, y2);
+    emu.reg_write_ymm(X86Reg::Ymm3, ym);
+    run(&mut emu, programs, 8);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    assert_eq!(&got[..16], &y1[..16], "vpblendvb ymm lower lane from vvvv");
+    assert_eq!(&got[16..], &y2[16..], "vpblendvb ymm upper lane from rm");
+
+    // 9/10: vphminposuw (VEX zeroes ymm upper) vs legacy phminposuw
+    //    (preserves ymm upper). Min word 55 first appears at index 2.
+    let mut hw = [0u8; 16];
+    let words: [u16; 8] = [700, 300, 55, 800, 55, 900, 1000, 65535];
+    for (i, w) in words.iter().enumerate() {
+        hw[i * 2..i * 2 + 2].copy_from_slice(&w.to_le_bytes());
+    }
+    for (idx, is_vex) in [(9usize, true), (10usize, false)] {
+        emu.reg_write_ymm(X86Reg::Ymm0, [0xEE; 32]);
+        emu.reg_write_xmm(X86Reg::Xmm1, hw);
+        run(&mut emu, programs, idx);
+        let got = emu.reg_read_ymm(X86Reg::Ymm0);
+        assert_eq!(
+            u16::from_le_bytes(got[0..2].try_into().unwrap()),
+            55,
+            "phminposuw min value (vex={is_vex})"
+        );
+        assert_eq!(
+            u16::from_le_bytes(got[2..4].try_into().unwrap()),
+            2,
+            "phminposuw min index (vex={is_vex})"
+        );
+        assert_eq!(&got[4..16], &[0u8; 12], "phminposuw upper words zeroed");
+        if is_vex {
+            assert_eq!(&got[16..32], &[0u8; 16], "vphminposuw zeroes ymm upper");
+        } else {
+            assert_eq!(
+                &got[16..32],
+                &[0xEE; 16],
+                "legacy phminposuw preserves ymm upper"
+            );
+        }
+    }
+
+    // 11: vmpsadbw ymm, imm 0x05 — per-lane control: lane 0 uses bits [2:0]
+    //    (5 → src quad at op2 bytes 4..8, dst window base 4), lane 1 uses
+    //    bits [5:3] (0 → src quad 0..4, base 0). With op1 (vvvv) all zero,
+    //    every result word is the plain byte sum of the selected quadruple.
+    let mut sadsrc = [0u8; 32];
+    sadsrc[4..8].copy_from_slice(&[1, 2, 3, 4]); // lane 0 quad → sum 10
+    sadsrc[16..20].copy_from_slice(&[5, 6, 7, 8]); // lane 1 quad → sum 26
+    emu.reg_write_ymm(X86Reg::Ymm1, [0u8; 32]);
+    emu.reg_write_ymm(X86Reg::Ymm2, sadsrc);
+    run(&mut emu, programs, 11);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    for j in 0..8 {
+        let lo = u16::from_le_bytes(got[j * 2..j * 2 + 2].try_into().unwrap());
+        let hi = u16::from_le_bytes(got[16 + j * 2..16 + j * 2 + 2].try_into().unwrap());
+        assert_eq!(lo, 10, "vmpsadbw lane 0 word {j}");
+        assert_eq!(hi, 26, "vmpsadbw lane 1 word {j}");
+    }
+
+    // 12: vmovq xmm0,xmm1 — low qword copied, bits 255:64 zeroed (the
+    //    legacy handler would leave ymm bits 255:128 intact).
+    let mut q1 = [0u8; 16];
+    q1[..8].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+    q1[8..].copy_from_slice(&u64::MAX.to_le_bytes());
+    emu.reg_write_ymm(X86Reg::Ymm0, [0xCD; 32]);
+    emu.reg_write_xmm(X86Reg::Xmm1, q1);
+    run(&mut emu, programs, 12);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    assert_eq!(f64_lane(&got, 0), 0x1122_3344_5566_7788, "vmovq low qword");
+    assert_eq!(&got[8..32], &[0u8; 24], "vmovq must zero bits 255:64");
+
+    // 13/14: vlddqu ymm (32-byte load) and legacy lddqu xmm (16-byte load).
+    let pattern: Vec<u8> = (0u8..32).map(|i| i.wrapping_mul(13) ^ 0x27).collect();
+    let base = 0x0060_0100u64;
+    emu.mem_write(base, &pattern).expect("write pattern");
+    emu.reg_write(X86Reg::Rax, base);
+    emu.reg_write_ymm(X86Reg::Ymm0, [0u8; 32]);
+    run(&mut emu, programs, 13);
+    assert_eq!(
+        &emu.reg_read_ymm(X86Reg::Ymm0)[..],
+        &pattern[..],
+        "vlddqu ymm must load all 32 bytes"
+    );
+    emu.reg_write_xmm(X86Reg::Xmm0, [0u8; 16]);
+    run(&mut emu, programs, 14);
+    assert_eq!(
+        &emu.reg_read_xmm(X86Reg::Xmm0)[..],
+        &pattern[..16],
+        "legacy lddqu xmm must load 16 bytes"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Float→int conversion boundaries: the rounded/truncated INTEGER decides
+// validity, not a float comparison against i32::MAX (Bochs softfloat
+// f32_to_i32 / f64_to_i32 semantics).
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cvt_float_to_int_boundary_semantics() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(run_cvt_boundary_cases)
+        .expect("spawn test thread")
+        .join()
+        .expect("join test thread");
+}
+
+fn run_cvt_boundary_cases() {
+    let cfg = EmulatorConfig::default();
+    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+        .expect("new emulator in flat long mode");
+    emu.reg_write(
+        X86Reg::Cr4,
+        emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+    );
+
+    let programs: &[(&str, &[u8])] = &[
+        ("cvttsd2si eax,xmm1", &[0xF2, 0x0F, 0x2C, 0xC1]),
+        ("cvtsd2si eax,xmm1", &[0xF2, 0x0F, 0x2D, 0xC1]),
+        ("cvttss2si eax,xmm1", &[0xF3, 0x0F, 0x2C, 0xC1]),
+        ("cvttsd2si rax,xmm1", &[0xF2, 0x48, 0x0F, 0x2C, 0xC1]),
+        ("vcvttps2dq xmm0,xmm1", &[0xC5, 0xFA, 0x5B, 0xC1]),
+        ("cvttps2dq xmm0,xmm1", &[0xF3, 0x0F, 0x5B, 0xC1]),
+    ];
+    for (i, (_, code)) in programs.iter().enumerate() {
+        let addr = CASE_BASE + i as u64 * CASE_STRIDE;
+        emu.mem_write(addr, code).expect("write case code");
+        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+            .expect("write park jump");
+    }
+    fn run(
+        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        programs: &[(&str, &[u8])],
+        idx: usize,
+    ) {
+        let (name, code) = programs[idx];
+        let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
+        let park = addr + code.len() as u64;
+        let stop = emu
+            .emu_start(addr, Some(park), None, Some(9))
+            .expect("emu_start");
+        assert_eq!(emu.cpu.rip(), park, "{name}: did not park (stop={stop:?})");
+    }
+
+    // 0: truncation of f64 values in (i32::MAX, 2^31) is VALID and yields
+    //    i32::MAX; from 2^31 upward it is invalid (integer indefinite).
+    for (input, want) in [
+        (2147483647.5f64, 0x7FFF_FFFFu64),
+        (2147483647.0, 0x7FFF_FFFF),
+        (2147483648.0, 0x8000_0000),
+        (-2147483648.9, 0x8000_0000), // truncates to exactly i32::MIN — valid
+        (-2147483649.0, 0x8000_0000), // invalid → indefinite (same bit pattern)
+        (f64::NAN, 0x8000_0000),
+    ] {
+        emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_f64(input));
+        emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF_DEAD_BEEF);
+        run(&mut emu, programs, 0);
+        assert_eq!(emu.reg_read(X86Reg::Rax), want, "cvttsd2si eax of {input}");
+    }
+
+    // 1: round-to-nearest-even — values below 2^31 - 0.5 round to i32::MAX
+    //    (valid); the 2147483647.5 tie rounds to even 2^31 → indefinite.
+    for (input, want) in [
+        (2147483647.4f64, 0x7FFF_FFFFu64),
+        (2147483647.5, 0x8000_0000),
+        (2147483646.5, 0x7FFF_FFFE), // tie → even 2147483646
+    ] {
+        emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_f64(input));
+        emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF_DEAD_BEEF);
+        run(&mut emu, programs, 1);
+        assert_eq!(emu.reg_read(X86Reg::Rax), want, "cvtsd2si eax of {input}");
+    }
+
+    // 2: f32 2^31 exactly must be indefinite (a float-domain check against
+    //    `i32::MAX as f32` == 2^31 wrongly accepts and saturates it);
+    //    the largest f32 below 2^31 converts exactly.
+    for (input, want) in [
+        (2147483648.0f32, 0x8000_0000u64), // 2^31, exact in f32
+        (2147483520.0f32, 0x7FFF_FF80),    // 2^31 - 128, largest valid f32
+    ] {
+        let mut x = [0u8; 16];
+        x[..4].copy_from_slice(&input.to_bits().to_le_bytes());
+        emu.reg_write_xmm(X86Reg::Xmm1, x);
+        emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF_DEAD_BEEF);
+        run(&mut emu, programs, 2);
+        assert_eq!(emu.reg_read(X86Reg::Rax), want, "cvttss2si eax of {input}");
+    }
+
+    // 3: 64-bit destination — 2^63 f64 is invalid, the largest f64 below
+    //    2^63 (2^63 - 1024) is valid.
+    for (input, want) in [
+        (9223372036854775808.0f64, 0x8000_0000_0000_0000u64),
+        (9223372036854774784.0f64, 9223372036854774784),
+    ] {
+        emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_f64(input));
+        emu.reg_write(X86Reg::Rax, 0);
+        run(&mut emu, programs, 3);
+        assert_eq!(emu.reg_read(X86Reg::Rax), want, "cvttsd2si rax of {input}");
+    }
+
+    // 4/5: packed truncation — VEX and legacy must agree lane-for-lane.
+    let lanes = [2147483648.0f32, -2147483520.0, 2147483520.0, -2.5];
+    let want = [0x8000_0000u32, 0x8000_0080, 0x7FFF_FF80, (-2i32) as u32];
+    for idx in [4usize, 5] {
+        emu.reg_write_xmm(X86Reg::Xmm1, xmm_from_f32x4(lanes));
+        emu.reg_write_xmm(X86Reg::Xmm0, [0u8; 16]);
+        run(&mut emu, programs, idx);
+        let got = emu.reg_read_xmm(X86Reg::Xmm0);
+        for i in 0..4 {
+            assert_eq!(
+                xmm_lane32(&got, i),
+                want[i],
+                "cvttps2dq (program {idx}) lane {i} of {}",
+                lanes[i]
+            );
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// VEX remap-gap families (ptest / movmsk / pmovzx / movq / blendvb) and cvt
+// overflow boundaries. These executed as legacy 128-bit SSE under VEX before
+// the remap was completed: upper YMM lanes ignored, destinations not zeroed.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn vex_remap_gap_families() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(run_remap_gap_cases)
+        .expect("spawn")
+        .join()
+        .expect("join");
+}
+
+fn run_remap_gap_cases() {
+    let cfg = EmulatorConfig::default();
+    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+        .expect("new emulator");
+    emu.reg_write(
+        X86Reg::Cr4,
+        emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+    );
+    emu.reg_write(X86Reg::Rsp, STACK_TOP); // pushfq/pop in the vptest case
+
+    // idx, name, bytes, insns
+    let programs: &[(&str, &[u8], u64)] = &[
+        // vptest ymm0, ymm1 ; pushfq ; pop rax   (VEX.256.66.0F38 17)
+        ("vptest ymm", &[0xC4, 0xE2, 0x7D, 0x17, 0xC1, 0x9C, 0x58], 3),
+        // vmovmskps eax, ymm1                     (VEX.256.0F 50)
+        ("vmovmskps ymm", &[0xC5, 0xFC, 0x50, 0xC1], 1),
+        // vpmovzxbw ymm0, xmm1                    (VEX.256.66.0F38 30)
+        ("vpmovzxbw", &[0xC4, 0xE2, 0x7D, 0x30, 0xC1], 1),
+        // vmovq xmm0, xmm1                        (VEX.128.F3.0F 7E)
+        ("vmovq upper-zero", &[0xC5, 0xFA, 0x7E, 0xC1], 1),
+        // vpblendvb xmm0, xmm1, xmm2, xmm3        (VEX.128.66.0F3A.W0 4C, is4=3)
+        ("vpblendvb is4", &[0xC4, 0xE3, 0x71, 0x4C, 0xC2, 0x30], 1),
+        // vcvttpd2dq xmm0, xmm1                   (VEX.128.66.0F E6, truncate)
+        ("vcvttpd2dq boundary", &[0xC5, 0xF9, 0xE6, 0xC1], 1),
+        // vcvtpd2dq xmm0, xmm1                    (VEX.128.F2.0F E6, round)
+        ("vcvtpd2dq boundary", &[0xC5, 0xFB, 0xE6, 0xC1], 1),
+    ];
+    for (i, (_, code, _)) in programs.iter().enumerate() {
+        let addr = CASE_BASE + i as u64 * CASE_STRIDE;
+        emu.mem_write(addr, code).expect("write code");
+        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+            .expect("write park");
+    }
+    fn run(emu: &mut Emulator<'static, Corei7SkylakeX>, programs: &[(&str, &[u8], u64)], idx: usize) {
+        let (name, code, insns) = programs[idx];
+        let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
+        let park = addr + code.len() as u64;
+        let stop = emu
+            .emu_start(addr, Some(park), None, Some(insns + 8))
+            .expect("emu_start");
+        assert_eq!(emu.cpu.rip(), park, "{name}: no park (stop={stop:?})");
+    }
+
+    // 0: vptest — overlap ONLY in the upper 128-bit lane. A 128-bit-only
+    // handler sees all-zero (ZF=1); a correct 256-bit handler sees the
+    // overlap (ZF=0).
+    let mut y = [0u8; 32];
+    y[16] = 0x01; // byte in the upper lane
+    emu.reg_write_ymm(X86Reg::Ymm0, y);
+    emu.reg_write_ymm(X86Reg::Ymm1, y);
+    emu.reg_write(X86Reg::Rax, 0);
+    run(&mut emu, programs, 0);
+    assert_eq!(
+        emu.reg_read(X86Reg::Rax) & 0x40,
+        0,
+        "vptest ZF must be 0 — upper-lane AND is nonzero (256-bit tested)"
+    );
+
+    // 1: vmovmskps ymm — sign bits in lanes 0,3,4,7 → 0b1001_1001 = 0x99.
+    // A 128-bit handler would return only 0x09.
+    let mut y = [0u8; 32];
+    for lane in [0usize, 3, 4, 7] {
+        y[lane * 4 + 3] = 0x80; // sign bit of each f32 lane
+    }
+    emu.reg_write_ymm(X86Reg::Ymm1, y);
+    emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF_0000_0000);
+    run(&mut emu, programs, 1);
+    assert_eq!(
+        emu.reg_read(X86Reg::Rax),
+        0x99,
+        "vmovmskps ymm must include lanes 4..7 and zero-extend to rax"
+    );
+
+    // 2: vpmovzxbw ymm0, xmm1 — 16 bytes zero-extend to 16 words; the upper
+    // words (from source bytes 8..15) must be present, not zero.
+    let mut x = [0u8; 16];
+    for i in 0..16 {
+        x[i] = (i as u8) | 0x80; // 0x80..0x8F, high bit set (proves zero-ext, not sign-ext)
+    }
+    emu.reg_write_ymm(X86Reg::Ymm0, [0xAA; 32]);
+    emu.reg_write_xmm(X86Reg::Xmm1, x);
+    run(&mut emu, programs, 2);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    for i in 0..16 {
+        let word = u16::from_le_bytes([got[i * 2], got[i * 2 + 1]]);
+        assert_eq!(word, (x[i] as u16), "vpmovzxbw word {i} zero-extend");
+    }
+
+    // 3: vmovq — low qword from xmm1, bits 64..256 zeroed even though ymm0
+    // was pre-dirtied.
+    emu.reg_write_ymm(X86Reg::Ymm0, [0xAA; 32]);
+    let mut x = [0u8; 16];
+    x[..8].copy_from_slice(&0x0123_4567_89AB_CDEF_u64.to_le_bytes());
+    x[8..].copy_from_slice(&0xFFFF_FFFF_FFFF_FFFF_u64.to_le_bytes());
+    emu.reg_write_xmm(X86Reg::Xmm1, x);
+    run(&mut emu, programs, 3);
+    let got = emu.reg_read_ymm(X86Reg::Ymm0);
+    assert_eq!(
+        u64::from_le_bytes(got[..8].try_into().unwrap()),
+        0x0123_4567_89AB_CDEF,
+        "vmovq low qword"
+    );
+    assert_eq!(&got[8..32], &[0u8; 24], "vmovq must zero bits 255:64");
+
+    // 4: vpblendvb — is4 mask xmm3; byte sign bit selects xmm2(rm) else
+    // xmm1(vvvv). Only bit 7 of each mask byte matters (not 0x01).
+    emu.reg_write_xmm(X86Reg::Xmm1, [0x11; 16]);
+    emu.reg_write_xmm(X86Reg::Xmm2, [0x22; 16]);
+    let mut mask = [0u8; 16];
+    for i in 0..16 {
+        mask[i] = if i % 2 == 0 { 0x80 } else { 0x7F }; // even: pick rm; odd: 0x7F has no sign → vvvv
+    }
+    emu.reg_write_xmm(X86Reg::Xmm3, mask);
+    emu.reg_write_xmm(X86Reg::Xmm0, [0u8; 16]);
+    run(&mut emu, programs, 4);
+    let got = emu.reg_read_xmm(X86Reg::Xmm0);
+    for i in 0..16 {
+        let want = if i % 2 == 0 { 0x22 } else { 0x11 };
+        assert_eq!(got[i], want, "vpblendvb byte {i} (sign-bit-only mask)");
+    }
+
+    // 5: vcvttpd2dq — truncation of 2147483647.5 is in-range → 0x7FFFFFFF.
+    let mut x = [0u8; 16];
+    x[..8].copy_from_slice(&2147483647.5f64.to_bits().to_le_bytes());
+    emu.reg_write_xmm(X86Reg::Xmm1, x);
+    run(&mut emu, programs, 5);
+    let got = emu.reg_read_xmm(X86Reg::Xmm0);
+    assert_eq!(
+        i32::from_le_bytes(got[..4].try_into().unwrap()),
+        0x7FFF_FFFF,
+        "vcvttpd2dq(2147483647.5) truncates to i32::MAX, not indefinite"
+    );
+
+    // 6: vcvtpd2dq — round-ties-even of 2147483647.5 → 2^31 (out of range) →
+    // integer-indefinite 0x80000000.
+    run(&mut emu, programs, 6);
+    let got = emu.reg_read_xmm(X86Reg::Xmm0);
+    assert_eq!(
+        got[..4],
+        [0x00, 0x00, 0x00, 0x80],
+        "vcvtpd2dq(2147483647.5) rounds up out of range → 0x80000000"
+    );
+}

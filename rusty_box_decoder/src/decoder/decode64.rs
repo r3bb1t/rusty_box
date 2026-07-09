@@ -1017,12 +1017,15 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         instr.opcode = remap_sse_to_vex(instr.opcode, vex_l);
     }
 
-    // VEX is4 operand: VBLENDVPS/VBLENDVPD encode a fourth (mask) register
-    // in imm8[7:4]; in 64-bit mode all four bits select xmm0-15.
+    // VEX is4 operand: VBLENDVPS/VBLENDVPD/VPBLENDVB encode a fourth (mask)
+    // register in imm8[7:4]; in 64-bit mode all four bits select xmm0-15.
     // Bochs fetchdecode32.cc BX_SRC_VIB (is_64 branch).
     if matches!(
         instr.opcode,
-        Opcode::VblendvpsVpsHpsWpsIb | Opcode::VblendvpdVpdHpdWpdIb
+        Opcode::VblendvpsVpsHpsWpsIb
+            | Opcode::VblendvpdVpdHpdWpdIb
+            | Opcode::V128VpblendvbVdqHdqWdqIb
+            | Opcode::V256VpblendvbVdqHdqWdqIb
     ) {
         instr.operands.src3 = ((instr.immediate >> 4) & 0xF) as u8;
     }
@@ -2551,6 +2554,178 @@ const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
                 V128VpmovmskbGdUdq
             } else {
                 V256VpmovmskbGdUdq
+            }
+        }
+
+        // ===== VPTEST (flags-only; must AND/ANDN the full VL, Bochs avx.cc
+        // VPTEST_VdqWdqR) — single VEX opcode, handler checks get_vl() =====
+        PtestVdqWdq => VptestVdqWdq,
+
+        // ===== VMOVMSKPS/VMOVMSKPD (VL256 → 8/4-bit masks, Bochs avx.cc
+        // VMOVMSKPS_GdUps / VMOVMSKPD_GdUpd) =====
+        MovmskpsGdUps => VmovmskpsGdUps,
+        MovmskpdGdUpd => VmovmskpdGdUpd,
+
+        // ===== VPMOVSX/VPMOVZX (Bochs avx2.cc VPMOVSXBW_VdqWdqR et al.;
+        // VL256 forms read a doubled source width — Bochs
+        // fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3820..25 / 30..35) =====
+        PmovsxbwVdqWq => {
+            if vl == 0 {
+                V128VpmovsxbwVdqWq
+            } else {
+                V256VpmovsxbwVdqWdq
+            }
+        }
+        PmovsxbdVdqWd => {
+            if vl == 0 {
+                V128VpmovsxbdVdqWd
+            } else {
+                V256VpmovsxbdVdqWq
+            }
+        }
+        PmovsxbqVdqWw => {
+            if vl == 0 {
+                V128VpmovsxbqVdqWw
+            } else {
+                V256VpmovsxbqVdqWd
+            }
+        }
+        PmovsxwdVdqWq => {
+            if vl == 0 {
+                V128VpmovsxwdVdqWq
+            } else {
+                V256VpmovsxwdVdqWdq
+            }
+        }
+        PmovsxwqVdqWd => {
+            if vl == 0 {
+                V128VpmovsxwqVdqWd
+            } else {
+                V256VpmovsxwqVdqWq
+            }
+        }
+        PmovsxdqVdqWq => {
+            if vl == 0 {
+                V128VpmovsxdqVdqWq
+            } else {
+                V256VpmovsxdqVdqWdq
+            }
+        }
+        PmovzxbwVdqWq => {
+            if vl == 0 {
+                V128VpmovzxbwVdqWq
+            } else {
+                V256VpmovzxbwVdqWdq
+            }
+        }
+        PmovzxbdVdqWd => {
+            if vl == 0 {
+                V128VpmovzxbdVdqWd
+            } else {
+                V256VpmovzxbdVdqWq
+            }
+        }
+        PmovzxbqVdqWw => {
+            if vl == 0 {
+                V128VpmovzxbqVdqWw
+            } else {
+                V256VpmovzxbqVdqWd
+            }
+        }
+        PmovzxwdVdqWq => {
+            if vl == 0 {
+                V128VpmovzxwdVdqWq
+            } else {
+                V256VpmovzxwdVdqWdq
+            }
+        }
+        PmovzxwqVdqWd => {
+            if vl == 0 {
+                V128VpmovzxwqVdqWd
+            } else {
+                V256VpmovzxwqVdqWq
+            }
+        }
+        PmovzxdqVdqWq => {
+            if vl == 0 {
+                V128VpmovzxdqVdqWq
+            } else {
+                V256VpmovzxdqVdqWdq
+            }
+        }
+
+        // ===== VPABSB/W/D (Bochs HANDLE_AVX_1OP<xmm_pabsb> et al.) =====
+        PabsbVdqWdq => {
+            if vl == 0 {
+                V128VpabsbVdqWdq
+            } else {
+                V256VpabsbVdqWdq
+            }
+        }
+        PabswVdqWdq => {
+            if vl == 0 {
+                V128VpabswVdqWdq
+            } else {
+                V256VpabswVdqWdq
+            }
+        }
+        PabsdVdqWdq => {
+            if vl == 0 {
+                V128VpabsdVdqWdq
+            } else {
+                V256VpabsdVdqWdq
+            }
+        }
+
+        // ===== VLDDQU — identical to the VL-aware vmovdqu/vmovups load
+        // (Bochs ia_opcodes.def BX_IA_VLDDQU_VdqMdq → VMOVUPS_VpsWpsM) =====
+        LddquVdqMdq => VlddquVdqMdq,
+
+        // ===== VINSERTPS (vvvv is first source; VL128-only, VEX.256 #UD —
+        // Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A21) =====
+        InsertpsVpsWssIb => {
+            if vl == 0 {
+                V128VinsertpsVpsWssIb
+            } else {
+                IaError
+            }
+        }
+
+        // ===== VMPSADBW (vvvv is first source; per-128-bit-lane control —
+        // Bochs avx2.cc VMPSADBW_VdqHdqWdqIbR) =====
+        MpsadbwVdqWdqIb => {
+            if vl == 0 {
+                V128VmpsadbwVdqHdqWdqIb
+            } else {
+                V256VmpsadbwVdqHdqWdqIb
+            }
+        }
+
+        // ===== VPHMINPOSUW (VL128-only, VEX.256 #UD — Bochs
+        // fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3841) =====
+        PhminposuwVdqWdq => {
+            if vl == 0 {
+                V128VphminposuwVdqWdq
+            } else {
+                IaError
+            }
+        }
+
+        // ===== VMOVQ (F3 0F 7E load / 66 0F D6 store; register forms must
+        // zero above VL — Bochs fetchdecode_opmap_avx.cc
+        // BxOpcodeGroup_VEX_0F7E / BxOpcodeGroup_VEX_0FD6, both ATTR_VL128) =====
+        MovqVqWq => {
+            if vl == 0 {
+                VmovqVqWq
+            } else {
+                IaError
+            }
+        }
+        MovqWqVq => {
+            if vl == 0 {
+                VmovqWqVq
+            } else {
+                IaError
             }
         }
 

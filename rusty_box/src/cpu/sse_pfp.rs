@@ -18,36 +18,10 @@
 #[cfg(not(feature = "std"))]
 use crate::cpu::float::FloatExt;
 
-/// Round-to-nearest-ties-even for f32 (no_std compatible).
-/// IEEE 754 default rounding: if exactly halfway, round to even.
-#[cfg(not(feature = "std"))]
-#[inline]
-pub(super) fn round_ties_even_f32(val: f32) -> f32 {
-    // Use integer truncation + manual halfway detection
-    let trunc = val as i32; // truncate toward zero
-    let frac = val - trunc as f32;
-    let abs_frac = if frac >= 0.0 { frac } else { -frac };
-    if abs_frac == 0.5 {
-        // Exactly halfway — round to even
-        if trunc % 2 == 0 {
-            trunc as f32
-        } else if val > 0.0 {
-            (trunc + 1) as f32
-        } else {
-            (trunc - 1) as f32
-        }
-    } else if abs_frac > 0.5 {
-        if val > 0.0 {
-            (trunc + 1) as f32
-        } else {
-            (trunc - 1) as f32
-        }
-    } else {
-        trunc as f32
-    }
-}
-
 /// Round-to-nearest-ties-even for f64 (no_std compatible).
+/// IEEE 754 default rounding: if exactly halfway, round to even.
+/// (The f32 conversions go through the exact f64 intermediate, so a
+/// dedicated f32 variant is not needed.)
 #[cfg(not(feature = "std"))]
 #[inline]
 pub(super) fn round_ties_even_f64(val: f64) -> f64 {
@@ -71,6 +45,71 @@ pub(super) fn round_ties_even_f64(val: f64) -> f64 {
     } else {
         trunc as f64
     }
+}
+
+/// Round-to-nearest-ties-even, dispatching on the `std` feature.
+#[inline]
+fn round_ties_even(val: f64) -> f64 {
+    #[cfg(feature = "std")]
+    {
+        val.round_ties_even()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        round_ties_even_f64(val)
+    }
+}
+
+/// f64 → i32 with x86 semantics (Bochs softfloat f64_to_i32 /
+/// f64_to_i32_round_to_zero): round or truncate FIRST, then range-check the
+/// resulting INTEGER; NaN or out-of-range yields the integer indefinite
+/// value 0x8000_0000. Checking the unrounded float against `i32::MAX as f64`
+/// misclassifies the boundary band (e.g. 2147483647.4 truncates to a valid
+/// 2147483647).
+#[inline]
+pub(super) fn cvt_f64_to_i32(val: f64, truncate: bool) -> i32 {
+    // NaN (comparisons are false), ±inf and everything far outside i32 range
+    // is invalid regardless of rounding; only the boundary band needs the
+    // integer-domain check below.
+    if !(val > -2_147_483_650.0 && val < 2_147_483_650.0) {
+        return i32::MIN;
+    }
+    let rounded = if truncate { val } else { round_ties_even(val) };
+    // `as` truncates toward zero — exact for every in-band value.
+    let int = rounded as i64;
+    if int < i32::MIN as i64 || int > i32::MAX as i64 {
+        i32::MIN
+    } else {
+        int as i32
+    }
+}
+
+/// f32 → i32 with x86 semantics; the f64 intermediate is exact for every
+/// f32, so the boundary analysis of [`cvt_f64_to_i32`] carries over
+/// (Bochs softfloat f32_to_i32 / f32_to_i32_round_to_zero).
+#[inline]
+pub(super) fn cvt_f32_to_i32(val: f32, truncate: bool) -> i32 {
+    cvt_f64_to_i32(val as f64, truncate)
+}
+
+/// f64 → i64 with x86 semantics (Bochs softfloat f64_to_i64 /
+/// f64_to_i64_round_to_zero). f64 values at or beyond ±2^63 are invalid;
+/// inside that band the spacing near the edges is ≥ 1024 (integral), so no
+/// rounded value can leave the band.
+#[inline]
+pub(super) fn cvt_f64_to_i64(val: f64, truncate: bool) -> i64 {
+    if !(val >= -9_223_372_036_854_775_808.0 && val < 9_223_372_036_854_775_808.0) {
+        return i64::MIN;
+    }
+    let rounded = if truncate { val } else { round_ties_even(val) };
+    rounded as i64
+}
+
+/// f32 → i64 with x86 semantics via the exact f64 intermediate
+/// (Bochs softfloat f32_to_i64 / f32_to_i64_round_to_zero).
+#[inline]
+pub(super) fn cvt_f32_to_i64(val: f32, truncate: bool) -> i64 {
+    cvt_f64_to_i64(val as f64, truncate)
 }
 
 use super::{
@@ -1082,22 +1121,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn cvtss2si_gd_wss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
-        // Use round-half-to-even (default MXCSR rounding mode)
-        // Rust's f32::round_ties_even() matches IEEE 754 roundTiesToEven
-        let result =
-            if op.is_nan() || op.is_infinite() || op > i32::MAX as f32 || op < i32::MIN as f32 {
-                // Integer indefinite value for out-of-range conversions
-                0x8000_0000u32
-            } else {
-                #[cfg(feature = "std")]
-                {
-                    (op.round_ties_even() as i32) as u32
-                }
-                #[cfg(not(feature = "std"))]
-                {
-                    round_ties_even_f32(op) as i32 as u32
-                }
-            };
+        // Round-half-to-even (default MXCSR rounding mode), then integer
+        // range check — Bochs softfloat f32_to_i32.
+        let result = cvt_f32_to_i32(op, false) as u32;
         self.set_gpr32(instr.dst().into(), result);
         Ok(())
     }
@@ -1106,19 +1132,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn cvtsd2si_gd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
-        let result =
-            if op.is_nan() || op.is_infinite() || op > i32::MAX as f64 || op < i32::MIN as f64 {
-                0x8000_0000u32
-            } else {
-                #[cfg(feature = "std")]
-                {
-                    (op.round_ties_even() as i32) as u32
-                }
-                #[cfg(not(feature = "std"))]
-                {
-                    round_ties_even_f64(op) as i32 as u32
-                }
-            };
+        let result = cvt_f64_to_i32(op, false) as u32;
         self.set_gpr32(instr.dst().into(), result);
         Ok(())
     }
@@ -1127,12 +1141,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn cvttss2si_gd_wss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
-        let result =
-            if op.is_nan() || op.is_infinite() || op > i32::MAX as f32 || op < i32::MIN as f32 {
-                0x8000_0000u32
-            } else {
-                (op as i32) as u32
-            };
+        let result = cvt_f32_to_i32(op, true) as u32;
         self.set_gpr32(instr.dst().into(), result);
         Ok(())
     }
@@ -1141,12 +1150,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn cvttsd2si_gd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
-        let result =
-            if op.is_nan() || op.is_infinite() || op > i32::MAX as f64 || op < i32::MIN as f64 {
-                0x8000_0000u32
-            } else {
-                (op as i32) as u32
-            };
+        let result = cvt_f64_to_i32(op, true) as u32;
         self.set_gpr32(instr.dst().into(), result);
         Ok(())
     }
@@ -1197,12 +1201,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn cvttss2si_gq_wss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
-        let result =
-            if op.is_nan() || op.is_infinite() || op > i64::MAX as f32 || op < i64::MIN as f32 {
-                0x8000_0000_0000_0000u64
-            } else {
-                (op as i64) as u64
-            };
+        let result = cvt_f32_to_i64(op, true) as u64;
         self.set_gpr64(instr.dst() as usize, result);
         Ok(())
     }
@@ -1211,12 +1210,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn cvttsd2si_gq_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
-        let result =
-            if op.is_nan() || op.is_infinite() || op > i64::MAX as f64 || op < i64::MIN as f64 {
-                0x8000_0000_0000_0000u64
-            } else {
-                (op as i64) as u64
-            };
+        let result = cvt_f64_to_i64(op, true) as u64;
         self.set_gpr64(instr.dst() as usize, result);
         Ok(())
     }
@@ -1225,19 +1219,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn cvtss2si_gq_wss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
-        let result =
-            if op.is_nan() || op.is_infinite() || op > i64::MAX as f32 || op < i64::MIN as f32 {
-                0x8000_0000_0000_0000u64
-            } else {
-                #[cfg(feature = "std")]
-                {
-                    (op.round_ties_even() as i64) as u64
-                }
-                #[cfg(not(feature = "std"))]
-                {
-                    round_ties_even_f32(op) as i64 as u64
-                }
-            };
+        let result = cvt_f32_to_i64(op, false) as u64;
         self.set_gpr64(instr.dst() as usize, result);
         Ok(())
     }
@@ -1246,19 +1228,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn cvtsd2si_gq_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
-        let result =
-            if op.is_nan() || op.is_infinite() || op > i64::MAX as f64 || op < i64::MIN as f64 {
-                0x8000_0000_0000_0000u64
-            } else {
-                #[cfg(feature = "std")]
-                {
-                    (op.round_ties_even() as i64) as u64
-                }
-                #[cfg(not(feature = "std"))]
-                {
-                    round_ties_even_f64(op) as i64 as u64
-                }
-            };
+        let result = cvt_f64_to_i64(op, false) as u64;
         self.set_gpr64(instr.dst() as usize, result);
         Ok(())
     }
@@ -1347,26 +1317,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
         for i in 0..4 {
-            let val = op2.xmm32f(i);
-            result.set_xmm32s(
-                i,
-                if val.is_nan()
-                    || val.is_infinite()
-                    || val > i32::MAX as f32
-                    || val < i32::MIN as f32
-                {
-                    0x8000_0000u32 as i32
-                } else {
-                    #[cfg(feature = "std")]
-                    {
-                        val.round_ties_even() as i32
-                    }
-                    #[cfg(not(feature = "std"))]
-                    {
-                        round_ties_even_f32(val) as i32
-                    }
-                },
-            );
+            result.set_xmm32s(i, cvt_f32_to_i32(op2.xmm32f(i), false));
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
@@ -1378,19 +1329,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
         for i in 0..4 {
-            let val = op2.xmm32f(i);
-            result.set_xmm32s(
-                i,
-                if val.is_nan()
-                    || val.is_infinite()
-                    || val > i32::MAX as f32
-                    || val < i32::MIN as f32
-                {
-                    0x8000_0000u32 as i32
-                } else {
-                    val as i32
-                },
-            );
+            result.set_xmm32s(i, cvt_f32_to_i32(op2.xmm32f(i), true));
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
@@ -1425,26 +1364,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
         for i in 0..2 {
-            let val = op2.xmm64f(i);
-            result.set_xmm32s(
-                i,
-                if val.is_nan()
-                    || val.is_infinite()
-                    || val > i32::MAX as f64
-                    || val < i32::MIN as f64
-                {
-                    0x8000_0000u32 as i32
-                } else {
-                    #[cfg(feature = "std")]
-                    {
-                        val.round_ties_even() as i32
-                    }
-                    #[cfg(not(feature = "std"))]
-                    {
-                        round_ties_even_f64(val) as i32
-                    }
-                },
-            );
+            result.set_xmm32s(i, cvt_f64_to_i32(op2.xmm64f(i), false));
         }
         // High 64 bits zeroed (from default())
         self.write_xmm_reg_lo128(instr.dst(), result);
@@ -1458,19 +1378,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
         for i in 0..2 {
-            let val = op2.xmm64f(i);
-            result.set_xmm32s(
-                i,
-                if val.is_nan()
-                    || val.is_infinite()
-                    || val > i32::MAX as f64
-                    || val < i32::MIN as f64
-                {
-                    0x8000_0000u32 as i32
-                } else {
-                    val as i32
-                },
-            );
+            result.set_xmm32s(i, cvt_f64_to_i32(op2.xmm64f(i), true));
         }
         // High 64 bits zeroed (from default())
         self.write_xmm_reg_lo128(instr.dst(), result);

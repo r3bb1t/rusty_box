@@ -151,47 +151,10 @@ fn avx_compare_f64(a: f64, b: f64, predicate: u8) -> bool {
     avx_cmp_relation(predicate, !unord && a < b, !unord && a == b, unord)
 }
 
-/// f32 → i32 with x86 integer-indefinite (0x8000_0000) on NaN/overflow.
-/// Round-to-nearest-even matches the default MXCSR mode, like the legacy
-/// SSE cvt handlers.
-#[inline]
-fn cvt_f32_i32(val: f32, truncate: bool) -> i32 {
-    if val.is_nan() || val.is_infinite() || val > i32::MAX as f32 || val < i32::MIN as f32 {
-        return 0x8000_0000u32 as i32;
-    }
-    if truncate {
-        val as i32
-    } else {
-        #[cfg(feature = "std")]
-        {
-            val.round_ties_even() as i32
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            super::sse_pfp::round_ties_even_f32(val) as i32
-        }
-    }
-}
-
-/// f64 → i32 with x86 integer-indefinite on NaN/overflow.
-#[inline]
-fn cvt_f64_i32(val: f64, truncate: bool) -> i32 {
-    if val.is_nan() || val.is_infinite() || val > i32::MAX as f64 || val < i32::MIN as f64 {
-        return 0x8000_0000u32 as i32;
-    }
-    if truncate {
-        val as i32
-    } else {
-        #[cfg(feature = "std")]
-        {
-            val.round_ties_even() as i32
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            super::sse_pfp::round_ties_even_f64(val) as i32
-        }
-    }
-}
+// f32/f64 → i32 with x86 integer-indefinite (0x8000_0000) on NaN/overflow —
+// shared with the legacy SSE cvt handlers (Bochs softfloat f32_to_i32 /
+// f64_to_i32): round/truncate first, then range-check the resulting integer.
+use super::sse_pfp::{cvt_f32_to_i32 as cvt_f32_i32, cvt_f64_to_i32 as cvt_f64_i32};
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ════════════════════════════════════════════════════════════════════
