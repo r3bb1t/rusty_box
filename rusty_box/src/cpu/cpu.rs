@@ -2467,9 +2467,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         let hash_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
         let entry = &self.i_cache.entry[hash_idx];
 
-        // Check if entry matches and has valid instruction (matching C++ line 299)
-        let cache_hit = matches!(entry.p_addr, crate::cpu::icache::IcacheAddress::Address(addr) if addr == p_addr)
-            && entry.i.ilen() != 0;
+        // Bochs find_entry (icache.h): hit iff the stored physical address matches.
+        // Invalid entries carry the all-ones sentinel, so a real p_addr never
+        // false-hits — no separate validity flag needed (Bochs has none either).
+        let cache_hit = entry.p_addr == p_addr;
 
         if cache_hit {
             // SMC detection: compare first 8 bytes against current memory
@@ -2487,7 +2488,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // remapped (e.g. uselib/mmap loaded a new library), the
                 // second-page bytes changed but the SMC check didn't catch it.
                 // Force a cache miss so boundary_fetch re-reads both pages.
-                let ilen = entry.i.ilen() as usize;
+                // ilen comes from the trace's first instruction in mpool (Bochs entry->i).
+                let ilen = self.i_cache.mpool[entry.mpool_start_idx].ilen() as usize;
                 if ilen > 0 && avail < ilen {
                     smc_invalid = true;
                 }
@@ -2495,7 +2497,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
             if !smc_invalid {
                 // Cache hit — return indices without cloning
-                return Ok((entry.mpool_start_idx, entry.tlen));
+                return Ok((entry.mpool_start_idx, entry.tlen as usize));
             }
         }
 
@@ -2518,7 +2520,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 &mut dummy_stamp_table,
             )?
         };
-        Ok((miss_entry.mpool_start_idx, miss_entry.tlen))
+        Ok((miss_entry.mpool_start_idx, miss_entry.tlen as usize))
     }
 
     pub(super) fn get_gpr32(&self, idx: usize) -> u32 {
