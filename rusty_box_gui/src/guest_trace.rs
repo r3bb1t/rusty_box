@@ -259,30 +259,40 @@ impl GuestTracer {
 
     /// writev(fd, iov, iovcnt) with fd 0..=2 — gather the first iovecs.
     fn log_writev(&mut self, ctx: &HookCtx, fd: u64, iov_ptr: u64, iovcnt: u64) {
-        let mut data = String::new();
+        let mut gathered: Vec<u8> = Vec::new();
         let mut total = 0u64;
-        let mut captured = 0usize;
         for i in 0..iovcnt.min(4) {
             let base = Self::read_u64(ctx, iov_ptr.wrapping_add(i * 16));
             let len = Self::read_u64(ctx, iov_ptr.wrapping_add(i * 16 + 8));
             let (Some(base), Some(len)) = (base, len) else {
                 break;
             };
-            total += len;
-            let room = WRITE_CAPTURE_CAP.saturating_sub(captured);
+            // iovec lengths are guest-controlled — a hostile/corrupt iovec
+            // must not overflow the byte counter.
+            total = total.saturating_add(len);
+            let room = WRITE_CAPTURE_CAP.saturating_sub(gathered.len());
             if room == 0 || len == 0 {
                 continue;
             }
             if let Some(chunk) = Self::read_guest(ctx, base, (len as usize).min(room)) {
-                captured += chunk.len();
-                data.push_str(&escape_bytes(&chunk));
+                gathered.extend_from_slice(&chunk);
             }
         }
+        // Same freeze-frame trigger as log_write: Go panics on stderr may
+        // arrive via writev (journald / buffered writers), and the prefix
+        // can start in a later iovec.
+        let is_panic = fd == 2
+            && (contains_bytes(&gathered, b"panic: ")
+                || contains_bytes(&gathered, b"fatal error:"));
+        let data = escape_bytes(&gathered);
         let cr3 = ctx.cr3();
         self.emit(
             false,
             format_args!("WRITE cr3={cr3:#012x} fd={fd} len={total} iov={iovcnt} \"{data}\""),
         );
+        if is_panic {
+            self.dump_flight();
+        }
     }
 
     fn log_kill(&mut self, ctx: &HookCtx, which: &str, target: u64, tid: u64, sig: u64) {
@@ -395,9 +405,25 @@ fn escape_bytes(bytes: &[u8]) -> String {
     bytes.escape_ascii().to_string()
 }
 
+/// Byte-level substring search (no `str` round-trip; guest data is not UTF-8).
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panic_marker_found_mid_buffer() {
+        // writev payloads may carry the panic prefix after a log preamble
+        // (or split across gathered iovecs) — detection must not be
+        // anchored to the buffer start.
+        let gathered = b"<3>snapd[1234]: panic: runtime error";
+        assert!(contains_bytes(gathered, b"panic: "));
+        assert!(!contains_bytes(gathered, b"fatal error:"));
+        assert!(contains_bytes(b"fatal error: out of memory", b"fatal error:"));
+    }
 
     #[test]
     fn escape_keeps_text_readable_and_one_line() {
