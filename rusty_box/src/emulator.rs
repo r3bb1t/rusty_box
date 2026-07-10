@@ -1807,6 +1807,41 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.device_manager
             .process_pci_deferred(&mut self.devices, &mut self.memory);
     }
+
+    /// Drain pending host input (keyboard scancodes, mouse, serial) from the GUI
+    /// into the device layer.
+    ///
+    /// Called from the active step loop AND from inside the HLT/MWAIT idle waits.
+    /// The idle path is the important one: a tickless (NO_HZ) guest raises no
+    /// periodic timer while halted, so without pumping here a keypress would sit
+    /// in the GUI queue until the halt budget expires (~seconds), making input
+    /// feel laggy and drop characters. Pumping inside the wait lets a keypress
+    /// enqueue a scancode, which the very next device tick delivers as IRQ1,
+    /// waking the guest within a device quantum.
+    #[cfg(feature = "alloc")]
+    fn pump_gui_input(&mut self) {
+        let mut scancodes_to_send = Vec::new();
+        let mut mouse_to_send = Vec::new();
+        let mut serial_input = Vec::new();
+        if let Some(ref mut gui) = self.gui {
+            gui.handle_events();
+            scancodes_to_send = gui.get_pending_scancodes();
+            mouse_to_send = gui.get_pending_mouse();
+            serial_input = gui.get_pending_serial_input();
+        }
+        for scancode in scancodes_to_send {
+            self.device_manager.keyboard.send_scancode(scancode);
+        }
+        for mouse in mouse_to_send {
+            self.device_manager
+                .keyboard
+                .mouse_motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons);
+        }
+        for byte in serial_input {
+            self.device_manager.serial.receive_byte(0, byte);
+        }
+    }
+
     /// Advance devices to the current Bochs virtual time.
     #[inline]
     pub fn advance_devices_to_pc_time(&mut self) {
@@ -2860,34 +2895,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // Counter for consecutive HLT+IF=0 zero-batches (transient recovery)
         let mut hlt_if0_count: u32 = 0;
         while instructions_executed < max_instructions && !self.stop_flag.load(Ordering::Relaxed) {
-            // 1. Handle GUI events (keyboard input) - do this first to avoid borrow conflicts
-
-            let mut scancodes_to_send = Vec::new();
-            let mut mouse_to_send = Vec::new();
-            let mut serial_input = Vec::new();
-            if let Some(ref mut gui) = self.gui {
-                gui.handle_events();
-                scancodes_to_send = gui.get_pending_scancodes();
-                mouse_to_send = gui.get_pending_mouse();
-                serial_input = gui.get_pending_serial_input();
-            }
-
-            // Send scancodes to keyboard device
-            for scancode in scancodes_to_send {
-                self.device_manager.keyboard.send_scancode(scancode);
-            }
-
-            // Forward mouse motion/buttons/wheel to the PS/2 aux device
-            for mouse in mouse_to_send {
-                self.device_manager
-                    .keyboard
-                    .mouse_motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons);
-            }
-
-            // Send serial input to COM1 (ttyS0)
-            for byte in serial_input {
-                self.device_manager.serial.receive_byte(0, byte);
-            }
+            // 1. Handle GUI events (keyboard/mouse/serial input) first.
+            self.pump_gui_input();
 
             // 2. Execute CPU instructions in batches
             let batch_size = (max_instructions - instructions_executed).min(INSTRUCTION_BATCH_SIZE);
@@ -3195,6 +3204,10 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
                             let mut hlt_budget = 0u64;
                             while hlt_budget < 100_000_000 {
+                                // Service host input while halted so an idle
+                                // (tickless) guest wakes promptly on a keypress,
+                                // instead of stalling for the whole halt budget.
+                                self.pump_gui_input();
                                 if self.has_interrupt()
                                     && (self.cpu.interrupts_enabled() || mwait_if)
                                 {
@@ -3293,6 +3306,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                     matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
                                 let mut hlt2 = 0u64;
                                 while hlt2 < 100_000_000 {
+                                    // Keep host input responsive during MWAIT idle.
+                                    self.pump_gui_input();
                                     if self.has_interrupt()
                                         && (self.cpu.interrupts_enabled() || mwait_if2)
                                     {
@@ -3626,6 +3641,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 let mwait_if = matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
                 let mut hlt_budget = 0u64;
                 while hlt_budget < 100_000_000 {
+                    // Service host input while halted (see run_interactive).
+                    self.pump_gui_input();
                     if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) {
                         break;
                     }
@@ -3685,27 +3702,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // Sync A20 state
         self.sync_a20_state();
 
-        // Handle keyboard scancodes and serial input from GUI
-        let mut scancodes_to_send = Vec::new();
-        let mut mouse_to_send = Vec::new();
-        let mut serial_input = Vec::new();
-        if let Some(ref mut gui) = self.gui {
-            gui.handle_events();
-            scancodes_to_send = gui.get_pending_scancodes();
-            mouse_to_send = gui.get_pending_mouse();
-            serial_input = gui.get_pending_serial_input();
-        }
-        for scancode in scancodes_to_send {
-            self.device_manager.keyboard.send_scancode(scancode);
-        }
-        for mouse in mouse_to_send {
-            self.device_manager
-                .keyboard
-                .mouse_motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons);
-        }
-        for byte in serial_input {
-            self.device_manager.serial.receive_byte(0, byte);
-        }
+        // Handle keyboard/mouse/serial input from GUI.
+        self.pump_gui_input();
 
         let shutdown = self.cpu.is_in_shutdown();
         Ok((total_executed, shutdown))
