@@ -101,6 +101,9 @@ pub struct DeviceManager {
     pub(crate) acpi_sm_needs_reregister: bool,
     /// Deferred: PAM registers changed, needs memory type update
     pub pam_needs_update: bool,
+    /// Deferred: a VGA PCI BAR (LFB or MMIO) changed, needs memory-handler
+    /// (re)registration at the new base.
+    pub(crate) vga_bar_needs_reregister: bool,
     /// Diagnostic: PIT fire count (check_irq0 returned true)
     pub diag_pit_fires: u64,
     /// Diagnostic: raise_irq(0) latched (irq_in was 0)
@@ -157,6 +160,7 @@ impl DeviceManager {
             acpi_pm_needs_reregister: false,
             acpi_sm_needs_reregister: false,
             pam_needs_update: false,
+            vga_bar_needs_reregister: false,
             diag_pit_fires: 0,
             diag_irq0_latched: 0,
             diag_irq0_already_high: 0,
@@ -251,6 +255,7 @@ impl DeviceManager {
             self.pci_ide_bar4_needs_reregister = false;
             self.acpi_pm_needs_reregister = false;
             self.acpi_sm_needs_reregister = false;
+            self.vga_bar_needs_reregister = false;
         }
 
         Ok(())
@@ -491,6 +496,8 @@ impl DeviceManager {
             0x09 => self.pci_ide.pci_read(address, io_len),
             // Device 1, Func 3: PIIX4 ACPI controller
             0x0B => self.acpi.pci_read(address, io_len),
+            // Device 2, Func 0: PCI VGA (returns 0xFFFFFFFF when pci_vga is off)
+            0x10 => self.vga.pci_read(address, io_len),
             // Unrecognized device
             _ => 0xFFFF_FFFF,
         }
@@ -540,8 +547,56 @@ impl DeviceManager {
             self.pam_needs_update = false;
             self.pci_bridge.apply_pam_to_memory(mem);
         }
+        if self.vga_bar_needs_reregister {
+            self.vga_bar_needs_reregister = false;
+            self.reregister_vga_bars(mem);
+        }
         // Sync pci_conf_addr to BxDevicesC
         io.pci_conf_addr = self.pci_conf_addr;
+    }
+
+    /// Apply committed VGA PCI BAR bases to the memory system: move the LFB
+    /// handler to a BIOS-assigned BAR0 base, and register the BAR2 MMIO window.
+    /// Bochs vga.cc pci_bar_change_notify + DEV_pci_set_base_mem.
+    fn reregister_vga_bars<'c>(&mut self, mem: &mut crate::memory::BxMemC<'c>) {
+        use crate::iodev::vga::PCI_VGA_MMIO_SIZE;
+        let device_id = crate::memory::MemoryDeviceId::Vga(&mut self.vga as *mut BxVgaC);
+
+        // BAR0: relocate the linear framebuffer.
+        if let Some((old_base, new_base)) = self.vga.take_pending_lfb_relocate() {
+            let size = self.vga.lfb_size() as u64;
+            let old_begin = old_base as u64;
+            let new_begin = new_base as u64;
+            if let Err(error) =
+                mem.unregister_memory_handlers(device_id, old_begin, old_begin + size - 1)
+            {
+                tracing::error!("VGA LFB unregister at {old_base:#010x} failed: {error:?}");
+            }
+            match mem.register_memory_handlers(device_id, new_begin, new_begin + size - 1) {
+                Ok(()) => {
+                    self.vga.set_lfb_base(new_base);
+                    tracing::debug!("VGA LFB relocated {old_base:#010x} -> {new_base:#010x}");
+                }
+                Err(error) => {
+                    tracing::error!("VGA LFB register at {new_base:#010x} failed: {error:?}");
+                }
+            }
+        }
+
+        // BAR2: register the VBE MMIO window at the assigned base.
+        if let Some(new_base) = self.vga.take_pending_mmio_base() {
+            let begin = new_base as u64;
+            let end = begin + PCI_VGA_MMIO_SIZE as u64 - 1;
+            match mem.register_memory_handlers(device_id, begin, end) {
+                Ok(()) => {
+                    self.vga.set_mmio_base(new_base);
+                    tracing::debug!("VGA BAR2 MMIO registered at {new_base:#010x}");
+                }
+                Err(error) => {
+                    tracing::error!("VGA BAR2 MMIO register at {new_base:#010x} failed: {error:?}");
+                }
+            }
+        }
     }
 
     /// Simulate time passing for timer-based devices
@@ -795,6 +850,12 @@ impl DeviceManager {
                             self.acpi_sm_needs_reregister = true;
                         }
                     }
+                    0x10 => {
+                        let change = self.vga.pci_write(reg_addr, value, io_len);
+                        if change.lfb || change.mmio {
+                            self.vga_bar_needs_reregister = true;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -992,5 +1053,76 @@ mod tests {
         // Trigger reset (bit 0 = 1)
         port.write(0x01);
         assert_eq!(port.reset_request, Some(ResetReason::Software));
+    }
+
+    // DeviceManager is large (VGA text buffers etc.); build it on a big stack,
+    // like the cet.rs tests, to avoid overflowing the small default test stack.
+    fn on_big_stack(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn vga_pci_bar0_commit_relocates_lfb_handler() {
+        on_big_stack(|| {
+            use crate::memory::{BxMemC, BxMemoryStubC, MemoryDeviceId};
+
+            let mut dm = DeviceManager::new();
+            dm.vga.enable_pci();
+            let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+            let mut mem = BxMemC::new(stub, false);
+
+            // Register the LFB at its default base (as vga.init would).
+            let vga_id = MemoryDeviceId::Vga(&mut dm.vga as *mut BxVgaC);
+            let size = dm.vga.lfb_size() as u64;
+            mem.register_memory_handlers(vga_id, 0xE000_0000, 0xE000_0000 + size - 1)
+                .unwrap();
+
+            // Guest relocates BAR0; process the deferred move.
+            let change = dm.vga.pci_write(0x10, 0xE800_0000, 4);
+            assert!(change.lfb);
+            dm.vga_bar_needs_reregister = true;
+            dm.reregister_vga_bars(&mut mem);
+
+            // Old base is free again; new base is occupied (1-page probes).
+            assert!(
+                mem.register_memory_handlers(MemoryDeviceId::None, 0xE000_0000, 0xE00F_FFFF)
+                    .is_ok(),
+                "old LFB base must be freed"
+            );
+            assert!(
+                mem.register_memory_handlers(MemoryDeviceId::None, 0xE800_0000, 0xE80F_FFFF)
+                    .is_err(),
+                "new LFB base must be occupied"
+            );
+        });
+    }
+
+    #[test]
+    fn vga_pci_bar2_commit_registers_mmio_window() {
+        on_big_stack(|| {
+            use crate::memory::{BxMemC, BxMemoryStubC, MemoryDeviceId};
+
+            let mut dm = DeviceManager::new();
+            dm.vga.enable_pci();
+            let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+            let mut mem = BxMemC::new(stub, false);
+
+            let change = dm.vga.pci_write(0x18, 0xF000_0000, 4);
+            assert!(change.mmio);
+            dm.vga_bar_needs_reregister = true;
+            dm.reregister_vga_bars(&mut mem);
+
+            assert!(dm.vga.is_mmio_addr(0xF000_0500));
+            assert!(
+                mem.register_memory_handlers(MemoryDeviceId::None, 0xF000_0000, 0xF000_0FFF)
+                    .is_err(),
+                "BAR2 MMIO window must be registered"
+            );
+        });
     }
 }

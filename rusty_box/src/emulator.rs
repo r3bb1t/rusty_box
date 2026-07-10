@@ -159,6 +159,10 @@ pub struct EmulatorConfig {
     pub ips: u32,
     /// Enable PCI support
     pub pci_enabled: bool,
+    /// Register the VGA adapter as a PCI device (`1234:1111`, class `0300`) so a
+    /// guest KMS driver (Linux `bochs-drm`) can bind for a high-res framebuffer.
+    /// Off by default; requires `pci_enabled`. Experimental.
+    pub pci_vga: bool,
     /// CPU parameters
     pub cpu_params: BxParams,
     /// Enable sync=slowdown clock synchronization.
@@ -176,6 +180,7 @@ impl Default for EmulatorConfig {
             memory_block_size: 128 * 1024,
             ips: 4_000_000,
             pci_enabled: true,
+            pci_vga: false,
             cpu_params: BxParams::default(),
             sync_slowdown: false,
         }
@@ -1150,6 +1155,12 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // Initialize device manager (actual hardware + I/O handler registration)
         self.device_manager
             .init(&mut self.devices, &mut self.memory)?;
+
+        // Register the VGA adapter on PCI when configured (experimental KMS path).
+        if self.config.pci_vga && self.config.pci_enabled {
+            self.device_manager.vga.enable_pci();
+            tracing::debug!("VGA registered as PCI device (1234:1111)");
+        }
 
         // Initialize PCI bridge DRAM row boundaries from RAM size.
         {

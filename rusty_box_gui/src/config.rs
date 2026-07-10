@@ -46,6 +46,9 @@ pub struct DisplayToml {
     pub height: Option<u16>,
     /// Pre-boot VBE bits-per-pixel (8/16/24/32).
     pub bpp: Option<u16>,
+    /// Register the VGA as a PCI device so Linux `bochs-drm` can bind for a KMS
+    /// framebuffer. Off by default; experimental (needs a guest boot to verify).
+    pub pci_vga: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -120,6 +123,8 @@ pub struct ResolvedConfig {
     /// Optional pre-boot VBE mode (width, height, bpp) applied to the VGA
     /// controller before reset. `None` leaves the built-in defaults.
     pub vga_mode: Option<VgaMode>,
+    /// Register the VGA on PCI (experimental KMS / `bochs-drm` path). Default off.
+    pub pci_vga: bool,
 }
 
 /// A pre-boot VBE display mode.
@@ -274,6 +279,8 @@ fn resolve_config_with_base(
         _ => None,
     };
 
+    let pci_vga = file.display.pci_vga.unwrap_or(false);
+
     let disk = resolve_disk(&file, args, config_dir)?;
     let cdrom = resolve_cdrom(&file, args, config_dir);
     let boot_order = resolve_boot_order(&file, args, display, disk.is_some(), cdrom.is_some())?;
@@ -297,6 +304,7 @@ fn resolve_config_with_base(
         log_level,
         config_path,
         vga_mode,
+        pci_vga,
     })
 }
 
@@ -368,6 +376,7 @@ impl ResolvedConfig {
             width: self.vga_mode.map(|mode| mode.width),
             height: self.vga_mode.map(|mode| mode.height),
             bpp: self.vga_mode.map(|mode| mode.bpp),
+            pci_vga: self.pci_vga.then_some(true),
         };
         let rom = RomToml {
             bios: Some(self.bios.clone()),
@@ -1380,6 +1389,7 @@ backend = "headless"
 width = 1920
 height = 1080
 bpp = 32
+pci_vga = true
 
 [rom]
 bios = "bios.bin"

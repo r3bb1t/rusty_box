@@ -128,6 +128,7 @@ where
         memory_block_size: kib_to_bytes("memory_block_kib", config.memory_block_kib)?,
         ips: config.ips,
         pci_enabled: config.pci,
+        pci_vga: config.pci_vga,
         sync_slowdown: config.sync_slowdown,
         cpu_params: config.cpu_params.clone(),
         ..EmulatorConfig::default()
@@ -549,6 +550,7 @@ mod tests {
             log_level: LogLevel::Warn,
             config_path: None,
             vga_mode: None,
+            pci_vga: false,
         })
         .unwrap_err();
 
@@ -610,6 +612,7 @@ mod tests {
             log_level: LogLevel::Warn,
             config_path: None,
             vga_mode: None,
+            pci_vga: false,
         }
     }
 
@@ -749,6 +752,7 @@ mod tests {
                 log_level: LogLevel::Warn,
                 config_path: None,
                 vga_mode: None,
+                pci_vga: false,
             }))
             .unwrap();
         drop(command_tx);
