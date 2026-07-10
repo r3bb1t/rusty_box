@@ -254,6 +254,15 @@ impl BxDevicesC {
         self.register_io_write_handler(device_id, port, name, mask);
     }
 
+    /// Unregister the read and write handlers for a port, restoring the
+    /// unhandled default. Bochs devices.cc `unregister_io_read_handler` +
+    /// `unregister_io_write_handler` (used when a PCI BAR moves).
+    pub fn unregister_io_handler(&mut self, port: u16) {
+        self.read_handlers[port as usize] = IoHandlerEntry::default();
+        self.write_handlers[port as usize] = IoHandlerEntry::default();
+        tracing::trace!("Unregistered I/O handlers for port {:#06x}", port);
+    }
+
     /// Read from an I/O port
     ///
     /// # Arguments
@@ -339,6 +348,38 @@ impl BxDevicesC {
                     } = *dm;
                     for &(irq, level) in &fwds[..count] {
                         ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
+                    }
+                }
+                // Arm a requested BM-DMA one-shot within the SAME I/O write,
+                // matching Bochs pci_ide.cc write:
+                // bx_pc_system.activate_timer(timer_index, 1, 0).
+                // (tick_devices drains any leftover when pcs_ptr is unset.)
+                if dm.pci_ide.pending_timer_arm.iter().any(Option::is_some) {
+                    if let Some(mut pcs_nn) = dm.pcs_ptr {
+                        // SAFETY: pcs_ptr follows the mem_ptr lifecycle — set
+                        // by the emulator before CPU execution, cleared after;
+                        // single-threaded I/O dispatch.
+                        let pcs = unsafe { pcs_nn.as_mut() };
+                        for ch in 0..2 {
+                            if let Some(usec) = dm.pci_ide.take_pending_timer_arm(ch) {
+                                match dm.pci_ide.bmdma[ch].timer_index {
+                                    Some(handle) => {
+                                        if let Err(error) =
+                                            pcs.activate_timer_usec(handle, usec, false)
+                                        {
+                                            tracing::error!(
+                                                "BM-DMA ch={ch}: timer arm failed: {error:?}"
+                                            );
+                                        }
+                                    }
+                                    None => {
+                                        tracing::error!(
+                                            "BM-DMA ch={ch}: arm requested without a timer handle"
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 // Consume PIC interrupt flags; propagated to io_bus below

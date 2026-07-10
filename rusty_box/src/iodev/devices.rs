@@ -49,6 +49,19 @@ pub struct Port92State {
     pub(crate) value: u8,
 }
 
+/// Fetch a BM-DMA PRD entry (physical address, raw size dword) from guest
+/// RAM. Bochs pci_ide.cc timer: DEV_MEM_READ_PHYSICAL(prd_current, 4, ...) x2.
+/// Reads past the end of RAM zero-fill (deterministic guest-error behavior).
+fn read_bmdma_prd(mem: &crate::memory::BxMemC<'_>, prd_addr: u32) -> (u32, u32) {
+    let mut raw = [0u8; 8];
+    let bytes = mem.peek_ram(prd_addr as usize, 8);
+    raw[..bytes.len()].copy_from_slice(bytes);
+    (
+        u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+        u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
+    )
+}
+
 /// Unified Device Manager
 ///
 /// Holds all hardware devices and manages their initialization,
@@ -120,6 +133,20 @@ pub struct DeviceManager {
     pub diag_vector_hist: [u32; 256],
     /// Pointer to BxMemC for fw_cfg DMA. Set temporarily during CPU execution.
     pub(crate) mem_ptr: Option<core::ptr::NonNull<BxMemC<'static>>>,
+    /// Pointer to BxPcSystemC so I/O writes can arm timers within the same
+    /// instruction (Bochs pci_ide.cc write: bx_pc_system.activate_timer).
+    /// Same lifecycle as `mem_ptr`: set before CPU execution, cleared after.
+    pub(crate) pcs_ptr: Option<core::ptr::NonNull<crate::pc_system::BxPcSystemC>>,
+    /// I/O base the BM-DMA ports are currently registered at (0 = none).
+    /// Lets a BAR4 move unregister the old range first, matching Bochs
+    /// devices.cc pci_write_handler_common BAR remapping.
+    pub(crate) bmdma_ports_base: u16,
+    /// BM-DMA sector staging buffer. Bochs pci_ide.cc timer() hands the drive
+    /// a pointer into the channel bounce buffer; here the drive callbacks need
+    /// `&mut BxPciIde` (abort/IRQ paths) while that buffer lives inside it, so
+    /// sectors stage through this scratch instead. Sized to the largest PRD
+    /// chunk (0x10000) so no transfer is ever clamped.
+    pub(crate) bmdma_scratch: [u8; 0x10000],
     /// System Control Port (Port 92h) — A20 gate and fast reset
     pub(crate) port92: SystemControlPort,
 }
@@ -169,6 +196,9 @@ impl DeviceManager {
             diag_total_usec: 0,
             diag_vector_hist: [0; 256],
             mem_ptr: None,
+            pcs_ptr: None,
+            bmdma_ports_base: 0,
+            bmdma_scratch: [0; 0x10000],
             port92: SystemControlPort::new(),
         }
     }
@@ -509,12 +539,24 @@ impl DeviceManager {
         if base == 0 {
             return;
         }
+        // A BAR4 move first unregisters the old range, matching Bochs
+        // devices.cc pci_write_handler_common (DEV_unregister_io*_handler on
+        // the previous BAR base before registering the new one).
+        let old_base = self.bmdma_ports_base;
+        if old_base != 0 && old_base != base {
+            for offset in 0..16u16 {
+                if self.pci_ide.bmdma_io_mask(offset as u8) != 0 {
+                    io.unregister_io_handler(old_base + offset);
+                }
+            }
+        }
         for offset in 0..16u16 {
             let mask = self.pci_ide.bmdma_io_mask(offset as u8);
             if mask != 0 {
                 io.register_io_handler(DeviceId::Pci, base + offset, "PCI IDE BM-DMA", mask);
             }
         }
+        self.bmdma_ports_base = base;
         tracing::debug!("PCI IDE BM-DMA ports registered at base {:#06x}", base);
     }
 
@@ -575,7 +617,7 @@ impl DeviceManager {
             match mem.register_memory_handlers(device_id, new_begin, new_begin + size - 1) {
                 Ok(()) => {
                     self.vga.set_lfb_base(new_base);
-                    tracing::debug!("VGA LFB relocated {old_base:#010x} -> {new_base:#010x}");
+                    tracing::info!("VGA LFB relocated {old_base:#010x} -> {new_base:#010x}");
                 }
                 Err(error) => {
                     tracing::error!("VGA LFB register at {new_base:#010x} failed: {error:?}");
@@ -590,11 +632,170 @@ impl DeviceManager {
             match mem.register_memory_handlers(device_id, begin, end) {
                 Ok(()) => {
                     self.vga.set_mmio_base(new_base);
-                    tracing::debug!("VGA BAR2 MMIO registered at {new_base:#010x}");
+                    tracing::info!("VGA BAR2 MMIO registered at {new_base:#010x}");
                 }
                 Err(error) => {
                     tracing::error!("VGA BAR2 MMIO register at {new_base:#010x} failed: {error:?}");
                 }
+            }
+        }
+    }
+
+    /// BM-DMA timer — walks the PRD table and pumps data between the drive
+    /// and guest RAM. Bochs pci_ide.cc `bx_pci_ide_c::timer()`.
+    ///
+    /// Bochs transfers directly between the drive and the channel bounce
+    /// buffer; here each sector passes through a small stack buffer because
+    /// the drive callbacks need `&mut BxPciIde` (abort/IRQ paths) while the
+    /// bounce buffer also lives in `BxPciIde::bmdma[channel]`.
+    pub fn pci_ide_timer<'c>(
+        &mut self,
+        channel: usize,
+        pcs: &mut crate::pc_system::BxPcSystemC,
+        mem: &mut crate::memory::BxMemC<'c>,
+    ) {
+        if channel >= 2 {
+            return;
+        }
+        let DeviceManager {
+            ref mut pci_ide,
+            ref mut harddrv,
+            ref mut pic,
+            ref mut bmdma_scratch,
+            ..
+        } = *self;
+
+        // Bochs pci_ide.cc timer: engine stopped or no PRD — nothing to do.
+        if (pci_ide.bmdma[channel].status & 0x01) == 0
+            || pci_ide.bmdma[channel].prd_current == 0
+        {
+            return;
+        }
+        let timer_index = match pci_ide.bmdma[channel].timer_index {
+            Some(index) => index,
+            None => {
+                tracing::error!("BM-DMA ch={channel}: timer fired without a registered handle");
+                return;
+            }
+        };
+        // Bochs pci_ide.cc timer: READ DMA waits for the drive's data_ready
+        // handshake (bmdma_start_transfer), re-polling at 1 us.
+        if pci_ide.bmdma[channel].cmd_rwcon && !pci_ide.bmdma[channel].data_ready {
+            if let Err(error) = pcs.activate_timer_usec(timer_index, 1, false) {
+                tracing::error!("BM-DMA ch={channel}: data-ready re-arm failed: {error:?}");
+            }
+            return;
+        }
+
+        // Fetch the current PRD entry (8 bytes: physical addr, size) from
+        // guest RAM. Bochs pci_ide.cc timer: DEV_MEM_READ_PHYSICAL.
+        let (prd_addr, prd_size_raw) = read_bmdma_prd(mem, pci_ide.bmdma[channel].prd_current);
+        let mut size = (prd_size_raw & 0xfffe) as usize;
+        if size == 0 {
+            size = 0x10000;
+        }
+
+        if pci_ide.bmdma[channel].cmd_rwcon {
+            // READ DMA: drive -> bounce buffer -> guest RAM (pci_ide.cc timer)
+            tracing::trace!("BM-DMA read ch={channel} addr={prd_addr:#010x} size={size:#x}");
+            let buffered =
+                pci_ide.bmdma[channel].buffer_top - pci_ide.bmdma[channel].buffer_idx;
+            let mut count = size as i64 - buffered as i64;
+            while count > 0 {
+                let mut sector_size = count as u32;
+                if harddrv.bmdma_read_sector(
+                    channel as u8,
+                    bmdma_scratch,
+                    &mut sector_size,
+                    pic,
+                    pci_ide,
+                ) {
+                    let top = pci_ide.bmdma[channel].buffer_top;
+                    let len = (sector_size as usize).min(bmdma_scratch.len());
+                    let end = (top + len).min(pci_ide.bmdma[channel].buffer.len());
+                    pci_ide.bmdma[channel].buffer[top..end]
+                        .copy_from_slice(&bmdma_scratch[..end - top]);
+                    pci_ide.bmdma[channel].buffer_top = end;
+                    count -= sector_size as i64;
+                } else {
+                    break;
+                }
+            }
+            if count > 0 {
+                // Drive ran dry mid-PRD: abort (pci_ide.cc timer).
+                harddrv.bmdma_complete(channel as u8, pic, pci_ide);
+                return;
+            }
+            let idx = pci_ide.bmdma[channel].buffer_idx;
+            let end = (idx + size).min(pci_ide.bmdma[channel].buffer.len());
+            mem.poke_ram(
+                prd_addr as usize,
+                &pci_ide.bmdma[channel].buffer[idx..end],
+            );
+            pci_ide.bmdma[channel].buffer_idx = end;
+        } else {
+            // WRITE DMA: guest RAM -> bounce buffer -> drive (pci_ide.cc timer)
+            tracing::trace!("BM-DMA write ch={channel} addr={prd_addr:#010x} size={size:#x}");
+            let top = pci_ide.bmdma[channel].buffer_top;
+            let end = (top + size).min(pci_ide.bmdma[channel].buffer.len());
+            let data = mem.peek_ram(prd_addr as usize, end - top);
+            let copied = data.len();
+            pci_ide.bmdma[channel].buffer[top..top + copied].copy_from_slice(data);
+            // Guest PRD pointing past end of RAM: zero-fill the shortfall so
+            // the transfer stays deterministic (Bochs reads whatever the
+            // physical page returns).
+            pci_ide.bmdma[channel].buffer[top + copied..end].fill(0);
+            pci_ide.bmdma[channel].buffer_top = end;
+
+            let mut count = (pci_ide.bmdma[channel].buffer_top
+                - pci_ide.bmdma[channel].buffer_idx) as i64;
+            while count > 511 {
+                let idx = pci_ide.bmdma[channel].buffer_idx;
+                bmdma_scratch[..512]
+                    .copy_from_slice(&pci_ide.bmdma[channel].buffer[idx..idx + 512]);
+                if harddrv.bmdma_write_sector(channel as u8, &bmdma_scratch[..512], pic, pci_ide)
+                {
+                    pci_ide.bmdma[channel].buffer_idx += 512;
+                    count -= 512;
+                } else {
+                    break;
+                }
+            }
+            if count >= 512 {
+                // Drive refused a sector mid-PRD: abort (pci_ide.cc timer).
+                harddrv.bmdma_complete(channel as u8, pic, pci_ide);
+                return;
+            }
+        }
+
+        if prd_size_raw & 0x8000_0000 != 0 {
+            // End of PRD table: transfer done (pci_ide.cc timer).
+            pci_ide.bmdma[channel].status &= !0x01;
+            pci_ide.bmdma[channel].status |= 0x04;
+            pci_ide.bmdma[channel].prd_current = 0;
+            harddrv.bmdma_complete(channel as u8, pic, pci_ide);
+        } else {
+            // Compact residue to the buffer start and move to the next PRD
+            // (pci_ide.cc timer: memmove + prd_current += 8 + re-arm).
+            let idx = pci_ide.bmdma[channel].buffer_idx;
+            let top = pci_ide.bmdma[channel].buffer_top;
+            let residue = top - idx;
+            if residue > 0 {
+                pci_ide.bmdma[channel].buffer.copy_within(idx..top, 0);
+            }
+            pci_ide.bmdma[channel].buffer_top = residue;
+            pci_ide.bmdma[channel].buffer_idx = 0;
+            pci_ide.bmdma[channel].prd_current += 8;
+            let (_, next_size_raw) =
+                read_bmdma_prd(mem, pci_ide.bmdma[channel].prd_current);
+            let mut next_size = next_size_raw & 0xfffe;
+            if next_size == 0 {
+                next_size = 0x10000;
+            }
+            if let Err(error) =
+                pcs.activate_timer_usec(timer_index, (next_size >> 4) | 0x10, false)
+            {
+                tracing::error!("BM-DMA ch={channel}: next-PRD re-arm failed: {error:?}");
             }
         }
     }
@@ -1099,6 +1300,158 @@ mod tests {
                     .is_err(),
                 "new LFB base must be occupied"
             );
+        });
+    }
+
+    #[test]
+    fn bmdma_read_dma_end_to_end_moves_disk_data_to_guest_ram() {
+        on_big_stack(|| {
+            use crate::iodev::harddrv::DeviceType;
+            use crate::memory::{BxMemC, BxMemoryStubC};
+            use crate::pc_system::{BxPcSystemC, TimerOwner};
+
+            let mut dm = DeviceManager::new();
+            let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+            let mut mem = BxMemC::new(stub, false);
+            let mut pcs = BxPcSystemC::new();
+
+            // Register the channel-0 BM-DMA timer as the emulator would.
+            let handle = pcs
+                .register_timer(TimerOwner::PciIdeCh0, 0, false, false, "test bmdma")
+                .unwrap();
+            dm.pci_ide.bmdma[0].timer_index = Some(handle);
+
+            // In-memory disk: 2 sectors with a recognizable pattern.
+            let disk: &'static [u8] = alloc::vec::Vec::leak(
+                (0..1024u32).map(|i| (i % 251) as u8).collect(),
+            );
+            {
+                let drive = &mut dm.harddrv.channels[0].drives[0];
+                drive.device_type = DeviceType::Disk;
+                drive.attach_data_ref(disk);
+            }
+
+            // BIOS assigns BAR4 → BM-DMA present.
+            assert!(dm.pci_ide.pci_write(0x20, 0x0000_C001, 4));
+            assert!(dm.pci_ide.bmdma_present());
+
+            // Guest builds a single-entry PRD table at 0x8000:
+            // target 0x4000, 1024 bytes, EOT.
+            let mut prd = [0u8; 8];
+            prd[0..4].copy_from_slice(&0x4000u32.to_le_bytes());
+            prd[4..8].copy_from_slice(&(1024u32 | 0x8000_0000).to_le_bytes());
+            mem.poke_ram(0x8000, &prd);
+
+            // Guest issues READ DMA (LBA 0, 2 sectors) via the port interface.
+            {
+                let DeviceManager {
+                    ref mut harddrv,
+                    ref mut pic,
+                    ref mut pci_ide,
+                    ..
+                } = dm;
+                harddrv.write(0x1F2, 2, 1, pic, pci_ide); // sector count
+                harddrv.write(0x1F3, 0, 1, pic, pci_ide); // LBA 7:0
+                harddrv.write(0x1F4, 0, 1, pic, pci_ide); // LBA 15:8
+                harddrv.write(0x1F5, 0, 1, pic, pci_ide); // LBA 23:16
+                harddrv.write(0x1F6, 0xE0, 1, pic, pci_ide); // LBA mode, drive 0
+                harddrv.write(0x1F7, 0xC8, 1, pic, pci_ide); // READ DMA
+            }
+            assert!(
+                dm.pci_ide.bmdma[0].data_ready,
+                "READ DMA must signal bmdma_start_transfer"
+            );
+
+            // Guest programs DTPR and starts the engine (read direction).
+            dm.pci_ide.bmdma_write(0xC004, 0x8000, 4);
+            dm.pci_ide.bmdma_write(0xC000, 0x09, 1);
+            let arm = dm.pci_ide.take_pending_timer_arm(0);
+            assert_eq!(arm, Some(1));
+            pcs.activate_timer_usec(handle, 1, false).unwrap();
+
+            // Timer fires: single PRD with EOT completes the transfer.
+            dm.pci_ide_timer(0, &mut pcs, &mut mem);
+
+            assert_eq!(
+                mem.peek_ram(0x4000, 1024),
+                disk,
+                "disk data must land at the PRD target"
+            );
+            let status = dm.pci_ide.bmdma[0].status;
+            assert_eq!(status & 0x01, 0, "engine active bit must clear on EOT");
+            assert_ne!(status & 0x04, 0, "IRQ bit must set on EOT");
+            assert_eq!(dm.pci_ide.bmdma[0].prd_current, 0);
+            let drive = &dm.harddrv.channels[0].drives[0];
+            assert!(
+                drive.controller.interrupt_pending,
+                "bmdma_complete must raise the drive interrupt"
+            );
+        });
+    }
+
+    #[test]
+    fn bmdma_bar4_move_unregisters_old_ports() {
+        on_big_stack(|| {
+            let mut dm = DeviceManager::new();
+            let mut io = BxDevicesC::new();
+
+            // BIOS assigns BAR4 at 0xC000 and the ports register there.
+            assert!(dm.pci_ide.pci_write(0x20, 0x0000_C001, 4));
+            dm.register_pci_ide_bmdma_ports(&mut io);
+            assert_eq!(io.read_handlers[0xC000].device_id, DeviceId::Pci);
+            assert_eq!(io.write_handlers[0xC004].device_id, DeviceId::Pci);
+
+            // Guest moves BAR4 to 0xD000: the old range must be unregistered
+            // (Bochs devices.cc pci_write_handler_common BAR remapping).
+            assert!(dm.pci_ide.pci_write(0x20, 0x0000_D001, 4));
+            dm.register_pci_ide_bmdma_ports(&mut io);
+            assert_eq!(io.read_handlers[0xC000].device_id, DeviceId::None);
+            assert_eq!(io.write_handlers[0xC004].device_id, DeviceId::None);
+            assert_eq!(io.read_handlers[0xD000].device_id, DeviceId::Pci);
+            assert_eq!(io.write_handlers[0xD004].device_id, DeviceId::Pci);
+        });
+    }
+
+    #[test]
+    fn bmdma_start_arms_timer_within_the_io_write() {
+        on_big_stack(|| {
+            use crate::pc_system::{BxPcSystemC, TimerOwner};
+
+            let mut dm = DeviceManager::new();
+            let mut io = BxDevicesC::new();
+            let mut pcs = BxPcSystemC::new();
+            pcs.initialize(1_000_000); // 1 tick = 1 us
+
+            let handle = pcs
+                .register_timer(TimerOwner::PciIdeCh0, 0, false, false, "test bmdma")
+                .unwrap();
+            dm.pci_ide.bmdma[0].timer_index = Some(handle);
+
+            // BAR4 assigned; BM-DMA ports registered on the I/O bus.
+            assert!(dm.pci_ide.pci_write(0x20, 0x0000_C001, 4));
+            dm.register_pci_ide_bmdma_ports(&mut io);
+
+            // Wire the execution-time pointers exactly like the emulator loop.
+            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
+            dm.pcs_ptr = Some(core::ptr::NonNull::from(&mut pcs));
+
+            // Guest programs DTPR and starts the engine: the one-shot must be
+            // armed during this same outp (Bochs pci_ide.cc write:
+            // bx_pc_system.activate_timer(timer_index, 1, 0)).
+            io.outp(0xC004, 0x8000, 4, 0);
+            io.outp(0xC000, 0x09, 1, 0);
+            io.clear_device_manager();
+            dm.pcs_ptr = None;
+
+            assert_eq!(
+                dm.pci_ide.take_pending_timer_arm(0),
+                None,
+                "arm must be drained by the outp itself"
+            );
+            pcs.tickn(1);
+            let (owners, _, count) = pcs.take_fired_timers();
+            assert_eq!(count, 1, "the 1 us one-shot must fire on the next tick");
+            assert_eq!(owners[0], TimerOwner::PciIdeCh0);
         });
     }
 

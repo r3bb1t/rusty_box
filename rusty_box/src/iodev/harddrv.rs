@@ -889,7 +889,7 @@ impl AtaDrive {
     }
 
     /// Fill the IDENTIFY PACKET DEVICE response (Bochs identify_ATAPI_drive, harddrv.cc)
-    fn identify_atapi_drive(&mut self) {
+    fn identify_atapi_drive(&mut self, bmdma_present: bool) {
         self.id_drive = [0u16; 256];
 
         // Word 0: General config — ATAPI device, removable, CMD DRQ, 12-byte packets
@@ -919,19 +919,25 @@ impl AtaDrive {
             self.id_drive[27 + i] = (hi << 8) | lo;
         }
 
-        // Word 49: Capabilities — LBA + DMA supported
-        // Bochs harddrv.cc: (1<<9)|(1<<8)
-        self.id_drive[49] = (1 << 9) | (1 << 8);
+        // Word 49: Capabilities — LBA always, DMA only with BM-DMA present.
+        // Bochs harddrv.cc identify_ATAPI_drive: gated on bmdma_present().
+        self.id_drive[49] = if bmdma_present {
+            (1 << 9) | (1 << 8)
+        } else {
+            1 << 9
+        };
 
         // Word 53: Field validity (words 64-70 valid, words 54-58 valid, words 88 valid)
         // Bochs harddrv.cc: 7
         self.id_drive[53] = 7;
 
         // Word 63: Multiword DMA modes supported (bits 0-2) and active (bits 8-10)
-        // Bochs harddrv.cc: modes 0-2 supported, active mode from mdma_mode
-        self.id_drive[63] = 0x07; // MDMA modes 0-2 supported
-        if self.controller.mdma_mode > 0 {
-            self.id_drive[63] |= (self.controller.mdma_mode as u16) << 8;
+        // Bochs harddrv.cc identify_ATAPI_drive: gated on bmdma_present().
+        if bmdma_present {
+            self.id_drive[63] = 0x07; // MDMA modes 0-2 supported
+            if self.controller.mdma_mode > 0 {
+                self.id_drive[63] |= (self.controller.mdma_mode as u16) << 8;
+            }
         }
 
         // Word 64: PIO modes supported — PIO mode 0
@@ -948,10 +954,12 @@ impl AtaDrive {
         self.id_drive[80] = 0x7E;
 
         // Word 88: Ultra DMA modes supported (bits 0-5) and active (bits 8-13)
-        // Bochs harddrv.cc: modes 0-5 supported, active mode from udma_mode
-        self.id_drive[88] = 0x3F; // UDMA modes 0-5 supported
-        if self.controller.udma_mode > 0 {
-            self.id_drive[88] |= (self.controller.udma_mode as u16) << 8;
+        // Bochs harddrv.cc identify_ATAPI_drive: gated on bmdma_present().
+        if bmdma_present {
+            self.id_drive[88] = 0x3F; // UDMA modes 0-5 supported
+            if self.controller.udma_mode > 0 {
+                self.id_drive[88] |= (self.controller.udma_mode as u16) << 8;
+            }
         }
 
         self.identify_set = true;
@@ -1239,7 +1247,7 @@ impl AtaDrive {
     }
 
     /// Fill identify buffer
-    fn fill_identify_buffer(&mut self) {
+    fn fill_identify_buffer(&mut self, bmdma_present: bool) {
         let buf = &mut self.controller.buffer;
         buf.fill(0);
 
@@ -1337,9 +1345,10 @@ impl AtaDrive {
         buf[96] = 0x01;
         buf[97] = 0x00;
 
-        // Word 49: Capabilities
+        // Word 49: Capabilities — bit 9 LBA, bit 8 DMA when BM-DMA present.
+        // Bochs harddrv.cc identify_drive: id_drive[49] gated on bmdma_present().
         buf[98] = 0x00;
-        buf[99] = 0x02; // LBA supported
+        buf[99] = if bmdma_present { 0x03 } else { 0x02 };
 
         // Word 51: PIO data transfer cycle timing mode (0x0200 = mode 2)
         buf[102] = 0x00;
@@ -1381,6 +1390,13 @@ impl AtaDrive {
         buf[121] = ((total >> 8) & 0xFF) as u8;
         buf[122] = ((total >> 16) & 0xFF) as u8;
         buf[123] = ((total >> 24) & 0xFF) as u8;
+
+        // Word 63: multiword DMA modes — low byte supported (0-2), high byte
+        // active. Bochs harddrv.cc identify_drive: gated on bmdma_present().
+        if bmdma_present {
+            buf[126] = 0x07;
+            buf[127] = self.controller.mdma_mode;
+        }
 
         // Word 64: PIO modes supported (0 = none beyond PIO2)
         // (buf[128-129] = 0 from fill)
@@ -1429,6 +1445,13 @@ impl AtaDrive {
         // Word 87: Command set/feature default (Bochs harddrv.cc)
         buf[174] = 0x00;
         buf[175] = 0x40;
+
+        // Word 88: ultra DMA modes — low byte supported (0-5), high byte
+        // active. Bochs harddrv.cc identify_drive: gated on bmdma_present().
+        if bmdma_present {
+            buf[176] = 0x3F;
+            buf[177] = self.controller.udma_mode;
+        }
 
         // Word 93: Hardware reset result (Bochs harddrv.cc)
         // = 1 | (1<<14) | 0x2000 = 0x6001
@@ -1815,6 +1838,10 @@ impl BxHardDriveC {
             if drive.controller.num_sectors == 0 {
                 return false;
             }
+            // Bochs bmdma_read_sector: ide_read_sector(channel, buffer, 512)
+            // — exactly one sector per callback; buffer_size may hold a stale
+            // count from a previous PIO/ATAPI command.
+            drive.controller.buffer_size = SECTOR_SIZE;
             if !drive.ide_read_sector() {
                 return false;
             }
@@ -1856,8 +1883,12 @@ impl BxHardDriveC {
                     return true;
                 }
                 _ => {
-                    // Other ATAPI commands: copy from controller buffer
-                    // Bochs harddrv.cc
+                    // Other ATAPI commands: copy from the controller buffer.
+                    // Bochs harddrv.cc bmdma_read_sector default case:
+                    // memcpy(buffer, controller->buffer,
+                    //        min(*sector_size, atapi.total_bytes_remaining))
+                    // — *sector_size is left unchanged (the engine still
+                    // advances by it), and there is no buffer_size clamp.
                     let remaining = drive.atapi.total_bytes_remaining as u32;
                     let copy_size = if *sector_size > remaining {
                         remaining as usize
@@ -1866,7 +1897,7 @@ impl BxHardDriveC {
                     };
                     let copy_size = copy_size
                         .min(buffer.len())
-                        .min(drive.controller.buffer_size);
+                        .min(drive.controller.buffer.len());
                     buffer[..copy_size].copy_from_slice(&drive.controller.buffer[..copy_size]);
                     return true;
                 }
@@ -1944,11 +1975,12 @@ impl BxHardDriveC {
             .remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
         drive.controller.status.insert(AtaStatus::DRDY);
         if is_cdrom {
-            // Bochs harddrv.cc: set interrupt_reason I/O=1, C/D=1
+            // Bochs harddrv.cc: set interrupt_reason I/O=1, C/D=1, REL=0
             drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x03;
         } else {
-            // Bochs harddrv.cc: disk completion
-            drive.controller.status.remove(AtaStatus::DWF);
+            // Bochs harddrv.cc bmdma_complete disk branch: write_fault=0,
+            // seek_complete=1, corrected_data=0
+            drive.controller.status.remove(AtaStatus::DWF | AtaStatus::CORR);
             drive.controller.status.insert(AtaStatus::DSC);
         }
 
@@ -3977,6 +4009,59 @@ impl BxHardDriveC {
                     }
                 }
             }
+            // 0xC8 = READ DMA, 0x25 = READ DMA EXT (LBA48)
+            0xC8 | 0x25 => {
+                // Bochs harddrv.cc case 0xC8/0x25: disks with BM-DMA only.
+                if drive.device_type == DeviceType::Disk && pci_ide.bmdma_present() {
+                    drive.lba48_transform(command == 0x25);
+                    if drive.calculate_logical_address().is_none() {
+                        self.command_aborted(channel_num, command, pic, pci_ide);
+                        return;
+                    }
+                    // Our commands complete synchronously (no seek timer), so
+                    // apply the Bochs seek_timer DMA completion directly:
+                    // BSY=0, DRDY=1, DSC=1, DRQ=1, then signal the BM-DMA
+                    // engine. Bochs harddrv.cc seek_timer case 0xC8/0x25:
+                    // DEV_ide_bmdma_start_transfer(channel).
+                    drive.controller.error = AtaError::empty();
+                    drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC | AtaStatus::DRQ;
+                    tracing::trace!(
+                        "ATA: READ DMA lba={} num_sectors={}",
+                        drive.get_lba(),
+                        drive.controller.num_sectors
+                    );
+                    pci_ide.bmdma_start_transfer(channel_num as u8);
+                } else {
+                    // Bochs harddrv.cc: "write cmd 0x%02x (READ DMA) not supported"
+                    tracing::debug!("ATA: READ DMA {command:#04x} rejected (no BM-DMA)");
+                    self.command_aborted(channel_num, command, pic, pci_ide);
+                    return;
+                }
+            }
+            // 0xCA = WRITE DMA, 0x35 = WRITE DMA EXT (LBA48)
+            0xCA | 0x35 => {
+                // Bochs harddrv.cc case 0xCA/0x35: disks with BM-DMA only.
+                if drive.device_type == DeviceType::Disk && pci_ide.bmdma_present() {
+                    drive.lba48_transform(command == 0x35);
+                    if drive.calculate_logical_address().is_none() {
+                        self.command_aborted(channel_num, command, pic, pci_ide);
+                        return;
+                    }
+                    // Bochs harddrv.cc case 0xCA/0x35: DRDY=1, DSC=1, DRQ=1;
+                    // data flows when the guest starts the BM-DMA engine.
+                    drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC | AtaStatus::DRQ;
+                    tracing::trace!(
+                        "ATA: WRITE DMA lba={} num_sectors={}",
+                        drive.get_lba(),
+                        drive.controller.num_sectors
+                    );
+                } else {
+                    // Bochs harddrv.cc: "write cmd 0x%02x (WRITE DMA) not supported"
+                    tracing::debug!("ATA: WRITE DMA {command:#04x} rejected (no BM-DMA)");
+                    self.command_aborted(channel_num, command, pic, pci_ide);
+                    return;
+                }
+            }
             // 0x30 = WRITE SECTORS with retries, 0x31 = without retries, 0x34 = WRITE SECTORS EXT (LBA48)
             ATA_CMD_WRITE_SECTORS | 0x31 | ATA_CMD_WRITE_SECTORS_EXT => {
                 // Bochs harddrv.cc — WRITE SECTORS (+ EXT variant)
@@ -4090,7 +4175,7 @@ impl BxHardDriveC {
                     return;
                 }
                 tracing::trace!("ATA: IDENTIFY command");
-                drive.fill_identify_buffer();
+                drive.fill_identify_buffer(pci_ide.bmdma_present());
                 drive.controller.status.insert(AtaStatus::DRQ);
                 drive.controller.interrupt_pending = true;
             }
@@ -4225,7 +4310,7 @@ impl BxHardDriveC {
                     drive.controller.buffer_index = 0;
 
                     if !drive.identify_set {
-                        drive.identify_atapi_drive();
+                        drive.identify_atapi_drive(pci_ide.bmdma_present());
                     }
                     // Convert id_drive[] to controller buffer (byte-swapped)
                     for i in 0..256 {

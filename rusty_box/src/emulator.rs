@@ -508,6 +508,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             .unwrap_unchecked()
             .set_mem_ptr(mem_static);
         (*dm_ptr.as_ptr()).mem_ptr = Some(mem_static);
+        (*dm_ptr.as_ptr()).pcs_ptr = Some(ps_ptr);
 
         let pic_ref: *mut _ = &mut self.device_manager.pic;
         let dma_ref: *mut _ = &mut self.device_manager.dma;
@@ -666,6 +667,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.devices.clear_device_manager();
         self.devices.clear_mem_ptr();
         self.device_manager.mem_ptr = None;
+        self.device_manager.pcs_ptr = None;
         result.map(|_| total_elapsed_ticks)
     }
 
@@ -1159,7 +1161,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // Register the VGA adapter on PCI when configured (experimental KMS path).
         if self.config.pci_vga && self.config.pci_enabled {
             self.device_manager.vga.enable_pci();
-            tracing::debug!("VGA registered as PCI device (1234:1111)");
+            tracing::info!("VGA registered as PCI device (1234:1111, class 0300)");
         }
 
         // Initialize PCI bridge DRAM row boundaries from RAM size.
@@ -1814,6 +1816,26 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 }
             }
         }
+        // Drain deferred BM-DMA timer arms (Bochs pci_ide.cc write:
+        // bx_pc_system.activate_timer(timer_index, 1, 0)). Deferred because
+        // the I/O dispatch path has no pc_system access; serviced here like
+        // the deferred seek completion above.
+        for ch in 0..2 {
+            if let Some(usec) = self.device_manager.pci_ide.take_pending_timer_arm(ch) {
+                match self.device_manager.pci_ide.bmdma[ch].timer_index {
+                    Some(handle) => {
+                        if let Err(error) =
+                            self.pc_system.activate_timer_usec(handle, usec, false)
+                        {
+                            tracing::error!("BM-DMA ch={ch}: timer arm failed: {error:?}");
+                        }
+                    }
+                    None => {
+                        tracing::error!("BM-DMA ch={ch}: arm requested without a timer handle");
+                    }
+                }
+            }
+        }
         // Process any deferred PCI port re-registrations and PAM changes
         self.device_manager
             .process_pci_deferred(&mut self.devices, &mut self.memory);
@@ -1945,12 +1967,20 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 TimerOwner::NullTimer => {}
                 TimerOwner::PciIdeCh0 => {
                     for _ in 0..counts[entry] {
-                        self.device_manager.pci_ide.timer(0);
+                        self.device_manager.pci_ide_timer(
+                            0,
+                            &mut self.pc_system,
+                            &mut self.memory,
+                        );
                     }
                 }
                 TimerOwner::PciIdeCh1 => {
                     for _ in 0..counts[entry] {
-                        self.device_manager.pci_ide.timer(1);
+                        self.device_manager.pci_ide_timer(
+                            1,
+                            &mut self.pc_system,
+                            &mut self.memory,
+                        );
                     }
                 }
                 TimerOwner::Lapic(cpu_index) => {

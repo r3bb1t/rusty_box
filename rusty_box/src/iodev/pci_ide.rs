@@ -103,6 +103,13 @@ pub struct BxPciIde {
 
     /// BAR4 I/O base address (BM-DMA registers)
     pub bmdma_base: u32,
+
+    /// Deferred one-shot timer arm request per channel, in microseconds.
+    /// Set by the BM-DMA command-register write (Bochs pci_ide.cc write:
+    /// `bx_pc_system.activate_timer(timer_index, 1, 0)`); drained by the
+    /// emulator loop, which owns `BxPcSystemC`. The I/O dispatch path has no
+    /// pc_system access, so the arm is deferred by at most one CPU batch.
+    pub(crate) pending_timer_arm: [Option<u32>; 2],
 }
 
 impl Default for BxPciIde {
@@ -119,6 +126,7 @@ impl BxPciIde {
             pci_conf: [0; PCI_CONF_SIZE],
             bmdma: [BmDmaChannel::new(), BmDmaChannel::new()],
             bmdma_base: 0,
+            pending_timer_arm: [None; 2],
         };
         ide.init_pci_conf();
         ide
@@ -135,12 +143,10 @@ impl BxPciIde {
         self.pci_conf[0x03] = 0x70;
         // Revision: 0x00
         self.pci_conf[0x08] = 0x00;
-        // Class code: IDE controller — ISA-compatible, no bus master DMA.
-        // Bochs uses 0x80 (bus master capable) because its DMA engine works.
-        // Our BM-DMA timer is disabled, so advertising bus master causes the
-        // kernel to attempt DMA transfers that never complete (30-second timeouts).
-        // Set 0x00 to force PIO mode until the DMA engine is implemented.
-        self.pci_conf[0x09] = 0x00;
+        // Class code 0x010180: IDE controller, ISA-compatible, bus-master
+        // capable (prog-if 0x80). Bochs pci_ide.cc init_pci_conf(0x8086,
+        // 0x7010, 0x00, 0x010180, 0x00, 0).
+        self.pci_conf[0x09] = 0x80;
         self.pci_conf[0x0A] = 0x01;
         self.pci_conf[0x0B] = 0x01;
         // Header type: single function (but shared with ISA bridge)
@@ -160,15 +166,15 @@ impl BxPciIde {
         self.pci_conf[0x43] = 0x80; // Channel 1 enabled
         self.pci_conf[0x44] = 0x00;
 
-        // BAR4: NOT pre-configured. The DMA timer is currently disabled,
-        // so advertising BAR4 causes 30-second kernel DMA timeouts before
-        // PIO fallback. With BAR4=0, the kernel uses PIO directly (no timeout).
-        // When DMA is re-enabled, restore BAR4 pre-configuration here.
+        // BAR4 (pci_conf[0x20..0x24]) and bmdma_base are NOT reset: BAR
+        // assignments persist across reset, matching Bochs where reset()
+        // leaves pci_bar[] untouched (pci_ide.cc reset).
 
         // Reset BM-DMA state
         for ch in self.bmdma.iter_mut() {
             ch.reset();
         }
+        self.pending_timer_arm = [None; 2];
     }
 
     /// Check if BM-DMA is present (BAR4 configured).
@@ -193,18 +199,15 @@ impl BxPciIde {
         }
     }
 
-    /// BM-DMA timer function — processes PRD tables and transfers data.
-    /// Bochs: bx_pci_ide_c::timer() (pci_ide.cc)
-    ///
-    /// TEMPORARILY DISABLED: The DMA timer is not connected. When the
-    /// DMA engine is fully implemented, this will process PRD tables
-    /// and perform bus-master DMA transfers via parameters passed from
-    /// the emulator timer dispatch.
-    pub(crate) fn timer(&mut self, _channel: usize) {
-        // DMA timer disabled — PIO path handles all transfers.
-        // When DMA is re-enabled, this method will take &mut BxPcSystemC,
-        // &mut BxHardDriveC, &mut BxPicC, and &mut [u8] (RAM) as parameters
-        // from the emulator's timer dispatch.
+    /// Drain a deferred one-shot timer arm request (microseconds) for a
+    /// channel. Set by the BM-DMA command-register write; the emulator loop
+    /// (which owns `BxPcSystemC`) drains it and activates the channel timer.
+    pub(crate) fn take_pending_timer_arm(&mut self, channel: usize) -> Option<u32> {
+        if channel < 2 {
+            self.pending_timer_arm[channel].take()
+        } else {
+            None
+        }
     }
 
     // ─── BM-DMA I/O Read ─────────────────────────────────────────────────
@@ -285,8 +288,11 @@ impl BxPciIde {
                             "write"
                         },
                     );
-                    // TODO: activate DMA timer when DMA engine is connected.
-                    // Bochs pci_ide.cc: bx_pc_system.activate_timer(period=1)
+                    // Bochs pci_ide.cc write:
+                    // bx_pc_system.activate_timer(timer_index, 1, 0).
+                    // Deferred: the emulator loop drains this and arms the
+                    // one-shot (I/O dispatch has no pc_system access).
+                    self.pending_timer_arm[channel] = Some(1);
                 } else if (value & 0x01 == 0) && self.bmdma[channel].cmd_ssbm {
                     // Stop DMA — Bochs pci_ide.cc
                     self.bmdma[channel].cmd_ssbm = false;
@@ -332,39 +338,56 @@ impl BxPciIde {
     /// Write to PCI configuration space.
     /// Bochs: bx_pci_ide_c::pci_write_handler() (pci_ide.cc)
     #[inline(never)]
-    pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> bool {
-        let bar4_changed = false;
-
-        // BAR0-BAR3 and some reserved ranges are read-only (pci_ide.cc)
+    pub fn pci_write(&mut self, address: u8, mut value: u32, io_len: u8) -> bool {
+        // BAR0-BAR3 and reserved 0x24..0x40 are read-only (Bochs pci_ide.cc
+        // pci_write_handler skips 0x10..0x20 and 0x24..0x40; BAR4 at
+        // 0x20..0x24 IS writable — the 16-port BM-DMA I/O BAR).
         if (0x10..0x20).contains(&address) || (address > 0x23 && address < 0x40) {
             return false;
         }
 
+        // BAR4 size probe: a full-dword write of >= 0xfffffff0 must read back
+        // the size mask for the 16-port I/O BAR. Bochs devices.cc
+        // pci_write_handler_common (generic BAR sizing for init_bar_io(4, 16)).
+        const BAR4_SIZE: u32 = 16;
+        let is_bar4 = (0x20..0x24).contains(&address);
+        let mut probe = false;
+        if is_bar4 && value >= 0xffff_fff0 {
+            value = (value & !(BAR4_SIZE - 1)) | 0x01; // I/O-space type bit
+            probe = true;
+        }
+
+        let mut bar4_written = false;
         for i in 0..io_len as usize {
             let addr = address as usize + i;
             if addr >= PCI_CONF_SIZE {
                 break;
             }
-            let value8 = ((value >> (i * 8)) & 0xFF) as u8;
+            let mut value8 = ((value >> (i * 8)) & 0xFF) as u8;
             let oldval = self.pci_conf[addr];
 
             match addr {
                 // Status registers — read-only (pci_ide.cc)
                 0x05 | 0x06 => {}
-                // Command register (pci_ide.cc)
+                // Command register (pci_ide.cc): I/O enable + bus master only
                 0x04 => {
                     self.pci_conf[addr] = value8 & 0x05;
                 }
-                // BAR4 (BM-DMA base address) — hardwired to 0 (no BM-DMA).
-                // Our BM-DMA timer is disabled, so we must not advertise BAR4.
-                // If BAR4 responds to sizing probes, the BIOS assigns an address
-                // and the kernel (ata_piix) attempts DMA transfers that never
-                // complete — causing 30-second timeouts on every CD-ROM read.
-                // When the DMA engine is implemented, restore the 16-port I/O BAR:
-                //   addr 0x20: (value8 & 0xF0) | 0x01
-                //   addr 0x21-0x23: value8
-                0x20..=0x23 => {
-                    // BAR4 writes ignored — hardwired to 0
+                // BAR4 low byte: keep the I/O-space type bit (Bochs
+                // devices.cc pci_write_handler_common BAR type preservation).
+                0x20 => {
+                    value8 = (value8 & 0xF0) | 0x01;
+                    if value8 != oldval {
+                        bar4_written = true;
+                    }
+                    self.pci_conf[addr] = value8;
+                }
+                // BAR4 upper bytes: stored verbatim
+                0x21..=0x23 => {
+                    if value8 != oldval {
+                        bar4_written = true;
+                    }
+                    self.pci_conf[addr] = value8;
                 }
                 // Default: store (pci_ide.cc)
                 _ => {
@@ -373,20 +396,19 @@ impl BxPciIde {
             }
         }
 
-        // Update BAR4 if changed — also enforce I/O BAR type in low nibble
-        if bar4_changed {
-            // Enforce BAR4 low nibble: bit 0 = 1 (I/O), bits 1-3 = 0 (size mask)
-            // This makes sizing probe return 0xFFFFFFF1 for 16-port BAR.
-            // Bochs: pci_write_handler_common (devices.cc)
-            self.pci_conf[0x20] = (self.pci_conf[0x20] & 0xF0) | 0x01;
+        // Commit the new BM-DMA base — never on a size probe (the probe value
+        // is transient; the BIOS writes the real base right after).
+        let mut bar4_changed = false;
+        if bar4_written && !probe {
             let new_base = u32::from_le_bytes([
                 self.pci_conf[0x20],
                 self.pci_conf[0x21],
                 self.pci_conf[0x22],
                 self.pci_conf[0x23],
-            ]) & 0xFFF0; // Align to 16 ports
+            ]) & !(BAR4_SIZE - 1);
             if new_base != self.bmdma_base {
                 self.bmdma_base = new_base;
+                bar4_changed = true;
                 tracing::debug!("PCI IDE: new BM-DMA base address: {:#06x}", self.bmdma_base);
             }
         }
@@ -462,14 +484,53 @@ mod tests {
     }
 
     #[test]
-    fn test_bar4_pci_write() {
+    fn test_bar4_pci_write_commits_base() {
         let mut ide = BxPciIde::new();
         ide.reset();
-        // BAR4 writes are currently hardwired to 0 (DMA disabled),
-        // so pci_write should return false (no BAR change).
+        // BIOS assigns the 16-port I/O BAR (Bochs init_bar_io(4, 16, ...)).
         let changed = ide.pci_write(0x20, 0x0000C001, 4);
+        assert!(changed);
+        assert_eq!(ide.bmdma_base, 0xC000);
+        assert!(ide.bmdma_present());
+        // Low nibble keeps the I/O-space type bit.
+        assert_eq!(ide.pci_conf[0x20] & 0x0F, 0x01);
+    }
+
+    #[test]
+    fn test_bar4_size_probe_never_commits() {
+        let mut ide = BxPciIde::new();
+        ide.reset();
+        // Size probe: full-ones write must read back the 16-port size mask
+        // and must NOT move the committed base.
+        let changed = ide.pci_write(0x20, 0xFFFF_FFFF, 4);
         assert!(!changed);
-        assert_eq!(ide.bmdma_base, 0); // BAR4 stays 0 while DMA is disabled
+        assert_eq!(ide.bmdma_base, 0);
+        assert_eq!(ide.pci_read(0x20, 4), 0xFFFF_FFF1);
+        // The real base write right after the probe commits normally.
+        let changed = ide.pci_write(0x20, 0x0000C001, 4);
+        assert!(changed);
+        assert_eq!(ide.bmdma_base, 0xC000);
+    }
+
+    #[test]
+    fn test_bar4_base_survives_reset() {
+        let mut ide = BxPciIde::new();
+        ide.reset();
+        assert!(ide.pci_write(0x20, 0x0000C001, 4));
+        ide.reset();
+        // Bochs pci_ide.cc reset() leaves BAR assignments untouched.
+        assert_eq!(ide.bmdma_base, 0xC000);
+        assert!(ide.bmdma_present());
+    }
+
+    #[test]
+    fn test_prog_if_advertises_bus_master() {
+        let ide = BxPciIde::new();
+        // Class code 0x010180 — prog-if bit 7 (bus master capable). Linux
+        // ata_piix only probes BAR4 when this bit is set.
+        assert_eq!(ide.pci_conf[0x09], 0x80);
+        assert_eq!(ide.pci_conf[0x0A], 0x01);
+        assert_eq!(ide.pci_conf[0x0B], 0x01);
     }
 
     #[test]
@@ -478,15 +539,19 @@ mod tests {
         ide.bmdma_base = 0xC000;
         ide.bmdma[0].dtpr = 0x1000;
 
-        // Start DMA (timer activation is a no-op since DMA timer is not connected)
+        // Start DMA — requests the deferred 1 us one-shot timer arm
+        // (Bochs pci_ide.cc write: activate_timer(timer_index, 1, 0)).
         ide.bmdma_write(0xC000, 0x01, 1);
         assert!(ide.bmdma[0].cmd_ssbm);
         assert_eq!(ide.bmdma[0].status & 0x01, 0x01);
         assert_eq!(ide.bmdma[0].prd_current, 0x1000);
+        assert_eq!(ide.take_pending_timer_arm(0), Some(1));
+        assert_eq!(ide.take_pending_timer_arm(0), None); // drained
 
         // Stop DMA
         ide.bmdma_write(0xC000, 0x00, 1);
         assert!(!ide.bmdma[0].cmd_ssbm);
         assert_eq!(ide.bmdma[0].status & 0x01, 0x00);
+        assert!(!ide.bmdma[0].data_ready);
     }
 }

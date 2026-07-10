@@ -205,6 +205,21 @@ impl BxMemC<'_> {
         }
     }
 
+    /// Write raw RAM bytes (no A20 masking, no memory handlers).
+    /// Mirror of `peek_ram` for device-initiated physical writes (bus-master
+    /// DMA). Bochs `BX_MEM_C::dmaWritePhysicalPage` (memory.cc) likewise
+    /// bypasses the handler layer and writes RAM pages directly.
+    /// Writes up to `data.len()` bytes at `addr`, truncated at end of RAM.
+    pub fn poke_ram(&mut self, addr: usize, data: &[u8]) {
+        let stub = &mut self.inherited_memory_stub;
+        let real_addr = stub.vector_offset + addr;
+        let ram = stub.actual_vector_mut();
+        if real_addr < ram.len() {
+            let end = (real_addr + data.len()).min(ram.len());
+            ram[real_addr..end].copy_from_slice(&data[..end - real_addr]);
+        }
+    }
+
     /// Get the current A20 mask
     pub fn a20_mask(&self) -> BxPhyAddress {
         self.a20_mask
