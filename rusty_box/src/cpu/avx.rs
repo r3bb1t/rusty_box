@@ -702,50 +702,578 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// VPMOVZXBD — Packed Zero-Extend Bytes to Dwords (VEX.L aware)
-    /// VEX.128: 4 bytes → 4 dwords (XMM)
-    /// VEX.256: 8 bytes → 8 dwords (YMM)
+    // ========================================================================
+    // VPMOVSX/VPMOVZX — sign/zero extension (Bochs avx2.cc VPMOVSXBW_VdqWdqR
+    // et al.). Each form reads a fixed source width (VL256 doubles the VL128
+    // width — Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3820..25 /
+    // 30..35) and widens into the full destination, zeroing above VL.
+    // ========================================================================
+
+    /// Read the widening source for VPMOVSX/VPMOVZX: `bytes` source bytes
+    /// (2/4/8/16) from the low bytes of the rm register or from memory,
+    /// zero-padded to 16 bytes.
+    fn vex_pmov_read(&mut self, instr: &Instruction, bytes: usize) -> super::Result<[u8; 16]> {
+        let mut out = [0u8; 16];
+        if instr.mod_c0() {
+            let src = self.read_xmm_reg(instr.src1());
+            out[..bytes].copy_from_slice(&src.raw()[..bytes]);
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            match bytes {
+                2 => out[..2].copy_from_slice(&self.v_read_word(seg, eaddr)?.to_le_bytes()),
+                4 => out[..4].copy_from_slice(&self.v_read_dword(seg, eaddr)?.to_le_bytes()),
+                8 => out[..8].copy_from_slice(&self.v_read_qword(seg, eaddr)?.to_le_bytes()),
+                _ => out.copy_from_slice(self.v_read_xmmword(seg, eaddr)?.raw()),
+            }
+        }
+        Ok(out)
+    }
+
+    /// VPMOVSXBW — sign-extend 8 (VL128) / 16 (VL256) bytes to words.
+    pub(super) fn vpmovsxbw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let src = self.vex_pmov_read(instr, 16)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..16 {
+                result.set_ymm16u(i, src[i] as i8 as i16 as u16);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_pmov_read(instr, 8)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..8 {
+                result.set_xmm16u(i, src[i] as i8 as i16 as u16);
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPMOVSXBD — sign-extend 4 (VL128) / 8 (VL256) bytes to dwords.
+    pub(super) fn vpmovsxbd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let src = self.vex_pmov_read(instr, 8)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..8 {
+                result.set_ymm32u(i, src[i] as i8 as i32 as u32);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_pmov_read(instr, 4)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..4 {
+                result.set_xmm32u(i, src[i] as i8 as i32 as u32);
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPMOVSXBQ — sign-extend 2 (VL128) / 4 (VL256) bytes to qwords.
+    pub(super) fn vpmovsxbq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let src = self.vex_pmov_read(instr, 4)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..4 {
+                result.set_ymm64u(i, src[i] as i8 as i64 as u64);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_pmov_read(instr, 2)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..2 {
+                result.set_xmm64u(i, src[i] as i8 as i64 as u64);
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPMOVSXWD — sign-extend 4 (VL128) / 8 (VL256) words to dwords.
+    pub(super) fn vpmovsxwd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let src = self.vex_pmov_read(instr, 16)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..8 {
+                let w = u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]);
+                result.set_ymm32u(i, w as i16 as i32 as u32);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_pmov_read(instr, 8)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..4 {
+                let w = u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]);
+                result.set_xmm32u(i, w as i16 as i32 as u32);
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPMOVSXWQ — sign-extend 2 (VL128) / 4 (VL256) words to qwords.
+    pub(super) fn vpmovsxwq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let src = self.vex_pmov_read(instr, 8)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..4 {
+                let w = u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]);
+                result.set_ymm64u(i, w as i16 as i64 as u64);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_pmov_read(instr, 4)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..2 {
+                let w = u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]);
+                result.set_xmm64u(i, w as i16 as i64 as u64);
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPMOVSXDQ — sign-extend 2 (VL128) / 4 (VL256) dwords to qwords.
+    pub(super) fn vpmovsxdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let src = self.vex_pmov_read(instr, 16)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..4 {
+                let d = u32::from_le_bytes([
+                    src[i * 4],
+                    src[i * 4 + 1],
+                    src[i * 4 + 2],
+                    src[i * 4 + 3],
+                ]);
+                result.set_ymm64u(i, d as i32 as i64 as u64);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_pmov_read(instr, 8)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..2 {
+                let d = u32::from_le_bytes([
+                    src[i * 4],
+                    src[i * 4 + 1],
+                    src[i * 4 + 2],
+                    src[i * 4 + 3],
+                ]);
+                result.set_xmm64u(i, d as i32 as i64 as u64);
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPMOVZXBW — zero-extend 8 (VL128) / 16 (VL256) bytes to words.
+    pub(super) fn vpmovzxbw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let src = self.vex_pmov_read(instr, 16)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..16 {
+                result.set_ymm16u(i, src[i] as u16);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_pmov_read(instr, 8)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..8 {
+                result.set_xmm16u(i, src[i] as u16);
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPMOVZXBD — zero-extend 4 (VL128) / 8 (VL256) bytes to dwords.
     pub(super) fn vpmovzxbd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let dst_idx = instr.dst();
-
         if instr.get_vl() >= 1 {
-            // 256-bit: read 8 bytes, zero-extend each to dword
-            let src_bytes: [u8; 8] = if instr.mod_c0() {
-                // Register form: lower 8 bytes of XMM
-                let src = self.read_xmm_reg(instr.src1());
-                let mut bytes = [0u8; 8];
-                bytes.copy_from_slice(&src.raw()[..8]);
-                bytes
-            } else {
-                let seg = BxSegregs::from(instr.seg());
-                let eaddr = self.resolve_addr(instr);
-                let q = self.v_read_qword(seg, eaddr)?;
-                q.to_le_bytes()
-            };
+            let src = self.vex_pmov_read(instr, 8)?;
             let mut result = BxPackedYmmRegister::default();
-            for (i, &byte) in src_bytes.iter().enumerate() {
-                result.set_ymm32u(i, byte as u32);
+            for i in 0..8 {
+                result.set_ymm32u(i, src[i] as u32);
             }
-            self.write_ymm_reg(dst_idx, result);
+            self.write_ymm_reg(instr.dst(), result);
         } else {
-            // 128-bit: read 4 bytes, zero-extend each to dword
-            let src_bytes: [u8; 4] = if instr.mod_c0() {
-                let src = self.read_xmm_reg(instr.src1());
-                let mut bytes = [0u8; 4];
-                bytes.copy_from_slice(&src.raw()[..4]);
-                bytes
-            } else {
-                let seg = BxSegregs::from(instr.seg());
-                let eaddr = self.resolve_addr(instr);
-                let d = self.v_read_dword(seg, eaddr)?;
-                d.to_le_bytes()
-            };
+            let src = self.vex_pmov_read(instr, 4)?;
             let mut result = BxPackedXmmRegister::default();
-            for (i, &byte) in src_bytes.iter().enumerate() {
-                result.set_xmm32u(i, byte as u32);
+            for i in 0..4 {
+                result.set_xmm32u(i, src[i] as u32);
             }
-            self.write_xmm_reg(dst_idx, result);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPMOVZXBQ — zero-extend 2 (VL128) / 4 (VL256) bytes to qwords.
+    pub(super) fn vpmovzxbq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let src = self.vex_pmov_read(instr, 4)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..4 {
+                result.set_ymm64u(i, src[i] as u64);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_pmov_read(instr, 2)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..2 {
+                result.set_xmm64u(i, src[i] as u64);
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPMOVZXWD — zero-extend 4 (VL128) / 8 (VL256) words to dwords.
+    pub(super) fn vpmovzxwd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let src = self.vex_pmov_read(instr, 16)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..8 {
+                let w = u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]);
+                result.set_ymm32u(i, w as u32);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_pmov_read(instr, 8)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..4 {
+                let w = u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]);
+                result.set_xmm32u(i, w as u32);
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPMOVZXWQ — zero-extend 2 (VL128) / 4 (VL256) words to qwords.
+    pub(super) fn vpmovzxwq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let src = self.vex_pmov_read(instr, 8)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..4 {
+                let w = u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]);
+                result.set_ymm64u(i, w as u64);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_pmov_read(instr, 4)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..2 {
+                let w = u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]);
+                result.set_xmm64u(i, w as u64);
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPMOVZXDQ — zero-extend 2 (VL128) / 4 (VL256) dwords to qwords.
+    pub(super) fn vpmovzxdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let src = self.vex_pmov_read(instr, 16)?;
+            let mut result = BxPackedYmmRegister::default();
+            for i in 0..4 {
+                let d = u32::from_le_bytes([
+                    src[i * 4],
+                    src[i * 4 + 1],
+                    src[i * 4 + 2],
+                    src[i * 4 + 3],
+                ]);
+                result.set_ymm64u(i, d as u64);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_pmov_read(instr, 8)?;
+            let mut result = BxPackedXmmRegister::default();
+            for i in 0..2 {
+                let d = u32::from_le_bytes([
+                    src[i * 4],
+                    src[i * 4 + 1],
+                    src[i * 4 + 2],
+                    src[i * 4 + 3],
+                ]);
+                result.set_xmm64u(i, d as u64);
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // VPTEST / VMOVMSKPS / VMOVMSKPD / VPABS / VLDDQU-adjacent VEX forms
+    // ========================================================================
+
+    /// VPTEST — logical compare over the full VL (Bochs avx.cc VPTEST_VdqWdqR):
+    /// ZF = ((rm AND dst) == 0), CF = ((rm AND NOT dst) == 0).
+    pub(super) fn vptest(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        // Bochs avx.cc VPTEST_VdqWdqR: clearEFlagsOSZAPC()
+        self.oszapc.set_oszapc_logic_32(1);
+        if instr.get_vl() >= 1 {
+            let op1 = self.read_ymm_reg(instr.dst());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut zf = true;
+            let mut cf = true;
+            for i in 0..4 {
+                if op2.ymm64u(i) & op1.ymm64u(i) != 0 {
+                    zf = false;
+                }
+                if op2.ymm64u(i) & !op1.ymm64u(i) != 0 {
+                    cf = false;
+                }
+            }
+            self.oszapc.set_zf(zf);
+            self.oszapc.set_cf(cf);
+        } else {
+            let op1 = self.read_xmm_reg(instr.dst());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let mut zf = true;
+            let mut cf = true;
+            for i in 0..2 {
+                if op2.xmm64u(i) & op1.xmm64u(i) != 0 {
+                    zf = false;
+                }
+                if op2.xmm64u(i) & !op1.xmm64u(i) != 0 {
+                    cf = false;
+                }
+            }
+            self.oszapc.set_zf(zf);
+            self.oszapc.set_cf(cf);
+        }
+        Ok(())
+    }
+
+    /// VMOVMSKPS — dword sign bits over VL (Bochs avx.cc VMOVMSKPS_GdUps):
+    /// 4-bit (VL128) or 8-bit (VL256) mask, zero-extended into the GPR.
+    pub(super) fn vmovmskps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut mask: u32 = 0;
+        if instr.get_vl() >= 1 {
+            let src = self.read_ymm_reg(instr.src1());
+            for i in 0..8 {
+                if src.ymm32u(i) & 0x8000_0000 != 0 {
+                    mask |= 1 << i;
+                }
+            }
+        } else {
+            let src = self.read_xmm_reg(instr.src1());
+            for i in 0..4 {
+                if src.xmm32u(i) & 0x8000_0000 != 0 {
+                    mask |= 1 << i;
+                }
+            }
+        }
+        self.set_gpr32(instr.dst().into(), mask);
+        Ok(())
+    }
+
+    /// VMOVMSKPD — qword sign bits over VL (Bochs avx.cc VMOVMSKPD_GdUpd):
+    /// 2-bit (VL128) or 4-bit (VL256) mask, zero-extended into the GPR.
+    pub(super) fn vmovmskpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut mask: u32 = 0;
+        if instr.get_vl() >= 1 {
+            let src = self.read_ymm_reg(instr.src1());
+            for i in 0..4 {
+                if src.ymm64u(i) & 0x8000_0000_0000_0000 != 0 {
+                    mask |= 1 << i;
+                }
+            }
+        } else {
+            let src = self.read_xmm_reg(instr.src1());
+            for i in 0..2 {
+                if src.xmm64u(i) & 0x8000_0000_0000_0000 != 0 {
+                    mask |= 1 << i;
+                }
+            }
+        }
+        self.set_gpr32(instr.dst().into(), mask);
+        Ok(())
+    }
+
+    /// VPABSB — per-byte absolute value over VL (Bochs HANDLE_AVX_1OP<xmm_pabsb>).
+    pub(super) fn vpabsb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let mut op = self.vex_read_src2_ymm(instr)?;
+            for lane in 0..2 {
+                let mut x = op.ymm128(lane);
+                super::sse::pabsb_lane(&mut x);
+                op.set_ymm128(lane, x);
+            }
+            self.write_ymm_reg(instr.dst(), op);
+        } else {
+            let mut op = self.vex_read_src2_xmm(instr)?;
+            super::sse::pabsb_lane(&mut op);
+            self.write_xmm_reg(instr.dst(), op);
+        }
+        Ok(())
+    }
+
+    /// VPABSW — per-word absolute value over VL (Bochs HANDLE_AVX_1OP<xmm_pabsw>).
+    pub(super) fn vpabsw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let mut op = self.vex_read_src2_ymm(instr)?;
+            for lane in 0..2 {
+                let mut x = op.ymm128(lane);
+                super::sse::pabsw_lane(&mut x);
+                op.set_ymm128(lane, x);
+            }
+            self.write_ymm_reg(instr.dst(), op);
+        } else {
+            let mut op = self.vex_read_src2_xmm(instr)?;
+            super::sse::pabsw_lane(&mut op);
+            self.write_xmm_reg(instr.dst(), op);
+        }
+        Ok(())
+    }
+
+    /// VPABSD — per-dword absolute value over VL (Bochs HANDLE_AVX_1OP<xmm_pabsd>).
+    pub(super) fn vpabsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let mut op = self.vex_read_src2_ymm(instr)?;
+            for lane in 0..2 {
+                let mut x = op.ymm128(lane);
+                super::sse::pabsd_lane(&mut x);
+                op.set_ymm128(lane, x);
+            }
+            self.write_ymm_reg(instr.dst(), op);
+        } else {
+            let mut op = self.vex_read_src2_xmm(instr)?;
+            super::sse::pabsd_lane(&mut op);
+            self.write_xmm_reg(instr.dst(), op);
+        }
+        Ok(())
+    }
+
+    /// VINSERTPS — insert dword with zero mask (Bochs avx.cc
+    /// VINSERTPS_VpsHpsWssIbR/M); vvvv is the first source, upper bits zeroed.
+    pub(super) fn vinsertps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let control = instr.ib();
+        let op2 = if instr.mod_c0() {
+            self.read_xmm_reg(instr.src1())
+                .xmm32u(((control >> 6) & 3) as usize)
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_dword(seg, eaddr)?
+        };
+        let mut op1 = self.read_xmm_reg(instr.src2());
+        super::sse::insertps_core(&mut op1, op2, control);
+        self.write_xmm_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// VMPSADBW — multiple SADs, per-128-bit lane (Bochs avx2.cc
+    /// VMPSADBW_VdqHdqWdqIbR); the upper lane consumes imm8 bits [5:3].
+    pub(super) fn vmpsadbw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let ib = instr.ib();
+        if instr.get_vl() >= 1 {
+            let op1 = self.read_ymm_reg(instr.src2());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..2 {
+                let control = if lane == 0 { ib } else { ib >> 3 };
+                result.set_ymm128(
+                    lane,
+                    super::sse::mpsadbw_lane(&op1.ymm128(lane), &op2.ymm128(lane), control),
+                );
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let op1 = self.read_xmm_reg(instr.src2());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let result = super::sse::mpsadbw_lane(&op1, &op2, ib);
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPHMINPOSUW — horizontal minimum unsigned word (Bochs sse.cc
+    /// PHMINPOSUW_VdqWdqR shared by the V128 form), upper bits zeroed.
+    pub(super) fn vphminposuw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.vex_read_src2_xmm(instr)?;
+        let result = super::sse::phminposuw_core(&op);
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// VMOVQ VqWq (VEX.128.F3.0F 7E) — load/move low qword, zero the rest
+    /// (Bochs ia_opcodes.def BX_IA_VMOVQ_VqWq → MOVQ_VqWqR / MOVSD_VsdWsdM).
+    pub(super) fn vmovq_vq_wq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let val = if instr.mod_c0() {
+            self.xmm_lo_qword(instr.src1())
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(seg, eaddr)?
+        };
+        let mut op = BxPackedXmmRegister::default();
+        op.set_xmm64u(0, val);
+        self.write_xmm_reg(instr.dst(), op);
+        Ok(())
+    }
+
+    /// VMOVQ WqVq (VEX.128.66.0F D6) — store low qword; the register form
+    /// zeroes the destination above bit 63 (Bochs ia_opcodes.def
+    /// BX_IA_VMOVQ_WqVq → MOVQ_VqWqR / MOVSD_WsdVsdM).
+    pub(super) fn vmovq_wq_vq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.mod_c0() {
+            let mut op = BxPackedXmmRegister::default();
+            op.set_xmm64u(0, self.xmm_lo_qword(instr.src1()));
+            self.write_xmm_reg(instr.dst(), op);
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            let val = self.xmm_lo_qword(instr.src1());
+            self.v_write_qword(seg, eaddr, val)?;
+        }
+        Ok(())
+    }
+
+    /// VPBLENDVB — variable byte blend (Bochs avx.cc VPBLENDVB_VdqHdqWdqIbR
+    /// via simd_int.h xmm_pblendvb). The mask register is is4 (imm8[7:4],
+    /// decoded into src3); blending is per-byte sign bit, per 128-bit lane.
+    pub(super) fn vpblendvb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let mut result = self.read_ymm_reg(instr.src2());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mask = self.read_ymm_reg(instr.src3());
+            for lane in 0..2 {
+                let mut r = result.ymm128(lane);
+                super::sse::pblendvb_lane(&mut r, &op2.ymm128(lane), &mask.ymm128(lane));
+                result.set_ymm128(lane, r);
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let mut result = self.read_xmm_reg(instr.src2());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let mask = self.read_xmm_reg(instr.src3());
+            super::sse::pblendvb_lane(&mut result, &op2, &mask);
+            self.write_xmm_reg(instr.dst(), result);
         }
         Ok(())
     }
@@ -1513,7 +2041,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for lane in 0..8 {
                 let (a, b, c) =
                     vex_fma_operands_u32(form, v.ymm32u(lane), h.ymm32u(lane), w.ymm32u(lane));
-                result.set_ymm32u(lane, f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status));
+                result.set_ymm32u(
+                    lane,
+                    f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
+                );
             }
             self.write_ymm_reg(dst_idx, result);
         } else {
@@ -1524,7 +2055,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for lane in 0..4 {
                 let (a, b, c) =
                     vex_fma_operands_u32(form, v.xmm32u(lane), h.xmm32u(lane), w.xmm32u(lane));
-                result.set_xmm32u(lane, f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status));
+                result.set_xmm32u(
+                    lane,
+                    f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
+                );
             }
             self.write_xmm_reg(dst_idx, result);
         }
@@ -1550,7 +2084,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for lane in 0..4 {
                 let (a, b, c) =
                     vex_fma_operands_u64(form, v.ymm64u(lane), h.ymm64u(lane), w.ymm64u(lane));
-                result.set_ymm64u(lane, f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status));
+                result.set_ymm64u(
+                    lane,
+                    f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
+                );
             }
             self.write_ymm_reg(dst_idx, result);
         } else {
@@ -1561,7 +2098,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for lane in 0..2 {
                 let (a, b, c) =
                     vex_fma_operands_u64(form, v.xmm64u(lane), h.xmm64u(lane), w.xmm64u(lane));
-                result.set_xmm64u(lane, f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status));
+                result.set_xmm64u(
+                    lane,
+                    f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
+                );
             }
             self.write_xmm_reg(dst_idx, result);
         }
@@ -2478,7 +3018,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     #[inline]
-    fn vex_read_src2_xmm(&mut self, instr: &Instruction) -> super::Result<BxPackedXmmRegister> {
+    pub(super) fn vex_read_src2_xmm(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedXmmRegister> {
         if instr.mod_c0() {
             Ok(self.read_xmm_reg(instr.src1()))
         } else {
@@ -2489,7 +3032,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     #[inline]
-    fn vex_read_src2_ymm(&mut self, instr: &Instruction) -> super::Result<BxPackedYmmRegister> {
+    pub(super) fn vex_read_src2_ymm(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedYmmRegister> {
         if instr.mod_c0() {
             Ok(self.read_ymm_reg(instr.src1()))
         } else {

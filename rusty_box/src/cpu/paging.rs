@@ -1645,14 +1645,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
             if tlb_entry.lpf == lpf && (tlb_entry.access_bits & needed_bit) != 0 {
                 // TLB hit — return cached physical address directly.
-                self.perf_tlb_hit += 1;
+                #[cfg(feature = "profiling")]
+                {
+                    self.perf_tlb_hit += 1;
+                }
                 let paddr = tlb_entry.ppf | (laddr & 0xFFF);
                 return Ok(paddr);
             }
         }
 
         // ---- DTLB miss — full page table walk ----
-        self.perf_tlb_miss += 1;
+        #[cfg(feature = "profiling")]
+        {
+            self.perf_tlb_miss += 1;
+        }
         let (paddr, combined_access, lpf_mask, pkey) =
             self.page_walk_for_dtlb(laddr, user, is_write, is_shadow_stack)?;
         let paddr = self.apply_a20(paddr);
@@ -1970,7 +1976,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         is_write: bool,
         is_shadow_stack: bool,
     ) -> Result<(u64, u32, u32, u32)> {
-        self.perf_page_walk += 1;
+        #[cfg(feature = "profiling")]
+        {
+            self.perf_page_walk += 1;
+        }
         if self.long_mode() {
             return self.page_walk_for_dtlb_long_mode(laddr, user, is_write, is_shadow_stack);
         }

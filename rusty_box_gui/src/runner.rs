@@ -42,10 +42,49 @@ pub fn run_resolved(config: ResolvedConfig) -> Result<RunSummary, RunError> {
 pub(crate) fn create_configured_disk_images(config: &ResolvedConfig) -> Result<(), RunError> {
     if let Some(disk) = &config.disk {
         if let Some(creation) = &disk.creation {
-            crate::disk_images::create_startup_disk(creation)?;
+            match crate::disk_images::provision_startup_disk(creation)? {
+                crate::disk_images::DiskProvisionOutcome::Created(created) => {
+                    tracing::info!(
+                        "startup disk: created {} ({} bytes)",
+                        created.path.display(),
+                        created.bytes
+                    );
+                }
+                crate::disk_images::DiskProvisionOutcome::Reused { path, bytes } => {
+                    tracing::info!(
+                        "startup disk: reusing existing image {} ({bytes} bytes)",
+                        path.display()
+                    );
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// Human-readable summary of what launching this config will do to the startup
+/// disk, or `None` when there is no startup image to provision. Used to warn the
+/// user before a potentially slow flat-file allocation.
+#[cfg(feature = "gui-egui")]
+pub(crate) fn startup_disk_action(config: &ResolvedConfig) -> Option<String> {
+    let creation = config.disk.as_ref()?.creation.as_ref()?;
+    if creation.overwrite {
+        Some(format!(
+            "Recreating disk image {} ({}) — overwrite is on, so any existing data is discarded. \
+             Allocating the full file can take a while; the window may look idle until it finishes.",
+            creation.path.display(),
+            creation.size.display()
+        ))
+    } else if creation.path.exists() {
+        None // reusing an existing image is instant; no warning needed
+    } else {
+        Some(format!(
+            "Creating disk image {} ({}). Allocating the full flat file can take a while — \
+             the window may look idle until the guest starts.",
+            creation.path.display(),
+            creation.size.display()
+        ))
+    }
 }
 
 fn prepare_configured_media_files(
@@ -94,7 +133,26 @@ where
         ..EmulatorConfig::default()
     };
 
+    #[cfg(not(feature = "guest-trace"))]
     let mut emu = Emulator::<Corei7SkylakeX>::new(emulator_config)?;
+    // Diagnostic build: run the CPU with the guest-death tracer installed.
+    // Single-CPU only — new_with_instrumentation rejects SMP configs.
+    #[cfg(feature = "guest-trace")]
+    let mut emu = {
+        let trace_log = crate::guest_trace::GuestTracer::default_log_path();
+        let tracer = crate::guest_trace::GuestTracer::create(&trace_log).map_err(|source| {
+            RunError::FileRead {
+                kind: "guest-trace log",
+                path: PathBuf::from(&trace_log),
+                source,
+            }
+        })?;
+        eprintln!("guest-trace: recording guest evidence to {trace_log}");
+        Emulator::<Corei7SkylakeX, crate::guest_trace::GuestTracer>::new_with_instrumentation(
+            emulator_config,
+            tracer,
+        )?
+    };
     if let Some(stop_flag) = stop_flag {
         emu.stop_flag = stop_flag;
     }
@@ -215,6 +273,16 @@ fn run_egui_emulator_loop(
         match command {
             crate::app::NativeEmulatorCommand::Start(config) => loop {
                 let stop_flag = prepare_egui_run(&shared);
+                // Warn in the window that a (possibly slow) disk allocation is
+                // about to happen, before run_with_gui blocks on it. Reusing an
+                // existing image returns None here (instant, no warning).
+                if create_startup_disks {
+                    if let Some(status) = startup_disk_action(&config) {
+                        if let Ok(mut display) = shared.lock() {
+                            display.startup_status = Some(status);
+                        }
+                    }
+                }
                 let bridge = BridgeGui::new(Arc::clone(&shared));
                 let summary = match run_with_gui(
                     config.clone(),
@@ -253,6 +321,7 @@ fn prepare_egui_run(shared: &Arc<Mutex<SharedDisplay>>) -> Arc<AtomicBool> {
         display.start_pending = false;
         display.reset_requested = false;
         display.runtime_error = None;
+        display.startup_status = None;
         drop(display.drain_serial_input());
         Arc::clone(&display.stop_flag)
     } else {
@@ -266,6 +335,7 @@ fn finish_egui_run(shared: &Arc<Mutex<SharedDisplay>>) -> bool {
         let restart_requested = display.reset_requested;
         display.emu_running = false;
         display.start_pending = false;
+        display.startup_status = None;
         restart_requested
     } else {
         false
@@ -470,6 +540,7 @@ mod tests {
             disk: None::<ResolvedDisk>,
             cdrom: None::<ResolvedCdrom>,
             log_level: LogLevel::Warn,
+            config_path: None,
         })
         .unwrap_err();
 
@@ -529,6 +600,7 @@ mod tests {
             }),
             cdrom: None::<ResolvedCdrom>,
             log_level: LogLevel::Warn,
+            config_path: None,
         }
     }
 
@@ -546,22 +618,46 @@ mod tests {
     }
 
     #[test]
-    fn startup_disk_creation_respects_no_overwrite() {
+    fn startup_disk_reuses_existing_valid_image() {
         let disk = unique_temp_path("rusty-box-gui-existing-disk");
+        // A valid (non-empty, sector-aligned) image that differs in size from the
+        // config: it must be kept as-is, not rewritten to the config size.
+        fs::write(&disk, [0u8; 1024]).unwrap();
+        let config = disk_creation_config(disk.clone(), false);
+
+        create_configured_disk_images(&config).unwrap();
+
+        assert_eq!(fs::metadata(&disk).unwrap().len(), 1024);
+        remove_test_file(&disk);
+    }
+
+    #[test]
+    fn startup_disk_rejects_invalid_existing_image() {
+        let disk = unique_temp_path("rusty-box-gui-invalid-disk");
+        // 1 byte is not a usable flat image (not 512-aligned).
         fs::write(&disk, [0x00]).unwrap();
         let config = disk_creation_config(disk.clone(), false);
-        fs::write(&config.bios, [0xEA]).unwrap();
 
         let error = create_configured_disk_images(&config).unwrap_err();
 
         assert!(matches!(
             error,
-            RunError::DiskCreate {
-                source: rusty_box_bximage::BxImageError::AlreadyExists { path }
-            } if path == disk
+            RunError::InvalidExistingDiskImage { path, len: 1 } if path == disk
         ));
         remove_test_file(&disk);
-        remove_test_file(&config.bios);
+    }
+
+    #[test]
+    fn startup_disk_overwrite_recreates_existing_image() {
+        let disk = unique_temp_path("rusty-box-gui-overwrite-disk");
+        fs::write(&disk, [0u8; 1024]).unwrap();
+        let config = disk_creation_config(disk.clone(), true);
+
+        create_configured_disk_images(&config).unwrap();
+
+        // overwrite = true still forces a fresh full-size image.
+        assert_eq!(fs::metadata(&disk).unwrap().len(), 10_321_920);
+        remove_test_file(&disk);
     }
 
     #[test]
@@ -642,6 +738,7 @@ mod tests {
                 disk: None::<ResolvedDisk>,
                 cdrom: None::<ResolvedCdrom>,
                 log_level: LogLevel::Warn,
+                config_path: None,
             }))
             .unwrap();
         drop(command_tx);

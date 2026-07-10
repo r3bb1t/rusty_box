@@ -81,6 +81,35 @@ pub(super) const BxOpcodeTable0F3A40: [u64; 1] =
     [form_opcode(attrs!(SSE_PREFIX_66), Opcode::DppsVpsWpsIb)];
 pub(super) const BxOpcodeTable0F3A41: [u64; 1] =
     [form_opcode(attrs!(SSE_PREFIX_66), Opcode::DppdVpdWpdIb)];
+
+// VBLENDVPS — VEX.66.0F3A.W0 4A /r ib. VEX-only (no legacy form); the
+// blend mask register is is4 (imm8[7:4]).
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A4A
+pub(super) const BxOpcodeTable0F3A4A: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+    Opcode::VblendvpsVpsHpsWpsIb,
+)];
+
+// VBLENDVPD — VEX.66.0F3A.W0 4B /r ib. VEX-only; mask register is is4.
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A4B
+pub(super) const BxOpcodeTable0F3A4B: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+    Opcode::VblendvpdVpdHpdWpdIb,
+)];
+
+// VPBLENDVB — VEX.66.0F3A 4C /r ib. VEX-only; the per-byte blend mask
+// register is is4 (imm8[7:4]).
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A4C
+pub(super) const BxOpcodeTable0F3A4C: [u64; 2] = [
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VL128),
+        Opcode::V128VpblendvbVdqHdqWdqIb,
+    ),
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VL256),
+        Opcode::V256VpblendvbVdqHdqWdqIb,
+    ),
+];
 pub(super) const BxOpcodeTable0F3A42: [u64; 1] =
     [form_opcode(attrs!(SSE_PREFIX_66), Opcode::MpsadbwVdqWdqIb)];
 pub(super) const BxOpcodeTable0F3A44: [u64; 1] = [form_opcode(
@@ -278,9 +307,9 @@ pub(super) const BxOpcodeTable0F3A: [&[u64]; 256] = [
     /* 0F 3A 47 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 48 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 49 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 4A */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 4B */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 4C */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 3A 4A */ &BxOpcodeTable0F3A4A,
+    /* 0F 3A 4B */ &BxOpcodeTable0F3A4B,
+    /* 0F 3A 4C */ &BxOpcodeTable0F3A4C,
     /* 0F 3A 4D */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 4E */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 4F */ &BX_OPCODE_GROUP_ERR,

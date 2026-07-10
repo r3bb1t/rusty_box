@@ -1807,6 +1807,41 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.device_manager
             .process_pci_deferred(&mut self.devices, &mut self.memory);
     }
+
+    /// Drain pending host input (keyboard scancodes, mouse, serial) from the GUI
+    /// into the device layer.
+    ///
+    /// Called from the active step loop AND from inside the HLT/MWAIT idle waits.
+    /// The idle path is the important one: a tickless (NO_HZ) guest raises no
+    /// periodic timer while halted, so without pumping here a keypress would sit
+    /// in the GUI queue until the halt budget expires (~seconds), making input
+    /// feel laggy and drop characters. Pumping inside the wait lets a keypress
+    /// enqueue a scancode, which the very next device tick delivers as IRQ1,
+    /// waking the guest within a device quantum.
+    #[cfg(feature = "alloc")]
+    fn pump_gui_input(&mut self) {
+        let mut scancodes_to_send = Vec::new();
+        let mut mouse_to_send = Vec::new();
+        let mut serial_input = Vec::new();
+        if let Some(ref mut gui) = self.gui {
+            gui.handle_events();
+            scancodes_to_send = gui.get_pending_scancodes();
+            mouse_to_send = gui.get_pending_mouse();
+            serial_input = gui.get_pending_serial_input();
+        }
+        for scancode in scancodes_to_send {
+            self.device_manager.keyboard.send_scancode(scancode);
+        }
+        for mouse in mouse_to_send {
+            self.device_manager
+                .keyboard
+                .mouse_motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons);
+        }
+        for byte in serial_input {
+            self.device_manager.serial.receive_byte(0, byte);
+        }
+    }
+
     /// Advance devices to the current Bochs virtual time.
     #[inline]
     pub fn advance_devices_to_pc_time(&mut self) {
@@ -2860,25 +2895,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // Counter for consecutive HLT+IF=0 zero-batches (transient recovery)
         let mut hlt_if0_count: u32 = 0;
         while instructions_executed < max_instructions && !self.stop_flag.load(Ordering::Relaxed) {
-            // 1. Handle GUI events (keyboard input) - do this first to avoid borrow conflicts
-
-            let mut scancodes_to_send = Vec::new();
-            let mut serial_input = Vec::new();
-            if let Some(ref mut gui) = self.gui {
-                gui.handle_events();
-                scancodes_to_send = gui.get_pending_scancodes();
-                serial_input = gui.get_pending_serial_input();
-            }
-
-            // Send scancodes to keyboard device
-            for scancode in scancodes_to_send {
-                self.device_manager.keyboard.send_scancode(scancode);
-            }
-
-            // Send serial input to COM1 (ttyS0)
-            for byte in serial_input {
-                self.device_manager.serial.receive_byte(0, byte);
-            }
+            // 1. Handle GUI events (keyboard/mouse/serial input) first.
+            self.pump_gui_input();
 
             // 2. Execute CPU instructions in batches
             let batch_size = (max_instructions - instructions_executed).min(INSTRUCTION_BATCH_SIZE);
@@ -3185,9 +3203,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                             let mwait_if =
                                 matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
                             let mut hlt_budget = 0u64;
-                            #[cfg(feature = "std")]
-                            let hlt_wall_start = std::time::Instant::now();
                             while hlt_budget < 100_000_000 {
+                                // Service host input while halted so an idle
+                                // (tickless) guest wakes promptly on a keypress,
+                                // instead of stalling for the whole halt budget.
+                                self.pump_gui_input();
                                 if self.has_interrupt()
                                     && (self.cpu.interrupts_enabled() || mwait_if)
                                 {
@@ -3213,20 +3233,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 self.sync_event_flags();
                                 if !self.can_fast_forward_bsp_hlt() {
                                     break;
-                                }
-                                // Wall-clock throttle: sleep if virtual time races ahead
-                                #[cfg(feature = "std")]
-                                {
-                                    let virtual_usec =
-                                        hlt_budget * 1_000_000 / (self.config.ips as u64).max(1);
-                                    let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
-                                    if self.config.sync_slowdown && virtual_usec > wall_usec + 1_000
-                                    {
-                                        let sleep_usec = (virtual_usec - wall_usec).min(15_000);
-                                        std::thread::sleep(std::time::Duration::from_micros(
-                                            sleep_usec,
-                                        ));
-                                    }
                                 }
                             }
 
@@ -3300,6 +3306,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                     matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
                                 let mut hlt2 = 0u64;
                                 while hlt2 < 100_000_000 {
+                                    // Keep host input responsive during MWAIT idle.
+                                    self.pump_gui_input();
                                     if self.has_interrupt()
                                         && (self.cpu.interrupts_enabled() || mwait_if2)
                                     {
@@ -3561,23 +3569,26 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             instructions_executed
         );
 
-        // Print perf summary to stderr (only for large batches, not sub-batches)
-        if instructions_executed >= 1_000_000 {
-            let pi = self.cpu.perf_instructions;
-            let tlb_h = self.cpu.perf_tlb_hit;
-            let tlb_m = self.cpu.perf_tlb_miss;
-            let pw = self.cpu.perf_page_walk;
-            let ic_m = self.cpu.perf_icache_miss;
-            let pf = self.cpu.perf_prefetch;
-            let tlb_total = tlb_h + tlb_m;
-            let tlb_pct = if tlb_total > 0 {
-                tlb_h as f64 / tlb_total as f64 * 100.0
-            } else {
-                0.0
-            };
-            // icount = instruction count (REP iterations count as separate ticks)
-            let bochs_ticks = self.cpu.icount;
-            tracing::debug!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
+        #[cfg(feature = "profiling")]
+        {
+            // Print perf summary to stderr (only for large batches, not sub-batches)
+            if instructions_executed >= 1_000_000 {
+                let pi = self.cpu.perf_instructions;
+                let tlb_h = self.cpu.perf_tlb_hit;
+                let tlb_m = self.cpu.perf_tlb_miss;
+                let pw = self.cpu.perf_page_walk;
+                let ic_m = self.cpu.perf_icache_miss;
+                let pf = self.cpu.perf_prefetch;
+                let tlb_total = tlb_h + tlb_m;
+                let tlb_pct = if tlb_total > 0 {
+                    tlb_h as f64 / tlb_total as f64 * 100.0
+                } else {
+                    0.0
+                };
+                // icount = instruction count (REP iterations count as separate ticks)
+                let bochs_ticks = self.cpu.icount;
+                tracing::debug!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
+            }
         }
 
         Ok(instructions_executed)
@@ -3629,9 +3640,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             {
                 let mwait_if = matches!(self.cpu.activity_state, CpuActivityState::MwaitIf);
                 let mut hlt_budget = 0u64;
-                #[cfg(feature = "std")]
-                let hlt_wall_start = std::time::Instant::now();
                 while hlt_budget < 100_000_000 {
+                    // Service host input while halted (see run_interactive).
+                    self.pump_gui_input();
                     if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) {
                         break;
                     }
@@ -3650,16 +3661,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     if !self.can_fast_forward_bsp_hlt() {
                         break;
                     }
-                    // Wall-clock throttle: sleep if virtual time races ahead
-                    #[cfg(feature = "std")]
-                    {
-                        let virtual_usec = hlt_budget * 1_000_000 / ips.max(1);
-                        let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
-                        if self.config.sync_slowdown && virtual_usec > wall_usec + 1_000 {
-                            let sleep_usec = (virtual_usec - wall_usec).min(15_000);
-                            std::thread::sleep(std::time::Duration::from_micros(sleep_usec));
-                        }
-                    }
                 }
                 if self.cpu.lapic_has_intr() {
                     self.cpu
@@ -3675,9 +3676,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 let vector = self.iac();
                 // SAFETY: see borrow_memory_for_cpu / inject_interrupt
                 if let Err(e) = unsafe { self.inject_interrupt(vector) } {
-                    tracing::warn!(
-                        "PIC interrupt injection (vector {vector:#04x}) failed: {e:?}"
-                    );
+                    tracing::warn!("PIC interrupt injection (vector {vector:#04x}) failed: {e:?}");
                 }
             }
 
@@ -3703,20 +3702,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // Sync A20 state
         self.sync_a20_state();
 
-        // Handle keyboard scancodes and serial input from GUI
-        let mut scancodes_to_send = Vec::new();
-        let mut serial_input = Vec::new();
-        if let Some(ref mut gui) = self.gui {
-            gui.handle_events();
-            scancodes_to_send = gui.get_pending_scancodes();
-            serial_input = gui.get_pending_serial_input();
-        }
-        for scancode in scancodes_to_send {
-            self.device_manager.keyboard.send_scancode(scancode);
-        }
-        for byte in serial_input {
-            self.device_manager.serial.receive_byte(0, byte);
-        }
+        // Handle keyboard/mouse/serial input from GUI.
+        self.pump_gui_input();
 
         let shutdown = self.cpu.is_in_shutdown();
         Ok((total_executed, shutdown))
@@ -3870,6 +3857,17 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// (e.g. the WASM app processes egui events directly).
     pub fn send_scancode(&mut self, scancode: u8) {
         self.device_manager.keyboard.send_scancode(scancode);
+    }
+
+    /// Send a relative PS/2 mouse update to the aux (mouse) device.
+    ///
+    /// Deltas are in mouse counts; `buttons` is a bitmask (bit 0 = left,
+    /// bit 1 = right, bit 2 = middle). Mirrors [`send_scancode`] for the WASM
+    /// path and the native input pump. Bochs keyboard.cc mouse_motion.
+    pub fn send_mouse_event(&mut self, dx: i32, dy: i32, dz: i32, buttons: u8) {
+        self.device_manager
+            .keyboard
+            .mouse_motion(dx, dy, dz, buttons);
     }
 
     #[cfg(feature = "alloc")]
@@ -6048,8 +6046,7 @@ mod tests {
                 // nothing — including APs parked in WAIT_FOR_SIPI — is
                 // credited one SMP quantum ("if (n == 0) n = quantum"), and
                 // time advances by executed / BX_SMP_PROCESSORS.
-                let expected =
-                    (retired + BOCHS_SMP_QUANTUM_TICKS * (cpu_count - 1)) / cpu_count;
+                let expected = (retired + BOCHS_SMP_QUANTUM_TICKS * (cpu_count - 1)) / cpu_count;
                 assert_eq!(
                     elapsed, expected,
                     "SMP round must advance (retired + quantum credits) / cpu_count \

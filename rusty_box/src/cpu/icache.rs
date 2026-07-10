@@ -124,34 +124,20 @@ const BX_MAX_TRACE_LENGTH: usize = 32;
 /// by it when BX_SMP_PROCESSORS > 1.
 const BX_SMP_QUANTUM: usize = 16;
 
-#[derive(Debug, PartialEq, Clone, Default, Copy)]
-pub(crate) enum IcacheAddress {
-    #[default]
-    Invalid,
-    Address(BxPhyAddress),
-}
-
-impl From<IcacheAddress> for BxPhyAddress {
-    fn from(value: IcacheAddress) -> Self {
-        match value {
-            IcacheAddress::Invalid => BX_ICACHE_INVALID_PHY_ADDRESS,
-            IcacheAddress::Address(addr) => addr,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct BxICacheEntry {
-    // p_addr: BxPhyAddress, // Physical address of the instruction
-    pub(super) p_addr: IcacheAddress, // Physical address of the instruction
+    /// Physical address of the trace's first instruction. Bochs `bxICacheEntry_c::pAddr`
+    /// (icache.h): a raw physical address whose invalid state is the all-ones sentinel
+    /// `BX_ICACHE_INVALID_PHY_ADDRESS`, NOT a separate tag. An entry is valid iff
+    /// `p_addr == pAddr` for the looked-up address (Bochs `find_entry`).
+    pub(super) p_addr: BxPhyAddress,
     pub(super) trace_mask: u32,
-    // orignial replaced
-    //tlen: u32, // Trace length in instructions
-    pub(super) tlen: usize, // Trace length in instructions
-    pub(super) i: Instruction,
-    // mpool_start_idx: Index in mpool where this trace starts
-    // In C++, entry->i is a pointer, so we can do pointer arithmetic
-    // In Rust, we need to store the index explicitly
+    pub(super) tlen: u32, // Bochs bxICacheEntry_c::tlen (Bit32u) — trace length in instructions
+    /// Index of the trace's first instruction in `mpool`. This is Rust's stand-in for
+    /// Bochs `bxInstruction_c *i` (a pointer): the trace runs `mpool[mpool_start_idx..][..tlen]`.
+    /// Bochs stores the pointer; we store the index. (A redundant full `Instruction`
+    /// copy used to be kept here for an ilen validity check — removed; validity now
+    /// comes from the `p_addr` sentinel, exactly like Bochs `find_entry`.)
     pub(super) mpool_start_idx: usize,
     /// First 8 bytes of this trace's instruction stream (for SMC detection).
     /// Compared against current memory on icache lookup to detect stale entries
@@ -159,6 +145,12 @@ pub struct BxICacheEntry {
     /// Bochs uses per-page write stamps; this is a simpler but effective alternative.
     pub(super) first_bytes: [u8; 8],
 }
+
+// This entry is loaded on every icache lookup (a top hot-path cost), so its size
+// drives the lookup cache-miss rate. It mirrors Bochs `bxICacheEntry_c` (24 bytes:
+// pAddr + traceMask + tlen + the `i` pointer, which our `mpool_start_idx` stands in
+// for) plus our 8-byte `first_bytes` SMC guard. Guard against accidental bloat.
+const _: () = assert!(core::mem::size_of::<BxICacheEntry>() == 32);
 
 /// Number of pages in 4GB physical address space (4GB / 4KB = 1M pages).
 const PHY_MEM_PAGES: usize = 1024 * 1024;
@@ -195,10 +187,9 @@ impl Default for PageSplitEntry {
         Self {
             ppf: BX_ICACHE_INVALID_PHY_ADDRESS,
             e: BxICacheEntry {
-                p_addr: IcacheAddress::Invalid,
+                p_addr: BX_ICACHE_INVALID_PHY_ADDRESS,
                 trace_mask: 0,
                 tlen: 0,
-                i: Instruction::default(),
                 mpool_start_idx: 0,
                 first_bytes: [0; 8],
             },
@@ -216,10 +207,9 @@ impl BxICache {
     pub fn new() -> Self {
         Self {
             entry: core::array::from_fn(|_| BxICacheEntry {
-                p_addr: IcacheAddress::Invalid,
+                p_addr: BX_ICACHE_INVALID_PHY_ADDRESS,
                 trace_mask: 0,
                 tlen: 0,
-                i: Instruction::default(),
                 mpool_start_idx: 0,
                 first_bytes: [0; 8],
             }),
@@ -233,7 +223,7 @@ impl BxICache {
 
     pub fn alloc_trace(&mut self, entry_idx: usize) {
         let entry = &mut self.entry[entry_idx];
-        if entry.p_addr != IcacheAddress::Invalid {
+        if entry.p_addr != BX_ICACHE_INVALID_PHY_ADDRESS {
             flush_smc(entry);
         }
     }
@@ -272,28 +262,13 @@ impl BxICache {
         hash & ((BX_ICACHE_ENTRIES - 1) as u32)
     }
 
-    pub(super) fn find_trace_start(
-        &self,
-        _entry: &BxICacheEntry,
-        _entry_idx: usize,
-    ) -> Option<usize> {
-        // Find where the trace starts in mpool
-        // This is a simplified implementation - in C++, entry->i is a pointer
-        // Here we need to search for the first instruction
-
-        // For now, return None to indicate trace not found
-        // A more sophisticated implementation would track trace locations
-        // TODO: Use algebraic types for clarity?
-        None
-    }
-
     pub(super) fn find_entry(
         &self,
         p_addr: BxPhyAddress,
         fetch_mode_mask: u64,
     ) -> Option<BxICacheEntry> {
         let e = self.get_entry(p_addr, fetch_mode_mask);
-        if BxPhyAddress::from(e.p_addr) != p_addr {
+        if e.p_addr != p_addr {
             return None;
         }
         Some(e)
@@ -303,10 +278,9 @@ impl BxICache {
         let index = Self::hash(p_addr, 0) as usize;
         let entry = &mut self.entry[index];
 
-        if let IcacheAddress::Address(addr) = entry.p_addr {
-            if addr == p_addr && entry.trace_mask & mask != 0 {
-                flush_smc(entry);
-            }
+        // Bochs handleSMC: invalid entries carry the sentinel, so a real pAddr never matches.
+        if entry.p_addr == p_addr && entry.trace_mask & mask != 0 {
+            flush_smc(entry);
         }
 
         // Check page split entries
@@ -324,10 +298,8 @@ impl BxICache {
         let index = Self::hash(ppf, 0) as usize;
         let entry = &mut self.entry[index];
 
-        if let IcacheAddress::Address(addr) = entry.p_addr {
-            if ppf_of(addr) == ppf {
-                flush_smc(entry);
-            }
+        if entry.p_addr != BX_ICACHE_INVALID_PHY_ADDRESS && ppf_of(entry.p_addr) == ppf {
+            flush_smc(entry);
         }
 
         // Flush page split entries
@@ -377,10 +349,8 @@ impl BxICache {
         let index = Self::hash(ppf, 0) as usize;
         let entry = &mut self.entry[index];
 
-        if let IcacheAddress::Address(addr) = entry.p_addr {
-            if ppf_of(addr) == ppf {
-                entry.p_addr = IcacheAddress::Invalid;
-            }
+        if entry.p_addr != BX_ICACHE_INVALID_PHY_ADDRESS && ppf_of(entry.p_addr) == ppf {
+            entry.p_addr = BX_ICACHE_INVALID_PHY_ADDRESS;
         }
 
         // Invalidate page split entries
@@ -396,7 +366,7 @@ impl BxICache {
 
     pub fn invalidate_all(&mut self) {
         for entry in &mut self.entry {
-            entry.p_addr = IcacheAddress::Invalid;
+            entry.p_addr = BX_ICACHE_INVALID_PHY_ADDRESS;
         }
         for entry in &mut self.page_split_index {
             if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
@@ -490,12 +460,11 @@ impl BxICache {
         // Scan all icache entries for ones that belong to the affected page
         // and have overlapping trace_mask bits.
         for entry in &mut self.entry {
-            if let IcacheAddress::Address(entry_addr) = entry.p_addr {
-                if Self::stamp_hash(entry_addr) == target_page_index
-                    && (entry.trace_mask & mask) != 0
-                {
-                    flush_smc(entry);
-                }
+            if entry.p_addr != BX_ICACHE_INVALID_PHY_ADDRESS
+                && Self::stamp_hash(entry.p_addr) == target_page_index
+                && (entry.trace_mask & mask) != 0
+            {
+                flush_smc(entry);
             }
         }
 
@@ -520,17 +489,29 @@ impl BxICache {
 }
 
 fn flush_smc(e: &mut BxICacheEntry) {
-    // Matching C++ line 64-74: flushSMC
-    if let IcacheAddress::Address(_) = e.p_addr {
-        e.p_addr = IcacheAddress::Invalid;
-
-        // If handlers chaining speedups are enabled, generate dummy entry
-        // (matching C++ line 66-72)
-        {
-            // TODO: Check if debugger is active (matching C++ line 67)
-            // For now, always generate dummy entry
-            gen_dummy_icache_entry(&mut e.i);
-        }
+    // Bochs icache.cc flushSMC invalidates the entry (pAddr = INVALID) and, under
+    // BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS, also writes an end-of-trace marker into
+    // the trace's first mpool slot via genDummyICacheEntry(e->i). We invalidate via
+    // the sentinel but deliberately do NOT mirror the mpool write — for a hard Rust
+    // aliasing-safety reason (safety trumps Bochs literalness), not because trace
+    // linking happens to be unimplemented:
+    //
+    //   flush_smc runs DURING instruction execution — a self-modifying store goes
+    //   access.rs write → smc_write_check → handle_smc_scan → flush_smc. Meanwhile
+    //   cpu_loop_n_impl holds a raw `*const Instruction` into mpool across
+    //   execute_instruction under the SAFETY invariant "mpool is not written during
+    //   execution". Taking `&mut mpool` here to write the marker would invalidate that
+    //   raw pointer (Stacked Borrows) → UB, observably so in instrumented builds which
+    //   deref it in fire_after_execution. (This is exactly why the pre-shrink code
+    //   wrote the dummy into a dead `entry.i` COPY, never into mpool.)
+    //
+    // The mpool marker is also unnecessary for correctness here: the pAddr sentinel
+    // fully invalidates the entry, and every trace is re-entered only through
+    // get_icache_entry, which rejects the sentinel and re-decodes. The marker only
+    // guards linked traces that jump into an invalidated trace's mpool region without
+    // a lookup — a path this design never creates.
+    if e.p_addr != BX_ICACHE_INVALID_PHY_ADDRESS {
+        e.p_addr = BX_ICACHE_INVALID_PHY_ADDRESS;
     }
 }
 
@@ -697,7 +678,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         let trace_start_idx = current_mpindex; // Store where this trace starts in mpool
         {
             let entry = &mut self.i_cache.entry[entry_idx];
-            entry.p_addr = IcacheAddress::Address(p_addr);
+            entry.p_addr = p_addr;
             entry.trace_mask = 0;
             entry.mpool_start_idx = trace_start_idx;
             // Store first 8 bytes of instruction stream for SMC detection.
@@ -820,24 +801,27 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     // TODO: Check if debugger is active (matching C++ line 194)
                     if remaining >= 15u32 {
                         // avoid merging with page split trace
-                        if self.merge_traces_internal(
+                        if let Some(merged) = self.merge_traces_internal(
                             entry_idx,
                             current_mpindex,
                             current_p_addr,
                             tlen,
                         ) {
-                            // Update entry and commit
-                            {
-                                let first_instr = self.i_cache.mpool[trace_start_idx];
+                            // merge_traces_internal set entry.tlen = tlen + merged and folded in
+                            // the source trace's mask. Add the decoded portion's mask, stamp the
+                            // page-write table with the full mask, advance mpindex PAST the spliced
+                            // instructions (else the next trace overwrites them), and commit.
+                            // (Bochs serveICacheMiss, icache.cc:197-200.)
+                            let full_mask = {
                                 let entry = &mut self.i_cache.entry[entry_idx];
-                                entry.tlen = tlen;
                                 entry.trace_mask |= trace_mask;
-                                entry.i = first_instr;
-                            }
-                            page_write_stamp_table.mark_icache_mask(current_p_addr, trace_mask);
-                            self.i_cache.mark_icache_mask(current_p_addr, trace_mask);
-                            self.i_cache.mpindex = current_mpindex;
-                            self.i_cache.commit_trace(tlen);
+                                entry.trace_mask
+                            };
+                            page_write_stamp_table.mark_icache_mask(current_p_addr, full_mask);
+                            self.i_cache.mark_icache_mask(current_p_addr, full_mask);
+                            self.i_cache.mpindex = current_mpindex + merged;
+                            self.i_cache
+                                .commit_trace(self.i_cache.entry[entry_idx].tlen as usize);
                             let entry = self.i_cache.entry[entry_idx].clone();
                             return Ok(entry);
                         }
@@ -920,7 +904,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     // invalid for now because boundaryFetch() can fault (matching C++ line 146-149)
                     {
                         let entry = &mut self.i_cache.entry[entry_idx];
-                        entry.p_addr = IcacheAddress::Invalid; // Mark as invalid temporarily (~entry->pAddr in C++)
+                        entry.p_addr = BX_ICACHE_INVALID_PHY_ADDRESS; // Mark as invalid temporarily (~entry->pAddr in C++)
                         entry.tlen = 1;
                         entry.mpool_start_idx = current_mpindex; // Store where this trace starts
                     }
@@ -949,11 +933,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     // Add the instruction to trace cache (matching C++ line 152-154)
                     {
                         let entry = &mut self.i_cache.entry[entry_idx];
-                        entry.p_addr = IcacheAddress::Address(p_addr); // Restore pAddr (~entry->pAddr in C++)
+                        entry.p_addr = p_addr; // Restore pAddr (~entry->pAddr in C++)
                         entry.trace_mask = 0x80000000; /* last line in page */
-                        entry.i = boundary_instr; // Set first instruction for ilen cache hit check
-                                                  // Note: tlen is already set to 1 above, no need to set it again
-                                                  // mpool_start_idx was already set above
+                        // tlen is already set to 1 above; mpool_start_idx was already set above.
                     }
 
                     page_write_stamp_table.mark_icache_mask(p_addr, 0x80000000);
@@ -1001,15 +983,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             }
         }
 
-        // Update entry tlen and first instruction (matching C++ line 217)
-        // In C++, entry->i is a pointer to the first instruction in mpool.
-        // In Rust, we store a copy of the first instruction in entry.i so that
-        // find_entry can check i.length != 0 for cache hit validation.
+        // Update entry tlen (matching C++ line 217). Bochs entry->i points at the
+        // first mpool instruction; our mpool_start_idx (set earlier) plays that role.
         {
-            let first_instr = self.i_cache.mpool[trace_start_idx];
             let entry = &mut self.i_cache.entry[entry_idx];
-            entry.tlen = tlen;
-            entry.i = first_instr;
+            entry.tlen = tlen as u32;
         }
         self.i_cache.mpindex = current_mpindex;
         self.i_cache.commit_trace(tlen);
@@ -1138,75 +1116,41 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         current_mpindex: usize,
         p_addr: BxPhyAddress,
         current_tlen: usize,
-    ) -> bool {
-        // TODO: Check if debugger is active - should assert !debugger_active
-
-        // Find entry in cache
+    ) -> Option<usize> {
+        // Bochs find_entry(pAddr): invalid entries carry the all-ones sentinel, so a real
+        // p_addr never matches one — a single compare covers both "exists" and "pAddr matches".
         let cache_entry_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
-
-        // Extract cached entry info without holding borrow
-        // Check if entry exists and matches (matching C++ line 226-228: if (e != NULL))
-        let cached_entry = &self.i_cache.entry[cache_entry_idx];
-
-        // Check if entry is valid (not Invalid address)
-        let cached_p_addr = match cached_entry.p_addr {
-            IcacheAddress::Address(addr) => addr,
-            IcacheAddress::Invalid => return false, // Entry doesn't exist (NULL in C++)
-        };
-
-        // Check if this is the right entry (matching pAddr)
-        if cached_p_addr != p_addr {
-            return false;
+        let e = &self.i_cache.entry[cache_entry_idx];
+        if e.p_addr != p_addr {
+            return None;
         }
 
-        let cached_tlen = cached_entry.tlen;
-        let cached_trace_mask = cached_entry.trace_mask;
-        let cached_first_instr = cached_entry.i;
+        // Bochs: max_length = e->tlen. With BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS, only merge if
+        // the whole cached trace still fits the max-trace budget (else leave it un-merged).
+        let max_length = e.tlen as usize;
+        if max_length + current_tlen > BX_MAX_TRACE_LENGTH {
+            return None;
+        }
+        let source_start_idx = e.mpool_start_idx; // Bochs e->i (pointer into mpool)
+        let source_trace_mask = e.trace_mask;
 
-        // determine max amount of instruction to take from another entry (matching C++ line 231)
-        let max_length = cached_tlen;
-
-        {
-            if max_length + current_tlen > BX_MAX_TRACE_LENGTH {
-                return false;
-            }
+        // memcpy(i, e->i, max_length): splice the cached trace's instructions onto the one being
+        // built. In-bounds by the budget check above plus serve_icache_miss's mpindex reservation;
+        // the source (a trace committed earlier, lower in mpool) and the target (the trace under
+        // construction) occupy distinct regions and never overlap.
+        debug_assert!(current_mpindex + max_length <= BX_ICACHE_MEM_POOL);
+        debug_assert!(source_start_idx + max_length <= BX_ICACHE_MEM_POOL);
+        for k in 0..max_length {
+            self.i_cache.mpool[current_mpindex + k] = self.i_cache.mpool[source_start_idx + k];
         }
 
-        // Find where the cached entry's trace starts in mpool
-        // Create a temporary entry for searching
-        let cached_entry_for_search = BxICacheEntry {
-            p_addr: IcacheAddress::Address(cached_p_addr),
-            trace_mask: cached_trace_mask,
-            tlen: cached_tlen,
-            i: cached_first_instr,
-            mpool_start_idx: 0, // Not used for search, just need valid struct
-            first_bytes: [0; 8],
-        };
-
-        if let Some(source_start_idx) = self
-            .i_cache
-            .find_trace_start(&cached_entry_for_search, cache_entry_idx)
-        {
-            // Copy instructions from found entry to current trace (matching C++ line 242: memcpy)
-            for i in 0..max_length {
-                if current_mpindex + i < BX_ICACHE_MEM_POOL
-                    && source_start_idx + i < BX_ICACHE_MEM_POOL
-                {
-                    self.i_cache.mpool[current_mpindex + i] =
-                        self.i_cache.mpool[source_start_idx + i];
-                }
-            }
-
-            // Update current entry (matching C++ line 243-246)
-            let current_entry = &mut self.i_cache.entry[current_entry_idx];
-            current_entry.tlen += max_length;
-            debug_assert!(current_entry.tlen <= BX_MAX_TRACE_LENGTH); // Matching C++ line 244: BX_ASSERT
-
-            current_entry.trace_mask |= cached_trace_mask; // Matching C++ line 246
-
-            return true;
-        }
-
-        false
+        // Bochs mergeTraces: entry->tlen += max_length; entry->traceMask |= e->traceMask. Our
+        // running length is the local current_tlen (the entry's tlen field is not bumped per
+        // instruction), so set the total here.
+        let entry = &mut self.i_cache.entry[current_entry_idx];
+        entry.tlen = (current_tlen + max_length) as u32;
+        debug_assert!(entry.tlen as usize <= BX_MAX_TRACE_LENGTH); // Bochs BX_ASSERT (icache.cc:244)
+        entry.trace_mask |= source_trace_mask;
+        Some(max_length)
     }
 }

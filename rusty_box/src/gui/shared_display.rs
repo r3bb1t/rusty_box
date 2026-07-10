@@ -26,6 +26,11 @@ pub struct SharedDisplay {
     pub fb_dirty: bool,
     /// Keyboard scancodes from GUI to emulator (PS/2 set 2)
     pub pending_scancodes: Vec<u8>,
+    /// Relative PS/2 mouse events from GUI to emulator, drained by the pump.
+    pub pending_mouse: Vec<super::host_input::HostMouseEvent>,
+    /// Whether the GUI currently captures the mouse for the guest (forwarding
+    /// motion/buttons and routing chords past egui). Toggled by the frontend.
+    pub mouse_captured: bool,
     /// Text mode columns (e.g. 80)
     pub screen_cols: u32,
     /// Text mode rows (e.g. 25)
@@ -46,6 +51,9 @@ pub struct SharedDisplay {
     pub reset_requested: bool,
     /// Last emulator startup/runtime error reported by the worker thread
     pub runtime_error: Option<String>,
+    /// Transient status shown before the guest produces video (e.g. "Creating
+    /// disk image…"), so a slow startup step doesn't look like a frozen window.
+    pub startup_status: Option<String>,
     /// Atomic flag polled by run_interactive to stop early (e.g. on reset); shared with GUI
     pub stop_flag: Arc<AtomicBool>,
     /// Serial console output text (accumulated from serial port TX)
@@ -69,6 +77,8 @@ impl SharedDisplay {
             fb_height: h,
             fb_dirty: false,
             pending_scancodes: Vec::new(),
+            pending_mouse: Vec::new(),
+            mouse_captured: false,
             screen_cols: cols,
             screen_rows: rows,
             font_width: fw,
@@ -79,6 +89,7 @@ impl SharedDisplay {
             palette: VGA_DEFAULT_PALETTE_16,
             reset_requested: false,
             runtime_error: None,
+            startup_status: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
             serial_log: String::new(),
             pending_serial_input: Vec::new(),

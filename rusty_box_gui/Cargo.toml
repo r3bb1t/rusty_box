@@ -23,6 +23,10 @@ path = "src/main.rs"
 default = ["gui-egui"]
 gui-egui = ["rusty_box/gui-egui", "dep:egui", "dep:eframe"]
 windows-gui-subsystem = []
+# Diagnostic build: hook the CPU and record guest process starts/exits,
+# stderr writes, mounts, signals, and CPU exceptions to guest_trace.log.
+# Costs emulation speed; single-CPU configs only. See src/guest_trace.rs.
+guest-trace = ["rusty_box/instrumentation"]
 
 [dependencies]
 rusty_box_bximage = { path = "../rusty_box_bximage" }

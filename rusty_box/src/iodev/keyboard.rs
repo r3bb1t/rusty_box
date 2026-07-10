@@ -1207,7 +1207,6 @@ impl BxKeyboardC {
     }
 
     /// Queue byte in internal mouse ring buffer (keyboard.cc)
-    #[allow(dead_code)]
     fn mouse_enq(&mut self, data: u8) {
         if self.mouse_internal_buffer.num_elements >= BX_MOUSE_BUFF_SIZE {
             tracing::warn!("Keyboard: Mouse buffer full, ignoring {:#04x}", data);
@@ -1222,6 +1221,183 @@ impl BxKeyboardC {
         if !self.kbd_controller.outb && self.kbd_controller.aux_clock_enabled {
             self.activate_timer();
         }
+    }
+
+    /// Enqueue a full PS/2 mouse packet (3 bytes, or 4 in IntelliMouse mode).
+    /// Returns false when the internal buffer lacks room for the whole packet.
+    /// Bochs keyboard.cc mouse_enQ_packet.
+    fn mouse_enq_packet(&mut self, b1: u8, b2: u8, b3: u8, b4: u8) -> bool {
+        let bytes: usize = if self.mouse.im_mode { 4 } else { 3 };
+
+        if self.mouse_internal_buffer.num_elements + bytes >= BX_MOUSE_BUFF_SIZE {
+            return false; // buffer doesn't have the space
+        }
+
+        self.mouse_enq(b1);
+        self.mouse_enq(b2);
+        self.mouse_enq(b3);
+        if self.mouse.im_mode {
+            self.mouse_enq(b4);
+        }
+
+        true
+    }
+
+    /// Build and enqueue a PS/2 movement packet from the accumulated deltas.
+    /// Bochs keyboard.cc create_mouse_packet.
+    fn create_mouse_packet(&mut self, force_enq: bool) {
+        if self.mouse_internal_buffer.num_elements != 0 && !force_enq {
+            return;
+        }
+
+        let mut delta_x = self.mouse.delayed_dx;
+        let mut delta_y = self.mouse.delayed_dy;
+        let button_state = self.mouse.button_status | 0x08;
+
+        if !force_enq && delta_x == 0 && delta_y == 0 {
+            return;
+        }
+
+        if delta_x > 254 {
+            delta_x = 254;
+        }
+        if delta_x < -254 {
+            delta_x = -254;
+        }
+        if delta_y > 254 {
+            delta_y = 254;
+        }
+        if delta_y < -254 {
+            delta_y = -254;
+        }
+
+        let mut b1 = (button_state & 0x0f) | 0x08; // bit3 always set
+        let b2;
+        let b3;
+
+        if (0..=255).contains(&delta_x) {
+            b2 = delta_x as u8;
+            self.mouse.delayed_dx = self.mouse.delayed_dx.wrapping_sub(delta_x);
+        } else if delta_x > 255 {
+            b2 = 0xff;
+            self.mouse.delayed_dx = self.mouse.delayed_dx.wrapping_sub(255);
+        } else if delta_x >= -256 {
+            b2 = delta_x as u8;
+            b1 |= 0x10;
+            self.mouse.delayed_dx = self.mouse.delayed_dx.wrapping_sub(delta_x);
+        } else {
+            b2 = 0x00;
+            b1 |= 0x10;
+            self.mouse.delayed_dx = self.mouse.delayed_dx.wrapping_add(256);
+        }
+
+        if (0..=255).contains(&delta_y) {
+            b3 = delta_y as u8;
+            self.mouse.delayed_dy = self.mouse.delayed_dy.wrapping_sub(delta_y);
+        } else if delta_y > 255 {
+            b3 = 0xff;
+            self.mouse.delayed_dy = self.mouse.delayed_dy.wrapping_sub(255);
+        } else if delta_y >= -256 {
+            b3 = delta_y as u8;
+            b1 |= 0x20;
+            self.mouse.delayed_dy = self.mouse.delayed_dy.wrapping_sub(delta_y);
+        } else {
+            b3 = 0x00;
+            b1 |= 0x20;
+            self.mouse.delayed_dy = self.mouse.delayed_dy.wrapping_add(256);
+        }
+
+        let b4 = self.mouse.delayed_dz.wrapping_neg() as u8;
+
+        self.mouse_enq_packet(b1, b2, b3, b4);
+    }
+
+    /// Flush any pending movement and clear accumulated deltas when the host
+    /// toggles PS/2 mouse capture. Bochs keyboard.cc mouse_enabled_changed.
+    pub(crate) fn mouse_enabled_changed(&mut self, enabled: bool) {
+        if self.mouse.delayed_dx != 0 || self.mouse.delayed_dy != 0 || self.mouse.delayed_dz != 0 {
+            self.create_mouse_packet(true);
+        }
+        self.mouse.delayed_dx = 0;
+        self.mouse.delayed_dy = 0;
+        self.mouse.delayed_dz = 0;
+        tracing::debug!("PS/2 mouse {}", if enabled { "enabled" } else { "disabled" });
+    }
+
+    /// Host mouse movement / button update. Accumulates relative deltas and
+    /// enqueues PS/2 packets as needed. Bochs keyboard.cc mouse_motion (relative
+    /// path only; absolute-position tablets are not modeled here).
+    pub(crate) fn mouse_motion(
+        &mut self,
+        mut delta_x: i32,
+        mut delta_y: i32,
+        mut delta_z: i32,
+        mut button_state: u8,
+    ) {
+        let mut force_enq = false;
+
+        // Don't generate interrupts if we are in remote mode.
+        if self.mouse.mode == MOUSE_MODE_REMOTE {
+            return;
+        }
+        // Note: `enable` only applies in stream mode.
+        if !self.mouse.enable {
+            return;
+        }
+
+        // Scale down the motion.
+        if delta_x < -1 || delta_x > 1 {
+            delta_x /= 2;
+        }
+        if delta_y < -1 || delta_y > 1 {
+            delta_y /= 2;
+        }
+
+        if !self.mouse.im_mode {
+            delta_z = 0;
+            button_state &= !0x04;
+        }
+
+        if delta_x == 0
+            && delta_y == 0
+            && delta_z == 0
+            && self.mouse.button_status == (button_state & 0x7)
+        {
+            return; // useless call, nothing changed
+        }
+
+        if self.mouse.button_status != (button_state & 0x7) || delta_z != 0 {
+            force_enq = true;
+        }
+
+        self.mouse.button_status = button_state & 0x7;
+
+        if delta_x > 255 {
+            delta_x = 255;
+        }
+        if delta_y > 255 {
+            delta_y = 255;
+        }
+        if delta_x < -256 {
+            delta_x = -256;
+        }
+        if delta_y < -256 {
+            delta_y = -256;
+        }
+
+        self.mouse.delayed_dx = self.mouse.delayed_dx.wrapping_add(delta_x as i16);
+        self.mouse.delayed_dy = self.mouse.delayed_dy.wrapping_add(delta_y as i16);
+        self.mouse.delayed_dz = delta_z as i16;
+
+        if self.mouse.delayed_dx > 255
+            || self.mouse.delayed_dx < -256
+            || self.mouse.delayed_dy > 255
+            || self.mouse.delayed_dy < -256
+        {
+            force_enq = true;
+        }
+
+        self.create_mouse_packet(force_enq);
     }
 
     /// Set timer_pending flag (keyboard.cc)
@@ -1980,5 +2156,98 @@ mod tests {
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_WRITE_OUTPUT_PORT as u32, 1, None);
         kbd.write(KBD_DATA_PORT, 0x00, 1, None);
         assert_eq!(kbd.reset_requested, Some(crate::cpu::ResetReason::Software));
+    }
+
+    fn stream_mouse() -> BxKeyboardC {
+        let mut kbd = BxKeyboardC::new();
+        kbd.mouse.mode = MOUSE_MODE_STREAM;
+        kbd.mouse.enable = true;
+        kbd
+    }
+
+    fn mouse_byte(kbd: &BxKeyboardC, i: usize) -> u8 {
+        let head = kbd.mouse_internal_buffer.head;
+        kbd.mouse_internal_buffer.buffer[(head + i) % BX_MOUSE_BUFF_SIZE]
+    }
+
+    #[test]
+    fn mouse_motion_builds_positive_ps2_packet() {
+        let mut kbd = stream_mouse();
+
+        // dx/dy > 1 are halved (Bochs mouse_motion scaling); left button held.
+        kbd.mouse_motion(10, 6, 0, 0x01);
+
+        assert_eq!(kbd.mouse_internal_buffer.num_elements, 3);
+        // b1: bit3 always set (0x08) + left button (0x01), no sign bits.
+        assert_eq!(
+            [mouse_byte(&kbd, 0), mouse_byte(&kbd, 1), mouse_byte(&kbd, 2)],
+            [0x09, 0x05, 0x03]
+        );
+    }
+
+    #[test]
+    fn mouse_motion_sets_sign_bits_for_negative_delta() {
+        let mut kbd = stream_mouse();
+
+        kbd.mouse_motion(-10, -6, 0, 0x00);
+
+        assert_eq!(kbd.mouse_internal_buffer.num_elements, 3);
+        // b1: 0x08 | X-sign(0x10) | Y-sign(0x20); b2/b3 = two's-complement -5/-3.
+        assert_eq!(
+            [mouse_byte(&kbd, 0), mouse_byte(&kbd, 1), mouse_byte(&kbd, 2)],
+            [0x38, 0xFB, 0xFD]
+        );
+    }
+
+    #[test]
+    fn mouse_motion_ignored_when_reporting_disabled() {
+        let mut kbd = BxKeyboardC::new();
+        kbd.mouse.mode = MOUSE_MODE_STREAM;
+        kbd.mouse.enable = false;
+
+        kbd.mouse_motion(10, 10, 0, 0x00);
+
+        assert_eq!(kbd.mouse_internal_buffer.num_elements, 0);
+    }
+
+    #[test]
+    fn mouse_motion_ignored_in_remote_mode() {
+        let mut kbd = stream_mouse();
+        kbd.mouse.mode = MOUSE_MODE_REMOTE;
+
+        kbd.mouse_motion(10, 10, 0, 0x00);
+
+        assert_eq!(kbd.mouse_internal_buffer.num_elements, 0);
+    }
+
+    #[test]
+    fn intellimouse_packet_carries_wheel_byte() {
+        let mut kbd = stream_mouse();
+        kbd.mouse.im_mode = true;
+
+        // Wheel down one notch, no motion. b4 = -delayed_dz.
+        kbd.mouse_motion(0, 0, 1, 0x00);
+
+        assert_eq!(kbd.mouse_internal_buffer.num_elements, 4);
+        assert_eq!(
+            [
+                mouse_byte(&kbd, 0),
+                mouse_byte(&kbd, 1),
+                mouse_byte(&kbd, 2),
+                mouse_byte(&kbd, 3)
+            ],
+            [0x08, 0x00, 0x00, 0xFF]
+        );
+    }
+
+    #[test]
+    fn non_intellimouse_drops_wheel_and_middle_button() {
+        let mut kbd = stream_mouse();
+        // im_mode stays false: dz cleared, middle-button bit masked off, and with
+        // no motion and no (visible) button change the call produces no packet.
+        kbd.mouse_motion(0, 0, 1, 0x04);
+
+        assert_eq!(kbd.mouse_internal_buffer.num_elements, 0);
+        assert_eq!(kbd.mouse.button_status, 0);
     }
 }

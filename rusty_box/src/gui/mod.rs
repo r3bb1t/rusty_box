@@ -1,4 +1,5 @@
 pub mod gui_trait;
+pub mod host_input;
 pub mod keymap;
 pub mod nogui;
 pub mod shared_display;
@@ -6,6 +7,7 @@ mod siminterface;
 pub mod vga_font;
 
 pub use gui_trait::{BxGui, DisplayMode, VgaTextModeInfo};
+pub use host_input::{HostInputEvent, HostInputSink, HostMouseEvent};
 pub use keymap::{ascii_to_scancode, char_to_scancode_sequence, needs_shift};
 pub use nogui::NoGui;
 

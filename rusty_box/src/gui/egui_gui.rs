@@ -25,6 +25,7 @@ mod bridge_impl {
     pub struct BridgeGui {
         shared: Arc<Mutex<SharedDisplay>>,
         local_scancodes: VecDeque<u8>,
+        local_mouse: VecDeque<crate::gui::host_input::HostMouseEvent>,
         display_mode: DisplayMode,
     }
 
@@ -34,6 +35,7 @@ mod bridge_impl {
             Self {
                 shared,
                 local_scancodes: VecDeque::new(),
+                local_mouse: VecDeque::new(),
                 display_mode: DisplayMode::Sim,
             }
         }
@@ -85,10 +87,13 @@ mod bridge_impl {
         }
 
         fn handle_events(&mut self) {
-            // Drain scancodes from shared display into local queue
+            // Drain scancodes and mouse events from shared display into local queues
             if let Ok(mut display) = self.shared.lock() {
                 for scancode in display.pending_scancodes.drain(..) {
                     self.local_scancodes.push_back(scancode);
+                }
+                for mouse in display.pending_mouse.drain(..) {
+                    self.local_mouse.push_back(mouse);
                 }
             }
         }
@@ -171,6 +176,10 @@ mod bridge_impl {
 
         fn get_pending_scancodes(&mut self) -> Vec<u8> {
             self.local_scancodes.drain(..).collect()
+        }
+
+        fn get_pending_mouse(&mut self) -> Vec<crate::gui::host_input::HostMouseEvent> {
+            self.local_mouse.drain(..).collect()
         }
 
         fn get_pending_serial_input(&mut self) -> Vec<u8> {

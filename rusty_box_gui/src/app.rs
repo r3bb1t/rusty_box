@@ -11,7 +11,10 @@ use std::sync::{
 };
 
 use egui::{Color32, RichText, Stroke};
-use rusty_box::params::{BxParams, BX_MAX_SMP_THREADS_SUPPORTED};
+use rusty_box::params::{
+    BxParams, BX_CPU_CORES_LIMIT, BX_CPU_HT_THREADS_LIMIT, BX_CPU_PROCESSORS_LIMIT,
+    BX_MAX_SMP_THREADS_SUPPORTED,
+};
 use rusty_box_bximage::{
     calculate_hard_disk_geometry, CreatedImage as BxCreatedImage, FloppyFormat, ImageSize,
     SectorSize,
@@ -160,8 +163,10 @@ struct NativeVmSettings {
     host_memory_mib: u32,
     memory_block_kib: u32,
     ips: u32,
-    cpus: u32,
-    boot_device: crate::args::BootDevice,
+    cpu_sockets: u32,
+    cpu_cores: u32,
+    cpu_threads: u32,
+    boot_order: Vec<crate::args::BootDevice>,
     pci: bool,
     sync_slowdown: bool,
     max_instructions: u64,
@@ -172,6 +177,7 @@ struct NativeVmSettings {
     disk_path: String,
     disk_channel: usize,
     disk_drive: usize,
+    disk_chs_override: Option<crate::args::DiskGeometry>,
     disk_creation: Option<crate::config::ResolvedDiskCreation>,
     cdrom_enabled: bool,
     cdrom_path: String,
@@ -184,17 +190,16 @@ impl NativeVmSettings {
     fn from_config(config: &crate::config::ResolvedConfig) -> Self {
         let disk = config.disk.as_ref();
         let cdrom = config.cdrom.as_ref();
+        let topology = config.cpu_params.cpu_topology();
         Self {
             memory_mib: config.memory_mib,
             host_memory_mib: config.host_memory_mib,
             memory_block_kib: config.memory_block_kib,
             ips: config.ips,
-            cpus: config.cpu_params.cpu_count(),
-            boot_device: config
-                .boot_order
-                .first()
-                .copied()
-                .unwrap_or(crate::args::BootDevice::Cdrom),
+            cpu_sockets: topology.n_processors(),
+            cpu_cores: topology.n_cores(),
+            cpu_threads: topology.n_threads(),
+            boot_order: config.boot_order.clone(),
             pci: config.pci,
             sync_slowdown: config.sync_slowdown,
             max_instructions: if config.max_instructions == u64::MAX {
@@ -212,6 +217,7 @@ impl NativeVmSettings {
             disk_path: disk.map_or_else(String::new, |disk| disk.path.display().to_string()),
             disk_channel: disk.map_or(0, |disk| disk.channel),
             disk_drive: disk.map_or(0, |disk| disk.drive),
+            disk_chs_override: None,
             disk_creation: disk.and_then(|disk| disk.creation.clone()),
             cdrom_enabled: cdrom.is_some(),
             cdrom_path: cdrom.map_or_else(String::new, |cdrom| cdrom.path.display().to_string()),
@@ -226,9 +232,16 @@ impl NativeVmSettings {
         config.memory_block_kib = self.memory_block_kib.max(1);
         config.ips = self.ips.max(1);
         config.cpu_params = BxParams::default()
-            .with_topology(self.cpus.max(1), 1, 1)
-            .map_err(|_| {
-                format!("CPU count must be between 1 and {BX_MAX_SMP_THREADS_SUPPORTED}")
+            .with_topology(
+                self.cpu_sockets.max(1),
+                self.cpu_cores.max(1),
+                self.cpu_threads.max(1),
+            )
+            .map_err(|error| {
+                format!(
+                    "Invalid CPU topology: {}",
+                    crate::config::topology_error_message(error)
+                )
             })?;
         config.pci = self.pci;
         config.sync_slowdown = self.sync_slowdown;
@@ -252,7 +265,15 @@ impl NativeVmSettings {
                 .as_ref()
                 .filter(|creation| creation.path == path)
                 .cloned();
-            let geometry = if let Some(creation) = &creation {
+            let geometry = if let Some(override_chs) = self.disk_chs_override {
+                if override_chs.cylinders == 0
+                    || override_chs.heads == 0
+                    || override_chs.sectors_per_track == 0
+                {
+                    return Err("Overridden disk CHS values must be non-zero".to_owned());
+                }
+                override_chs
+            } else if let Some(creation) = &creation {
                 let geometry = calculate_hard_disk_geometry(creation.size, SectorSize::Bytes512)
                     .map_err(|error| format!("Failed to inspect hard disk: {error}"))?;
                 if geometry.cylinders > u16::MAX as u64 {
@@ -299,15 +320,19 @@ impl NativeVmSettings {
 
     fn boot_order_for_attached_media(&self) -> Result<Vec<crate::args::BootDevice>, String> {
         let mut order = Vec::with_capacity(2);
-        let first = self.boot_device;
-        if self.is_boot_device_attached(first) {
-            order.push(first);
+        // Keep the user's chosen order, dropping unattached or duplicate devices.
+        for device in &self.boot_order {
+            if self.is_boot_device_attached(*device) && !order.contains(device) {
+                order.push(*device);
+            }
         }
+        // Append any attached device the list didn't mention, so freshly enabled
+        // media stays bootable without forcing the user to edit the order first.
         for device in [
             crate::args::BootDevice::Disk,
             crate::args::BootDevice::Cdrom,
         ] {
-            if device != first && self.is_boot_device_attached(device) {
+            if self.is_boot_device_attached(device) && !order.contains(&device) {
                 order.push(device);
             }
         }
@@ -900,6 +925,25 @@ impl NativeShellApp {
                             ui.close();
                         }
                     });
+                    ui.menu_button("Input", |ui| {
+                        if ui
+                            .add_enabled(running, egui::Button::new("Send Ctrl+Alt+Del"))
+                            .clicked()
+                        {
+                            self.emulator.send_ctrl_alt_del();
+                            ui.close();
+                        }
+                        let captured = self.emulator.mouse_captured();
+                        let label = if captured {
+                            "Release Mouse"
+                        } else {
+                            "Capture Mouse"
+                        };
+                        if ui.add_enabled(running, egui::Button::new(label)).clicked() {
+                            self.emulator.toggle_mouse_capture();
+                            ui.close();
+                        }
+                    });
                     ui.menu_button("Help", |ui| {
                         if ui.button("About Rusty Box Workstation").clicked() {
                             self.chrome.show_about = true;
@@ -1336,22 +1380,66 @@ impl NativeShellApp {
                 detail_row(ui, "Virtual processors", &self.vm_info.cpus.to_string());
                 ui.add_enabled_ui(editable, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Virtual processors")
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
+                        ui.label(RichText::new("Sockets").strong().color(TEXT_PRIMARY));
                         changed |= draw_u32_field(
                             ui,
-                            &mut self.settings.cpus,
+                            &mut self.settings.cpu_sockets,
                             1,
-                            BX_MAX_SMP_THREADS_SUPPORTED,
+                            BX_CPU_PROCESSORS_LIMIT,
                             "",
                             editable,
                             1,
                             None,
                         );
                     });
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Cores / socket")
+                                .strong()
+                                .color(TEXT_PRIMARY),
+                        );
+                        changed |= draw_u32_field(
+                            ui,
+                            &mut self.settings.cpu_cores,
+                            1,
+                            BX_CPU_CORES_LIMIT,
+                            "",
+                            editable,
+                            1,
+                            None,
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Threads / core")
+                                .strong()
+                                .color(TEXT_PRIMARY),
+                        );
+                        changed |= draw_u32_field(
+                            ui,
+                            &mut self.settings.cpu_threads,
+                            1,
+                            BX_CPU_HT_THREADS_LIMIT,
+                            "",
+                            editable,
+                            1,
+                            None,
+                        );
+                    });
+                    let total = self
+                        .settings
+                        .cpu_sockets
+                        .saturating_mul(self.settings.cpu_cores)
+                        .saturating_mul(self.settings.cpu_threads);
+                    let total_text = if total > BX_MAX_SMP_THREADS_SUPPORTED {
+                        RichText::new(format!(
+                            "{total} logical CPUs — exceeds SMP limit of {BX_MAX_SMP_THREADS_SUPPORTED}"
+                        ))
+                        .color(ACCENT_AMBER)
+                    } else {
+                        RichText::new(format!("{total} logical CPUs")).color(TEXT_MUTED)
+                    };
+                    ui.label(total_text);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("IPS target").strong().color(TEXT_PRIMARY));
                         changed |= draw_u32_field(
@@ -1395,26 +1483,72 @@ impl NativeShellApp {
                 );
                 ui.add_enabled_ui(editable, |ui| {
                     changed |= ui.checkbox(&mut self.settings.pci, "Enable PCI").changed();
-                    egui::ComboBox::from_label("Primary boot")
-                        .selected_text(self.settings.boot_device.to_string())
-                        .show_ui(ui, |ui| {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.settings.boot_device,
-                                    crate::args::BootDevice::Disk,
-                                    "disk",
-                                )
-                                .changed();
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.settings.boot_device,
-                                    crate::args::BootDevice::Cdrom,
-                                    "cdrom",
-                                )
-                                .changed();
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("Boot order (first match boots)")
+                            .strong()
+                            .color(TEXT_PRIMARY),
+                    );
+
+                    let mut move_up: Option<usize> = None;
+                    let mut move_down: Option<usize> = None;
+                    let mut remove: Option<usize> = None;
+                    let len = self.settings.boot_order.len();
+                    for (index, device) in self.settings.boot_order.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("{}. {device}", index + 1))
+                                    .color(TEXT_PRIMARY),
+                            );
+                            if ui
+                                .add_enabled(index > 0, egui::Button::new("▲"))
+                                .on_hover_text("Move earlier")
+                                .clicked()
+                            {
+                                move_up = Some(index);
+                            }
+                            if ui
+                                .add_enabled(index + 1 < len, egui::Button::new("▼"))
+                                .on_hover_text("Move later")
+                                .clicked()
+                            {
+                                move_down = Some(index);
+                            }
+                            if ui.button("✕").on_hover_text("Remove").clicked() {
+                                remove = Some(index);
+                            }
                         });
+                    }
+                    if let Some(index) = move_up {
+                        self.settings.boot_order.swap(index, index - 1);
+                        changed = true;
+                    }
+                    if let Some(index) = move_down {
+                        self.settings.boot_order.swap(index, index + 1);
+                        changed = true;
+                    }
+                    if let Some(index) = remove {
+                        self.settings.boot_order.remove(index);
+                        changed = true;
+                    }
+
+                    for device in [
+                        crate::args::BootDevice::Disk,
+                        crate::args::BootDevice::Cdrom,
+                    ] {
+                        if !self.settings.boot_order.contains(&device) {
+                            let attached = self.settings.is_boot_device_attached(device);
+                            if ui
+                                .add_enabled(attached, egui::Button::new(format!("Add {device}")))
+                                .clicked()
+                            {
+                                self.settings.boot_order.push(device);
+                                changed = true;
+                            }
+                        }
+                    }
                 });
-                detail_row(ui, "Boot order", &self.vm_info.boot);
+                detail_row(ui, "Effective boot order", &self.vm_info.boot);
             }
             HardwareDevice::HardDisk => {
                 hardware_intro(
@@ -1452,6 +1586,47 @@ impl NativeShellApp {
                             .add(egui::DragValue::new(&mut self.settings.disk_drive).range(0..=1))
                             .changed();
                     });
+
+                    let mut override_enabled = self.settings.disk_chs_override.is_some();
+                    if ui
+                        .checkbox(&mut override_enabled, "Override CHS geometry")
+                        .on_hover_text(
+                            "Force a specific cylinders/heads/sectors geometry instead of \
+                             auto-detecting it from the image size.",
+                        )
+                        .changed()
+                    {
+                        self.settings.disk_chs_override = override_enabled.then(|| {
+                            self.config.disk.as_ref().map_or(
+                                crate::args::DiskGeometry {
+                                    cylinders: 16_383,
+                                    heads: 16,
+                                    sectors_per_track: 63,
+                                },
+                                |disk| disk.geometry,
+                            )
+                        });
+                        changed = true;
+                    }
+                    if let Some(chs) = &mut self.settings.disk_chs_override {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Cylinders").strong().color(TEXT_PRIMARY));
+                            changed |= ui
+                                .add(egui::DragValue::new(&mut chs.cylinders).range(1..=u16::MAX))
+                                .changed();
+                            ui.label(RichText::new("heads").strong().color(TEXT_PRIMARY));
+                            changed |= ui
+                                .add(egui::DragValue::new(&mut chs.heads).range(1..=u8::MAX))
+                                .changed();
+                            ui.label(RichText::new("sectors").strong().color(TEXT_PRIMARY));
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut chs.sectors_per_track)
+                                        .range(1..=u8::MAX),
+                                )
+                                .changed();
+                        });
+                    }
                 });
                 if let Some(disk) = &self.config.disk {
                     detail_row(ui, "Detected CHS", &disk.geometry.to_string());
@@ -1505,14 +1680,21 @@ impl NativeShellApp {
                             .add(egui::DragValue::new(&mut self.settings.cdrom_drive).range(0..=1))
                             .changed();
                     });
-                    let mut boot_cdrom =
-                        self.settings.boot_device == crate::args::BootDevice::Cdrom;
+                    let mut boot_cdrom = self.settings.boot_order.first()
+                        == Some(&crate::args::BootDevice::Cdrom);
                     if ui.checkbox(&mut boot_cdrom, "Boot CD/DVD first").changed() {
-                        self.settings.boot_device = if boot_cdrom {
-                            crate::args::BootDevice::Cdrom
+                        // Reposition the CD/DVD within the boot order without
+                        // disturbing the other devices' relative order.
+                        self.settings
+                            .boot_order
+                            .retain(|device| *device != crate::args::BootDevice::Cdrom);
+                        if boot_cdrom {
+                            self.settings
+                                .boot_order
+                                .insert(0, crate::args::BootDevice::Cdrom);
                         } else {
-                            crate::args::BootDevice::Disk
-                        };
+                            self.settings.boot_order.push(crate::args::BootDevice::Cdrom);
+                        }
                         changed = true;
                     }
                 });
@@ -1598,9 +1780,46 @@ impl NativeShellApp {
             }
         }
 
+        ui.add_space(12.0);
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Save settings to config file").clicked() {
+                self.save_settings_to_config_file();
+            }
+            if let Some(path) = &self.config.config_path {
+                ui.label(RichText::new(format!("→ {}", path.display())).color(TEXT_MUTED));
+            }
+        });
+
         if !editable {
             ui.add_space(8.0);
             ui.label(RichText::new("Power off before changing VM hardware.").color(ACCENT_AMBER));
+        }
+    }
+
+    /// Persist the current profile's settings to its TOML config file so they
+    /// survive across launches.
+    fn save_settings_to_config_file(&mut self) {
+        if let Err(message) = self.apply_pending_settings() {
+            self.shell_notice = Some(ShellNotice::error(message));
+            return;
+        }
+        let Some(path) = self.config.config_path.clone() else {
+            self.shell_notice = Some(ShellNotice::error(
+                "No config file path is known for this session; cannot save.".to_owned(),
+            ));
+            return;
+        };
+        match self.config.save_to_toml(&path) {
+            Ok(()) => {
+                self.shell_notice = Some(ShellNotice::info(format!(
+                    "Saved settings to {}.",
+                    path.display()
+                )));
+            }
+            Err(error) => {
+                self.shell_notice = Some(ShellNotice::error(error.to_string()));
+            }
         }
     }
     fn draw_images_page(&mut self, ui: &mut egui::Ui) {
@@ -2163,6 +2382,8 @@ pub struct WebShellApp {
     last_ips_instructions: u64,
     cached_ips: f64,
     frame_count: u64,
+    /// Previous PS/2 button bitmask for relative mouse forwarding.
+    web_prev_mouse_buttons: u8,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2387,10 +2608,10 @@ fn web_uploaded_media_config(
     }
 }
 #[cfg(target_arch = "wasm32")]
-const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bios/BIOS-bochs-latest");
+const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
 #[cfg(target_arch = "wasm32")]
 const VGA_BIOS_DATA: &[u8] =
-    include_bytes!("../../cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin");
+    include_bytes!("../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin");
 
 #[cfg(target_arch = "wasm32")]
 impl WebShellApp {
@@ -2425,6 +2646,7 @@ impl WebShellApp {
             last_ips_instructions: 0,
             cached_ips: 0.0,
             frame_count: 0,
+            web_prev_mouse_buttons: 0,
         }
     }
 
@@ -2748,6 +2970,25 @@ impl WebShellApp {
         });
     }
 
+    /// Forward relative mouse motion / buttons / wheel to the guest while the
+    /// pointer is over the display. Uses the shared egui→`HostInputSink`
+    /// translator with the `Emulator` acting as the sink (single-threaded wasm
+    /// applies events immediately).
+    fn process_mouse(&mut self, ctx: &egui::Context, image_rect: egui::Rect) {
+        let hovering = ctx
+            .input(|input| input.pointer.hover_pos().is_some_and(|p| image_rect.contains(p)));
+        if !hovering {
+            return;
+        }
+        let Some(emu) = &mut self.emulator else {
+            return;
+        };
+        let prev = self.web_prev_mouse_buttons;
+        self.web_prev_mouse_buttons = ctx.input(|input| {
+            rusty_box::gui::host_input::translate_egui_mouse(input, prev, &mut **emu)
+        });
+    }
+
     fn update_ips(&mut self) {
         let now = web_time::Instant::now();
         let elapsed = now.duration_since(self.last_ips_time);
@@ -2783,11 +3024,16 @@ impl WebShellApp {
         };
         self.display.fb_dirty = false;
 
+        // Crisp integer upscale (NEAREST magnify), smooth downscale (LINEAR minify).
+        let options = egui::TextureOptions {
+            magnification: egui::TextureFilter::Nearest,
+            minification: egui::TextureFilter::Linear,
+            ..Default::default()
+        };
         match &mut self.texture {
-            Some(texture) => texture.set(image, egui::TextureOptions::NEAREST),
+            Some(texture) => texture.set(image, options),
             None => {
-                self.texture =
-                    Some(ctx.load_texture("vga_display", image, egui::TextureOptions::NEAREST));
+                self.texture = Some(ctx.load_texture("vga_display", image, options));
             }
         }
     }
@@ -3072,15 +3318,28 @@ impl WebShellApp {
                     .as_ref()
                     .expect("display surface requires a texture");
                 let available = ui.available_size();
-                let tex_w = self.display.fb_width as f32;
+                let tex_w = (self.display.fb_width.max(1)) as f32;
                 let tex_h = self.display.fb_height.max(1) as f32;
-                let max_scale_x = (available.x / tex_w).floor().max(1.0);
-                let max_scale_y = (available.y / tex_h).floor().max(1.0);
-                let scale = max_scale_x.min(max_scale_y);
-                let size = egui::vec2(tex_w * scale, tex_h * scale);
+                // Scale in PHYSICAL pixels (see eframe_app.rs): a point-space integer
+                // scale becomes a fractional physical scale on HiDPI -> uneven NEAREST
+                // pixels. Snap upscales to an integer physical multiple; fractional-fit
+                // a guest larger than the panel (LINEAR minify handles it).
+                let ppp = ui.ctx().pixels_per_point().max(f32::EPSILON);
+                let fit = ((available.x * ppp) / tex_w).min((available.y * ppp) / tex_h);
+                let size = if fit < 1.0 {
+                    egui::vec2(tex_w * fit / ppp, tex_h * fit / ppp)
+                } else {
+                    let iscale = fit.floor().max(1.0);
+                    egui::vec2(tex_w * iscale / ppp, tex_h * iscale / ppp)
+                };
+                let mut image_rect = None;
                 ui.centered_and_justified(|ui| {
-                    ui.image(egui::load::SizedTexture::new(texture.id(), size));
+                    let response = ui.image(egui::load::SizedTexture::new(texture.id(), size));
+                    image_rect = Some(response.rect);
                 });
+                if let Some(rect) = image_rect {
+                    self.process_mouse(ui.ctx(), rect);
+                }
             }
             WebConsoleSurface::Launcher => {
                 ui.centered_and_justified(|ui| {
@@ -3743,6 +4002,7 @@ mod tests {
             }),
             cpu_params: BxParams::default(),
             log_level: crate::args::LogLevel::Warn,
+            config_path: None,
         }
     }
 
@@ -3966,6 +4226,126 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn native_settings_apply_cpu_topology() {
+        let mut config = test_resolved_config();
+        let mut settings = NativeVmSettings::from_config(&config);
+        settings.cpu_sockets = 2;
+        settings.cpu_cores = 2;
+        settings.cpu_threads = 2;
+
+        settings.apply_to_config(&mut config).unwrap();
+
+        assert_eq!(config.cpu_params.cpu_count(), 8);
+        let topology = config.cpu_params.cpu_topology();
+        assert_eq!(topology.n_processors(), 2);
+        assert_eq!(topology.n_cores(), 2);
+        assert_eq!(topology.n_threads(), 2);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_settings_reject_out_of_range_topology() {
+        let mut config = test_resolved_config();
+        let mut settings = NativeVmSettings::from_config(&config);
+        settings.cpu_cores = 99;
+
+        let error = settings.apply_to_config(&mut config).unwrap_err();
+        assert!(error.contains("CPU topology"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_settings_apply_chs_override() {
+        let disk = unique_temp_path("rusty-box-gui-chs-override");
+        write_test_disk(&disk);
+        let mut config = test_resolved_config();
+        config.disk = None;
+        let mut settings = NativeVmSettings::from_config(&config);
+        settings.disk_enabled = true;
+        settings.disk_path = disk.display().to_string();
+        settings.disk_chs_override = Some(crate::args::DiskGeometry {
+            cylinders: 512,
+            heads: 8,
+            sectors_per_track: 32,
+        });
+
+        settings.apply_to_config(&mut config).unwrap();
+
+        let attached = config.disk.as_ref().expect("disk should attach");
+        assert_eq!(attached.geometry.cylinders, 512);
+        assert_eq!(attached.geometry.heads, 8);
+        assert_eq!(attached.geometry.sectors_per_track, 32);
+        remove_test_file(&disk);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_settings_reject_zero_chs_override() {
+        let disk = unique_temp_path("rusty-box-gui-chs-zero");
+        write_test_disk(&disk);
+        let mut config = test_resolved_config();
+        config.disk = None;
+        let mut settings = NativeVmSettings::from_config(&config);
+        settings.disk_enabled = true;
+        settings.disk_path = disk.display().to_string();
+        settings.disk_chs_override = Some(crate::args::DiskGeometry {
+            cylinders: 0,
+            heads: 8,
+            sectors_per_track: 32,
+        });
+
+        let error = settings.apply_to_config(&mut config).unwrap_err();
+        assert!(error.contains("non-zero"));
+        remove_test_file(&disk);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_settings_apply_boot_order() {
+        let disk = unique_temp_path("rusty-box-gui-boot-order");
+        write_test_disk(&disk);
+        let mut config = test_resolved_config();
+        let mut settings = NativeVmSettings::from_config(&config);
+        settings.disk_enabled = true;
+        settings.disk_path = disk.display().to_string();
+        settings.cdrom_enabled = true;
+        settings.boot_order = vec![
+            crate::args::BootDevice::Disk,
+            crate::args::BootDevice::Cdrom,
+        ];
+
+        settings.apply_to_config(&mut config).unwrap();
+        assert_eq!(
+            config.boot_order,
+            vec![
+                crate::args::BootDevice::Disk,
+                crate::args::BootDevice::Cdrom
+            ]
+        );
+        remove_test_file(&disk);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_settings_boot_order_drops_unattached_and_appends_attached() {
+        let disk = unique_temp_path("rusty-box-gui-boot-filter");
+        write_test_disk(&disk);
+        let mut config = test_resolved_config();
+        let mut settings = NativeVmSettings::from_config(&config);
+        // Ask to boot the CD first, but only attach the hard disk.
+        settings.disk_enabled = true;
+        settings.disk_path = disk.display().to_string();
+        settings.cdrom_enabled = false;
+        settings.boot_order = vec![crate::args::BootDevice::Cdrom];
+
+        settings.apply_to_config(&mut config).unwrap();
+        // Unattached CD dropped; attached disk appended so the VM still boots.
+        assert_eq!(config.boot_order, vec![crate::args::BootDevice::Disk]);
+        remove_test_file(&disk);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn native_vm_settings_attach_disk_from_none() {
         let disk = unique_temp_path("rusty-box-gui-settings-disk");
         write_test_disk(&disk);
@@ -3976,7 +4356,7 @@ mod tests {
         settings.disk_path = disk.display().to_string();
         settings.disk_channel = 1;
         settings.disk_drive = 1;
-        settings.boot_device = crate::args::BootDevice::Disk;
+        settings.boot_order = vec![crate::args::BootDevice::Disk];
 
         settings.apply_to_config(&mut config).unwrap();
 
@@ -4011,7 +4391,7 @@ mod tests {
         settings.disk_enabled = true;
         settings.disk_path = disk.display().to_string();
         settings.cdrom_enabled = false;
-        settings.boot_device = crate::args::BootDevice::Disk;
+        settings.boot_order = vec![crate::args::BootDevice::Disk];
         settings.apply_to_config(&mut config).unwrap();
         assert!(config.disk.is_some());
         assert!(config.cdrom.is_none());

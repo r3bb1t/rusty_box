@@ -144,6 +144,12 @@ pub trait BxGui: Send + Sync {
         Vec::new()
     }
 
+    /// Get pending relative mouse events to forward to the PS/2 aux device.
+    fn get_pending_mouse(&mut self) -> Vec<crate::gui::host_input::HostMouseEvent> {
+        // Default: empty (GUIs without mouse forwarding)
+        Vec::new()
+    }
+
     /// Get pending serial input bytes (ASCII chars to inject into serial port RX)
     /// Used when console=ttyS0 — keyboard input needs to go to serial, not PS/2
     fn get_pending_serial_input(&mut self) -> Vec<u8> {

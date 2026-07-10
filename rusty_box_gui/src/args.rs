@@ -1,5 +1,5 @@
 use clap::{ArgAction, Parser, ValueEnum};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf, str::FromStr};
 
 #[derive(Debug, Clone, Parser)]
@@ -67,6 +67,15 @@ pub struct Args {
     #[arg(long = "cpus", value_name = "N")]
     pub cpus: Option<u32>,
 
+    #[arg(long = "cpu-sockets", value_name = "N", conflicts_with = "cpus")]
+    pub cpu_sockets: Option<u32>,
+
+    #[arg(long = "cpu-cores", value_name = "N", conflicts_with = "cpus")]
+    pub cpu_cores: Option<u32>,
+
+    #[arg(long = "cpu-threads", value_name = "N", conflicts_with = "cpus")]
+    pub cpu_threads: Option<u32>,
+
     #[arg(long = "pci", action = ArgAction::SetTrue, conflicts_with = "no_pci")]
     pub pci: bool,
 
@@ -83,7 +92,7 @@ pub struct Args {
     pub log_level: Option<LogLevel>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DisplayBackend {
     Terminal,
@@ -92,14 +101,14 @@ pub enum DisplayBackend {
     Egui,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BootDevice {
     Disk,
     Cdrom,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LogLevel {
     Trace,
@@ -109,7 +118,7 @@ pub enum LogLevel {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DiskGeometry {
     pub cylinders: u16,
     pub heads: u8,

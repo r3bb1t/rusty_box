@@ -29,8 +29,22 @@ pub struct RustyBoxApp {
     // Cached serial log for display (updated each frame from shared)
     cached_serial_log: String,
     serial_log_len: usize,
+    // Cached transient startup status (e.g. "Creating disk image…"), shown
+    // before the guest produces video.
+    cached_startup_status: Option<String>,
     serial_input: String,
     fit_to_available: bool,
+    /// When true, stretch the framebuffer to a 4:3 display aspect (VGA text/low-res
+    /// modes such as 720x400 / 320x200 have non-square pixels a CRT shows as 4:3);
+    /// when false (default), draw crisp integer-square pixels.
+    pixel_aspect_correct: bool,
+    /// Previous PS/2 button bitmask, so a release with no motion is still reported.
+    prev_mouse_buttons: u8,
+    /// Previous modifier-key state, to synthesize make/break scancodes for
+    /// Shift/Ctrl/Alt (egui reports these via `Modifiers`, not `Key` events).
+    prev_ctrl: bool,
+    prev_alt: bool,
+    prev_shift: bool,
 }
 
 impl RustyBoxApp {
@@ -50,14 +64,25 @@ impl RustyBoxApp {
             cached_emu_running: false,
             cached_serial_log: String::new(),
             serial_log_len: 0,
+            cached_startup_status: None,
             serial_input: String::new(),
             fit_to_available: false,
+            pixel_aspect_correct: false,
+            prev_mouse_buttons: 0,
+            prev_ctrl: false,
+            prev_alt: false,
+            prev_shift: false,
         }
     }
 
     /// Use fractional scaling to fill constrained embedded surfaces.
     pub fn set_fit_to_available(&mut self, fit_to_available: bool) {
         self.fit_to_available = fit_to_available;
+    }
+
+    /// Enable 4:3 pixel-aspect correction for non-square VGA modes.
+    pub fn set_pixel_aspect_correct(&mut self, pixel_aspect_correct: bool) {
+        self.pixel_aspect_correct = pixel_aspect_correct;
     }
 
     fn should_request_repaint(&self) -> bool {
@@ -144,11 +169,92 @@ impl RustyBoxApp {
             });
         });
 
+        // Synthesize make/break scancodes for Ctrl and Alt from egui's modifier
+        // state (egui reports these via `Modifiers`, not `Key` events), so guest
+        // chords like Ctrl+C and Alt+F reach the VM. Shift is intentionally NOT
+        // forwarded here: printable characters already carry their own shift in
+        // `char_to_scancode_sequence`, and adding it again would double-shift.
+        let mods = ctx.input(|i| i.modifiers);
+        push_modifier_scancode(&mut scancodes, self.prev_ctrl, mods.ctrl, 0x14);
+        push_modifier_scancode(&mut scancodes, self.prev_alt, mods.alt, 0x11);
+        self.prev_ctrl = mods.ctrl;
+        self.prev_alt = mods.alt;
+        self.prev_shift = mods.shift;
+
         if !scancodes.is_empty() {
             if let Ok(mut display) = self.shared.lock() {
                 display.pending_scancodes.extend_from_slice(&scancodes);
             }
         }
+    }
+
+    /// Queue the PS/2 Set-2 sequence for Ctrl+Alt+Del. Needed because the host OS
+    /// usually intercepts the real chord before egui sees it.
+    pub fn send_ctrl_alt_del(&mut self) {
+        const CTRL_ALT_DEL: [u8; 11] = [
+            0x14, // Ctrl make
+            0x11, // Alt make
+            0xE0, 0x71, // Del make (extended)
+            0xE0, 0xF0, 0x71, // Del break (extended)
+            0xF0, 0x11, // Alt break
+            0xF0, 0x14, // Ctrl break
+        ];
+        if let Ok(mut display) = self.shared.lock() {
+            display
+                .pending_scancodes
+                .extend_from_slice(&CTRL_ALT_DEL);
+        }
+    }
+
+    /// Toggle whether the display captures mouse/keyboard input for the guest.
+    pub fn toggle_mouse_capture(&mut self) {
+        if let Ok(mut display) = self.shared.lock() {
+            display.mouse_captured = !display.mouse_captured;
+        }
+    }
+
+    /// Whether the guest currently captures the mouse.
+    pub fn mouse_captured(&self) -> bool {
+        self.shared
+            .lock()
+            .map(|display| display.mouse_captured)
+            .unwrap_or(false)
+    }
+
+    /// Route pointer activity over the display rectangle to the guest.
+    ///
+    /// While the guest is not captured, a click on the display grabs it. While
+    /// captured, relative motion / buttons / wheel are forwarded to the PS/2 aux
+    /// device (via the shared queue) and the host cursor is hidden; the user
+    /// releases capture from the toolbar toggle.
+    fn handle_display_pointer(&mut self, ui: &egui::Ui, image_rect: egui::Rect) {
+        if !self.shared_emu_running() {
+            return;
+        }
+        if !ui.rect_contains_pointer(image_rect) {
+            return;
+        }
+
+        if !self.mouse_captured() {
+            // Click-to-capture: consume the click that grabs the guest.
+            let clicked = ui
+                .ctx()
+                .input(|input| input.pointer.button_clicked(egui::PointerButton::Primary));
+            if clicked {
+                self.toggle_mouse_capture();
+            }
+            return;
+        }
+
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        let prev = self.prev_mouse_buttons;
+        let new_buttons = if let Ok(mut display) = self.shared.lock() {
+            ui.ctx()
+                .input(|input| super::host_input::translate_egui_mouse(input, prev, &mut *display))
+        } else {
+            prev
+        };
+        self.prev_mouse_buttons = new_buttons;
     }
 
     /// Update the egui texture from the shared framebuffer.
@@ -161,6 +267,12 @@ impl RustyBoxApp {
             // Always cache status for the status bar.
             self.cached_emu_running = display.emu_running;
             self.cached_ips = display.ips;
+            // Once the guest produces real video, the startup notice has served
+            // its purpose — clear it so it doesn't linger over the running guest.
+            if display.fb_dirty {
+                display.startup_status = None;
+            }
+            self.cached_startup_status.clone_from(&display.startup_status);
 
             // Sync serial log if it changed.
             if display.serial_log.len() != self.serial_log_len {
@@ -207,7 +319,18 @@ impl RustyBoxApp {
             egui::ColorImage::new([w, h], padded)
         };
 
-        let options = egui::TextureOptions::NEAREST; // Pixel-perfect rendering
+        // Crisp integer upscale (NEAREST magnify) with smooth downscale (LINEAR
+        // minify) for the default path; fully LINEAR when we deliberately do a
+        // fractional stretch (aspect correction or an embedded fit-to-fill).
+        let options = if self.pixel_aspect_correct || self.fit_to_available {
+            egui::TextureOptions::LINEAR
+        } else {
+            egui::TextureOptions {
+                magnification: egui::TextureFilter::Nearest,
+                minification: egui::TextureFilter::Linear,
+                ..Default::default()
+            }
+        };
 
         match &mut self.texture {
             Some(tex) if self.last_width == w as u32 && self.last_height == h as u32 => {
@@ -269,7 +392,12 @@ impl RustyBoxApp {
             ctx.set_visuals(visuals);
         }
 
-        if self.shared_emu_running() && !ctx.egui_wants_keyboard_input() {
+        // Forward the keyboard while the VM runs. When the mouse is captured we
+        // bypass egui's focus gate so chords (Ctrl+C, Alt+Tab in the guest) reach
+        // the VM even if a host widget holds focus.
+        if self.shared_emu_running()
+            && (self.mouse_captured() || !ctx.egui_wants_keyboard_input())
+        {
             self.process_input(&ctx);
         }
         self.update_texture(&ctx, apply_theme);
@@ -425,28 +553,70 @@ impl RustyBoxApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(0x0D, 0x0D, 0x1A)))
             .show_inside(ui, |ui| {
-                if let Some(tex) = &self.texture {
+                let mut image_rect = None;
+                if let Some(status) = self.cached_startup_status.clone() {
+                    // A startup step (e.g. allocating the disk image) is running.
+                    // Show it with a spinner instead of a blank panel, so the
+                    // window doesn't look frozen while the guest has no video yet.
+                    ui.centered_and_justified(|ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add(egui::Spinner::new().size(28.0));
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new(status)
+                                    .color(egui::Color32::from_rgb(0xE8, 0xEE, 0xF5))
+                                    .size(15.0),
+                            );
+                        });
+                    });
+                } else if let Some(tex) = &self.texture {
                     let available = ui.available_size();
-                    let tex_w = self.last_width as f32;
+                    let tex_w = self.last_width.max(1) as f32;
                     let tex_h = self.last_height.max(1) as f32;
+                    // Scale in PHYSICAL pixels. egui draws in points and multiplies by
+                    // pixels_per_point, so a point-space integer scale becomes a
+                    // FRACTIONAL physical scale on HiDPI (1.25/1.5x) -> uneven NEAREST
+                    // pixels. Compute the fit in physical px and snap upscales to an
+                    // integer physical multiple, then convert the draw size back to points.
+                    let ppp = ui.ctx().pixels_per_point().max(f32::EPSILON);
+                    let avail_px_x = (available.x * ppp).max(1.0);
+                    let avail_px_y = (available.y * ppp).max(1.0);
 
-                    let scale = if self.fit_to_available {
-                        (available.x / tex_w).min(available.y / tex_h).max(1.0)
+                    let (draw_w, draw_h) = if self.pixel_aspect_correct {
+                        // Present a 4:3 rectangle (VGA pixel aspect), fit to the panel.
+                        let mut w = available.x;
+                        let mut h = available.x * 3.0 / 4.0;
+                        if h > available.y {
+                            h = available.y;
+                            w = available.y * 4.0 / 3.0;
+                        }
+                        (w, h)
                     } else {
-                        // Integer scaling for crisp desktop pixels.
-                        let max_scale_x = (available.x / tex_w).floor().max(1.0);
-                        let max_scale_y = (available.y / tex_h).floor().max(1.0);
-                        max_scale_x.min(max_scale_y)
+                        let fit = (avail_px_x / tex_w).min(avail_px_y / tex_h);
+                        if self.fit_to_available || fit < 1.0 {
+                            // Embedded fill, or guest larger than the panel: fractional
+                            // fit (LINEAR handles the non-integer scale smoothly).
+                            let s = fit.max(f32::EPSILON);
+                            (tex_w * s / ppp, tex_h * s / ppp)
+                        } else {
+                            // Crisp integer upscale: snap to an integer PHYSICAL-pixel
+                            // multiple so NEAREST magnification is even.
+                            let iscale = fit.floor().max(1.0);
+                            (tex_w * iscale / ppp, tex_h * iscale / ppp)
+                        }
                     };
-                    let (w, h) = (tex_w * scale, tex_h * scale);
 
-                    // Center the image
-                    let offset_x = (available.x - w) / 2.0;
-                    let offset_y = (available.y - h) / 2.0;
+                    // Center the image.
+                    let offset_x = ((available.x - draw_w) / 2.0).max(0.0);
+                    let offset_y = ((available.y - draw_h) / 2.0).max(0.0);
                     ui.add_space(offset_y);
                     ui.horizontal(|ui| {
                         ui.add_space(offset_x);
-                        ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(w, h)));
+                        let response = ui.image(egui::load::SizedTexture::new(
+                            tex.id(),
+                            egui::vec2(draw_w, draw_h),
+                        ));
+                        image_rect = Some(response.rect);
                     });
                 } else {
                     ui.centered_and_justified(|ui| {
@@ -456,6 +626,9 @@ impl RustyBoxApp {
                                 .size(14.0),
                         );
                     });
+                }
+                if let Some(rect) = image_rect {
+                    self.handle_display_pointer(ui, rect);
                 }
             });
 
@@ -530,6 +703,18 @@ fn egui_key_to_scancodes(key: egui::Key, pressed: bool) -> Vec<u8> {
         seq.push(make_code);
     }
     seq
+}
+
+/// Append a PS/2 Set-2 make (key down) or break (key up) code for a modifier key
+/// when its state changed this frame. `make` is the Set-2 make byte
+/// (e.g. `0x14` = left Ctrl, `0x11` = left Alt, `0x12` = left Shift).
+fn push_modifier_scancode(scancodes: &mut Vec<u8>, was_down: bool, now_down: bool, make: u8) {
+    if now_down && !was_down {
+        scancodes.push(make);
+    } else if !now_down && was_down {
+        scancodes.push(0xF0);
+        scancodes.push(make);
+    }
 }
 
 /// Fallback: convert an egui Key to a lowercase ASCII character.

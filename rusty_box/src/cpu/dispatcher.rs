@@ -2653,6 +2653,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::UnpcklpdVpdWdq => self.unpcklpd_vpd_wpd(instr),
             Opcode::UnpckhpdVpdWdq => self.unpckhpd_vpd_wpd(instr),
 
+            // SSE3 Horizontal Add/Subtract (sse_pfp.rs)
+            Opcode::HaddpsVpsWps => self.haddps_vps_wps(instr),
+            Opcode::HaddpdVpdWpd => self.haddpd_vpd_wpd(instr),
+            Opcode::HsubpsVpsWps => self.hsubps_vps_wps(instr),
+            Opcode::HsubpdVpdWpd => self.hsubpd_vpd_wpd(instr),
+
+            // SSE4.1 Dot Products (sse_pfp.rs)
+            Opcode::DppsVpsWpsIb => self.dpps_vps_wps_ib(instr),
+            Opcode::DppdVpdWpdIb => self.dppd_vpd_wpd_ib(instr),
+
             // =========================================================================
             // SSE2 Packed Integer (sse.rs)
             // =========================================================================
@@ -2763,6 +2773,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::PsignwVdqWdq => self.psignw_vdq_wdq(instr),
             Opcode::PsigndVdqWdq => self.psignd_vdq_wdq(instr),
             Opcode::PalignrVdqWdqIb => self.palignr_vdq_wdq_ib(instr),
+            Opcode::PabsbVdqWdq => self.pabsb_vdq_wdq(instr),
+            Opcode::PabswVdqWdq => self.pabsw_vdq_wdq(instr),
+            Opcode::PabsdVdqWdq => self.pabsd_vdq_wdq(instr),
+
+            // SSE3 LDDQU — unaligned 128-bit load, same semantics as MOVDQU
+            // (Bochs ia_opcodes.def BX_IA_LDDQU_VdqMdq → MOVUPS_VpsWpsM)
+            Opcode::LddquVdqMdq => self.movdqu_load_sse(instr),
 
             // =========================================================================
             // SSE4.1 128-bit Packed Integer (sse.rs)
@@ -2774,6 +2791,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::PmaxudVdqWdq => self.pmaxud_vdq_wdq(instr),
             Opcode::PmulldVdqWdq => self.pmulld_vdq_wdq(instr),
             Opcode::PblendwVdqWdqIb => self.pblendw_vdq_wdq_ib(instr),
+            Opcode::MpsadbwVdqWdqIb => self.mpsadbw_vdq_wdq_ib(instr),
+            Opcode::PhminposuwVdqWdq => self.phminposuw_vdq_wdq(instr),
+            Opcode::InsertpsVpsWssIb => self.insertps_vps_wss_ib(instr),
+
+            // SSE4.1 FP blends (sse.rs)
+            Opcode::BlendpsVpsWpsIb => self.blendps_vps_wps_ib(instr),
+            Opcode::BlendpdVpdWpdIb => self.blendpd_vpd_wpd_ib(instr),
+            Opcode::BlendvpsVpsWps => self.blendvps_vps_wps(instr),
+            Opcode::BlendvpdVpdWpd => self.blendvpd_vpd_wpd(instr),
 
             // SSE4.1 Insert/Extract (PEXTRB/D/Q, PINSRB/D/Q)
             Opcode::PextrbEdVdqIbR => self.pextrb_ed_vdq_ib_r(instr),
@@ -3996,6 +4022,91 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::VorpsVpsHpsWps | Opcode::VorpdVpdHpdWpd => self.vorps(instr),
             Opcode::VxorpsVpsHpsWps | Opcode::VxorpdVpdHpdWpd => self.vxorps(instr),
 
+            // --- VEX FP arithmetic (avx_pfp.rs, Bochs avx_pfp.cc) ---
+            Opcode::VaddpsVpsHpsWps => self.vaddps(instr),
+            Opcode::VaddpdVpdHpdWpd => self.vaddpd(instr),
+            Opcode::VsubpsVpsHpsWps => self.vsubps(instr),
+            Opcode::VsubpdVpdHpdWpd => self.vsubpd(instr),
+            Opcode::VmulpsVpsHpsWps => self.vmulps(instr),
+            Opcode::VmulpdVpdHpdWpd => self.vmulpd(instr),
+            Opcode::VdivpsVpsHpsWps => self.vdivps(instr),
+            Opcode::VdivpdVpdHpdWpd => self.vdivpd(instr),
+            Opcode::VminpsVpsHpsWps => self.vminps(instr),
+            Opcode::VminpdVpdHpdWpd => self.vminpd(instr),
+            Opcode::VmaxpsVpsHpsWps => self.vmaxps(instr),
+            Opcode::VmaxpdVpdHpdWpd => self.vmaxpd(instr),
+            Opcode::VaddsubpsVpsHpsWps => self.vaddsubps(instr),
+            Opcode::VaddsubpdVpdHpdWpd => self.vaddsubpd(instr),
+            Opcode::VhaddpsVpsHpsWps => self.vhaddps(instr),
+            Opcode::VhaddpdVpdHpdWpd => self.vhaddpd(instr),
+            Opcode::VhsubpsVpsHpsWps => self.vhsubps(instr),
+            Opcode::VhsubpdVpdHpdWpd => self.vhsubpd(instr),
+            Opcode::VblendpsVpsHpsWpsIb => self.vblendps(instr),
+            Opcode::VblendpdVpdHpdWpdIb => self.vblendpd(instr),
+            Opcode::VblendvpsVpsHpsWpsIb => self.vblendvps(instr),
+            Opcode::VblendvpdVpdHpdWpdIb => self.vblendvpd(instr),
+            Opcode::VdppsVpsHpsWpsIb => self.vdpps(instr),
+            Opcode::VdppdVpdHpdWpdIb => self.vdppd(instr),
+            Opcode::VaddssVssHpsWss => self.vaddss(instr),
+            Opcode::VaddsdVsdHpdWsd => self.vaddsd(instr),
+            Opcode::VsubssVssHpsWss => self.vsubss(instr),
+            Opcode::VsubsdVsdHpdWsd => self.vsubsd(instr),
+            Opcode::VmulssVssHpsWss => self.vmulss(instr),
+            Opcode::VmulsdVsdHpdWsd => self.vmulsd(instr),
+            Opcode::VdivssVssHpsWss => self.vdivss(instr),
+            Opcode::VdivsdVsdHpdWsd => self.vdivsd(instr),
+            Opcode::VminssVssHpsWss => self.vminss(instr),
+            Opcode::VminsdVsdHpdWsd => self.vminsd(instr),
+            Opcode::VmaxssVssHpsWss => self.vmaxss(instr),
+            Opcode::VmaxsdVsdHpdWsd => self.vmaxsd(instr),
+            Opcode::VsqrtpsVpsWps => self.vsqrtps(instr),
+            Opcode::VsqrtpdVpdWpd => self.vsqrtpd(instr),
+            Opcode::VsqrtssVssHpsWss => self.vsqrtss(instr),
+            Opcode::VsqrtsdVsdHpdWsd => self.vsqrtsd(instr),
+            Opcode::VcmppsVpsHpsWpsIb => self.vcmpps(instr),
+            Opcode::VcmppdVpdHpdWpdIb => self.vcmppd(instr),
+            Opcode::VcmpssVssHpsWssIb => self.vcmpss(instr),
+            Opcode::VcmpsdVsdHpdWsdIb => self.vcmpsd(instr),
+            Opcode::VshufpsVpsHpsWpsIb => self.vshufps(instr),
+            Opcode::VshufpdVpdHpdWpdIb => self.vshufpd(instr),
+            Opcode::VunpcklpsVpsHpsWps => self.vunpcklps(instr),
+            Opcode::VunpckhpsVpsHpsWps => self.vunpckhps(instr),
+            Opcode::VunpcklpdVpdHpdWpd => self.vunpcklpd(instr),
+            Opcode::VunpckhpdVpdHpdWpd => self.vunpckhpd(instr),
+            Opcode::V128VmovssVssHpsWss => self.vmovss_load(instr),
+            Opcode::V128VmovsdVsdHpdWsd => self.vmovsd_load(instr),
+            Opcode::V128VmovssWssHpsVss => self.vmovss_store(instr),
+            Opcode::V128VmovsdWsdHpdVsd => self.vmovsd_store(instr),
+            Opcode::V128VmovlpsVpsHpsMq | Opcode::V128VmovlpdVpdHpdMq => self.vmovlp(instr),
+            Opcode::V128VmovhpsVpsHpsMq | Opcode::V128VmovhpdVpdHpdMq => self.vmovhp(instr),
+            Opcode::V128VmovhlpsVpsHpsWps => self.vmovhlps(instr),
+            Opcode::V128VmovlhpsVpsHpsWps => self.vmovlhps(instr),
+            Opcode::VmovsldupVpsWps => self.vmovsldup(instr),
+            Opcode::VmovshdupVpsWps => self.vmovshdup(instr),
+            Opcode::V128VmovddupVpdWpd | Opcode::V256VmovddupVpdWpd => self.vmovddup(instr),
+            Opcode::Vcvtss2sdVsdWss => self.vcvtss2sd(instr),
+            Opcode::Vcvtsd2ssVssWsd => self.vcvtsd2ss(instr),
+            Opcode::Vcvtsi2sdVsdEd => self.vcvtsi2sd_ed(instr),
+            Opcode::Vcvtsi2sdVsdEq => self.vcvtsi2sd_eq(instr),
+            Opcode::Vcvtsi2ssVssEd => self.vcvtsi2ss_ed(instr),
+            Opcode::Vcvtsi2ssVssEq => self.vcvtsi2ss_eq(instr),
+            Opcode::Vcvtdq2psVpsWdq => self.vcvtdq2ps(instr),
+            Opcode::Vcvtps2dqVdqWps => self.vcvtps2dq(instr),
+            Opcode::Vcvttps2dqVdqWps => self.vcvttps2dq(instr),
+            Opcode::Vcvtdq2pdVpdWdq => self.vcvtdq2pd(instr),
+            Opcode::Vcvtps2pdVpdWps => self.vcvtps2pd(instr),
+            Opcode::Vcvtpd2psVpsWpd => self.vcvtpd2ps(instr),
+            Opcode::Vcvtpd2dqVdqWpd => self.vcvtpd2dq(instr),
+            Opcode::Vcvttpd2dqVdqWpd => self.vcvttpd2dq(instr),
+            Opcode::VroundpsVpsWpsIb => self.vroundps(instr),
+            Opcode::VroundpdVpdWpdIb => self.vroundpd(instr),
+            Opcode::VroundssVssHpsWssIb => self.vroundss(instr),
+            Opcode::VroundsdVsdHpdWsdIb => self.vroundsd(instr),
+            Opcode::VrcppsVpsWps => self.vrcpps(instr),
+            Opcode::VrcpssVssHpsWss => self.vrcpss(instr),
+            Opcode::VrsqrtpsVpsWps => self.vrsqrtps(instr),
+            Opcode::VrsqrtssVssHpsWss => self.vrsqrtss(instr),
+
             Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vextracti128WdqVdqIb => self.vextracti128(instr),
@@ -4178,8 +4289,49 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // VEX-encoded byte mask
             Opcode::V128VpmovmskbGdUdq | Opcode::V256VpmovmskbGdUdq => self.vpmovmskb(instr),
 
-            // VEX-encoded zero/sign extend
+            // VEX-encoded FP sign masks (Bochs avx.cc VMOVMSKPS_GdUps/VMOVMSKPD_GdUpd)
+            Opcode::VmovmskpsGdUps => self.vmovmskps(instr),
+            Opcode::VmovmskpdGdUpd => self.vmovmskpd(instr),
+
+            // VEX-encoded logical compare (Bochs avx.cc VPTEST_VdqWdqR)
+            Opcode::VptestVdqWdq => self.vptest(instr),
+
+            // VEX-encoded zero/sign extend (Bochs avx2.cc VPMOVSX*/VPMOVZX*)
+            Opcode::V128VpmovsxbwVdqWq | Opcode::V256VpmovsxbwVdqWdq => self.vpmovsxbw(instr),
+            Opcode::V128VpmovsxbdVdqWd | Opcode::V256VpmovsxbdVdqWq => self.vpmovsxbd(instr),
+            Opcode::V128VpmovsxbqVdqWw | Opcode::V256VpmovsxbqVdqWd => self.vpmovsxbq(instr),
+            Opcode::V128VpmovsxwdVdqWq | Opcode::V256VpmovsxwdVdqWdq => self.vpmovsxwd(instr),
+            Opcode::V128VpmovsxwqVdqWd | Opcode::V256VpmovsxwqVdqWq => self.vpmovsxwq(instr),
+            Opcode::V128VpmovsxdqVdqWq | Opcode::V256VpmovsxdqVdqWdq => self.vpmovsxdq(instr),
+            Opcode::V128VpmovzxbwVdqWq | Opcode::V256VpmovzxbwVdqWdq => self.vpmovzxbw(instr),
             Opcode::V128VpmovzxbdVdqWd | Opcode::V256VpmovzxbdVdqWq => self.vpmovzxbd(instr),
+            Opcode::V128VpmovzxbqVdqWw | Opcode::V256VpmovzxbqVdqWd => self.vpmovzxbq(instr),
+            Opcode::V128VpmovzxwdVdqWq | Opcode::V256VpmovzxwdVdqWdq => self.vpmovzxwd(instr),
+            Opcode::V128VpmovzxwqVdqWd | Opcode::V256VpmovzxwqVdqWq => self.vpmovzxwq(instr),
+            Opcode::V128VpmovzxdqVdqWq | Opcode::V256VpmovzxdqVdqWdq => self.vpmovzxdq(instr),
+
+            // VEX-encoded packed absolute value (Bochs HANDLE_AVX_1OP<xmm_pabs*>)
+            Opcode::V128VpabsbVdqWdq | Opcode::V256VpabsbVdqWdq => self.vpabsb(instr),
+            Opcode::V128VpabswVdqWdq | Opcode::V256VpabswVdqWdq => self.vpabsw(instr),
+            Opcode::V128VpabsdVdqWdq | Opcode::V256VpabsdVdqWdq => self.vpabsd(instr),
+
+            // VLDDQU — identical to the VL-aware unaligned load (Bochs
+            // ia_opcodes.def BX_IA_VLDDQU_VdqMdq → VMOVUPS_VpsWpsM)
+            Opcode::VlddquVdqMdq => self.vmovdqu_load(instr),
+
+            // VEX-encoded SSE4.1 forms (vvvv-sourced or upper-zeroing)
+            Opcode::V128VinsertpsVpsWssIb => self.vinsertps(instr),
+            Opcode::V128VmpsadbwVdqHdqWdqIb | Opcode::V256VmpsadbwVdqHdqWdqIb => {
+                self.vmpsadbw(instr)
+            }
+            Opcode::V128VphminposuwVdqWdq => self.vphminposuw(instr),
+            Opcode::V128VpblendvbVdqHdqWdqIb | Opcode::V256VpblendvbVdqHdqWdqIb => {
+                self.vpblendvb(instr)
+            }
+
+            // VMOVQ (VEX.128 F3 0F 7E load / 66 0F D6 store; upper-zeroing)
+            Opcode::VmovqVqWq => self.vmovq_vq_wq(instr),
+            Opcode::VmovqWqVq => self.vmovq_wq_vq(instr),
 
             // =========================================================================
             // AVX-512 Opmask (k-register) instructions (avx512_mask.rs)
@@ -5354,7 +5506,7 @@ mod tests {
         let v = 1.0f32.to_bits(); // dst  → handler v
         let h = 3.0f32.to_bits(); // vvvv → handler h
         let w = 16_777_216.0f32.to_bits(); // rm → handler w  (= 2^24)
-        // Form 213 permutation → (a,b,c) = (h, v, w).
+                                           // Form 213 permutation → (a,b,c) = (h, v, w).
         let (a, b, c) = (h, v, w);
 
         let mut st_rne = SoftFloatStatus::default();

@@ -90,7 +90,7 @@ const SREG_MOD1OR2_BASE32_64: [u8; 16] = [
 // Decoding mask bit offsets
 use super::tables::{
     AS32_OFFSET, AS64_OFFSET, IS64_OFFSET, LOCK_PREFIX_OFFSET, MODC0_OFFSET, NNN_OFFSET,
-    OS32_OFFSET, OS64_OFFSET, RRR_OFFSET, SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET,
+    OS32_OFFSET, OS64_OFFSET, RRR_OFFSET, SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET, VEX_OFFSET,
 };
 use super::{find_opcode_in_table, read_u16_le, read_u32_le};
 
@@ -931,6 +931,13 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         | (if lock_rep_value == LOCK_REP_LOCK { 1 } else { 0 } << LOCK_PREFIX_OFFSET)
         | (if mod_c0 { 1 } else { 0 } << MODC0_OFFSET)
         | (1 << IS64_OFFSET) // 64-bit mode
+        // VEX prefix present — required by VEX-only table entries (e.g.
+        // VBLENDVPS/VBLENDVPD, KSHIFT*) so their legacy encodings #UD.
+        // Bochs uses separate BxOpcodeTableVEX tables instead of a decmask
+        // bit; this port shares tables, so the bit carries the distinction.
+        // EVEX has its own lookup (lookup_evex_opcode) and, like Bochs,
+        // must not match VEX-only entries on its shared-table fallback.
+        | (if is_vex && !is_evex { 1 } else { 0 } << VEX_OFFSET)
         | ((nnn & 0x7) << NNN_OFFSET)
         | ((rm & 0x7) << RRR_OFFSET)
         | ((vex_w as u32) << VEX_W_OFFSET)
@@ -1008,6 +1015,19 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     // is dispatched. EVEX has its own tables and doesn't need this.
     if is_vex && !is_evex {
         instr.opcode = remap_sse_to_vex(instr.opcode, vex_l);
+    }
+
+    // VEX is4 operand: VBLENDVPS/VBLENDVPD/VPBLENDVB encode a fourth (mask)
+    // register in imm8[7:4]; in 64-bit mode all four bits select xmm0-15.
+    // Bochs fetchdecode32.cc BX_SRC_VIB (is_64 branch).
+    if matches!(
+        instr.opcode,
+        Opcode::VblendvpsVpsHpsWpsIb
+            | Opcode::VblendvpdVpdHpdWpdIb
+            | Opcode::V128VpblendvbVdqHdqWdqIb
+            | Opcode::V256VpblendvbVdqHdqWdqIb
+    ) {
+        instr.operands.src3 = ((instr.immediate >> 4) & 0xF) as u8;
     }
 
     // Check if opcode lookup failed
@@ -2338,6 +2358,121 @@ const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
         MulpdVpdWpd => VmulpdVpdHpdWpd,
         SubpdVpdWpd => VsubpdVpdHpdWpd,
         DivpdVpdWpd => VdivpdVpdHpdWpd,
+        MinpsVpsWps => VminpsVpsHpsWps,
+        MinpdVpdWpd => VminpdVpdHpdWpd,
+        MaxpsVpsWps => VmaxpsVpsHpsWps,
+        MaxpdVpdWpd => VmaxpdVpdHpdWpd,
+        AddsubpsVpsWps => VaddsubpsVpsHpsWps,
+        AddsubpdVpdWpd => VaddsubpdVpdHpdWpd,
+        HaddpsVpsWps => VhaddpsVpsHpsWps,
+        HaddpdVpdWpd => VhaddpdVpdHpdWpd,
+        HsubpsVpsWps => VhsubpsVpsHpsWps,
+        HsubpdVpdWpd => VhsubpdVpdHpdWpd,
+
+        // ===== SSE4.1 blend / dot-product (vvvv is first source) =====
+        BlendpsVpsWpsIb => VblendpsVpsHpsWpsIb,
+        BlendpdVpdWpdIb => VblendpdVpdHpdWpdIb,
+        DppsVpsWpsIb => VdppsVpsHpsWpsIb,
+        // VDPPD is VL128-only; VEX.256 encodings #UD
+        // (Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A41 ATTR_VL128)
+        DppdVpdWpdIb => {
+            if vl == 0 {
+                VdppdVpdHpdWpdIb
+            } else {
+                IaError
+            }
+        }
+        // VEX-encoded 66 0F 38 10/14/15 do not exist in AVX: the variable
+        // blends moved to VEX.0F3A 4A-4C with an is4 mask register (Bochs
+        // fetchdecode_opmap_avx.cc marks these VEX slots BxOpcodeGroup_ERR).
+        PblendvbVdqWdq => IaError,
+        BlendvpsVpsWps => IaError,
+        BlendvpdVpdWpd => IaError,
+
+        // ===== Floating-point scalar arithmetic (VEX.vvvv is first source;
+        // the legacy 2-operand SSE handler would destructively use dst) =====
+        AddssVssWss => VaddssVssHpsWss,
+        AddsdVsdWsd => VaddsdVsdHpdWsd,
+        SubssVssWss => VsubssVssHpsWss,
+        SubsdVsdWsd => VsubsdVsdHpdWsd,
+        MulssVssWss => VmulssVssHpsWss,
+        MulsdVsdWsd => VmulsdVsdHpdWsd,
+        DivssVssWss => VdivssVssHpsWss,
+        DivsdVsdWsd => VdivsdVsdHpdWsd,
+        MinssVssWss => VminssVssHpsWss,
+        MinsdVsdWsd => VminsdVsdHpdWsd,
+        MaxssVssWss => VmaxssVssHpsWss,
+        MaxsdVsdWsd => VmaxsdVsdHpdWsd,
+
+        // ===== Square root (scalar forms merge upper elements from vvvv) =====
+        SqrtpsVpsWps => VsqrtpsVpsWps,
+        SqrtpdVpdWpd => VsqrtpdVpdWpd,
+        SqrtssVssWss => VsqrtssVssHpsWss,
+        SqrtsdVsdWsd => VsqrtsdVsdHpdWsd,
+
+        // ===== FP compare (32 AVX predicates; vvvv is first source) =====
+        CmppsVpsWpsIb => VcmppsVpsHpsWpsIb,
+        CmppdVpdWpdIb => VcmppdVpdHpdWpdIb,
+        CmpssVssWssIb => VcmpssVssHpsWssIb,
+        CmpsdVsdWsdIb => VcmpsdVsdHpdWsdIb,
+
+        // ===== FP shuffle / unpack (vvvv is first source) =====
+        ShufpsVpsWpsIb => VshufpsVpsHpsWpsIb,
+        ShufpdVpdWpdIb => VshufpdVpdHpdWpdIb,
+        UnpcklpsVpsWdq => VunpcklpsVpsHpsWps,
+        UnpckhpsVpsWdq => VunpckhpsVpsHpsWps,
+        UnpcklpdVpdWdq => VunpcklpdVpdHpdWpd,
+        UnpckhpdVpdWdq => VunpckhpdVpdHpdWpd,
+
+        // ===== Scalar moves (register forms merge low element into vvvv's
+        // upper elements; the VEX handler splits mod internally) =====
+        MovssVssWss => V128VmovssVssHpsWss,
+        MovsdVsdWsd => V128VmovsdVsdHpdWsd,
+        MovssWssVss => V128VmovssWssHpsVss,
+        MovsdWsdVsd => V128VmovsdWsdHpdVsd,
+        MovlpsVpsMq => V128VmovlpsVpsHpsMq,
+        MovlpdVsdMq => V128VmovlpdVpdHpdMq,
+        MovhpsVpsMq => V128VmovhpsVpsHpsMq,
+        MovhpdVsdMq => V128VmovhpdVpdHpdMq,
+        MovhlpsVpsWps => V128VmovhlpsVpsHpsWps,
+        MovlhpsVpsWps => V128VmovlhpsVpsHpsWps,
+        MovsldupVpsWps => VmovsldupVpsWps,
+        MovshdupVpsWps => VmovshdupVpsWps,
+        MovddupVpdWq => {
+            if vl == 0 {
+                V128VmovddupVpdWpd
+            } else {
+                V256VmovddupVpdWpd
+            }
+        }
+
+        // ===== Scalar conversions (vvvv provides the upper elements) =====
+        Cvtss2sdVsdWss => Vcvtss2sdVsdWss,
+        Cvtsd2ssVssWsd => Vcvtsd2ssVssWsd,
+        Cvtsi2sdVsdEd => Vcvtsi2sdVsdEd,
+        Cvtsi2sdVsdEq => Vcvtsi2sdVsdEq,
+        Cvtsi2ssVssEd => Vcvtsi2ssVssEd,
+        Cvtsi2ssVssEq => Vcvtsi2ssVssEq,
+
+        // ===== Packed conversions (single-source; VL selects lane count) =====
+        Cvtdq2psVpsWdq => Vcvtdq2psVpsWdq,
+        Cvtps2dqVdqWps => Vcvtps2dqVdqWps,
+        Cvttps2dqVdqWps => Vcvttps2dqVdqWps,
+        Cvtdq2pdVpdWq => Vcvtdq2pdVpdWdq,
+        Cvtps2pdVpdWps => Vcvtps2pdVpdWps,
+        Cvtpd2psVpsWpd => Vcvtpd2psVpsWpd,
+        Cvtpd2dqVqWpd => Vcvtpd2dqVdqWpd,
+        Cvttpd2dqVqWpd => Vcvttpd2dqVdqWpd,
+
+        // ===== Round / reciprocal approximations =====
+        RoundpsVpsWpsIb => VroundpsVpsWpsIb,
+        RoundpdVpdWpdIb => VroundpdVpdWpdIb,
+        RoundssVssWssIb => VroundssVssHpsWssIb,
+        RoundsdVsdWsdIb => VroundsdVsdHpdWsdIb,
+        RcppsVpsWps => VrcppsVpsWps,
+        RcpssVssWss => VrcpssVssHpsWss,
+        RsqrtpsVpsWps => VrsqrtpsVpsWps,
+        RsqrtssVssWss => VrsqrtssVssHpsWss,
 
         // ===== Store-form moves (VEX handler does VL-aware stores + register form) =====
         MovdquWdqVdq => {
@@ -2419,6 +2554,178 @@ const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
                 V128VpmovmskbGdUdq
             } else {
                 V256VpmovmskbGdUdq
+            }
+        }
+
+        // ===== VPTEST (flags-only; must AND/ANDN the full VL, Bochs avx.cc
+        // VPTEST_VdqWdqR) — single VEX opcode, handler checks get_vl() =====
+        PtestVdqWdq => VptestVdqWdq,
+
+        // ===== VMOVMSKPS/VMOVMSKPD (VL256 → 8/4-bit masks, Bochs avx.cc
+        // VMOVMSKPS_GdUps / VMOVMSKPD_GdUpd) =====
+        MovmskpsGdUps => VmovmskpsGdUps,
+        MovmskpdGdUpd => VmovmskpdGdUpd,
+
+        // ===== VPMOVSX/VPMOVZX (Bochs avx2.cc VPMOVSXBW_VdqWdqR et al.;
+        // VL256 forms read a doubled source width — Bochs
+        // fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3820..25 / 30..35) =====
+        PmovsxbwVdqWq => {
+            if vl == 0 {
+                V128VpmovsxbwVdqWq
+            } else {
+                V256VpmovsxbwVdqWdq
+            }
+        }
+        PmovsxbdVdqWd => {
+            if vl == 0 {
+                V128VpmovsxbdVdqWd
+            } else {
+                V256VpmovsxbdVdqWq
+            }
+        }
+        PmovsxbqVdqWw => {
+            if vl == 0 {
+                V128VpmovsxbqVdqWw
+            } else {
+                V256VpmovsxbqVdqWd
+            }
+        }
+        PmovsxwdVdqWq => {
+            if vl == 0 {
+                V128VpmovsxwdVdqWq
+            } else {
+                V256VpmovsxwdVdqWdq
+            }
+        }
+        PmovsxwqVdqWd => {
+            if vl == 0 {
+                V128VpmovsxwqVdqWd
+            } else {
+                V256VpmovsxwqVdqWq
+            }
+        }
+        PmovsxdqVdqWq => {
+            if vl == 0 {
+                V128VpmovsxdqVdqWq
+            } else {
+                V256VpmovsxdqVdqWdq
+            }
+        }
+        PmovzxbwVdqWq => {
+            if vl == 0 {
+                V128VpmovzxbwVdqWq
+            } else {
+                V256VpmovzxbwVdqWdq
+            }
+        }
+        PmovzxbdVdqWd => {
+            if vl == 0 {
+                V128VpmovzxbdVdqWd
+            } else {
+                V256VpmovzxbdVdqWq
+            }
+        }
+        PmovzxbqVdqWw => {
+            if vl == 0 {
+                V128VpmovzxbqVdqWw
+            } else {
+                V256VpmovzxbqVdqWd
+            }
+        }
+        PmovzxwdVdqWq => {
+            if vl == 0 {
+                V128VpmovzxwdVdqWq
+            } else {
+                V256VpmovzxwdVdqWdq
+            }
+        }
+        PmovzxwqVdqWd => {
+            if vl == 0 {
+                V128VpmovzxwqVdqWd
+            } else {
+                V256VpmovzxwqVdqWq
+            }
+        }
+        PmovzxdqVdqWq => {
+            if vl == 0 {
+                V128VpmovzxdqVdqWq
+            } else {
+                V256VpmovzxdqVdqWdq
+            }
+        }
+
+        // ===== VPABSB/W/D (Bochs HANDLE_AVX_1OP<xmm_pabsb> et al.) =====
+        PabsbVdqWdq => {
+            if vl == 0 {
+                V128VpabsbVdqWdq
+            } else {
+                V256VpabsbVdqWdq
+            }
+        }
+        PabswVdqWdq => {
+            if vl == 0 {
+                V128VpabswVdqWdq
+            } else {
+                V256VpabswVdqWdq
+            }
+        }
+        PabsdVdqWdq => {
+            if vl == 0 {
+                V128VpabsdVdqWdq
+            } else {
+                V256VpabsdVdqWdq
+            }
+        }
+
+        // ===== VLDDQU — identical to the VL-aware vmovdqu/vmovups load
+        // (Bochs ia_opcodes.def BX_IA_VLDDQU_VdqMdq → VMOVUPS_VpsWpsM) =====
+        LddquVdqMdq => VlddquVdqMdq,
+
+        // ===== VINSERTPS (vvvv is first source; VL128-only, VEX.256 #UD —
+        // Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A21) =====
+        InsertpsVpsWssIb => {
+            if vl == 0 {
+                V128VinsertpsVpsWssIb
+            } else {
+                IaError
+            }
+        }
+
+        // ===== VMPSADBW (vvvv is first source; per-128-bit-lane control —
+        // Bochs avx2.cc VMPSADBW_VdqHdqWdqIbR) =====
+        MpsadbwVdqWdqIb => {
+            if vl == 0 {
+                V128VmpsadbwVdqHdqWdqIb
+            } else {
+                V256VmpsadbwVdqHdqWdqIb
+            }
+        }
+
+        // ===== VPHMINPOSUW (VL128-only, VEX.256 #UD — Bochs
+        // fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3841) =====
+        PhminposuwVdqWdq => {
+            if vl == 0 {
+                V128VphminposuwVdqWdq
+            } else {
+                IaError
+            }
+        }
+
+        // ===== VMOVQ (F3 0F 7E load / 66 0F D6 store; register forms must
+        // zero above VL — Bochs fetchdecode_opmap_avx.cc
+        // BxOpcodeGroup_VEX_0F7E / BxOpcodeGroup_VEX_0FD6, both ATTR_VL128) =====
+        MovqVqWq => {
+            if vl == 0 {
+                VmovqVqWq
+            } else {
+                IaError
+            }
+        }
+        MovqWqVq => {
+            if vl == 0 {
+                VmovqWqVq
+            } else {
+                IaError
             }
         }
 

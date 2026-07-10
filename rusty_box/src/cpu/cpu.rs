@@ -816,6 +816,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.icount.saturating_sub(self.icount_last_sync)
     }
 
+    /// Bridge for Bochs service_local_apic() -> signal_event() with Rust-owned LAPIC state.
     #[inline]
     pub(crate) fn sync_lapic_intr_event(&mut self) {
         if self.lapic.intr_pending {
@@ -2052,8 +2053,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     prof_assign_ns = 0;
                     prof_exec_ns = 0;
                 }
-                self.perf_icache_miss = 0;
-                self.perf_prefetch = 0;
+                #[cfg(feature = "profiling")]
+                {
+                    self.perf_icache_miss = 0;
+                    self.perf_prefetch = 0;
+                }
                 // Clear STOP_TRACE (trace-boundary hint only; served its purpose).
                 // BX_ASYNC_EVENT_SLEEP (bit 0) intentionally survives: if HLT was the
                 // last instruction in this batch, the next batch sees SLEEP set, calls
@@ -2245,7 +2249,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 }
 
                 iteration += 1;
-                self.sync_lapic_intr_event();
 
                 // Check async events (matching C++ line 215: if (async_event) break;)
                 // When async_event is set (branch taken, exception, HLT, etc.), we MUST
@@ -2412,15 +2415,16 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             let eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
             eip_biased >= self.eip_page_window_size
         };
-
         // Get raw pointer to mem before calling prefetch() to work around borrow checker
         // SAFETY: addr_of_mut avoids creating intermediate reference; pointer valid for fn scope
         let mem_ptr: *mut BxMemC<'c> = unsafe { core::ptr::addr_of_mut!(*mem) };
-
         let mut eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
 
         if needs_prefetch {
-            self.perf_prefetch += 1;
+            #[cfg(feature = "profiling")]
+            {
+                self.perf_prefetch += 1;
+            }
             let mut retry_count = 0;
             loop {
                 // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
@@ -2467,9 +2471,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         let hash_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
         let entry = &self.i_cache.entry[hash_idx];
 
-        // Check if entry matches and has valid instruction (matching C++ line 299)
-        let cache_hit = matches!(entry.p_addr, crate::cpu::icache::IcacheAddress::Address(addr) if addr == p_addr)
-            && entry.i.ilen() != 0;
+        // Bochs find_entry (icache.h): hit iff the stored physical address matches.
+        // Invalid entries carry the all-ones sentinel, so a real p_addr never
+        // false-hits — no separate validity flag needed (Bochs has none either).
+        let cache_hit = entry.p_addr == p_addr;
 
         if cache_hit {
             // SMC detection: compare first 8 bytes against current memory
@@ -2487,7 +2492,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // remapped (e.g. uselib/mmap loaded a new library), the
                 // second-page bytes changed but the SMC check didn't catch it.
                 // Force a cache miss so boundary_fetch re-reads both pages.
-                let ilen = entry.i.ilen() as usize;
+                // ilen comes from the trace's first instruction in mpool (Bochs entry->i).
+                let ilen = self.i_cache.mpool[entry.mpool_start_idx].ilen() as usize;
                 if ilen > 0 && avail < ilen {
                     smc_invalid = true;
                 }
@@ -2495,12 +2501,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
             if !smc_invalid {
                 // Cache hit — return indices without cloning
-                return Ok((entry.mpool_start_idx, entry.tlen));
+                return Ok((entry.mpool_start_idx, entry.tlen as usize));
             }
         }
 
         // Cache miss path
-        self.perf_icache_miss += 1;
+        #[cfg(feature = "profiling")]
+        {
+            self.perf_icache_miss += 1;
+        }
 
         let mut dummy_mapping: [u32; 0] = [];
         let mut dummy_stamp_table = crate::cpu::icache::BxPageWriteStampTable {
@@ -2518,7 +2527,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 &mut dummy_stamp_table,
             )?
         };
-        Ok((miss_entry.mpool_start_idx, miss_entry.tlen))
+        Ok((miss_entry.mpool_start_idx, miss_entry.tlen as usize))
     }
 
     pub(super) fn get_gpr32(&self, idx: usize) -> u32 {

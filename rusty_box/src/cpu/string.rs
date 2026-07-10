@@ -2018,6 +2018,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 let mask = !(0xFFu32 << (byte_offset * 8));
                 let new_val = (old & mask) | ((value as u32) << (byte_offset * 8));
                 self.lapic.write(aligned, new_val, 4);
+                self.sync_lapic_intr_event();
                 if (aligned & 0xFF0) == 0x300 {
                     self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                     self.instrumentation.stop_request = true;
@@ -2140,6 +2141,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs apic.cc write() — LAPIC registers are always dword-accessed.
         if self.lapic.is_selected(a20_addr as BxPhyAddress) {
             self.lapic.write(a20_addr as BxPhyAddress, value, 4);
+            self.sync_lapic_intr_event();
             if ((a20_addr as BxPhyAddress) & 0xFF0) == 0x300 {
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 self.instrumentation.stop_request = true;
