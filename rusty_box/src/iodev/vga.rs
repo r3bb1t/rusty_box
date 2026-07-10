@@ -149,7 +149,7 @@ const VGA_X_TILESIZE: u32 = 16;
 const VGA_Y_TILESIZE: u32 = 24;
 
 /// QEMU-compatible MMIO BAR2 size (4KB)
-const PCI_VGA_MMIO_SIZE: u32 = 0x1000;
+pub(crate) const PCI_VGA_MMIO_SIZE: u32 = 0x1000;
 /// Offset within BAR2 MMIO for Bochs VBE extension registers
 const PCI_VGA_BOCHS_OFFSET: u32 = 0x500;
 /// Size of the Bochs VBE extension register region within BAR2
@@ -650,6 +650,20 @@ pub(crate) struct BxVgaC {
     /// capability ceiling and seeds the power-on VBE dimensions. Preserved across
     /// `reset()`.
     preferred_mode: Option<(u16, u16, u16)>,
+
+    /// PCI configuration space (256 bytes). Only meaningful when `pci_enabled`.
+    /// Bochs bx_vga_c::pci_conf. Mirrors `init_pci_conf(0x1234,0x1111,0,0x030000,0,0)`.
+    pci_conf: [u8; 256],
+    /// Whether this VGA registers as a PCI device (`1234:1111`, class `0300`).
+    /// Config-gated (`[display] pci_vga`), default off. Preserved across reset.
+    pci_enabled: bool,
+    /// Committed BAR2 (VBE MMIO) base, or 0 when unmapped.
+    mmio_base: u32,
+    /// A BAR0 commit that still needs the deferred LFB re-registration:
+    /// `(old_base, new_base)`. Drained by the emulator's PCI-deferred pass.
+    pending_lfb_relocate: Option<(u32, u32)>,
+    /// A BAR2 commit that still needs the deferred MMIO registration: the new base.
+    pending_mmio_base: Option<u32>,
 }
 
 impl Default for BxVgaC {
@@ -757,6 +771,11 @@ impl BxVgaC {
             last_fh: 0,
             last_bpp: 8, // Bochs: s.last_bpp = 8
             preferred_mode: None,
+            pci_conf: [0u8; 256],
+            pci_enabled: false,
+            mmio_base: 0,
+            pending_lfb_relocate: None,
+            pending_mmio_base: None,
         };
 
         // CRTC registers: Bochs zeroes them via memset; the VGA BIOS programs them.
@@ -885,10 +904,28 @@ impl BxVgaC {
         let has_icount_sync = self.has_icount_sync;
         let ips = self.ips;
         let preferred_mode = self.preferred_mode;
+        // PCI/BAR state persists across reset (Bochs bx_vga_c::reset only re-applies
+        // command/status; the BARs and the committed LFB base survive), so the
+        // registered LFB memory handler stays consistent with vbe.base_address.
+        let pci_enabled = self.pci_enabled;
+        let pci_conf = self.pci_conf;
+        let mmio_base = self.mmio_base;
+        let lfb_base = self.vbe.base_address;
         *self = Self::new();
         self.has_icount_sync = has_icount_sync;
         self.ips = ips;
         self.preferred_mode = preferred_mode;
+        self.pci_enabled = pci_enabled;
+        if pci_enabled {
+            self.pci_conf = pci_conf;
+            self.mmio_base = mmio_base;
+            self.vbe.base_address = lfb_base;
+            // Bochs reset_vals: command = io+mem enable, status = devsel medium.
+            self.pci_conf[0x04] = 0x03;
+            self.pci_conf[0x05] = 0x00;
+            self.pci_conf[0x06] = 0x00;
+            self.pci_conf[0x07] = 0x02;
+        }
         self.apply_preferred_mode();
     }
 
@@ -2421,6 +2458,11 @@ impl BxVgaC {
     }
 
     pub(crate) fn mem_read(&mut self, addr: BxPhyAddress, len: u32, data: &mut [u8]) -> bool {
+        // BAR2 (VBE MMIO) window is registered as a VGA memory handler; route it
+        // to the dispi MMIO handler rather than the framebuffer/legacy path.
+        if self.is_mmio_addr(addr) {
+            return self.vbe_mmio_read(addr, len, data);
+        }
         for (i, current_addr) in (addr..(addr + len as u64)).enumerate() {
             if let Some(byte) = data.get_mut(i) {
                 #[cfg(feature = "alloc")]
@@ -2450,6 +2492,9 @@ impl BxVgaC {
     /// Based on bx_vgacore_c::mem_write / mem_write_handler in vgacore.cc
     /// Implements all 4 write modes with full planar memory support.
     pub(crate) fn mem_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) -> bool {
+        if self.is_mmio_addr(addr) {
+            return self.vbe_mmio_write(addr, len, data);
+        }
         self.probe_handler_calls = self.probe_handler_calls.wrapping_add(1);
         for (i, current_addr) in (addr..(addr + len as u64)).enumerate() {
             if let Some(&value) = data.get(i) {
@@ -3160,11 +3205,186 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
 //   0x400-0x4FF: VBE EDID data (currently unimplemented)
 //   0x500-0x515: Bochs VBE extension registers (PCI_VGA_BOCHS_OFFSET)
 //
-// BAR2 is registered via I/O port dispatch, not PCI BAR init.
-// PCI BAR infrastructure is not implemented; MMIO access is handled
-// through the vbe_mmio_read / vbe_mmio_write methods directly.
+// When PCI is enabled the BAR2 window is registered as a memory handler on BAR2
+// commit; mem_read/mem_write detect the MMIO range (is_mmio_addr) and route to
+// vbe_mmio_read / vbe_mmio_write. BAR0 is the linear framebuffer.
+
+/// Result of a PCI config write: which BAR (if any) committed a new base and so
+/// needs a deferred memory-handler (re)registration.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct VgaBarChange {
+    pub lfb: bool,
+    pub mmio: bool,
+}
 
 impl BxVgaC {
+    /// Enable PCI presence (`1234:1111`, class `0x030000`) and seed the config
+    /// space. Bochs vga.cc `init_pci_conf` + `init_bar_mem`. Config-gated
+    /// (`[display] pci_vga`), off by default.
+    pub(crate) fn enable_pci(&mut self) {
+        self.pci_enabled = true;
+        self.init_pci_conf();
+    }
+
+    /// Whether the VGA is registered as a PCI device.
+    pub(crate) fn pci_enabled(&self) -> bool {
+        self.pci_enabled
+    }
+
+    /// Linear-framebuffer (BAR0) size in bytes.
+    pub(crate) fn lfb_size(&self) -> u32 {
+        self.vbe_memsize
+    }
+
+    fn init_pci_conf(&mut self) {
+        self.pci_conf = [0u8; 256];
+        // Vendor 0x1234 / device 0x1111 (Bochs "experimental PCI VGA").
+        self.pci_conf[0x00] = 0x34;
+        self.pci_conf[0x01] = 0x12;
+        self.pci_conf[0x02] = 0x11;
+        self.pci_conf[0x03] = 0x11;
+        // Command = io + mem enable; status = devsel medium.
+        self.pci_conf[0x04] = 0x03;
+        self.pci_conf[0x07] = 0x02;
+        // Revision 0, class code 0x030000 (display controller, VGA-compatible).
+        self.pci_conf[0x0A] = 0x00;
+        self.pci_conf[0x0B] = 0x03;
+        // BAR0 = LFB, 32-bit prefetchable memory (low nibble 0x08). Seed the base
+        // to the fixed init LFB address so BAR0 is consistent before the BIOS
+        // reassigns it; a differing BAR0 write relocates the framebuffer.
+        let base = VBE_DISPI_LFB_PHYSICAL_ADDRESS;
+        self.pci_conf[0x10] = (base as u8 & 0xf0) | 0x08;
+        self.pci_conf[0x11] = (base >> 8) as u8;
+        self.pci_conf[0x12] = (base >> 16) as u8;
+        self.pci_conf[0x13] = (base >> 24) as u8;
+        // BAR2 = VBE MMIO, 32-bit non-prefetchable memory, base 0 until assigned.
+    }
+
+    /// Read the PCI config space. Reads back `0xFFFFFFFF` (no device) when PCI is
+    /// disabled, so a gated-off VGA is invisible to enumeration.
+    pub(crate) fn pci_read(&self, address: u8, io_len: u8) -> u32 {
+        if !self.pci_enabled {
+            return 0xFFFF_FFFF;
+        }
+        let mut value = 0u32;
+        for i in 0..io_len as usize {
+            let addr = address as usize + i;
+            if addr < 256 {
+                value |= (self.pci_conf[addr] as u32) << (i * 8);
+            }
+        }
+        value
+    }
+
+    /// Write the PCI config space, handling BAR0 (LFB) and BAR2 (MMIO) sizing and
+    /// commit. Mirrors Bochs `pci_write_handler_common` + vga.cc
+    /// `pci_write_handler`. Returns which BAR committed a new base so the caller
+    /// schedules the deferred memory (re)registration.
+    pub(crate) fn pci_write(&mut self, address: u8, mut value: u32, io_len: u8) -> VgaBarChange {
+        if !self.pci_enabled {
+            return VgaBarChange::default();
+        }
+
+        // (base register, size) of the BAR this address falls in, if any.
+        let bar: Option<(u8, u32)> = if (0x10..0x14).contains(&address) {
+            Some((0x10, self.vbe_memsize)) // BAR0: LFB
+        } else if (0x18..0x1C).contains(&address) {
+            Some((0x18, PCI_VGA_MMIO_SIZE)) // BAR2: MMIO
+        } else {
+            None
+        };
+
+        let mut bar_change = 0u8;
+        if let Some((base_reg, size)) = bar {
+            // Size probe: a write of >= 0xfffffff0 must read back the size mask.
+            if value >= 0xffff_fff0 {
+                let low = self.pci_conf[base_reg as usize] & 0x0f;
+                value = (value & !(size - 1)) | (low as u32);
+                bar_change = 2; // marks a probe; never commits
+            }
+        }
+
+        for i in 0..io_len as usize {
+            let addr = address as usize + i;
+            if addr >= 256 {
+                break;
+            }
+            let mut value8 = ((value >> (i * 8)) & 0xff) as u8;
+            let oldval = self.pci_conf[addr];
+            match bar {
+                Some((base_reg, _)) if addr == base_reg as usize => {
+                    // Aligned low byte of a MEM BAR: keep the type nibble.
+                    value8 = (value8 & 0xf0) | (oldval & 0x0f);
+                }
+                Some(_) => {} // upper BAR bytes: stored verbatim
+                None => match addr {
+                    0x04 => value8 &= 0x03,  // command: io + mem enable only
+                    0x0C | 0x0D | 0x3C => {} // cache-line, latency, interrupt-line: writable
+                    // Everything else (ids/status/class/header, unimplemented
+                    // BARs, expansion ROM) is read-only.
+                    _ => continue,
+                },
+            }
+            if value8 != oldval {
+                bar_change |= 1;
+            }
+            self.pci_conf[addr] = value8;
+        }
+
+        let mut change = VgaBarChange::default();
+        if bar_change == 1 {
+            if let Some((base_reg, size)) = bar {
+                let raw = u32::from_le_bytes([
+                    self.pci_conf[base_reg as usize],
+                    self.pci_conf[base_reg as usize + 1],
+                    self.pci_conf[base_reg as usize + 2],
+                    self.pci_conf[base_reg as usize + 3],
+                ]);
+                let new_base = raw & !(size - 1);
+                if base_reg == 0x10 {
+                    if new_base != self.vbe.base_address {
+                        // Defer the LFB handler move (needs memory access);
+                        // vbe.base_address is updated by the deferred handler.
+                        self.pending_lfb_relocate = Some((self.vbe.base_address, new_base));
+                        change.lfb = true;
+                    }
+                } else if new_base != self.mmio_base {
+                    self.pending_mmio_base = Some(new_base);
+                    change.mmio = true;
+                }
+            }
+        }
+        change
+    }
+
+    /// Drain a pending LFB relocation `(old_base, new_base)`.
+    pub(crate) fn take_pending_lfb_relocate(&mut self) -> Option<(u32, u32)> {
+        self.pending_lfb_relocate.take()
+    }
+
+    /// Drain a pending BAR2 MMIO base assignment.
+    pub(crate) fn take_pending_mmio_base(&mut self) -> Option<u32> {
+        self.pending_mmio_base.take()
+    }
+
+    /// Record the committed LFB base after the deferred relocation registered it.
+    pub(crate) fn set_lfb_base(&mut self, base: u32) {
+        self.vbe.base_address = base;
+    }
+
+    /// Record the committed BAR2 MMIO base after the deferred registration.
+    pub(crate) fn set_mmio_base(&mut self, base: u32) {
+        self.mmio_base = base;
+    }
+
+    /// Whether `addr` falls in the committed BAR2 MMIO window.
+    pub(crate) fn is_mmio_addr(&self, addr: BxPhyAddress) -> bool {
+        self.pci_enabled
+            && self.mmio_base != 0
+            && addr >= self.mmio_base as BxPhyAddress
+            && addr < self.mmio_base as BxPhyAddress + PCI_VGA_MMIO_SIZE as BxPhyAddress
+    }
+
     fn vbe_read_index(&self, index: u16) -> u16 {
         match index {
             VBE_DISPI_INDEX_ID => self.vbe.cur_dispi,
@@ -3536,6 +3756,107 @@ mod tests {
     fn write_vbe(vga: &mut BxVgaC, index: u16, value: u16) {
         vga.write_port(VBE_DISPI_IOPORT_INDEX, index as u32, 2);
         vga.write_port(VBE_DISPI_IOPORT_DATA, value as u32, 2);
+    }
+
+    fn pci_vga() -> BxVgaC {
+        let mut vga = BxVgaC::new();
+        vga.enable_pci();
+        vga
+    }
+
+    #[test]
+    fn pci_disabled_is_invisible_to_enumeration() {
+        let vga = BxVgaC::new();
+        assert!(!vga.pci_enabled());
+        assert_eq!(vga.pci_read(0x00, 4), 0xFFFF_FFFF);
+        // Writes are ignored, no BAR change signalled.
+        let mut vga = vga;
+        let change = vga.pci_write(0x10, 0xE800_0000, 4);
+        assert!(!change.lfb && !change.mmio);
+    }
+
+    #[test]
+    fn pci_identity_class_and_bar0_type() {
+        let vga = pci_vga();
+        assert_eq!(vga.pci_read(0x00, 4), 0x1111_1234); // device<<16 | vendor
+        assert_eq!(vga.pci_read(0x08, 4), 0x0300_0000); // rev/prog-if/subclass/class
+        assert_eq!(vga.pci_read(0x10, 1) & 0x0F, 0x08); // BAR0 prefetchable memory
+    }
+
+    #[test]
+    fn bar0_size_probe_returns_16mb_mask() {
+        let mut vga = pci_vga();
+        vga.pci_write(0x10, 0xFFFF_FFFF, 4);
+        assert_eq!(vga.pci_read(0x10, 4), 0xFF00_0008); // ~(16MiB-1) | prefetchable
+        assert!(vga.take_pending_lfb_relocate().is_none(), "probe must not commit");
+    }
+
+    #[test]
+    fn bar2_size_probe_returns_4kb_mask() {
+        let mut vga = pci_vga();
+        vga.pci_write(0x18, 0xFFFF_FFFF, 4);
+        assert_eq!(vga.pci_read(0x18, 4), 0xFFFF_F000); // ~(4KiB-1)
+        assert!(vga.take_pending_mmio_base().is_none());
+    }
+
+    #[test]
+    fn bar0_commit_relocates_lfb_and_preserves_type_bits() {
+        let mut vga = pci_vga();
+        let change = vga.pci_write(0x10, 0xE800_0000, 4);
+        assert!(change.lfb && !change.mmio);
+        assert_eq!(
+            vga.take_pending_lfb_relocate(),
+            Some((0xE000_0000, 0xE800_0000))
+        );
+        assert_eq!(vga.pci_read(0x10, 4), 0xE800_0008); // base + preserved type nibble
+    }
+
+    #[test]
+    fn bar0_commit_to_same_base_is_a_noop() {
+        let mut vga = pci_vga();
+        let change = vga.pci_write(0x10, 0xE000_0000, 4); // equals the seeded init base
+        assert!(!change.lfb);
+        assert!(vga.take_pending_lfb_relocate().is_none());
+    }
+
+    #[test]
+    fn bar2_commit_signals_mmio_registration() {
+        let mut vga = pci_vga();
+        let change = vga.pci_write(0x18, 0xF000_0000, 4);
+        assert!(change.mmio && !change.lfb);
+        assert_eq!(vga.take_pending_mmio_base(), Some(0xF000_0000));
+        assert_eq!(vga.pci_read(0x18, 4), 0xF000_0000);
+    }
+
+    #[test]
+    fn unimplemented_bars_read_back_zero() {
+        let mut vga = pci_vga();
+        for bar in [0x14u8, 0x1C, 0x20, 0x24, 0x30] {
+            vga.pci_write(bar, 0xFFFF_FFFF, 4);
+            assert_eq!(vga.pci_read(bar, 4), 0, "BAR/ROM at {bar:#x} must be 0");
+        }
+    }
+
+    #[test]
+    fn ids_and_class_are_read_only() {
+        let mut vga = pci_vga();
+        vga.pci_write(0x00, 0xDEAD_BEEF, 4);
+        vga.pci_write(0x08, 0xFFFF_FFFF, 4);
+        assert_eq!(vga.pci_read(0x00, 4), 0x1111_1234);
+        assert_eq!(vga.pci_read(0x08, 4), 0x0300_0000);
+    }
+
+    #[test]
+    fn pci_state_survives_reset() {
+        let mut vga = pci_vga();
+        vga.pci_write(0x10, 0xE800_0000, 4);
+        let _ = vga.take_pending_lfb_relocate();
+        vga.set_lfb_base(0xE800_0000); // as the deferred handler would
+        vga.reset();
+        assert!(vga.pci_enabled());
+        assert_eq!(vga.pci_read(0x00, 4), 0x1111_1234);
+        assert_eq!(vga.pci_read(0x10, 4), 0xE800_0008); // BAR persists
+        assert_eq!(vga.pci_read(0x04, 1) & 0x03, 0x03); // command re-applied
     }
 
     #[test]

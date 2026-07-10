@@ -201,6 +201,8 @@ struct NativeVmSettings {
     cdrom_drive: usize,
     /// Optional pre-boot VBE display mode; `None` keeps the VGA defaults.
     vga_mode: Option<crate::config::VgaMode>,
+    /// Register the VGA on PCI (experimental KMS / bochs-drm path).
+    pci_vga: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -242,6 +244,7 @@ impl NativeVmSettings {
             cdrom_channel: cdrom.map_or(1, |cdrom| cdrom.channel),
             cdrom_drive: cdrom.map_or(0, |cdrom| cdrom.drive),
             vga_mode: config.vga_mode,
+            pci_vga: config.pci_vga,
         }
     }
 
@@ -334,6 +337,7 @@ impl NativeVmSettings {
         }
 
         config.vga_mode = self.vga_mode;
+        config.pci_vga = self.pci_vga;
 
         config.boot_order = self.boot_order_for_attached_media()?;
         Ok(())
@@ -1810,11 +1814,20 @@ impl NativeShellApp {
                     ui.label(
                         RichText::new(
                             "Raises the VBE ceiling so the guest can select this mode (via GRUB \
-                             gfxpayload / vesafb). A full KMS framebuffer additionally needs the \
-                             PCI-VGA device, which is not yet enabled.",
+                             gfxpayload / vesafb).",
                         )
                         .color(TEXT_MUTED),
                     );
+                    changed |= ui
+                        .checkbox(
+                            &mut self.settings.pci_vga,
+                            "Register VGA on PCI (experimental KMS / bochs-drm)",
+                        )
+                        .on_hover_text(
+                            "Exposes the adapter as PCI 1234:1111 so Linux bochs-drm can bind for \
+                             a full KMS framebuffer. Experimental — verify with a guest boot.",
+                        )
+                        .changed();
                 });
                 detail_row(ui, "Adapter", "VGA text/graphics framebuffer");
                 detail_row(ui, "Applied BIOS", &self.vm_info.bios.display().to_string());
@@ -4059,6 +4072,7 @@ mod tests {
             log_level: crate::args::LogLevel::Warn,
             config_path: None,
             vga_mode: None,
+            pci_vga: false,
         }
     }
 
