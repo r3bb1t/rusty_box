@@ -408,6 +408,12 @@ impl BxCmosC {
         self.ram[REG_STAT_B as usize] &= 0x8F;
         self.ram[REG_STAT_C as usize] = 0x00;
 
+        // Bochs cmos.cc reset: `activate_timer(one_second_timer_index,
+        // 1000000, 1)` unconditionally re-arms the one-second timer to a
+        // fresh 1,000,000us countdown on every reset, regardless of how
+        // much of the previous countdown was left.
+        self.one_second_remaining = 1_000_000;
+
         // Bochs cmos.cc reset: handle periodic interrupt rate select —
         // CRA_change() re-evaluates periodic_interval_usec/timer state,
         // which also picks up PIE having just been forced off above.
@@ -1246,8 +1252,15 @@ mod tests {
     // Finding #1 — host-DoS in date conversion (Bochs utctime.h port)
     // =========================================================================
 
+    /// Isolates the month-OOB path: only `REG_MONTH` is malformed, day of
+    /// month is left at whatever valid value `init_defaults`/`update_clock`
+    /// already put there. The old code did
+    /// `for m in 1..month { DAYS_IN_MONTH[(m-1)] }`, which only panics once
+    /// `month >= 14` — `1..13` (month=13) tops out at index `m-1 == 11`,
+    /// still in bounds for a 12-entry table. BCD 0x14 decodes to decimal
+    /// 14, so `1..14` reaches index 12 and would have panicked pre-fix.
     #[test]
-    fn cmos_malformed_date_does_not_panic() {
+    fn cmos_malformed_month_does_not_panic() {
         let mut cmos = BxCmosC::new();
 
         // Enter SET mode (Bochs cmos.cc: CRB bit7 = 1 freezes the user
@@ -1256,17 +1269,41 @@ mod tests {
         cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
         cmos.write(CMOS_DATA, 0x80, 1);
 
-        // Out-of-range month (13, BCD 0x13) and day 0. The old code did
-        // `for m in 1..month { DAYS_IN_MONTH[(m-1)] }` (OOB panic once
-        // month >= 14) and `days += mday - 1` on a u64 (underflow panic
-        // when mday == 0). Neither can happen anymore: timeutc()
-        // normalizes both without ever indexing by the raw value.
+        // Out-of-range month: BCD 0x14 decodes to decimal 14.
         cmos.write(CMOS_ADDR, REG_MONTH as u32, 1);
-        cmos.write(CMOS_DATA, 0x13, 1);
+        cmos.write(CMOS_DATA, 0x14, 1);
+
+        // Exit SET mode -> update_timeval() runs on the malformed register.
+        cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+        cmos.write(CMOS_DATA, 0x00, 1);
+
+        // Refresh registers from the now-normalized timeval and check the
+        // result landed in-range (reaching this point at all proves no
+        // panic occurred).
+        cmos.update_clock();
+        let month = bcd_to_bin(cmos.ram[REG_MONTH as usize], false);
+        let mday = bcd_to_bin(cmos.ram[REG_MONTH_DAY as usize], false);
+        assert!((1..=12).contains(&month), "month {month} out of range");
+        assert!((1..=31).contains(&mday), "mday {mday} out of range");
+    }
+
+    /// Isolates the mday-underflow path: only `REG_MONTH_DAY` is malformed
+    /// (0), month is left at whatever valid value was already there. The
+    /// old code did `days += mday - 1` on a `u64`, which underflows and
+    /// panics (debug builds) when `mday == 0`.
+    #[test]
+    fn cmos_malformed_mday_does_not_panic() {
+        let mut cmos = BxCmosC::new();
+
+        // Enter SET mode.
+        cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+        cmos.write(CMOS_DATA, 0x80, 1);
+
+        // Day-of-month 0 — out of the valid 1..=31 range.
         cmos.write(CMOS_ADDR, REG_MONTH_DAY as u32, 1);
         cmos.write(CMOS_DATA, 0x00, 1);
 
-        // Exit SET mode -> update_timeval() runs on the malformed registers.
+        // Exit SET mode -> update_timeval() runs on the malformed register.
         cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
         cmos.write(CMOS_DATA, 0x00, 1);
 
@@ -1473,6 +1510,26 @@ mod tests {
         // Bits 7,3,2,1,0 must be preserved.
         assert_eq!(cmos.ram[REG_STAT_B as usize] & 0x8F, 0xFF & !0x08 & 0x8F);
         assert_eq!(cmos.ram[REG_STAT_C as usize], 0x00);
+    }
+
+    #[test]
+    fn cmos_reset_rearms_one_second_timer() {
+        let mut cmos = BxCmosC::new();
+
+        // Burn the one-second countdown down to a small leftover value —
+        // simulates a reset happening partway through the current second.
+        cmos.one_second_remaining = 1;
+        cmos.reset();
+
+        // Bochs cmos.cc reset: `activate_timer(one_second_timer_index,
+        // 1000000, 1)` unconditionally re-arms a fresh 1,000,000us
+        // countdown, regardless of how much was left beforehand.
+        assert_eq!(cmos.one_second_remaining, 1_000_000);
+
+        // Also check the case where it had already elapsed to 0.
+        cmos.one_second_remaining = 0;
+        cmos.reset();
+        assert_eq!(cmos.one_second_remaining, 1_000_000);
     }
 
     #[test]
