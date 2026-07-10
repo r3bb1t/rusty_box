@@ -311,6 +311,7 @@ fn android_gui_config() -> ResolvedConfig {
         }),
         log_level: LogLevel::Warn,
         config_path: None,
+        vga_mode: None,
     }
 }
 

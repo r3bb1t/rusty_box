@@ -205,6 +205,13 @@ where
 
     emu.init_gui(0, &[])?;
     emu.reset(ResetReason::Hardware)?;
+    // Apply the pre-boot VBE mode after reset (reset re-defaults the VGA, and
+    // BxVgaC::set_preferred_mode persists it across any later guest-triggered
+    // reset). Raises the DISPI caps so the guest may select this resolution.
+    if let Some(mode) = config.vga_mode {
+        emu.device_manager
+            .set_vga_preferred_mode(mode.width, mode.height, mode.bpp);
+    }
     emu.init_gui_signal_handlers();
     emu.start();
     if should_prequeue_boot_enter(&config.boot_order) {
@@ -541,6 +548,7 @@ mod tests {
             cdrom: None::<ResolvedCdrom>,
             log_level: LogLevel::Warn,
             config_path: None,
+            vga_mode: None,
         })
         .unwrap_err();
 
@@ -601,6 +609,7 @@ mod tests {
             cdrom: None::<ResolvedCdrom>,
             log_level: LogLevel::Warn,
             config_path: None,
+            vga_mode: None,
         }
     }
 
@@ -739,6 +748,7 @@ mod tests {
                 cdrom: None::<ResolvedCdrom>,
                 log_level: LogLevel::Warn,
                 config_path: None,
+                vga_mode: None,
             }))
             .unwrap();
         drop(command_tx);

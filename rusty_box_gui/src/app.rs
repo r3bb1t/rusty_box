@@ -28,6 +28,22 @@ const BG_CARD: Color32 = Color32::from_rgb(0x17, 0x21, 0x2B);
 const STROKE_HAIRLINE: Color32 = Color32::from_rgb(0x26, 0x34, 0x43);
 const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xE8, 0xEE, 0xF5);
 const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x98, 0xA8);
+
+/// Common pre-boot VBE resolutions offered by the Display panel picker.
+const VGA_MODE_PRESETS: &[(u16, u16)] = &[
+    (1024, 768),
+    (1280, 720),
+    (1280, 1024),
+    (1600, 1200),
+    (1920, 1080),
+];
+
+fn vga_mode_label(mode: Option<crate::config::VgaMode>) -> String {
+    match mode {
+        None => "Default (VGA / VBE)".to_owned(),
+        Some(mode) => format!("{}×{} @ {}bpp", mode.width, mode.height, mode.bpp),
+    }
+}
 const ACCENT_CYAN: Color32 = Color32::from_rgb(0x46, 0xD9, 0xC7);
 const ACCENT_BLUE: Color32 = Color32::from_rgb(0x6A, 0xA8, 0xFF);
 const ACCENT_AMBER: Color32 = Color32::from_rgb(0xF2, 0xB8, 0x4B);
@@ -183,6 +199,8 @@ struct NativeVmSettings {
     cdrom_path: String,
     cdrom_channel: usize,
     cdrom_drive: usize,
+    /// Optional pre-boot VBE display mode; `None` keeps the VGA defaults.
+    vga_mode: Option<crate::config::VgaMode>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -223,6 +241,7 @@ impl NativeVmSettings {
             cdrom_path: cdrom.map_or_else(String::new, |cdrom| cdrom.path.display().to_string()),
             cdrom_channel: cdrom.map_or(1, |cdrom| cdrom.channel),
             cdrom_drive: cdrom.map_or(0, |cdrom| cdrom.drive),
+            vga_mode: config.vga_mode,
         }
     }
 
@@ -313,6 +332,8 @@ impl NativeVmSettings {
         } else {
             config.cdrom = None;
         }
+
+        config.vga_mode = self.vga_mode;
 
         config.boot_order = self.boot_order_for_attached_media()?;
         Ok(())
@@ -1760,6 +1781,40 @@ impl NativeShellApp {
                                     .changed();
                             }
                         });
+
+                    egui::ComboBox::from_label("Display resolution")
+                        .selected_text(vga_mode_label(self.settings.vga_mode))
+                        .show_ui(ui, |ui| {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.settings.vga_mode,
+                                    None,
+                                    "Default (VGA / VBE)",
+                                )
+                                .changed();
+                            for &(w, h) in VGA_MODE_PRESETS {
+                                let mode = crate::config::VgaMode {
+                                    width: w,
+                                    height: h,
+                                    bpp: 32,
+                                };
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut self.settings.vga_mode,
+                                        Some(mode),
+                                        format!("{w}×{h} @ 32bpp"),
+                                    )
+                                    .changed();
+                            }
+                        });
+                    ui.label(
+                        RichText::new(
+                            "Raises the VBE ceiling so the guest can select this mode (via GRUB \
+                             gfxpayload / vesafb). A full KMS framebuffer additionally needs the \
+                             PCI-VGA device, which is not yet enabled.",
+                        )
+                        .color(TEXT_MUTED),
+                    );
                 });
                 detail_row(ui, "Adapter", "VGA text/graphics framebuffer");
                 detail_row(ui, "Applied BIOS", &self.vm_info.bios.display().to_string());
@@ -4003,6 +4058,7 @@ mod tests {
             cpu_params: BxParams::default(),
             log_level: crate::args::LogLevel::Warn,
             config_path: None,
+            vga_mode: None,
         }
     }
 
@@ -4240,6 +4296,29 @@ mod tests {
         assert_eq!(topology.n_processors(), 2);
         assert_eq!(topology.n_cores(), 2);
         assert_eq!(topology.n_threads(), 2);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_settings_apply_vga_mode() {
+        let mut config = test_resolved_config();
+        let mut settings = NativeVmSettings::from_config(&config);
+        settings.vga_mode = Some(crate::config::VgaMode {
+            width: 1280,
+            height: 1024,
+            bpp: 32,
+        });
+
+        settings.apply_to_config(&mut config).unwrap();
+
+        assert_eq!(
+            config.vga_mode,
+            Some(crate::config::VgaMode {
+                width: 1280,
+                height: 1024,
+                bpp: 32,
+            })
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
