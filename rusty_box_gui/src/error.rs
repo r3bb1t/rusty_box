@@ -76,6 +76,9 @@ pub enum RunError {
     #[error("created disk CHS exceeds current GUI geometry field: {} needs {cylinders} cylinders", path.display())]
     CreatedDiskChsOverflow { path: PathBuf, cylinders: u64 },
 
+    #[error("existing disk image {} is not a usable flat image ({len} bytes, not a non-zero multiple of 512); set disk.create.overwrite = true to replace it, or delete it", path.display())]
+    InvalidExistingDiskImage { path: PathBuf, len: u64 },
+
     #[error("invalid disk.create.size: {source}")]
     DiskCreateSize {
         source: rusty_box_bximage::BxImageError,

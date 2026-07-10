@@ -29,6 +29,9 @@ pub struct RustyBoxApp {
     // Cached serial log for display (updated each frame from shared)
     cached_serial_log: String,
     serial_log_len: usize,
+    // Cached transient startup status (e.g. "Creating disk image…"), shown
+    // before the guest produces video.
+    cached_startup_status: Option<String>,
     serial_input: String,
     fit_to_available: bool,
     /// When true, stretch the framebuffer to a 4:3 display aspect (VGA text/low-res
@@ -61,6 +64,7 @@ impl RustyBoxApp {
             cached_emu_running: false,
             cached_serial_log: String::new(),
             serial_log_len: 0,
+            cached_startup_status: None,
             serial_input: String::new(),
             fit_to_available: false,
             pixel_aspect_correct: false,
@@ -263,6 +267,12 @@ impl RustyBoxApp {
             // Always cache status for the status bar.
             self.cached_emu_running = display.emu_running;
             self.cached_ips = display.ips;
+            // Once the guest produces real video, the startup notice has served
+            // its purpose — clear it so it doesn't linger over the running guest.
+            if display.fb_dirty {
+                display.startup_status = None;
+            }
+            self.cached_startup_status.clone_from(&display.startup_status);
 
             // Sync serial log if it changed.
             if display.serial_log.len() != self.serial_log_len {
@@ -544,7 +554,22 @@ impl RustyBoxApp {
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(0x0D, 0x0D, 0x1A)))
             .show_inside(ui, |ui| {
                 let mut image_rect = None;
-                if let Some(tex) = &self.texture {
+                if let Some(status) = self.cached_startup_status.clone() {
+                    // A startup step (e.g. allocating the disk image) is running.
+                    // Show it with a spinner instead of a blank panel, so the
+                    // window doesn't look frozen while the guest has no video yet.
+                    ui.centered_and_justified(|ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add(egui::Spinner::new().size(28.0));
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new(status)
+                                    .color(egui::Color32::from_rgb(0xE8, 0xEE, 0xF5))
+                                    .size(15.0),
+                            );
+                        });
+                    });
+                } else if let Some(tex) = &self.texture {
                     let available = ui.available_size();
                     let tex_w = self.last_width.max(1) as f32;
                     let tex_h = self.last_height.max(1) as f32;
