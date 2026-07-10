@@ -147,6 +147,10 @@ pub struct DeviceManager {
     pub(crate) acpi_sm_needs_reregister: bool,
     /// Deferred: PAM registers changed, needs memory type update
     pub pam_needs_update: bool,
+    /// Deferred: the SMRAM control register (0x72) was written, needs SMRAM
+    /// routing re-applied to memory (Bochs pci.cc smram_control's
+    /// mem->enable_smram()/disable_smram() calls).
+    pub smram_needs_update: bool,
     /// Deferred: a VGA PCI BAR (LFB or MMIO) changed, needs memory-handler
     /// (re)registration at the new base.
     pub(crate) vga_bar_needs_reregister: bool,
@@ -220,6 +224,7 @@ impl DeviceManager {
             acpi_pm_needs_reregister: false,
             acpi_sm_needs_reregister: false,
             pam_needs_update: false,
+            smram_needs_update: false,
             vga_bar_needs_reregister: false,
             diag_pit_fires: 0,
             diag_irq0_latched: 0,
@@ -319,6 +324,10 @@ impl DeviceManager {
             self.acpi_pm_needs_reregister = false;
             self.acpi_sm_needs_reregister = false;
             self.vga_bar_needs_reregister = false;
+            // pci_bridge.reset() (above) already set pci_conf[0x72] = 0x02
+            // (SMRAME off) and the emulator calls mem.disable_smram()
+            // directly on hardware reset, so no deferred re-apply is needed.
+            self.smram_needs_update = false;
         }
 
         Ok(())
@@ -624,6 +633,10 @@ impl DeviceManager {
         if self.pam_needs_update {
             self.pam_needs_update = false;
             self.pci_bridge.apply_pam_to_memory(mem);
+        }
+        if self.smram_needs_update {
+            self.smram_needs_update = false;
+            self.pci_bridge.apply_smram_to_memory(mem);
         }
         if self.vga_bar_needs_reregister {
             self.vga_bar_needs_reregister = false;
@@ -1073,8 +1086,12 @@ impl DeviceManager {
                         if let Some((addr, val, len)) =
                             pci_write_common_gate(reg_addr, value, io_len)
                         {
-                            if self.pci_bridge.pci_write(addr, val, len) {
+                            let effects = self.pci_bridge.pci_write(addr, val, len);
+                            if effects.pam_changed {
                                 self.pam_needs_update = true;
+                            }
+                            if effects.smram_changed {
+                                self.smram_needs_update = true;
                             }
                         }
                     }
@@ -1786,6 +1803,54 @@ mod tests {
                 dm.pci_ide.bmdma_present(),
                 "BAR4 write must reach the device through the filter"
             );
+        });
+    }
+
+    // ─── Finding #8: SMRAM control register (0x72) drives memory shadowing ───
+
+    #[test]
+    fn smram_register_write_defers_then_applies_to_memory() {
+        on_big_stack(|| {
+            use crate::memory::{BxMemC, BxMemoryStubC};
+
+            fn conf_addr(devfunc: u8, reg: u8) -> u32 {
+                0x8000_0000u32 | ((devfunc as u32) << 8) | (reg as u32 & 0xFC)
+            }
+
+            let mut dm = DeviceManager::new();
+            let mut io = BxDevicesC::new();
+            let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+            let mut mem = BxMemC::new(stub, false);
+
+            // Host bridge is devfunc 0x00; SMRAM control lives at 0x72
+            // (reg 0x70 + offset 2, since 0x72 & 0xFC == 0x70).
+            dm.pci_conf_addr = conf_addr(0x00, 0x72);
+
+            // SMRAME|DOPEN (0x48): SMRAM open, unrestricted.
+            dm.pci_write(0xCFE, 0x48, 1);
+            assert!(
+                dm.smram_needs_update,
+                "writing 0x72 must set the deferred flag"
+            );
+            dm.process_pci_deferred(&mut io, &mut mem);
+            assert!(!dm.smram_needs_update, "drain must clear the flag");
+            assert_eq!(mem.smram_state(), (true, true, false));
+
+            // SMRAME off (0x02): SMRAM fully disabled.
+            dm.pci_conf_addr = conf_addr(0x00, 0x72);
+            dm.pci_write(0xCFE, 0x02, 1);
+            assert!(dm.smram_needs_update);
+            dm.process_pci_deferred(&mut io, &mut mem);
+            assert_eq!(mem.smram_state(), (false, false, false));
+
+            // Illegal DOPEN&&DCLS combo (SMRAME|DOPEN|DCLS = 0x68): Bochs
+            // BX_PANICs; rusty_box must not crash the host on a guest
+            // register write and instead treats it as disabled.
+            dm.pci_conf_addr = conf_addr(0x00, 0x72);
+            dm.pci_write(0xCFE, 0x68, 1);
+            assert!(dm.smram_needs_update);
+            dm.process_pci_deferred(&mut io, &mut mem);
+            assert_eq!(mem.smram_state(), (false, false, false));
         });
     }
 }

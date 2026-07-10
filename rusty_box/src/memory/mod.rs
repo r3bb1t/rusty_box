@@ -230,6 +230,18 @@ impl BxMemC<'_> {
         &mut self.inherited_memory_stub
     }
 
+    /// Enable SMRAM (System Management RAM) with the given DOPEN/DCLS state.
+    ///
+    /// Matches BX_MEM_C::enable_smram(bool enable, bool restricted) from
+    /// cpp_orig/bochs/memory/misc_mem.cc: `enable` is DOPEN (SMM space open
+    /// for non-SMM-mode CPU accesses), `restricted` is DCLS (SMM space closed
+    /// to data references while still open to code fetches).
+    pub fn enable_smram(&mut self, enable: bool, restricted: bool) {
+        self.smram_available = true;
+        self.smram_enable = enable;
+        self.smram_restricted = restricted;
+    }
+
     /// Disable SMRAM (System Management RAM)
     ///
     /// Matches BX_MEM_C::disable_smram() from cpp_orig/bochs/memory/misc_mem.cc
@@ -237,6 +249,14 @@ impl BxMemC<'_> {
         self.smram_available = false;
         self.smram_enable = false;
         self.smram_restricted = false;
+    }
+
+    /// Snapshot of SMRAM control state: (available, enable/DOPEN, restricted/DCLS).
+    /// Test/diagnostic accessor — the actual A0000-BFFFF routing decision is
+    /// made directly against these flags in misc_mem.rs
+    /// (get_host_mem_addr/read_physical_page/write_physical_page), untouched here.
+    pub(crate) fn smram_state(&self) -> (bool, bool, bool) {
+        (self.smram_available, self.smram_enable, self.smram_restricted)
     }
 }
 

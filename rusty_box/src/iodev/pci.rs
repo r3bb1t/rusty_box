@@ -27,6 +27,20 @@ pub const fn pci_device(device: u8, function: u8) -> u8 {
     (device << 3) | (function & 7)
 }
 
+/// Deferred memory-subsystem updates a host-bridge config-space write
+/// requires. Bochs applies PAM/SMRAM to the memory object synchronously
+/// inside `pci_write_handler` (pci.cc); here the memory system lives outside
+/// the bridge (borrow-separated), so `devices.rs` defers via
+/// `pam_needs_update`/`smram_needs_update` and drains these flags once both
+/// `&mut BxPciBridge` and `&mut BxMemC` are available (`process_pci_deferred`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PciBridgeWriteEffects {
+    /// A PAM register (0x59-0x5F) changed; memory shadow-RAM types must be re-applied.
+    pub pam_changed: bool,
+    /// The SMRAM control register (0x72) was written; SMRAM routing must be re-applied.
+    pub smram_changed: bool,
+}
+
 /// PCI interrupt pin constants (Bochs pci.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -172,12 +186,13 @@ impl BxPciBridge {
 
     /// Write to PCI configuration space.
     /// Bochs: bx_pci_bridge_c::pci_write_handler() (pci.cc) — i440FX path
-    /// Returns `true` if PAM registers were modified (caller must update memory types).
-    pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> bool {
-        let mut pam_changed = false;
+    /// Returns which deferred memory-subsystem updates the caller must apply
+    /// (PAM registers changed and/or the SMRAM control register was written).
+    pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> PciBridgeWriteEffects {
+        let mut effects = PciBridgeWriteEffects::default();
         // BARs are read-only (pci.cc)
         if (0x10..0x34).contains(&address) {
-            return false;
+            return effects;
         }
 
         for i in 0..io_len as usize {
@@ -220,7 +235,7 @@ impl BxPciBridge {
                 0x59..=0x5F => {
                     if value8 != oldval {
                         self.pci_conf[addr] = value8;
-                        pam_changed = true;
+                        effects.pam_changed = true;
                         tracing::debug!(
                             "i440FX PAM register {:#04x} = {:#04x} (memory shadowing changed)",
                             addr,
@@ -242,6 +257,11 @@ impl BxPciBridge {
                 // SMRAM control (pci.cc)
                 0x72 => {
                     self.smram_control(value8);
+                    // Bochs calls mem->disable_smram()/enable_smram() from
+                    // inside smram_control() on every write, unconditionally
+                    // (no oldval-vs-newval gate like PAM). Mirror that here
+                    // via the deferred flag.
+                    effects.smram_changed = true;
                 }
                 // ERRCMD (pci.cc) — preserve bits 1,3 from old, write bits 0,2,4-7 from new
                 0x7A => {
@@ -262,7 +282,38 @@ impl BxPciBridge {
                 self.dram_detect
             );
         }
-        pam_changed
+        effects
+    }
+
+    /// Apply the SMRAM control register (0x72) to the memory subsystem.
+    /// Bochs: bx_pci_bridge_c::smram_control() (pci.cc) — the
+    /// mem->enable_smram()/disable_smram() half of that function. Idempotent:
+    /// derives state from the already-committed `pci_conf[0x72]`, so it is
+    /// safe to call any number of times from the deferred drain
+    /// (`devices.rs process_pci_deferred`).
+    pub fn apply_smram_to_memory<'c>(&self, mem: &mut crate::memory::BxMemC<'c>) {
+        let v = self.pci_conf[0x72];
+        if (v & 0x08) == 0 {
+            // SMRAME=0: disable SMRAM (Bochs pci.cc smram_control).
+            mem.disable_smram();
+        } else {
+            let dopen = (v & 0x40) != 0;
+            let dcls = (v & 0x20) != 0;
+            if dopen && dcls {
+                // Bochs: BX_PANIC(("SMRAM control: DOPEN not mutually
+                // exclusive with DCLS !")). Divergence (intentional, safer):
+                // a guest-controlled register write must not crash the host,
+                // so we log and treat the illegal combination as SMRAM
+                // disabled instead of panicking.
+                tracing::error!(
+                    "SMRAM control: DOPEN and DCLS both set (illegal combo per i440FX \
+                     spec); Bochs would BX_PANIC — disabling SMRAM instead"
+                );
+                mem.disable_smram();
+            } else {
+                mem.enable_smram(dopen, dcls);
+            }
+        }
     }
 
     /// Apply PAM register settings to the memory subsystem.
@@ -405,5 +456,37 @@ mod tests {
                                                      // Try to set DOPEN — should fail because DLCK is set
         bridge.pci_write(0x72, 0x48, 1); // DOPEN=1
         assert_eq!(bridge.pci_conf[0x72] & 0x40, 0); // DOPEN stays 0
+    }
+
+    // ─── Finding #8: apply_smram_to_memory actually switches memory ──────────
+
+    #[test]
+    fn apply_smram_to_memory_derives_state_from_register() {
+        use crate::memory::{BxMemC, BxMemoryStubC};
+
+        let mut bridge = BxPciBridge::new();
+        bridge.reset();
+        let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(stub, false);
+
+        // SMRAME|DOPEN (0x48): SMRAM open, unrestricted (DOPEN=1, DCLS=0).
+        let effects = bridge.pci_write(0x72, 0x48, 1);
+        assert!(effects.smram_changed);
+        bridge.apply_smram_to_memory(&mut mem);
+        assert_eq!(mem.smram_state(), (true, true, false));
+
+        // SMRAME off (0x02): SMRAM fully disabled.
+        let effects = bridge.pci_write(0x72, 0x02, 1);
+        assert!(effects.smram_changed);
+        bridge.apply_smram_to_memory(&mut mem);
+        assert_eq!(mem.smram_state(), (false, false, false));
+
+        // Illegal DOPEN&&DCLS combo (SMRAME|DOPEN|DCLS = 0x68): Bochs
+        // BX_PANICs here; we must not panic the host on a guest register
+        // write, so we log and treat it as disabled instead.
+        let effects = bridge.pci_write(0x72, 0x68, 1);
+        assert!(effects.smram_changed);
+        bridge.apply_smram_to_memory(&mut mem);
+        assert_eq!(mem.smram_state(), (false, false, false));
     }
 }
