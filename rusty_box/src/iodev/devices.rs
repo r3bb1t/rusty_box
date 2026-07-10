@@ -128,6 +128,13 @@ impl Default for DeviceManager {
 }
 
 impl DeviceManager {
+    /// Set the pre-boot VBE display mode on the VGA controller: raises the DISPI
+    /// capability ceiling and seeds the power-on dimensions. Preserved across
+    /// guest resets.
+    pub fn set_vga_preferred_mode(&mut self, width: u16, height: u16, bpp: u16) {
+        self.vga.set_preferred_mode(width, height, bpp);
+    }
+
     /// Create a new device manager with all devices
     pub fn new() -> Self {
         Self {

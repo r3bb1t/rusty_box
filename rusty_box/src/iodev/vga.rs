@@ -645,6 +645,11 @@ pub(crate) struct BxVgaC {
     last_fw: u32,
     last_fh: u32,
     last_bpp: u32,
+
+    /// Optional pre-boot VBE mode (xres, yres, bpp). When set, raises the DISPI
+    /// capability ceiling and seeds the power-on VBE dimensions. Preserved across
+    /// `reset()`.
+    preferred_mode: Option<(u16, u16, u16)>,
 }
 
 impl Default for BxVgaC {
@@ -751,6 +756,7 @@ impl BxVgaC {
             last_fw: 0,
             last_fh: 0,
             last_bpp: 8, // Bochs: s.last_bpp = 8
+            preferred_mode: None,
         };
 
         // CRTC registers: Bochs zeroes them via memset; the VGA BIOS programs them.
@@ -878,9 +884,53 @@ impl BxVgaC {
         // Save state that should persist across reset
         let has_icount_sync = self.has_icount_sync;
         let ips = self.ips;
+        let preferred_mode = self.preferred_mode;
         *self = Self::new();
         self.has_icount_sync = has_icount_sync;
         self.ips = ips;
+        self.preferred_mode = preferred_mode;
+        self.apply_preferred_mode();
+    }
+
+    /// Set the pre-boot VBE mode: raise the DISPI capability ceiling so the guest
+    /// may select up to this resolution, and seed the power-on dimensions.
+    /// Preserved across `reset()`. Mirrors the DISPI MAX_XRES/MAX_YRES/MAX_BPP
+    /// capability registers Bochs exposes (vga.cc). Reallocates the dirty-tile
+    /// grid when the ceiling grows.
+    pub(crate) fn set_preferred_mode(&mut self, xres: u16, yres: u16, bpp: u16) {
+        self.preferred_mode = Some((xres, yres, bpp));
+        self.apply_preferred_mode();
+    }
+
+    fn apply_preferred_mode(&mut self) {
+        let Some((xres, yres, bpp)) = self.preferred_mode else {
+            return;
+        };
+        // Never lower the built-in defaults; only raise the ceiling so the
+        // requested mode is not rejected by the DISPI xres/yres range checks.
+        self.vbe.max_xres = self.vbe.max_xres.max(xres);
+        self.vbe.max_yres = self.vbe.max_yres.max(yres);
+        self.vbe.max_bpp = self.vbe.max_bpp.max(bpp);
+        // Power-on VBE dimensions (the guest may still program its own mode).
+        self.vbe.xres = xres;
+        self.vbe.yres = yres;
+        self.vbe.bpp = bpp;
+        self.vbe.virtual_xres = xres;
+        self.vbe.virtual_yres = yres;
+
+        // Grow the dirty-tile grid to cover the (possibly larger) capability.
+        let num_x_tiles =
+            ((self.vbe.max_xres as u32 + VGA_X_TILESIZE - 1) / VGA_X_TILESIZE) as u16;
+        let num_y_tiles =
+            ((self.vbe.max_yres as u32 + VGA_Y_TILESIZE - 1) / VGA_Y_TILESIZE) as u16;
+        if num_x_tiles != self.num_x_tiles || num_y_tiles != self.num_y_tiles {
+            self.num_x_tiles = num_x_tiles;
+            self.num_y_tiles = num_y_tiles;
+            #[cfg(feature = "alloc")]
+            {
+                self.vga_tile_updated = vec![true; num_x_tiles as usize * num_y_tiles as usize];
+            }
+        }
     }
 
     /// Initialize icount-based timing for retrace computation.
@@ -3486,6 +3536,50 @@ mod tests {
     fn write_vbe(vga: &mut BxVgaC, index: u16, value: u16) {
         vga.write_port(VBE_DISPI_IOPORT_INDEX, index as u32, 2);
         vga.write_port(VBE_DISPI_IOPORT_DATA, value as u32, 2);
+    }
+
+    #[test]
+    fn preferred_mode_raises_caps_reallocs_tiles_and_survives_reset() {
+        let mut vga = BxVgaC::new();
+        let default_x_tiles = vga.num_x_tiles;
+
+        // 1920 exceeds the built-in 1600 cap, forcing a cap raise + tile regrow.
+        vga.set_preferred_mode(1920, 1080, 32);
+
+        assert!(vga.vbe.max_xres >= 1920);
+        assert!(vga.vbe.max_yres >= 1080);
+        assert_eq!(vga.vbe.xres, 1920);
+        assert_eq!(vga.vbe.yres, 1080);
+        assert_eq!(vga.vbe.bpp, 32);
+        assert!(vga.num_x_tiles > default_x_tiles);
+        assert_eq!(
+            vga.num_x_tiles,
+            ((vga.vbe.max_xres as u32).div_ceil(VGA_X_TILESIZE)) as u16
+        );
+        assert_eq!(
+            vga.vga_tile_updated.len(),
+            vga.num_x_tiles as usize * vga.num_y_tiles as usize
+        );
+
+        // Reset re-defaults the device but must re-apply the preferred mode.
+        vga.reset();
+        assert!(vga.vbe.max_xres >= 1920);
+        assert_eq!(vga.vbe.xres, 1920);
+        assert_eq!(vga.vbe.yres, 1080);
+    }
+
+    #[test]
+    fn preferred_mode_never_lowers_default_caps() {
+        let mut vga = BxVgaC::new();
+        let (dx, dy) = (vga.vbe.max_xres, vga.vbe.max_yres);
+
+        // A small mode must not shrink the built-in capability ceiling.
+        vga.set_preferred_mode(800, 600, 16);
+
+        assert_eq!(vga.vbe.max_xres, dx);
+        assert_eq!(vga.vbe.max_yres, dy);
+        assert_eq!(vga.vbe.xres, 800);
+        assert_eq!(vga.vbe.yres, 600);
     }
 
     #[test]

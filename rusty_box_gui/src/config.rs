@@ -40,6 +40,12 @@ pub struct EmulatorToml {
 #[serde(default, deny_unknown_fields)]
 pub struct DisplayToml {
     pub backend: Option<DisplayBackend>,
+    /// Pre-boot VBE mode width in pixels (raises the DISPI capability ceiling).
+    pub width: Option<u16>,
+    /// Pre-boot VBE mode height in pixels.
+    pub height: Option<u16>,
+    /// Pre-boot VBE bits-per-pixel (8/16/24/32).
+    pub bpp: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -111,6 +117,17 @@ pub struct ResolvedConfig {
     /// without a file context (tests, `resolve_config`); the native launcher
     /// fills it in `load_config`.
     pub config_path: Option<PathBuf>,
+    /// Optional pre-boot VBE mode (width, height, bpp) applied to the VGA
+    /// controller before reset. `None` leaves the built-in defaults.
+    pub vga_mode: Option<VgaMode>,
+}
+
+/// A pre-boot VBE display mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VgaMode {
+    pub width: u16,
+    pub height: u16,
+    pub bpp: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,6 +264,16 @@ fn resolve_config_with_base(
             .map(|path| resolve_toml_path(config_dir, path)),
     };
 
+    // A pre-boot VBE mode requires at least a width and height; bpp defaults to 32.
+    let vga_mode = match (file.display.width, file.display.height) {
+        (Some(width), Some(height)) if width != 0 && height != 0 => Some(VgaMode {
+            width,
+            height,
+            bpp: file.display.bpp.unwrap_or(32),
+        }),
+        _ => None,
+    };
+
     let disk = resolve_disk(&file, args, config_dir)?;
     let cdrom = resolve_cdrom(&file, args, config_dir);
     let boot_order = resolve_boot_order(&file, args, display, disk.is_some(), cdrom.is_some())?;
@@ -269,6 +296,7 @@ fn resolve_config_with_base(
         cdrom,
         log_level,
         config_path,
+        vga_mode,
     })
 }
 
@@ -337,6 +365,9 @@ impl ResolvedConfig {
         };
         let display = DisplayToml {
             backend: Some(self.display),
+            width: self.vga_mode.map(|mode| mode.width),
+            height: self.vga_mode.map(|mode| mode.height),
+            bpp: self.vga_mode.map(|mode| mode.bpp),
         };
         let rom = RomToml {
             bios: Some(self.bios.clone()),
@@ -1281,6 +1312,55 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
     }
 
     #[test]
+    fn resolves_vga_mode_from_display_section() {
+        let file = config(
+            r#"
+[display]
+width = 1920
+height = 1080
+
+[rom]
+bios = "bios.bin"
+
+[disk]
+path = "disk.img"
+chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
+"#,
+        );
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        // bpp defaults to 32 when omitted.
+        assert_eq!(
+            resolved.vga_mode,
+            Some(VgaMode {
+                width: 1920,
+                height: 1080,
+                bpp: 32,
+            })
+        );
+    }
+
+    #[test]
+    fn vga_mode_requires_both_width_and_height() {
+        let file = config(
+            r#"
+[display]
+width = 1920
+
+[rom]
+bios = "bios.bin"
+
+[disk]
+path = "disk.img"
+chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
+"#,
+        );
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        assert_eq!(resolved.vga_mode, None);
+    }
+
+    #[test]
     fn save_round_trip_reparses_equal() {
         let file = config(
             r#"
@@ -1297,6 +1377,9 @@ sync_slowdown = false
 
 [display]
 backend = "headless"
+width = 1920
+height = 1080
+bpp = 32
 
 [rom]
 bios = "bios.bin"
