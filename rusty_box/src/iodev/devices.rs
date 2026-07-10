@@ -28,9 +28,7 @@ use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT, SYSTEM_CONTRO
 use super::pci::BxPciBridge;
 use super::pci2isa::BxPiix3;
 use super::pci_ide::BxPciIde;
-use super::pic::{
-    BxPicC, PIC_ELCR1, PIC_ELCR2, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA,
-};
+use super::pic::{BxPicC, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA};
 use super::pit::{BxPitC, PIT_CONTROL, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2};
 use super::serial::BxSerialC;
 use super::vga::BxVgaC;
@@ -60,6 +58,68 @@ fn read_bmdma_prd(mem: &crate::memory::BxMemC<'_>, prd_addr: u32) -> (u32, u32) 
         u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
         u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
     )
+}
+
+/// Bochs devices.cc `bx_pci_device_c::pci_write_handler_common` — config-space
+/// bytes that are always read-only, regardless of which device is targeted:
+/// vendor/device ID (0x00-0x03), revision + class code (0x08-0x0B), header
+/// type (0x0E), and interrupt pin (0x3D). Applied uniformly BEFORE any
+/// device's own `pci_write` runs. BARs, command/status, cache-line/latency,
+/// expansion ROM, and interrupt line are untouched by this filter.
+fn pci_common_reg_is_readonly(addr: u8) -> bool {
+    matches!(addr, 0x00..=0x03 | 0x08..=0x0B | 0x0E | 0x3D)
+}
+
+/// Split a raw PCI config-space write into its writable sub-spans after
+/// dropping any bytes on Bochs's common read-only set
+/// (`pci_common_reg_is_readonly`), invoking `f(addr, value, len)` once per
+/// contiguous writable run with `value`'s low byte corresponding to `addr`.
+/// A write entirely inside the read-only set invokes `f` zero times.
+fn for_each_writable_pci_span(
+    reg_addr: u8,
+    value: u32,
+    io_len: u8,
+    mut f: impl FnMut(u8, u32, u8),
+) {
+    let mut run_start: Option<u8> = None;
+    for i in 0..io_len {
+        let addr = reg_addr.wrapping_add(i);
+        if pci_common_reg_is_readonly(addr) {
+            if let Some(start) = run_start.take() {
+                let len = i - start;
+                f(
+                    reg_addr.wrapping_add(start),
+                    extract_pci_write_bytes(value, start, len),
+                    len,
+                );
+            }
+        } else if run_start.is_none() {
+            run_start = Some(i);
+        }
+    }
+    if let Some(start) = run_start {
+        let len = io_len - start;
+        f(
+            reg_addr.wrapping_add(start),
+            extract_pci_write_bytes(value, start, len),
+            len,
+        );
+    }
+}
+
+/// Extract `len` bytes starting at byte offset `start` from a little-endian
+/// `value`, right-justified so byte 0 of the result corresponds to
+/// `reg_addr + start` (what the per-device `pci_write` methods expect).
+fn extract_pci_write_bytes(value: u32, start: u8, len: u8) -> u32 {
+    if len == 0 {
+        return 0;
+    }
+    let shifted = value >> (start * 8);
+    if len >= 4 {
+        shifted
+    } else {
+        shifted & ((1u32 << (len * 8)) - 1)
+    }
 }
 
 /// Unified Device Manager
@@ -291,15 +351,16 @@ impl DeviceManager {
         Ok(())
     }
 
-    /// Register PIC I/O handlers
+    /// Register PIC I/O handlers.
+    /// Note: ELCR1/ELCR2 (0x4D0/0x4D1) are NOT PIC ports in Bochs — they
+    /// belong to the PIIX3 PCI-to-ISA bridge (pci2isa.cc), which forwards
+    /// mode changes to `BxPicC::set_mode()`. See `register_pci_handlers`.
     fn register_pic_handlers(&mut self, io: &mut BxDevicesC) {
         for port in [
             PIC_MASTER_CMD,
             PIC_MASTER_DATA,
             PIC_SLAVE_CMD,
             PIC_SLAVE_DATA,
-            PIC_ELCR1,
-            PIC_ELCR2,
         ] {
             io.register_io_handler(DeviceId::Pic, port, "8259 PIC", 0x1);
         }
@@ -450,12 +511,14 @@ impl DeviceManager {
             io.register_io_handler(DeviceId::Pci, port, "PCI Config Data", 0x7);
         }
 
-        // PIIX3 I/O ports: APM (0xB2-0xB3), ELCR (0x4D0-0x4D1)
+        // PIIX3 I/O ports: APM (0xB2-0xB3), ELCR (0x4D0-0x4D1), CPU reset (0xCF9)
+        // Bochs pci2isa.cc init(): all five registered as 1-byte ports.
         for port in [
             super::pci2isa::APM_CMD_PORT,
             super::pci2isa::APM_STS_PORT,
             super::pci2isa::ELCR1_PORT,
             super::pci2isa::ELCR2_PORT,
+            super::pci2isa::PCI_RESET_PORT,
         ] {
             io.register_io_handler(DeviceId::Pci, port, "PIIX3", 0x1);
         }
@@ -500,8 +563,8 @@ impl DeviceManager {
                 let reg_addr = reg.wrapping_add(offset);
                 self.pci_device_read(devfunc, reg_addr, io_len)
             }
-            // APM + ELCR ports → PIIX3
-            0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 => self.pci2isa.read(address),
+            // APM + ELCR + CPU reset ports → PIIX3
+            0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 | 0x0CF9 => self.pci2isa.read(address),
             _ => {
                 // BM-DMA ports
                 let base = self.pci_ide.bmdma_base as u16;
@@ -1028,22 +1091,45 @@ impl DeviceManager {
                     return;
                 }
                 let reg_addr = reg + offset;
+                // Bochs devices.cc pci_write_handler_common: drop guest
+                // writes to the common read-only bytes BEFORE the write
+                // reaches the device-specific handler, for every devfunc.
                 match devfunc {
                     0x00 => {
-                        let pam_changed = self.pci_bridge.pci_write(reg_addr, value, io_len);
+                        let mut pam_changed = false;
+                        for_each_writable_pci_span(reg_addr, value, io_len, |addr, val, len| {
+                            if self.pci_bridge.pci_write(addr, val, len) {
+                                pam_changed = true;
+                            }
+                        });
                         if pam_changed {
                             self.pam_needs_update = true;
                         }
                     }
-                    0x08 => self.pci2isa.pci_write(reg_addr, value, io_len),
+                    0x08 => {
+                        for_each_writable_pci_span(reg_addr, value, io_len, |addr, val, len| {
+                            self.pci2isa.pci_write(addr, val, len);
+                        });
+                    }
                     0x09 => {
-                        let bar4_changed = self.pci_ide.pci_write(reg_addr, value, io_len);
+                        let mut bar4_changed = false;
+                        for_each_writable_pci_span(reg_addr, value, io_len, |addr, val, len| {
+                            if self.pci_ide.pci_write(addr, val, len) {
+                                bar4_changed = true;
+                            }
+                        });
                         if bar4_changed {
                             self.pci_ide_bar4_needs_reregister = true;
                         }
                     }
                     0x0B => {
-                        let (pm_changed, sm_changed) = self.acpi.pci_write(reg_addr, value, io_len);
+                        let mut pm_changed = false;
+                        let mut sm_changed = false;
+                        for_each_writable_pci_span(reg_addr, value, io_len, |addr, val, len| {
+                            let (pm, sm) = self.acpi.pci_write(addr, val, len);
+                            pm_changed |= pm;
+                            sm_changed |= sm;
+                        });
                         if pm_changed {
                             self.acpi_pm_needs_reregister = true;
                         }
@@ -1052,15 +1138,21 @@ impl DeviceManager {
                         }
                     }
                     0x10 => {
-                        let change = self.vga.pci_write(reg_addr, value, io_len);
-                        if change.lfb || change.mmio {
+                        let mut lfb_changed = false;
+                        let mut mmio_changed = false;
+                        for_each_writable_pci_span(reg_addr, value, io_len, |addr, val, len| {
+                            let change = self.vga.pci_write(addr, val, len);
+                            lfb_changed |= change.lfb;
+                            mmio_changed |= change.mmio;
+                        });
+                        if lfb_changed || mmio_changed {
                             self.vga_bar_needs_reregister = true;
                         }
                     }
                     _ => {}
                 }
             }
-            0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 => {
+            0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 | 0x0CF9 => {
                 self.pci2isa.write(address, value, io_len);
                 if address == 0x00B2 {
                     self.acpi.generate_smi(value as u8);
@@ -1069,6 +1161,17 @@ impl DeviceManager {
                         "APM command {:#04x}: forwarded to ACPI, apms cleared (no SMM)",
                         value
                     );
+                }
+                // Bochs pci2isa.cc write case 0x04d0/0x04d1:
+                // DEV_pic_set_mode(is_master, elcr) — forward the new
+                // edge/level trigger mode to the 8259 whose ELCR changed.
+                if self.pci2isa.elcr1_changed {
+                    self.pci2isa.elcr1_changed = false;
+                    self.pic.set_mode(true, self.pci2isa.elcr1);
+                }
+                if self.pci2isa.elcr2_changed {
+                    self.pci2isa.elcr2_changed = false;
+                    self.pic.set_mode(false, self.pci2isa.elcr2);
                 }
             }
             _ => {
@@ -1475,6 +1578,211 @@ mod tests {
                 mem.register_memory_handlers(MemoryDeviceId::None, 0xF000_0000, 0xF000_0FFF)
                     .is_err(),
                 "BAR2 MMIO window must be registered"
+            );
+        });
+    }
+
+    // ─── Finding #2: port 0xCF9 (PIIX3 reset control) registration/dispatch ───
+
+    #[test]
+    fn pci_reset_port_cf9_registers_and_dispatches_through_io_bus() {
+        on_big_stack(|| {
+            let mut dm = DeviceManager::new();
+            let mut io = BxDevicesC::new();
+            dm.register_pci_handlers(&mut io);
+
+            assert_eq!(
+                io.write_handlers[0x0CF9].device_id,
+                DeviceId::Pci,
+                "port 0xCF9 write must be registered (Bochs pci2isa.cc init)"
+            );
+            assert_eq!(
+                io.read_handlers[0x0CF9].device_id,
+                DeviceId::Pci,
+                "port 0xCF9 read must be registered (Bochs pci2isa.cc init)"
+            );
+
+            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
+            // Set reset type = hardware (bit1), then trigger (bit1|bit2) —
+            // Bochs pci2isa.cc write case 0x0cf9.
+            io.outp(0x0CF9, 0x02, 1, 0);
+            io.outp(0x0CF9, 0x06, 1, 0);
+            io.clear_device_manager();
+
+            assert_eq!(
+                dm.pci2isa.reset_request,
+                Some(ResetReason::Hardware),
+                "OUT 0xCF9,0x06 with reset_type=hardware must request a hardware reset"
+            );
+
+            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
+            let value = io.inp(0x0CF9, 1, 0);
+            io.clear_device_manager();
+            assert_eq!(
+                value, 0x02,
+                "read of 0xCF9 must return the stored pci_reset value, not the unhandled sentinel"
+            );
+        });
+    }
+
+    // ─── Finding #3: ELCR writes must reach BxPicC::set_mode ───
+
+    #[test]
+    fn elcr_write_drains_into_pic_set_mode() {
+        on_big_stack(|| {
+            let mut dm = DeviceManager::new();
+            let mut io = BxDevicesC::new();
+            dm.register_pci_handlers(&mut io);
+
+            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
+            // ELCR1 bit5 -> IRQ5 level-triggered (Bochs pci2isa.cc write case
+            // 0x04d0: DEV_pic_set_mode(1, elcr1)).
+            io.outp(0x04D0, 0x20, 1, 0);
+            io.clear_device_manager();
+
+            assert_eq!(dm.pci2isa.elcr1, 0x20);
+            assert!(
+                !dm.pci2isa.elcr1_changed,
+                "elcr1_changed must be drained by the write dispatch"
+            );
+            assert_eq!(
+                dm.pic.master.edge_level, 0x20,
+                "pic.set_mode(true, elcr1) must mirror ELCR1 into master edge_level"
+            );
+
+            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
+            // ELCR2 bit2 -> IRQ10 level-triggered (Bochs pci2isa.cc write case
+            // 0x04d1: DEV_pic_set_mode(0, elcr2)).
+            io.outp(0x04D1, 0x04, 1, 0);
+            io.clear_device_manager();
+
+            assert_eq!(dm.pci2isa.elcr2, 0x04);
+            assert!(
+                !dm.pci2isa.elcr2_changed,
+                "elcr2_changed must be drained by the write dispatch"
+            );
+            assert_eq!(
+                dm.pic.slave.edge_level, 0x04,
+                "pic.set_mode(false, elcr2) must mirror ELCR2 into slave edge_level"
+            );
+        });
+    }
+
+    #[test]
+    fn level_triggered_irq_keeps_irr_set_after_iac_ack() {
+        on_big_stack(|| {
+            let mut dm = DeviceManager::new();
+            let mut io = BxDevicesC::new();
+            dm.register_pci_handlers(&mut io);
+
+            // Mark IRQ5 level-triggered via the real ELCR1 port write path.
+            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
+            io.outp(0x04D0, 0x20, 1, 0);
+            io.clear_device_manager();
+            assert_eq!(dm.pic.master.edge_level, 0x20);
+
+            // Unmask IRQ5 and assert the line (a level-triggered device holds
+            // the line high until it services the condition).
+            dm.pic.master.imr &= !(1 << 5);
+            dm.pic.raise_irq(5);
+            assert_ne!(
+                dm.pic.master.irr & (1 << 5),
+                0,
+                "IRR must be set once the line is raised"
+            );
+
+            let vector = dm.pic.iac();
+            assert_eq!(vector, dm.pic.master.interrupt_offset + 5);
+
+            // Level-triggered: IRR must stay set after ack because the guest
+            // hasn't lowered the line yet (Bochs pic.cc IAC edge_level gate).
+            assert_ne!(
+                dm.pic.master.irr & (1 << 5),
+                0,
+                "level-triggered IRQ must keep IRR set after ack"
+            );
+        });
+    }
+
+    // ─── Finding #21: common PCI config-space read-only filter ───
+
+    #[test]
+    fn pci_config_write_blocks_common_readonly_bytes_but_allows_bar_and_command() {
+        on_big_stack(|| {
+            fn conf_addr(devfunc: u8, reg: u8) -> u32 {
+                0x8000_0000u32 | ((devfunc as u32) << 8) | (reg as u32 & 0xFC)
+            }
+
+            let mut dm = DeviceManager::new();
+            const PIIX3: u8 = 0x08;
+            const PCI_IDE: u8 = 0x09;
+
+            // Vendor/device ID (0x00-0x03) must stay read-only.
+            let vendor_before = dm.pci2isa.pci_conf[0x00];
+            dm.pci_conf_addr = conf_addr(PIIX3, 0x00);
+            dm.pci_write(0x0CFC, 0xDEAD_BEEF, 4);
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x00], vendor_before,
+                "vendor ID must stay read-only"
+            );
+
+            // Revision + class code (0x08-0x0B) must stay read-only.
+            let class_before = dm.pci2isa.pci_conf[0x0A];
+            dm.pci_conf_addr = conf_addr(PIIX3, 0x08);
+            dm.pci_write(0x0CFC, 0xFFFF_FFFF, 4);
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x0A], class_before,
+                "class code must stay read-only"
+            );
+
+            // A dword write spanning 0x0C-0x0F must drop only the header-type
+            // byte (0x0E); cache-line size (0x0C) and latency timer (0x0D)
+            // must still be writable (do NOT over-filter).
+            let htype_before = dm.pci2isa.pci_conf[0x0E];
+            dm.pci_conf_addr = conf_addr(PIIX3, 0x0C);
+            dm.pci_write(0x0CFC, 0xFFFF_FFFF, 4);
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x0E], htype_before,
+                "header type must stay read-only even mid-span"
+            );
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x0C], 0xFF,
+                "cache-line size byte must remain writable"
+            );
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x0D], 0xFF,
+                "latency timer byte must remain writable"
+            );
+
+            // A dword write spanning 0x3C-0x3F must drop only the
+            // interrupt-pin byte (0x3D); interrupt line (0x3C) stays writable.
+            let intpin_before = dm.pci2isa.pci_conf[0x3D];
+            dm.pci_conf_addr = conf_addr(PIIX3, 0x3C);
+            dm.pci_write(0x0CFC, 0xFFFF_FFFF, 4);
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x3D], intpin_before,
+                "interrupt pin must stay read-only even mid-span"
+            );
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x3C], 0xFF,
+                "interrupt line must remain writable"
+            );
+
+            // Command register (0x04) must remain writable through the filter.
+            dm.pci_conf_addr = conf_addr(PIIX3, 0x04);
+            dm.pci_write(0x0CFC, 0x0F, 1);
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x04], 0x0F,
+                "command register must remain writable through the filter"
+            );
+
+            // BAR4 (PCI IDE BM-DMA base, 0x20) must remain writable through
+            // the filter — it is nowhere near the read-only byte set.
+            dm.pci_conf_addr = conf_addr(PCI_IDE, 0x20);
+            dm.pci_write(0x0CFC, 0x0000_C001, 4);
+            assert!(
+                dm.pci_ide.bmdma_present(),
+                "BAR4 write must reach the device through the filter"
             );
         });
     }
