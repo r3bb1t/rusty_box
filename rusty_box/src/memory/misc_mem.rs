@@ -848,51 +848,136 @@ impl BxMemC<'_> {
         );
 
         for page_idx in start_page..=end_page {
-            // Calculate bitmap for 64KB sub-ranges within this page
-            let mut bitmap = 0xFFFFu16;
-            let page_base = (page_idx as BxPhyAddress) << 20;
+            self.register_page(page_idx, device_id, begin_addr, end_addr)?;
+        }
 
-            if begin_addr > page_base {
-                let sub_page = ((begin_addr >> 16) & 0xF) as u16;
-                bitmap &= 0xFFFFu16 << sub_page;
+        Ok(())
+    }
+
+    /// Register one 1 MB page's slice of a handler range. Factored out of
+    /// `register_memory_handlers` so `unregister_memory_handlers` can rebuild a
+    /// page's handler chain from the surviving handlers.
+    fn register_page(
+        &mut self,
+        page_idx: usize,
+        device_id: super::MemoryDeviceId,
+        begin_addr: BxPhyAddress,
+        end_addr: BxPhyAddress,
+    ) -> Result<()> {
+        use crate::memory::error::MemoryError;
+
+        // Calculate bitmap for 64KB sub-ranges within this page
+        let mut bitmap = 0xFFFFu16;
+        let page_base = (page_idx as BxPhyAddress) << 20;
+
+        if begin_addr > page_base {
+            let sub_page = ((begin_addr >> 16) & 0xF) as u16;
+            bitmap &= 0xFFFFu16 << sub_page;
+        }
+
+        if end_addr < page_base + 0x100000 {
+            let sub_page = ((end_addr >> 16) & 0xF) as u16;
+            bitmap &= 0xFFFFu16 >> (0x0F - sub_page);
+        }
+
+        // Check for overlapping handlers
+        if let Some(existing) = &self.memory_handlers[page_idx] {
+            if (bitmap & existing.bitmap) != 0 {
+                tracing::error!("Register failed: overlapping memory handlers!");
+                return Err(MemoryError::OverlappingHandlers.into());
+            }
+            bitmap |= existing.bitmap;
+        }
+
+        // If this page already has a handler, move it to the overflow pool
+        let next_idx = if let Some(existing) = self.memory_handlers[page_idx].take() {
+            let idx = self.alloc_overflow_slot();
+            self.handler_overflow[idx] = Some(existing);
+            Some(idx as u16)
+        } else {
+            None
+        };
+
+        self.memory_handlers[page_idx] = Some(super::MemoryHandlerStruct {
+            next: next_idx,
+            begin: begin_addr,
+            end: end_addr,
+            bitmap,
+            device_id,
+        });
+        Ok(())
+    }
+
+    /// Allocate an overflow-pool slot, reusing a freed (`None`) slot before
+    /// extending the high-water mark. Without this, repeated register/unregister
+    /// cycles (PCI BAR relocation) would leak the fixed 16-entry pool.
+    fn alloc_overflow_slot(&mut self) -> usize {
+        for idx in 0..self.handler_overflow_count {
+            if self.handler_overflow[idx].is_none() {
+                return idx;
+            }
+        }
+        assert!(
+            self.handler_overflow_count < MAX_HANDLER_OVERFLOW,
+            "handler overflow pool exhausted"
+        );
+        let idx = self.handler_overflow_count;
+        self.handler_overflow_count += 1;
+        idx
+    }
+
+    /// Remove the memory handler covering exactly `[begin_addr, end_addr]` for
+    /// `device_id`, restoring any other handlers that shared its pages. The
+    /// inverse of [`register_memory_handlers`]; required for PCI BAR relocation
+    /// (e.g. moving the VGA LFB to a BIOS-assigned base). Pages with no matching
+    /// handler are left untouched.
+    pub fn unregister_memory_handlers(
+        &mut self,
+        device_id: super::MemoryDeviceId,
+        begin_addr: BxPhyAddress,
+        end_addr: BxPhyAddress,
+    ) -> Result<()> {
+        use crate::memory::error::MemoryError;
+
+        if end_addr < begin_addr {
+            return Err(MemoryError::InvalidAddressRange.into());
+        }
+
+        let start_page = (begin_addr >> 20) as usize;
+        let end_page = (end_addr >> 20) as usize;
+        // A page holds at most one handler per non-overlapping 64 KB sub-range.
+        const MAX_PAGE_HANDLERS: usize = MAX_HANDLER_OVERFLOW + 1;
+
+        for page_idx in start_page..=end_page {
+            if page_idx >= self.memory_handlers.len() {
+                break;
             }
 
-            if end_addr < page_base + 0x100000 {
-                let sub_page = ((end_addr >> 16) & 0xF) as u16;
-                bitmap &= 0xFFFFu16 >> (0x0F - sub_page);
-            }
-
-            // Check for overlapping handlers
-            if let Some(existing) = &self.memory_handlers[page_idx] {
-                if (bitmap & existing.bitmap) != 0 {
-                    tracing::error!("Register failed: overlapping memory handlers!");
-                    return Err(MemoryError::OverlappingHandlers.into());
+            // Detach the whole chain for this page, freeing its overflow slots.
+            let mut survivors: [Option<(super::MemoryDeviceId, BxPhyAddress, BxPhyAddress)>;
+                MAX_PAGE_HANDLERS] = [None; MAX_PAGE_HANDLERS];
+            let mut nsurv = 0usize;
+            let mut cur = self.memory_handlers[page_idx].take();
+            while let Some(handler) = cur {
+                let next = handler
+                    .next
+                    .and_then(|idx| self.handler_overflow[idx as usize].take());
+                let is_target = handler.begin == begin_addr
+                    && handler.end == end_addr
+                    && handler.device_id.same_device(&device_id);
+                if !is_target {
+                    survivors[nsurv] = Some((handler.device_id, handler.begin, handler.end));
+                    nsurv += 1;
                 }
-                bitmap |= existing.bitmap;
+                cur = next;
             }
 
-            // If this page already has a handler, move it to overflow pool
-            let next_idx = if let Some(existing) = self.memory_handlers[page_idx].take() {
-                assert!(
-                    (self.handler_overflow_count) < MAX_HANDLER_OVERFLOW,
-                    "handler overflow pool exhausted"
-                );
-                let idx = self.handler_overflow_count;
-                self.handler_overflow[idx] = Some(existing);
-                self.handler_overflow_count += 1;
-                Some(idx as u16)
-            } else {
-                None
-            };
-
-            let handler = super::MemoryHandlerStruct {
-                next: next_idx,
-                begin: begin_addr,
-                end: end_addr,
-                bitmap,
-                device_id,
-            };
-            self.memory_handlers[page_idx] = Some(handler);
+            // Rebuild from the survivors, earliest-registered first, so the chain
+            // order and the union bitmap are reconstructed exactly.
+            for i in (0..nsurv).rev() {
+                let (did, begin, end) = survivors[i].expect("survivor slot populated");
+                self.register_page(page_idx, did, begin, end)?;
+            }
         }
 
         Ok(())
@@ -1016,5 +1101,112 @@ impl BxMemC<'_> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+    use crate::memory::MemoryDeviceId;
+
+    fn test_mem() -> BxMemC<'static> {
+        let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        BxMemC::new(stub, false)
+    }
+
+    // Fake device pointers — the handler table only stores/compares them here;
+    // these tests never dispatch through them, so they are never dereferenced.
+    fn vga_a() -> MemoryDeviceId {
+        MemoryDeviceId::Vga(core::ptr::null_mut())
+    }
+    fn vga_b() -> MemoryDeviceId {
+        MemoryDeviceId::Vga(4usize as *mut crate::iodev::vga::BxVgaC)
+    }
+
+    fn handler_range_at(mem: &BxMemC<'_>, addr: u64) -> Option<(u64, u64)> {
+        let page = (addr >> 20) as usize;
+        if page >= mem.memory_handlers.len() {
+            return None;
+        }
+        let mut cur = mem.memory_handlers[page].as_ref();
+        while let Some(h) = cur {
+            if h.begin <= addr && h.end >= addr {
+                return Some((h.begin, h.end));
+            }
+            cur = h.next.and_then(|i| mem.handler_overflow[i as usize].as_ref());
+        }
+        None
+    }
+
+    #[test]
+    fn unregister_removes_sole_handler_and_frees_the_range() {
+        let mut mem = test_mem();
+        let begin = 0xE000_0000u64;
+        let end = begin + (16 << 20) - 1; // 16 MB LFB, 16 pages
+
+        mem.register_memory_handlers(vga_a(), begin, end).unwrap();
+        assert_eq!(handler_range_at(&mem, begin + 0x1234), Some((begin, end)));
+
+        mem.unregister_memory_handlers(vga_a(), begin, end).unwrap();
+        for p in (begin >> 20)..=(end >> 20) {
+            assert!(
+                mem.memory_handlers[p as usize].is_none(),
+                "page {p:#x} not cleared"
+            );
+        }
+        // Bitmap was cleared, so the same range can be registered again.
+        mem.register_memory_handlers(vga_a(), begin, end).unwrap();
+        assert_eq!(handler_range_at(&mem, begin), Some((begin, end)));
+    }
+
+    #[test]
+    fn unregister_preserves_other_handler_on_shared_page() {
+        let mut mem = test_mem();
+        let a = (0xA0000u64, 0xAFFFFu64); // page 0, 64 KB sub-range 0xA
+        let b = (0xB0000u64, 0xBFFFFu64); // page 0, 64 KB sub-range 0xB
+
+        mem.register_memory_handlers(vga_a(), a.0, a.1).unwrap();
+        mem.register_memory_handlers(vga_b(), b.0, b.1).unwrap();
+
+        mem.unregister_memory_handlers(vga_a(), a.0, a.1).unwrap();
+
+        assert_eq!(handler_range_at(&mem, 0xB_8000), Some(b), "B must survive");
+        assert_eq!(handler_range_at(&mem, 0xA_8000), None, "A must be gone");
+
+        // A's sub-range is free again.
+        mem.register_memory_handlers(vga_a(), a.0, a.1).unwrap();
+        assert_eq!(handler_range_at(&mem, 0xA_8000), Some(a));
+        assert_eq!(handler_range_at(&mem, 0xB_8000), Some(b));
+    }
+
+    #[test]
+    fn unregister_matches_device_identity() {
+        let mut mem = test_mem();
+        let r = (0xC0000u64, 0xCFFFFu64);
+        mem.register_memory_handlers(vga_a(), r.0, r.1).unwrap();
+
+        // Wrong device id must not remove the handler.
+        mem.unregister_memory_handlers(vga_b(), r.0, r.1).unwrap();
+        assert_eq!(handler_range_at(&mem, 0xC_8000), Some(r));
+
+        mem.unregister_memory_handlers(vga_a(), r.0, r.1).unwrap();
+        assert_eq!(handler_range_at(&mem, 0xC_8000), None);
+    }
+
+    #[test]
+    fn repeated_register_unregister_does_not_leak_overflow_pool() {
+        let mut mem = test_mem();
+        let a = (0xA0000u64, 0xAFFFFu64);
+        let b = (0xB0000u64, 0xBFFFFu64);
+        mem.register_memory_handlers(vga_a(), a.0, a.1).unwrap();
+
+        // Far more cycles than the 16-entry pool could hold if it leaked.
+        for _ in 0..200 {
+            mem.register_memory_handlers(vga_b(), b.0, b.1).unwrap();
+            mem.unregister_memory_handlers(vga_b(), b.0, b.1).unwrap();
+        }
+
+        assert!(mem.handler_overflow_count <= MAX_HANDLER_OVERFLOW);
+        assert_eq!(handler_range_at(&mem, 0xA_8000), Some(a));
     }
 }

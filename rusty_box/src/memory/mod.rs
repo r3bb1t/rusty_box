@@ -116,6 +116,18 @@ impl MemoryDeviceId {
             _ => None,
         }
     }
+
+    /// Whether two ids refer to the same device instance (pointer identity).
+    /// Used by `unregister_memory_handlers` to match the handler to remove.
+    #[inline]
+    pub(crate) fn same_device(&self, other: &MemoryDeviceId) -> bool {
+        match (self, other) {
+            (MemoryDeviceId::Vga(a), MemoryDeviceId::Vga(b)) => core::ptr::eq(*a, *b),
+            (MemoryDeviceId::IoApic(a), MemoryDeviceId::IoApic(b)) => core::ptr::eq(*a, *b),
+            (MemoryDeviceId::None, MemoryDeviceId::None) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug)]
