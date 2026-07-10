@@ -70,55 +70,28 @@ fn pci_common_reg_is_readonly(addr: u8) -> bool {
     matches!(addr, 0x00..=0x03 | 0x08..=0x0B | 0x0E | 0x3D)
 }
 
-/// Split a raw PCI config-space write into its writable sub-spans after
-/// dropping any bytes on Bochs's common read-only set
-/// (`pci_common_reg_is_readonly`), invoking `f(addr, value, len)` once per
-/// contiguous writable run with `value`'s low byte corresponding to `addr`.
-/// A write entirely inside the read-only set invokes `f` zero times.
-fn for_each_writable_pci_span(
-    reg_addr: u8,
-    value: u32,
-    io_len: u8,
-    mut f: impl FnMut(u8, u32, u8),
-) {
-    let mut run_start: Option<u8> = None;
-    for i in 0..io_len {
-        let addr = reg_addr.wrapping_add(i);
-        if pci_common_reg_is_readonly(addr) {
-            if let Some(start) = run_start.take() {
-                let len = i - start;
-                f(
-                    reg_addr.wrapping_add(start),
-                    extract_pci_write_bytes(value, start, len),
-                    len,
-                );
-            }
-        } else if run_start.is_none() {
-            run_start = Some(i);
-        }
-    }
-    if let Some(start) = run_start {
-        let len = io_len - start;
-        f(
-            reg_addr.wrapping_add(start),
-            extract_pci_write_bytes(value, start, len),
-            len,
-        );
-    }
-}
-
-/// Extract `len` bytes starting at byte offset `start` from a little-endian
-/// `value`, right-justified so byte 0 of the result corresponds to
-/// `reg_addr + start` (what the per-device `pci_write` methods expect).
-fn extract_pci_write_bytes(value: u32, start: u8, len: u8) -> u32 {
-    if len == 0 {
-        return 0;
-    }
-    let shifted = value >> (start * 8);
-    if len >= 4 {
-        shifted
+/// Bochs devices.cc `bx_pci_device_c::pci_write_handler_common` — gate a raw
+/// PCI config-space write BEFORE it reaches the device-specific `pci_write`.
+/// Bochs checks only the write's STARTING offset (`address`, i.e. `reg_addr`
+/// here); there is no per-byte mid-span filtering, so a multi-byte write
+/// that starts on a writable register reaches the device unfiltered even if
+/// it spills into a read-only byte (e.g. a dword write starting at 0x0C
+/// still overwrites the read-only header-type byte at 0x0E — an obscure
+/// upstream quirk, not a bug to "fix").
+///
+/// Returns `None` if the whole write must be dropped (starting offset is in
+/// `pci_common_reg_is_readonly`). Returns `Some((addr, value, len))` with the
+/// write to forward to the device otherwise; for a write starting at 0x3C
+/// (interrupt line) Bochs stores only that single byte
+/// (`pci_conf[0x3c] = (Bit8u)value`) regardless of `io_len`, so the returned
+/// write is clamped to one byte.
+fn pci_write_common_gate(reg_addr: u8, value: u32, io_len: u8) -> Option<(u8, u32, u8)> {
+    if pci_common_reg_is_readonly(reg_addr) {
+        None
+    } else if reg_addr == 0x3C {
+        Some((reg_addr, value & 0xFF, 1))
     } else {
-        shifted & ((1u32 << (len * 8)) - 1)
+        Some((reg_addr, value, io_len))
     }
 }
 
@@ -1091,62 +1064,57 @@ impl DeviceManager {
                     return;
                 }
                 let reg_addr = reg + offset;
-                // Bochs devices.cc pci_write_handler_common: drop guest
-                // writes to the common read-only bytes BEFORE the write
-                // reaches the device-specific handler, for every devfunc.
+                // Bochs devices.cc pci_write_handler_common: gate on the
+                // write's STARTING offset only (pci_write_common_gate), then
+                // dispatch the (possibly 0x3C-clamped) write to the target
+                // device's pci_write exactly once, for every devfunc.
                 match devfunc {
                     0x00 => {
-                        let mut pam_changed = false;
-                        for_each_writable_pci_span(reg_addr, value, io_len, |addr, val, len| {
+                        if let Some((addr, val, len)) =
+                            pci_write_common_gate(reg_addr, value, io_len)
+                        {
                             if self.pci_bridge.pci_write(addr, val, len) {
-                                pam_changed = true;
+                                self.pam_needs_update = true;
                             }
-                        });
-                        if pam_changed {
-                            self.pam_needs_update = true;
                         }
                     }
                     0x08 => {
-                        for_each_writable_pci_span(reg_addr, value, io_len, |addr, val, len| {
+                        if let Some((addr, val, len)) =
+                            pci_write_common_gate(reg_addr, value, io_len)
+                        {
                             self.pci2isa.pci_write(addr, val, len);
-                        });
+                        }
                     }
                     0x09 => {
-                        let mut bar4_changed = false;
-                        for_each_writable_pci_span(reg_addr, value, io_len, |addr, val, len| {
+                        if let Some((addr, val, len)) =
+                            pci_write_common_gate(reg_addr, value, io_len)
+                        {
                             if self.pci_ide.pci_write(addr, val, len) {
-                                bar4_changed = true;
+                                self.pci_ide_bar4_needs_reregister = true;
                             }
-                        });
-                        if bar4_changed {
-                            self.pci_ide_bar4_needs_reregister = true;
                         }
                     }
                     0x0B => {
-                        let mut pm_changed = false;
-                        let mut sm_changed = false;
-                        for_each_writable_pci_span(reg_addr, value, io_len, |addr, val, len| {
+                        if let Some((addr, val, len)) =
+                            pci_write_common_gate(reg_addr, value, io_len)
+                        {
                             let (pm, sm) = self.acpi.pci_write(addr, val, len);
-                            pm_changed |= pm;
-                            sm_changed |= sm;
-                        });
-                        if pm_changed {
-                            self.acpi_pm_needs_reregister = true;
-                        }
-                        if sm_changed {
-                            self.acpi_sm_needs_reregister = true;
+                            if pm {
+                                self.acpi_pm_needs_reregister = true;
+                            }
+                            if sm {
+                                self.acpi_sm_needs_reregister = true;
+                            }
                         }
                     }
                     0x10 => {
-                        let mut lfb_changed = false;
-                        let mut mmio_changed = false;
-                        for_each_writable_pci_span(reg_addr, value, io_len, |addr, val, len| {
+                        if let Some((addr, val, len)) =
+                            pci_write_common_gate(reg_addr, value, io_len)
+                        {
                             let change = self.vga.pci_write(addr, val, len);
-                            lfb_changed |= change.lfb;
-                            mmio_changed |= change.mmio;
-                        });
-                        if lfb_changed || mmio_changed {
-                            self.vga_bar_needs_reregister = true;
+                            if change.lfb || change.mmio {
+                                self.vga_bar_needs_reregister = true;
+                            }
                         }
                     }
                     _ => {}
@@ -1735,16 +1703,23 @@ mod tests {
                 "class code must stay read-only"
             );
 
-            // A dword write spanning 0x0C-0x0F must drop only the header-type
-            // byte (0x0E); cache-line size (0x0C) and latency timer (0x0D)
-            // must still be writable (do NOT over-filter).
+            // Header type (0x0E) must stay read-only when a write STARTS
+            // there (Bochs gates only on the starting offset).
             let htype_before = dm.pci2isa.pci_conf[0x0E];
             dm.pci_conf_addr = conf_addr(PIIX3, 0x0C);
-            dm.pci_write(0x0CFC, 0xFFFF_FFFF, 4);
+            dm.pci_write(0x0CFE, 0xFF, 1); // offset 2 -> reg_addr 0x0C+2 = 0x0E
             assert_eq!(
                 dm.pci2isa.pci_conf[0x0E], htype_before,
-                "header type must stay read-only even mid-span"
+                "header type must stay read-only when the write starts there"
             );
+
+            // Bochs parity quirk: a dword write STARTING at 0x0C (cache-line
+            // size, writable) is NOT gated at all, so it reaches the device
+            // unfiltered even though it spills into the read-only header-type
+            // byte at 0x0E -- Bochs checks only the starting offset, there is
+            // no per-byte mid-span protection.
+            dm.pci_conf_addr = conf_addr(PIIX3, 0x0C);
+            dm.pci_write(0x0CFC, 0xFFFF_FFFF, 4);
             assert_eq!(
                 dm.pci2isa.pci_conf[0x0C], 0xFF,
                 "cache-line size byte must remain writable"
@@ -1753,19 +1728,46 @@ mod tests {
                 dm.pci2isa.pci_conf[0x0D], 0xFF,
                 "latency timer byte must remain writable"
             );
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x0E], 0xFF,
+                "a write starting at a writable offset reaches the device \
+                 unfiltered even if it spills into a read-only byte (Bochs \
+                 devices.cc pci_write_handler_common start-offset-only gate)"
+            );
 
-            // A dword write spanning 0x3C-0x3F must drop only the
-            // interrupt-pin byte (0x3D); interrupt line (0x3C) stays writable.
+            // Interrupt pin (0x3D) must stay read-only when a write STARTS
+            // there.
             let intpin_before = dm.pci2isa.pci_conf[0x3D];
+            dm.pci_conf_addr = conf_addr(PIIX3, 0x3C);
+            dm.pci_write(0x0CFD, 0xFF, 1); // offset 1 -> reg_addr 0x3C+1 = 0x3D
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x3D], intpin_before,
+                "interrupt pin must stay read-only when the write starts there"
+            );
+
+            // Bochs special-cases a write STARTING at 0x3C (interrupt line):
+            // only that single byte is stored regardless of io_len, so a
+            // dword write starting at 0x3C must NOT reach 0x3D/0x3E/0x3F.
+            let byte3e_before = dm.pci2isa.pci_conf[0x3E];
+            let byte3f_before = dm.pci2isa.pci_conf[0x3F];
             dm.pci_conf_addr = conf_addr(PIIX3, 0x3C);
             dm.pci_write(0x0CFC, 0xFFFF_FFFF, 4);
             assert_eq!(
-                dm.pci2isa.pci_conf[0x3D], intpin_before,
-                "interrupt pin must stay read-only even mid-span"
-            );
-            assert_eq!(
                 dm.pci2isa.pci_conf[0x3C], 0xFF,
                 "interrupt line must remain writable"
+            );
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x3D], intpin_before,
+                "a write starting at 0x3C must not reach the interrupt pin \
+                 byte -- Bochs clamps it to a single-byte store"
+            );
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x3E], byte3e_before,
+                "a write starting at 0x3C must not reach byte 0x3E"
+            );
+            assert_eq!(
+                dm.pci2isa.pci_conf[0x3F], byte3f_before,
+                "a write starting at 0x3C must not reach byte 0x3F"
             );
 
             // Command register (0x04) must remain writable through the filter.
