@@ -364,9 +364,8 @@ impl BxPciBridge {
         } else {
             let dopen = (v & 0x40) != 0;
             let dcls = (v & 0x20) != 0;
-            if dopen && dcls {
-                tracing::warn!("SMRAM: DOPEN and DCLS both set (invalid)");
-            }
+            // Illegal DOPEN&&DCLS combo is logged once, where the state is
+            // actually decided/dropped: apply_smram_to_memory() (tracing::error!).
             tracing::trace!("SMRAM enabled: DOPEN={}, DCLS={}", dopen, dcls);
         }
 

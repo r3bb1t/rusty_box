@@ -1219,43 +1219,54 @@ mod handler_tests {
         use crate::cpu::icache::BxPageWriteStampTable;
         use crate::iodev::vga::BxVgaC;
 
-        let mut mem = test_mem();
+        // BxICache contains ~19MB fixed arrays; the debug-mode struct literal
+        // built by BxCpuBuilder::build() overflows the small default test
+        // stack (2MB on win32), so this must run on a big-stack thread —
+        // same pattern as cpu/tests_jumps.rs.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                let mut mem = test_mem();
 
-        // Register a VGA memory handler over the SMRAM window (0xA0000-0xBFFFF),
-        // matching real hardware where VGA legacy memory owns that range when
-        // SMRAM shadowing is closed.
-        let mut vga = BxVgaC::new();
-        let vga_id = MemoryDeviceId::Vga(&mut vga as *mut BxVgaC);
-        mem.register_memory_handlers(vga_id, 0xA0000, 0xBFFFF).unwrap();
+                // Register a VGA memory handler over the SMRAM window (0xA0000-0xBFFFF),
+                // matching real hardware where VGA legacy memory owns that range when
+                // SMRAM shadowing is closed.
+                let mut vga = BxVgaC::new();
+                let vga_id = MemoryDeviceId::Vga(&mut vga as *mut BxVgaC);
+                mem.register_memory_handlers(vga_id, 0xA0000, 0xBFFFF).unwrap();
 
-        let cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
-        let mut fine_grained: [u32; 0] = [];
-        let mut stamp_table = BxPageWriteStampTable::new(&mut fine_grained);
+                let cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                let mut fine_grained: [u32; 0] = [];
+                let mut stamp_table = BxPageWriteStampTable::new(&mut fine_grained);
 
-        // SMRAM open (DOPEN, unrestricted): the write must land in RAM,
-        // bypassing the VGA handler entirely — write_physical_page checks
-        // smram_available/smram_enable BEFORE the memory-handler table.
-        mem.enable_smram(true, false);
-        let mut data = [0x42u8];
-        mem.write_physical_page(&[&*cpu], &mut stamp_table, 0xA1000, 1, &mut data)
+                // SMRAM open (DOPEN, unrestricted): the write must land in RAM,
+                // bypassing the VGA handler entirely — write_physical_page checks
+                // smram_available/smram_enable BEFORE the memory-handler table.
+                mem.enable_smram(true, false);
+                let mut data = [0x42u8];
+                mem.write_physical_page(&[&*cpu], &mut stamp_table, 0xA1000, 1, &mut data)
+                    .unwrap();
+                assert_eq!(
+                    mem.peek_ram(0xA1000, 1),
+                    &[0x42],
+                    "SMRAM open must route the write to RAM"
+                );
+
+                // disable_smram() must restore prior (VGA-handler) routing: the same
+                // address now goes to the VGA handler, not RAM, so the RAM byte
+                // written above stays untouched by the second write.
+                mem.disable_smram();
+                let mut data2 = [0x99u8];
+                mem.write_physical_page(&[&*cpu], &mut stamp_table, 0xA1000, 1, &mut data2)
+                    .unwrap();
+                assert_eq!(
+                    mem.peek_ram(0xA1000, 1),
+                    &[0x42],
+                    "SMRAM disabled must route the write to the VGA handler, not RAM"
+                );
+            })
+            .unwrap()
+            .join()
             .unwrap();
-        assert_eq!(
-            mem.peek_ram(0xA1000, 1),
-            &[0x42],
-            "SMRAM open must route the write to RAM"
-        );
-
-        // disable_smram() must restore prior (VGA-handler) routing: the same
-        // address now goes to the VGA handler, not RAM, so the RAM byte
-        // written above stays untouched by the second write.
-        mem.disable_smram();
-        let mut data2 = [0x99u8];
-        mem.write_physical_page(&[&*cpu], &mut stamp_table, 0xA1000, 1, &mut data2)
-            .unwrap();
-        assert_eq!(
-            mem.peek_ram(0xA1000, 1),
-            &[0x42],
-            "SMRAM disabled must route the write to the VGA handler, not RAM"
-        );
     }
 }

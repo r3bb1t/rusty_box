@@ -2944,8 +2944,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
             let result = unsafe { self.run_cpu_batch(batch_size) };
 
-            // Apply PAM register changes immediately (BIOS needs this before next batch)
-            if self.device_manager.pam_needs_update {
+            // Apply PAM/SMRAM register changes immediately (BIOS needs this before next batch)
+            if self.device_manager.pam_needs_update || self.device_manager.smram_needs_update {
                 self.device_manager
                     .process_pci_deferred(&mut self.devices, &mut self.memory);
             }
