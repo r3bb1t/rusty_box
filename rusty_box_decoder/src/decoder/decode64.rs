@@ -2691,6 +2691,41 @@ const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
             }
         }
 
+        // ===== VPINSRB/W/D/Q (vvvv is first source; VL128-only, VEX.256 #UD —
+        // Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A20/22 and the
+        // 0F C4 VPINSRW group). The legacy SSE forms are 2-operand (dst==base);
+        // remap so the 3-operand VEX handler that sources vvvv is dispatched.
+        // W-bit split for D/Q is already resolved by the table's OS64 match
+        // (VEX.W1 implies OS64 → PinsrqVdqEqIb; W0 → PinsrdVdqEdIb). =====
+        PinsrwVdqEwIb => {
+            if vl == 0 {
+                V128VpinsrwVdqEwIb
+            } else {
+                IaError
+            }
+        }
+        PinsrbVdqEbIb => {
+            if vl == 0 {
+                V128VpinsrbVdqEbIb
+            } else {
+                IaError
+            }
+        }
+        PinsrdVdqEdIb => {
+            if vl == 0 {
+                V128VpinsrdVdqEdIb
+            } else {
+                IaError
+            }
+        }
+        PinsrqVdqEqIb => {
+            if vl == 0 {
+                V128VpinsrqVdqEqIb
+            } else {
+                IaError
+            }
+        }
+
         // ===== VMPSADBW (vvvv is first source; per-128-bit-lane control —
         // Bochs avx2.cc VMPSADBW_VdqHdqWdqIbR) =====
         MpsadbwVdqWdqIb => {

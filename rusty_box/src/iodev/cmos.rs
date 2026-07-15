@@ -54,13 +54,14 @@ pub const REG_SHUTDOWN: u8 = 0x0F;
 pub const REG_EQUIPMENT: u8 = 0x14;
 pub const REG_CSUM_HIGH: u8 = 0x2E;
 pub const REG_CSUM_LOW: u8 = 0x2F;
+/// Century register (aka REG_IBM_CENTURY_BYTE, Bochs cmos.cc)
 pub const REG_CENTURY: u8 = 0x32;
+/// PS/2-style alternative century register — mirrors REG_CENTURY on writes
+/// (Bochs cmos.cc REG_IBM_PS2_CENTURY_BYTE; needed by WinXP per Bochs comment)
+pub const REG_IBM_PS2_CENTURY_BYTE: u8 = 0x37;
 
 /// CMOS RAM size (256 bytes: standard 128 + extended 128 via ports 0x72/0x73)
 pub const CMOS_SIZE: usize = 256;
-
-/// Days per month (non-leap year)
-const DAYS_IN_MONTH: [u8; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 /// Convert BCD to binary
 fn bcd_to_bin(value: u8, is_binary: bool) -> u8 {
@@ -80,9 +81,181 @@ fn bin_to_bcd(value: u8, is_binary: bool) -> u8 {
     }
 }
 
-/// Check if year is a leap year
-fn is_leap_year(year: u32) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+// =============================================================================
+// Portable UTC time conversion (Bochs iodev/utctime.h)
+//
+// Ported verbatim from `utctime_ext`/`timeutc`: pure integer math, no
+// per-year/per-day iteration, so it is O(1) regardless of how far `timeval`
+// or the broken-down fields are from a sane range. The previous hand-rolled
+// loops in `update_clock`/`update_timeval` were O(days) and O(months) and
+// could be driven by the guest into a multi-hour host stall (finding #1) or
+// an out-of-bounds panic (month >= 14) / underflow panic (day == 0).
+// =============================================================================
+
+/// Days elapsed between the start of a month and the start of the year,
+/// indexed `[is_leap][month]` (Bochs utctime.h `utctime_ext`/`timeutc`
+/// `monthlydays`).
+const MONTHLYDAYS: [[i64; 13]; 2] = [
+    [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365],
+    [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366],
+];
+
+/// Broken-down UTC time, mirror of Bochs `struct utctm` (utctime.h).
+/// `mon` is 0-based (0 = January); `year` is years since 1900. Bochs uses
+/// `Bit16s` for these fields; we use `i64` throughout (per design) since the
+/// values here are only ever a handful of register-byte-sized inputs, and
+/// the overflow check in `utctime_ext` explicitly reproduces the effect of
+/// the narrower Bochs type instead of relying on it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct BrokenTime {
+    sec: i64,
+    min: i64,
+    hour: i64,
+    mday: i64,
+    mon: i64,
+    year: i64,
+    wday: i64,
+    yday: i64,
+}
+
+/// Bochs utctime.h `utctime_ext`: epoch seconds (since 1970-01-01) ->
+/// normalized broken-down time. Returns `false` if the resulting year does
+/// not fit in the range Bochs's `Bit16s tm_year` could represent (Bochs
+/// signals this by returning `NULL`; we reproduce the equivalent bound
+/// explicitly since `BrokenTime::year` is `i64`, not a narrow type that
+/// would actually truncate).
+fn utctime_ext(epoch: i64, t: &mut BrokenTime) -> bool {
+    let mut etmp: i64 = epoch;
+    let mut eyear: i64 = 2001;
+
+    // Get time of day, then days number based at 2001-01-01 (nearest
+    // non-leap start of a 400yr cycle).
+    let mut tsec = etmp % 86400;
+    etmp /= 86400;
+    etmp -= 11323;
+    if tsec < 0 {
+        etmp -= 1;
+        tsec += 86400;
+    }
+
+    let sec = tsec % 60;
+    tsec /= 60;
+    let min = tsec % 60;
+    tsec /= 60;
+    let hour = tsec;
+
+    let mut wday = (etmp - 6) % 7;
+    if wday < 0 {
+        wday += 7;
+    }
+
+    if etmp < 0 {
+        eyear += 400 * (etmp / 146097 - 1);
+        etmp %= 146097;
+        etmp += 146097;
+    }
+    eyear += 400 * (etmp / 146097);
+    etmp %= 146097;
+    eyear += 100 * (etmp / 36524);
+    etmp %= 36524;
+    eyear += 4 * (etmp / 1461);
+    etmp %= 1461;
+    while (eyear % 4 != 0) && (etmp >= 365) {
+        eyear += 1;
+        etmp -= 365;
+    }
+
+    // Find out if the year is leap (Bochs does this with Bit8u bitwise
+    // tricks on isleap; reproduced with the same boolean result).
+    let mut isleap: u8 = 0;
+    isleap |= if eyear % 400 == 0 { 2 } else { 0 };
+    isleap |= if eyear % 4 == 0 { 1 } else { 0 };
+    isleap &= if eyear % 100 == 0 { !1u8 } else { !0u8 };
+    let isleap = usize::from(isleap != 0);
+
+    eyear -= 1900;
+    // Bochs: `bdt.tm_year = (Bit16s)eyear; if (eyear != bdt.tm_year) return
+    // NULL;` — a cast-truncation to Bit16s that fails whenever `eyear` does
+    // not fit in that range. Reproduce the same bound directly.
+    if !(i64::from(i16::MIN)..=i64::from(i16::MAX)).contains(&eyear) {
+        return false;
+    }
+
+    let yday = etmp;
+    let mut mon: i64 = 0;
+    while etmp >= MONTHLYDAYS[isleap][(mon + 1) as usize] {
+        mon += 1;
+    }
+    etmp -= MONTHLYDAYS[isleap][mon as usize];
+    let mday = etmp + 1;
+
+    t.sec = sec;
+    t.min = min;
+    t.hour = hour;
+    t.wday = wday;
+    t.yday = yday;
+    t.mday = mday;
+    t.mon = mon;
+    t.year = eyear;
+    true
+}
+
+/// Bochs utctime.h `timeutc`: broken-down (possibly out-of-range) time ->
+/// epoch seconds. Normalizes `t` in place via `utctime_ext`. Returns `-1` on
+/// failure (resulting year out of the representable range), mirroring
+/// `timegm()`/`mktime()` semantics. This is what lets `update_timeval`
+/// accept malformed register contents (e.g. month=19, day=0) safely: the
+/// out-of-range fields fall out of the integer math below without ever
+/// indexing an array by them.
+fn timeutc(t: &mut BrokenTime) -> i64 {
+    let mut isleap: u8 = 3;
+
+    let mut etmp = t.year;
+    let mut tmon = t.mon;
+
+    etmp += tmon / 12;
+    tmon %= 12;
+    if tmon < 0 {
+        etmp -= 1;
+        tmon += 12;
+    }
+
+    etmp -= 101; // years passed since 2001
+    let mut epoch: i64 = 0;
+    if etmp < 0 {
+        epoch += 146097 * (etmp / 400 - 1);
+        etmp %= 400;
+        etmp += 400;
+    }
+
+    epoch += (etmp / 400) * 146097;
+    etmp %= 400;
+    isleap &= if etmp == 399 { !0u8 } else { !2u8 };
+    epoch += (etmp / 100) * 36524;
+    etmp %= 100;
+    isleap &= if etmp == 99 { !1u8 } else { !0u8 };
+    epoch += (etmp / 4) * 1461;
+    etmp %= 4;
+    isleap &= if etmp == 3 { !0u8 } else { !1u8 };
+    let isleap = usize::from(isleap != 0);
+    epoch += etmp * 365;
+
+    // Number of entire days between the current date and 2001-01-01.
+    epoch += MONTHLYDAYS[isleap][tmon as usize];
+    epoch += t.mday - 1;
+    epoch *= 24;
+    epoch += t.hour;
+    epoch *= 60;
+    epoch += t.min;
+    epoch *= 60;
+    epoch += t.sec;
+    epoch += 978_307_200; // seconds between 2001-01-01 and 1970-01-01
+
+    if utctime_ext(epoch, t) {
+        epoch
+    } else {
+        -1
+    }
 }
 
 /// CMOS/RTC Controller (matching Bochs cmos.cc structure)
@@ -97,7 +270,10 @@ pub struct BxCmosC {
 
     // --- Timer state (Bochs cmos.cc timer architecture) ---
     /// Internal Unix timestamp (seconds since epoch). Incremented by one_second_timer.
-    timeval: u64,
+    /// Signed (Bochs cmos.cc uses `Bit64s`) — the CMOS clamp range extends
+    /// below 1970 (year 0 minimum), and normalization math in
+    /// `utctime_ext`/`timeutc` requires signed arithmetic throughout.
+    timeval: i64,
     /// Periodic interrupt interval in microseconds (from CRA_change).
     /// u32::MAX means disabled.
     periodic_interval_usec: u32,
@@ -184,7 +360,7 @@ impl BxCmosC {
             use std::time::{SystemTime, UNIX_EPOCH};
             self.timeval = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
+                .map(|d| d.as_secs() as i64)
                 .unwrap_or(1_735_732_800);
         }
         #[cfg(not(feature = "std"))]
@@ -224,8 +400,24 @@ impl BxCmosC {
         self.irq8_pending = false;
         self.irq8_lower_pending = false;
 
-        // Clear interrupt flags
+        // Bochs cmos.cc reset: RESET affects the following registers:
+        //  CRA: no effects
+        //  CRB: bits 4,5,6 forced to 0 (UIE/AIE/PIE)
+        //  CRC: bits 4,5,6,7 forced to 0
+        //  CRD: no effects
+        self.ram[REG_STAT_B as usize] &= 0x8F;
         self.ram[REG_STAT_C as usize] = 0x00;
+
+        // Bochs cmos.cc reset: `activate_timer(one_second_timer_index,
+        // 1000000, 1)` unconditionally re-arms the one-second timer to a
+        // fresh 1,000,000us countdown on every reset, regardless of how
+        // much of the previous countdown was left.
+        self.one_second_remaining = 1_000_000;
+
+        // Bochs cmos.cc reset: handle periodic interrupt rate select —
+        // CRA_change() re-evaluates periodic_interval_usec/timer state,
+        // which also picks up PIE having just been forced off above.
+        self.cra_change();
     }
 
     // =========================================================================
@@ -248,11 +440,12 @@ impl BxCmosC {
             self.periodic_interval_usec =
                 (1_000_000.0f64 / (32768.0f64 / ((1u32 << (effective_nibble - 1)) as f64))) as u32;
 
-            // If Periodic Interrupt Enable bit set, activate timer
+            // If Periodic Interrupt Enable bit set, activate timer.
+            // Bochs cmos.cc CRA_change: `activate_timer()` unconditionally
+            // restarts the countdown from periodic_interval_usec — it is
+            // not gated on the timer having been idle (finding #19).
             if self.ram[REG_STAT_B as usize] & 0x40 != 0 {
-                if self.periodic_timer_remaining == 0 {
-                    self.periodic_timer_remaining = self.periodic_interval_usec;
-                }
+                self.periodic_timer_remaining = self.periodic_interval_usec;
             } else {
                 self.periodic_timer_remaining = 0;
             }
@@ -300,12 +493,12 @@ impl BxCmosC {
         // Update CMOS registers from timeval
         self.update_clock();
 
-        // Set Update-Ended flag (UF, bit 4 of Status C)
-        self.ram[REG_STAT_C as usize] |= 0x10;
-
-        // If Update-Ended Interrupt Enable (UIE, bit 4 of Status B) is set
+        // Bochs cmos.cc uip_timer: the Update-Ended flag (UF, bit 4 of
+        // Status C) is only set together with IRQF when Update-Ended
+        // Interrupt Enable (UIE, bit 4 of Status B) is set — NOT
+        // unconditionally on every update cycle (finding #33).
         if self.ram[REG_STAT_B as usize] & 0x10 != 0 {
-            self.ram[REG_STAT_C as usize] |= 0x80; // Set IRQF
+            self.ram[REG_STAT_C as usize] |= 0x90; // IRQF + UF
             if self.irq_enabled {
                 self.irq8_pending = true;
             }
@@ -328,12 +521,11 @@ impl BxCmosC {
             || self.ram[REG_HOUR_ALARM as usize] == self.ram[REG_HOUR as usize];
 
         if sec_match && min_match && hour_match {
-            // Set Alarm Flag (AF, bit 5 of Status C)
-            self.ram[REG_STAT_C as usize] |= 0x20;
-
-            // If Alarm Interrupt Enable (AIE, bit 5 of Status B) is set
+            // Bochs cmos.cc uip_timer: the Alarm Flag (AF, bit 5 of Status
+            // C) is only set together with IRQF when Alarm Interrupt
+            // Enable (AIE, bit 5 of Status B) is set (finding #33).
             if self.ram[REG_STAT_B as usize] & 0x20 != 0 {
-                self.ram[REG_STAT_C as usize] |= 0x80; // Set IRQF
+                self.ram[REG_STAT_C as usize] |= 0xA0; // IRQF + AF
                 if self.irq_enabled {
                     self.irq8_pending = true;
                 }
@@ -347,131 +539,123 @@ impl BxCmosC {
         let is_binary = (self.ram[REG_STAT_B as usize] & 0x04) != 0;
         let is_24hour = (self.ram[REG_STAT_B as usize] & 0x02) != 0;
 
-        // Convert Unix timestamp to date components
-        let mut remaining = self.timeval;
-
-        // Seconds of day
-        let total_seconds_today = (remaining % 86400) as u32;
-        remaining /= 86400;
-
-        let sec = (total_seconds_today % 60) as u8;
-        let min = ((total_seconds_today / 60) % 60) as u8;
-        let mut hour = (total_seconds_today / 3600) as u8;
-
-        // Days since Unix epoch (1970-01-01)
-        let mut days = remaining as u32;
-
-        // Day of week (1970-01-01 was Thursday=5 in 1-based Sun=1 convention)
-        let wday = ((days + 4) % 7) + 1; // 1=Sunday
-
-        // Calculate year
-        let mut year: u32 = 1970;
-        loop {
-            let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-            if days < days_in_year {
-                break;
-            }
-            days -= days_in_year;
-            year += 1;
+        // Bochs cmos.cc update_clock: clamp timeval into the representable
+        // range before decoding it. This is the host-DoS fix (finding #1):
+        // previously an unbounded `timeval` fed an O(days) year-search loop
+        // that a guest could drive into a multi-hour host stall by writing
+        // an extreme date and exiting SET mode. The clamp wraps like a
+        // simple overflow, exactly mirroring Bochs.
+        const MINTVALSET: i64 = -62_167_219_200; // year 0000-01-01
+        const MAXTVALSET_BCD: i64 = 253_402_300_799; // year 9999-12-31 23:59:59
+        const MAXTVALSET_BIN: i64 = 745_690_751_999; // year 25599-12-31 23:59:59
+        let maxtvalset = if is_binary {
+            MAXTVALSET_BIN
+        } else {
+            MAXTVALSET_BCD
+        };
+        while self.timeval > maxtvalset {
+            self.timeval -= maxtvalset - MINTVALSET + 1;
+        }
+        while self.timeval < MINTVALSET {
+            self.timeval += maxtvalset - MINTVALSET + 1;
         }
 
-        // Calculate month and day
-        let mut month: u8 = 1;
-        for (m, &days_in_month) in DAYS_IN_MONTH.iter().enumerate() {
-            let mut dim = days_in_month as u32;
-            if m == 1 && is_leap_year(year) {
-                dim += 1;
-            }
-            if days < dim {
-                break;
-            }
-            days -= dim;
-            month += 1;
+        // Bochs cmos.cc update_clock: `time_calendar = utctime(&s.timeval);`
+        let mut bt = BrokenTime::default();
+        // timeval is clamped into a range whose years fit comfortably
+        // within utctime_ext's overflow bound, so this cannot fail.
+        let decoded = utctime_ext(self.timeval, &mut bt);
+        debug_assert!(
+            decoded,
+            "cmos update_clock: clamped timeval failed to decode"
+        );
+        if !decoded {
+            return;
         }
-        let mday = days as u8 + 1;
 
-        // Handle 12-hour format
-        if !is_24hour {
-            if hour == 0 {
-                hour = 12; // 12 AM
-            } else if hour > 12 {
+        // update seconds / minutes
+        self.ram[REG_SEC as usize] = bin_to_bcd(bt.sec as u8, is_binary);
+        self.ram[REG_MIN as usize] = bin_to_bcd(bt.min as u8, is_binary);
+
+        // update hours
+        if is_24hour {
+            self.ram[REG_HOUR as usize] = bin_to_bcd(bt.hour as u8, is_binary);
+        } else {
+            let mut hour = bt.hour;
+            let pm = if hour > 11 { 0x80u8 } else { 0x00u8 };
+            if hour > 11 {
                 hour -= 12;
-                // In BCD 12-hour mode, bit 7 of hour = PM flag
-                // We'll set it after BCD conversion
             }
+            if hour == 0 {
+                hour = 12;
+            }
+            self.ram[REG_HOUR as usize] = bin_to_bcd(hour as u8, is_binary) | pm;
         }
 
-        // Store in CMOS registers
-        self.ram[REG_SEC as usize] = bin_to_bcd(sec, is_binary);
-        self.ram[REG_MIN as usize] = bin_to_bcd(min, is_binary);
+        // update day of the week (0..6 -> 1..7)
+        self.ram[REG_WEEK_DAY as usize] = bin_to_bcd((bt.wday + 1) as u8, is_binary);
 
-        let pm = if !is_24hour && (total_seconds_today / 3600) >= 12 {
-            0x80
-        } else {
-            0
-        };
-        let raw_hour = if !is_24hour {
-            let h = (total_seconds_today / 3600) as u8;
-            if h == 0 {
-                12
-            } else if h > 12 {
-                h - 12
-            } else {
-                h
-            }
-        } else {
-            hour
-        };
-        self.ram[REG_HOUR as usize] = bin_to_bcd(raw_hour, is_binary) | pm;
+        // update day of the month
+        self.ram[REG_MONTH_DAY as usize] = bin_to_bcd(bt.mday as u8, is_binary);
 
-        self.ram[REG_WEEK_DAY as usize] = bin_to_bcd(wday as u8, is_binary);
-        self.ram[REG_MONTH_DAY as usize] = bin_to_bcd(mday, is_binary);
-        self.ram[REG_MONTH as usize] = bin_to_bcd(month, is_binary);
-        self.ram[REG_YEAR as usize] = bin_to_bcd((year % 100) as u8, is_binary);
-        self.ram[REG_CENTURY as usize] = bin_to_bcd((year / 100) as u8, is_binary);
+        // update month (0..11 -> 1..12)
+        self.ram[REG_MONTH as usize] = bin_to_bcd((bt.mon + 1) as u8, is_binary);
+
+        // update year
+        self.ram[REG_YEAR as usize] = bin_to_bcd((bt.year % 100) as u8, is_binary);
+
+        // update century
+        self.ram[REG_CENTURY as usize] = bin_to_bcd((bt.year / 100 + 19) as u8, is_binary);
+
+        // Bochs cmos.cc update_clock: some BIOSes also use reg 0x37 for the
+        // century byte (critical for WinXP per Bochs comment) — mirror it.
+        self.ram[REG_IBM_PS2_CENTURY_BYTE as usize] = self.ram[REG_CENTURY as usize];
     }
 
     /// Convert CMOS date/time registers back to timeval
-    /// Called when exiting SET mode (Bochs cmos.cc update_timeval)
+    /// Called when exiting SET mode, or immediately on a non-SET-mode write
+    /// (Bochs cmos.cc update_timeval)
     fn update_timeval(&mut self) {
         let is_binary = (self.ram[REG_STAT_B as usize] & 0x04) != 0;
         let is_24hour = (self.ram[REG_STAT_B as usize] & 0x02) != 0;
 
-        let sec = bcd_to_bin(self.ram[REG_SEC as usize], is_binary) as u64;
-        let min = bcd_to_bin(self.ram[REG_MIN as usize], is_binary) as u64;
+        let mut bt = BrokenTime::default();
 
-        let hour_raw = self.ram[REG_HOUR as usize];
-        let pm = (hour_raw & 0x80) != 0;
-        let mut hour = bcd_to_bin(hour_raw & 0x7F, is_binary) as u64;
-        if !is_24hour {
-            if pm && hour < 12 {
-                hour += 12;
-            } else if !pm && hour == 12 {
-                hour = 0;
+        // update seconds / minutes
+        bt.sec = bcd_to_bin(self.ram[REG_SEC as usize], is_binary) as i64;
+        bt.min = bcd_to_bin(self.ram[REG_MIN as usize], is_binary) as i64;
+
+        // update hours
+        if is_24hour {
+            bt.hour = bcd_to_bin(self.ram[REG_HOUR as usize], is_binary) as i64;
+        } else {
+            let pm_flag = self.ram[REG_HOUR as usize] & 0x80;
+            let mut val_bin = bcd_to_bin(self.ram[REG_HOUR as usize] & 0x7F, is_binary) as i64;
+            if val_bin < 12 && pm_flag > 0 {
+                val_bin += 12;
+            } else if val_bin == 12 && pm_flag == 0 {
+                val_bin = 0;
             }
+            bt.hour = val_bin;
         }
 
-        let mday = bcd_to_bin(self.ram[REG_MONTH_DAY as usize], is_binary) as u64;
-        let month = bcd_to_bin(self.ram[REG_MONTH as usize], is_binary) as u64;
-        let year_2digit = bcd_to_bin(self.ram[REG_YEAR as usize], is_binary) as u64;
-        let century = bcd_to_bin(self.ram[REG_CENTURY as usize], is_binary) as u64;
-        let year = century * 100 + year_2digit;
+        // update day of the month
+        bt.mday = bcd_to_bin(self.ram[REG_MONTH_DAY as usize], is_binary) as i64;
 
-        // Convert to days since epoch
-        let mut days: u64 = 0;
-        for y in 1970..year {
-            days += if is_leap_year(y as u32) { 366 } else { 365 };
-        }
-        for m in 1..month {
-            let mut dim = DAYS_IN_MONTH[(m - 1) as usize] as u64;
-            if m == 2 && is_leap_year(year as u32) {
-                dim += 1;
-            }
-            days += dim;
-        }
-        days += mday - 1;
+        // update month (register is 1..12 -> BrokenTime is 0..11; may be
+        // out of range for a malformed guest write, e.g. 0 or >=14 — that
+        // is fine, timeutc()/utctime_ext() normalize it without indexing
+        // anything by the raw value, unlike the old DAYS_IN_MONTH loop)
+        bt.mon = bcd_to_bin(self.ram[REG_MONTH as usize], is_binary) as i64 - 1;
 
-        self.timeval = days * 86400 + hour * 3600 + min * 60 + sec;
+        // update year
+        let mut val_yr = bcd_to_bin(self.ram[REG_CENTURY as usize], is_binary) as i64;
+        val_yr = (val_yr - 19) * 100;
+        val_yr += bcd_to_bin(self.ram[REG_YEAR as usize], is_binary) as i64;
+        bt.year = val_yr;
+
+        // Bochs cmos.cc update_timeval: `s.timeval = timeutc(&time_calendar);`
+        self.timeval = timeutc(&mut bt);
     }
 
     // =========================================================================
@@ -580,13 +764,14 @@ impl BxCmosC {
                 match addr as u8 {
                     REG_STAT_A => {
                         // Bits 0-6 are writable, bit 7 (UIP) is read-only
-                        let old_val = self.ram[addr];
                         self.ram[addr] = (self.ram[addr] & 0x80) | (value & 0x7F);
 
-                        // If rate or divider changed, recalculate periodic timer
-                        if (old_val & 0x7F) != (value & 0x7F) {
-                            self.cra_change();
-                        }
+                        // Bochs cmos.cc write REG_STAT_A: CRA_change() is
+                        // called unconditionally on every write, not only
+                        // when the rate/divider bits changed — it always
+                        // re-activates (restarts) the periodic timer when
+                        // PIE is set (finding #19).
+                        self.cra_change();
                     }
                     REG_STAT_B => {
                         let old_val = self.ram[addr];
@@ -633,23 +818,47 @@ impl BxCmosC {
                     REG_STAT_C | REG_STAT_D => {
                         // Read-only registers — writes ignored
                     }
-                    // Time registers: if in SET mode, mark timeval_change
-                    REG_SEC | REG_MIN | REG_HOUR | REG_WEEK_DAY | REG_MONTH_DAY | REG_MONTH
-                    | REG_YEAR | REG_CENTURY => {
+                    // Time registers: in SET mode, defer the timeval sync
+                    // (mark timeval_change) until SET mode is exited;
+                    // otherwise apply it immediately (Bochs cmos.cc write:
+                    // `if (reg[STAT_B] & 0x80) timeval_change=1; else
+                    // update_timeval();` — finding #9. Previously only the
+                    // SET-mode branch existed, so a guest writing time
+                    // registers outside SET mode had no effect at all.
+                    REG_SEC
+                    | REG_MIN
+                    | REG_HOUR
+                    | REG_WEEK_DAY
+                    | REG_MONTH_DAY
+                    | REG_MONTH
+                    | REG_YEAR
+                    | REG_CENTURY
+                    | REG_IBM_PS2_CENTURY_BYTE => {
                         if addr < CMOS_SIZE {
                             self.ram[addr] = value;
+
+                            // Bochs cmos.cc write: PS/2 BIOSes also use
+                            // 0x37 for the century byte; mirror writes to
+                            // 0x37 into the canonical 0x32 register.
+                            if addr as u8 == REG_IBM_PS2_CENTURY_BYTE {
+                                self.ram[REG_CENTURY as usize] = value;
+                            }
+
                             if self.ram[REG_STAT_B as usize] & 0x80 != 0 {
                                 self.timeval_change = true;
+                            } else {
+                                self.update_timeval();
                             }
                         }
                     }
                     _ => {
                         if addr < CMOS_SIZE {
                             self.ram[addr] = value;
-                            // Update checksum if we wrote to checksum-covered area
-                            if (0x10..0x2E).contains(&addr) {
-                                self.update_checksum();
-                            }
+                            // Bochs cmos.cc write: the checksum is never
+                            // recomputed from an I/O write — only by
+                            // explicit calls like set_memory_size() /
+                            // configure_disk_geometry() at setup time
+                            // (finding #33).
                         }
                     }
                 }
@@ -704,8 +913,13 @@ impl BxCmosC {
         if self.one_second_remaining > 0 {
             if usec32 >= self.one_second_remaining {
                 self.one_second_timer();
-                // Reload for next second (continuous timer)
-                self.one_second_remaining = 1_000_000 - (usec32 - self.one_second_remaining);
+                // Reload for next second (continuous timer). Saturating:
+                // a tick spanning more than 1s (usec32 - remaining >
+                // 1_000_000) must not underflow this u32 subtraction
+                // (finding #33) — it only fires the timer once per call
+                // regardless of overshoot, same as before, just safely.
+                let elapsed_over = usec32 - self.one_second_remaining;
+                self.one_second_remaining = 1_000_000u32.saturating_sub(elapsed_over);
                 if self.one_second_remaining == 0 {
                     self.one_second_remaining = 1_000_000;
                 }
@@ -1011,5 +1225,394 @@ mod tests {
 
         // Timeval should have incremented
         assert_eq!(cmos.timeval, initial_timeval + 1);
+    }
+
+    // =========================================================================
+    // Low-level utctime.h port sanity checks
+    // =========================================================================
+
+    #[test]
+    fn utctime_ext_epoch_zero_is_1970_01_01_thursday() {
+        let mut bt = BrokenTime::default();
+        assert!(utctime_ext(0, &mut bt));
+        assert_eq!(bt.year, 70); // 1970 - 1900
+        assert_eq!(bt.mon, 0); // January (0-based)
+        assert_eq!(bt.mday, 1);
+        assert_eq!(bt.hour, 0);
+        assert_eq!(bt.min, 0);
+        assert_eq!(bt.sec, 0);
+        assert_eq!(bt.wday, 4); // Thursday (0=Sunday) — the real epoch weekday
+    }
+
+    #[test]
+    fn timeutc_is_inverse_of_utctime_ext() {
+        // A handful of representative epochs, including negative (pre-1970)
+        // and one that lands past a 400-year cycle boundary.
+        for &epoch in &[0i64, 1_735_732_800, -1, -62_167_219_200, 253_402_300_799] {
+            let mut bt = BrokenTime::default();
+            assert!(utctime_ext(epoch, &mut bt), "utctime_ext({epoch}) failed");
+            assert_eq!(timeutc(&mut bt), epoch, "round-trip failed for {epoch}");
+        }
+    }
+
+    // =========================================================================
+    // Finding #1 — host-DoS in date conversion (Bochs utctime.h port)
+    // =========================================================================
+
+    /// Isolates the month-OOB path: only `REG_MONTH` is malformed, day of
+    /// month is left at whatever valid value `init_defaults`/`update_clock`
+    /// already put there. The old code did
+    /// `for m in 1..month { DAYS_IN_MONTH[(m-1)] }`, which only panics once
+    /// `month >= 14` — `1..13` (month=13) tops out at index `m-1 == 11`,
+    /// still in bounds for a 12-entry table. BCD 0x14 decodes to decimal
+    /// 14, so `1..14` reaches index 12 and would have panicked pre-fix.
+    #[test]
+    fn cmos_malformed_month_does_not_panic() {
+        let mut cmos = BxCmosC::new();
+
+        // Enter SET mode (Bochs cmos.cc: CRB bit7 = 1 freezes the user
+        // copy of time so registers can be written without a mid-write
+        // update racing in). Default mode bits: BCD, 12-hour.
+        cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+        cmos.write(CMOS_DATA, 0x80, 1);
+
+        // Out-of-range month: BCD 0x14 decodes to decimal 14.
+        cmos.write(CMOS_ADDR, REG_MONTH as u32, 1);
+        cmos.write(CMOS_DATA, 0x14, 1);
+
+        // Exit SET mode -> update_timeval() runs on the malformed register.
+        cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+        cmos.write(CMOS_DATA, 0x00, 1);
+
+        // Refresh registers from the now-normalized timeval and check the
+        // result landed in-range (reaching this point at all proves no
+        // panic occurred).
+        cmos.update_clock();
+        let month = bcd_to_bin(cmos.ram[REG_MONTH as usize], false);
+        let mday = bcd_to_bin(cmos.ram[REG_MONTH_DAY as usize], false);
+        assert!((1..=12).contains(&month), "month {month} out of range");
+        assert!((1..=31).contains(&mday), "mday {mday} out of range");
+    }
+
+    /// Isolates the mday-underflow path: only `REG_MONTH_DAY` is malformed
+    /// (0), month is left at whatever valid value was already there. The
+    /// old code did `days += mday - 1` on a `u64`, which underflows and
+    /// panics (debug builds) when `mday == 0`.
+    #[test]
+    fn cmos_malformed_mday_does_not_panic() {
+        let mut cmos = BxCmosC::new();
+
+        // Enter SET mode.
+        cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+        cmos.write(CMOS_DATA, 0x80, 1);
+
+        // Day-of-month 0 — out of the valid 1..=31 range.
+        cmos.write(CMOS_ADDR, REG_MONTH_DAY as u32, 1);
+        cmos.write(CMOS_DATA, 0x00, 1);
+
+        // Exit SET mode -> update_timeval() runs on the malformed register.
+        cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+        cmos.write(CMOS_DATA, 0x00, 1);
+
+        // Refresh registers from the now-normalized timeval and check the
+        // result landed in-range (reaching this point at all proves no
+        // panic occurred).
+        cmos.update_clock();
+        let month = bcd_to_bin(cmos.ram[REG_MONTH as usize], false);
+        let mday = bcd_to_bin(cmos.ram[REG_MONTH_DAY as usize], false);
+        assert!((1..=12).contains(&month), "month {month} out of range");
+        assert!((1..=31).contains(&mday), "mday {mday} out of range");
+    }
+
+    #[test]
+    fn cmos_update_clock_clamps_extreme_timeval() {
+        let mut cmos = BxCmosC::new();
+        // BCD mode is the default (STAT_B bit2 = 0) -> the smaller of the
+        // two Bochs clamp ranges applies (year 0000..=9999).
+        const MINTVALSET: i64 = -62_167_219_200;
+        const MAXTVALSET_BCD: i64 = 253_402_300_799;
+
+        // A value the old `loop { days -= days_in_year; year += 1; }`
+        // would have iterated through year-by-year (finding #1's host-DoS
+        // surface) — the new clamp+utctime_ext path is O(1) date math, so
+        // this returns promptly regardless of magnitude.
+        cmos.timeval = 10_000_000_000_000; // ~317,000 years past epoch
+        cmos.update_clock();
+        assert!((MINTVALSET..=MAXTVALSET_BCD).contains(&cmos.timeval));
+
+        cmos.timeval = -10_000_000_000_000;
+        cmos.update_clock();
+        assert!((MINTVALSET..=MAXTVALSET_BCD).contains(&cmos.timeval));
+    }
+
+    // =========================================================================
+    // Finding #9 — century register 0x37 mirror + non-SET write branch
+    // =========================================================================
+
+    #[test]
+    fn cmos_century_0x37_mirrors_0x32() {
+        let mut cmos = BxCmosC::new();
+
+        // A non-SET-mode write to 0x37 must mirror into 0x32 immediately
+        // (Bochs cmos.cc write: `if (addr == REG_IBM_PS2_CENTURY_BYTE)
+        // reg[REG_IBM_CENTURY_BYTE] = value;`).
+        cmos.write(CMOS_ADDR, REG_IBM_PS2_CENTURY_BYTE as u32, 1);
+        cmos.write(CMOS_DATA, 0x20, 1); // BCD 20 (21st century)
+        assert_eq!(cmos.ram[REG_CENTURY as usize], 0x20);
+        assert_eq!(cmos.ram[REG_IBM_PS2_CENTURY_BYTE as usize], 0x20);
+
+        // update_clock() must also keep both registers mirrored (Bochs
+        // cmos.cc update_clock: `reg[REG_IBM_PS2_CENTURY_BYTE] =
+        // reg[REG_IBM_CENTURY_BYTE];`).
+        cmos.ram[REG_IBM_PS2_CENTURY_BYTE as usize] = 0x00; // desync it
+        cmos.update_clock();
+        assert_eq!(
+            cmos.ram[REG_IBM_PS2_CENTURY_BYTE as usize],
+            cmos.ram[REG_CENTURY as usize]
+        );
+    }
+
+    #[test]
+    fn cmos_time_write_outside_set_mode_applies() {
+        let mut cmos = BxCmosC::new();
+        // SET mode is off by default (STAT_B bit 7 = 0).
+        assert_eq!(cmos.ram[REG_STAT_B as usize] & 0x80, 0);
+
+        let before = cmos.timeval;
+
+        // BCD mode (default): 0x30 = 30 seconds.
+        cmos.write(CMOS_ADDR, REG_SEC as u32, 1);
+        cmos.write(CMOS_DATA, 0x30, 1);
+
+        // Finding #9: previously only the SET-mode branch existed, so a
+        // write outside SET mode had no effect on timeval at all.
+        assert_ne!(cmos.timeval, before, "update_timeval() did not run");
+        let mut bt = BrokenTime::default();
+        assert!(utctime_ext(cmos.timeval, &mut bt));
+        assert_eq!(bt.sec, 30);
+    }
+
+    // =========================================================================
+    // Finding #1 / #9 combined — BCD + binary, 12h + 24h round trip
+    // =========================================================================
+
+    #[test]
+    fn cmos_date_roundtrip() {
+        for &(is_binary, is_24hour) in &[(false, false), (false, true), (true, false), (true, true)]
+        {
+            let mut cmos = BxCmosC::new();
+            let stat_b = (if is_24hour { 0x02 } else { 0 }) | (if is_binary { 0x04 } else { 0 });
+
+            // Program mode bits first (no SET mode yet).
+            cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+            cmos.write(CMOS_DATA, stat_b as u32, 1);
+
+            // Enter SET mode.
+            cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+            cmos.write(CMOS_DATA, (stat_b | 0x80) as u32, 1);
+
+            let (sec, min, hour24, mday, month, year2, century) =
+                (45u8, 30u8, 15u8, 4u8, 7u8, 25u8, 20u8);
+            let enc = |v: u8| bin_to_bcd(v, is_binary);
+
+            cmos.write(CMOS_ADDR, REG_SEC as u32, 1);
+            cmos.write(CMOS_DATA, enc(sec) as u32, 1);
+            cmos.write(CMOS_ADDR, REG_MIN as u32, 1);
+            cmos.write(CMOS_DATA, enc(min) as u32, 1);
+
+            let hour_reg = if is_24hour {
+                enc(hour24)
+            } else {
+                enc(hour24 - 12) | 0x80 // 15:00 -> 3 PM
+            };
+            cmos.write(CMOS_ADDR, REG_HOUR as u32, 1);
+            cmos.write(CMOS_DATA, hour_reg as u32, 1);
+
+            cmos.write(CMOS_ADDR, REG_MONTH_DAY as u32, 1);
+            cmos.write(CMOS_DATA, enc(mday) as u32, 1);
+            cmos.write(CMOS_ADDR, REG_MONTH as u32, 1);
+            cmos.write(CMOS_DATA, enc(month) as u32, 1);
+            cmos.write(CMOS_ADDR, REG_YEAR as u32, 1);
+            cmos.write(CMOS_DATA, enc(year2) as u32, 1);
+            cmos.write(CMOS_ADDR, REG_CENTURY as u32, 1);
+            cmos.write(CMOS_DATA, enc(century) as u32, 1);
+
+            // Exit SET mode -> update_timeval() applies the registers.
+            cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+            cmos.write(CMOS_DATA, stat_b as u32, 1);
+
+            // Round trip: registers -> timeval -> registers.
+            cmos.update_clock();
+
+            assert_eq!(
+                bcd_to_bin(cmos.ram[REG_SEC as usize], is_binary),
+                sec,
+                "sec (binary={is_binary} 24h={is_24hour})"
+            );
+            assert_eq!(
+                bcd_to_bin(cmos.ram[REG_MIN as usize], is_binary),
+                min,
+                "min (binary={is_binary} 24h={is_24hour})"
+            );
+            assert_eq!(
+                bcd_to_bin(cmos.ram[REG_MONTH_DAY as usize], is_binary),
+                mday,
+                "mday (binary={is_binary} 24h={is_24hour})"
+            );
+            assert_eq!(
+                bcd_to_bin(cmos.ram[REG_MONTH as usize], is_binary),
+                month,
+                "month (binary={is_binary} 24h={is_24hour})"
+            );
+            assert_eq!(
+                bcd_to_bin(cmos.ram[REG_YEAR as usize], is_binary),
+                year2,
+                "year2 (binary={is_binary} 24h={is_24hour})"
+            );
+            assert_eq!(
+                bcd_to_bin(cmos.ram[REG_CENTURY as usize], is_binary),
+                century,
+                "century (binary={is_binary} 24h={is_24hour})"
+            );
+
+            if is_24hour {
+                assert_eq!(
+                    bcd_to_bin(cmos.ram[REG_HOUR as usize], is_binary),
+                    hour24,
+                    "hour24 (binary={is_binary})"
+                );
+            } else {
+                let raw = cmos.ram[REG_HOUR as usize];
+                assert_ne!(raw & 0x80, 0, "expected PM flag (binary={is_binary})");
+                assert_eq!(
+                    bcd_to_bin(raw & 0x7F, is_binary),
+                    hour24 - 12,
+                    "hour12 (binary={is_binary})"
+                );
+            }
+        }
+    }
+
+    // =========================================================================
+    // Finding #19 — reset() masks CRB + restarts periodic; STAT_A rewrite
+    // restarts timer
+    // =========================================================================
+
+    #[test]
+    fn cmos_reset_masks_stat_b_and_clears_stat_c() {
+        let mut cmos = BxCmosC::new();
+        // Set UIE(0x10)/AIE(0x20)/PIE(0x40) plus a bit outside that mask,
+        // and dirty Status C.
+        cmos.ram[REG_STAT_B as usize] = 0xFF & !0x08; // all bits except sq-wave
+        cmos.ram[REG_STAT_C as usize] = 0xF0;
+
+        cmos.reset();
+
+        // Bochs cmos.cc reset: `reg[REG_STAT_B] &= 0x8f;` clears bits 4-6.
+        assert_eq!(cmos.ram[REG_STAT_B as usize] & 0x70, 0);
+        // Bits 7,3,2,1,0 must be preserved.
+        assert_eq!(cmos.ram[REG_STAT_B as usize] & 0x8F, 0xFF & !0x08 & 0x8F);
+        assert_eq!(cmos.ram[REG_STAT_C as usize], 0x00);
+    }
+
+    #[test]
+    fn cmos_reset_rearms_one_second_timer() {
+        let mut cmos = BxCmosC::new();
+
+        // Burn the one-second countdown down to a small leftover value —
+        // simulates a reset happening partway through the current second.
+        cmos.one_second_remaining = 1;
+        cmos.reset();
+
+        // Bochs cmos.cc reset: `activate_timer(one_second_timer_index,
+        // 1000000, 1)` unconditionally re-arms a fresh 1,000,000us
+        // countdown, regardless of how much was left beforehand.
+        assert_eq!(cmos.one_second_remaining, 1_000_000);
+
+        // Also check the case where it had already elapsed to 0.
+        cmos.one_second_remaining = 0;
+        cmos.reset();
+        assert_eq!(cmos.one_second_remaining, 1_000_000);
+    }
+
+    #[test]
+    fn cmos_stat_a_write_restarts_periodic_timer() {
+        let mut cmos = BxCmosC::new();
+        // Enable PIE with a periodic rate already active.
+        cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+        cmos.write(CMOS_DATA, 0x42, 1); // 24-hour + PIE
+
+        let interval = cmos.periodic_interval_usec;
+        assert!(cmos.periodic_timer_remaining > 0);
+
+        // Burn most of the countdown down.
+        cmos.periodic_timer_remaining = 1;
+
+        // Bochs cmos.cc write REG_STAT_A: CRA_change() always re-activates
+        // (restarts) the timer, even though the rate nibble is unchanged.
+        cmos.write(CMOS_ADDR, REG_STAT_A as u32, 1);
+        let stat_a = cmos.ram[REG_STAT_A as usize];
+        cmos.write(CMOS_DATA, stat_a as u32, 1);
+
+        assert_eq!(cmos.periodic_timer_remaining, interval);
+    }
+
+    // =========================================================================
+    // Finding #33 (cmos.rs-local parts) — UF/AF gated on enables, no
+    // auto-checksum on I/O writes, saturating one-second reload
+    // =========================================================================
+
+    #[test]
+    fn cmos_update_ended_flag_gated_on_uie() {
+        let mut cmos = BxCmosC::new();
+        // UIE (Status B bit 4) left clear.
+        assert_eq!(cmos.ram[REG_STAT_B as usize] & 0x10, 0);
+
+        cmos.tick(1_000_001); // fires one_second_timer -> schedules UIP
+        cmos.tick(300); // fires the 244us UIP timer -> uip_timer()
+
+        // UF (Status C bit 4) must NOT be set when UIE is disabled.
+        assert_eq!(cmos.ram[REG_STAT_C as usize] & 0x10, 0);
+    }
+
+    #[test]
+    fn cmos_update_ended_flag_set_when_uie_enabled() {
+        let mut cmos = BxCmosC::new();
+        cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+        cmos.write(CMOS_DATA, 0x12, 1); // 24-hour + UIE
+
+        cmos.tick(1_000_001);
+        cmos.tick(300);
+
+        assert_ne!(cmos.ram[REG_STAT_C as usize] & 0x10, 0);
+    }
+
+    #[test]
+    fn cmos_write_does_not_auto_recompute_checksum() {
+        let mut cmos = BxCmosC::new();
+        let good_high = cmos.ram[REG_CSUM_HIGH as usize];
+        let good_low = cmos.ram[REG_CSUM_LOW as usize];
+
+        // Write into the checksummed region (0x10..0x2E) via the I/O port.
+        cmos.write(CMOS_ADDR, 0x15, 1);
+        cmos.write(CMOS_DATA, 0xAB, 1);
+
+        // Bochs cmos.cc never recomputes the checksum from an I/O write.
+        assert_eq!(cmos.ram[REG_CSUM_HIGH as usize], good_high);
+        assert_eq!(cmos.ram[REG_CSUM_LOW as usize], good_low);
+    }
+
+    #[test]
+    fn cmos_one_second_tick_overshoot_does_not_underflow() {
+        let mut cmos = BxCmosC::new();
+        let before = cmos.timeval;
+
+        // A single tick spanning several seconds must not panic (u32
+        // underflow in the old unguarded `1_000_000 - overshoot`).
+        cmos.tick(5_000_000);
+
+        assert_eq!(cmos.timeval, before + 1); // fires once per tick() call
+        assert!(cmos.one_second_remaining > 0);
+        assert!(cmos.one_second_remaining <= 1_000_000);
     }
 }

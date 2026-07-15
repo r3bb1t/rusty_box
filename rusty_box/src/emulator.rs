@@ -20,7 +20,7 @@ use crate::{
         apic::{LocalApicCpuEvent, LocalApicTimerActivation, PendingIpi},
         cpu::CpuActivityState,
         instrumentation::{ExitSet, Instrumentation},
-        BxCpuC, BxCpuIdTrait, CpuError, ResetReason, Result as CpuResult,
+        BxCpuC, BxCpuIdTrait, CpuError, CpuidFreq, ResetReason, Result as CpuResult,
     },
     iodev::{
         devices::{DeviceManager, SystemControlPort},
@@ -41,7 +41,6 @@ use core::sync::atomic::Ordering;
 const BZIMAGE_MIN_HEADER_LEN: usize = 0x264;
 #[cfg(not(feature = "alloc"))]
 const NO_ALLOC_MAX_AP_CPUS: usize = (crate::params::BX_MAX_SMP_THREADS_SUPPORTED as usize) - 1;
-const BOCHS_SMP_QUANTUM_TICKS: u64 = 16;
 const BOCHS_APIC_BUS_ID_MASK: u32 = 0xFF;
 const BZIMAGE_BOOT_SIGNATURE_OFFSET: usize = 0x1FE;
 const BZIMAGE_BOOT_SIGNATURE_LO: u8 = 0x55;
@@ -170,6 +169,29 @@ pub struct EmulatorConfig {
     /// (non-HLT) execution with a GUI attached. Matches Bochs `clock: sync=slowdown`.
     /// Default: true (GUI), false (headless). Override with RUSTY_BOX_NOSYNC=1.
     pub sync_slowdown: bool,
+    /// Advance the PIT and ACPI PM timer on host wall-clock time instead of
+    /// emulated (icount) time — Bochs `clock: sync=realtime` (pit.cc reads
+    /// bx_virt_timer with is_realtime). Default false = Bochs `sync=none`:
+    /// device timers advance strictly with emulated time, so guest PIT/TSC
+    /// calibration measures exactly the `ips` rate and boots are
+    /// deterministic. (Previously rusty_box force-enabled this in std builds,
+    /// which made PIT-based calibration measure wall-clock host throughput.)
+    pub sync_realtime: bool,
+    /// SMP scheduling quantum — Bochs `cpu: quantum=N` (config.cc
+    /// BXPN_SMP_QUANTUM): maximum instructions a CPU executes before control
+    /// returns to the round-robin scheduler; also caps SMP trace length
+    /// (icache.cc). Range 1-32 (config.h BX_SMP_QUANTUM_MIN/MAX), default 16.
+    /// Larger values cost interrupt-interleave granularity but sharply reduce
+    /// per-slice overhead (32 ≈ single-CPU throughput on idle-heavy phases).
+    /// Ignored with a single CPU.
+    pub smp_quantum: u32,
+    /// How CPU models report the CPUID frequency leaves 0x15/0x16 — Bochs
+    /// `cpu: cpuid_freq=hardware|none|ips` (cpuid.cc get_freq_leaf_15/16,
+    /// bochs-emu/Bochs#791). Default `None` (leaves not enumerated; guests
+    /// PIT-calibrate the true tick rate) — deliberate divergence from the
+    /// Bochs default `hardware`, which makes modern Linux trust the dumped
+    /// multi-GHz TSC frequency and run all TSC-derived time `freq/ips` slow.
+    pub cpuid_freq: CpuidFreq,
 }
 
 impl Default for EmulatorConfig {
@@ -183,6 +205,9 @@ impl Default for EmulatorConfig {
             pci_vga: false,
             cpu_params: BxParams::default(),
             sync_slowdown: false,
+            sync_realtime: false,
+            smp_quantum: 16,
+            cpuid_freq: CpuidFreq::default(),
         }
     }
 }
@@ -316,6 +341,11 @@ pub struct Emulator<'a, I: BxCpuIdTrait, T: Instrumentation = ()> {
     last_device_time_usec: u64,
     /// Bochs SMP scheduler remainder from `executed %= BX_SMP_PROCESSORS`.
     smp_tick_remainder: u64,
+    /// Ticks accumulated since the last full SMP round servicing (timer
+    /// dispatch + device time + event-flag sync). Forces servicing at the
+    /// same ~1 ms cadence the single-CPU batch path uses even when no timer
+    /// fires (keyboard/realtime device pacing).
+    smp_service_accum_ticks: u64,
     /// True when the last `run_cpu_batch` advanced `pc_system` internally.
     /// SMP batches tick at Bochs round boundaries so LAPIC/pc-system timers
     /// fire before the next virtual CPU slice; outer loops must not tick them
@@ -488,6 +518,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     pub unsafe fn run_cpu_batch(&mut self, batch_size: u64) -> CpuResult<u64> {
         self.batch_advanced_pc_system = false;
         self.drain_lapic_bus();
+        self.drain_pending_smc();
         let batch_size = self.active_batch_step_ticks(batch_size);
         let cpu_count = self.cpu_count();
         let has_ap_cpus = cpu_count > 1;
@@ -508,6 +539,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             .unwrap_unchecked()
             .set_mem_ptr(mem_static);
         (*dm_ptr.as_ptr()).mem_ptr = Some(mem_static);
+        (*dm_ptr.as_ptr()).pcs_ptr = Some(ps_ptr);
 
         let pic_ref: *mut _ = &mut self.device_manager.pic;
         let dma_ref: *mut _ = &mut self.device_manager.dma;
@@ -543,8 +575,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             let per_cpu_batch = if smp {
                 // Bochs SMP main.cc runs exactly one trace per CPU, and
                 // icache.cc caps each SMP trace by the configured quantum
-                // (default 16).
-                BOCHS_SMP_QUANTUM_TICKS.min(remaining.max(1))
+                // (BXPN_SMP_QUANTUM, default 16, range 1-32).
+                self.smp_quantum_ticks().min(remaining.max(1))
             } else {
                 (remaining / runnable_count as u64).max(1)
             };
@@ -556,7 +588,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         // Bochs main.cc: a CPU that produced no instructions
                         // (cpu_run_trace returned immediately) is credited the
                         // SMP quantum before the round average.
-                        round_ticks = round_ticks.saturating_add(BOCHS_SMP_QUANTUM_TICKS);
+                        round_ticks = round_ticks.saturating_add(self.smp_quantum_ticks());
                     }
                     continue;
                 }
@@ -605,7 +637,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         let elapsed = if smp {
                             let delta = self.cpu_ref(cpu_index).icount_delta_since_sync();
                             if delta == 0 {
-                                BOCHS_SMP_QUANTUM_TICKS
+                                self.smp_quantum_ticks()
                             } else {
                                 delta
                             }
@@ -617,7 +649,13 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         } else {
                             round_ticks.max(elapsed)
                         };
-                        self.drain_lapic_bus();
+                        // Only the cpu that just ran can have queued new IPIs.
+                        self.drain_lapic_bus_from(cpu_count, cpu_index);
+                        // Bochs icache.cc handleSMC loops over every cpu at
+                        // the store; under round-robin no sibling can execute
+                        // before this slice-boundary drain, so it is
+                        // observably identical.
+                        self.drain_pending_smc();
                     }
                     Err(err) => {
                         result = Err(err);
@@ -651,11 +689,35 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             total_elapsed_ticks = total_elapsed_ticks.saturating_add(elapsed_ticks);
             if smp {
                 // Bochs advances `bx_pc_system` after every SMP processor
-                // round. Keep the Rust batch loop large for host throughput,
-                // but fire pc-system/LAPIC timers at the same virtual-time
-                // boundary before another CPU slice can run.
-                self.advance_pc_system_after_cpu_ticks(elapsed_ticks);
+                // round (BX_TICKN(executed / BX_SMP_PROCESSORS)) — the tick
+                // countdown must run per round so timers fire at their exact
+                // virtual-time boundary. The full servicing (timer dispatch,
+                // device time, event-flag sync) measured ~2x the cost of the
+                // guest instructions when run unconditionally per round, so
+                // it only runs when a timer fired / an event flag is raised /
+                // a millisecond quantum of ticks accumulated — the same
+                // cadence the single-CPU batch path services devices at.
+                self.service_lapic_timer_requests();
+                self.pc_system.tickn(elapsed_ticks as u32);
                 self.batch_advanced_pc_system = true;
+                self.smp_service_accum_ticks =
+                    self.smp_service_accum_ticks.saturating_add(elapsed_ticks);
+                let quantum_due = match self.millisecond_timer_quantum_ticks() {
+                    Some(quantum) => self.smp_service_accum_ticks >= quantum,
+                    None => true,
+                };
+                if quantum_due || self.smp_round_service_due() {
+                    self.smp_service_accum_ticks = 0;
+                    self.dispatch_timer_fires();
+                    self.advance_devices_to_pc_time();
+                    self.sync_event_flags();
+                    // Timers fired above may have run device DMA (bus-master
+                    // IDE) into guest RAM — invalidate stale traces before
+                    // the next round's slices (Bochs memory.cc
+                    // dmaWritePhysicalPage → decWriteStamp → handleSMC is
+                    // synchronous).
+                    self.drain_pending_smc();
+                }
             }
 
             if !smp {
@@ -663,10 +725,83 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             }
         }
 
+        if has_ap_cpus {
+            // Batch exit: dispatch and sync anything the gated per-round
+            // servicing left pending, so run_interactive resumes from the
+            // same state the ungated path produced.
+            self.dispatch_timer_fires();
+            self.advance_devices_to_pc_time();
+            self.sync_event_flags();
+        }
+        self.drain_pending_smc();
         self.devices.clear_device_manager();
         self.devices.clear_mem_ptr();
         self.device_manager.mem_ptr = None;
+        self.device_manager.pcs_ptr = None;
         result.map(|_| total_elapsed_ticks)
+    }
+
+    /// Bochs `cpu: quantum=N` (BXPN_SMP_QUANTUM), clamped to config.h
+    /// BX_SMP_QUANTUM_MIN..=BX_SMP_QUANTUM_MAX.
+    #[inline]
+    fn smp_quantum_ticks(&self) -> u64 {
+        (self.config.smp_quantum as u64).clamp(1, 32)
+    }
+
+    /// True when the per-round SMP servicing actually has work: a timer
+    /// fired, an interrupt flag is raised somewhere, or deferred IOAPIC
+    /// deliveries are queued. Cheap flag reads only — this gate runs every
+    /// 32-tick round, and the full servicing measured ~2x the cost of the
+    /// guest instructions themselves when run unconditionally per round.
+    #[inline]
+    fn smp_round_service_due(&self) -> bool {
+        if self.pc_system.has_fired_timers()
+            || self.pc_system.intr_raised
+            || self.pc_system.intr_cleared
+            || self.pc_system.async_event_pending
+            || self.device_manager.pic.irq_pending
+            || self.device_manager.pic.irq_cleared
+            || self.device_manager.ioapic.has_pending_deliveries()
+            || self.device_manager.keyboard.needs_fast_service()
+        {
+            return true;
+        }
+        for cpu_index in 0..self.cpu_count() {
+            if self.cpu_ref(cpu_index).lapic.intr_pending {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Apply queued SMC invalidations to every cpu, then drop the queue.
+    ///
+    /// Bochs icache.cc `handleSMC`: on a write hitting stamped lines, every
+    /// processor gets `async_event |= BX_ASYNC_EVENT_STOP_TRACE` and an
+    /// icache flush, synchronously. Here the writing cpu (or device) queued
+    /// the event; this drain runs at slice/round/batch boundaries — before
+    /// any sibling cpu can execute — so guest-visible behavior is identical.
+    /// Per-cpu `smc_seq_seen` watermarks make repeat calls O(1) when nothing
+    /// is pending.
+    fn drain_pending_smc(&mut self) {
+        if !self.memory.smc_has_pending() {
+            // Empty queue ⇒ every cpu already caught up (the queue is only
+            // cleared after a full catch-up) — one load per slice.
+            return;
+        }
+        let newest = self.memory.smc_seq_next();
+        let mem_ptr: *const BxMemC<'a> = &self.memory;
+        for cpu_index in 0..self.cpu_count() {
+            if self.cpu_ref(cpu_index).smc_seq_seen < newest {
+                // SAFETY: memory and the cpu array are distinct fields of
+                // self; smc_apply_pending only reads the pending queue.
+                unsafe {
+                    self.cpu_mut_at(cpu_index)
+                        .smc_apply_pending(&*mem_ptr, true)
+                };
+            }
+        }
+        self.memory.smc_clear_pending();
     }
 
     /// Inject an external interrupt with temporary memory bus wiring.
@@ -717,6 +852,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         let topology = config.cpu_params.cpu_topology();
         let mut cpu = BxCpuBuilder::<I>::new().build_with_tracer(tracer)?;
         cpu.configure_smp(0, topology);
+        cpu.set_smp_quantum(config.smp_quantum);
+        cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
         Self::new_from_parts(config, cpu, Vec::new())
     }
 
@@ -728,11 +865,15 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         let cpu_count = config.cpu_params.cpu_count();
         let mut cpu = build_cpu()?;
         cpu.configure_smp(0, topology);
+        cpu.set_smp_quantum(config.smp_quantum);
+        cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
 
         let mut ap_cpus = Vec::with_capacity(cpu_count.saturating_sub(1) as usize);
         for cpu_id in 1..cpu_count {
             let mut ap_cpu = build_cpu()?;
             ap_cpu.configure_smp(cpu_id, topology);
+            ap_cpu.set_smp_quantum(config.smp_quantum);
+            ap_cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
             ap_cpus.push(ap_cpu);
         }
         Self::new_from_parts(config, cpu, ap_cpus)
@@ -840,9 +981,13 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         let pc_system = BxPcSystemC::new();
         let mut ap_cpu_ptrs = [core::ptr::null_mut(); NO_ALLOC_MAX_AP_CPUS];
         cpu.configure_smp(0, topology);
+        cpu.set_smp_quantum(config.smp_quantum);
+        cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
         for (index, ap_cpu_slot) in ap_cpus.iter_mut().take(required_ap_count).enumerate() {
             let ap_cpu: &mut BxCpuC<'a, I, T> = &mut **ap_cpu_slot;
             ap_cpu.configure_smp((index + 1) as u32, topology);
+            ap_cpu.set_smp_quantum(config.smp_quantum);
+            ap_cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
             ap_cpu_ptrs[index] = ap_cpu as *mut BxCpuC<'a, I, T>;
         }
 
@@ -1159,7 +1304,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // Register the VGA adapter on PCI when configured (experimental KMS path).
         if self.config.pci_vga && self.config.pci_enabled {
             self.device_manager.vga.enable_pci();
-            tracing::debug!("VGA registered as PCI device (1234:1111)");
+            tracing::info!("VGA registered as PCI device (1234:1111, class 0300)");
         }
 
         // Initialize PCI bridge DRAM row boundaries from RAM size.
@@ -1506,6 +1651,12 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             // Step 2: Disable SMRAM (matches original line 405: mem->disable_smram())
             self.memory.disable_smram();
 
+            // Reset the machine-wide SMC write-stamp table (Bochs
+            // pageWriteStampTable.resetWriteStamps on hardware reset; every
+            // cpu's icache is flushed by the cpu resets below, so no stale
+            // trace can outlive its stamps).
+            self.memory.smc_reset_stamps();
+
             // Step 3: Reset all device plugins (matches original line 406: bx_reset_plugins())
             // This resets all devices: PIC, PIT, CMOS, DMA, Keyboard, HardDrive, VGA
             self.device_manager.reset(reset_type)?;
@@ -1573,8 +1724,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             self.device_manager
                 .acpi
                 .init_icount_sync(self.cpu.icount, ips);
+            // Bochs `clock: sync=realtime` only when configured (pit.cc reads
+            // bx_virt_timer with is_realtime from the clock option); with the
+            // default sync=none the timers stay on emulated (icount) time.
             #[cfg(feature = "std")]
-            {
+            if self.config.sync_realtime {
                 self.device_manager.pit.enable_realtime_sync();
                 self.device_manager.acpi.enable_realtime_sync();
             }
@@ -1750,7 +1904,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         channel: usize,
         drive: usize,
         path: &str,
-        cylinders: u16,
+        cylinders: u32,
         heads: u8,
         spt: u8,
     ) -> std::io::Result<()> {
@@ -1811,6 +1965,25 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         ..
                     } = *dm;
                     harddrv.ready_to_send_atapi(ch, pic, pci_ide);
+                }
+            }
+        }
+        // Drain deferred BM-DMA timer arms (Bochs pci_ide.cc write:
+        // bx_pc_system.activate_timer(timer_index, 1, 0)). Deferred because
+        // the I/O dispatch path has no pc_system access; serviced here like
+        // the deferred seek completion above.
+        for ch in 0..2 {
+            if let Some(usec) = self.device_manager.pci_ide.take_pending_timer_arm(ch) {
+                match self.device_manager.pci_ide.bmdma[ch].timer_index {
+                    Some(handle) => {
+                        if let Err(error) = self.pc_system.activate_timer_usec(handle, usec, false)
+                        {
+                            tracing::error!("BM-DMA ch={ch}: timer arm failed: {error:?}");
+                        }
+                    }
+                    None => {
+                        tracing::error!("BM-DMA ch={ch}: arm requested without a timer handle");
+                    }
                 }
             }
         }
@@ -1945,12 +2118,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 TimerOwner::NullTimer => {}
                 TimerOwner::PciIdeCh0 => {
                     for _ in 0..counts[entry] {
-                        self.device_manager.pci_ide.timer(0);
+                        self.device_manager
+                            .pci_ide_timer(0, &mut self.pc_system, &mut self.memory);
                     }
                 }
                 TimerOwner::PciIdeCh1 => {
                     for _ in 0..counts[entry] {
-                        self.device_manager.pci_ide.timer(1);
+                        self.device_manager
+                            .pci_ide_timer(1, &mut self.pc_system, &mut self.memory);
                     }
                 }
                 TimerOwner::Lapic(cpu_index) => {
@@ -1966,9 +2141,17 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     fn drain_lapic_bus(&mut self) {
         let cpu_count = self.cpu_count();
         for src in 0..cpu_count {
-            while let Some(ipi) = { self.cpu_mut_at(src).lapic.take_pending_ipi() } {
-                self.deliver_pending_ipi(cpu_count, src, ipi);
-            }
+            self.drain_lapic_bus_from(cpu_count, src);
+        }
+    }
+
+    /// Drain queued ICR IPIs from ONE cpu. After a round-robin slice only the
+    /// cpu that just executed can have queued new IPIs, so the per-slice
+    /// drain checks that single source instead of sweeping all cpus (the full
+    /// sweep still runs at batch boundaries and in sync_event_flags).
+    fn drain_lapic_bus_from(&mut self, cpu_count: usize, src: usize) {
+        while let Some(ipi) = { self.cpu_mut_at(src).lapic.take_pending_ipi() } {
+            self.deliver_pending_ipi(cpu_count, src, ipi);
         }
     }
 
@@ -1976,9 +2159,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     fn drain_lapic_bus(&mut self) {
         let cpu_count = self.cpu_count();
         for src in 0..cpu_count {
-            while let Some(ipi) = { self.cpu_mut_at(src).lapic.take_pending_ipi() } {
-                self.deliver_pending_ipi(cpu_count, src, ipi);
-            }
+            self.drain_lapic_bus_from(cpu_count, src);
         }
     }
 
@@ -2224,6 +2405,35 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         }
     }
 
+    /// Apply guest LAPIC timer programming at the SMP round boundary before
+    /// advancing that round's virtual time. Bochs activates these timers at
+    /// the register write; deferred Rust requests must retain the same epoch.
+    fn service_lapic_timer_requests(&mut self) {
+        let ticks_now = self.pc_system.time_ticks();
+        for cpu_index in 0..self.cpu_count() {
+            let has_request = {
+                let lapic = &self.cpu_ref(cpu_index).lapic;
+                lapic.timer_deactivate_request || lapic.timer_activate_request.is_some()
+            };
+            if !has_request {
+                continue;
+            }
+
+            let (timer_handle, deactivate, activate) = {
+                let cpu = self.cpu_mut_at(cpu_index);
+                cpu.lapic.current_ticks = ticks_now;
+                cpu.lapic.ticks_at_sync = ticks_now;
+                cpu.lapic.icount_at_sync = cpu.icount;
+                let timer_handle = cpu.lapic.timer_handle;
+                let deactivate = cpu.lapic.timer_deactivate_request;
+                cpu.lapic.timer_deactivate_request = false;
+                let activate = cpu.lapic.timer_activate_request.take();
+                (timer_handle, deactivate, activate)
+            };
+            self.apply_lapic_timer_request(cpu_index, timer_handle, deactivate, activate, false);
+        }
+    }
+
     fn service_lapic_local_events(&mut self) {
         for cpu_index in 0..self.cpu_count() {
             while let Some(cpu_event) = self.cpu_mut_at(cpu_index).lapic.take_pending_cpu_event() {
@@ -2319,15 +2529,19 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     pub fn sync_event_flags(&mut self) {
         self.drain_lapic_bus();
         self.service_lapic_local_events();
-        // PIC: BX_RAISE_INTR
-        if self.device_manager.pic.irq_pending {
-            self.cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
+        // PIC deferred edges collapse to the final INT pin level. IAC may
+        // queue both a clear and a reassertion while servicing the next
+        // request; the final pin is authoritative, so the later assertion
+        // cannot be erased by the stale clear notification.
+        if self.device_manager.pic.irq_pending || self.device_manager.pic.irq_cleared {
+            let asserted = self.device_manager.pic.has_interrupt();
             self.device_manager.pic.irq_pending = false;
-        }
-        // PIC: BX_CLEAR_INTR
-        if self.device_manager.pic.irq_cleared {
-            self.cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
             self.device_manager.pic.irq_cleared = false;
+            if asserted {
+                self.cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
+            } else {
+                self.cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
+            }
         }
         // IOAPIC: drain pending deliveries to LAPICs
         {
@@ -2914,8 +3128,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
             let result = unsafe { self.run_cpu_batch(batch_size) };
 
-            // Apply PAM register changes immediately (BIOS needs this before next batch)
-            if self.device_manager.pam_needs_update {
+            // Apply PAM/SMRAM/XBCS register changes immediately (BIOS needs this before next batch)
+            if self.device_manager.pam_needs_update
+                || self.device_manager.smram_needs_update
+                || self.device_manager.bios_write_needs_update
+            {
                 self.device_manager
                     .process_pci_deferred(&mut self.devices, &mut self.memory);
             }
@@ -3738,7 +3955,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         channel: usize,
         drive: usize,
         data: alloc::vec::Vec<u8>,
-        cylinders: u16,
+        cylinders: u32,
         heads: u8,
         spt: u8,
     ) {
@@ -3760,7 +3977,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         channel: usize,
         drive: usize,
         data: &'static [u8],
-        cylinders: u16,
+        cylinders: u32,
         heads: u8,
         spt: u8,
     ) {
@@ -4534,6 +4751,43 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(feature = "instrumentation")]
+    #[test]
+    fn instrumented_constructor_applies_configured_cpuid_frequency() {
+        struct NoopTracer;
+        impl crate::cpu::instrumentation::Instrumentation for NoopTracer {}
+
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const CODE_ADDR: u64 = 0x1000;
+                let mut config = EmulatorConfig::default();
+                config.cpuid_freq = crate::cpu::cpuid::CpuidFreq::Ips;
+                config.ips = 120_000_000;
+                let mut emu =
+                    Emulator::<Corei7SkylakeX, NoopTracer>::new_with_mode_and_instrumentation(
+                        config,
+                        CpuSetupMode::FlatProtected32,
+                        NoopTracer,
+                    )
+                    .unwrap();
+                emu.virt_write(CODE_ADDR, &[0x0F, 0xA2, 0xEB, 0xFE])
+                    .unwrap();
+                emu.reg_write(X86Reg::Rax, 0x15);
+                emu.reg_write(X86Reg::Rcx, 0);
+
+                emu.emu_start(CODE_ADDR, Some(CODE_ADDR + 2), None, Some(8))
+                    .unwrap();
+
+                assert_eq!(emu.reg_read(X86Reg::Rax), 1);
+                assert_eq!(emu.reg_read(X86Reg::Rbx), 1);
+                assert_eq!(emu.reg_read(X86Reg::Rcx), 120_000_000);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn test_emulator_initialization() {
         std::thread::Builder::new()
@@ -4670,6 +4924,45 @@ mod tests {
     }
 
     #[test]
+    fn rep_insw32_fast_path_retires_exact_iteration_count() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const CODE_ADDR: u64 = 0x1000;
+                const DEST_ADDR: u64 = 0x2000;
+                const COUNT: u64 = 64;
+                const UNMAPPED_PORT: u64 = 0x1234;
+
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                // REP INSW with 32-bit address size, then a parking jump.
+                emu.virt_write(CODE_ADDR, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
+                    .unwrap();
+                emu.reg_write(X86Reg::Rip, CODE_ADDR);
+                emu.reg_write(X86Reg::Rdx, UNMAPPED_PORT);
+                emu.reg_write(X86Reg::Rdi, DEST_ADDR);
+                emu.reg_write(X86Reg::Rcx, COUNT);
+
+                let before = emu.cpu_ref(BSP_INDEX).icount;
+                let executed = unsafe { emu.run_cpu_batch(1) }.unwrap();
+                let retired = emu.cpu_ref(BSP_INDEX).icount - before;
+
+                // The trace executes REP INSW plus the following parking jump.
+                // The REP contributes exactly COUNT retirements.
+                assert_eq!(executed, 2);
+                assert_eq!(retired, COUNT + 1);
+                assert_eq!(emu.reg_read(X86Reg::Rcx), 0);
+                assert_eq!(emu.reg_read(X86Reg::Rdi), DEST_ADDR + COUNT * 2);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn smp_batch_with_parked_application_processors_reaches_timer_quantum() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
@@ -4780,6 +5073,143 @@ mod tests {
                     emu.cpu_ref(AP_INDEX).activity_state,
                     CpuActivityState::Active,
                     "SIPI delivery to parked AP was delayed past the BSP batch"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Bochs icache.cc handleSMC: a store that hits a page with cached traces
+    /// sets BX_ASYNC_EVENT_STOP_TRACE on the WRITING cpu too, so the remainder
+    /// of the currently-executing trace is abandoned and re-decoded from the
+    /// (now patched) memory. Without it, the stale tail of the running trace
+    /// executes the pre-patch instruction.
+    #[test]
+    fn smc_store_within_current_trace_stops_trace() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                // 0x1000: mov byte [0x100E], 0x41   ; patch "inc eax" -> "inc ecx"
+                // 0x1007: nop x7                    ; same trace, past first_bytes
+                // 0x100E: inc eax (0x40)            ; stale target
+                // 0x100F: hlt
+                let mut code = vec![0xC6, 0x05, 0x0E, 0x10, 0x00, 0x00, 0x41];
+                code.extend_from_slice(&[0x90; 7]);
+                code.push(0x40);
+                code.push(0xF4);
+                emu.virt_write(0x1000, &code).unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+
+                unsafe { emu.run_cpu_batch(4096) }.unwrap();
+
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rcx),
+                    1,
+                    "patched inc ecx must execute (trace re-decoded after SMC store)"
+                );
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rax),
+                    0,
+                    "stale inc eax executed from the invalidated trace"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Bochs icache.cc handleSMC loops over BX_SMP_PROCESSORS: a write by one
+    /// CPU to a page with cached traces must flush EVERY cpu's icache, not just
+    /// the writer's. The AP spins on a nop-sled loop whose jmp sits past the
+    /// 8-byte first_bytes guard; the BSP patches the jmp to hlt;hlt. Stale
+    /// sibling caches spin forever.
+    #[test]
+    fn smp_cross_cpu_code_patch_invalidates_sibling_icache() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(2, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                // AP (real mode, SIPI vector 0x09 -> 0x0900:0000 = phys 0x9000):
+                //   0x9000: nop x8
+                //   0x9008: jmp 0x9000 (EB F6)
+                let mut ap_code = vec![0x90u8; 8];
+                ap_code.extend_from_slice(&[0xEB, 0xF6]);
+                emu.virt_write(0x9000, &ap_code).unwrap();
+                // BSP: spin long enough that the AP has cached its loop trace,
+                // then patch the AP's jmp to hlt;hlt, then halt.
+                let mut bsp_code = vec![0x90u8; 600];
+                // mov word [0x9008], 0xF4F4
+                bsp_code.extend_from_slice(&[0x66, 0xC7, 0x05, 0x08, 0x90, 0x00, 0x00, 0xF4, 0xF4]);
+                bsp_code.push(0xF4); // hlt
+                emu.virt_write(0x1000, &bsp_code).unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+                emu.cpu_mut_at(AP_INDEX).deliver_sipi(0x09);
+
+                for _ in 0..100 {
+                    unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                    if matches!(emu.cpu_ref(AP_INDEX).activity_state, CpuActivityState::Hlt) {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).activity_state,
+                    CpuActivityState::Hlt,
+                    "AP kept executing a stale cached trace after the BSP patched its code"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Bochs memory.cc dmaWritePhysicalPage -> pageWriteStampTable.decWriteStamp:
+    /// device-initiated physical writes (bus-master DMA) must invalidate cached
+    /// traces exactly like CPU stores. poke_ram is our dmaWritePhysicalPage.
+    #[test]
+    fn dma_write_to_cached_code_page_invalidates_icache() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                // 0x1000: nop x8 / 0x1008: jmp 0x1000 — jmp is past first_bytes.
+                let mut code = vec![0x90u8; 8];
+                code.extend_from_slice(&[0xEB, 0xF6]);
+                emu.virt_write(0x1000, &code).unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+
+                // Let the CPU cache and spin the loop trace.
+                unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                // Device DMA patches the jmp to hlt;hlt.
+                emu.memory.poke_ram(0x1008, &[0xF4, 0xF4]);
+
+                for _ in 0..50 {
+                    unsafe { emu.run_cpu_batch(4096) }.unwrap();
+                    if matches!(emu.cpu_ref(0).activity_state, CpuActivityState::Hlt) {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    emu.cpu_ref(0).activity_state,
+                    CpuActivityState::Hlt,
+                    "CPU kept executing a stale cached trace after DMA overwrote the code page"
                 );
             })
             .unwrap()
@@ -5080,6 +5510,65 @@ mod tests {
                     assert_eq!(actual_id, expected_id as u8);
                 }
                 assert_eq!(ioapic_id, Some(NONFLAT_TOPOLOGY_CPUS as u8));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn cpuid_freq_config_reaches_every_cpu_through_cpuid_instruction() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                // `ips` mode: leaf 0x15 must report a crystal of `ips` Hz with
+                // a 1/1 ratio and leaf 0x16 the rate in MHz — on the BSP and
+                // on every AP (Bochs cpuid.cc get_freq_leaf_15/16).
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default().with_topology(1, 2, 1).unwrap();
+                config.ips = 120_000_000;
+                config.cpuid_freq = CpuidFreq::Ips;
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let instr = Instruction::default();
+
+                for cpu_index in 0..emu.cpu_count() {
+                    let cpu = emu.cpu_mut_at(cpu_index);
+                    cpu.set_eax(0x15);
+                    cpu.set_ecx(0);
+                    cpu.cpuid(&instr).unwrap();
+                    assert_eq!(
+                        (cpu.eax(), cpu.ebx(), cpu.ecx(), cpu.edx()),
+                        (1, 1, 120_000_000, 0)
+                    );
+
+                    cpu.set_eax(0x16);
+                    cpu.set_ecx(0);
+                    cpu.cpuid(&instr).unwrap();
+                    assert_eq!(
+                        (cpu.eax(), cpu.ebx(), cpu.ecx(), cpu.edx()),
+                        (120, 120, 100, 0)
+                    );
+
+                    // Max standard leaf stays Bochs-exact 0x16 in every mode
+                    // (Bochs corei7_skylake-x.cc max_std_leaf).
+                    cpu.set_eax(0);
+                    cpu.set_ecx(0);
+                    cpu.cpuid(&instr).unwrap();
+                    assert_eq!(cpu.eax(), 0x16);
+                }
+
+                // Default config (CpuidFreq::None): the frequency leaves read
+                // as not enumerated so guests PIT-calibrate the true rate.
+                let mut emu = Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
+                let cpu = emu.cpu_mut_at(0);
+                cpu.set_eax(0x15);
+                cpu.set_ecx(0);
+                cpu.cpuid(&instr).unwrap();
+                assert_eq!((cpu.eax(), cpu.ebx(), cpu.ecx(), cpu.edx()), (0, 0, 0, 0));
+                cpu.set_eax(0x16);
+                cpu.set_ecx(0);
+                cpu.cpuid(&instr).unwrap();
+                assert_eq!((cpu.eax(), cpu.ebx(), cpu.ecx(), cpu.edx()), (0, 0, 0, 0));
             })
             .unwrap()
             .join()
@@ -5488,17 +5977,18 @@ mod tests {
                 assert!(emu.cpu_runnable_for_batch(AP_INDEX));
 
                 let before = emu.cpu_ref(AP_INDEX).icount;
-                let elapsed = unsafe { emu.run_cpu_batch(BOCHS_SMP_QUANTUM_TICKS) }.unwrap();
+                let quantum = emu.smp_quantum_ticks();
+                let elapsed = unsafe { emu.run_cpu_batch(quantum) }.unwrap();
                 let ap_delta = emu.cpu_ref(AP_INDEX).icount - before;
 
-                assert!(elapsed >= BOCHS_SMP_QUANTUM_TICKS);
+                assert!(elapsed >= quantum);
                 assert!(
                     elapsed < ap_delta,
                     "elapsed ticks {elapsed} were not averaged with the halted peer quantum; AP delta was {ap_delta}"
                 );
                 assert_eq!(
                     emu.smp_tick_remainder,
-                    (BOCHS_SMP_QUANTUM_TICKS + ap_delta) % 2
+                    (quantum + ap_delta) % 2
                 );
             })
             .unwrap()
@@ -5532,7 +6022,8 @@ mod tests {
                 emu.cpu.lapic.intr_pending = false;
                 emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
 
-                let _elapsed = unsafe { emu.run_cpu_batch(BOCHS_SMP_QUANTUM_TICKS) }.unwrap();
+                let quantum = emu.smp_quantum_ticks();
+                let _elapsed = unsafe { emu.run_cpu_batch(quantum) }.unwrap();
                 assert!(
                     emu.cpu_ref(AP_INDEX).rax() > 0,
                     "AP RDTSC did not observe halted peer quantum elapsed earlier in the SMP round"
@@ -5586,7 +6077,8 @@ mod tests {
                 }
                 emu.service_lapic_local_events();
 
-                let elapsed = unsafe { emu.run_cpu_batch(BOCHS_SMP_QUANTUM_TICKS) }.unwrap();
+                let quantum = emu.smp_quantum_ticks();
+                let elapsed = unsafe { emu.run_cpu_batch(quantum) }.unwrap();
 
                 assert!(elapsed > 0);
                 assert!(
@@ -5779,6 +6271,75 @@ mod tests {
                         .value,
                     NMI_HANDLER_SEG,
                     "AP did not vector through IVT entry 2 to the NMI handler"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn smp_service_gate_honors_pending_keyboard_work() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
+                for cpu_index in 0..emu.cpu_count() {
+                    emu.cpu_mut_at(cpu_index).async_event = 0;
+                }
+                emu.device_manager.pic.irq_pending = false;
+                emu.device_manager.pic.irq_cleared = false;
+                assert!(!emu.smp_round_service_due());
+
+                emu.device_manager.keyboard.kbd_controller.timer_pending = 1;
+                assert!(emu.smp_round_service_due());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn lapic_timer_request_is_activated_before_round_ticks_advance() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                let handle = emu
+                    .pc_system
+                    .register_timer(
+                        TimerOwner::Lapic(BSP_INDEX),
+                        TEST_LAPIC_TIMER_PERIOD_TICKS,
+                        false,
+                        false,
+                        "bsp_lapic",
+                    )
+                    .unwrap();
+                let programmed_at = emu.pc_system.time_ticks();
+                {
+                    let cpu = emu.cpu_mut_at(BSP_INDEX);
+                    cpu.lapic.timer_handle = Some(handle);
+                    cpu.lapic.write_aligned(0xF0, 0x1FF);
+                    cpu.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR);
+                    cpu.lapic
+                        .set_initial_timer_count(TEST_LAPIC_TIMER_PERIOD_TICKS as u32);
+                    assert!(cpu.lapic.timer_activate_request.is_some());
+                }
+
+                emu.service_lapic_timer_requests();
+
+                assert!(emu
+                    .cpu_ref(BSP_INDEX)
+                    .lapic
+                    .timer_activate_request
+                    .is_none());
+                assert_eq!(
+                    emu.pc_system.timers[handle].time_to_fire,
+                    programmed_at + TEST_LAPIC_TIMER_PERIOD_TICKS
                 );
             })
             .unwrap()
@@ -6057,7 +6618,7 @@ mod tests {
                 // nothing — including APs parked in WAIT_FOR_SIPI — is
                 // credited one SMP quantum ("if (n == 0) n = quantum"), and
                 // time advances by executed / BX_SMP_PROCESSORS.
-                let expected = (retired + BOCHS_SMP_QUANTUM_TICKS * (cpu_count - 1)) / cpu_count;
+                let expected = (retired + emu.smp_quantum_ticks() * (cpu_count - 1)) / cpu_count;
                 assert_eq!(
                     elapsed, expected,
                     "SMP round must advance (retired + quantum credits) / cpu_count \
@@ -6100,5 +6661,253 @@ mod tests {
             madt.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
             ACPI_CHECKSUM_VALID_SUM
         );
+    }
+
+    #[test]
+    fn pic_deferred_clear_cannot_erase_reasserted_int_pin() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.cpu
+                    .clear_event(BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_INTR);
+                emu.device_manager.pic.irq_pending = true;
+                emu.device_manager.pic.irq_cleared = true;
+                emu.device_manager.pic.master.int_pin = true;
+
+                emu.sync_event_flags();
+
+                assert_ne!(
+                    emu.cpu.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_INTR,
+                    0
+                );
+                assert!(!emu.device_manager.pic.irq_pending);
+                assert!(!emu.device_manager.pic.irq_cleared);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(feature = "instrumentation")]
+    #[test]
+    fn rep_insw_respects_configured_page_write_permissions() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const CODE_ADDR: u64 = 0x1000;
+                const DEST_ADDR: u64 = 0x2000;
+                const UNMAPPED_PORT: u64 = 0x1234;
+
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.virt_write(CODE_ADDR, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
+                    .unwrap();
+                emu.mem_write(DEST_ADDR, &[0x34, 0x12]).unwrap();
+                emu.mem_protect(
+                    DEST_ADDR,
+                    0x1000,
+                    crate::cpu::instrumentation::MemPerms::READ,
+                );
+                emu.reg_write(X86Reg::Rip, CODE_ADDR);
+                emu.reg_write(X86Reg::Rdx, UNMAPPED_PORT);
+                emu.reg_write(X86Reg::Rdi, DEST_ADDR);
+                emu.reg_write(X86Reg::Rcx, 1);
+
+                unsafe { emu.run_cpu_batch(1) }.unwrap();
+                assert_eq!(emu.mem_read_vec(DEST_ADDR, 2).unwrap(), [0x34, 0x12]);
+                assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn split_page_rmw_faults_before_first_mmio_read() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                use std::sync::{
+                    atomic::{AtomicUsize, Ordering},
+                    Arc,
+                };
+
+                const CODE_ADDR: u64 = 0x10_0000;
+                const DEST_ADDR: u64 = 0x1F_FFFF;
+                const SECOND_LARGE_PAGE_PDE: u64 = 0x3008;
+                const UNMAPPED_PORT: u64 = 0x1234;
+
+                let reads = Arc::new(AtomicUsize::new(0));
+                let read_count = Arc::clone(&reads);
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatLong64,
+                )
+                .unwrap();
+                emu.mem_write(CODE_ADDR, &[0x66, 0x6D, 0xEB, 0xFE]).unwrap();
+                // The first byte remains mapped at the end of the first 2 MiB
+                // page; the second byte faults in the now-nonpresent page.
+                emu.mem_write(SECOND_LARGE_PAGE_PDE, &0u64.to_le_bytes())
+                    .unwrap();
+                emu.mmio_map(
+                    DEST_ADDR,
+                    1,
+                    Box::new(move |_addr, _size| {
+                        read_count.fetch_add(1, Ordering::SeqCst);
+                        0
+                    }),
+                    Box::new(|_addr, _size, _value| {}),
+                );
+                emu.reg_write(X86Reg::Rip, CODE_ADDR);
+                emu.reg_write(X86Reg::Rdx, UNMAPPED_PORT);
+                emu.reg_write(X86Reg::Rdi, DEST_ADDR);
+
+                unsafe { emu.run_cpu_batch(1) }.unwrap();
+                assert_eq!(emu.reg_read(X86Reg::Cr2), 0x20_0000);
+                assert_eq!(
+                    reads.load(Ordering::SeqCst),
+                    0,
+                    "first MMIO byte was consumed before second-page translation"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(feature = "instrumentation")]
+    #[test]
+    fn insw_permission_fault_precedes_destructive_mmio_read() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                use std::sync::{
+                    atomic::{AtomicUsize, Ordering},
+                    Arc,
+                };
+
+                const CODE_ADDR: u64 = 0x1000;
+                const DEST_ADDR: u64 = 0x20_0000;
+                const UNMAPPED_PORT: u64 = 0x1234;
+
+                let reads = Arc::new(AtomicUsize::new(0));
+                let writes = Arc::new(AtomicUsize::new(0));
+                let read_count = Arc::clone(&reads);
+                let write_count = Arc::clone(&writes);
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.virt_write(CODE_ADDR, &[0x66, 0x6D, 0xEB, 0xFE])
+                    .unwrap();
+                emu.mmio_map(
+                    DEST_ADDR,
+                    2,
+                    Box::new(move |_addr, _size| {
+                        read_count.fetch_add(1, Ordering::SeqCst);
+                        0
+                    }),
+                    Box::new(move |_addr, _size, _value| {
+                        write_count.fetch_add(1, Ordering::SeqCst);
+                    }),
+                );
+                emu.mem_protect(
+                    DEST_ADDR,
+                    0x1000,
+                    crate::cpu::instrumentation::MemPerms::READ,
+                );
+                emu.reg_write(X86Reg::Rip, CODE_ADDR);
+                emu.reg_write(X86Reg::Rdx, UNMAPPED_PORT);
+                emu.reg_write(X86Reg::Rdi, DEST_ADDR);
+
+                unsafe { emu.run_cpu_batch(1) }.unwrap();
+                assert_eq!(reads.load(Ordering::SeqCst), 0);
+                assert_eq!(writes.load(Ordering::SeqCst), 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn rep_insw_mmio_fallback_reads_once_per_input_word() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                use std::sync::{
+                    atomic::{AtomicUsize, Ordering},
+                    Arc,
+                };
+
+                const CODE_ADDR: u64 = 0x1000;
+                const DEST_ADDR: u64 = 0x20_0000;
+                const UNMAPPED_PORT: u64 = 0x1234;
+
+                let reads = Arc::new(AtomicUsize::new(0));
+                let writes = Arc::new(AtomicUsize::new(0));
+                let read_count = Arc::clone(&reads);
+                let write_count = Arc::clone(&writes);
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.virt_write(CODE_ADDR, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
+                    .unwrap();
+                emu.mmio_map(
+                    DEST_ADDR,
+                    2,
+                    Box::new(move |_addr, _size| {
+                        read_count.fetch_add(1, Ordering::SeqCst);
+                        0
+                    }),
+                    Box::new(move |_addr, _size, _value| {
+                        write_count.fetch_add(1, Ordering::SeqCst);
+                    }),
+                );
+                emu.reg_write(X86Reg::Rip, CODE_ADDR);
+                emu.reg_write(X86Reg::Rdx, UNMAPPED_PORT);
+                emu.reg_write(X86Reg::Rdi, DEST_ADDR);
+                emu.reg_write(X86Reg::Rcx, 1);
+
+                unsafe { emu.run_cpu_batch(1) }.unwrap();
+
+                assert_eq!(reads.load(Ordering::SeqCst), 1);
+                assert_eq!(writes.load(Ordering::SeqCst), 1);
+                assert_eq!(emu.reg_read(X86Reg::Rcx), 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn empty_dma_write_is_a_no_op() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                let before = emu.mem_read_vec(0x1000, 4).unwrap();
+
+                emu.memory.poke_ram(0x1000, &[]);
+
+                assert_eq!(emu.mem_read_vec(0x1000, 4).unwrap(), before);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

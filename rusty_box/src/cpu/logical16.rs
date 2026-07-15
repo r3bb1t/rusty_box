@@ -292,16 +292,26 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     #[inline]
     pub fn write_rmw_linear_word(&mut self, val: u16) {
         if self.address_xlation.pages > 2 {
-            // Host pointer cached from TLB hit — direct write
+            // Host pointer cached from TLB hit — direct write.
             self.address_xlation.write_pages_u16(val);
         } else if self.address_xlation.pages == 1 {
-            // Single-page physical write
-            self.mem_write_word(self.address_xlation.paddress1, val);
+            // Preserve the prepared physical translation and dispatch the
+            // original access width to CPU-local MMIO before ordinary memory.
+            let paddr = self.address_xlation.paddress1;
+            if !self.mmio_write(paddr, 2, val as u64) {
+                self.mem_write_word(paddr, val);
+            }
         } else {
-            // Cross-page (pages == 2): split write (little-endian)
+            // Cross-page RMW commits each prepared byte independently.
             let bytes = val.to_le_bytes();
-            self.mem_write_byte(self.address_xlation.paddress1, bytes[0]);
-            self.mem_write_byte(self.address_xlation.paddress2, bytes[1]);
+            let paddr1 = self.address_xlation.paddress1;
+            if !self.mmio_write(paddr1, 1, bytes[0] as u64) {
+                self.mem_write_byte(paddr1, bytes[0]);
+            }
+            let paddr2 = self.address_xlation.paddress2;
+            if !self.mmio_write(paddr2, 1, bytes[1] as u64) {
+                self.mem_write_byte(paddr2, bytes[1]);
+            }
         }
     }
 

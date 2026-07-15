@@ -310,10 +310,12 @@ const DAC_STATE_READ_MODE: u8 = 0x03;
 const PEL_CYCLES_PER_COLOR: u8 = 3;
 
 // ---- Register index masks ----
-const CRTC_INDEX_MASK: u8 = 0x1F;
+// Bochs vgacore.cc write: CRTC index is masked with `& 0x3f` (case 0x03d4/0x03b4).
+// The Sequencer and Graphics Controller indices are stored UNMASKED; out-of-range
+// DATA writes to those two are no-ops instead (see the `read_port`/`write_port`
+// match arms, which guard every register-array access by valid range).
+const CRTC_INDEX_MASK: u8 = 0x3F;
 const ATTR_INDEX_MASK: u8 = 0x1F;
-const SEQ_INDEX_MASK: u8 = 0x07;
-const GFX_INDEX_MASK: u8 = 0x0F;
 
 /// Text mode dimensions
 const TEXT_COLS: usize = 80;
@@ -613,6 +615,10 @@ pub(crate) struct BxVgaC {
     // =====================================================================
     /// VBE extension state (DISPI registers, resolution, banking, etc.)
     vbe: VbeState,
+    /// DDC monitor (EDID over I2C via VBE_DISPI register 0xB) — Bochs
+    /// vga.h bx_ddc_c ddc. Internal I2C state is not snapshotted (Bochs
+    /// persists only vbe.ddc_enabled, vga.cc register_state).
+    ddc: crate::iodev::ddc::BxDdcC,
     /// Total VBE memory size in bytes (configurable, default 16MB)
     vbe_memsize: u32,
     #[cfg(feature = "alloc")]
@@ -680,6 +686,7 @@ impl BxVgaC {
         let num_x_tiles = ((vbe.max_xres as u32 + VGA_X_TILESIZE - 1) / VGA_X_TILESIZE) as u16;
         let num_y_tiles = ((vbe.max_yres as u32 + VGA_Y_TILESIZE - 1) / VGA_Y_TILESIZE) as u16;
         let mut vga = Self {
+            ddc: crate::iodev::ddc::BxDdcC::new(),
             crtc_index: 0,
             crtc_regs: [0; 25],
             attr_index: 0,
@@ -956,10 +963,8 @@ impl BxVgaC {
         self.vbe.virtual_yres = yres;
 
         // Grow the dirty-tile grid to cover the (possibly larger) capability.
-        let num_x_tiles =
-            ((self.vbe.max_xres as u32 + VGA_X_TILESIZE - 1) / VGA_X_TILESIZE) as u16;
-        let num_y_tiles =
-            ((self.vbe.max_yres as u32 + VGA_Y_TILESIZE - 1) / VGA_Y_TILESIZE) as u16;
+        let num_x_tiles = ((self.vbe.max_xres as u32 + VGA_X_TILESIZE - 1) / VGA_X_TILESIZE) as u16;
+        let num_y_tiles = ((self.vbe.max_yres as u32 + VGA_Y_TILESIZE - 1) / VGA_Y_TILESIZE) as u16;
         if num_x_tiles != self.num_x_tiles || num_y_tiles != self.num_y_tiles {
             self.num_x_tiles = num_x_tiles;
             self.num_y_tiles = num_y_tiles;
@@ -1184,7 +1189,12 @@ impl BxVgaC {
             VBE_DISPI_IOPORT_DATA => self.vbe_read_index(self.vbe.curindex) as u32,
             VGA_CRTC_INDEX | VGA_CRTC_INDEX_MONO => self.crtc_index as u32,
             VGA_CRTC_DATA | VGA_CRTC_DATA_MONO => {
-                if self.crtc_index < 25 {
+                // Bochs vgacore.cc read: CRTC index 0x22 reads back the graphics
+                // controller's data latch for the currently selected read-map plane,
+                // instead of a CRTC register.
+                if self.crtc_index == 0x22 {
+                    self.latch[self.graphics_regs[GFX_REG_READ_MAP_SELECT] as usize & 3] as u32
+                } else if self.crtc_index < 25 {
                     self.crtc_regs[self.crtc_index as usize] as u32
                 } else {
                     0
@@ -1333,6 +1343,23 @@ impl BxVgaC {
             }
             VGA_CRTC_DATA | VGA_CRTC_DATA_MONO if self.crtc_index < 25 => {
                 let index = self.crtc_index as usize;
+
+                // Bochs vgacore.cc write: CR11 bit 7 (write_protect) locks CRTC
+                // registers 0x00-0x06 against writes entirely; a write to 0x07
+                // while protected updates only bit 4 (line-compare bit 8),
+                // leaving the rest of the register untouched. CR11 itself
+                // (index 0x11) is not protected, so it can always be cleared.
+                if (self.crtc_regs[CRTC_VERT_RETRACE_END] & 0x80) != 0 && index < 0x08 {
+                    if index == CRTC_OVERFLOW {
+                        self.crtc_regs[CRTC_OVERFLOW] =
+                            (self.crtc_regs[CRTC_OVERFLOW] & !0x10) | (value & 0x10);
+                        self.vga_mem_updated = 1;
+                        #[cfg(feature = "alloc")]
+                        self.redraw_current_legacy_area();
+                    }
+                    return;
+                }
+
                 let old_value = self.crtc_regs[index];
                 if old_value != value {
                     self.crtc_regs[index] = value;
@@ -1422,7 +1449,10 @@ impl BxVgaC {
                     self.attr_regs[self.attr_index as usize] = value;
                 }
             VGA_SEQ_INDEX => {
-                self.seq_index = value & SEQ_INDEX_MASK;
+                // Bochs vgacore.cc write: sequencer index is stored unmasked
+                // (`s.sequencer.index = value;`). Out-of-range DATA writes are
+                // no-ops below, not aliased into the register array.
+                self.seq_index = value;
             }
             VGA_SEQ_DATA
                 if self.seq_index < 5 => {
@@ -1443,7 +1473,10 @@ impl BxVgaC {
                     }
                 }
             VGA_GRAPHICS_INDEX => {
-                self.graphics_index = value & GFX_INDEX_MASK;
+                // Bochs vgacore.cc write: graphics controller index is stored
+                // unmasked (`s.graphics_ctrl.index = value;`). Out-of-range
+                // DATA writes are no-ops below, not aliased into the register array.
+                self.graphics_index = value;
             }
             VGA_GRAPHICS_DATA
                 if self.graphics_index < 9 => {
@@ -1480,19 +1513,10 @@ impl BxVgaC {
                     }
                 }
 
-            // Misc Output Read port (0x3CC) - also accept writes for compatibility
-            VGA_MISC_OUTPUT => {
-                self.misc_output = value;
-                self.misc_color_emulation = (value & MISC_OUT_COLOR_EMULATION) != 0;
-                self.misc_enable_ram = (value & MISC_OUT_ENABLE_RAM) != 0;
-                self.misc_clock_select =
-                    (value >> MISC_OUT_CLOCK_SEL_SHIFT) & MISC_OUT_CLOCK_SEL_MASK;
-                self.misc_select_high_bank = (value & MISC_OUT_HIGH_BANK) != 0;
-                self.misc_horiz_sync_pol = (value & MISC_OUT_HORIZ_POL) != 0;
-                self.misc_vert_sync_pol = (value & MISC_OUT_VERT_POL) != 0;
-                // Bochs vgacore.cc
-                self.calculate_retrace_timing();
-            }
+            // Misc Output Read port (0x3CC). Bochs vgacore.cc write: `case 0x03cc:
+            // /* Graphics 1 Position (EGA) */ // ignore, EGA only???` — the real
+            // Misc Output write port is 0x3C2 (VGA_MISC_OUTPUT_WRITE below).
+            VGA_MISC_OUTPUT => {}
 
             // Misc Output Write port - CRITICAL for BIOS color mode setup
             VGA_MISC_OUTPUT_WRITE => {
@@ -3425,6 +3449,16 @@ impl BxVgaC {
             VBE_DISPI_INDEX_VIRT_WIDTH => self.vbe.virtual_xres,
             VBE_DISPI_INDEX_VIRT_HEIGHT => self.vbe.virtual_yres,
             VBE_DISPI_INDEX_VIDEO_MEMORY_64K => (self.vbe_memsize >> 16) as u16,
+            VBE_DISPI_INDEX_DDC => {
+                // Bochs vga.cc vbe_read VBE_DISPI_INDEX_DDC: bit 7 reports
+                // the interface enabled, low bits are the DDC line states;
+                // disabled reads as 0x000F.
+                if self.vbe.ddc_enabled {
+                    (1 << 7) | self.ddc.read() as u16
+                } else {
+                    0x000F
+                }
+            }
             _ => {
                 tracing::error!("VBE read: unknown index 0x{:x}", index);
                 0
@@ -3730,7 +3764,15 @@ impl BxVgaC {
                 // Read-only in Bochs; ignore writes
             }
             VBE_DISPI_INDEX_DDC => {
-                self.vbe.ddc_enabled = (value16 & 1) != 0;
+                // Bochs vga.cc vbe_write VBE_DISPI_INDEX_DDC: bit 7 enables
+                // the DDC interface; bits 0/1 drive the I2C clock (DCK) and
+                // data (DDA) lines of the monitor's EDID channel.
+                if (value16 >> 7) & 1 != 0 {
+                    self.vbe.ddc_enabled = true;
+                    self.ddc.write(value16 & 1 != 0, (value16 >> 1) & 1 != 0);
+                } else {
+                    self.vbe.ddc_enabled = false;
+                }
             }
             _ => {
                 tracing::error!(
@@ -3788,7 +3830,10 @@ mod tests {
         let mut vga = pci_vga();
         vga.pci_write(0x10, 0xFFFF_FFFF, 4);
         assert_eq!(vga.pci_read(0x10, 4), 0xFF00_0008); // ~(16MiB-1) | prefetchable
-        assert!(vga.take_pending_lfb_relocate().is_none(), "probe must not commit");
+        assert!(
+            vga.take_pending_lfb_relocate().is_none(),
+            "probe must not commit"
+        );
     }
 
     #[test]
@@ -4144,5 +4189,151 @@ mod tests {
             .find(|tile| tile.x == 0 && tile.y == 0)
             .expect("missing origin tile");
         assert_eq!(&tile.rgba[0..4], &[0x33, 0x22, 0x11, 0xff]);
+    }
+
+    // ---- Finding #5: write to 0x3CC (Misc Output *read* port) is ignored ----
+    // Bochs vgacore.cc write: `case 0x03cc: /* Graphics 1 Position (EGA) */ // ignore`.
+    // The real Misc Output write port is 0x3C2.
+    #[test]
+    fn misc_output_write_to_0x3cc_is_ignored() {
+        let mut vga = BxVgaC::new();
+
+        // Program a known, distinctive Misc Output value via the real write
+        // port (0x3C2). Keep color_emulation=1 so the color-mode ports stay
+        // routable for the rest of the test.
+        vga.write_port(VGA_MISC_OUTPUT_WRITE, 0xAB, 1);
+        assert_eq!(vga.misc_output, 0xAB);
+        assert!(vga.misc_color_emulation);
+
+        // A write to 0x3CC must be a no-op (Bochs: "Graphics 1 Position (EGA)").
+        vga.write_port(VGA_MISC_OUTPUT, 0x00, 1);
+
+        assert_eq!(
+            vga.misc_output, 0xAB,
+            "0x3CC write must not alter Misc Output"
+        );
+        assert!(
+            vga.misc_color_emulation,
+            "0x3CC write must not flip color/mono emulation"
+        );
+        // Read path at 0x3CC is unaffected and still reflects the programmed value.
+        assert_eq!(vga.read_port(VGA_MISC_OUTPUT, 1, 0), 0xAB);
+    }
+
+    // ---- Finding #6a: Sequencer index is stored unmasked; out-of-range DATA
+    // writes are no-ops (Bochs vgacore.cc write: `default:` case does nothing) ----
+    #[test]
+    fn sequencer_out_of_range_index_data_write_is_noop() {
+        let mut vga = BxVgaC::new();
+        vga.seq_regs = [0x11, 0x22, 0x33, 0x44, 0x55];
+
+        vga.write_port(VGA_SEQ_INDEX, 8, 1);
+        assert_eq!(vga.seq_index, 8, "sequencer index must be stored unmasked");
+        vga.write_port(VGA_SEQ_DATA, 0x00, 1);
+
+        // Index 8 is out of range (valid: 0..=4); the write must be dropped,
+        // not aliased onto index 0 (sequencer reset), which would have reset
+        // the sequencer and cleared char map state.
+        assert_eq!(vga.seq_regs, [0x11, 0x22, 0x33, 0x44, 0x55]);
+    }
+
+    // ---- Finding #6b: CRTC index 0x22 read-back returns the graphics latch,
+    // not an aliased register (Bochs vgacore.cc read: `case 0x22`) ----
+    #[test]
+    fn crtc_index_0x22_reads_back_graphics_latch() {
+        let mut vga = BxVgaC::new();
+        // Give CR2 (start horizontal blank) a sentinel value distinct from the
+        // latch. With the old `& 0x1F` masking, index 0x22 aliased onto CR2.
+        vga.crtc_regs[CRTC_START_HORIZ_BLANK] = 0xAB;
+        vga.latch = [0x11, 0x22, 0x33, 0x44];
+        vga.graphics_regs[GFX_REG_READ_MAP_SELECT] = 2;
+
+        vga.write_port(VGA_CRTC_INDEX, 0x22, 1);
+        assert_eq!(
+            vga.crtc_index, 0x22,
+            "CRTC index must be masked with 0x3F, not 0x1F"
+        );
+
+        let data = vga.read_port(VGA_CRTC_DATA, 1, 0);
+        assert_eq!(
+            data, 0x33,
+            "0x3D5 must read back latch[read_map_select], not CR2"
+        );
+    }
+
+    // ---- Finding #6c: Graphics Controller index is stored unmasked; out-of-range
+    // DATA writes are no-ops (Bochs vgacore.cc write: `default:` case does nothing) ----
+    #[test]
+    fn graphics_out_of_range_index_data_write_is_noop() {
+        let mut vga = BxVgaC::new();
+        vga.graphics_regs = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+        vga.write_port(VGA_GRAPHICS_INDEX, 0x20, 1);
+        assert_eq!(
+            vga.graphics_index, 0x20,
+            "graphics index must be stored unmasked"
+        );
+        vga.write_port(VGA_GRAPHICS_DATA, 0xFF, 1);
+
+        assert_eq!(vga.graphics_regs, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    // ---- Finding #7: CR11 bit 7 write-protects CRTC registers 0-7 ----
+    // Bochs vgacore.cc write: when `CRTC.reg[0x11] & 0x80` is set, writes to
+    // CRTC indices 0x00-0x06 are dropped and a write to 0x07 updates only bit 4.
+    #[test]
+    fn crtc_write_protect_locks_registers_0_to_7() {
+        let mut vga = BxVgaC::new();
+
+        // Seed CR0..CR7 with distinct sentinel values while unprotected.
+        for index in 0u32..=7 {
+            vga.write_port(VGA_CRTC_INDEX, index, 1);
+            let sentinel = 0x05 + index as u8; // CR7 sentinel (0x0C) has bit4 clear
+            vga.write_port(VGA_CRTC_DATA, sentinel as u32, 1);
+        }
+        let seeded = vga.crtc_regs;
+        assert_eq!(seeded[0x07], 0x0C);
+
+        // Engage write protection via CR11 bit 7.
+        vga.write_port(VGA_CRTC_INDEX, CRTC_VERT_RETRACE_END as u32, 1);
+        vga.write_port(VGA_CRTC_DATA, 0x80, 1);
+        assert_eq!(vga.crtc_regs[CRTC_VERT_RETRACE_END], 0x80);
+
+        // Attempt to overwrite CR0..CR6: must be dropped entirely.
+        for index in 0u32..=6 {
+            vga.write_port(VGA_CRTC_INDEX, index, 1);
+            vga.write_port(VGA_CRTC_DATA, 0xFF, 1);
+            assert_eq!(
+                vga.crtc_regs[index as usize], seeded[index as usize],
+                "CR{index} must be unchanged while write-protected"
+            );
+        }
+
+        // CR7 write while protected: only bit 4 (line-compare bit 8) may change.
+        vga.write_port(VGA_CRTC_INDEX, CRTC_OVERFLOW as u32, 1);
+        vga.write_port(VGA_CRTC_DATA, 0xFF, 1);
+        assert_eq!(
+            vga.crtc_regs[CRTC_OVERFLOW],
+            seeded[CRTC_OVERFLOW] | 0x10,
+            "CR7 write while protected must set only bit 4"
+        );
+
+        vga.write_port(VGA_CRTC_INDEX, CRTC_OVERFLOW as u32, 1);
+        vga.write_port(VGA_CRTC_DATA, 0x00, 1);
+        assert_eq!(
+            vga.crtc_regs[CRTC_OVERFLOW],
+            seeded[CRTC_OVERFLOW] & !0x10,
+            "CR7 write while protected must clear only bit 4"
+        );
+
+        // Disengage write protection (CR11 is never itself protected).
+        vga.write_port(VGA_CRTC_INDEX, CRTC_VERT_RETRACE_END as u32, 1);
+        vga.write_port(VGA_CRTC_DATA, 0x00, 1);
+        assert_eq!(vga.crtc_regs[CRTC_VERT_RETRACE_END], 0x00);
+
+        // Writes to CR0..CR6 now go through normally again.
+        vga.write_port(VGA_CRTC_INDEX, 0, 1);
+        vga.write_port(VGA_CRTC_DATA, 0x99, 1);
+        assert_eq!(vga.crtc_regs[0], 0x99);
     }
 }

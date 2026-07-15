@@ -233,7 +233,7 @@ fn run() -> Status {
     emu.configure_memory_in_cmos_from_config();
     emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
     emu.configure_boot_sequence(2, 0, 0);
-    emu.attach_disk_data_ref(0, 0, DLX_DISK, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
+    emu.attach_disk_data_ref(0, 0, DLX_DISK, DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT);
 
     if let Err(e) = emu.reset(ResetReason::Hardware) {
         bail!("Reset: {:?}", e);

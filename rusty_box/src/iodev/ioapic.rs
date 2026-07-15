@@ -894,6 +894,12 @@ impl BxIoApic {
     }
 
     /// Take all pending deliveries, resetting the queue.
+    /// True when deferred deliveries are queued (SMP round servicing gate).
+    #[inline]
+    pub(crate) fn has_pending_deliveries(&self) -> bool {
+        self.num_pending_deliveries > 0
+    }
+
     pub(crate) fn take_pending_deliveries(
         &mut self,
     ) -> (

@@ -235,7 +235,7 @@ fn run_emulator(
             emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
             emu.configure_boot_sequence(2, 0, 0);
             let disk_path_str = disk_path.to_string_lossy().to_string();
-            emu.attach_disk(0, 0, &disk_path_str, DLX_CYLINDERS, DLX_HEADS, DLX_SPT)
+            emu.attach_disk(0, 0, &disk_path_str, DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT)
                 .expect("Failed to attach DLX disk image");
             println!("DLX disk attached: {}", disk_path.display());
         }

@@ -797,6 +797,13 @@ impl BxPcSystemC {
 
     /// Drain the buffer of timer owners that fired since the last drain.
     /// Returns `(owners, counts, count)` — iterate entries `0..count`.
+    /// True when `tickn` recorded timer fires that have not been dispatched.
+    /// Cheap read for the SMP round loop's servicing gate.
+    #[inline]
+    pub fn has_fired_timers(&self) -> bool {
+        self.num_fired > 0
+    }
+
     pub fn take_fired_timers(
         &mut self,
     ) -> ([TimerOwner; BX_MAX_TIMERS], [u32; BX_MAX_TIMERS], usize) {

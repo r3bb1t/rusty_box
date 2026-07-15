@@ -1,6 +1,6 @@
 // cpu/cpudb/intel/corei7_skylake-x.cc
 
-use crate::cpu::cpuid::BxCpuIdTrait;
+use crate::cpu::cpuid::{BxCpuIdTrait, CpuidFreq, CpuidLeaf};
 use crate::cpu::decoder::{features::X86Feature, BX_ISA_EXTENSIONS_ARRAY_SIZE};
 
 use bitflags::bitflags;
@@ -306,11 +306,79 @@ const EXT1_EDX_BASE: CpuIdExt1Edx = CpuIdExt1Edx::NX
 // ─── Skylake-X struct ─────────────────────────────────────────────────────
 
 #[derive(Debug)]
-pub struct Corei7SkylakeX {}
+pub struct Corei7SkylakeX {
+    /// How the CPUID frequency leaves 0x15/0x16 are reported.
+    /// Bochs cpuid.cc get_freq_leaf_15/get_freq_leaf_16 (bochs-emu/Bochs#791).
+    cpuid_freq: CpuidFreq,
+    /// Emulated tick rate, consulted only in `CpuidFreq::Ips` mode.
+    ips: u32,
+}
+
+impl Corei7SkylakeX {
+    /// Leaf 0x15 (TSC / core crystal clock) per the configured mode.
+    /// Bochs cpuid.cc bx_cpuid_t::get_freq_leaf_15.
+    fn get_freq_leaf_15(&self) -> CpuidLeaf {
+        match self.cpuid_freq {
+            // EBX=0: TSC/crystal ratio not enumerated, ECX=0: crystal not
+            // enumerated; guests fall back to timer calibration and measure
+            // the true rate.
+            CpuidFreq::None => CpuidLeaf::zeros(),
+            // TSC frequency = core crystal clock * EBX/EAX: report the true
+            // tick rate as a crystal running at `ips` Hz with a 1/1 ratio.
+            CpuidFreq::Ips => CpuidLeaf {
+                eax: 1,
+                ebx: 1,
+                ecx: self.ips,
+                edx: 0,
+            },
+            // Hardware dump: Bochs corei7_skylake-x.cc — denominator 2,
+            // numerator 0x124 (292), nominal crystal not enumerated.
+            CpuidFreq::Hardware => CpuidLeaf {
+                eax: 0x0000_0002,
+                ebx: 0x0000_0124,
+                ecx: 0x0000_0000,
+                edx: 0x0000_0000,
+            },
+        }
+    }
+
+    /// Leaf 0x16 (processor frequency information) per the configured mode.
+    /// Bochs cpuid.cc bx_cpuid_t::get_freq_leaf_16. Also serves leaves above
+    /// the max standard leaf (Bochs corei7_skylake-x.cc `default:` arm).
+    fn get_freq_leaf_16(&self) -> CpuidLeaf {
+        match self.cpuid_freq {
+            // EAX=0: processor base frequency not enumerated.
+            CpuidFreq::None => CpuidLeaf::zeros(),
+            // Base and max frequency of the emulated tick rate in MHz.
+            CpuidFreq::Ips => {
+                let mhz = ((self.ips as u64 + 500_000) / 1_000_000) as u32;
+                CpuidLeaf {
+                    eax: mhz,
+                    ebx: mhz,
+                    ecx: 100,
+                    edx: 0,
+                }
+            }
+            // Hardware dump: Bochs corei7_skylake-x.cc —
+            // 3500 MHz base / 4000 MHz max / 100 MHz bus.
+            CpuidFreq::Hardware => CpuidLeaf {
+                eax: 0x0000_0DAC,
+                ebx: 0x0000_0FA0,
+                ecx: 0x0000_0064,
+                edx: 0x0000_0000,
+            },
+        }
+    }
+}
 
 impl BxCpuIdTrait for Corei7SkylakeX {
     fn get_name(&self) -> &'static str {
         "corei7_skylake_x"
+    }
+
+    fn set_cpuid_freq(&mut self, freq: CpuidFreq, ips: u32) {
+        self.cpuid_freq = freq;
+        self.ips = ips;
     }
 
     fn get_vmx_extensions_bitmask(&self) -> Option<crate::cpu::cpuid::VMXExtensions> {
@@ -349,7 +417,10 @@ impl BxCpuIdTrait for Corei7SkylakeX {
     }
 
     fn new() -> Self {
-        Self {}
+        Self {
+            cpuid_freq: CpuidFreq::default(),
+            ips: 4_000_000, // Bochs config.cc BXPN_IPS default; overwritten via set_cpuid_freq()
+        }
     }
 
     /// Returns ISA extensions bitmask for Skylake-X.
@@ -451,16 +522,13 @@ impl BxCpuIdTrait for Corei7SkylakeX {
     fn get_cpuid_leaf(&self, eax: u32, ecx: u32) -> (u32, u32, u32, u32) {
         match eax {
             // ── Basic CPUID Information ─────────────────────────────────
-            // Max leaf = 0x14 (stop before leaf 0x15/0x16).
-            // Bochs's Alpine config uses a generic CPU model without
-            // leaf 0x15 (TSC crystal ratio) or 0x16 (processor frequency).
-            // Without these leaves, the kernel falls back to PIT-based TSC
-            // calibration, which correctly measures our emulated tick rate
-            // (= IPS setting). With leaves 0x15/0x16 reporting 3.5 GHz,
-            // the kernel trusts that value and never calibrates — causing
-            // all timer operations to run ~233x too slow at IPS=15M.
+            // Bochs corei7_skylake-x.cc: max_std_leaf = 0x16.
+            // How leaves 0x15/0x16 report frequencies is governed by the
+            // cpuid_freq option (get_freq_leaf_15/16 below) — with the
+            // default CpuidFreq::None they read as not enumerated and the
+            // kernel PIT-calibrates the true tick rate (= IPS setting).
             0x00000000 => (
-                0x00000014, // Max basic leaf = 20 (no leaf 0x15/0x16)
+                0x00000016, // Max basic leaf (Bochs corei7_skylake-x.cc)
                 0x756e6547, // "Genu"
                 0x6c65746e, // "ntel"
                 0x49656e69, // "ineI" → "GenuineIntel"
@@ -594,25 +662,14 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             0x0000000E..=0x00000014 => (0, 0, 0, 0),
 
             // ── Leaf 15: TSC/Crystal Clock Ratio ────────────────────────
-            // Bochs corei7_skylake-x.cc
-            // EAX=2, EBX=0x124 (292), ECX=0 (crystal freq unknown)
-            // TSC_freq = crystal_freq * (EBX/EAX).
-            // ECX=0 means kernel cannot compute TSC freq from this leaf.
-            0x00000015 => (
-                0x00000002, // EAX: denominator
-                0x00000124, // EBX: numerator
-                0x00000000, // ECX: nominal crystal freq (0 = unknown)
-                0x00000000,
-            ),
+            // TSC_freq = crystal_freq * (EBX/EAX); reporting mode governed
+            // by cpuid_freq. Bochs cpuid.cc get_freq_leaf_15.
+            0x00000015 => self.get_freq_leaf_15().as_tuple(),
 
             // ── Leaf 16: Processor Frequency ────────────────────────────
-            // Bochs corei7_skylake-x.cc (also the default case)
-            0x00000016 => (
-                0x00000DAC, // EAX: base freq = 3500 MHz
-                0x00000FA0, // EBX: max freq = 4000 MHz
-                0x00000064, // ECX: bus freq = 100 MHz
-                0x00000000,
-            ),
+            // Reporting mode governed by cpuid_freq.
+            // Bochs cpuid.cc get_freq_leaf_16 (also the default case).
+            0x00000016 => self.get_freq_leaf_16().as_tuple(),
 
             // ── Extended CPUID Leaves ───────────────────────────────────
             0x80000000 => (
@@ -658,7 +715,9 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                     (0, 0, 0, 0) // beyond max extended leaf
                 } else if eax > 0x00000016 && eax < 0x80000000 {
                     // Beyond max standard leaf — Bochs returns leaf 0x16 data
-                    (0x00000DAC, 0x00000FA0, 0x00000064, 0x00000000)
+                    // (corei7_skylake-x.cc `case 0x16: default:` merged arm),
+                    // subject to the same cpuid_freq mode.
+                    self.get_freq_leaf_16().as_tuple()
                 } else {
                     (0, 0, 0, 0)
                 }
@@ -673,7 +732,7 @@ mod tests {
 
     #[test]
     fn skylake_x_extended_topology_matches_bochs() {
-        let cpuid = Corei7SkylakeX {};
+        let cpuid = Corei7SkylakeX::new();
 
         assert_eq!(
             cpuid.get_cpuid_leaf(0x0000_0001, 0).1,
@@ -693,7 +752,7 @@ mod tests {
 
     #[test]
     fn skylake_x_does_not_advertise_incomplete_avx512() {
-        let cpuid = Corei7SkylakeX {};
+        let cpuid = Corei7SkylakeX::new();
         let (_, leaf7_ebx, _, _) = cpuid.get_cpuid_leaf(0x0000_0007, 0);
         assert_eq!(leaf7_ebx & CpuIdStd7Ebx::AVX512F.bits(), 0);
         assert_eq!(leaf7_ebx & CpuIdStd7Ebx::AVX512VL.bits(), 0);
@@ -712,12 +771,71 @@ mod tests {
 
     #[test]
     fn skylake_x_advertises_fma_after_vex_fma3_support() {
-        let cpuid = Corei7SkylakeX {};
+        let cpuid = Corei7SkylakeX::new();
         let (_, _, leaf1_ecx, _) = cpuid.get_cpuid_leaf(0x0000_0001, 0);
         assert_ne!(leaf1_ecx & CpuIdStd1Ecx::FMA.bits(), 0);
 
         let bitmask = cpuid.get_isa_extensions_bitmask();
         let idx = X86Feature::IsaAvxFma as usize;
         assert_ne!(bitmask[idx / 32] & (1 << (idx % 32)), 0);
+    }
+
+    #[test]
+    fn skylake_x_max_std_leaf_matches_bochs_in_every_cpuid_freq_mode() {
+        // Bochs corei7_skylake-x.cc: max_std_leaf = 0x16 regardless of the
+        // cpuid_freq mode — only the leaf CONTENTS change.
+        for freq in [CpuidFreq::Hardware, CpuidFreq::None, CpuidFreq::Ips] {
+            let mut cpuid = Corei7SkylakeX::new();
+            cpuid.set_cpuid_freq(freq, 4_000_000);
+            assert_eq!(cpuid.get_cpuid_leaf(0, 0).0, 0x0000_0016);
+        }
+    }
+
+    #[test]
+    fn skylake_x_cpuid_freq_default_reports_leaves_not_enumerated() {
+        // rusty_box default is CpuidFreq::None: all-zero leaves 0x15/0x16
+        // (the SDM-sanctioned opt-out) so guests PIT-calibrate the true rate.
+        let cpuid = Corei7SkylakeX::new();
+        assert_eq!(cpuid.get_cpuid_leaf(0x0000_0015, 0), (0, 0, 0, 0));
+        assert_eq!(cpuid.get_cpuid_leaf(0x0000_0016, 0), (0, 0, 0, 0));
+        // The above-max-leaf fallthrough serves leaf 0x16 data (Bochs
+        // corei7_skylake-x.cc `default:` arm) and must follow the mode too.
+        assert_eq!(cpuid.get_cpuid_leaf(0x0000_0017, 0), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn skylake_x_cpuid_freq_hardware_reports_bochs_dump_values() {
+        // Bochs corei7_skylake-x.cc leaf 0x15/0x16 hardware dump.
+        let mut cpuid = Corei7SkylakeX::new();
+        cpuid.set_cpuid_freq(CpuidFreq::Hardware, 4_000_000);
+        assert_eq!(
+            cpuid.get_cpuid_leaf(0x0000_0015, 0),
+            (0x0000_0002, 0x0000_0124, 0x0000_0000, 0x0000_0000)
+        );
+        assert_eq!(
+            cpuid.get_cpuid_leaf(0x0000_0016, 0),
+            (0x0000_0DAC, 0x0000_0FA0, 0x0000_0064, 0x0000_0000)
+        );
+        assert_eq!(
+            cpuid.get_cpuid_leaf(0x0000_0017, 0),
+            (0x0000_0DAC, 0x0000_0FA0, 0x0000_0064, 0x0000_0000)
+        );
+    }
+
+    #[test]
+    fn skylake_x_cpuid_freq_ips_reports_true_tick_rate() {
+        // Bochs cpuid.cc get_freq_leaf_15/16 in `ips` mode: leaf 0x15 is a
+        // crystal of `ips` Hz with a 1/1 ratio; leaf 0x16 is `ips` in MHz
+        // (rounded), 100 MHz bus.
+        let mut cpuid = Corei7SkylakeX::new();
+        cpuid.set_cpuid_freq(CpuidFreq::Ips, 4_000_000);
+        assert_eq!(cpuid.get_cpuid_leaf(0x0000_0015, 0), (1, 1, 4_000_000, 0));
+        assert_eq!(cpuid.get_cpuid_leaf(0x0000_0016, 0), (4, 4, 100, 0));
+
+        // Rounding: 120_600_000 -> 121 MHz; u32::MAX ips must not overflow.
+        cpuid.set_cpuid_freq(CpuidFreq::Ips, 120_600_000);
+        assert_eq!(cpuid.get_cpuid_leaf(0x0000_0016, 0).0, 121);
+        cpuid.set_cpuid_freq(CpuidFreq::Ips, u32::MAX);
+        assert_eq!(cpuid.get_cpuid_leaf(0x0000_0016, 0).0, 4295);
     }
 }

@@ -244,7 +244,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         paddr: BxPhyAddress,
         value: u32,
         mem: &mut BxMemC,
-        page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
     ) -> Result<()> {
         let mut data = value.to_le_bytes();
         // We need to pass &[&BxCpuC] but we have &mut self
@@ -256,7 +255,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // write_physical_page returns crate::memory::Result which is Result<T, crate::error::Error>
         // We need to convert it to Result<T, CpuError>
         let result =
-            mem.write_physical_page(&[cpu_ref], page_write_stamp_table, paddr, 4, &mut data);
+            mem.write_physical_page(&[cpu_ref], paddr, 4, &mut data);
+        // Bochs handleSMC flushes the writer synchronously at the store — a
+        // guest page table living inside a cached code page must invalidate
+        // the stale traces immediately (A/D-bit updates land here).
+        self.smc_sync_after_phys_write();
         match result {
             Ok(()) => Ok(()),
             Err(crate::error::Error::Memory(e)) => Err(super::CpuError::Memory(e)),
@@ -274,7 +277,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         user: bool,
         rw: MemoryAccessType,
         mem: &mut BxMemC,
-        page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
     ) -> Result<BxPhyAddress> {
         // Get page directory base from CR3
         let cr3 = self.cr3;
@@ -342,7 +344,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     entry_addr[BX_LEVEL_PDE],
                     entry[BX_LEVEL_PDE],
                     mem,
-                    page_write_stamp_table,
                 )?;
             }
             let ppf_4m = (entry[BX_LEVEL_PDE] & 0xFFC00000) as u64;
@@ -421,7 +422,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_LEVEL_PTE,
             is_write,
             mem,
-            page_write_stamp_table,
         )?;
 
         // Extract page frame from PTE
@@ -459,7 +459,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         leaf: usize,
         write: bool,
         mem: &mut BxMemC,
-        page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
     ) -> Result<()> {
         // Update PDE accessed bit if needed (when accessing PTE)
         if leaf == BX_LEVEL_PTE && (entry[BX_LEVEL_PDE] & pte_bits32::ACCESSED) == 0 {
@@ -468,7 +467,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 entry_addr[BX_LEVEL_PDE],
                 entry[BX_LEVEL_PDE],
                 mem,
-                page_write_stamp_table,
             )?;
         }
 
@@ -479,7 +477,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if set_dirty {
                 entry[leaf] |= pte_bits32::DIRTY; // Set dirty bit
             }
-            self.write_physical_dword(entry_addr[leaf], entry[leaf], mem, page_write_stamp_table)?;
+            self.write_physical_dword(entry_addr[leaf], entry[leaf], mem)?;
         }
 
         Ok(())
@@ -499,7 +497,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         rw: MemoryAccessType,
         a20_mask: BxPhyAddress,
         mem: &mut BxMemC,
-        page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
     ) -> Result<BxPhyAddress> {
         // Mask to 32 bits if not in long mode
         let laddr = if self.long_mode() {
@@ -517,11 +514,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Paging is enabled — dispatch to the appropriate paging mode.
         // Bochs paging.cc
         let result = if self.long_mode() {
-            self.translate_linear_long_mode_slow(laddr, user, rw, mem, page_write_stamp_table)
+            self.translate_linear_long_mode_slow(laddr, user, rw, mem)
         } else if self.cr4.pae() {
-            self.translate_linear_pae_slow(laddr, user, rw, mem, page_write_stamp_table)
+            self.translate_linear_pae_slow(laddr, user, rw, mem)
         } else {
-            self.translate_linear_legacy(laddr, user, rw, mem, page_write_stamp_table)
+            self.translate_linear_legacy(laddr, user, rw, mem)
         };
 
         match result {
@@ -611,7 +608,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         user: bool,
         rw: MemoryAccessType,
         mem: &mut BxMemC,
-        _page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
     ) -> Result<BxPhyAddress> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
@@ -718,7 +714,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 let cpu_ref = as_cpu_ref();
                 if let Err(e) = mem.write_physical_page(
                     &[cpu_ref],
-                    _page_write_stamp_table,
                     entry_addr[BX_LEVEL_PDE],
                     8,
                     &mut data.clone(),
@@ -820,7 +815,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let cpu_ref = as_cpu_ref();
             if let Err(e) = mem.write_physical_page(
                 &[cpu_ref],
-                _page_write_stamp_table,
                 entry_addr[BX_LEVEL_PDE],
                 8,
                 &mut data.clone(),
@@ -843,7 +837,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let cpu_ref = as_cpu_ref();
             if let Err(e) = mem.write_physical_page(
                 &[cpu_ref],
-                _page_write_stamp_table,
                 entry_addr[BX_LEVEL_PTE],
                 8,
                 &mut data.clone(),
@@ -883,7 +876,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         user: bool,
         rw: MemoryAccessType,
         mem: &mut BxMemC,
-        _page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
     ) -> Result<BxPhyAddress> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
@@ -1068,7 +1060,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 let cpu_ref = as_cpu_ref();
                 if let Err(e) = mem.write_physical_page(
                     &[cpu_ref],
-                    _page_write_stamp_table,
                     entry_addr[level],
                     8,
                     &mut data.clone(),
@@ -1093,7 +1084,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let cpu_ref = as_cpu_ref();
             if let Err(e) = mem.write_physical_page(
                 &[cpu_ref],
-                _page_write_stamp_table,
                 entry_addr[leaf],
                 8,
                 &mut data.clone(),

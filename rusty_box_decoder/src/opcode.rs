@@ -14,6 +14,8 @@ macro_rules! back_to_enum {
 
         impl $name {
             const ALL_VARIANTS: &'static [$name] = &[$($name::$vname,)*];
+            /// Number of valid sequential opcode discriminants.
+            pub const COUNT: usize = Self::ALL_VARIANTS.len();
 
             /// Convert from u16 in const context (safe, no transmute).
             /// Valid because Opcode is `#[repr(u16)]` with sequential discriminants.

@@ -298,14 +298,10 @@ impl NativeVmSettings {
             } else if let Some(creation) = &creation {
                 let geometry = calculate_hard_disk_geometry(creation.size, SectorSize::Bytes512)
                     .map_err(|error| format!("Failed to inspect hard disk: {error}"))?;
-                if geometry.cylinders > u16::MAX as u64 {
-                    return Err(format!(
-                        "Hard disk geometry exceeds BIOS limit: {} cylinders",
-                        geometry.cylinders
-                    ));
-                }
+                // `calculate_hard_disk_geometry` already caps cylinders at BOCHS_MAX_CYLINDERS
+                // (2^24), which fits the u32 geometry field — no extra limit needed.
                 crate::args::DiskGeometry {
-                    cylinders: geometry.cylinders as u16,
+                    cylinders: geometry.cylinders as u32,
                     heads: geometry.heads as u8,
                     sectors_per_track: geometry.sectors_per_track as u8,
                 }
@@ -1637,7 +1633,10 @@ impl NativeShellApp {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Cylinders").strong().color(TEXT_PRIMARY));
                             changed |= ui
-                                .add(egui::DragValue::new(&mut chs.cylinders).range(1..=u16::MAX))
+                                .add(
+                                    egui::DragValue::new(&mut chs.cylinders)
+                                        .range(1..=(rusty_box_bximage::BOCHS_MAX_CYLINDERS - 1) as u32),
+                                )
                                 .changed();
                             ui.label(RichText::new("heads").strong().color(TEXT_PRIMARY));
                             changed |= ui
@@ -2409,14 +2408,10 @@ impl DiskCreatorPanel {
         policy: ExistingFilePolicy,
     ) -> Result<BxCreatedImage, String> {
         let size = ImageSize::parse(&self.hard_disk_size).map_err(|error| error.to_string())?;
-        let geometry = calculate_hard_disk_geometry(size, SectorSize::Bytes512)
-            .map_err(|error| error.to_string())?;
-        if geometry.cylinders > u16::MAX as u64 {
-            return Err(
-                "disk is too large for the current Rusty Box BIOS geometry limit; choose 31 GiB or smaller"
-                    .to_owned(),
-            );
-        }
+        // Reject sizes whose physical geometry exceeds the emulator's cylinder limit
+        // (BOCHS_MAX_CYLINDERS, 2^24) *before* touching the filesystem. Everything below
+        // that — including 32 GiB+ — is a valid disk.
+        calculate_hard_disk_geometry(size, SectorSize::Bytes512).map_err(|error| error.to_string())?;
 
         create_flat_hard_disk(path, size, SectorSize::Bytes512, policy)
             .map_err(|error| error.to_string())
@@ -4057,6 +4052,9 @@ mod tests {
             ips: 300_000_000,
             pci: true,
             sync_slowdown: false,
+            sync_realtime: false,
+            smp_quantum: 16,
+            cpuid_freq: rusty_box::CpuidFreq::None,
             max_instructions: u64::MAX,
             display: crate::args::DisplayBackend::Egui,
             bios: std::path::PathBuf::from("bios.bin"),
@@ -4861,21 +4859,21 @@ mod tests {
     }
 
     #[test]
-    fn hard_disk_panel_rejects_too_large_for_gui_attach_limit() {
+    fn hard_disk_panel_rejects_beyond_bochs_cylinder_limit() {
+        // 32 GiB is now accepted; only sizes whose physical geometry exceeds
+        // BOCHS_MAX_CYLINDERS (2^24, ~8063 GiB with 16h/63s/512b) are rejected — and
+        // rejected before any file is written, so this stays cheap.
         let path = unique_temp_path("rusty-box-gui-panel-huge-disk");
         let mut panel = DiskCreatorPanel::default();
         panel.path = path.display().to_string();
-        panel.hard_disk_size = "32G".to_owned();
+        panel.hard_disk_size = "9000G".to_owned();
 
         panel.create_image();
 
-        assert_eq!(
-            panel.status,
-            Some(CreatorStatus::Error(
-                "disk is too large for the current Rusty Box BIOS geometry limit; choose 31 GiB or smaller"
-                    .to_owned()
-            ))
-        );
+        assert!(matches!(
+            &panel.status,
+            Some(CreatorStatus::Error(message)) if message.contains("exceeds Bochs limit")
+        ));
         assert!(fs::metadata(&path).is_err());
     }
 

@@ -30,6 +30,12 @@ pub enum RunError {
     #[error("invalid CPU topology: {message}")]
     InvalidCpuTopology { message: String },
 
+    #[error("smp_quantum must be 1-32 (Bochs cpu: quantum=N), got {value}")]
+    InvalidSmpQuantum { value: u32 },
+
+    #[error("cpuid_freq must be hardware|none|ips (Bochs cpu: cpuid_freq=), got {value}")]
+    InvalidCpuidFreq { value: String },
+
     #[error("boot order cannot be empty; set boot.order or pass --boot disk|cdrom")]
     EmptyBootOrder,
 
@@ -72,9 +78,6 @@ pub enum RunError {
         first: &'static str,
         second: &'static str,
     },
-
-    #[error("created disk CHS exceeds current GUI geometry field: {} needs {cylinders} cylinders", path.display())]
-    CreatedDiskChsOverflow { path: PathBuf, cylinders: u64 },
 
     #[error("existing disk image {} is not a usable flat image ({len} bytes, not a non-zero multiple of 512); set disk.create.overwrite = true to replace it, or delete it", path.display())]
     InvalidExistingDiskImage { path: PathBuf, len: u64 },

@@ -212,7 +212,7 @@ fn run_emulator(
     emu.configure_boot_sequence(2, 0, 0);
 
     // Attach disk
-    emu.attach_disk(0, 0, disk_path, DLX_CYLINDERS, DLX_HEADS, DLX_SPT)
+    emu.attach_disk(0, 0, disk_path, DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT)
         .expect("Failed to attach disk image");
 
     // Initialize GUI, reset, start

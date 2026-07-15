@@ -35,7 +35,7 @@ use super::{cpudb::intel::core_i7_skylake::Corei7SkylakeX, cpuid::BxCpuIdTrait};
 
 pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
     // Note: hardcode this for now
-    Corei7SkylakeX {}
+    Corei7SkylakeX::new()
 }
 
 // ResetReason is defined in cpu/mod.rs (always available without alloc)

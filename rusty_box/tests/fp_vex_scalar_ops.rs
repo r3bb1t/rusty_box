@@ -598,6 +598,72 @@ fn run_split_load_cases() {
 // TZCNT. A wrong splat lane or a BSF-like TZCNT breaks newline splitting.
 // ════════════════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════════════════
+// VPINSRW is 3-operand under VEX: the base vector comes from vvvv (not the
+// destination as legacy SSE PINSRW does), and the upper 128 bits of the YMM
+// destination are cleared. Windows setup emits VEX integer-insert; decoding it
+// as the 2-operand SSE form silently corrupts data.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn vex_vpinsrw_sources_vvvv_and_clears_upper() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| {
+            let cfg = EmulatorConfig::default();
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                .expect("new emulator");
+            emu.reg_write(
+                X86Reg::Cr4,
+                emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+            );
+
+            // vpinsrw xmm0, xmm1, ecx, 3 (VEX.128.66.0F.W0 C4 /r ib, 2-byte VEX
+            // C5 F1: vvvv=~1). modrm C1 → reg=xmm0, rm=ecx. imm=3. Then park.
+            emu.mem_write(CASE_BASE, &[0xC5, 0xF1, 0xC4, 0xC1, 0x03, 0xEB, 0xFE])
+                .expect("write code");
+
+            // Destination xmm0 gets a poison value that must be overwritten, and
+            // ymm0's upper lane is poisoned to prove it gets cleared.
+            emu.reg_write_ymm(X86Reg::Ymm0, [0xAA; 32]);
+            // vvvv source (xmm1) = bytes 00..0F → the real base vector.
+            let base: [u8; 16] = [
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+                0x0E, 0x0F,
+            ];
+            emu.reg_write_xmm(X86Reg::Xmm1, base);
+            emu.reg_write(X86Reg::Rcx, 0x1234);
+
+            let stop = emu
+                .emu_start(CASE_BASE, Some(CASE_BASE + 5), None, Some(9))
+                .expect("emu_start");
+            assert_eq!(
+                emu.cpu.rip(),
+                CASE_BASE + 5,
+                "vpinsrw did not park (stop={stop:?})"
+            );
+
+            // Expected: copy of xmm1 with word[3] (bytes 6..8) replaced by 0x1234.
+            let mut expect = base;
+            expect[6] = 0x34;
+            expect[7] = 0x12;
+            let got = emu.reg_read_ymm(X86Reg::Ymm0);
+            assert_eq!(
+                &got[..16],
+                &expect[..],
+                "VPINSRW must build from vvvv (xmm1), not the destination"
+            );
+            assert_eq!(
+                &got[16..],
+                &[0u8; 16],
+                "VEX-128 VPINSRW must clear ymm0 bits [255:128]"
+            );
+        })
+        .expect("spawn test thread")
+        .join()
+        .expect("join test thread");
+}
+
 #[test]
 fn indexbyte_avx2_ingredients() {
     std::thread::Builder::new()

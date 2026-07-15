@@ -94,4 +94,5 @@ pub mod snapshot;
 // Re-export commonly used types
 #[cfg(feature = "alloc")]
 pub use emulator::Emulator;
+pub use cpu::CpuidFreq;
 pub use emulator::EmulatorConfig;

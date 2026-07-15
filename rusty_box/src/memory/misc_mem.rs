@@ -57,12 +57,13 @@ impl BxMemC<'_> {
             handler_overflow_count: 0,
 
             pci_enabled,
-            // Bochs defaults bios_write_enabled to false (misc_mem.cc), then the
-            // PCI2ISA bridge sets it via DEV_mem_set_bios_write() when register 0x4E
-            // bit 2 is written (pci2isa.cc). Our PCI2ISA handler at 0x4E logs the
-            // change but does not propagate it to memory, so we keep true here to
-            // ensure BIOS ROM writes (shadow RAM, flash) work during early POST.
-            bios_write_enabled: true,
+            // Bochs defaults bios_write_enabled to false (misc_mem.cc
+            // init_memory); the PIIX3 bridge is the only thing that flips it,
+            // via DEV_mem_set_bios_write() when XBCS register 0x4E bit 2 is
+            // written (pci2isa.cc case 0x4e), now wired end-to-end through
+            // BxPiix3::pci_write -> DeviceManager::bios_write_needs_update ->
+            // apply_bios_write_to_memory (devices.rs process_pci_deferred).
+            bios_write_enabled: false,
             bios_rom_addr: 0xffff0000,
             flash_type: 0,
             flash_status: 0x80,
@@ -457,7 +458,6 @@ impl BxMemC<'_> {
     pub fn write_physical_page<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
         &mut self,
         cpus: &[&BxCpuC<I, T>],
-        page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
         addr: BxPhyAddress,
         len: usize,
         data: &mut [u8],
@@ -493,7 +493,6 @@ impl BxMemC<'_> {
                     // Write to SMRAM - delegate to stub for regular memory write
                     return self.inherited_memory_stub.write_physical_page(
                         cpus,
-                        page_write_stamp_table,
                         addr,
                         len,
                         data,
@@ -541,7 +540,6 @@ impl BxMemC<'_> {
                 // Regular RAM - delegate to stub
                 return self.inherited_memory_stub.write_physical_page(
                     cpus,
-                    page_write_stamp_table,
                     addr,
                     len,
                     data,
@@ -550,7 +548,7 @@ impl BxMemC<'_> {
             }
 
             // Address must be in range 0x000A0000..0x000FFFFF
-            page_write_stamp_table.dec_write_stamp(a20_addr);
+            self.inherited_memory_stub.smc_dec_write_stamp_page(a20_addr);
 
             for &data_byte in &data[..len] {
                 // SMMRAM (0xA0000-0xBFFFF)
@@ -1208,5 +1206,118 @@ mod handler_tests {
 
         assert!(mem.handler_overflow_count <= MAX_HANDLER_OVERFLOW);
         assert_eq!(handler_range_at(&mem, 0xA_8000), Some(a));
+    }
+
+    // ─── Finding #8: enable_smram/disable_smram actually switch routing ──────
+
+    #[test]
+    fn enable_smram_bypasses_vga_handler_disable_restores_it() {
+        use crate::cpu::builder::BxCpuBuilder;
+        use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+        use crate::iodev::vga::BxVgaC;
+
+        // BxICache contains ~19MB fixed arrays; the debug-mode struct literal
+        // built by BxCpuBuilder::build() overflows the small default test
+        // stack (2MB on win32), so this must run on a big-stack thread —
+        // same pattern as cpu/tests_jumps.rs.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                let mut mem = test_mem();
+
+                // Register a VGA memory handler over the SMRAM window (0xA0000-0xBFFFF),
+                // matching real hardware where VGA legacy memory owns that range when
+                // SMRAM shadowing is closed.
+                let mut vga = BxVgaC::new();
+                let vga_id = MemoryDeviceId::Vga(&mut vga as *mut BxVgaC);
+                mem.register_memory_handlers(vga_id, 0xA0000, 0xBFFFF).unwrap();
+
+                let cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+
+                // SMRAM open (DOPEN, unrestricted): the write must land in RAM,
+                // bypassing the VGA handler entirely — write_physical_page checks
+                // smram_available/smram_enable BEFORE the memory-handler table.
+                mem.enable_smram(true, false);
+                let mut data = [0x42u8];
+                mem.write_physical_page(&[&*cpu], 0xA1000, 1, &mut data)
+                    .unwrap();
+                assert_eq!(
+                    mem.peek_ram(0xA1000, 1),
+                    &[0x42],
+                    "SMRAM open must route the write to RAM"
+                );
+
+                // disable_smram() must restore prior (VGA-handler) routing: the same
+                // address now goes to the VGA handler, not RAM, so the RAM byte
+                // written above stays untouched by the second write.
+                mem.disable_smram();
+                let mut data2 = [0x99u8];
+                mem.write_physical_page(&[&*cpu], 0xA1000, 1, &mut data2)
+                    .unwrap();
+                assert_eq!(
+                    mem.peek_ram(0xA1000, 1),
+                    &[0x42],
+                    "SMRAM disabled must route the write to the VGA handler, not RAM"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    // ─── Finding #35b: bios_write_enabled gates BIOS-ROM-region writes ───────
+    //
+    // Bochs misc_mem.cc BX_MEM_C::init_memory() defaults bios_write_enabled
+    // to false; PIIX3 XBCS bit 2 (pci2isa.cc case 0x4e) is the only thing
+    // that ever flips it via DEV_mem_set_bios_write(). memory.cc gates the
+    // top-of-address-space BIOS mirror write path on it directly:
+    //   } else if (BX_MEM_THIS bios_write_enabled && is_bios) { ... }
+
+    #[test]
+    fn bios_write_enabled_gates_high_mirror_rom_writes() {
+        use crate::cpu::builder::BxCpuBuilder;
+        use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                let mut mem = test_mem();
+                mem.set_a20_mask(0xFFFF_FFFF_FFFF_FFFF); // A20 enabled: no address wraparound
+
+                let cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+
+                // High BIOS mirror: any address >= bios_rom_addr (default
+                // 0xffff0000), far above the 1MB guest RAM this test_mem()
+                // uses, so write_physical_page takes the `is_bios` branch.
+                let addr: u64 = 0xFFFF_0000;
+                let rom_offset = bios_map_last128k(addr as usize);
+
+                // Default (matches Bochs init_memory: bios_write_enabled =
+                // false): the write must be dropped, not land in ROM.
+                assert!(!mem.bios_write_enabled());
+                let mut data = [0xAAu8];
+                mem.write_physical_page(&[&*cpu], addr, 1, &mut data)
+                    .unwrap();
+                assert_ne!(
+                    mem.get_stub_mut().rom()[rom_offset],
+                    0xAA,
+                    "write must be dropped while BIOS write is disabled (Bochs default)"
+                );
+
+                // XBCS bit 2 set (pci2isa.cc DEV_mem_set_bios_write(true)):
+                // the same write must now land.
+                mem.set_bios_write_enabled(true);
+                let mut data2 = [0xAAu8];
+                mem.write_physical_page(&[&*cpu], addr, 1, &mut data2)
+                    .unwrap();
+                assert_eq!(
+                    mem.get_stub_mut().rom()[rom_offset],
+                    0xAA,
+                    "write must succeed once BIOS write is enabled"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

@@ -4109,6 +4109,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
+            // VEXTRACTF128 and VEXTRACTI128 are bit-identical 128-bit lane
+            // extracts; Bochs routes both to the same VEXTRACTF128 handler.
+            Opcode::V256Vextractf128WdqVdqIb => self.vextracti128(instr),
             Opcode::V256Vextracti128WdqVdqIb => self.vextracti128(instr),
             Opcode::V256Vperm2f128VdqHdqWdqIb | Opcode::V256Vperm2i128VdqHdqWdqIb => {
                 self.vperm2f128(instr)
@@ -4321,6 +4324,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             // VEX-encoded SSE4.1 forms (vvvv-sourced or upper-zeroing)
             Opcode::V128VinsertpsVpsWssIb => self.vinsertps(instr),
+            // VEX integer-insert family — 3-operand (vvvv is the base vector),
+            // upper YMM bits cleared. Distinct from the 2-operand SSE PINSR*.
+            Opcode::V128VpinsrbVdqEbIb => self.vpinsrb(instr),
+            Opcode::V128VpinsrwVdqEwIb => self.vpinsrw(instr),
+            Opcode::V128VpinsrdVdqEdIb => self.vpinsrd(instr),
+            Opcode::V128VpinsrqVdqEqIb => self.vpinsrq(instr),
             Opcode::V128VmpsadbwVdqHdqWdqIb | Opcode::V256VmpsadbwVdqHdqWdqIb => {
                 self.vmpsadbw(instr)
             }

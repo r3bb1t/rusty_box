@@ -2,33 +2,43 @@
 
 //! 8254 PIT (Programmable Interval Timer) Emulation
 //!
-//! Based on Bochs pit82c54.cc — faithful port of the Bochs state machine.
-//! The 8254 PIT provides three independent 16-bit counters:
+//! Based on Bochs pit82c54.cc (counter state machines) and pit.cc (port
+//! handlers, IRQ0 wiring, speaker state). The 8254 PIT provides three
+//! independent 16-bit counters:
 //! - Counter 0: System timer (IRQ0) - ~18.2 Hz for DOS tick
 //! - Counter 1: DRAM refresh (legacy, not used)
 //! - Counter 2: Speaker/beep control
 //!
-//! Base frequency: 1.193182 MHz
+//! Base frequency: 1.193181 MHz (Bochs pit.cc TICKS_PER_SECOND)
+//!
+//! Port 0x61 (System Control Port B) is owned by the PIT, exactly as in
+//! Bochs (pit.cc bx_pit_c::init registers 0x0061): bit 0 = counter 2 GATE,
+//! bit 1 = speaker data enable, bit 4 = refresh clock divided by 2 (derived
+//! from the microsecond clock), bit 5 = counter 2 OUT.
 
 /// PIT I/O port addresses
 pub const PIT_COUNTER0: u16 = 0x0040;
 pub const PIT_COUNTER1: u16 = 0x0041;
 pub const PIT_COUNTER2: u16 = 0x0042;
 pub const PIT_CONTROL: u16 = 0x0043;
+/// System Control Port B — registered by the PIT (Bochs pit.cc init)
+pub const PIT_SYSTEM_CONTROL_B: u16 = 0x0061;
 
-/// PIT base frequency in Hz
-pub const PIT_FREQUENCY: u32 = 1193182;
+/// PIT input clock ticks per second — Bochs pit.cc TICKS_PER_SECOND
+/// ("1.193181MHz Clock"). Note: NOT 1193182; Bochs uses 1193181 and all
+/// tick/usec conversions must match it.
+pub const TICKS_PER_SECOND: u32 = 1_193_181;
 
-/// Ticks per second
-pub const TICKS_PER_SECOND: u32 = PIT_FREQUENCY;
+/// PIT base frequency in Hz (alias of the Bochs tick rate)
+pub const PIT_FREQUENCY: u32 = TICKS_PER_SECOND;
 
-/// Microseconds per second
+/// Microseconds per second — Bochs pit.cc USEC_PER_SECOND
 pub const USEC_PER_SECOND: u32 = 1_000_000;
 
 /// Number of PIT counters
 const PIT_NUM_COUNTERS: usize = 3;
 
-// ---- Read/write state machine (Bochs pit82c54.h) ----
+// ---- Read/write state machine (Bochs pit82c54.h rw_status) ----
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum RWState {
     LsByte = 0,
@@ -63,7 +73,7 @@ pub struct PitCounter {
     pub(crate) count_msb_latched: bool,
     /// Status latched for reading
     pub(crate) status_latched: bool,
-    /// Latched status value
+    /// Latched status value (Bochs: status_latch)
     pub(crate) latched_status: u8,
     /// Null count (count not yet loaded into CE from CR)
     pub(crate) null_count: bool,
@@ -86,6 +96,19 @@ pub struct PitCounter {
     pub(crate) state_bit_2: bool,
     /// Next change time (for scheduling optimization, 0 = no change expected)
     pub(crate) next_change_time: u32,
+    /// Whether an OUT handler is attached (Bochs: out_handler != NULL).
+    /// Bochs pit.cc attaches irq_handler to counter 0 and speaker_handler
+    /// to counter 2; rusty_box has no host audio backend, so only counter 0
+    /// carries a handler (counter 2's Bochs handler only drives
+    /// DEV_speaker_set_line, which has no register-visible state).
+    pub(crate) out_handler_attached: bool,
+    /// Number of OUT pin transitions since the last drain. Bochs
+    /// pit82c54.cc set_OUT invokes out_handler synchronously on every
+    /// actual transition; rusty_box records them here and the
+    /// DeviceManager replays them into the PIC (see
+    /// DeviceManager::service_pit_irq0). Transitions strictly alternate,
+    /// so (count, current OUT level) reconstructs the exact sequence.
+    pub(crate) out_transitions: u32,
 }
 
 impl Default for PitCounter {
@@ -114,6 +137,8 @@ impl Default for PitCounter {
             state_bit_1: false,
             state_bit_2: false,
             next_change_time: 0,
+            out_handler_attached: false, // Bochs: out_handler=NULL
+            out_transitions: 0,
         }
     }
 }
@@ -124,10 +149,23 @@ impl PitCounter {
         Self::default()
     }
 
-    /// Bochs pit82c54.cc set_OUT — only calls handler on transition
+    /// Bochs pit82c54.cc set_OUT — updates the pin only on an actual
+    /// transition and invokes the OUT handler on it. rusty_box records the
+    /// transition for a later synchronous replay into the PIC (the CPU never
+    /// executes between the transition and the replay, so the observable
+    /// ordering matches Bochs's immediate callback).
     fn set_out(&mut self, data: bool) {
-        self.output = data;
-        // Note: Bochs calls out_handler callback here; we detect transitions in tick()
+        if self.output != data {
+            self.output = data;
+            if self.out_handler_attached {
+                self.out_transitions = self.out_transitions.saturating_add(1);
+            }
+        }
+    }
+
+    /// Take (and clear) the pending OUT transition count.
+    fn take_out_transitions(&mut self) -> u32 {
+        core::mem::take(&mut self.out_transitions)
     }
 
     /// Bochs pit82c54.cc set_count
@@ -176,36 +214,91 @@ impl PitCounter {
         }
     }
 
-    /// Fast-path: advance counter by N ticks without calling clock() for each.
-    /// Bochs pit82c54.cc clock_multiple().
-    /// Returns true if counter 0 output transitioned (IRQ0 should fire).
-    /// When next_change_time >= ticks, we can just decrement count_binary by ticks.
-    fn clock_multiple(&mut self, ticks: u32) -> bool {
-        if ticks == 0 {
-            return false;
-        }
-        // If next_change_time is 0, state machine needs per-tick evaluation
-        if self.next_change_time == 0 {
-            return false; // Caller must use per-tick clock()
-        }
-        if self.next_change_time > ticks {
-            // No state change within these ticks — just decrement
-            self.next_change_time -= ticks;
-            if !self.bcd_mode {
-                self.count_binary = self.count_binary.wrapping_sub(ticks as u16);
-                self.count = self.count_binary;
+    /// Bochs pit82c54.cc decrement_multiple — bulk decrement with wrap
+    /// handling; works for both binary and BCD counters.
+    fn decrement_multiple(&mut self, mut cycles: u32) {
+        while cycles > 0 {
+            if cycles <= self.count_binary as u32 {
+                self.count_binary -= cycles as u16;
+                cycles = 0;
+                self.set_count_to_binary();
             } else {
-                // BCD: decrement one at a time (rare, keep simple)
-                return false;
+                cycles -= self.count_binary as u32 + 1;
+                self.count_binary = 0;
+                self.set_count_to_binary();
+                self.decrement();
             }
-            return false;
         }
-        // next_change_time <= ticks: a state change will occur
-        // Fall back to per-tick for the remaining portion
-        false
     }
 
-    /// Latch the current count value — Bochs pit82c54.cc
+    /// Bochs pit82c54.cc clock_multiple — advance the counter by `cycles`
+    /// input clocks, bulk-decrementing between scheduled state changes and
+    /// running the full per-clock state machine (clock()) exactly at each
+    /// boundary. Mode 3 decrements by 2 per cycle (square-wave halves).
+    fn clock_multiple(&mut self, mut cycles: u32) {
+        while cycles > 0 {
+            if self.next_change_time == 0 {
+                if self.count_written {
+                    match self.mode {
+                        0 => {
+                            if self.gate && self.write_state != RWState::MsByteMultiple {
+                                self.decrement_multiple(cycles);
+                            }
+                        }
+                        1 => self.decrement_multiple(cycles),
+                        2 => {
+                            if !self.first_pass && self.gate {
+                                self.decrement_multiple(cycles);
+                            }
+                        }
+                        3 => {
+                            if !self.first_pass && self.gate {
+                                self.decrement_multiple(2 * cycles);
+                            }
+                        }
+                        4 => {
+                            if self.gate {
+                                self.decrement_multiple(cycles);
+                            }
+                        }
+                        5 => self.decrement_multiple(cycles),
+                        _ => {}
+                    }
+                }
+                cycles = 0;
+            } else {
+                match self.mode {
+                    0 | 1 | 2 | 4 | 5 => {
+                        if self.next_change_time > cycles {
+                            self.decrement_multiple(cycles);
+                            self.next_change_time -= cycles;
+                            cycles = 0;
+                        } else {
+                            self.decrement_multiple(self.next_change_time - 1);
+                            cycles -= self.next_change_time;
+                            self.clock();
+                        }
+                    }
+                    3 => {
+                        if self.next_change_time > cycles {
+                            self.decrement_multiple(cycles * 2);
+                            self.next_change_time -= cycles;
+                            cycles = 0;
+                        } else {
+                            self.decrement_multiple((self.next_change_time - 1) * 2);
+                            cycles -= self.next_change_time;
+                            self.clock();
+                        }
+                    }
+                    _ => {
+                        cycles = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Latch the current count value — Bochs pit82c54.cc latch_counter
     pub fn latch_count(&mut self) {
         if self.count_lsb_latched || self.count_msb_latched {
             // Previous latch not yet read — do nothing
@@ -227,6 +320,7 @@ impl PitCounter {
             }
             RWState::MsByteMultiple => {
                 // Latching during 2-part read — reset to LSB first
+                // (Bochs pit82c54.cc latch_counter "UNL_2P_READ" guess)
                 self.read_state = RWState::LsByteMultiple;
                 self.outlatch = self.count;
                 self.count_lsb_latched = true;
@@ -235,7 +329,7 @@ impl PitCounter {
         }
     }
 
-    /// Latch the status register — Bochs pit82c54.cc
+    /// Latch the status register — Bochs pit82c54.cc write (READ_BACK)
     pub fn latch_status(&mut self) {
         if !self.status_latched {
             self.latched_status = ((self.output as u8) << 7)
@@ -247,21 +341,34 @@ impl PitCounter {
         }
     }
 
-    /// Read counter — Bochs pit82c54.cc
+    /// Read counter — Bochs pit82c54.cc read
     pub fn read(&mut self) -> u8 {
         if self.status_latched {
+            // Bochs pit82c54.cc read: "Undefined output when status latched
+            // and count half read" — Bochs BX_ERRORs and falls through to
+            // the trailing `return 0` WITHOUT clearing any latch state, so
+            // this configuration keeps returning 0 until the counter is
+            // reprogrammed. Reproduced Bochs quirk (iodev parity audit #32).
+            if self.count_msb_latched && self.read_state == RWState::MsByteMultiple {
+                return 0;
+            }
             self.status_latched = false;
             return self.latched_status;
         }
 
-        // Latched count read
+        // Latched count read — Bochs advances the two-part read_state even
+        // when reading from the latch.
         if self.count_lsb_latched {
-            // Read LSB of latched value
+            if self.read_state == RWState::LsByteMultiple {
+                self.read_state = RWState::MsByteMultiple;
+            }
             self.count_lsb_latched = false;
             return (self.outlatch & 0xFF) as u8;
         }
         if self.count_msb_latched {
-            // Read MSB of latched value
+            if self.read_state == RWState::MsByteMultiple {
+                self.read_state = RWState::LsByteMultiple;
+            }
             self.count_msb_latched = false;
             return (self.outlatch >> 8) as u8;
         }
@@ -281,7 +388,7 @@ impl PitCounter {
         }
     }
 
-    /// Write counter — Bochs pit82c54.cc
+    /// Write counter initial value — Bochs pit82c54.cc write
     pub fn write(&mut self, data: u8) {
         match self.write_state {
             RWState::LsByteMultiple => {
@@ -304,13 +411,13 @@ impl PitCounter {
             }
         }
 
-        // Bochs pit82c54.cc
+        // Bochs pit82c54.cc write
         if self.count_written {
             self.null_count = true;
             self.set_count(self.inlatch);
         }
 
-        // Mode-specific actions after count write (Bochs pit82c54.cc)
+        // Mode-specific actions after count write (Bochs pit82c54.cc write)
         match self.mode {
             0 => {
                 if self.count_written {
@@ -337,13 +444,11 @@ impl PitCounter {
         }
     }
 
-    /// Clock the counter by one tick — Bochs pit82c54.cc
-    /// Returns true if output transitioned LOW→HIGH (for IRQ generation)
-    pub fn clock(&mut self) -> bool {
-        let old_output = self.output;
-
+    /// Clock the counter by one tick — Bochs pit82c54.cc clock.
+    /// OUT pin transitions are recorded via set_out (Bochs out_handler).
+    pub fn clock(&mut self) {
         match self.mode {
-            // ---- Mode 0: Interrupt on Terminal Count (Bochs pit82c54.cc) ----
+            // ---- Mode 0: Interrupt on Terminal Count (Bochs pit82c54.cc clock) ----
             0 => {
                 if self.count_written {
                     if self.null_count {
@@ -382,7 +487,7 @@ impl PitCounter {
                 self.trigger_gate = false;
             }
 
-            // ---- Mode 1: Hardware Retriggerable One-Shot (Bochs pit82c54.cc) ----
+            // ---- Mode 1: Hardware Retriggerable One-Shot (Bochs pit82c54.cc clock) ----
             1 => {
                 if self.count_written {
                     if self.trigger_gate {
@@ -415,7 +520,7 @@ impl PitCounter {
                 self.trigger_gate = false;
             }
 
-            // ---- Mode 2: Rate Generator (Bochs pit82c54.cc) ----
+            // ---- Mode 2: Rate Generator (Bochs pit82c54.cc clock) ----
             2 | 6 => {
                 if self.count_written {
                     if self.trigger_gate || self.first_pass {
@@ -448,25 +553,34 @@ impl PitCounter {
                 self.trigger_gate = false;
             }
 
-            // ---- Mode 3: Square Wave Generator (Bochs pit82c54.cc) ----
+            // ---- Mode 3: Square Wave Generator (Bochs pit82c54.cc clock) ----
             3 | 7 => {
                 if self.count_written {
                     if (self.trigger_gate || self.first_pass || self.state_bit_2) && self.gate {
                         self.set_count(self.inlatch & 0xFFFE);
                         self.state_bit_1 = (self.inlatch & 0x1) != 0;
                         if !self.output || !self.state_bit_1 {
-                            let half = self.count_binary / 2;
-                            if half <= 1 {
+                            // Bochs pit82c54.cc clock (mode 3):
+                            // ((count_binary/2)-1) computed in Bit32u — a
+                            // reloaded count of 0 underflows to 0xFFFFFFFF
+                            // and masks to 0xFFFF, scheduling the next OUT
+                            // toggle 65535 ticks out instead of 32767, so a
+                            // count of 0 yields ~9.1 Hz instead of the real
+                            // hardware's 18.2 Hz. Reproduced Bochs quirk
+                            // (iodev parity audit #32, parity ruling: match
+                            // Bochs exactly).
+                            let half_minus_1 = (self.count_binary as u32 / 2).wrapping_sub(1);
+                            if half_minus_1 == 0 {
                                 self.next_change_time = 1;
                             } else {
-                                self.next_change_time = (half - 1) as u32;
+                                self.next_change_time = half_minus_1 & 0xFFFF;
                             }
                         } else {
-                            let half = self.count_binary / 2;
+                            let half = self.count_binary as u32 / 2;
                             if half == 0 {
                                 self.next_change_time = 1;
                             } else {
-                                self.next_change_time = half as u32;
+                                self.next_change_time = half & 0xFFFF;
                             }
                         }
                         self.null_count = false;
@@ -483,9 +597,9 @@ impl PitCounter {
                             self.decrement();
                             if !self.output || !self.state_bit_1 {
                                 self.next_change_time =
-                                    (self.count_binary / 2).wrapping_sub(1) as u32;
+                                    (self.count_binary as u32 / 2).wrapping_sub(1) & 0xFFFF;
                             } else {
-                                self.next_change_time = (self.count_binary / 2) as u32;
+                                self.next_change_time = (self.count_binary as u32 / 2) & 0xFFFF;
                             }
                             if self.count == 0 {
                                 self.state_bit_2 = true;
@@ -505,7 +619,7 @@ impl PitCounter {
                 self.trigger_gate = false;
             }
 
-            // ---- Mode 4: Software Triggered Strobe (Bochs pit82c54.cc) ----
+            // ---- Mode 4: Software Triggered Strobe (Bochs pit82c54.cc clock) ----
             4 => {
                 if self.count_written {
                     if !self.output {
@@ -547,7 +661,7 @@ impl PitCounter {
                 self.trigger_gate = false;
             }
 
-            // ---- Mode 5: Hardware Triggered Strobe (Bochs pit82c54.cc) ----
+            // ---- Mode 5: Hardware Triggered Strobe (Bochs pit82c54.cc clock) ----
             5 => {
                 if self.count_written {
                     if !self.output {
@@ -582,19 +696,18 @@ impl PitCounter {
             }
 
             _ => {
+                // Bochs pit82c54.cc clock default: "Mode not implemented."
+                self.next_change_time = 0;
                 self.trigger_gate = false;
             }
         }
-
-        // Return true if output transitioned LOW→HIGH (rising edge for IRQ)
-        !old_output && self.output
     }
 
-    /// Set GATE input — Bochs pit82c54.cc
+    /// Set GATE input — Bochs pit82c54.cc set_GATE
     /// Detects rising edge and sets triggerGATE; mode-specific behavior
     pub fn set_gate(&mut self, data: bool) {
         let old_gate = self.gate;
-        // Only process on actual change (Bochs line 830)
+        // Only process on actual change (Bochs pit82c54.cc set_GATE)
         if old_gate == data {
             return;
         }
@@ -683,18 +796,38 @@ pub struct BxPitC {
     pub(crate) total_ticks: u64,
     /// Timer handles for scheduling
     pub(crate) timer_handles: [Option<usize>; 3],
-    /// IRQ0 callback (for system timer)
-    irq0_pending: bool,
+    /// Bochs pit.cc s.speaker_data_on — port 0x61 bit 1 (write) / bit 1 (read)
+    pub(crate) speaker_data_on: bool,
+    /// Bochs pit.cc s.speaker_active — tracks (port 0x61 & 3) == 3 while
+    /// counter 2 is in mode 3 (beep on/off state)
+    pub(crate) speaker_active: bool,
+    /// Bochs pit.cc s.speaker_level — speaker line level for non-mode-3
+    /// counter 2 operation (updated on port 0x61 writes)
+    pub(crate) speaker_level: bool,
     /// IPS (instructions per second) for converting icount to PIT ticks.
     ips: u64,
     /// icount value at last PIT synchronization point.
     icount_at_last_sync: u64,
-    /// Fractional PIT tick accumulator (units: instruction_count * PIT_FREQUENCY).
-    /// Preserves fractions across calls so that even a few instructions
-    /// between reads can accumulate enough for a PIT tick (~13 instr at 15M IPS).
-    pit_tick_accumulator: u128,
-    /// Fractional PIT tick accumulator for microsecond-based clock sources.
+    /// Monotonic emulated-microsecond clock — the Bochs bx_virt_timer
+    /// time_usec() equivalent. All counter movement is quantized to whole
+    /// microseconds of this clock, exactly like Bochs pit.cc periodic();
+    /// the port 0x61 refresh bit reads it directly.
+    total_usec: u64,
+    /// Sub-microsecond remainder of the icount→usec conversion
+    /// (units: instruction_count * USEC_PER_SECOND, modulo ips). Carries
+    /// fractions across sync points so no emulated time is lost.
+    usec_remainder: u128,
+    /// Sub-tick remainder of the usec→tick conversion — the integer-exact
+    /// equivalent of Bochs pit.cc periodic()'s
+    /// `USEC_TO_TICKS(total_usec) - total_ticks` derivation.
     pit_usec_accumulator: u128,
+    /// Snapshot of `total_usec` at the last DeviceManager tick, used to
+    /// reconcile the two feeds of the single PIT clock: executed
+    /// instructions arrive via icount (port-access syncs), while HLT
+    /// fast-forward time arrives only through the emulator's usec delta
+    /// (Bochs advances pc_system ticks during HLT — event.cc
+    /// handleWaitForEvent BX_TICKN — which its virt_timer usec includes).
+    usec_at_last_device_tick: u64,
     /// Last host timestamp for Bochs-style realtime PIT synchronization.
     #[cfg(feature = "std")]
     realtime_last: Option<std::time::Instant>,
@@ -707,41 +840,62 @@ impl Default for BxPitC {
 }
 
 impl BxPitC {
-    /// Create a new PIT controller
+    /// Create a new PIT controller in power-on state (Bochs bx_pit_c
+    /// constructor + init()).
     pub fn new() -> Self {
-        Self {
+        let mut pit = Self {
             counters: [PitCounter::new(0), PitCounter::new(1), PitCounter::new(2)],
             total_ticks: 0,
             timer_handles: [None; 3],
-            irq0_pending: false,
+            speaker_data_on: false,
+            speaker_active: false,
+            speaker_level: false,
             ips: 0,
             icount_at_last_sync: 0,
-            pit_tick_accumulator: 0,
+            total_usec: 0,
+            usec_remainder: 0,
             pit_usec_accumulator: 0,
+            usec_at_last_device_tick: 0,
             #[cfg(feature = "std")]
             realtime_last: None,
-        }
+        };
+        pit.init();
+        pit
     }
 
-    /// Initialize the PIT
+    /// Power-on initialization — Bochs pit.cc bx_pit_c::init. This is the
+    /// ONLY place the counters are programmed to their defaults; a guest
+    /// reset (reset()) deliberately leaves all PIT state alone.
     pub fn init(&mut self) {
         tracing::debug!("PIT: Initializing 8254 Programmable Interval Timer");
-        self.reset();
-    }
-
-    /// Reset the PIT
-    pub fn reset(&mut self) {
+        // Bochs pit.cc init: speaker state cleared
+        self.speaker_data_on = false;
+        self.speaker_active = false;
+        self.speaker_level = false;
+        // Bochs pit.cc init → s.timer.init() (pit82c54.cc init)
         self.counters = [PitCounter::new(0), PitCounter::new(1), PitCounter::new(2)];
+        // Bochs pit.cc init: s.timer.set_OUT_handler(0, irq_handler).
+        // Counter 2's Bochs handler (speaker_handler) only drives the host
+        // audio line (DEV_speaker_set_line) with no register-visible state;
+        // rusty_box has no audio backend, so no handler is attached there.
+        self.counters[0].out_handler_attached = true;
         self.total_ticks = 0;
-        self.irq0_pending = false;
+        self.total_usec = 0;
         self.icount_at_last_sync = 0;
-        self.pit_tick_accumulator = 0;
+        self.usec_remainder = 0;
         self.pit_usec_accumulator = 0;
+        self.usec_at_last_device_tick = 0;
         #[cfg(feature = "std")]
         if self.realtime_last.is_some() {
             self.realtime_last = Some(std::time::Instant::now());
         }
     }
+
+    /// Guest reset — Bochs pit.cc bx_pit_c::reset delegates to pit82c54.cc
+    /// reset, which is intentionally EMPTY: the counters, speaker state and
+    /// time baselines all survive a guest-initiated reset. Only power-on
+    /// init() programs the counters.
+    pub fn reset(&mut self) {}
 
     /// Initialize icount synchronization for fine-grained PIT timing.
     /// Stores IPS and the initial icount baseline so that subsequent
@@ -755,8 +909,9 @@ impl BxPitC {
     #[cfg(feature = "std")]
     pub fn enable_realtime_sync(&mut self) {
         self.realtime_last = Some(std::time::Instant::now());
-        self.pit_tick_accumulator = 0;
+        self.usec_remainder = 0;
         self.pit_usec_accumulator = 0;
+        self.usec_at_last_device_tick = self.total_usec;
     }
 
     /// Returns true when PIT uses host realtime instead of icount-derived time.
@@ -765,82 +920,94 @@ impl BxPitC {
         self.realtime_last.is_some()
     }
 
-    fn clock_pit_ticks(&mut self, pit_ticks: u64) -> bool {
-        let mut irq0 = false;
-        let mut remaining_total = pit_ticks;
-
-        while remaining_total > 0 {
-            // Fast path: skip ticks in bulk when no state change is imminent
-            // (Bochs pit82c54.cc clock_multiple). Then per-tick for remainder.
-            // 5M PIT ticks ≈ 4.2 seconds at 1.193182 MHz.
-            let mut remaining = remaining_total.min(5_000_000) as u32;
-            remaining_total -= remaining as u64;
-
-            while remaining > 0 {
-                let skip = remaining
-                    .min(self.counters[0].next_change_time.saturating_sub(1).max(1))
-                    .min(self.counters[1].next_change_time.saturating_sub(1).max(1))
-                    .min(self.counters[2].next_change_time.saturating_sub(1).max(1));
-                if skip > 1 {
-                    let c0_fired = self.counters[0].clock_multiple(skip);
-                    self.counters[1].clock_multiple(skip);
-                    self.counters[2].clock_multiple(skip);
-                    self.total_ticks += skip as u64;
-                    remaining -= skip;
-                    if c0_fired {
-                        irq0 = true;
-                    }
-                } else {
-                    self.total_ticks += 1;
-                    if self.counters[0].clock() {
-                        irq0 = true;
-                    }
-                    self.counters[1].clock();
-                    self.counters[2].clock();
-                    remaining -= 1;
-                }
-            }
+    /// Bochs pit82c54.cc get_next_event_time — including the Bit32u quirk:
+    /// when counter 0's next_change_time is 0, the `time1 < out` / `time2 <
+    /// out` comparisons against 0 are never true, so the result is 0
+    /// regardless of the other counters.
+    fn get_next_event_time(&self) -> u32 {
+        let time0 = self.counters[0].next_change_time;
+        let time1 = self.counters[1].next_change_time;
+        let time2 = self.counters[2].next_change_time;
+        let mut out = time0;
+        if time1 != 0 && time1 < out {
+            out = time1;
         }
-
-        if irq0 {
-            self.irq0_pending = true;
+        if time2 != 0 && time2 < out {
+            out = time2;
         }
-
-        irq0
+        out
     }
 
-    fn advance_by_usec(&mut self, usec: u64) -> bool {
+    /// Advance all three counters by `ticks_delta` PIT input clocks —
+    /// Bochs pit.cc bx_pit_c::periodic (the ticks loop) + pit82c54.cc
+    /// clock_all. Chunks by the next scheduled counter event; Bochs works
+    /// in Bit32u, so u64 deltas are additionally chunked to keep mode 3's
+    /// `2*cycles` in clock_multiple from overflowing.
+    pub(crate) fn clock_pit_ticks(&mut self, mut ticks_delta: u64) {
+        const MAX_CHUNK: u64 = 0x3FFF_FFFF;
+        while ticks_delta > 0 {
+            let maxchange = self.get_next_event_time() as u64;
+            let timedelta = if maxchange == 0 || maxchange > ticks_delta {
+                ticks_delta.min(MAX_CHUNK)
+            } else {
+                maxchange
+            };
+            let cycles = timedelta as u32;
+            // Bochs pit82c54.cc clock_all
+            self.counters[0].clock_multiple(cycles);
+            self.counters[1].clock_multiple(cycles);
+            self.counters[2].clock_multiple(cycles);
+            self.total_ticks = self.total_ticks.wrapping_add(timedelta);
+            ticks_delta -= timedelta;
+        }
+    }
+
+    /// Advance the PIT by whole emulated microseconds — Bochs pit.cc
+    /// bx_pit_c::periodic: `total_usec += delta; ticks_delta =
+    /// USEC_TO_TICKS(total_usec) - total_ticks;` (the remainder-carrying
+    /// accumulator below yields the identical cumulative integer floors).
+    fn advance_by_usec(&mut self, usec: u64) {
+        self.total_usec += usec;
         self.pit_usec_accumulator += usec as u128 * TICKS_PER_SECOND as u128;
         let pit_ticks = (self.pit_usec_accumulator / USEC_PER_SECOND as u128) as u64;
         self.pit_usec_accumulator %= USEC_PER_SECOND as u128;
-        self.clock_pit_ticks(pit_ticks)
+        self.clock_pit_ticks(pit_ticks);
     }
 
     #[cfg(feature = "std")]
-    fn sync_to_realtime(&mut self) -> bool {
+    fn sync_to_realtime(&mut self) {
         let Some(last) = self.realtime_last else {
-            return false;
+            return;
         };
         let now = std::time::Instant::now();
         let elapsed = now.saturating_duration_since(last).as_micros() as u64;
         if elapsed == 0 {
-            return false;
+            return;
         }
         self.realtime_last = Some(now);
-        self.advance_by_usec(elapsed)
+        self.advance_by_usec(elapsed);
+    }
+
+    /// Monotonic emulated-microsecond clock — the icount/realtime-sync
+    /// equivalent of Bochs bx_virt_timer.time_usec() as consumed by pit.cc.
+    /// Single conversion from the time source (no tick round-trip), so the
+    /// port 0x61 refresh bit `(usec/15)&1` matches Bochs exactly.
+    pub(crate) fn time_usec(&self) -> u64 {
+        self.total_usec
     }
 
     /// Synchronize PIT counters to match elapsed CPU time.
-    /// Called before counter reads to ensure counters are up-to-date.
-    /// Uses a fractional accumulator to avoid losing ticks when only a few
-    /// instructions have elapsed between reads (~13 instructions per PIT tick
-    /// at 15M IPS).
+    /// Called before counter reads AND writes (Bochs pit.cc bx_pit_c::read
+    /// runs handle_timer() and bx_pit_c::write runs periodic(time_passed32)
+    /// before touching the counters). Uses a fractional accumulator to
+    /// avoid losing ticks when only a few instructions have elapsed between
+    /// accesses (~13 instructions per PIT tick at 15M IPS).
     pub fn sync_to_icount(&mut self, icount: u64) {
         #[cfg(feature = "std")]
         if self.realtime_last.is_some() {
-            let _ = self.sync_to_realtime();
+            self.sync_to_realtime();
             self.icount_at_last_sync = icount;
-            self.pit_tick_accumulator = 0;
+            self.usec_remainder = 0;
             return;
         }
 
@@ -852,26 +1019,49 @@ impl BxPitC {
         if elapsed_instr == 0 {
             return;
         }
-
-        // Accumulate fractional PIT ticks.
-        self.pit_tick_accumulator += elapsed_instr as u128 * TICKS_PER_SECOND as u128;
-        let pit_ticks = (self.pit_tick_accumulator / self.ips as u128) as u64;
-        self.pit_tick_accumulator %= self.ips as u128;
-
-        self.clock_pit_ticks(pit_ticks);
         self.icount_at_last_sync = icount;
+
+        // icount → whole emulated microseconds first (Bochs pc_system
+        // time_usec = ticks/m_ips feeding pit.cc periodic()), so counter
+        // movement is quantized to microseconds exactly like Bochs. The
+        // sub-microsecond remainder is carried, never dropped.
+        self.usec_remainder += elapsed_instr as u128 * USEC_PER_SECOND as u128;
+        let usec = (self.usec_remainder / self.ips as u128) as u64;
+        self.usec_remainder %= self.ips as u128;
+        if usec != 0 {
+            self.advance_by_usec(usec);
+        }
     }
 
-    /// Read from PIT I/O port
+    /// Read from PIT I/O port — Bochs pit.cc bx_pit_c::read
     pub fn read(&mut self, port: u16, _io_len: u8, icount: u64) -> u32 {
-        // Synchronize counters to current CPU time before reading.
-        // This ensures the kernel's PIT-polling calibration loops see the counter decrement.
+        // Bochs pit.cc bx_pit_c::read runs handle_timer() (periodic to
+        // "now") before reading any register, so the guest observes the
+        // counter state as of the current instruction.
         self.sync_to_icount(icount);
         match port {
             PIT_COUNTER0 => self.counters[0].read() as u32,
             PIT_COUNTER1 => self.counters[1].read() as u32,
             PIT_COUNTER2 => self.counters[2].read() as u32,
-            PIT_CONTROL => 0xFF, // Control port is write-only
+            PIT_CONTROL => {
+                // Bochs pit.cc read case 0x43 → pit82c54.cc read
+                // (CONTROL_ADDRESS): "Read from control word register not
+                // defined." — returns 0.
+                0
+            }
+            PIT_SYSTEM_CONTROL_B => {
+                // Bochs pit.cc bx_pit_c::read case 0x61 — the value is
+                // composed FRESH on every read; bits 2/3/6/7 always read 0:
+                //   bit 5 = timer.read_OUT(2)
+                //   bit 4 = refresh_clock_div2 = (time_usec / 15) & 1
+                //   bit 1 = speaker_data_on
+                //   bit 0 = timer.read_GATE(2)
+                let refresh_clock_div2 = (self.time_usec() / 15) & 1 != 0;
+                ((self.counters[2].output as u32) << 5)
+                    | ((refresh_clock_div2 as u32) << 4)
+                    | ((self.speaker_data_on as u32) << 1)
+                    | (self.counters[2].gate as u32)
+            }
             _ => {
                 tracing::warn!("PIT: Unknown read port {:#06x}", port);
                 0xFF
@@ -879,21 +1069,59 @@ impl BxPitC {
         }
     }
 
-    /// Write to PIT I/O port
-    pub fn write(&mut self, port: u16, value: u32, _io_len: u8) {
+    /// Write to PIT I/O port — Bochs pit.cc bx_pit_c::write
+    pub fn write(&mut self, port: u16, value: u32, _io_len: u8, icount: u64) {
+        // Bochs pit.cc bx_pit_c::write: periodic(time_passed32) runs BEFORE
+        // s.timer.write(...) — the counters advance to "now" under the OLD
+        // programming, then the write is applied. This holds for all of
+        // 0x40-0x43 and 0x61.
+        self.sync_to_icount(icount);
         let value = value as u8;
         match port {
             PIT_COUNTER0 => self.counters[0].write(value),
             PIT_COUNTER1 => self.counters[1].write(value),
-            PIT_COUNTER2 => self.counters[2].write(value),
+            PIT_COUNTER2 => {
+                self.counters[2].write(value);
+                // Bochs pit.cc write case 0x42: if speaker_active and
+                // counter 2 is in mode 3 with a complete new count,
+                // DEV_speaker_beep_on(1193180.0/count) retunes the beep.
+                // rusty_box has no host audio backend (iodev parity audit
+                // #32), and the retune changes no register-visible state,
+                // so nothing further happens here.
+            }
             PIT_CONTROL => self.write_control(value),
+            PIT_SYSTEM_CONTROL_B => self.write_port61(value),
             _ => {
                 tracing::warn!("PIT: Unknown write port {:#06x} value={:#04x}", port, value);
             }
         }
     }
 
-    /// Write to the control register — Bochs pit82c54.cc
+    /// Port 0x61 write — Bochs pit.cc bx_pit_c::write case 0x61
+    fn write_port61(&mut self, value: u8) {
+        self.counters[2].set_gate(value & 0x01 != 0);
+        self.speaker_data_on = (value >> 1) & 0x01 != 0;
+        let new_speaker_active = (value & 3) == 3;
+        if self.counters[2].mode == 3 {
+            if self.speaker_active != new_speaker_active {
+                // Bochs pit.cc: DEV_speaker_beep_on(1193180.0/count) /
+                // DEV_speaker_beep_off() — the host audio backend is absent
+                // in rusty_box, so only the speaker_active state tracking
+                // remains (it is what Bochs saves/restores and gates the
+                // beep retune on the 0x42 write path).
+                self.speaker_active = new_speaker_active;
+            }
+        } else {
+            let new_speaker_level = self.speaker_data_on && self.counters[2].output;
+            if self.speaker_level != new_speaker_level {
+                // Bochs pit.cc: DEV_speaker_set_line(new_speaker_level) —
+                // audio backend absent; state tracking only.
+                self.speaker_level = new_speaker_level;
+            }
+        }
+    }
+
+    /// Write to the control register — Bochs pit82c54.cc write (address 3)
     fn write_control(&mut self, value: u8) {
         let sc = (value >> 6) & 0x03;
 
@@ -911,7 +1139,7 @@ impl BxPitC {
             return;
         }
 
-        // Counter Program Command — Bochs pit82c54.cc
+        // Counter Program Command — Bochs pit82c54.cc write
         let m = (value >> 1) & 0x07;
         let bcd = (value & 0x01) != 0;
 
@@ -926,7 +1154,7 @@ impl BxPitC {
         ctr.rw_mode = rw;
         ctr.bcd_mode = bcd;
         ctr.mode = m;
-        // Mode aliasing: 6→2, 7→3 (Bochs pit82c54.cc)
+        // Mode aliasing: 6→2, 7→3 (Bochs pit82c54.cc write)
         if ctr.mode > 5 {
             ctr.mode &= 0x3;
         }
@@ -947,7 +1175,10 @@ impl BxPitC {
             _ => {}
         }
 
-        // All modes except mode 0 have initial output of 1 (Bochs line 752-757)
+        // All modes except mode 0 have initial output of 1 (Bochs
+        // pit82c54.cc write). set_out records the transition, so a
+        // control-word write that moves counter 0's OUT pin produces an
+        // IRQ0 edge exactly like Bochs's set_OUT → out_handler path.
         if m != 0 {
             ctr.set_out(true);
         } else {
@@ -964,18 +1195,19 @@ impl BxPitC {
         );
     }
 
-    /// Handle read-back command — Bochs pit82c54.cc
+    /// Handle read-back command — Bochs pit82c54.cc write (READ_BACK)
     fn read_back(&mut self, value: u8) {
         let latch_count = (value & 0x20) == 0; // Bit 5: 0 = latch count
         let latch_status = (value & 0x10) == 0; // Bit 4: 0 = latch status
 
         for i in 0..PIT_NUM_COUNTERS {
             if (value & (0x02 << i)) != 0 {
-                if latch_status {
-                    self.counters[i].latch_status();
-                }
+                // Bochs order: latch count first, then status
                 if latch_count {
                     self.counters[i].latch_count();
+                }
+                if latch_status {
+                    self.counters[i].latch_status();
                 }
             }
         }
@@ -991,43 +1223,74 @@ impl BxPitC {
         self.counters[2].output
     }
 
-    /// Simulate time passing (in microseconds)
-    #[inline]
-    pub fn tick(&mut self, usec: u64, icount: u64) -> bool {
-        #[cfg(feature = "std")]
-        if self.realtime_last.is_some() {
-            let irq0 = self.sync_to_realtime();
-            if self.ips > 0 {
-                self.icount_at_last_sync = icount;
-                self.pit_tick_accumulator = 0;
-            }
-            return irq0;
-        }
-
-        let irq0 = self.advance_by_usec(usec);
-
-        // Reset icount baseline and accumulator so that read()-based sync
-        // doesn't double-count the ticks we just advanced via usec.
-        if self.ips > 0 {
-            self.icount_at_last_sync = icount;
-            self.pit_tick_accumulator = 0;
-        }
-
-        irq0
+    /// Take pending counter-0 OUT transitions and the current OUT level.
+    ///
+    /// Bochs pit.cc bx_pit_c::irq_handler is invoked synchronously on every
+    /// counter-0 set_OUT transition (raise_irq(0) on 0→1, lower_irq(0) on
+    /// 1→0). rusty_box records the transitions on the counter and the
+    /// DeviceManager replays them into the PIC after every PIT-mutating
+    /// operation (DeviceManager::service_pit_irq0). Transitions strictly
+    /// alternate (set_OUT fires only on a change), so (count, final level)
+    /// reconstructs the exact sequence.
+    pub fn drain_irq0_events(&mut self) -> (u32, bool) {
+        let transitions = self.counters[0].take_out_transitions();
+        (transitions, self.counters[0].output)
     }
 
-    /// Check and clear IRQ0 pending flag
+    /// Simulate time passing (in microseconds). OUT transitions produced by
+    /// the elapsed ticks are recorded on the counters; the caller drains
+    /// them via drain_irq0_events / DeviceManager::service_pit_irq0.
     #[inline]
-    pub fn check_irq0(&mut self) -> bool {
-        let pending = self.irq0_pending;
-        self.irq0_pending = false;
-        pending
+    pub fn tick(&mut self, usec: u64, icount: u64) {
+        #[cfg(feature = "std")]
+        if self.realtime_last.is_some() {
+            // Wall clock is the authority; the realtime arm of
+            // sync_to_icount also refreshes the icount baseline.
+            self.sync_to_icount(icount);
+            return;
+        }
+        if self.ips > 0 {
+            // Single PIT clock, two feeds: fold executed instructions first
+            // (same icount→usec conversion the port-access path uses), then
+            // top up with the emulator's usec delta MINUS what those syncs
+            // already advanced within this span. The remainder covers HLT
+            // fast-forward time, where icount stands still but virtual time
+            // does not (Bochs event.cc handleWaitForEvent ticks pc_system
+            // during HLT, and pit.cc periodic runs on that clock). Any
+            // sub-microsecond phase surplus carries to the next span —
+            // nothing is double-counted or dropped.
+            self.sync_to_icount(icount);
+            let already = self.total_usec - self.usec_at_last_device_tick;
+            if usec > already {
+                self.advance_by_usec(usec - already);
+            }
+            self.usec_at_last_device_tick = self.total_usec - already.saturating_sub(usec);
+            return;
+        }
+        self.advance_by_usec(usec);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Drive the counters by an exact number of PIT input clocks — the
+    /// pit82c54.cc clock_all tick domain (after the usec→tick conversion).
+    fn advance_ticks(pit: &mut BxPitC, ticks: u64) {
+        pit.clock_pit_ticks(ticks);
+    }
+
+    /// PIT with icount sync at ips = USEC_PER_SECOND: one instruction is
+    /// exactly one emulated microsecond, so cumulative PIT ticks after
+    /// icount N are floor(N * TICKS_PER_SECOND / USEC_PER_SECOND) — the
+    /// exact Bochs usec→tick derivation (pit.cc USEC_TO_TICKS), quantized
+    /// to whole microseconds just like pit.cc periodic().
+    fn usec_locked_pit() -> BxPitC {
+        let mut pit = BxPitC::new();
+        pit.init_icount_sync(0, USEC_PER_SECOND as u64);
+        pit
+    }
 
     #[test]
     fn test_pit_creation() {
@@ -1038,6 +1301,26 @@ mod tests {
         assert!(pit.counters[0].output);
         assert!(pit.counters[0].count_written);
         assert!(!pit.counters[0].first_pass);
+        // Bochs pit.cc init: only counter 0 has an OUT handler (irq_handler)
+        assert!(pit.counters[0].out_handler_attached);
+        assert!(!pit.counters[1].out_handler_attached);
+        assert!(!pit.counters[2].out_handler_attached);
+        // Bochs pit.cc init: speaker state cleared
+        assert!(!pit.speaker_data_on);
+        assert!(!pit.speaker_active);
+        assert!(!pit.speaker_level);
+    }
+
+    #[test]
+    fn frequency_constant_matches_bochs() {
+        // Bochs pit.cc: #define TICKS_PER_SECOND (1193181)
+        assert_eq!(TICKS_PER_SECOND, 1_193_181);
+        assert_eq!(PIT_FREQUENCY, 1_193_181);
+        // Derived math: exactly one second of usec yields exactly one
+        // second of PIT ticks (Bochs USEC_TO_TICKS).
+        let mut pit = BxPitC::new();
+        pit.tick(1_000_000, 0);
+        assert_eq!(pit.total_ticks, 1_193_181);
     }
 
     #[test]
@@ -1045,42 +1328,310 @@ mod tests {
         let mut pit = BxPitC::new();
 
         // Configure counter 0 for mode 2 (rate generator), low-high access
-        pit.write(PIT_CONTROL, 0x34, 1); // Counter 0, low-high, mode 2
+        pit.write(PIT_CONTROL, 0x34, 1, 0); // Counter 0, low-high, mode 2
 
         // After control word: count_written=false, first_pass=true
         assert!(!pit.counters[0].count_written);
         assert!(pit.counters[0].first_pass);
+        // Control word for mode != 0 sets OUT high — already high, so no
+        // transition is recorded.
+        assert_eq!(pit.drain_irq0_events(), (0, true));
 
         // Write count value 10
-        pit.write(PIT_COUNTER0, 10, 1); // Low byte
-        pit.write(PIT_COUNTER0, 0, 1); // High byte
+        pit.write(PIT_COUNTER0, 10, 1, 0); // Low byte
+        pit.write(PIT_COUNTER0, 0, 1, 0); // High byte
 
         // After full write: count_written=true
         assert!(pit.counters[0].count_written);
         assert_eq!(pit.counters[0].inlatch, 10);
 
-        // Clock: first_pass=true → reload from inlatch, set output HIGH
-        pit.counters[0].clock();
-        assert!(pit.counters[0].output); // HIGH after reload
-        assert!(!pit.counters[0].first_pass); // first_pass cleared
+        // Tick 1: reload from inlatch, output stays HIGH
+        advance_ticks(&mut pit, 1);
+        assert!(pit.counters[0].output);
+        assert!(!pit.counters[0].first_pass);
+        assert_eq!(pit.counters[0].count, 10);
 
-        // Clock 8 more times (count goes 10→9→...→2)
-        for _ in 0..8 {
-            let irq = pit.counters[0].clock();
-            assert!(!irq); // No IRQ yet
-            assert!(pit.counters[0].output); // Still HIGH
-        }
+        // Ticks 2..=9: count 10 → 2, output stays HIGH
+        advance_ticks(&mut pit, 8);
+        assert!(pit.counters[0].output);
+        assert_eq!(pit.counters[0].count, 2);
+        assert_eq!(pit.drain_irq0_events(), (0, true));
 
-        // Clock once more: count reaches 1, output goes LOW, first_pass=true
-        let irq = pit.counters[0].clock();
-        assert!(!irq); // LOW transition, not rising edge
-        assert!(!pit.counters[0].output); // LOW pulse
-        assert!(pit.counters[0].first_pass);
+        // Tick 10: count reaches 1 → OUT pulses LOW (Bochs irq_handler
+        // would call lower_irq(0))
+        advance_ticks(&mut pit, 1);
+        assert!(!pit.counters[0].output);
+        assert_eq!(pit.drain_irq0_events(), (1, false));
 
-        // Next clock: first_pass → reload and output HIGH (rising edge = IRQ)
-        let irq = pit.counters[0].clock();
-        assert!(irq); // Rising edge! IRQ fires
-        assert!(pit.counters[0].output); // Back to HIGH
+        // Tick 11: reload → OUT back HIGH (raise_irq(0))
+        advance_ticks(&mut pit, 1);
+        assert!(pit.counters[0].output);
+        assert_eq!(pit.drain_irq0_events(), (1, true));
+
+        // A full period processed in one bulk advance yields the LOW+HIGH
+        // transition pair (lower then raise, in order).
+        advance_ticks(&mut pit, 10);
+        assert!(pit.counters[0].output);
+        assert_eq!(pit.drain_irq0_events(), (2, true));
+    }
+
+    #[test]
+    fn write_syncs_counter_to_now_before_applying() {
+        // Finding #16: Bochs pit.cc bx_pit_c::write runs periodic() BEFORE
+        // s.timer.write(...), so elapsed ticks replay under the OLD program.
+        let mut pit = usec_locked_pit();
+
+        // Program counter 0: mode 2, LSB/MSB, count 100 (at icount 0)
+        pit.write(PIT_CONTROL, 0x34, 1, 0);
+        pit.write(PIT_COUNTER0, 100, 1, 0);
+        pit.write(PIT_COUNTER0, 0, 1, 0);
+
+        // Write to port 0x61 (GATE2) at icount 51 (= 51 usec) — the write
+        // handler must first advance the counters:
+        // ticks = floor(51 * 1193181 / 1e6) = 60 → 1 reload + 59 decrements.
+        pit.write(PIT_SYSTEM_CONTROL_B, 0x01, 1, 51);
+        assert_eq!(
+            pit.counters[0].count, 41,
+            "port 0x61 write must sync counters to now first"
+        );
+
+        // Write a new LSB to counter 0 itself at icount 76 — cumulative
+        // ticks = floor(76 * 1193181 / 1e6) = 90, so 30 more decrements
+        // must elapse under the old count before the (partial) write applies.
+        pit.write(PIT_COUNTER0, 200, 1, 76);
+        assert_eq!(
+            pit.counters[0].count, 11,
+            "count-register write must sync counters to now first"
+        );
+        // The partial (LSB-only) write latched the new value but did not
+        // load it yet (write_state = MSByte_multiple pauses the load).
+        assert_eq!(pit.counters[0].inlatch, 200);
+        assert!(!pit.counters[0].count_written);
+    }
+
+    #[test]
+    fn mode3_bulk_decrement_is_two_per_tick() {
+        // Finding #17: Bochs pit82c54.cc clock_multiple decrements mode 3
+        // by 2*cycles in the bulk path.
+        let mut pit = BxPitC::new();
+
+        pit.write(PIT_CONTROL, 0x36, 1, 0); // Counter 0, low-high, mode 3
+        pit.write(PIT_COUNTER0, 0xE8, 1, 0); // 1000 & 0xFF
+        pit.write(PIT_COUNTER0, 0x03, 1, 0); // 1000 >> 8
+
+        // Tick 1: reload → count = 1000, next change at half-period
+        advance_ticks(&mut pit, 1);
+        assert_eq!(pit.counters[0].count, 1000);
+        assert_eq!(pit.counters[0].next_change_time, 499);
+
+        // 100 more ticks in bulk → count decrements by 2 per tick = 200
+        advance_ticks(&mut pit, 100);
+        assert_eq!(
+            pit.counters[0].count, 800,
+            "mode 3 bulk path must decrement 2 per tick"
+        );
+        // count stays even in binary mode 3
+        assert_eq!(pit.counters[0].count % 2, 0);
+    }
+
+    #[test]
+    fn bcd_bulk_decrement_consumes_ticks() {
+        // Finding #17: the old bulk path returned without decrementing BCD
+        // counters while the caller still consumed the ticks.
+        let mut pit = BxPitC::new();
+
+        pit.write(PIT_CONTROL, 0x35, 1, 0); // Counter 0, low-high, mode 2, BCD
+        pit.write(PIT_COUNTER0, 0x00, 1, 0); // BCD 100 LSB
+        pit.write(PIT_COUNTER0, 0x01, 1, 0); // BCD 100 MSB
+
+        // Tick 1: reload → count = 0x0100 (BCD 100)
+        advance_ticks(&mut pit, 1);
+        assert_eq!(pit.counters[0].count, 0x0100);
+        assert_eq!(pit.counters[0].count_binary, 100);
+
+        // 50 more ticks in bulk → BCD count must actually decrement
+        advance_ticks(&mut pit, 50);
+        assert_eq!(pit.counters[0].count_binary, 50);
+        assert_eq!(
+            pit.counters[0].count, 0x0050,
+            "BCD bulk decrement must consume the ticks"
+        );
+    }
+
+    #[test]
+    fn port61_read_composition_is_fresh_every_read() {
+        // Finding #18: Bochs pit.cc read case 0x61 composes the value fresh:
+        // bit5=OUT2, bit4=(usec/15)&1, bit1=speaker_data_on, bit0=GATE2;
+        // bits 2/3/6/7 read 0.
+        let mut pit = usec_locked_pit();
+
+        // Power-on: GATE2=1, OUT2=1, speaker off, usec=0 → 0b0010_0001
+        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, 0), 0x21);
+        // Repeated read without time passing: identical (no per-read toggle)
+        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, 0), 0x21);
+
+        // Write bits 1/2/3 set, bit 0 clear: GATE2 drops, speaker data on;
+        // bits 2/3 must NOT be echoed back.
+        pit.write(PIT_SYSTEM_CONTROL_B, 0x0E, 1, 0);
+        assert!(pit.speaker_data_on);
+        assert!(!pit.counters[2].gate);
+        // Counter 2 is mode 4 (power-on) → speaker_level = data_on && OUT2
+        assert!(pit.speaker_level);
+        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, 0), 0x22);
+
+        // Advance virtual time past 15 usec (18 ticks ≈ 15.09 usec) → the
+        // refresh bit (bit 4) flips because it derives from the usec clock.
+        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, 18) & 0x10, 0x10);
+        // ... and stays put when read again with no time elapsed.
+        assert_eq!(pit.read(PIT_SYSTEM_CONTROL_B, 1, 18) & 0x10, 0x10);
+    }
+
+    #[test]
+    fn port43_read_returns_zero() {
+        // Finding #32b: Bochs pit82c54.cc read(CONTROL_ADDRESS) returns 0.
+        let mut pit = BxPitC::new();
+        assert_eq!(pit.read(PIT_CONTROL, 1, 0), 0);
+    }
+
+    #[test]
+    fn guest_reset_preserves_counter_state() {
+        // Finding #32a: Bochs pit82c54.cc reset is empty — counters keep
+        // their programming across a guest reset.
+        let mut pit = BxPitC::new();
+        pit.write(PIT_CONTROL, 0x34, 1, 0);
+        pit.write(PIT_COUNTER0, 100, 1, 0);
+        pit.write(PIT_COUNTER0, 0, 1, 0);
+        pit.write(PIT_SYSTEM_CONTROL_B, 0x02, 1, 0); // speaker_data_on
+        advance_ticks(&mut pit, 11);
+        let count_before = pit.counters[0].count;
+
+        pit.reset();
+
+        assert_eq!(pit.counters[0].mode, 2);
+        assert_eq!(pit.counters[0].inlatch, 100);
+        assert_eq!(pit.counters[0].count, count_before);
+        assert!(pit.counters[0].count_written);
+        assert!(pit.speaker_data_on);
+        assert_eq!(pit.total_ticks, 11);
+    }
+
+    #[test]
+    fn control_word_out_transition_is_recorded() {
+        // Finding #32d: Bochs pit82c54.cc write (control word) calls
+        // set_OUT, which invokes the counter-0 out_handler on a transition
+        // → IRQ0 edge from a control-word write alone.
+        let mut pit = BxPitC::new();
+        assert!(pit.counters[0].output); // power-on OUT=1
+
+        pit.write(PIT_CONTROL, 0x30, 1, 0); // Counter 0, low-high, mode 0 → OUT low
+        assert!(!pit.counters[0].output);
+        assert_eq!(
+            pit.drain_irq0_events(),
+            (1, false),
+            "control-word OUT 1→0 must be recorded as an IRQ0 lower"
+        );
+
+        // Reprogramming to a mode with initial OUT high transitions back.
+        pit.write(PIT_CONTROL, 0x34, 1, 0);
+        assert_eq!(pit.drain_irq0_events(), (1, true));
+    }
+
+    #[test]
+    fn mode0_terminal_count_raises_out_level() {
+        let mut pit = BxPitC::new();
+        pit.write(PIT_CONTROL, 0x30, 1, 0); // mode 0 → OUT low
+        assert_eq!(pit.drain_irq0_events(), (1, false));
+        pit.write(PIT_COUNTER0, 5, 1, 0);
+        pit.write(PIT_COUNTER0, 0, 1, 0);
+
+        // Tick 1 loads the count; ticks 2..=6 count 5→0; OUT goes HIGH at
+        // terminal count and STAYS high (level, not pulse).
+        advance_ticks(&mut pit, 6);
+        assert!(pit.counters[0].output);
+        assert_eq!(pit.drain_irq0_events(), (1, true));
+
+        // Further ticks: count wraps but OUT stays high — no transitions.
+        advance_ticks(&mut pit, 94);
+        assert_eq!(pit.drain_irq0_events(), (0, true));
+    }
+
+    #[test]
+    fn mode3_count0_reproduces_bochs_91hz_quirk() {
+        // Finding #32f (parity ruling): Bochs pit82c54.cc clock (mode 3
+        // reload) computes ((count_binary/2)-1) in Bit32u; count 0
+        // underflows and masks to 0xFFFF, so each half-period is 65536
+        // ticks (~9.1 Hz square wave) instead of real hardware's 32768
+        // (~18.2 Hz). Reproduced Bochs quirk.
+        let mut pit = BxPitC::new();
+        pit.write(PIT_CONTROL, 0x36, 1, 0); // Counter 0, low-high, mode 3
+        pit.write(PIT_COUNTER0, 0, 1, 0);
+        pit.write(PIT_COUNTER0, 0, 1, 0); // count 0 (= 0x10000 on real HW)
+
+        // Tick 1: reload — the quirk schedules the next OUT change 0xFFFF
+        // ticks out (18.2 Hz behavior would be 0x7FFF/0x8000).
+        advance_ticks(&mut pit, 1);
+        assert_eq!(pit.counters[0].next_change_time, 0xFFFF);
+        assert!(pit.counters[0].output);
+
+        // OUT must still be high after 32768 ticks (where real hardware
+        // would have toggled) ...
+        advance_ticks(&mut pit, 32_768);
+        assert!(pit.counters[0].output);
+
+        // ... and toggles only at tick 65537 (reload boundary + 1).
+        advance_ticks(&mut pit, 32_767);
+        assert!(pit.counters[0].output);
+        advance_ticks(&mut pit, 1);
+        assert!(!pit.counters[0].output);
+        assert_eq!(pit.drain_irq0_events(), (1, false));
+    }
+
+    #[test]
+    fn latched_status_with_half_read_count_returns_zero_forever() {
+        // Finding #32e: Bochs pit82c54.cc read — status latched while a
+        // latched count is half-read (MSB pending in MSByte_multiple) hits
+        // the "Undefined output" error path and returns 0 WITHOUT clearing
+        // any latch, so every subsequent read also returns 0.
+        let mut pit = usec_locked_pit();
+        pit.write(PIT_CONTROL, 0x34, 1, 0); // Counter 0, low-high, mode 2
+        pit.write(PIT_COUNTER0, 0x34, 1, 0);
+        pit.write(PIT_COUNTER0, 0x12, 1, 0);
+        pit.sync_to_icount(5);
+
+        // Latch the count, read only the LSB (read_state → MSByte_multiple)
+        pit.write(PIT_CONTROL, 0x00, 1, 5);
+        let lsb = pit.read(PIT_COUNTER0, 1, 5);
+        assert_eq!(lsb, (pit.counters[0].outlatch & 0xFF) as u32);
+        assert!(pit.counters[0].count_msb_latched);
+
+        // READ_BACK latch status for counter 0 (bit5=1: no count latch,
+        // bit4=0: latch status, bit1: select counter 0)
+        pit.write(PIT_CONTROL, 0xE2, 1, 5);
+        assert!(pit.counters[0].status_latched);
+
+        // Bochs error path: returns 0 and clears nothing — forever.
+        assert_eq!(pit.read(PIT_COUNTER0, 1, 5), 0);
+        assert_eq!(pit.read(PIT_COUNTER0, 1, 5), 0);
+        assert!(pit.counters[0].status_latched);
+        assert!(pit.counters[0].count_msb_latched);
+    }
+
+    #[test]
+    fn latched_two_part_read_advances_read_state() {
+        // Bochs pit82c54.cc read: reading a latched LSB in LSByte_multiple
+        // advances read_state to MSByte_multiple (and back on the MSB).
+        let mut pit = usec_locked_pit();
+        pit.write(PIT_CONTROL, 0x34, 1, 0);
+        pit.write(PIT_COUNTER0, 0x34, 1, 0);
+        pit.write(PIT_COUNTER0, 0x12, 1, 0);
+        pit.sync_to_icount(3);
+
+        pit.write(PIT_CONTROL, 0x00, 1, 3); // latch counter 0
+        let outlatch = pit.counters[0].outlatch;
+        assert_eq!(pit.read(PIT_COUNTER0, 1, 3), (outlatch & 0xFF) as u32);
+        assert_eq!(pit.counters[0].read_state, RWState::MsByteMultiple);
+        assert_eq!(pit.read(PIT_COUNTER0, 1, 3), (outlatch >> 8) as u32);
+        assert_eq!(pit.counters[0].read_state, RWState::LsByteMultiple);
     }
 
     #[test]
@@ -1147,7 +1698,7 @@ mod tests {
         let baseline = std::time::Instant::now() + std::time::Duration::from_millis(1);
         pit.realtime_last = Some(baseline);
 
-        assert!(!pit.sync_to_realtime());
+        pit.sync_to_realtime();
         assert_eq!(
             pit.realtime_last,
             Some(baseline),

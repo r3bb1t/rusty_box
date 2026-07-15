@@ -368,7 +368,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let ok = atomic
                 .compare_exchange(expected, new_val, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok();
-            self.i_cache.smc_write_check(paddr, 8);
+            self.smc_write_check(paddr, 8);
             Ok(ok)
         } else {
             // MMIO-backed SS page (not a real architectural case). Fall back to

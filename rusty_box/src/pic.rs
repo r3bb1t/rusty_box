@@ -111,16 +111,17 @@
 //! trigger mode. Edge-triggered IRQs must be deasserted before re-asserting
 //! to create a new edge. Level-triggered IRQs remain asserted in IRR until
 //! the device deasserts the line. IRQ0-2 and IRQ8,13 are always edge-triggered.
+//!
+//! Note: the ELCR ports themselves are NOT owned by the 8259 (Bochs pic.cc
+//! never registers or handles 0x4D0/0x4D1) — they belong to the PIIX3
+//! PCI-to-ISA bridge (Bochs `iodev/pci2isa.cc`), which stores `elcr1`/`elcr2`
+//! and forwards mode changes here via [`BxPicC::set_mode`].
 
 /// PIC I/O port addresses
 pub const PIC_MASTER_CMD: u16 = 0x0020;
 pub const PIC_MASTER_DATA: u16 = 0x0021;
 pub const PIC_SLAVE_CMD: u16 = 0x00A0;
 pub const PIC_SLAVE_DATA: u16 = 0x00A1;
-
-/// Edge/Level Control Register ports (ELCR)
-pub const PIC_ELCR1: u16 = 0x04D0;
-pub const PIC_ELCR2: u16 = 0x04D1;
 
 const PIC_IOAPIC_FORWARD_CAPACITY: usize = 256;
 
@@ -338,8 +339,6 @@ pub struct BxPicC {
     pub(crate) master: Pic8259State,
     /// Slave PIC state (ports 0xA0-0xA1)
     pub(crate) slave: Pic8259State,
-    /// Edge/Level Control Registers (ELCR)
-    pub(crate) elcr: [u8; 2],
     /// Flag: set when an external interrupt is pending (replaces raw pointer to CPU async_event).
     /// The emulator reads and clears this, applying BX_EVENT_PENDING_INTR to the CPU.
     pub(crate) irq_pending: bool,
@@ -379,7 +378,6 @@ impl BxPicC {
         Self {
             master,
             slave,
-            elcr: [0, 0],
             irq_pending: false,
             irq_cleared: false,
             ioapic_forwards: [(0, false); PIC_IOAPIC_FORWARD_CAPACITY],
@@ -430,7 +428,7 @@ impl BxPicC {
         self.reset();
     }
 
-    /// Reset the PIC to initial state
+    /// Reset the PIC to initial state (Bochs `bx_pic_c::reset`)
     pub fn reset(&mut self) {
         self.master.imr = 0xFF;
         self.master.isr = 0;
@@ -438,6 +436,8 @@ impl BxPicC {
         self.master.int_pin = false;
         self.master.init = PicInitState::default();
         self.master.irq_in = [0; 8];
+        // Bochs pic.cc reset(): master_pic.edge_level = 0
+        self.master.edge_level = 0;
 
         self.slave.imr = 0xFF;
         self.slave.isr = 0;
@@ -445,8 +445,8 @@ impl BxPicC {
         self.slave.int_pin = false;
         self.slave.init = PicInitState::default();
         self.slave.irq_in = [0; 8];
-
-        self.elcr = [0, 0];
+        // Bochs pic.cc reset(): slave_pic.edge_level = 0
+        self.slave.edge_level = 0;
     }
 
     /// Dispatch `Pic8259State::service()` result, handling cascade side effects.
@@ -517,8 +517,6 @@ impl BxPicC {
                 }
             }
             PIC_SLAVE_DATA => self.slave.imr as u32,
-            PIC_ELCR1 => self.elcr[0] as u32,
-            PIC_ELCR2 => self.elcr[1] as u32,
             _ => {
                 tracing::warn!("PIC: Unknown read port {:#06x}", port);
                 0xFF
@@ -529,6 +527,10 @@ impl BxPicC {
     // ---- Write handlers ----
 
     /// Write to PIC I/O port (Bochs `bx_pic_c::write`)
+    ///
+    /// Note: this does NOT handle 0x4D0/0x4D1 (ELCR) — those ports belong to
+    /// the PIIX3 bridge, which calls [`BxPicC::set_mode`] directly. See the
+    /// module-level ELCR note.
     pub fn write(&mut self, port: u16, value: u32, _io_len: u8) {
         let value = value as u8;
         match port {
@@ -536,18 +538,6 @@ impl BxPicC {
             PIC_MASTER_DATA => self.write_data(value, true),
             PIC_SLAVE_CMD => self.write_cmd(value, false),
             PIC_SLAVE_DATA => self.write_data(value, false),
-            PIC_ELCR1 => {
-                self.elcr[0] = value & 0xF8; // IRQ0-2 are edge-triggered only
-                                             // Sync ELCR to master PIC edge_level (Bochs pic.cc set_mode)
-                self.master.edge_level = self.elcr[0];
-                tracing::trace!("PIC: ELCR1 = {:#04x}", value);
-            }
-            PIC_ELCR2 => {
-                self.elcr[1] = value & 0xDE; // IRQ8,13 are edge-triggered only
-                                             // Sync ELCR to slave PIC edge_level (Bochs pic.cc set_mode)
-                self.slave.edge_level = self.elcr[1];
-                tracing::trace!("PIC: ELCR2 = {:#04x}", value);
-            }
             _ => {
                 tracing::warn!("PIC: Unknown write port {:#06x} value={:#04x}", port, value);
             }
@@ -903,6 +893,15 @@ impl BxPicC {
         self.master.int_pin
     }
 
+    /// Consume deferred edge notifications after the CPU observes the current
+    /// PIC INT pin deasserted. A later assertion records a fresh irq_pending.
+    #[inline]
+    pub(crate) fn reconcile_deasserted_intr(&mut self) {
+        debug_assert!(!self.master.int_pin);
+        self.irq_pending = false;
+        self.irq_cleared = false;
+    }
+
     /// Interrupt Acknowledge — CPU INTA cycle (Bochs `bx_pic_c::IAC`)
     ///
     /// Returns the interrupt vector number. Handles:
@@ -1010,6 +1009,24 @@ mod tests {
         assert!(pic.has_interrupt());
         let vector = pic.iac();
         assert_eq!(vector, 0x08); // IRQ0 -> INT 0x08
+    }
+
+    #[test]
+    fn reconciled_clear_cannot_erase_a_later_pic_assertion() {
+        let mut pic = BxPicC::new();
+        pic.irq_pending = true;
+        pic.irq_cleared = true;
+        pic.master.int_pin = false;
+
+        pic.reconcile_deasserted_intr();
+        assert!(!pic.irq_pending);
+        assert!(!pic.irq_cleared);
+
+        pic.master.imr = 0;
+        let _ = pic.raise_irq(0);
+        assert!(pic.irq_pending);
+        assert!(pic.has_interrupt());
+        assert!(!pic.irq_cleared);
     }
 
     #[test]

@@ -639,6 +639,62 @@ fn test_vex_vpermq_decode_runtime_sequence() {
 }
 
 #[test]
+fn test_vex_vextractf128_decode_win10_setup_sequence() {
+    // Captured from Windows 10 setup (VEX.256.66.0F3A.W0 19 /r ib).
+    // Sibling of VEXTRACTI128 (0x39); must decode, not #UD.
+    // c4 e3 7d 19 d8 01 = VEXTRACTF128 xmm0, ymm3, 1
+    let instr = fetch_decode64(&[0xC4, 0xE3, 0x7D, 0x19, 0xD8, 0x01]).unwrap();
+    assert_eq!(instr.ilen(), 6);
+    assert_eq!(instr.get_ia_opcode(), Opcode::V256Vextractf128WdqVdqIb);
+    assert_eq!(instr.dst(), 3); // nnn = source YMM (ymm3)
+    assert_eq!(instr.src1(), 0); // rm = destination XMM (xmm0)
+    assert_eq!(instr.ib(), 0x01);
+    assert_eq!(instr.get_vl(), 1);
+}
+
+#[test]
+fn test_vex_pinsr_family_decode() {
+    // VEX integer-insert family — 3-operand (vvvv = base vector). These used to
+    // mis-decode as the 2-operand SSE PINSR* (dropping vvvv → wrong data).
+
+    // VPINSRW xmm0, xmm1, eax, 3 — VEX.128.66.0F.W0 C4 (2-byte VEX C5).
+    // C5 F1: R=1(→0) vvvv=~1=1110 L=0 pp=01(66); modrm C0 = mod11 reg000 rm000.
+    let w = fetch_decode64(&[0xC5, 0xF1, 0xC4, 0xC0, 0x03]).unwrap();
+    assert_eq!(w.ilen(), 5);
+    assert_eq!(w.get_ia_opcode(), Opcode::V128VpinsrwVdqEwIb);
+    assert_eq!(w.dst(), 0);
+    assert_eq!(w.src2(), 1); // vvvv = base vector (xmm1)
+    assert_eq!(w.src1(), 0); // rm = GPR source (eax)
+    assert_eq!(w.ib(), 0x03);
+
+    // VPINSRB xmm0, xmm1, al, 5 — VEX.128.66.0F3A.W0 20 (3-byte VEX C4).
+    let b = fetch_decode64(&[0xC4, 0xE3, 0x71, 0x20, 0xC0, 0x05]).unwrap();
+    assert_eq!(b.ilen(), 6);
+    assert_eq!(b.get_ia_opcode(), Opcode::V128VpinsrbVdqEbIb);
+    assert_eq!(b.src2(), 1);
+    assert_eq!(b.ib(), 0x05);
+
+    // VPINSRD xmm0, xmm2, ecx, 2 — VEX.128.66.0F3A.W0 22.
+    let d = fetch_decode64(&[0xC4, 0xE3, 0x69, 0x22, 0xC1, 0x02]).unwrap();
+    assert_eq!(d.ilen(), 6);
+    assert_eq!(d.get_ia_opcode(), Opcode::V128VpinsrdVdqEdIb);
+    assert_eq!(d.src2(), 2); // vvvv = xmm2
+    assert_eq!(d.src1(), 1); // rm = ecx
+
+    // VPINSRQ xmm0, xmm2, rcx, 1 — VEX.128.66.0F3A.W1 22 (W1 → qword form).
+    let q = fetch_decode64(&[0xC4, 0xE3, 0xE9, 0x22, 0xC1, 0x01]).unwrap();
+    assert_eq!(q.ilen(), 6);
+    assert_eq!(q.get_ia_opcode(), Opcode::V128VpinsrqVdqEqIb);
+
+    // VEX.256 encoding of VPINSRW is illegal (VL128-only) → #UD.
+    assert!(fetch_decode64(&[0xC5, 0xF5, 0xC4, 0xC0, 0x03]).is_err());
+
+    // Legacy (non-VEX) PINSRW must still decode as the 2-operand SSE form.
+    let legacy = fetch_decode64(&[0x66, 0x0F, 0xC4, 0xC1, 0x03]).unwrap();
+    assert_eq!(legacy.get_ia_opcode(), Opcode::PinsrwVdqEwIb);
+}
+
+#[test]
 fn test_vex_fma3_decode_runtime_sequences() {
     // Captured from Ubuntu userspace boot: VEX.128.66.0F38.W1 A9 /r m64.
     let a9 = fetch_decode64(&[0xC4, 0xE2, 0xF9, 0xA9, 0x51, 0x18]).unwrap();

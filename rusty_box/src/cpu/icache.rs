@@ -11,106 +11,63 @@ use crate::{
     memory::BxMemC,
 };
 
-// Slice-based BxPageWriteStampTable for use with memory system
-#[derive(Debug)]
-pub struct BxPageWriteStampTable<'a> {
-    pub(crate) fine_granularity_mapping: &'a mut [u32],
+/// Number of entries in the machine-wide SMC page-write-stamp table.
+/// Bochs icache.h `bxPageWriteStampTable` allocates PHY_MEM_PAGES_IN_4G_SPACE
+/// = 1M entries (4GB / 4KB); physical addresses beyond the table's coverage
+/// alias into it ("can share writeStamps between multiple pages if >32 bit
+/// phy address"). The no-alloc build uses a smaller power-of-two table:
+/// heavier aliasing only makes SMC flushing MORE conservative (extra
+/// false-positive flushes), never less correct.
+#[cfg(feature = "alloc")]
+pub(crate) const SMC_STAMP_ENTRIES: usize = 1024 * 1024;
+#[cfg(not(feature = "alloc"))]
+pub(crate) const SMC_STAMP_ENTRIES: usize = 8192;
+
+/// Bochs icache.h `bxPageWriteStampTable::hash` — stamp-table index of a
+/// physical address (page number, aliased into the table).
+#[inline]
+pub(crate) fn smc_page_index(p_addr: BxPhyAddress) -> usize {
+    (((p_addr as u32) >> 12) as usize) & (SMC_STAMP_ENTRIES - 1)
 }
 
-impl<'a> BxPageWriteStampTable<'a> {
-    pub fn new(fine_granularity_mapping: &'a mut [u32]) -> Self {
-        Self {
-            fine_granularity_mapping,
-        }
+/// Bochs icache.h `markICache`/`decWriteStamp` mask computation: one bit per
+/// 128-byte line of the 4KB page touched by `[p_addr, p_addr + len)`.
+///
+/// Callers split cross-page writes before reaching this helper.
+#[inline]
+pub(crate) fn smc_cache_line_mask(p_addr: BxPhyAddress, len: u32) -> u32 {
+    if len == 0 {
+        return 0;
     }
 
-    /// Increment write stamp for a partial page write
-    /// Assumption: write does not split 4K page
-    pub fn inc_write_stamp_with_len(&mut self, p_addr: BxPhyAddress, len: u32) {
-        if self.fine_granularity_mapping.is_empty() {
-            return;
-        }
-        let index = Self::hash(p_addr);
-        if index < self.fine_granularity_mapping.len() && self.fine_granularity_mapping[index] != 0
-        {
-            // Calculate mask for affected cache lines (128-byte granularity)
-            let page_offset = (p_addr as u32) & 0xfff;
-            let shift1 = (page_offset >> 7).min(31);
-            let shift2 = ((page_offset + len - 1) >> 7).min(31);
-            let mut mask: u32 = 1 << shift1;
-            mask |= 1 << shift2;
-
-            if self.fine_granularity_mapping[index] & mask != 0 {
-                // TODO: Call handle_smc to invalidate instruction cache
-                // This requires access to CPUs which we don't have here
-                // For now, just clear the affected bits
-                self.fine_granularity_mapping[index] &= !mask;
-            }
-        }
-    }
-
-    /// Decrement write stamp for a whole page
-    /// This invalidates instruction cache entries for the entire page
-    pub fn dec_write_stamp(&mut self, p_addr: BxPhyAddress) {
-        self.dec_write_stamp_with_len(p_addr, 4096)
-    }
-
-    /// Decrement write stamp for a partial page write
-    /// Assumption: write does not split 4K page
-    pub fn dec_write_stamp_with_len(&mut self, p_addr: BxPhyAddress, len: u32) {
-        if self.fine_granularity_mapping.is_empty() {
-            return;
-        }
-        let index = Self::hash(p_addr);
-        if index < self.fine_granularity_mapping.len() && self.fine_granularity_mapping[index] != 0
-        {
-            // Calculate mask for affected cache lines (128-byte granularity)
-            let page_offset = (p_addr as u32) & 0xfff;
-            let shift1 = (page_offset >> 7).min(31);
-            let shift2 = ((page_offset + len - 1) >> 7).min(31);
-            let mut mask: u32 = 1 << shift1;
-            mask |= 1 << shift2;
-
-            if self.fine_granularity_mapping[index] & mask != 0 {
-                // TODO: Call handle_smc to invalidate instruction cache
-                // This requires access to CPUs which we don't have here
-                // For now, just clear the affected bits
-                self.fine_granularity_mapping[index] &= !mask;
-            }
-        }
-    }
-
-    pub fn mark_icache_mask(&mut self, p_addr: BxPhyAddress, mask: u32) {
-        if self.fine_granularity_mapping.is_empty() {
-            return;
-        }
-        let index = Self::hash(p_addr);
-        if index < self.fine_granularity_mapping.len() {
-            self.fine_granularity_mapping[index] |= mask;
-        }
-    }
-
-    fn hash(p_addr: BxPhyAddress) -> usize {
-        lpf_of(p_addr) as usize
-    }
+    let page_off = (p_addr as u32) & 0x0fff;
+    let first_line = page_off >> 7;
+    let last_byte = page_off.saturating_add(len - 1).min(0x0fff);
+    let last_line = last_byte >> 7;
+    let line_count = last_line - first_line + 1;
+    let range = if line_count == 32 {
+        u32::MAX
+    } else {
+        (1u32 << line_count) - 1
+    };
+    range << first_line
 }
 
-// Internal array-based BxPageWriteStampTable for use within icache (not exported)
-#[derive(Debug)]
-struct BxPageWriteStampTableInternal {
-    fine_granularity_mapping: [u32; 32768], // 128MB / 4KB = 32768 pages
+/// One queued cross-CPU SMC invalidation — a write hit 128-byte lines with
+/// cached traces, and every CPU's icache must flush them (Bochs icache.cc
+/// `handleSMC` loops over BX_SMP_PROCESSORS synchronously; the queue defers
+/// the sibling flushes to the round-robin slice boundary, which no other CPU
+/// can execute before).
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct PendingSmc {
+    pub(crate) p_addr: BxPhyAddress,
+    pub(crate) mask: u32,
 }
 
-fn handle_smc<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpus: &mut [BxCpuC<I, T>],
-    p_addr: BxPhyAddress,
-    mask: u32,
-) {
-    // INC_SMC_STAT(smc);
-    for cpu in cpus {
-        cpu.i_cache.handle_smc(p_addr, mask);
-    }
-}
+/// Capacity of the pending cross-CPU SMC queue. Overflow falls back to a
+/// full icache flush on every CPU that has not caught up — conservative but
+/// correct.
+pub(crate) const SMC_PENDING_CAP: usize = 64;
 
 const BX_ICACHE_INVALID_PHY_ADDRESS: BxPhyAddress = BxPhyAddress::MAX;
 // Bochs icache.h: BxICacheEntries = (64 * 1024). Must be a power of 2.
@@ -119,10 +76,6 @@ const BX_ICACHE_ENTRIES: usize = 64 * 1024;
 const BX_ICACHE_PAGE_SPLIT_ENTRIES: usize = 8;
 pub(super) const BX_ICACHE_MEM_POOL: usize = 576 * 1024;
 const BX_MAX_TRACE_LENGTH: usize = 32;
-/// Bochs config.cc BXPN_SMP_QUANTUM default: instructions a CPU may execute
-/// before control returns to the SMP scheduler; icache.cc caps trace length
-/// by it when BX_SMP_PROCESSORS > 1.
-const BX_SMP_QUANTUM: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct BxICacheEntry {
@@ -152,9 +105,6 @@ pub struct BxICacheEntry {
 // for) plus our 8-byte `first_bytes` SMC guard. Guard against accidental bloat.
 const _: () = assert!(core::mem::size_of::<BxICacheEntry>() == 32);
 
-/// Number of pages in 4GB physical address space (4GB / 4KB = 1M pages).
-const PHY_MEM_PAGES: usize = 1024 * 1024;
-
 pub struct BxICache {
     pub(crate) entry: [BxICacheEntry; BX_ICACHE_ENTRIES],
     /// Large array (~15 MB) — struct should be heap-allocated (e.g. via Box).
@@ -162,18 +112,6 @@ pub struct BxICache {
     pub(crate) mpindex: usize,
     next_page_split_index: usize,
     page_split_index: [PageSplitEntry; BX_ICACHE_PAGE_SPLIT_ENTRIES],
-    /// Per-page fine-granularity bitmask for SMC (Self-Modifying Code) detection.
-    /// Matching Bochs `bxPageWriteStampTable::fineGranularityMapping`.
-    ///
-    /// Each 4KB page gets one u32 entry. Each bit represents a 128-byte "cache line"
-    /// within the page (4096 / 128 = 32 lines = 32 bits). If a bit is set, there
-    /// exists an icache trace covering that cache line on that page.
-    ///
-    /// On memory write, if the written cache line's bit is set in the stamp,
-    /// `handle_smc_scan()` is called to invalidate affected icache entries.
-    /// This avoids the previous bug where `invalidate_page()` only checked one
-    /// hash index and missed entries at other offsets within the page.
-    page_write_stamps: [u32; PHY_MEM_PAGES],
 }
 
 #[derive(Clone, Debug)]
@@ -217,7 +155,6 @@ impl BxICache {
             mpindex: 0,
             next_page_split_index: 0,
             page_split_index: core::array::from_fn(|_| PageSplitEntry::default()),
-            page_write_stamps: [0u32; PHY_MEM_PAGES],
         }
     }
 
@@ -238,7 +175,8 @@ impl BxICache {
         // Store the page split entry
         self.page_split_index[self.next_page_split_index].ppf = p_addr;
         self.page_split_index[self.next_page_split_index].e = e.clone();
-        self.next_page_split_index = (self.next_page_split_index + 1) % BX_ICACHE_PAGE_SPLIT_ENTRIES;
+        self.next_page_split_index =
+            (self.next_page_split_index + 1) % BX_ICACHE_PAGE_SPLIT_ENTRIES;
     }
 
     pub fn get_entry(&self, p_addr: BxPhyAddress, fetch_mode_mask: u64) -> BxICacheEntry {
@@ -272,26 +210,6 @@ impl BxICache {
             return None;
         }
         Some(e)
-    }
-
-    fn handle_smc(&mut self, p_addr: BxPhyAddress, mask: u32) {
-        let index = Self::hash(p_addr, 0) as usize;
-        let entry = &mut self.entry[index];
-
-        // Bochs handleSMC: invalid entries carry the sentinel, so a real pAddr never matches.
-        if entry.p_addr == p_addr && entry.trace_mask & mask != 0 {
-            flush_smc(entry);
-        }
-
-        // Check page split entries
-        let ppf = ppf_of(p_addr);
-        for i in 0..BX_ICACHE_PAGE_SPLIT_ENTRIES {
-            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS
-                && ppf_of(self.page_split_index[i].ppf) == ppf
-            {
-                flush_smc(&mut self.page_split_index[i].e);
-            }
-        }
     }
 
     pub fn flush_page(&mut self, ppf: BxPhyAddress) {
@@ -340,9 +258,10 @@ impl BxICache {
 
         // Reset mpool write pointer so new traces can be allocated from the start
         self.mpindex = 0;
-
-        // Clear all page write stamps since no cached entries remain
-        self.reset_write_stamps();
+        // NOTE: the machine-wide SMC write-stamp table (Bochs
+        // pageWriteStampTable, owned by BxMemoryStubC) is deliberately NOT
+        // cleared here — other CPUs' traces are still marked in it, and
+        // over-marked stamps only cause conservative extra flushes.
     }
 
     pub fn invalidate_page(&mut self, ppf: BxPhyAddress) {
@@ -376,115 +295,53 @@ impl BxICache {
         }
     }
 
-    // =========================================================================
-    // Bochs-style pageWriteStampTable SMC detection
-    // Reference: cpp_orig/bochs/cpu/icache.h lines 29-101
-    // =========================================================================
-
-    /// Hash physical address to page write stamp index.
-    /// Matching Bochs `bxPageWriteStampTable::hash()`.
-    #[inline]
-    fn stamp_hash(p_addr: BxPhyAddress) -> usize {
-        ((p_addr as u32) >> 12) as usize
-    }
-
-    /// Compute the 128-byte cache line bitmask for a physical address range.
-    /// Each bit represents one of the 32 cache lines in a 4KB page.
-    /// Matching Bochs `markICache()` / `decWriteStamp()` mask computation.
-    #[inline]
-    fn cache_line_mask(p_addr: BxPhyAddress, len: u32) -> u32 {
-        let page_off = (p_addr as u32) & 0xFFF;
-        let shift1 = (page_off >> 7).min(31);
-        let shift2 = ((page_off.wrapping_add(len - 1)) >> 7).min(31);
-        (1u32 << shift1) | (1u32 << shift2)
-    }
-
-    /// Called when creating a new trace entry in serve_icache_miss().
-    /// Marks the page as having icache entries covering the given physical address range.
-    /// Matching Bochs `bxPageWriteStampTable::markICache()`.
-    pub fn mark_icache(&mut self, p_addr: BxPhyAddress, len: u32) {
-        let index = Self::stamp_hash(p_addr);
-        if index < self.page_write_stamps.len() {
-            let mask = Self::cache_line_mask(p_addr, len);
-            self.page_write_stamps[index] |= mask;
-        }
-    }
-
-    /// Mark icache with a pre-computed cache line mask.
-    /// Matching Bochs `bxPageWriteStampTable::markICacheMask()`.
-    pub fn mark_icache_mask(&mut self, p_addr: BxPhyAddress, mask: u32) {
-        let index = Self::stamp_hash(p_addr);
-        if index < self.page_write_stamps.len() {
-            self.page_write_stamps[index] |= mask;
-        }
-    }
-
-    /// Called on every memory write. Checks if the write overlaps a page with
-    /// cached instructions, and if so, invalidates affected icache entries.
-    /// Matching Bochs `bxPageWriteStampTable::decWriteStamp(pAddr, len)`.
+    /// Bochs icache.h `bxICache_c::handleSMC` — the per-CPU flush body of the
+    /// all-processors loop in icache.cc `handleSMC`.
     ///
-    /// This replaces the old `invalidate_page()` approach which only checked
-    /// one hash index per page and missed entries at other offsets.
-    pub fn smc_write_check(&mut self, p_addr: BxPhyAddress, len: u32) {
-        let index = Self::stamp_hash(p_addr);
-        if index >= self.page_write_stamps.len() {
-            return;
-        }
-        if self.page_write_stamps[index] == 0 {
-            return; // Fast path: no cached instructions on this page
-        }
+    /// Every trace STARTING in the written page hashes into the contiguous
+    /// 4096-entry window at `hash(LPF(pAddr), 0)`: the entry hash is
+    /// `(pAddr ^ fetchModeMask) & (entries - 1)` and FetchModeMask only uses
+    /// bits 0-7, so the XOR never moves an entry out of its page-aligned
+    /// 0x1000 window. Bochs scans 128 entries per 128-byte line and stops
+    /// after the highest written line (`line_mask > mask`) — NOT the whole
+    /// entry table; this bound is what keeps SMC-heavy phases (boot-time
+    /// code patching, code near data) fast.
+    ///
+    /// Page identity is compared by the SHARED stamp-table index (Bochs:
+    /// "pageWriteStampTable wrap — multiple physical addresses could be
+    /// mapped into a single entry and all of them have to be invalidated
+    /// here now").
+    pub(crate) fn handle_smc_scan(&mut self, p_addr: BxPhyAddress, mask: u32) {
+        let target_page_index = smc_page_index(p_addr);
 
-        let mask = Self::cache_line_mask(p_addr, len);
-        if self.page_write_stamps[index] & mask == 0 {
-            return; // Write doesn't overlap any cached cache lines
-        }
+        // Bochs handleSMC: breakLinks() first — invalidates all page-split
+        // traces (a page-split trace may spill into the written page). This
+        // also covers Bochs's separate `mask & 0x1` page-split pass, which
+        // re-checks entries breakLinks already invalidated.
+        self.break_links();
 
-        // SMC detected — invalidate affected icache entries
-        self.handle_smc_scan(p_addr, mask);
-        self.page_write_stamps[index] &= !mask;
-    }
-
-    /// Scan icache entries and invalidate any whose physical page matches and
-    /// whose trace_mask overlaps the written cache lines.
-    /// Matching Bochs `bxICache_c::handleSMC()`.
-    fn handle_smc_scan(&mut self, p_addr: BxPhyAddress, mask: u32) {
-        let target_page_index = Self::stamp_hash(p_addr);
-
-        tracing::trace!(
-            "SMC detected: p_addr={:#x}, page_index={:#x}, mask={:#010b}",
-            p_addr,
-            target_page_index,
-            mask
-        );
-
-        // Scan all icache entries for ones that belong to the affected page
-        // and have overlapping trace_mask bits.
-        for entry in &mut self.entry {
-            if entry.p_addr != BX_ICACHE_INVALID_PHY_ADDRESS
-                && Self::stamp_hash(entry.p_addr) == target_page_index
-                && (entry.trace_mask & mask) != 0
-            {
-                flush_smc(entry);
+        // Bochs: bxICacheEntry_c *e = get_entry(LPFOf(pAddr), 0);
+        // LPF has its low 12 bits clear, so `start` is a multiple of 0x1000
+        // and `start + 4096 <= BX_ICACHE_ENTRIES` — the window never wraps.
+        let start = Self::hash(lpf_of(p_addr), 0) as usize;
+        let mut idx = start;
+        // "go over 32 'cache lines' of 128 byte each"
+        for n in 0..32u32 {
+            let line_mask = 1u32 << n;
+            if line_mask > mask {
+                break;
             }
-        }
-
-        // Also check page split entries — a write to the first cache line could
-        // affect traces that start on the previous page and spill into this one.
-        if mask & 0x1 != 0 {
-            for pse in &mut self.page_split_index {
-                if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS
-                    && Self::stamp_hash(pse.ppf) == target_page_index
+            for _ in 0..128 {
+                let entry = &mut self.entry[idx];
+                if entry.p_addr != BX_ICACHE_INVALID_PHY_ADDRESS
+                    && smc_page_index(entry.p_addr) == target_page_index
+                    && (entry.trace_mask & mask) != 0
                 {
-                    pse.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                    flush_smc(&mut pse.e);
+                    flush_smc(entry);
                 }
+                idx += 1;
             }
         }
-    }
-
-    /// Reset all page write stamps (e.g., on full icache flush).
-    pub fn reset_write_stamps(&mut self) {
-        self.page_write_stamps.fill(0);
     }
 }
 
@@ -609,8 +466,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         p_addr: BxPhyAddress,
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
-        page_write_stamp_table: &mut BxPageWriteStampTable,
     ) -> Result<BxICacheEntry> {
+        // Raw pointer for stamp-table marking after `mem` is moved into
+        // boundary_fetch below (same reborrow discipline as cpu_loop's
+        // mem_ptr; the borrows never overlap).
+        let mem_raw: *mut BxMemC<'c> = mem;
         // Get entry index first to avoid borrow conflicts
         let entry_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
 
@@ -651,10 +511,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             .segment_d_b();
         // Bochs icache.cc getICacheEntry: "Don't allow traces longer than
         // cpu_loop can execute" — with multiple processors the trace is
-        // capped by the SMP quantum (BXPN_SMP_QUANTUM, default 16),
-        // otherwise by BX_MAX_TRACE_LENGTH.
+        // capped by the configured SMP quantum (BXPN_SMP_QUANTUM, default 16,
+        // range 1-32), otherwise by BX_MAX_TRACE_LENGTH.
         let quantum = if self.cpu_topology.cpu_count() > 1 {
-            BX_SMP_QUANTUM
+            (self.smp_trace_quantum.max(1)) as usize
         } else {
             BX_MAX_TRACE_LENGTH
         };
@@ -729,15 +589,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
             match decode_result {
                 Ok(()) => {
+                    let handler =
+                        self.handler_for_instruction(&self.i_cache.mpool[current_mpindex]);
+                    self.i_cache_handlers[current_mpindex] = handler;
                     // Instruction is already in mpool[current_mpindex] — get its length
                     let i_len = { self.i_cache.mpool[current_mpindex].ilen() as u32 };
 
-                    // Call assignHandler during trace creation (matching C++ line 169)
-                    // This checks feature flags and determines if trace should stop
-                    // Note: In C++, handlers are stored in instruction structure (i->execute1, i->handlers.execute2)
-                    // In Rust, we can't store function pointers in instruction structure (it's in decoder crate),
-                    // so we call assign_handler again during execution to get the handler.
-                    // But we still call it here to check if tracing should stop (matching original behavior).
+                    // Bochs stores the selected execute handler in each decoded
+                    // instruction. Rust keeps the generic function pointer in
+                    // the parallel i_cache_handlers pool populated above.
                     // Check if this instruction ends the trace (matching Bochs assignHandler
                     // BxTraceEnd check). Control-flow instructions (branches, jumps, calls,
                     // returns, loops, interrupts) must end the trace so that the next
@@ -817,8 +677,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                                 entry.trace_mask |= trace_mask;
                                 entry.trace_mask
                             };
-                            page_write_stamp_table.mark_icache_mask(current_p_addr, full_mask);
-                            self.i_cache.mark_icache_mask(current_p_addr, full_mask);
+                            // SAFETY: no live borrow of mem at this point (see mem_raw above).
+                            unsafe { (*mem_raw).smc_mark_icache_mask(current_p_addr, full_mask) };
                             self.i_cache.mpindex = current_mpindex + merged;
                             self.i_cache
                                 .commit_trace(self.i_cache.entry[entry_idx].tlen as usize);
@@ -889,6 +749,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                                 );
                                 self.i_cache.mpool[current_mpindex].set_ia_opcode(Opcode::IaError);
                                 self.i_cache.mpool[current_mpindex].set_ilen(1);
+                                let handler = self
+                                    .handler_for_instruction(&self.i_cache.mpool[current_mpindex]);
+                                self.i_cache_handlers[current_mpindex] = handler;
                                 // Set trace length to include this IaError entry
                                 self.i_cache.entry[entry_idx].tlen = 1;
                                 return Ok(self.i_cache.entry[entry_idx].clone());
@@ -928,6 +791,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         break;
                     }
                     self.i_cache.mpool[current_mpindex] = boundary_instr;
+                    let handler =
+                        self.handler_for_instruction(&self.i_cache.mpool[current_mpindex]);
+                    self.i_cache_handlers[current_mpindex] = handler;
                     current_mpindex += 1;
 
                     // Add the instruction to trace cache (matching C++ line 152-154)
@@ -938,10 +804,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         // tlen is already set to 1 above; mpool_start_idx was already set above.
                     }
 
-                    page_write_stamp_table.mark_icache_mask(p_addr, 0x80000000);
-                    page_write_stamp_table.mark_icache_mask(self.p_addr_fetch_page, 0x1);
-                    self.i_cache.mark_icache_mask(p_addr, 0x80000000);
-                    self.i_cache.mark_icache_mask(self.p_addr_fetch_page, 0x1);
+                    // SAFETY: boundary_fetch's borrow of mem ended above (see mem_raw).
+                    unsafe {
+                        (*mem_raw).smc_mark_icache_mask(p_addr, 0x80000000);
+                        (*mem_raw).smc_mark_icache_mask(self.p_addr_fetch_page, 0x1);
+                    }
 
                     // Add end-of-trace opcode if not in debugger (matching C++ line 158-163)
                     // TODO: Check debugger active state
@@ -950,6 +817,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                             let entry = &mut self.i_cache.entry[entry_idx];
                             entry.tlen += 1; /* Add the inserted end of trace opcode */
                             gen_dummy_icache_entry(&mut self.i_cache.mpool[current_mpindex]);
+                            let handler =
+                                self.handler_for_instruction(&self.i_cache.mpool[current_mpindex]);
+                            self.i_cache_handlers[current_mpindex] = handler;
                             current_mpindex += 1;
                         }
                     }
@@ -968,8 +838,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             let entry = &mut self.i_cache.entry[entry_idx];
             entry.trace_mask |= trace_mask;
         }
-        page_write_stamp_table.mark_icache_mask(current_p_addr, trace_mask);
-        self.i_cache.mark_icache_mask(current_p_addr, trace_mask);
+        // SAFETY: no live borrow of mem at this point (see mem_raw above).
+        unsafe { (*mem_raw).smc_mark_icache_mask(current_p_addr, trace_mask) };
 
         // Add end-of-trace opcode if not in debugger (matching C++ line 210-214)
         // TODO: Check debugger active state
@@ -978,6 +848,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             if current_mpindex < BX_ICACHE_MEM_POOL {
                 // Note: tlen will be incremented here, then used below
                 gen_dummy_icache_entry(&mut self.i_cache.mpool[current_mpindex]);
+                let handler = self.handler_for_instruction(&self.i_cache.mpool[current_mpindex]);
+                self.i_cache_handlers[current_mpindex] = handler;
                 current_mpindex += 1;
                 tlen += 1; /* Add the inserted end of trace opcode */
             }
@@ -1142,6 +1014,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         debug_assert!(source_start_idx + max_length <= BX_ICACHE_MEM_POOL);
         for k in 0..max_length {
             self.i_cache.mpool[current_mpindex + k] = self.i_cache.mpool[source_start_idx + k];
+            self.i_cache_handlers[current_mpindex + k] =
+                self.i_cache_handlers[source_start_idx + k];
         }
 
         // Bochs mergeTraces: entry->tlen += max_length; entry->traceMask |= e->traceMask. Our
@@ -1152,5 +1026,19 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         debug_assert!(entry.tlen as usize <= BX_MAX_TRACE_LENGTH); // Bochs BX_ASSERT (icache.cc:244)
         entry.trace_mask |= source_trace_mask;
         Some(max_length)
+    }
+}
+
+#[cfg(test)]
+mod smc_mask_tests {
+    use super::smc_cache_line_mask;
+
+    #[test]
+    fn smc_mask_covers_every_touched_cache_line() {
+        assert_eq!(smc_cache_line_mask(0x0180, 0), 0);
+        assert_eq!(smc_cache_line_mask(0x0180, 1), 1 << 3);
+        assert_eq!(smc_cache_line_mask(0x0180, 0x0180), 0b111 << 3);
+        assert_eq!(smc_cache_line_mask(0x0000, 0x1000), u32::MAX);
+        assert_eq!(smc_cache_line_mask(0x0f80, 0x0080), 1 << 31);
     }
 }

@@ -1,0 +1,356 @@
+From 55d154e0f0119bc037455fb8fbef021085f7459f Mon Sep 17 00:00:00 2001
+From: r3bb1t <49586603+r3bb1t@users.noreply.github.com>
+Date: Mon, 13 Jul 2026 15:25:42 +0300
+Subject: [PATCH] add 'cpuid_freq' option to control reporting of CPUID leaves
+ 0x15/0x16
+
+CPU models since Skylake-X copy CPUID leaves 0x15 and 0x16 from real
+hardware dumps, declaring a multi-GHz TSC while the emulated TSC advances
+at the bochsrc 'ips' rate. Linux >= 4.8 trusts these leaves, never
+calibrates against the PIT, and all TSC-derived guest time runs
+declared_freq/ips (~875x at the default ips) slow. See issue #791.
+
+The new 'cpu: cpuid_freq=' option keeps the hardware dump values by
+default ('hardware', no behavior change), reports the leaves as not
+enumerated ('none', the SDM-sanctioned encoding, restoring guest
+timer-based calibration of the true rate), or derives them from the
+emulated tick rate ('ips', for guests that trust CPUID).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ bochs/.bochsrc                            | 11 ++++++
+ bochs/PARAM_TREE.txt                      |  1 +
+ bochs/config.cc                           | 10 ++++-
+ bochs/cpu/cpudb/intel/arrow_lake.cc       |  4 +-
+ bochs/cpu/cpudb/intel/corei3_cnl.cc       |  4 +-
+ bochs/cpu/cpudb/intel/corei7_icelake-u.cc |  4 +-
+ bochs/cpu/cpudb/intel/corei7_skylake-x.cc |  4 +-
+ bochs/cpu/cpudb/intel/sapphire_rapids.cc  |  4 +-
+ bochs/cpu/cpudb/intel/tigerlake.cc        |  4 +-
+ bochs/cpu/cpuid.cc                        | 47 +++++++++++++++++++++++
+ bochs/cpu/cpuid.h                         | 15 ++++++++
+ bochs/doc/docbook/user/user.dbk           | 15 ++++++++
+ bochs/doc/man/bochsrc.5                   |  9 +++++
+ bochs/param_names.h                       |  1 +
+ 14 files changed, 119 insertions(+), 14 deletions(-)
+
+diff --git a/bochs/.bochsrc b/bochs/.bochsrc
+index b609fb28d..a6a00e942 100644
+--- a/bochs/.bochsrc
++++ b/bochs/.bochsrc
+@@ -182,6 +182,17 @@
+ #    Determine whether to limit maximum CPUID function to 2. This mode is
+ #    required to workaround WinNT installation and boot issues.
+ #
++#  CPUID_FREQ:
++#    Select how the CPUID frequency leaves 0x15/0x16 are reported by CPU
++#    models that implement them (hardware/none/ips). With 'hardware'
++#    (default) the values dumped from the modeled hardware are reported,
++#    but modern guest kernels trust these leaves for TSC calibration while
++#    the emulated TSC actually advances at the IPS rate, so guest
++#    timekeeping can run off by orders of magnitude. With 'none' the
++#    frequencies are reported as not enumerated and guests fall back to
++#    timer based calibration, with 'ips' the leaves report the emulated
++#    tick rate itself.
++#
+ #  MSRS:
+ #    Define path to user CPU Model Specific Registers (MSRs) specification.
+ #    See example in msrs.def.
+diff --git a/bochs/PARAM_TREE.txt b/bochs/PARAM_TREE.txt
+index f3fd7f5c1..ab78fd038 100644
+--- a/bochs/PARAM_TREE.txt
++++ b/bochs/PARAM_TREE.txt
+@@ -29,6 +29,7 @@ cpu
+   reset_on_triple_fault
+   msrs
+   cpuid_limit_winnt
++  cpuid_freq
+   mwait_is_nop
+   brand_string
+ 
+diff --git a/bochs/config.cc b/bochs/config.cc
+index 6f08e0b6d..dce02e146 100644
+--- a/bochs/config.cc
++++ b/bochs/config.cc
+@@ -698,6 +698,11 @@ void bx_init_options()
+       "cpuid_limit_winnt", "Limit max CPUID function to 3",
+       "Limit max CPUID function reported to 3 to workaround WinNT issue",
+       0);
++  static const char *cpuid_freq_names[] = { "hardware", "none", "ips", NULL };
++  new bx_param_enum_c(cpu_param,
++      "cpuid_freq", "CPUID frequency leaves 0x15/0x16 mode",
++      "Report CPUID frequency leaves 0x15/0x16 from the hardware dump of the selected model, as not enumerated, or derived from the emulated tick rate (ips)",
++      cpuid_freq_names, 0, 0);
+ #if BX_SUPPORT_MONITOR_MWAIT
+   new bx_param_bool_c(cpu_param,
+       "mwait_is_nop", "Don't put CPU to sleep state by MWAIT",
+@@ -3615,10 +3620,11 @@ int bx_write_configuration(const char *rc, int overwrite)
+ #else
+   fprintf(fp, "cpu: count=1, ips=%u, ", SIM->get_param_num(BXPN_IPS)->get());
+ #endif
+-  fprintf(fp, "model=%s, reset_on_triple_fault=%d, cpuid_limit_winnt=%d",
++  fprintf(fp, "model=%s, reset_on_triple_fault=%d, cpuid_limit_winnt=%d, cpuid_freq=%s",
+     SIM->get_param_enum(BXPN_CPU_MODEL)->get_selected(),
+     SIM->get_param_bool(BXPN_RESET_ON_TRIPLE_FAULT)->get(),
+-    SIM->get_param_bool(BXPN_CPUID_LIMIT_WINNT)->get());
++    SIM->get_param_bool(BXPN_CPUID_LIMIT_WINNT)->get(),
++    SIM->get_param_enum(BXPN_CPUID_FREQ)->get_selected());
+ #if BX_CPU_LEVEL >= 5
+   fprintf(fp, ", ignore_bad_msrs=%d", SIM->get_param_bool(BXPN_IGNORE_BAD_MSRS)->get());
+ #endif
+diff --git a/bochs/cpu/cpudb/intel/arrow_lake.cc b/bochs/cpu/cpudb/intel/arrow_lake.cc
+index e884dd5ef..30a88bc22 100644
+--- a/bochs/cpu/cpudb/intel/arrow_lake.cc
++++ b/bochs/cpu/cpudb/intel/arrow_lake.cc
+@@ -227,10 +227,10 @@ void arrow_lake_t::get_cpuid_leaf(Bit32u function, Bit32u subfunction, cpuid_fun
+     get_reserved_leaf(leaf);
+     return;
+   case 0x00000015: // CPUID leaf 0x00000015 - Time Stamp Counter and Core Crystal Clock Information Leaf
+-    get_leaf(leaf, 0x00000002, 0x000000da, 0x0249f000, 0x00000000);
++    get_freq_leaf_15(leaf, 0x00000002, 0x000000da, 0x0249f000);
+     return;
+   case 0x00000016: // CPUID leaf 0x00000016 - Processor Frequency Information Leaf
+-    get_leaf(leaf, 0x00001068, 0x00001450, 0x00000064, 0x00000000);
++    get_freq_leaf_16(leaf, 0x00001068, 0x00001450, 0x00000064);
+     return;
+   case 0x00000017:
+     get_reserved_leaf(leaf);
+diff --git a/bochs/cpu/cpudb/intel/corei3_cnl.cc b/bochs/cpu/cpudb/intel/corei3_cnl.cc
+index 64a0260f1..211b711b6 100644
+--- a/bochs/cpu/cpudb/intel/corei3_cnl.cc
++++ b/bochs/cpu/cpudb/intel/corei3_cnl.cc
+@@ -199,11 +199,11 @@ void corei3_cnl_t::get_cpuid_leaf(Bit32u function, Bit32u subfunction, cpuid_fun
+     get_reserved_leaf(leaf);
+     return;
+   case 0x00000015: // CPUID leaf 0x00000015 - Time Stamp Counter and Core Crystal Clock Information Leaf
+-    get_leaf(leaf, 0x00000002, 0x000000b8, 0x016e3600, 0x00000000);
++    get_freq_leaf_15(leaf, 0x00000002, 0x000000b8, 0x016e3600);
+     return;
+   case 0x00000016: // CPUID leaf 0x00000016 - Processor Frequency Information Leaf
+   default:
+-    get_leaf(leaf, 0x00000898, 0x00000c80, 0x00000064, 0x00000000);
++    get_freq_leaf_16(leaf, 0x00000898, 0x00000c80, 0x00000064);
+     return;
+   }
+ }
+diff --git a/bochs/cpu/cpudb/intel/corei7_icelake-u.cc b/bochs/cpu/cpudb/intel/corei7_icelake-u.cc
+index 534a69d49..064b06d02 100644
+--- a/bochs/cpu/cpudb/intel/corei7_icelake-u.cc
++++ b/bochs/cpu/cpudb/intel/corei7_icelake-u.cc
+@@ -216,10 +216,10 @@ void corei7_icelake_t::get_cpuid_leaf(Bit32u function, Bit32u subfunction, cpuid
+     get_reserved_leaf(leaf);
+     return;
+   case 0x00000015: // CPUID leaf 0x00000015 - Time Stamp Counter and Core Crystal Clock Information Leaf
+-    get_leaf(leaf, 0x00000002, 0x0000004e, 0x0249f000, 0x00000000);
++    get_freq_leaf_15(leaf, 0x00000002, 0x0000004e, 0x0249f000);
+     return;
+   case 0x00000016: // CPUID leaf 0x00000016 - Processor Frequency Information Leaf
+-    get_leaf(leaf, 0x000005dc, 0x00000f3c, 0x00000064, 0x00000000);
++    get_freq_leaf_16(leaf, 0x000005dc, 0x00000f3c, 0x00000064);
+     return;
+   case 0x00000017:
+     get_reserved_leaf(leaf);
+diff --git a/bochs/cpu/cpudb/intel/corei7_skylake-x.cc b/bochs/cpu/cpudb/intel/corei7_skylake-x.cc
+index 07e89e89b..38da64cb4 100644
+--- a/bochs/cpu/cpudb/intel/corei7_skylake-x.cc
++++ b/bochs/cpu/cpudb/intel/corei7_skylake-x.cc
+@@ -193,11 +193,11 @@ void corei7_skylake_x_t::get_cpuid_leaf(Bit32u function, Bit32u subfunction, cpu
+     get_reserved_leaf(leaf);
+     return;
+   case 0x00000015: // CPUID leaf 0x000000015 - Time Stamp Counter and Nominal Core Crystal Clock Information
+-    get_leaf(leaf, 0x00000002, 0x00000124, 0x00000000, 0x00000000);
++    get_freq_leaf_15(leaf, 0x00000002, 0x00000124, 0x00000000);
+     return;
+   case 0x00000016: // CPUID leaf 0x000000016 - Processor Frequency Information
+   default:
+-    get_leaf(leaf, 0x00000dac, 0x00000fa0, 0x00000064, 0x00000000);
++    get_freq_leaf_16(leaf, 0x00000dac, 0x00000fa0, 0x00000064);
+     return;
+   }
+ }
+diff --git a/bochs/cpu/cpudb/intel/sapphire_rapids.cc b/bochs/cpu/cpudb/intel/sapphire_rapids.cc
+index 1850a21b5..abead61bc 100644
+--- a/bochs/cpu/cpudb/intel/sapphire_rapids.cc
++++ b/bochs/cpu/cpudb/intel/sapphire_rapids.cc
+@@ -238,10 +238,10 @@ void sapphire_rapids_t::get_cpuid_leaf(Bit32u function, Bit32u subfunction, cpui
+     get_reserved_leaf(leaf);
+     return;
+   case 0x00000015: // CPUID leaf 0x00000015 - Time Stamp Counter and Core Crystal Clock Information Leaf
+-    get_leaf(leaf, 0x00000002, 0x000000b0, 0x017d7840, 0x00000000);
++    get_freq_leaf_15(leaf, 0x00000002, 0x000000b0, 0x017d7840);
+     return;
+   case 0x00000016: // CPUID leaf 0x00000016 - Processor Frequency Information Leaf
+-    get_leaf(leaf, 0x00000898, 0x000012c0, 0x00000064, 0x00000000);
++    get_freq_leaf_16(leaf, 0x00000898, 0x000012c0, 0x00000064);
+     return;
+   case 0x00000017:
+     get_reserved_leaf(leaf);
+diff --git a/bochs/cpu/cpudb/intel/tigerlake.cc b/bochs/cpu/cpudb/intel/tigerlake.cc
+index 366c9f50d..2a1dbe0a2 100644
+--- a/bochs/cpu/cpudb/intel/tigerlake.cc
++++ b/bochs/cpu/cpudb/intel/tigerlake.cc
+@@ -222,10 +222,10 @@ void tigerlake_t::get_cpuid_leaf(Bit32u function, Bit32u subfunction, cpuid_func
+     get_reserved_leaf(leaf);
+     return;
+   case 0x00000015: // CPUID leaf 0x00000015 - Time Stamp Counter and Core Crystal Clock Information Leaf
+-    get_leaf(leaf, 0x00000002, 0x0000007e, 0x0249f000, 0x00000000);
++    get_freq_leaf_15(leaf, 0x00000002, 0x0000007e, 0x0249f000);
+     return;
+   case 0x00000016: // CPUID leaf 0x00000016 - Processor Frequency Information Leaf
+-    get_leaf(leaf, 0x00000960, 0x00001068, 0x00000064, 0x00000000);
++    get_freq_leaf_16(leaf, 0x00000960, 0x00001068, 0x00000064);
+     return;
+   case 0x00000017:
+     get_reserved_leaf(leaf);
+diff --git a/bochs/cpu/cpuid.cc b/bochs/cpu/cpuid.cc
+index c54ff25cd..b2186cee2 100644
+--- a/bochs/cpu/cpuid.cc
++++ b/bochs/cpu/cpuid.cc
+@@ -451,6 +451,53 @@ void bx_cpuid_t::get_leaf_0(unsigned max_leaf, const char *vendor_string, cpuid_
+ #endif
+ }
+ 
++// leaf 0x00000015 - Time Stamp Counter and Nominal Core Crystal Clock Information
++void bx_cpuid_t::get_freq_leaf_15(cpuid_function_t *leaf, Bit32u eax, Bit32u ebx, Bit32u ecx) const
++{
++  static unsigned cpuid_freq = SIM->get_param_enum(BXPN_CPUID_FREQ)->get();
++
++  switch(cpuid_freq) {
++  case BX_CPUID_FREQ_NONE:
++    // EBX=0: TSC/crystal ratio not enumerated, ECX=0: crystal not enumerated;
++    // guests fall back to their own timer calibration and measure the true rate
++    get_leaf(leaf, 0, 0, 0, 0);
++    break;
++  case BX_CPUID_FREQ_IPS:
++    // TSC frequency = core crystal clock * EBX/EAX: report the true tick rate
++    // as a crystal running at 'ips' Hz with a 1/1 ratio
++    get_leaf(leaf, 1, 1, (Bit32u) SIM->get_param_num(BXPN_IPS)->get(), 0);
++    break;
++  case BX_CPUID_FREQ_HARDWARE:
++  default:
++    get_leaf(leaf, eax, ebx, ecx, 0);
++    break;
++  }
++}
++
++// leaf 0x00000016 - Processor Frequency Information
++void bx_cpuid_t::get_freq_leaf_16(cpuid_function_t *leaf, Bit32u eax, Bit32u ebx, Bit32u ecx) const
++{
++  static unsigned cpuid_freq = SIM->get_param_enum(BXPN_CPUID_FREQ)->get();
++
++  switch(cpuid_freq) {
++  case BX_CPUID_FREQ_NONE:
++    // EAX=0: processor base frequency not enumerated
++    get_leaf(leaf, 0, 0, 0, 0);
++    break;
++  case BX_CPUID_FREQ_IPS:
++    {
++      // report base and max frequency of the emulated tick rate in MHz
++      Bit32u mhz = (Bit32u)((SIM->get_param_num(BXPN_IPS)->get() + 500000) / 1000000);
++      get_leaf(leaf, mhz, mhz, 100, 0);
++    }
++    break;
++  case BX_CPUID_FREQ_HARDWARE:
++  default:
++    get_leaf(leaf, eax, ebx, ecx, 0);
++    break;
++  }
++}
++
+ void bx_cpuid_t::get_ext_cpuid_brand_string_leaf(const char *brand_string, Bit32u function, cpuid_function_t *leaf) const
+ {
+   static const char *brand_string_ovr = (const char *)SIM->get_param_string(BXPN_BRAND_STRING)->getptr();
+diff --git a/bochs/cpu/cpuid.h b/bochs/cpu/cpuid.h
+index b6142288c..ca9b04cec 100644
+--- a/bochs/cpu/cpuid.h
++++ b/bochs/cpu/cpuid.h
+@@ -35,6 +35,14 @@ struct cpuid_function_t {
+ 
+ class VMCS_Mapping;
+ 
++// modes of the bochsrc 'cpu: cpuid_freq=' option controlling how the CPUID
++// frequency leaves 0x15/0x16 are reported (see bx_cpuid_t::get_freq_leaf_15)
++enum {
++  BX_CPUID_FREQ_HARDWARE = 0, // values dumped from the modeled hardware
++  BX_CPUID_FREQ_NONE = 1,     // frequencies not enumerated
++  BX_CPUID_FREQ_IPS = 2       // derived from the emulated tick rate (ips)
++};
++
+ class bx_cpuid_t {
+ public:
+   bx_cpuid_t(BX_CPU_C *_cpu);
+@@ -144,6 +152,13 @@ protected:
+ 
+   void get_ext_cpuid_leaf_8(cpuid_function_t *leaf) const;
+ 
++  // CPUID leaves 0x15/0x16 declare the TSC and processor base frequencies of
++  // the CPU the model was dumped from, while the emulated TSC advances at the
++  // 'ips' rate; the 'cpu: cpuid_freq=' option chooses how they are reported.
++  // The eax/ebx/ecx arguments carry the hardware dump values of the model.
++  void get_freq_leaf_15(cpuid_function_t *leaf, Bit32u eax, Bit32u ebx, Bit32u ecx) const;
++  void get_freq_leaf_16(cpuid_function_t *leaf, Bit32u eax, Bit32u ebx, Bit32u ecx) const;
++
+   BX_CPP_INLINE void get_leaf(cpuid_function_t *leaf, Bit32u eax, Bit32u ebx, Bit32u ecx, Bit32u edx) const
+   {
+     leaf->eax = eax;
+diff --git a/bochs/doc/docbook/user/user.dbk b/bochs/doc/docbook/user/user.dbk
+index 95a5dd595..9ffee363f 100644
+--- a/bochs/doc/docbook/user/user.dbk
++++ b/bochs/doc/docbook/user/user.dbk
+@@ -3518,6 +3518,21 @@ will be completely bogus !
+ Determine whether to limit maximum CPUID function to 2. This mode is required
+ to work around WinNT installation and boot issues.
+ </para>
++<para><command>cpuid_freq</command></para>
++<para>
++Select how the CPUID frequency leaves 0x15 (Time Stamp Counter and Nominal
++Core Crystal Clock Information) and 0x16 (Processor Frequency Information)
++are reported by CPU models that implement them. With <option>hardware</option>
++(default) the values dumped from the modeled hardware are reported; note that
++modern guest kernels trust these leaves for TSC calibration while the emulated
++TSC actually advances at the <option>ips</option> rate, so guest timekeeping
++can run off by orders of magnitude. With <option>none</option> the frequencies
++are reported as not enumerated and guests fall back to timer-based calibration,
++measuring the true tick rate. With <option>ips</option> the leaves report the
++emulated tick rate itself, so guests that trust CPUID also obtain the true
++rate. The CPUID brand string of the selected model is not affected by this
++option; use the <option>brand_string</option> option to override it.
++</para>
+ <para><command>mwait_is_nop</command></para>
+ <para>
+ When this option is enabled MWAIT will not put the CPU into a sleep state.
+diff --git a/bochs/doc/man/bochsrc.5 b/bochs/doc/man/bochsrc.5
+index a19c2e624..403d4159a 100644
+--- a/bochs/doc/man/bochsrc.5
++++ b/bochs/doc/man/bochsrc.5
+@@ -175,6 +175,15 @@ cpuid_limit_winnt:
+ Determine whether to limit maximum CPUID function to 2. This mode is
+ required to workaround WinNT installation and boot issues.
+ 
++cpuid_freq:
++
++Select how the CPUID frequency leaves 0x15/0x16 are reported by CPU models
++that implement them (hardware/none/ips). With 'hardware' (default) the
++values dumped from the modeled hardware are reported, but modern guest
++kernels trust these leaves for TSC calibration while the emulated TSC
++actually advances at the IPS rate. With 'none' the frequencies are reported
++as not enumerated, with 'ips' the leaves report the emulated tick rate.
++
+ mwait_is_nop:
+ 
+ When this option is enabled MWAIT will not put the CPU into a sleep state.
+diff --git a/bochs/param_names.h b/bochs/param_names.h
+index b6486f9c5..919bfdc7e 100644
+--- a/bochs/param_names.h
++++ b/bochs/param_names.h
+@@ -48,6 +48,7 @@
+ #define BXPN_IGNORE_BAD_MSRS             "cpu.ignore_bad_msrs"
+ #define BXPN_CONFIGURABLE_MSRS_PATH      "cpu.msrs"
+ #define BXPN_CPUID_LIMIT_WINNT           "cpu.cpuid_limit_winnt"
++#define BXPN_CPUID_FREQ                  "cpu.cpuid_freq"
+ #define BXPN_MWAIT_IS_NOP                "cpu.mwait_is_nop"
+ #define BXPN_BRAND_STRING                "cpu.brand_string"
+ #define BXPN_MEMORY                      "memory.standard.ram"
+-- 
+2.52.0.windows.1
+

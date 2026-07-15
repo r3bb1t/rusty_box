@@ -302,6 +302,9 @@ fn restore_pit_state(pit: &mut crate::iodev::pit::BxPitC, d: &[u8]) {
         off += 1;
         c.count_written = d[off] != 0;
         off += 1;
+        // Pending OUT transitions from the pre-restore run are stale;
+        // the restored OUT level is the new IRQ0 line baseline.
+        c.out_transitions = 0;
     }
     pit.total_ticks = u64_at(d, &mut off);
 }

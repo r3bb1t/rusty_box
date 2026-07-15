@@ -130,6 +130,9 @@ where
         pci_enabled: config.pci,
         pci_vga: config.pci_vga,
         sync_slowdown: config.sync_slowdown,
+        sync_realtime: config.sync_realtime,
+        smp_quantum: config.smp_quantum,
+        cpuid_freq: config.cpuid_freq,
         cpu_params: config.cpu_params.clone(),
         ..EmulatorConfig::default()
     };
@@ -174,7 +177,9 @@ where
         let geometry = disk.geometry;
         emu.configure_disk_geometry_in_cmos(
             disk_cmos_drive(disk),
-            geometry.cylinders,
+            // Bochs harddrv.cc truncates the physical cylinder count to Bit16u when
+            // filling the CMOS geometry registers; large disks are addressed via LBA.
+            geometry.cylinders as u16,
             geometry.heads,
             geometry.sectors_per_track,
         );
@@ -539,6 +544,9 @@ mod tests {
             ips: 4_000_000,
             pci: true,
             sync_slowdown: false,
+            sync_realtime: false,
+            smp_quantum: 16,
+            cpuid_freq: rusty_box::CpuidFreq::None,
             max_instructions: 0,
             cpu_params: BxParams::default(),
             display: DisplayBackend::Headless,
@@ -587,6 +595,9 @@ mod tests {
             ips: 4_000_000,
             pci: true,
             sync_slowdown: false,
+            sync_realtime: false,
+            smp_quantum: 16,
+            cpuid_freq: rusty_box::CpuidFreq::None,
             max_instructions: 0,
             cpu_params: BxParams::default(),
             display: DisplayBackend::Headless,
@@ -741,6 +752,9 @@ mod tests {
                 ips: 4_000_000,
                 pci: true,
                 sync_slowdown: false,
+                sync_realtime: false,
+                smp_quantum: 16,
+                cpuid_freq: rusty_box::CpuidFreq::None,
                 max_instructions: 0,
                 cpu_params: BxParams::default(),
                 display: DisplayBackend::Egui,
