@@ -1,0 +1,170 @@
+[    0.000000] Linux version 7.0.0-14-generic (buildd@lcy02-amd64-043) (x86_64-linux-gnu-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #14-Ubuntu SMP PREEMPT_DYNAMIC Mon Apr 13 11:09:53 UTC 2026 (Ubuntu 7.0.0-14.14-generic 7.0.0)
+[    0.000000] Command line: BOOT_IMAGE=/casper/vmlinuz console=ttyS0,115200 ---
+[    0.000000] KERNEL supported cpus:
+[    0.000000]   Intel GenuineIntel
+[    0.000000]   AMD AuthenticAMD
+[    0.000000]   Hygon HygonGenuine
+[    0.000000]   Centaur CentaurHauls
+[    0.000000]   zhaoxin   Shanghai  
+[    0.000000] Disabled fast string operations
+[    0.000000] x86/CPU: Running old microcode
+[    0.000000] BIOS-provided physical RAM map:
+[    0.000000] BIOS-e820: [mem 0x0000000000000000-0x000000000009efff]  System RAM
+[    0.000000] BIOS-e820: [mem 0x000000000009f000-0x000000000009ffff]  device reserved
+[    0.000000] BIOS-e820: [gap 0x00000000000a0000-0x00000000000e7fff]
+[    0.000000] BIOS-e820: [mem 0x00000000000e8000-0x00000000000fffff]  device reserved
+[    0.000000] BIOS-e820: [mem 0x0000000000100000-0x00000000bffeffff]  System RAM
+[    0.000000] BIOS-e820: [mem 0x00000000bfff0000-0x00000000bfffffff]  ACPI data
+[    0.000000] BIOS-e820: [gap 0x00000000c0000000-0x00000000fffbffff]
+[    0.000000] BIOS-e820: [mem 0x00000000fffc0000-0x00000000ffffffff]  device reserved
+[    0.000000] BIOS-e820: [mem 0x0000000100000000-0x000000013fffffff]  System RAM
+[    0.000000] NX (Execute Disable) protection: active
+[    0.000000] APIC: Static calls initialized
+[    0.000000] SMBIOS 2.4 present.
+[    0.000000] DMI:  , BIOS Bochs 3.0.devel 16/02/2025
+[    0.000000] DMI: Memory slots populated: 1/1
+[    0.000000] tsc: Detected 4.000 MHz processor
+[    0.855672] last_pfn = 0x140000 max_arch_pfn = 0x400000000
+[    0.857678] MTRR map: 3 entries (2 fixed + 1 variable; max 18), built from 8 variable MTRRs
+[    0.859683] x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+[    0.861644] last_pfn = 0xc0000 max_arch_pfn = 0x400000000
+[    3.228925] found SMP MP-table at [mem 0x000fa2b0-0x000fa2bf]
+[    3.240945] Using GB pages for direct mapping
+[    3.593346] RAMDISK: [mem 0x2c1b9000-0x320d3fff]
+[    4.257050] ACPI: Early table checksum verification disabled
+[    4.259158] ACPI: RSDP 0x00000000000FA3F0 000014 (v00 BOCHS )
+[    4.262266] ACPI: RSDT 0x00000000BFFF0000 000034 (v01 BOCHS  BXPCRSDT 00000001 BXPC 00000001)
+[    4.266604] ACPI: FACP 0x00000000BFFF0034 000074 (v01 BOCHS  BXPCFACP 00000001 BXPC 00000001)
+[    4.271550] ACPI: DSDT 0x00000000BFFF0100 000E38 (v01 BXPC   BXDSDT   00000001 INTL 20230331)
+[    4.275861] ACPI: FACS 0x00000000BFFF00C0 000040
+[    4.279289] ACPI: APIC 0x00000000BFFF0F70 00004A (v01 BOCHS  BXPCAPIC 00000001 BXPC 00000001)
+[    4.283613] ACPI: SSDT 0x00000000BFFF0F38 000037 (v01 BOCHS  BXPCSSDT 00000001 BXPC 00000001)
+[    4.287938] ACPI: HPET 0x00000000BFFF0FC0 000038 (v01 BOCHS  BXPCHPET 00000001 BXPC 00000001)
+[    4.291711] ACPI: Reserving FACP table memory at [mem 0xbfff0034-0xbfff00a7]
+[    4.293275] ACPI: Reserving DSDT table memory at [mem 0xbfff0100-0xbfff0f37]
+[    4.294841] ACPI: Reserving FACS table memory at [mem 0xbfff00c0-0xbfff00ff]
+[    4.296423] ACPI: Reserving APIC table memory at [mem 0xbfff0f70-0xbfff0fb9]
+[    4.297993] ACPI: Reserving SSDT table memory at [mem 0xbfff0f38-0xbfff0f6e]
+[    4.299585] ACPI: Reserving HPET table memory at [mem 0xbfff0fc0-0xbfff0ff7]
+[    4.490444] No NUMA configuration found
+[    4.491353] Faking a node at [mem 0x0000000000000000-0x000000013fffffff]
+[    4.508932] NODE_DATA(0) allocated [mem 0x13ffd3280-0x13fffdfff]
+[    4.987158] ACPI: PM-Timer IO Port: 0xb008
+[    4.992886] IOAPIC[0]: apic_id 1, version 17, address 0xfec00000, GSI 0-23
+[    4.995568] ACPI: INT_SRC_OVR (bus 0 bus_irq 0 global_irq 2 dfl dfl)
+[    5.000369] ACPI: Using ACPI (MADT) for SMP configuration information
+[    5.001463] ACPI: HPET id: 0x8086a201 base: 0xfed00000
+[    5.004018] [Firmware Bug]: TSC_DEADLINE disabled due to Errata; please update microcode to version: 0x2000014 (or later)
+[    5.009233] CPU topo: Max. logical packages:   1
+[    5.010305] CPU topo: Max. logical nodes:      1
+[    5.011242] CPU topo: Num. nodes per package:  1
+[    5.016161] CPU topo: Max. logical dies:       1
+[    5.017099] CPU topo: Max. dies per package:   1
+[    5.025986] CPU topo: Max. threads per core:   1
+[    5.026966] CPU topo: Num. cores per package:     1
+[    5.027947] CPU topo: Num. threads per package:   1
+[    5.028891] CPU topo: Allowing 1 present CPUs plus 0 hotplug CPUs
+[    5.036612] PM: hibernation: Registered nosave memory: [mem 0x00000000-0x00000fff]
+[    5.038704] PM: hibernation: Registered nosave memory: [mem 0x0009f000-0x000fffff]
+[    5.040912] PM: hibernation: Registered nosave memory: [mem 0xbfff0000-0xffffffff]
+[    5.042690] [gap 0xc0000000-0xfffbffff] available for PCI devices
+[    5.044025] Booting paravirtualized kernel on bare hardware
+[    5.045131] clocksource: refined-jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 1910969940391419 ns
+[    5.066704] Zone ranges:
+[    5.067374]   DMA      [mem 0x0000000000001000-0x0000000000ffffff]
+[    5.069259]   DMA32    [mem 0x0000000001000000-0x00000000ffffffff]
+[    5.071193]   Normal   [mem 0x0000000100000000-0x000000013fffffff]
+[    5.073159]   Device   empty
+[    5.074464] Movable zone start for each node
+[    5.078279] Early memory node ranges
+[    5.079006]   node   0: [mem 0x0000000000001000-0x000000000009efff]
+[    5.080514]   node   0: [mem 0x0000000000100000-0x00000000bffeffff]
+[    5.082741]   node   0: [mem 0x0000000100000000-0x000000013fffffff]
+[    5.084678] Initmem setup node 0 [mem 0x0000000000001000-0x000000013fffffff]
+[    5.090127] On node 0, zone DMA: 1 pages in unavailable ranges
+[    5.122072] On node 0, zone DMA: 97 pages in unavailable ranges
+[   13.276948] On node 0, zone Normal: 16 pages in unavailable ranges
+[   13.282265] setup_percpu: NR_CPUS:8192 nr_cpumask_bits:1 nr_cpu_ids:1 nr_node_ids:1
+[   13.438823] percpu: Embedded 85 pages/cpu s225280 r8192 d114688 u2097152
+[   13.468709] Kernel command line: BOOT_IMAGE=/casper/vmlinuz console=ttyS0,115200 ---
+[   13.513461] Unknown kernel command line parameters "---", will be passed to user space.
+[   13.520632] random: crng init done
+[   13.521365] printk: log buffer data + meta data: 262144 + 1114112 = 1376256 bytes
+[   13.707040] Dentry cache hash table entries: 524288 (order: 10, 4194304 bytes, linear)
+[   13.801006] Inode-cache hash table entries: 262144 (order: 9, 2097152 bytes, linear)
+[   13.816986] software IO TLB: area num 1.
+[   19.796960] Fallback order for Node 0: 0 
+[   19.799175] Built 1 zonelists, mobility grouping on.  Total pages: 1048462
+[   19.800540] Policy zone: Normal
+[   19.805372] mem auto-init: stack:all(zero), heap alloc:on, heap free:off
+[   29.171392] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=1, Nodes=1
+[   29.204339] Kernel/User page tables isolation: enabled
+[   34.916965] ftrace: allocating 63887 entries in 252 pages
+[   34.918079] ftrace: allocated 252 pages with 6 groups
+[   35.308299] Dynamic Preempt: lazy
+[   35.353833] rcu: Preemptible hierarchical RCU implementation.
+[   35.354542] rcu: 	RCU restricting CPUs from NR_CPUS=8192 to nr_cpu_ids=1.
+[   35.355704] 	Trampoline variant of Tasks RCU enabled.
+[   35.356384] 	Rude variant of Tasks RCU enabled.
+[   35.357047] 	Tracing variant of Tasks RCU enabled.
+[   35.357737] rcu: RCU calculated value of scheduler-enlistment delay is 100 jiffies.
+[   35.358722] rcu: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=1
+[   35.369696] RCU Tasks: Setting shift to 0 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=1.
+[   35.371470] RCU Tasks Rude: Setting shift to 0 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=1.
+[   45.027022] NR_IRQS: 524544, nr_irqs: 256, preallocated irqs: 16
+[   45.106406] rcu: srcu_init: Setting srcu_struct sizes based on contention.
+[   45.162856] Console: colour VGA+ 80x25
+[   45.166509] printk: legacy console [ttyS0] enabled
+[   45.987967] ACPI: Core revision 20251212
+[   46.059444] clocksource: hpet: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 19112604467 ns
+[   46.079493] APIC: Switch to symmetric I/O mode setup
+[   46.099706] x2apic: IRQ remapping doesn't support X2APIC mode
+[   46.220777] ..TIMER: vector=0x30 apic1=0 pin1=2 apic2=-1 pin2=-1
+[   46.235586] clocksource: tsc-early: mask: 0xffffffffffffffff max_cycles: 0x1d854df40, max_idle_ns: 881590404240 ns
+[   46.258132] Calibrating delay loop (skipped), value calculated using timer frequency.. 8.00 BogoMIPS (lpj=4000)
+[   46.280221] Disabled fast string operations
+[   46.296093] CPU0: Thermal monitoring enabled (TM1)
+[   46.325189] Last level iTLB entries: 4KB 64, 2MB 8, 4MB 8
+[   46.333220] Last level dTLB entries: 4KB 64, 2MB 32, 4MB 32, 1GB 4
+[   46.345092] process: using mwait in idle threads
+[   46.356218] mitigations: Enabled attack vectors: user_kernel, user_user, guest_host, guest_guest, SMT mitigations: auto
+[   46.390118] Speculative Store Bypass: Vulnerable
+[   46.401008] Spectre V2 : Mitigation: Retpolines
+[   46.411225] RETBleed: Vulnerable
+[   46.420165] MDS: Vulnerable: Clear CPU buffers attempted, no microcode
+[   46.431230] MMIO Stale Data: Vulnerable: Clear CPU buffers attempted, no microcode
+[   46.443015] VMSCAPE: Vulnerable
+[   46.452034] Spectre V1 : Mitigation: usercopy/swapgs barriers and __user pointer sanitization
+[   46.463194] Spectre V2 : Spectre v2 / SpectreRSB: Filling RSB on context switch and VMEXIT
+[   46.485108] GDS: Vulnerable: No microcode
+[   46.500170] x86/fpu: Supporting XSAVE feature 0x001: 'x87 floating point registers'
+[   46.508188] x86/fpu: Supporting XSAVE feature 0x002: 'SSE registers'
+[   46.519122] x86/fpu: Supporting XSAVE feature 0x004: 'AVX registers'
+[   46.530034] x86/fpu: Supporting XSAVE feature 0x020: 'AVX-512 opmask'
+[   46.541122] x86/fpu: Supporting XSAVE feature 0x040: 'AVX-512 Hi256'
+[   46.552043] x86/fpu: Supporting XSAVE feature 0x080: 'AVX-512 ZMM_Hi256'
+[   46.564168] x86/fpu: xstate_offset[2]:  576, xstate_sizes[2]:  256
+[   46.573055] x86/fpu: xstate_offset[5]:  832, xstate_sizes[5]:   64
+[   46.581147] x86/fpu: xstate_offset[6]:  896, xstate_sizes[6]:  512
+[   46.590048] x86/fpu: xstate_offset[7]: 1408, xstate_sizes[7]: 1024
+[   46.598124] x86/fpu: Enabled xstate features 0xe7, context size is 2432 bytes, using 'compacted' format.
+[  123.679969] Freeing SMP alternatives memory: 56K
+[  123.687094] pid_max: default: 32768 minimum: 301
+[  123.905958] landlock: Up and running.
+[  123.911889] Yama: becoming mindful.
+[  124.117148] AppArmor: AppArmor initialized
+[  124.124278] AppArmor: AppArmor secmark mediation reserved: ready to be enabled
+[  124.285140] Mount-cache hash table entries: 8192 (order: 4, 65536 bytes, linear)
+[  124.299958] Mountpoint-cache hash table entries: 8192 (order: 4, 65536 bytes, linear)
+[  124.483127] VFS: Finished mounting rootfs on nullfs
+[  126.408608] smpboot: CPU0: Intel(R) Core(TM) i7-7800X CPU @ 3.50GHz (family: 0x6, model: 0x55, stepping: 0x4)
+[  194.945970] workqueue: psi_avgs_work hogged CPU for >1000000us 4 times, consider switching to WQ_UNBOUND
+[  220.721970] workqueue: psi_avgs_work hogged CPU for >1000000us 5 times, consider switching to WQ_UNBOUND
+[  359.267016] Performance Events: 
+[  365.440017] workqueue: psi_avgs_work hogged CPU for >1000000us 7 times, consider switching to WQ_UNBOUND
+[  369.962006] PEBS fmt0-, 
+[  526.267970] workqueue: vmstat_shepherd hogged CPU for >1000000us 4 times, consider switching to WQ_UNBOUND
+[  603.427017] workqueue: vmstat_shepherd hogged CPU for >1000000us 5 times, consider switching to WQ_UNBOUND
+[  662.678017] workqueue: vmstat_shepherd hogged CPU for >1000000us 7 times, consider switching to WQ_UNBOUND
+[  783.748987] Skylake events, 
+[  977.679010] workqueue: vmstat_shepherd hogged CPU for >1000000us 11 times, consider switching to WQ_UNBOUND

@@ -305,7 +305,7 @@ fn run_dlxlinux() -> Result<()> {
     // =========================================================================
     tracing::info!("Attaching disk image: {}", disk_path.display());
     let disk_path_str = disk_path.to_string_lossy().to_string();
-    emu.attach_disk(0, 0, &disk_path_str, DLX_CYLINDERS, DLX_HEADS, DLX_SPT)
+    emu.attach_disk(0, 0, &disk_path_str, DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT)
         .expect("Failed to attach disk image");
     tracing::info!(
         "✓ Disk attached: CHS={}/{}/{}",

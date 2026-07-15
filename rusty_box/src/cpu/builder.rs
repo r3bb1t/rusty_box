@@ -56,6 +56,7 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
         unsafe {
             Self::init_cpu_fields(ptr, cpuid, tracer);
             let mut boxed = alloc::boxed::Box::from_raw(ptr);
+            boxed.initialize_opcode_handlers();
             let config = Default::default();
             boxed.initialize(config)?;
             Ok(boxed)
@@ -75,6 +76,7 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
         let cpuid = I::new();
         Self::init_cpu_fields(ptr, cpuid, tracer);
         let cpu = &mut *ptr;
+        cpu.initialize_opcode_handlers();
         cpu.initialize(Default::default())?;
         Ok(cpu)
     }

@@ -194,7 +194,11 @@ pub enum DeviceType {
 /// Drive geometry
 #[derive(Debug, Clone)]
 pub struct DriveGeometry {
-    pub(crate) cylinders: u16,
+    // Bochs stores the physical cylinder count as `unsigned` (hdimage.h `cylinders`),
+    // allowing disks with more than 65535 cylinders (large disks addressed via LBA).
+    // The 16-bit ATA cylinder *register* (`controller_t::cylinder_no`) stays u16; only
+    // this physical geometry field is wide.
+    pub(crate) cylinders: u32,
     pub(crate) heads: u8,
     pub(crate) sectors_per_track: u8,
     pub(crate) total_sectors: u64,
@@ -202,7 +206,7 @@ pub struct DriveGeometry {
 
 impl DriveGeometry {
     /// Create geometry from CHS values
-    pub fn from_chs(cylinders: u16, heads: u8, spt: u8) -> Self {
+    pub fn from_chs(cylinders: u32, heads: u8, spt: u8) -> Self {
         Self {
             cylinders,
             heads,
@@ -1041,9 +1045,11 @@ impl AtaDrive {
                 self.controller.head_no += 1;
                 if self.controller.head_no >= self.geometry.heads {
                     self.controller.head_no = 0;
-                    self.controller.cylinder_no += 1;
-                    if self.controller.cylinder_no >= self.geometry.cylinders {
-                        self.controller.cylinder_no = self.geometry.cylinders - 1;
+                    self.controller.cylinder_no = self.controller.cylinder_no.wrapping_add(1);
+                    // Bochs harddrv.cc increment_address: cylinder_no is Bit16u,
+                    // hdimage->cylinders is unsigned; comparison promotes the register.
+                    if u32::from(self.controller.cylinder_no) >= self.geometry.cylinders {
+                        self.controller.cylinder_no = (self.geometry.cylinders - 1) as u16;
                     }
                 }
             }
@@ -1255,8 +1261,10 @@ impl AtaDrive {
         buf[0] = 0x40; // Fixed drive
         buf[1] = 0x00;
 
-        // Word 1: Number of cylinders
-        let cyls = self.geometry.cylinders;
+        // Word 1: Number of cylinders in default translation mode.
+        // Bochs harddrv.cc identify_drive: if the physical cylinder count exceeds
+        // 16383, this word (and the current-CHS word 54) is clamped to 16383.
+        let cyls = self.geometry.cylinders.min(16383);
         buf[2] = (cyls & 0xFF) as u8;
         buf[3] = (cyls >> 8) as u8;
 
@@ -1653,7 +1661,7 @@ impl BxHardDriveC {
         channel: usize,
         drive: usize,
         path: &str,
-        cylinders: u16,
+        cylinders: u32,
         heads: u8,
         spt: u8,
     ) -> std::io::Result<()> {
@@ -1670,7 +1678,7 @@ impl BxHardDriveC {
         channel: usize,
         drive: usize,
         data: Vec<u8>,
-        cylinders: u16,
+        cylinders: u32,
         heads: u8,
         spt: u8,
     ) {
@@ -1685,7 +1693,7 @@ impl BxHardDriveC {
         channel: usize,
         drive: usize,
         data: &'static [u8],
-        cylinders: u16,
+        cylinders: u32,
         heads: u8,
         spt: u8,
     ) {
@@ -1980,7 +1988,10 @@ impl BxHardDriveC {
         } else {
             // Bochs harddrv.cc bmdma_complete disk branch: write_fault=0,
             // seek_complete=1, corrected_data=0
-            drive.controller.status.remove(AtaStatus::DWF | AtaStatus::CORR);
+            drive
+                .controller
+                .status
+                .remove(AtaStatus::DWF | AtaStatus::CORR);
             drive.controller.status.insert(AtaStatus::DSC);
         }
 
@@ -2299,16 +2310,21 @@ impl BxHardDriveC {
 
     /// Bulk-read up to `buf.len()` bytes from the IDE data port.
     ///
-    /// Equivalent to calling `read(port, 2)` in a loop but avoids per-word
-    /// handler dispatch overhead. Returns the number of bytes actually copied.
+    /// Equivalent to calling `read(port, io_len)` in a loop but avoids
+    /// per-element handler dispatch overhead. Returns only whole port elements;
+    /// callers may safely fall back when zero bytes are returned.
     /// Handles ATAPI lazy-load, sector transitions, and DRQ completion.
     pub fn bulk_read_data(
         &mut self,
         port: u16,
+        io_len: u8,
         buf: &mut [u8],
         pic: &mut super::pic::BxPicC,
         pci_ide: &mut super::pci_ide::BxPciIde,
     ) -> usize {
+        if io_len != 2 && io_len != 4 {
+            return 0;
+        }
         let channel_num = match self.port_to_channel(port) {
             Some(c) => c,
             None => return 0,
@@ -2316,15 +2332,6 @@ impl BxHardDriveC {
 
         let selected = self.channels[channel_num].drive_select;
         let drive = &mut self.channels[channel_num].drives[selected as usize];
-
-        // Bochs BX_SUPPORT_REPEAT_SPEEDUPS (harddrv.cc) bulk path is
-        // ONLY for ATA READ SECTORS, NEVER for ATAPI. For ATAPI commands (0xA0),
-        // return 0 to force the per-word read() handler path, which has the
-        // correct single-block lazy-load and DRQ completion logic matching
-        // Bochs harddrv.cc exactly.
-        if drive.controller.current_command == ATA_CMD_PACKET {
-            return 0;
-        }
 
         if drive.device_type == DeviceType::None {
             return 0;
@@ -2382,7 +2389,18 @@ impl BxHardDriveC {
                 break;
             }
             let wanted = buf.len() - total_copied;
-            let to_copy = available.min(wanted);
+            let mut to_copy = available.min(wanted);
+            if current_command == ATA_CMD_PACKET {
+                let drq_remaining = (drive.atapi.drq_bytes as u32)
+                    .saturating_sub(drive.controller.drq_index)
+                    as usize;
+                to_copy = to_copy.min(drq_remaining);
+            }
+            let element_size = usize::from(io_len);
+            to_copy -= to_copy % element_size;
+            if to_copy == 0 {
+                break;
+            }
 
             let idx = drive.controller.buffer_index;
             buf[total_copied..total_copied + to_copy]
@@ -2417,6 +2435,11 @@ impl BxHardDriveC {
                             if drive.ide_read_sector() {
                                 drive.controller.buffer_index = 0;
                                 need_raise_irq = true;
+                                // Scalar data-port reads raise an interrupt at
+                                // every completed ATA buffer. Stop this bulk
+                                // call at the same boundary so REP can observe
+                                // the IRQ before consuming the next buffer.
+                                break;
                             } else {
                                 need_abort_cmd = Some(current_command);
                                 break;
@@ -4626,6 +4649,28 @@ mod tests {
     }
 
     #[test]
+    fn identify_caps_cylinders_for_large_disk() {
+        // 32 GiB flat disk → 66576 cylinders (16h/63s/512b), beyond the 16-bit ATA
+        // cylinder register. Bochs harddrv.cc identify_drive clamps IDENTIFY words 1 and
+        // 54 to 16383 while still reporting the full LBA sector count.
+        let cylinders = 66_576u32;
+        let total = cylinders as u64 * 16 * 63;
+        let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(cylinders, 16, 63));
+        assert_eq!(drive.geometry.total_sectors, total);
+
+        drive.fill_identify_buffer(false);
+        let buf = &drive.controller.buffer;
+
+        // Word 1 (number of cylinders) and word 54 (current-CHS cylinders): clamped.
+        assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 16_383);
+        assert_eq!(u16::from_le_bytes([buf[108], buf[109]]), 16_383);
+
+        // Words 60-61 (total addressable LBA sectors): NOT clamped.
+        let lba = u32::from_le_bytes([buf[120], buf[121], buf[122], buf[123]]);
+        assert_eq!(u64::from(lba), total);
+    }
+
+    #[test]
     fn test_increment_address_lba() {
         let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(306, 4, 17));
         drive.controller.lba_mode = true;
@@ -4663,6 +4708,21 @@ mod tests {
         assert_eq!(drive.controller.head_no, 1);
         assert_eq!(drive.controller.cylinder_no, 0);
         assert_eq!(drive.controller.num_sectors, 1);
+    }
+
+    #[test]
+    fn chs_cylinder_register_wraps_at_u16_max() {
+        let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(65_536, 1, 1));
+        drive.controller.lba_mode = false;
+        drive.controller.sector_no = 1;
+        drive.controller.head_no = 0;
+        drive.controller.cylinder_no = u16::MAX;
+
+        drive.increment_address();
+
+        assert_eq!(drive.controller.sector_no, 1);
+        assert_eq!(drive.controller.head_no, 0);
+        assert_eq!(drive.controller.cylinder_no, 0);
     }
 
     #[test]

@@ -22,7 +22,7 @@ use super::{
 
 use crate::{
     config::BxPhyAddress,
-    cpu::{icache::BxPageWriteStampTable, rusty_box::MemoryAccessType},
+    cpu::rusty_box::MemoryAccessType,
 };
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
@@ -1994,7 +1994,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr < self.mem_host_len))
         {
             write_host_byte(host_base, a20_addr, value);
-            self.i_cache.smc_write_check(a20_addr as BxPhyAddress, 1);
+            self.smc_write_check(a20_addr as BxPhyAddress, 1);
             return;
         }
 
@@ -2035,18 +2035,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 if let Some(b) = slice.get_mut(0) {
                     *b = value;
                 }
-                self.i_cache.smc_write_check(paddr, 1);
+                self.smc_write_check(paddr, 1);
                 return;
             }
 
             // Vetoed: go through handler-aware physical write.
-            let mut dummy_mapping: [u32; 0] = [];
-            let mut stamp = BxPageWriteStampTable::new(&mut dummy_mapping);
             let mut data = [value];
-            if let Err(e) = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 1, &mut data) {
+            if let Err(e) = mem.write_physical_page(&[cpu_ref], paddr, 1, &mut data) {
                 tracing::warn!("physical write failed at paddr={:#x}: {e}", paddr);
             }
-            self.i_cache.smc_write_check(paddr, 1);
+            self.smc_write_check(paddr, 1);
             return;
         }
 
@@ -2055,7 +2053,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let addr_usize = addr as usize;
             if addr_usize < self.mem_len {
                 write_host_byte(ptr, addr_usize, value);
-                self.i_cache.smc_write_check(addr as BxPhyAddress, 1);
+                self.smc_write_check(addr as BxPhyAddress, 1);
             }
         }
     }
@@ -2085,7 +2083,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr + 1 < self.mem_host_len))
         {
             write_unaligned_u16(host_offset_mut(host_base, a20_addr), value);
-            self.i_cache.smc_write_check(a20_addr as BxPhyAddress, 2);
+            self.smc_write_check(a20_addr as BxPhyAddress, 2);
             return;
         }
         // Slow path: per-byte writes (handles MMIO/VGA/ROM)
@@ -2134,7 +2132,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr + 3 < self.mem_host_len))
         {
             write_unaligned_u32(host_offset_mut(host_base, a20_addr), value);
-            self.i_cache.smc_write_check(a20_addr as BxPhyAddress, 4);
+            self.smc_write_check(a20_addr as BxPhyAddress, 4);
             return;
         }
         // LAPIC MMIO intercept: 32-bit aligned register access
@@ -2152,14 +2150,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // (IOAPIC, VGA, etc.) with proper dword access width.
         if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let paddr: BxPhyAddress = addr as BxPhyAddress;
-            let mut dummy_mapping: [u32; 0] = [];
-            let mut stamp = BxPageWriteStampTable::new(&mut dummy_mapping);
             let mut data = value.to_le_bytes();
             if mem
-                .write_physical_page(&[cpu_ref], &mut stamp, paddr, 4, &mut data)
+                .write_physical_page(&[cpu_ref], paddr, 4, &mut data)
                 .is_ok()
             {
-                self.i_cache.smc_write_check(paddr, 4);
+                self.smc_write_check(paddr, 4);
                 return;
             }
         }

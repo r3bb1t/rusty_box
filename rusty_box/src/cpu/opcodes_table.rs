@@ -1063,6 +1063,107 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait, T: crate::cpu::instrumentation::
         Ok(())
     }
 
+    fn mov64_gd_ed_m_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.mov64_gd_ed_m(instr)
+    }
+
+    fn mov64_gd_ed_r_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.mov64_gd_ed_r(instr);
+        Ok(())
+    }
+
+    fn mov64_ed_gd_m_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.mov64_ed_gd_m(instr)
+    }
+
+    fn mov64_ed_gd_r_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.mov64_ed_gd_r(instr);
+        Ok(())
+    }
+
+    fn mov_eq_gq_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.mov_eq_gq(instr)
+    }
+
+    fn mov_gq_eq_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.mov_gq_eq(instr)
+    }
+
+    fn lea_gq_m_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.lea_gq_m(instr);
+        Ok(())
+    }
+
+    fn and_gd_ed_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.and_gd_ed(instr)
+    }
+
+    fn add_gq_eq_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.add_gq_eq(instr)
+    }
+
+    fn ror_ed_ib_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.ror_ed_ib(instr)
+    }
+
+    fn xor_eq_gq_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.xor_eq_gq(instr)
+    }
+
+    fn xor_gq_eq_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.xor_gq_eq(instr)
+    }
+
+    fn dec_eq_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.dec_eq(instr)
+    }
+
+    fn jnz_jq_wrapper<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &mut BxCpuC<'_, I, T>,
+        instr: &Instruction,
+    ) -> Result<()> {
+        cpu.jnz_jq(instr)
+    }
+
     // Match on opcode and return appropriate entry. The table is populated
     // incrementally; opcodes without a match here fall through to `None`.
     match opcode {
@@ -1515,6 +1616,70 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait, T: crate::cpu::instrumentation::
             execute1: |_cpu: &mut BxCpuC<'_, I, T>, _instr: &Instruction| -> Result<()> { Ok(()) },
             execute2: None,
             opflags: OpFlags::empty(),
+        }),
+
+        // Dominant 64-bit installer-path handlers. These wrappers are exact
+        // equivalents of their canonical dispatcher arms.
+        Opcode::MovOp64GdEd => Some(BxOpcodeEntry {
+            execute1: mov64_gd_ed_m_wrapper,
+            execute2: Some(mov64_gd_ed_r_wrapper),
+            opflags: OpFlags::empty(),
+        }),
+        Opcode::MovOp64EdGd => Some(BxOpcodeEntry {
+            execute1: mov64_ed_gd_m_wrapper,
+            execute2: Some(mov64_ed_gd_r_wrapper),
+            opflags: OpFlags::empty(),
+        }),
+        Opcode::MovEqGq => Some(BxOpcodeEntry {
+            execute1: mov_eq_gq_wrapper,
+            execute2: Some(mov_eq_gq_wrapper),
+            opflags: OpFlags::empty(),
+        }),
+        Opcode::MovGqEq => Some(BxOpcodeEntry {
+            execute1: mov_gq_eq_wrapper,
+            execute2: Some(mov_gq_eq_wrapper),
+            opflags: OpFlags::empty(),
+        }),
+        Opcode::LeaGqM => Some(BxOpcodeEntry {
+            execute1: lea_gq_m_wrapper,
+            execute2: None,
+            opflags: OpFlags::empty(),
+        }),
+        Opcode::AndGdEd => Some(BxOpcodeEntry {
+            execute1: and_gd_ed_wrapper,
+            execute2: Some(and_gd_ed_wrapper),
+            opflags: OpFlags::empty(),
+        }),
+        Opcode::AddGqEq => Some(BxOpcodeEntry {
+            execute1: add_gq_eq_wrapper,
+            execute2: Some(add_gq_eq_wrapper),
+            opflags: OpFlags::empty(),
+        }),
+        Opcode::RorEdIb => Some(BxOpcodeEntry {
+            execute1: ror_ed_ib_wrapper,
+            execute2: Some(ror_ed_ib_wrapper),
+            opflags: OpFlags::empty(),
+        }),
+
+        Opcode::XorEqGq | Opcode::XorEqGqZeroIdiom => Some(BxOpcodeEntry {
+            execute1: xor_eq_gq_wrapper,
+            execute2: Some(xor_eq_gq_wrapper),
+            opflags: OpFlags::LOCKABLE,
+        }),
+        Opcode::XorGqEq | Opcode::XorGqEqZeroIdiom => Some(BxOpcodeEntry {
+            execute1: xor_gq_eq_wrapper,
+            execute2: Some(xor_gq_eq_wrapper),
+            opflags: OpFlags::empty(),
+        }),
+        Opcode::DecEq => Some(BxOpcodeEntry {
+            execute1: dec_eq_wrapper,
+            execute2: Some(dec_eq_wrapper),
+            opflags: OpFlags::LOCKABLE,
+        }),
+        Opcode::JnzJq | Opcode::JnzJbq => Some(BxOpcodeEntry {
+            execute1: jnz_jq_wrapper,
+            execute2: None,
+            opflags: OpFlags::TRACE_END,
         }),
 
         // Default: opcode not yet in table

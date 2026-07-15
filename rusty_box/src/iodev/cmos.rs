@@ -825,8 +825,15 @@ impl BxCmosC {
                     // update_timeval();` — finding #9. Previously only the
                     // SET-mode branch existed, so a guest writing time
                     // registers outside SET mode had no effect at all.
-                    REG_SEC | REG_MIN | REG_HOUR | REG_WEEK_DAY | REG_MONTH_DAY | REG_MONTH
-                    | REG_YEAR | REG_CENTURY | REG_IBM_PS2_CENTURY_BYTE => {
+                    REG_SEC
+                    | REG_MIN
+                    | REG_HOUR
+                    | REG_WEEK_DAY
+                    | REG_MONTH_DAY
+                    | REG_MONTH
+                    | REG_YEAR
+                    | REG_CENTURY
+                    | REG_IBM_PS2_CENTURY_BYTE => {
                         if addr < CMOS_SIZE {
                             self.ram[addr] = value;
 
@@ -1391,12 +1398,8 @@ mod tests {
 
     #[test]
     fn cmos_date_roundtrip() {
-        for &(is_binary, is_24hour) in &[
-            (false, false),
-            (false, true),
-            (true, false),
-            (true, true),
-        ] {
+        for &(is_binary, is_24hour) in &[(false, false), (false, true), (true, false), (true, true)]
+        {
             let mut cmos = BxCmosC::new();
             let stat_b = (if is_24hour { 0x02 } else { 0 }) | (if is_binary { 0x04 } else { 0 });
 

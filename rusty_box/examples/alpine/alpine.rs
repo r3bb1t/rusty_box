@@ -332,7 +332,7 @@ fn run_alpine() -> Result<()> {
         // Hard disk boot: configure CHS geometry and attach
         emu.configure_disk_geometry_in_cmos(0, cylinders, heads, spt);
         emu.configure_boot_sequence(2, 0, 0); // 2 = hard disk first
-        emu.attach_disk(0, 0, &disk_path_str, cylinders, heads, spt)
+        emu.attach_disk(0, 0, &disk_path_str, cylinders.into(), heads, spt)
             .expect("Failed to attach disk image");
         println!("  Disk attached: CHS={}/{}/{}", cylinders, heads, spt);
     }

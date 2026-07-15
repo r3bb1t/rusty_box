@@ -33,6 +33,20 @@ pub const PCI_RESET_PORT: u16 = 0x0CF9;
 /// Bits set for IRQs that can be used: 3,4,5,6,7,9,10,11,12,14,15
 const VALID_PCI_IRQ_MASK: u16 = 0xDEF8;
 
+/// Deferred memory-subsystem update a PIIX3 config-space write requires.
+/// Bochs applies the BIOS-write-enable state to the memory object
+/// synchronously inside `pci_write_handler` (pci2isa.cc case 0x4e); here the
+/// memory system lives outside the bridge (borrow-separated), so
+/// `devices.rs` defers via `bios_write_needs_update` and drains it once both
+/// `&mut BxPiix3` and `&mut BxMemC` are available (`process_pci_deferred`) --
+/// same pattern as `PciBridgeWriteEffects` in `pci.rs`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Piix3WriteEffects {
+    /// The XBCS register (0x4E) changed a bit that affects BIOS-ROM
+    /// write-enable state; must be re-applied to memory.
+    pub bios_write_changed: bool,
+}
+
 /// PIIX3 PCI-to-ISA bridge state.
 /// Bochs: bx_piix3_c (pci2isa.h)
 #[derive(Debug)]
@@ -242,10 +256,13 @@ impl BxPiix3 {
 
     /// Write to PCI configuration space.
     /// Bochs: bx_piix3_c::pci_write_handler() (pci2isa.cc)
-    pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) {
+    /// Returns which deferred memory-subsystem updates the caller must apply
+    /// (the XBCS register changed a bit affecting BIOS-ROM write-enable).
+    pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> Piix3WriteEffects {
+        let mut effects = Piix3WriteEffects::default();
         // BARs are read-only
         if (0x10..0x34).contains(&address) {
-            return;
+            return effects;
         }
 
         for i in 0..io_len as usize {
@@ -272,10 +289,19 @@ impl BxPiix3 {
                     let clear_bits = value8 & 0x78;
                     self.pci_conf[addr] = (oldval & !clear_bits) | 0x02;
                 }
-                // XBCS register (pci2isa.cc) — BIOS write enable
+                // XBCS register (pci2isa.cc) — BIOS write enable / rom access
                 0x4E => {
                     if (value8 & 0x04) != (oldval & 0x04) {
                         tracing::trace!("BIOS write support set to {}", (value8 & 0x04) != 0);
+                        effects.bios_write_changed = true;
+                    }
+                    if (value8 & 0xC0) != (oldval & 0xC0) {
+                        tracing::trace!(
+                            "BIOS enable switches: lower={} extended={}",
+                            (value8 >> 6) & 1,
+                            (value8 >> 7) & 1
+                        );
+                        effects.bios_write_changed = true;
                     }
                     self.pci_conf[addr] = value8;
                 }
@@ -312,6 +338,20 @@ impl BxPiix3 {
                 }
             }
         }
+        effects
+    }
+
+    /// Apply the XBCS register (0x4E) BIOS-write-enable bits to the memory
+    /// subsystem. Bochs: bx_piix3_c::pci_write_handler() (pci2isa.cc) case
+    /// 0x4e's `DEV_mem_set_bios_write`/`DEV_mem_set_bios_rom_access` calls.
+    /// Idempotent: derives state from the already-committed
+    /// `pci_conf[0x4E]`, so it is safe to call any number of times from the
+    /// deferred drain (`devices.rs process_pci_deferred`).
+    pub fn apply_bios_write_to_memory<'c>(&self, mem: &mut crate::memory::BxMemC<'c>) {
+        let v = self.pci_conf[0x4E];
+        mem.set_bios_write_enabled((v & 0x04) != 0);
+        mem.set_bios_rom_access(crate::memory::BIOS_ROM_LOWER, (v & 0x40) != 0);
+        mem.set_bios_rom_access(crate::memory::BIOS_ROM_EXTENDED, (v & 0x80) != 0);
     }
 
     /// Read from PCI configuration space.
@@ -480,5 +520,73 @@ mod tests {
         bridge.write(0x0CF9, 0x06, 1); // Set type + trigger
         assert!(bridge.reset_request.is_some());
         assert_eq!(bridge.reset_request, Some(ResetReason::Hardware));
+    }
+
+    // ─── Finding #35b: XBCS (0x4E) BIOS write-enable wiring ──────────────────
+    //
+    // Bochs pci2isa.cc bx_piix3_c::pci_write_handler case 0x4e:
+    //   if ((value8 & 0x04) != (oldval & 0x04)) DEV_mem_set_bios_write(...)
+    //   if ((value8 & 0xc0) != (oldval & 0xc0)) DEV_mem_set_bios_rom_access(...) x2
+    //   pci_conf[address+i] = value8;   (always stored)
+
+    #[test]
+    fn test_xbcs_write_signals_effects_only_on_relevant_bit_change() {
+        let mut bridge = BxPiix3::new();
+        bridge.reset();
+        // pci_conf[0x4e] == 0x03 after reset (bit2=0, bits6-7=0).
+
+        // Writing the same "no relevant bits changed" pattern must not signal.
+        let effects = bridge.pci_write(0x4E, 0x03, 1);
+        assert!(!effects.bios_write_changed);
+
+        // Setting bit2 (BIOS write enable) must signal.
+        let effects = bridge.pci_write(0x4E, 0x07, 1); // 0x03 | 0x04
+        assert!(effects.bios_write_changed);
+        assert_eq!(bridge.pci_conf[0x4E], 0x07, "byte is always stored");
+
+        // Re-writing the identical value must not signal again.
+        let effects = bridge.pci_write(0x4E, 0x07, 1);
+        assert!(!effects.bios_write_changed);
+
+        // Changing only the rom-access bits (6-7) must also signal.
+        let effects = bridge.pci_write(0x4E, 0xC7, 1); // 0x07 | 0xC0
+        assert!(effects.bios_write_changed);
+    }
+
+    #[test]
+    fn test_apply_bios_write_to_memory_drives_mem_from_xbcs() {
+        use crate::memory::{BxMemC, BxMemoryStubC};
+
+        let mut bridge = BxPiix3::new();
+        bridge.reset();
+        let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(stub, false);
+
+        // Bit2 set -> BIOS write enabled; bits 6-7 clear -> both rom-access
+        // region bits disabled.
+        bridge.pci_write(0x4E, 0x04, 1);
+        bridge.apply_bios_write_to_memory(&mut mem);
+        assert!(mem.bios_write_enabled());
+        assert_eq!(mem.bios_rom_access(), 0x00);
+
+        // Bit2 clear, bits 6+7 set -> BIOS write disabled; both rom-access
+        // region bits enabled.
+        bridge.pci_write(0x4E, 0xC0, 1);
+        bridge.apply_bios_write_to_memory(&mut mem);
+        assert!(!mem.bios_write_enabled());
+        assert_eq!(mem.bios_rom_access(), 0x03); // BIOS_ROM_LOWER | BIOS_ROM_EXTENDED
+    }
+
+    #[test]
+    fn test_piix3_reset_does_not_touch_bios_write_enable() {
+        // Bochs bx_piix3_c::reset() sets pci_conf[0x4e] = 0x03 directly,
+        // WITHOUT going through pci_write_handler -- so it never calls
+        // DEV_mem_set_bios_write(). The memory-side bios_write_enabled state
+        // is deliberately left untouched by a guest reset in upstream Bochs;
+        // rusty_box's reset() must not synthesize a deferred update either.
+        let mut bridge = BxPiix3::new();
+        bridge.pci_write(0x4E, 0x07, 1); // enable BIOS write
+        bridge.reset();
+        assert_eq!(bridge.pci_conf[0x4E], 0x03, "register value resets");
     }
 }

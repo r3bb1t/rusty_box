@@ -731,6 +731,16 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// this structure should be aligned on a 32-byte boundary to be friendly
     /// with the host cache lines.
     pub(super) i_cache: BxICache,
+    /// Direct handlers for opcode/form pairs whose table entries exactly match
+    /// `execute_instruction`. Unmapped or mode-sensitive forms remain `None`
+    /// and use the canonical dispatcher.
+    pub(super) opcode_handlers:
+        [Option<InstructionHandler<I, T>>; super::decoder::Opcode::COUNT * 2],
+    /// Handler selected when each mpool instruction is decoded. This mirrors
+    /// Bochs' `bxInstruction_c::execute1` without changing the decoder crate's
+    /// generic-free instruction layout.
+    pub(super) i_cache_handlers:
+        [Option<InstructionHandler<I, T>>; super::icache::BX_ICACHE_MEM_POOL],
     pub(super) fetch_mode_mask: super::opcodes_table::FetchModeMask,
 
     pub(super) address_xlation: AddressXlation,
@@ -762,6 +772,19 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// It must only be set for the duration of a CPU execution call and cleared afterwards.
     pub(super) mem_bus: Option<NonNull<crate::memory::BxMemC<'c>>>,
 
+    /// SMP scheduling quantum — Bochs BXPN_SMP_QUANTUM (`cpu: quantum=N`),
+    /// range 1-32, default 16. Caps SMP trace length in serve_icache_miss
+    /// (Bochs icache.cc) so a CPU returns to the round-robin scheduler after
+    /// at most this many instructions. Ignored when cpu_count == 1.
+    pub(super) smp_trace_quantum: u8,
+
+    /// Watermark into the machine-wide SMC event queue (memory stub
+    /// `smc_seq_next`): this cpu has applied every queued invalidation with a
+    /// sequence number below this. Bochs icache.cc `handleSMC` flushes every
+    /// cpu synchronously; the queue + watermark defer sibling flushes to the
+    /// round-robin slice boundary, which no other cpu can execute before.
+    pub(crate) smc_seq_seen: u64,
+
     /// Optional I/O bus (device port handlers), wired by the emulator during execution.
     ///
     /// This is a raw pointer to avoid borrow checker overhead in the hot path.
@@ -791,6 +814,47 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
 }
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+    /// Build the compact opcode/form dispatch table once per CPU.
+    ///
+    /// The excluded entries are dormant-table implementations known to differ
+    /// from the canonical dispatcher. The two 32-bit MOV memory forms are also
+    /// mode-sensitive for SS and therefore keep the dispatcher fallback.
+    pub(super) fn initialize_opcode_handlers(&mut self) {
+        use super::decoder::Opcode;
+        use super::opcodes_table::get_opcode_entry;
+
+        self.opcode_handlers.fill(None);
+        for raw_opcode in 0..Opcode::COUNT {
+            let opcode = Opcode::from_u16_const(raw_opcode as u16);
+            let Some(entry) = get_opcode_entry::<I, T>(opcode) else {
+                continue;
+            };
+            let base = raw_opcode * 2;
+            match opcode {
+                Opcode::AddAlib
+                | Opcode::XorAlib
+                | Opcode::PushOp16Sw
+                | Opcode::PopOp16Sw
+                | Opcode::JmpfAp => {}
+                Opcode::MovOp32GdEd | Opcode::MovOp32EdGd => {
+                    self.opcode_handlers[base + 1] = entry.execute2;
+                }
+                _ => {
+                    self.opcode_handlers[base] = Some(entry.execute1);
+                    self.opcode_handlers[base + 1] = entry.execute2;
+                }
+            }
+        }
+    }
+    #[inline]
+    pub(super) fn handler_for_instruction(
+        &self,
+        instr: &Instruction,
+    ) -> Option<InstructionHandler<I, T>> {
+        let opcode = instr.get_ia_opcode() as usize;
+        self.opcode_handlers[opcode * 2 + usize::from(instr.mod_c0())]
+    }
+
     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
     /// Persistent sleep sentinel set by enter_sleep_state (HLT/MWAIT).
     /// Matches Bochs proc_ctrl.cc `async_event = 1` — survives the
@@ -804,6 +868,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.cpu_topology = topology;
         self.lapic.set_id(cpu_id);
         self.lapic.set_bus_cpu_count(topology.cpu_count());
+        if self.smp_trace_quantum == 0 {
+            // Bochs config.cc BXPN_SMP_QUANTUM default.
+            self.smp_trace_quantum = 16;
+        }
+    }
+
+    /// Set the SMP scheduling quantum — Bochs `cpu: quantum=N`, clamped to
+    /// config.h BX_SMP_QUANTUM_MIN..=BX_SMP_QUANTUM_MAX (1..=32).
+    #[inline]
+    pub fn set_smp_quantum(&mut self, quantum: u32) {
+        self.smp_trace_quantum = quantum.clamp(1, 32) as u8;
+    }
+
+    /// Configure how the CPUID frequency leaves 0x15/0x16 are reported.
+    /// Bochs `cpu: cpuid_freq=` (cpuid.cc get_freq_leaf_15/16); no-op for
+    /// models without those leaves.
+    #[inline]
+    pub fn set_cpuid_freq(&mut self, freq: crate::cpu::cpuid::CpuidFreq, ips: u32) {
+        self.cpuid.set_cpuid_freq(freq, ips);
     }
 
     #[inline]
@@ -1300,7 +1383,7 @@ pub(super) struct BxGuardFound {
 }
 
 /// Type alias for instruction handler function pointer
-type InstructionHandler<I, T> = fn(&mut BxCpuC<'_, I, T>, &Instruction) -> Result<()>;
+pub(super) type InstructionHandler<I, T> = fn(&mut BxCpuC<'_, I, T>, &Instruction) -> Result<()>;
 
 impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
     /// Bochs `signal_event()`: set event bit and force async check.
@@ -1731,6 +1814,79 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     #[inline]
     pub fn clear_mem_bus(&mut self) {
         self.mem_bus = None;
+    }
+
+    /// Check whether a direct bulk write would overlap cached guest code.
+    ///
+    /// The probe is intentionally non-mutating: callers can abandon the bulk
+    /// path and let the scalar RMW access perform Bochs-ordered invalidation
+    /// before the corresponding external side effect.
+    #[inline]
+    pub(crate) fn smc_range_has_cached_code(&self, p_addr: BxPhyAddress, len: u32) -> bool {
+        let Some(mem_bus) = self.mem_bus else {
+            return true;
+        };
+        // SAFETY: mem_bus is wired for the duration of CPU execution and this
+        // shared probe does not mutate memory or alias a mutable borrow.
+        let mem = unsafe { mem_bus.as_ref() };
+        mem.smc_range_has_stamps(p_addr, len)
+    }
+
+    /// Bochs icache.h `bxPageWriteStampTable::decWriteStamp` + icache.cc
+    /// `handleSMC`: check a store against the machine-wide write-stamp table.
+    /// On a hit the event is queued for every cpu; this (writing) cpu applies
+    /// it immediately below — flush affected traces and stop the current
+    /// trace — exactly Bochs's synchronous behavior for the writer. Sibling
+    /// cpus are flushed by the emulator's drain before their next slice,
+    /// which the single-threaded round-robin scheduler guarantees runs first.
+    #[inline]
+    pub(crate) fn smc_write_check(&mut self, p_addr: BxPhyAddress, len: u32) {
+        let Some(mem_bus) = self.mem_bus else { return };
+        // SAFETY: mem_bus is wired for the duration of cpu execution (same
+        // invariant as every other mem_bus access); BxCpuC and BxMemC are
+        // distinct objects, so this temporary &mut never aliases self.
+        let mem = unsafe { &mut *mem_bus.as_ptr() };
+        mem.smc_dec_write_stamp(p_addr, len);
+        if mem.smc_seq_next() > self.smc_seq_seen {
+            self.smc_apply_pending(mem, true);
+        }
+    }
+
+    /// Apply queued SMC invalidations this cpu has not seen yet (watermark).
+    /// The per-cpu body of Bochs icache.cc `handleSMC`'s all-processors loop:
+    /// flush affected traces and (when `stop_trace`) set
+    /// BX_ASYNC_EVENT_STOP_TRACE so the currently-running trace is abandoned.
+    /// Non-consuming — events stay queued until the emulator's drain has
+    /// applied them to every cpu.
+    #[cold]
+    pub(crate) fn smc_apply_pending(&mut self, mem: &crate::memory::BxMemC, stop_trace: bool) {
+        let (needs_full_flush, events) = mem.smc_pending_since(self.smc_seq_seen);
+        if needs_full_flush {
+            // Pending-queue overflow dropped events — conservative full flush.
+            self.i_cache.flush_all();
+        } else {
+            for ev in events {
+                self.i_cache.handle_smc_scan(ev.p_addr, ev.mask);
+            }
+        }
+        self.smc_seq_seen = mem.smc_seq_next();
+        if stop_trace {
+            self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+        }
+    }
+
+    /// After a handler-aware physical write (`write_physical_page`) issued
+    /// from cpu context, apply any SMC invalidation it queued to THIS cpu
+    /// immediately — Bochs icache.cc `handleSMC` flushes the writer
+    /// synchronously at the store.
+    #[inline]
+    pub(crate) fn smc_sync_after_phys_write(&mut self) {
+        let Some(mem_bus) = self.mem_bus else { return };
+        // SAFETY: same mem_bus wiring invariant as smc_write_check.
+        let mem = unsafe { &*mem_bus.as_ptr() };
+        if mem.smc_seq_next() > self.smc_seq_seen {
+            self.smc_apply_pending(mem, true);
+        }
     }
 
     #[inline]
@@ -2199,7 +2355,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         .fire_before_execution(rip_before, instr_ref());
                 }
 
-                match self.execute_instruction(instr_ref()) {
+                let execution_result = if let Some(handler) = self.i_cache_handlers[instr_idx] {
+                    handler(self, instr_ref())
+                } else {
+                    self.execute_instruction(instr_ref())
+                };
+                match execution_result {
                     Ok(()) => {}
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
                         // Exception delivery during execution: restart decode (Bochs longjmp).
@@ -2410,6 +2571,16 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
     ) -> Result<(usize, usize)> {
+        // Apply machine-wide SMC invalidations this cpu has not seen before
+        // consulting the icache — device DMA (Bochs memory.cc
+        // dmaWritePhysicalPage) and non-store cpu write paths queue events
+        // between this cpu's slices/stores. Bochs flushes every cpu
+        // synchronously in icache.cc handleSMC; the watermark makes this a
+        // single compare per trace lookup. No STOP_TRACE: there is no
+        // running trace at a lookup boundary.
+        if mem.smc_seq_next() > self.smc_seq_seen {
+            self.smc_apply_pending(mem, false);
+        }
         // Check if we need to prefetch a new page (matching C++ lines 289-292)
         let needs_prefetch = self.eip_page_window_size == 0 || {
             let eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
@@ -2481,6 +2652,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             let mut smc_invalid = false;
             if let Some(fetch_slice) = self.eip_fetch_ptr {
                 let offset = eip_biased as usize;
+                debug_assert!(offset < fetch_slice.len());
                 let avail = fetch_slice.len().saturating_sub(offset).min(8);
                 if avail > 0 && fetch_slice[offset..offset + avail] != entry.first_bytes[..avail] {
                     smc_invalid = true;
@@ -2511,21 +2683,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.perf_icache_miss += 1;
         }
 
-        let mut dummy_mapping: [u32; 0] = [];
-        let mut dummy_stamp_table = crate::cpu::icache::BxPageWriteStampTable {
-            fine_granularity_mapping: &mut dummy_mapping,
-        };
-
         // SAFETY: prefetch() borrow is released before serve_icache_miss is called
         let miss_entry = unsafe {
             let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
-            self.serve_icache_miss(
-                eip_biased,
-                p_addr,
-                mem_reborrowed,
-                cpus,
-                &mut dummy_stamp_table,
-            )?
+            self.serve_icache_miss(eip_biased, p_addr, mem_reborrowed, cpus)?
         };
         Ok((miss_entry.mpool_start_idx, miss_entry.tlen as usize))
     }
@@ -2865,11 +3026,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             Some(tlb_host_addr)
         } else {
             // TLB miss - need to walk page tables
-            // Create a dummy page_write_stamp_table for page table walking
-            let mut dummy_mapping: [u32; 0] = [];
-            let mut dummy_stamp_table = crate::cpu::icache::BxPageWriteStampTable {
-                fine_granularity_mapping: &mut dummy_mapping,
-            };
             // Get a20_mask before borrowing mem mutably
             let a20_mask = mem.a20_mask();
             // Create a dummy TLB entry (not actually used for page walk)
@@ -2881,7 +3037,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 MemoryAccessType::Execute,
                 a20_mask,
                 mem,
-                &mut dummy_stamp_table,
             ) {
                 Ok(p_addr) => {
                     self.p_addr_fetch_page = ppf_of(p_addr);

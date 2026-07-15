@@ -24,6 +24,7 @@ pub mod acpi;
 #[cfg(feature = "alloc")]
 pub mod acpi_tables;
 pub mod cmos;
+pub mod ddc;
 pub mod devices;
 pub use crate::dma;
 pub mod fw_cfg;
@@ -417,28 +418,60 @@ impl BxDevicesC {
     /// directly from the ATA controller buffer in one call, avoiding per-word
     /// handler dispatch overhead. Returns the number of bytes actually read.
     /// For other ports, returns 0 (caller should fall back to per-word I/O).
-    pub fn inp_bulk(&mut self, port: u16, buf: &mut [u8]) -> usize {
-        // Only optimize IDE data ports (base + 0 = data register)
-        if port != 0x1F0 && port != 0x170 {
+    pub fn inp_bulk(&mut self, port: u16, io_len: u8, buf: &mut [u8]) -> usize {
+        // Only optimize IDE data ports (base + 0 = data register).
+        if (port != 0x1F0 && port != 0x170) || (io_len != 2 && io_len != 4) {
             return 0;
         }
         let entry = &self.read_handlers[port as usize];
         if entry.device_id != DeviceId::HardDrive {
             return 0;
         }
-        if let Some(dm) = self.device_manager_mut() {
-            {
+
+        let mut pic_pending = false;
+        let mut pic_cleared = false;
+        let bytes_read = if let Some(dm) = self.device_manager_mut() {
+            let result = {
                 let devices::DeviceManager {
                     ref mut harddrv,
                     ref mut pic,
                     ref mut pci_ide,
                     ..
                 } = *dm;
-                harddrv.bulk_read_data(port, buf, pic, pci_ide)
+                harddrv.bulk_read_data(port, io_len, buf, pic, pci_ide)
+            };
+            // Match scalar inp(): deliver PIC-to-IOAPIC forwards and expose
+            // interrupt edge changes to the CPU before the REP chunk retires.
+            {
+                let (fwds, count) = dm.pic.take_ioapic_forwards();
+                let devices::DeviceManager {
+                    ref mut pic,
+                    ref mut ioapic,
+                    ..
+                } = *dm;
+                for &(irq, level) in &fwds[..count] {
+                    ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
+                }
             }
+            if dm.pic.irq_pending {
+                dm.pic.irq_pending = false;
+                pic_pending = true;
+            }
+            if dm.pic.irq_cleared {
+                dm.pic.irq_cleared = false;
+                pic_cleared = true;
+            }
+            result
         } else {
             0
+        };
+        if pic_pending {
+            self.pic_irq_pending = true;
         }
+        if pic_cleared {
+            self.pic_irq_cleared = true;
+        }
+        bytes_read
     }
 
     /// Default read handler - returns 0xFFFFFFFF for unhandled ports
@@ -584,17 +617,17 @@ impl BxDevicesC {
     ) -> u32 {
         match id {
             DeviceId::Pic => dm.pic.read(port, io_len),
-            DeviceId::Pit => dm.pit.read(port, io_len, icount),
+            DeviceId::Pit => {
+                let result = dm.pit.read(port, io_len, icount);
+                // The pre-read sync can clock counter 0's OUT pin — replay
+                // the transitions into the PIC (Bochs pit.cc irq_handler
+                // fires synchronously from handle_timer inside read).
+                dm.drain_pit_irq0();
+                result
+            }
             DeviceId::Cmos => dm.cmos.read(port, io_len),
             DeviceId::Dma => dm.dma.read(port, io_len),
-            DeviceId::Keyboard => {
-                let devices::DeviceManager {
-                    ref mut keyboard,
-                    ref mut pit,
-                    ..
-                } = *dm;
-                keyboard.read(port, io_len, icount, Some(pit))
-            }
+            DeviceId::Keyboard => dm.keyboard.read(port, io_len),
             DeviceId::HardDrive => {
                 let devices::DeviceManager {
                     ref mut harddrv,
@@ -628,17 +661,18 @@ impl BxDevicesC {
     ) {
         match id {
             DeviceId::Pic => dm.pic.write(port, value, io_len),
-            DeviceId::Pit => dm.pit.write(port, value, io_len),
+            DeviceId::Pit => {
+                dm.pit.write(port, value, io_len, icount);
+                // Both the pre-write sync and the write itself (count or
+                // control-word writes moving counter 0's OUT pin) can
+                // produce IRQ0 transitions — replay them into the PIC
+                // (Bochs pit.cc irq_handler fires synchronously from
+                // periodic()/timer.write() inside write).
+                dm.drain_pit_irq0();
+            }
             DeviceId::Cmos => dm.cmos.write(port, value, io_len),
             DeviceId::Dma => dm.dma.write(port, value, io_len),
-            DeviceId::Keyboard => {
-                let devices::DeviceManager {
-                    ref mut keyboard,
-                    ref mut pit,
-                    ..
-                } = *dm;
-                keyboard.write(port, value, io_len, Some(pit))
-            }
+            DeviceId::Keyboard => dm.keyboard.write(port, value, io_len),
             DeviceId::HardDrive => {
                 let devices::DeviceManager {
                     ref mut harddrv,

@@ -3,9 +3,7 @@ use super::{
     cpuid::BxCpuIdTrait,
     decoder::BxSegregs,
     eflags::EFlags,
-    svm::{
-        SvmVmexit, BX_VM_CR_MSR_INIT_REDIRECT_MASK, SVM_INTERCEPT0_INIT, SVM_INTERCEPT0_SMI,
-    },
+    svm::{SvmVmexit, BX_VM_CR_MSR_INIT_REDIRECT_MASK, SVM_INTERCEPT0_INIT, SVM_INTERCEPT0_SMI},
     vmx::VmxVmexitReason,
     BxCpuC,
 };
@@ -436,6 +434,19 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                             }
                         }
                     } else {
+                        // The CPU event bit mirrors the PIC INT pin. If no vector is
+                        // deliverable, reconcile a stale assertion now; otherwise
+                        // async_event remains set and every instruction exits its
+                        // trace to rescan an empty PIC indefinitely.
+                        // Consume deferred PIC edge flags while reconciling the
+                        // current deasserted INT pin. A later device assertion
+                        // will set irq_pending again, so it cannot be erased by
+                        // this acknowledge's stale irq_cleared flag.
+                        pic.reconcile_deasserted_intr();
+                        self.clear_event(Self::BX_EVENT_PENDING_INTR);
+                        if self.pending_event & Self::BX_EVENT_PENDING_LAPIC_INTR == 0 {
+                            self.async_event = super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        }
                         #[cfg(debug_assertions)]
                         {
                             self.diag_hae_intr_pic_empty += 1;
@@ -800,7 +811,11 @@ mod tests {
         assert!(ap.is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT));
         assert!(!ap.in_smm, "SMI must not enter SMM while GIF=0");
         assert_eq!(ap.activity_state, CpuActivityState::Active);
-        assert_eq!(ap.rax(), NONZERO_RAX_SENTINEL, "INIT must not reset while GIF=0");
+        assert_eq!(
+            ap.rax(),
+            NONZERO_RAX_SENTINEL,
+            "INIT must not reset while GIF=0"
+        );
 
         // STGI: with GIF set again, the held INIT is processed. Drop the SMI
         // first so this test does not depend on SMM entry machinery.
@@ -1056,8 +1071,7 @@ mod tests {
         );
         assert_eq!(
             ap.event_mask
-                & (BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI
-                    | BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI),
+                & (BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI | BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI),
             0,
             "SIPI unmasks SMI/NMI before the VMexit (Bochs deliver_SIPI)"
         );

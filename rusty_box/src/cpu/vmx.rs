@@ -1635,13 +1635,11 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return;
         };
         let mut data = val.to_le_bytes();
-        let mut dummy_mapping: [u32; 0] = [];
-        let mut stamp = super::icache::BxPageWriteStampTable {
-            fine_granularity_mapping: &mut dummy_mapping,
-        };
-        if let Err(e) = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 2, &mut data) {
+        if let Err(e) = mem.write_physical_page(&[cpu_ref], paddr, 2, &mut data) {
             tracing::warn!("write_phys_word({:#018x}) failed: {:?}", paddr, e);
         }
+        // Bochs handleSMC flushes the writer synchronously at the store.
+        self.smc_sync_after_phys_write();
     }
 
     fn write_phys_dword(&mut self, paddr: u64, val: u32) {
@@ -1649,13 +1647,11 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return;
         };
         let mut data = val.to_le_bytes();
-        let mut dummy_mapping: [u32; 0] = [];
-        let mut stamp = super::icache::BxPageWriteStampTable {
-            fine_granularity_mapping: &mut dummy_mapping,
-        };
-        if let Err(e) = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 4, &mut data) {
+        if let Err(e) = mem.write_physical_page(&[cpu_ref], paddr, 4, &mut data) {
             tracing::warn!("write_phys_dword({:#018x}) failed: {:?}", paddr, e);
         }
+        // Bochs handleSMC flushes the writer synchronously at the store.
+        self.smc_sync_after_phys_write();
     }
 
     fn write_phys_qword(&mut self, paddr: u64, val: u64) {
@@ -1663,13 +1659,11 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return;
         };
         let mut data = val.to_le_bytes();
-        let mut dummy_mapping: [u32; 0] = [];
-        let mut stamp = super::icache::BxPageWriteStampTable {
-            fine_granularity_mapping: &mut dummy_mapping,
-        };
-        if let Err(e) = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 8, &mut data) {
+        if let Err(e) = mem.write_physical_page(&[cpu_ref], paddr, 8, &mut data) {
             tracing::warn!("write_phys_qword({:#018x}) failed: {:?}", paddr, e);
         }
+        // Bochs handleSMC flushes the writer synchronously at the store.
+        self.smc_sync_after_phys_write();
     }
 
     /// Dispatch a VMCS field encoding → named field in `self.vmcs`.
@@ -4479,17 +4473,15 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return;
         };
         let mut data = [val];
-        let mut dummy_mapping: [u32; 0] = [];
-        let mut stamp = super::icache::BxPageWriteStampTable {
-            fine_granularity_mapping: &mut dummy_mapping,
-        };
-        if let Err(e) = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 1, &mut data) {
+        if let Err(e) = mem.write_physical_page(&[cpu_ref], paddr, 1, &mut data) {
             tracing::warn!(
                 "write_physical_byte({:#018x}) failed: {:?}; byte dropped",
                 paddr,
                 e
             );
         }
+        // Bochs handleSMC flushes the writer synchronously at the store.
+        self.smc_sync_after_phys_write();
     }
 
     /// Bochs vapic.cc `VMX_Posted_Interrupt_Processing` — fast probe that

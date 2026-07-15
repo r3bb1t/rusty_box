@@ -214,10 +214,14 @@ impl BxPciBridge {
                 }
                 // Status lo — read-only (pci.cc)
                 0x06 | 0x0C | 0x0F => {}
-                // Status hi — write-1-to-clear (pci.cc)
+                // Status hi — write-1-to-clear (pci.cc) — i440FX path:
+                //   value8' = (pci_conf[0x07] & !value8) | 0x02;
+                //   pci_conf[addr] &= !value8';
+                // which reduces (per-bit) to (oldval & value8) & 0xFD: every
+                // bit is old-AND-written, and bit1 is unconditionally forced
+                // to 0 (not 1 — the previous formula here had this backwards).
                 0x07 => {
-                    let clear_bits = (self.pci_conf[0x07] & !value8) | 0x02;
-                    self.pci_conf[addr] = clear_bits;
+                    self.pci_conf[addr] = (oldval & value8) & 0xFD;
                 }
                 // Latency timer (pci.cc)
                 0x0D => {
@@ -267,8 +271,19 @@ impl BxPciBridge {
                 0x7A => {
                     self.pci_conf[addr] = (value8 & 0xF5) | (self.pci_conf[addr] & 0x0A);
                 }
+                // Extended SMRAM control (pci.cc case 0x73) — I440BX-only in
+                // Bochs; the i440FX case has no matching `if`, so it falls to
+                // an implicit no-op. Read-only here.
+                0x73 => {}
                 // ERRSTS (pci.cc) — read-only in i440FX
                 0xB8 => {}
+                // AGP aperture size (pci.cc case 0xb4) — I440BX-only; no-op on i440FX.
+                0xB4 => {}
+                // GART base address bytes (pci.cc case 0xb9/0xba/0xbb) —
+                // I440BX-only; no-op on i440FX.
+                0xB9 | 0xBA | 0xBB => {}
+                // AGP misc control (pci.cc case 0xf0) — I440BX-only; no-op on i440FX.
+                0xF0 => {}
                 // Default: store value (pci.cc)
                 _ => {
                     self.pci_conf[addr] = value8;
@@ -455,6 +470,74 @@ mod tests {
                                                      // Try to set DOPEN — should fail because DLCK is set
         bridge.pci_write(0x72, 0x48, 1); // DOPEN=1
         assert_eq!(bridge.pci_conf[0x72] & 0x40, 0); // DOPEN stays 0
+    }
+
+    // ─── Finding #20b: status register (0x06/0x07) write-1-to-clear ──────────
+    //
+    // Bochs pci.cc bx_pci_bridge_c::pci_write_handler case 0x07 (i440FX path):
+    //   value8 = (pci_conf[0x07] & ~value8) | 0x02;
+    //   pci_conf[addr] &= ~value8;
+    // Algebraically this reduces (per-bit) to: new = (old & written) & 0xFD
+    // for every bit except bit1, which is unconditionally forced to 0 (NOT
+    // forced to 1 as the old rusty_box formula did).
+
+    #[test]
+    fn test_status_reg_write1_to_clear_matches_bochs_formula() {
+        let mut bridge = BxPciBridge::new();
+        bridge.reset();
+
+        // Seed a known "before" state directly (bypassing pci_write).
+        bridge.pci_conf[0x07] = 0xAA; // 1010_1010
+        bridge.pci_write(0x07, 0xF0, 1); // write 1111_0000
+                                         // Bochs: new = (0xAA & 0xF0) & 0xFD = 0xA0 & 0xFD = 0xA0
+        assert_eq!(bridge.pci_conf[0x07], 0xA0);
+
+        // Bit1 (0x02) is unconditionally cleared by the formula, even though
+        // reset() sets it — this is the opposite of the old rusty_box code,
+        // which forced it permanently SET.
+        bridge.pci_conf[0x07] = 0x02; // only the reset "always" bit set
+        bridge.pci_write(0x07, 0xFF, 1); // guest clears everything
+        assert_eq!(
+            bridge.pci_conf[0x07], 0x00,
+            "Bochs formula forces bit1 to 0 on any write, not 1"
+        );
+
+        // Writing 0x00 (guest "touches nothing" under naive RW1C intuition)
+        // actually zeroes the whole byte per Bochs's exact formula — a
+        // faithful (if surprising) parity requirement, not a bug to "fix".
+        bridge.pci_conf[0x07] = 0xFD;
+        bridge.pci_write(0x07, 0x00, 1);
+        assert_eq!(bridge.pci_conf[0x07], 0x00);
+    }
+
+    #[test]
+    fn test_status_reg_low_byte_always_read_only() {
+        let mut bridge = BxPciBridge::new();
+        bridge.reset();
+        let before = bridge.pci_conf[0x06];
+        bridge.pci_write(0x06, 0xFF, 1);
+        assert_eq!(bridge.pci_conf[0x06], before);
+    }
+
+    // ─── Finding #35a: i440FX read-only registers (pci.cc case list) ─────────
+    // Bochs's i440FX pci_write_handler falls through to a no-op for these
+    // registers (their `case`s are guarded by `chipset == BX_PCI_CHIPSET_I440BX`,
+    // which is never true for our i440FX-only bridge): 0x73, 0xB4, 0xB9, 0xBA,
+    // 0xBB, 0xF0.
+
+    #[test]
+    fn test_i440fx_extra_read_only_registers_ignore_writes() {
+        let mut bridge = BxPciBridge::new();
+        bridge.reset();
+
+        for addr in [0x73u8, 0xB4, 0xB9, 0xBA, 0xBB, 0xF0] {
+            let before = bridge.pci_conf[addr as usize];
+            bridge.pci_write(addr, 0xFF, 1);
+            assert_eq!(
+                bridge.pci_conf[addr as usize], before,
+                "register {addr:#04x} must be read-only on the i440FX bridge"
+            );
+        }
     }
 
     // ─── Finding #8: apply_smram_to_memory actually switches memory ──────────

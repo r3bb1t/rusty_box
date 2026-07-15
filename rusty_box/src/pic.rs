@@ -893,6 +893,15 @@ impl BxPicC {
         self.master.int_pin
     }
 
+    /// Consume deferred edge notifications after the CPU observes the current
+    /// PIC INT pin deasserted. A later assertion records a fresh irq_pending.
+    #[inline]
+    pub(crate) fn reconcile_deasserted_intr(&mut self) {
+        debug_assert!(!self.master.int_pin);
+        self.irq_pending = false;
+        self.irq_cleared = false;
+    }
+
     /// Interrupt Acknowledge — CPU INTA cycle (Bochs `bx_pic_c::IAC`)
     ///
     /// Returns the interrupt vector number. Handles:
@@ -1000,6 +1009,24 @@ mod tests {
         assert!(pic.has_interrupt());
         let vector = pic.iac();
         assert_eq!(vector, 0x08); // IRQ0 -> INT 0x08
+    }
+
+    #[test]
+    fn reconciled_clear_cannot_erase_a_later_pic_assertion() {
+        let mut pic = BxPicC::new();
+        pic.irq_pending = true;
+        pic.irq_cleared = true;
+        pic.master.int_pin = false;
+
+        pic.reconcile_deasserted_intr();
+        assert!(!pic.irq_pending);
+        assert!(!pic.irq_cleared);
+
+        pic.master.imr = 0;
+        let _ = pic.raise_irq(0);
+        assert!(pic.irq_pending);
+        assert!(pic.has_interrupt());
+        assert!(!pic.irq_cleared);
     }
 
     #[test]

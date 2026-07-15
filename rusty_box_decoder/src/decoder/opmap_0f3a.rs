@@ -65,6 +65,13 @@ pub(super) const BxOpcodeTable0F3A18: [u64; 1] = [form_opcode(
     Opcode::V256Vinsertf128VdqHdqWdqIb,
 )];
 
+// VEXTRACTF128 — VEX.256.66.0F3A.W0 19 /r ib
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A19
+pub(super) const BxOpcodeTable0F3A19: [u64; 1] = [form_opcode(
+    attrs!(SSE_PREFIX_66 | VL256 | VEX_W0),
+    Opcode::V256Vextractf128WdqVdqIb,
+)];
+
 // VINSERTI128 — VEX.256.66.0F3A.W0 38 /r ib
 pub(super) const BxOpcodeTable0F3A38: [u64; 1] = [form_opcode(
     attrs!(SSE_PREFIX_66 | VL256 | VEX_W0),
@@ -258,7 +265,7 @@ pub(super) const BxOpcodeTable0F3A: [&[u64]; 256] = [
     /* 0F 3A 16 */ &BxOpcodeTable0F3A16,
     /* 0F 3A 17 */ &BxOpcodeTable0F3A17,
     /* 0F 3A 18 */ &BxOpcodeTable0F3A18,
-    /* 0F 3A 19 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 3A 19 */ &BxOpcodeTable0F3A19,
     /* 0F 3A 1A */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 1B */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 1C */ &BX_OPCODE_GROUP_ERR,

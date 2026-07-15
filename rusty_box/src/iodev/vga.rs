@@ -615,6 +615,10 @@ pub(crate) struct BxVgaC {
     // =====================================================================
     /// VBE extension state (DISPI registers, resolution, banking, etc.)
     vbe: VbeState,
+    /// DDC monitor (EDID over I2C via VBE_DISPI register 0xB) — Bochs
+    /// vga.h bx_ddc_c ddc. Internal I2C state is not snapshotted (Bochs
+    /// persists only vbe.ddc_enabled, vga.cc register_state).
+    ddc: crate::iodev::ddc::BxDdcC,
     /// Total VBE memory size in bytes (configurable, default 16MB)
     vbe_memsize: u32,
     #[cfg(feature = "alloc")]
@@ -682,6 +686,7 @@ impl BxVgaC {
         let num_x_tiles = ((vbe.max_xres as u32 + VGA_X_TILESIZE - 1) / VGA_X_TILESIZE) as u16;
         let num_y_tiles = ((vbe.max_yres as u32 + VGA_Y_TILESIZE - 1) / VGA_Y_TILESIZE) as u16;
         let mut vga = Self {
+            ddc: crate::iodev::ddc::BxDdcC::new(),
             crtc_index: 0,
             crtc_regs: [0; 25],
             attr_index: 0,
@@ -958,10 +963,8 @@ impl BxVgaC {
         self.vbe.virtual_yres = yres;
 
         // Grow the dirty-tile grid to cover the (possibly larger) capability.
-        let num_x_tiles =
-            ((self.vbe.max_xres as u32 + VGA_X_TILESIZE - 1) / VGA_X_TILESIZE) as u16;
-        let num_y_tiles =
-            ((self.vbe.max_yres as u32 + VGA_Y_TILESIZE - 1) / VGA_Y_TILESIZE) as u16;
+        let num_x_tiles = ((self.vbe.max_xres as u32 + VGA_X_TILESIZE - 1) / VGA_X_TILESIZE) as u16;
+        let num_y_tiles = ((self.vbe.max_yres as u32 + VGA_Y_TILESIZE - 1) / VGA_Y_TILESIZE) as u16;
         if num_x_tiles != self.num_x_tiles || num_y_tiles != self.num_y_tiles {
             self.num_x_tiles = num_x_tiles;
             self.num_y_tiles = num_y_tiles;
@@ -3446,6 +3449,16 @@ impl BxVgaC {
             VBE_DISPI_INDEX_VIRT_WIDTH => self.vbe.virtual_xres,
             VBE_DISPI_INDEX_VIRT_HEIGHT => self.vbe.virtual_yres,
             VBE_DISPI_INDEX_VIDEO_MEMORY_64K => (self.vbe_memsize >> 16) as u16,
+            VBE_DISPI_INDEX_DDC => {
+                // Bochs vga.cc vbe_read VBE_DISPI_INDEX_DDC: bit 7 reports
+                // the interface enabled, low bits are the DDC line states;
+                // disabled reads as 0x000F.
+                if self.vbe.ddc_enabled {
+                    (1 << 7) | self.ddc.read() as u16
+                } else {
+                    0x000F
+                }
+            }
             _ => {
                 tracing::error!("VBE read: unknown index 0x{:x}", index);
                 0
@@ -3751,7 +3764,15 @@ impl BxVgaC {
                 // Read-only in Bochs; ignore writes
             }
             VBE_DISPI_INDEX_DDC => {
-                self.vbe.ddc_enabled = (value16 & 1) != 0;
+                // Bochs vga.cc vbe_write VBE_DISPI_INDEX_DDC: bit 7 enables
+                // the DDC interface; bits 0/1 drive the I2C clock (DCK) and
+                // data (DDA) lines of the monitor's EDID channel.
+                if (value16 >> 7) & 1 != 0 {
+                    self.vbe.ddc_enabled = true;
+                    self.ddc.write(value16 & 1 != 0, (value16 >> 1) & 1 != 0);
+                } else {
+                    self.vbe.ddc_enabled = false;
+                }
             }
             _ => {
                 tracing::error!(
@@ -3809,7 +3830,10 @@ mod tests {
         let mut vga = pci_vga();
         vga.pci_write(0x10, 0xFFFF_FFFF, 4);
         assert_eq!(vga.pci_read(0x10, 4), 0xFF00_0008); // ~(16MiB-1) | prefetchable
-        assert!(vga.take_pending_lfb_relocate().is_none(), "probe must not commit");
+        assert!(
+            vga.take_pending_lfb_relocate().is_none(),
+            "probe must not commit"
+        );
     }
 
     #[test]
@@ -4184,7 +4208,10 @@ mod tests {
         // A write to 0x3CC must be a no-op (Bochs: "Graphics 1 Position (EGA)").
         vga.write_port(VGA_MISC_OUTPUT, 0x00, 1);
 
-        assert_eq!(vga.misc_output, 0xAB, "0x3CC write must not alter Misc Output");
+        assert_eq!(
+            vga.misc_output, 0xAB,
+            "0x3CC write must not alter Misc Output"
+        );
         assert!(
             vga.misc_color_emulation,
             "0x3CC write must not flip color/mono emulation"
@@ -4222,10 +4249,16 @@ mod tests {
         vga.graphics_regs[GFX_REG_READ_MAP_SELECT] = 2;
 
         vga.write_port(VGA_CRTC_INDEX, 0x22, 1);
-        assert_eq!(vga.crtc_index, 0x22, "CRTC index must be masked with 0x3F, not 0x1F");
+        assert_eq!(
+            vga.crtc_index, 0x22,
+            "CRTC index must be masked with 0x3F, not 0x1F"
+        );
 
         let data = vga.read_port(VGA_CRTC_DATA, 1, 0);
-        assert_eq!(data, 0x33, "0x3D5 must read back latch[read_map_select], not CR2");
+        assert_eq!(
+            data, 0x33,
+            "0x3D5 must read back latch[read_map_select], not CR2"
+        );
     }
 
     // ---- Finding #6c: Graphics Controller index is stored unmasked; out-of-range

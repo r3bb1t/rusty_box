@@ -1,24 +1,34 @@
-//! Alpine Linux boot with strace-style syscall tracing.
+//! Alpine Linux boot with strace-style syscall tracing, in a graphical egui window.
 //!
-//! Boots Alpine from ISO (BIOS path by default, or `RUSTY_BOX_BOOT=direct` for
-//! direct kernel+initramfs). Every SYSCALL is intercepted via the `pre_syscall`
-//! hook, decoded with string argument resolution, and logged to `strace.log`
-//! (keeps the VGA terminal clean). The SYSCALL executes architecturally so the
-//! Linux kernel actually services it — the hook only observes.
+//! Opens a native window (VGA display via `BridgeGui`, emulator on a background
+//! thread, `eframe` on the main thread — same architecture as `rusty_box_egui`).
+//! Every SYSCALL is intercepted via the `pre_syscall` hook, decoded with string
+//! argument resolution, and logged to `strace.log` (keeps the display clean).
+//! The SYSCALL executes architecturally so the Linux kernel actually services it
+//! — the hook only observes.
+//!
+//! Boots Alpine from ISO. Default is direct kernel+initramfs boot with
+//! `console=tty0`, which renders to the VGA console shown in the window.
+//! `RUSTY_BOX_BOOT=bios` uses full BIOS/ISOLINUX boot instead — but the ISO's
+//! default is serial-only, so that path only fills the serial console panel.
 //!
 //! ```bash
-//! cargo run --release --example alpine_strace --features "std,instrumentation"
+//! cargo run --release --example alpine_strace --features "std,instrumentation,gui-egui"
 //! ```
 //!
 //! Env:
-//! - `ALPINE_ISO`         — path to Alpine virt ISO
-//! - `ALPINE_RAM_MB`      — RAM (default 256)
-//! - `MAX_INSTRUCTIONS`   — cap (default 4e9)
-//! - `STRACE_LOG`         — output file (default `strace.log`)
-//! - `RUSTY_BOX_BOOT`     — `direct` skips BIOS/ISOLINUX
-//! - `RUSTY_BOX_HEADLESS` — set → no GUI
+//! - `ALPINE_ISO`       — path to Alpine virt ISO
+//! - `ALPINE_RAM_MB`    — RAM (default 256)
+//! - `MAX_INSTRUCTIONS` — cap (default: run until window closed)
+//! - `STRACE_LOG`       — output file (default `strace.log`)
+//! - `RUSTY_BOX_BOOT`   — `bios` for full BIOS/ISOLINUX boot (serial-only)
+//! - `RUSTY_BOX_NOSYNC` — set to `1` to disable wall-clock slowdown
 
-#![cfg(all(feature = "std", feature = "instrumentation"))]
+#![cfg(all(
+    feature = "std",
+    feature = "instrumentation",
+    feature = "gui-egui"
+))]
 
 use rusty_box::{
     cpu::{
@@ -26,10 +36,10 @@ use rusty_box::{
         ResetReason, X86Reg,
     },
     emulator::{Emulator, EmulatorConfig},
-    gui::{NoGui, TermGui},
+    gui::{shared_display::SharedDisplay, BridgeGui, RustyBoxApp},
     Result,
 };
-use std::time::Instant;
+use std::sync::{atomic::Ordering, Arc, Mutex};
 
 mod syscalls;
 
@@ -87,7 +97,22 @@ impl Instrumentation for StraceTracer {
     }
 }
 
-// ─────────────────────────── Boot helpers ───────────────────────────
+// ─────────────────────────── Boot config ───────────────────────────
+
+enum BootMode {
+    /// Full BIOS + ISOLINUX boot from the ISO.
+    Bios,
+    /// Direct kernel + initramfs boot (skips BIOS/ISOLINUX).
+    Direct,
+}
+
+struct BootConfig {
+    iso_path: String,
+    ram_mb: usize,
+    max_instructions: u64,
+    mode: BootMode,
+    sync_slowdown: bool,
+}
 
 /// Truncate a `String` to `max` **bytes** without splitting a UTF-8 codepoint.
 /// Appends `...` when truncation occurred.
@@ -185,39 +210,22 @@ fn extract_from_iso(iso_data: &[u8], target_path: &[&str]) -> Option<Vec<u8>> {
     None
 }
 
+/// Read the first candidate path that exists, relative to the current dir and
+/// its parent (covers both `rusty_box/` and the workspace root as CWD).
+fn find_file(candidates: &[&str]) -> Option<Vec<u8>> {
+    let ws = std::env::current_dir().unwrap_or_default();
+    let ws = ws.to_string_lossy();
+    candidates
+        .iter()
+        .flat_map(|c| [format!("{ws}/{c}"), format!("{ws}/../{c}"), c.to_string()])
+        .find_map(|p| std::fs::read(&p).ok())
+}
+
 // ─────────────────────────── Main ───────────────────────────
 
 fn main() {
-    const STACK: usize = 1500 * 1024 * 1024;
-    std::thread::Builder::new()
-        .stack_size(STACK)
-        .name("alpine-strace".into())
-        .spawn(|| {
-            if let Err(e) = run() {
-                eprintln!("Error: {e:?}");
-                std::process::exit(1);
-            }
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-fn run() -> Result<()> {
-    let iso_path =
-        std::env::var("ALPINE_ISO").unwrap_or_else(|_| "alpine-virt-3.23.3-x86_64.iso".to_string());
-    let ram_mb: usize = std::env::var("ALPINE_RAM_MB")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(256);
-    let max_instructions: u64 = std::env::var("MAX_INSTRUCTIONS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4_000_000_000);
-    let headless = std::env::var("RUSTY_BOX_HEADLESS").is_ok();
-    let bios_boot = std::env::var("RUSTY_BOX_BOOT").unwrap_or_default() != "direct";
-
-    // Route strace output to a file so it doesn't interleave with VGA terminal output.
+    // Route strace output to a file so it doesn't compete with the GUI. The
+    // guard must stay alive for the whole program, so it lives in `main`.
     let log_path = std::env::var("STRACE_LOG").unwrap_or_else(|_| "strace.log".into());
     let file_appender = tracing_appender::rolling::never(".", &log_path);
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
@@ -229,138 +237,174 @@ fn run() -> Result<()> {
         .init();
     eprintln!("Strace output -> {log_path}");
 
-    tracing::info!("Reading ISO: {iso_path}");
-    let iso_data = std::fs::read(&iso_path).unwrap_or_else(|e| {
-        eprintln!("Failed to read '{iso_path}': {e}\nSet ALPINE_ISO=/path/to/alpine-virt-*.iso");
-        std::process::exit(1);
-    });
-    tracing::info!("  ISO size: {} MB", iso_data.len() / 1024 / 1024);
+    let iso_path =
+        std::env::var("ALPINE_ISO").unwrap_or_else(|_| "alpine-virt-3.24.1-x86_64.iso".to_string());
+    let ram_mb: usize = std::env::var("ALPINE_RAM_MB")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256);
+    let max_instructions: u64 = std::env::var("MAX_INSTRUCTIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(u64::MAX);
+    // Default to direct kernel boot with `console=tty0`, which renders to the
+    // VGA text console shown in the window. BIOS/ISOLINUX boot (RUSTY_BOX_BOOT=bios)
+    // uses the ISO's serial-only default, so it only fills the serial panel.
+    let mode = if std::env::var("RUSTY_BOX_BOOT").unwrap_or_default() == "bios" {
+        BootMode::Bios
+    } else {
+        BootMode::Direct
+    };
+    // sync=slowdown enabled by default — throttles active execution to match
+    // wall-clock time. Override with RUSTY_BOX_NOSYNC=1.
+    let sync_slowdown = std::env::var("RUSTY_BOX_NOSYNC").map_or(true, |v| v != "1");
 
-    let ram_bytes = ram_mb * 1024 * 1024;
+    // Fail fast if the ISO is missing (before we open a window).
+    if std::fs::metadata(&iso_path).is_err() {
+        eprintln!(
+            "Failed to read '{iso_path}'\nSet ALPINE_ISO=/path/to/alpine-virt-*.iso"
+        );
+        std::process::exit(1);
+    }
+
+    let boot = BootConfig {
+        iso_path,
+        ram_mb,
+        max_instructions,
+        mode,
+        sync_slowdown,
+    };
+
+    // Shared VGA display state bridged between the emulator thread and the GUI.
+    let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+    let shared_for_emu = Arc::clone(&shared);
+
+    // Emulator runs on a background thread with a large stack (deep call chains).
+    let emu_thread = std::thread::Builder::new()
+        .stack_size(1500 * 1024 * 1024)
+        .name("alpine-strace".into())
+        .spawn(move || loop {
+            {
+                let mut d = shared_for_emu.lock().unwrap();
+                d.stop_flag.store(false, Ordering::Relaxed);
+                d.emu_running = true;
+                d.reset_requested = false;
+            }
+
+            if let Err(e) = run_emulator(&boot, Arc::clone(&shared_for_emu)) {
+                eprintln!("Emulator error: {e:?}");
+            }
+
+            let restart = shared_for_emu.lock().unwrap().reset_requested;
+            if !restart {
+                break;
+            }
+            eprintln!("Restarting emulator (Reset requested)...");
+        })
+        .expect("Failed to spawn emulator thread");
+
+    // eframe must run on the main thread.
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([760.0, 450.0])
+            .with_min_inner_size([720.0, 426.0])
+            .with_title("Rusty Box — Alpine Linux (strace)"),
+        ..Default::default()
+    };
+    let shared_for_gui = Arc::clone(&shared);
+    let _ = eframe::run_native(
+        "Rusty Box strace",
+        native_options,
+        Box::new(move |cc| Ok(Box::new(RustyBoxApp::new(cc, shared_for_gui)))),
+    );
+
+    // Window closed → tell the emulator to stop, then join.
+    {
+        let mut d = shared.lock().unwrap();
+        d.stop_flag.store(true, Ordering::Relaxed);
+        d.emu_running = false;
+    }
+    let _ = emu_thread.join();
+}
+
+fn run_emulator(boot: &BootConfig, shared: Arc<Mutex<SharedDisplay>>) -> Result<()> {
+    let ram_bytes = boot.ram_mb * 1024 * 1024;
     let config = EmulatorConfig {
         guest_memory_size: ram_bytes,
         host_memory_size: ram_bytes,
         ips: 300_000_000,
         pci_enabled: true,
+        sync_slowdown: boot.sync_slowdown,
         ..EmulatorConfig::default()
     };
+
     let mut emu = Emulator::<Corei7SkylakeX, StraceTracer>::new_with_instrumentation(
         config,
         StraceTracer::default(),
     )?;
+
+    // Wire the GUI stop flag so closing the window stops execution.
+    emu.stop_flag = Arc::clone(&shared.lock().unwrap().stop_flag);
+    emu.set_gui(BridgeGui::new(Arc::clone(&shared)));
     emu.init_memory_and_pc_system()?;
 
-    if bios_boot {
-        let ws = std::env::current_dir().unwrap_or_default();
-        let ws = ws.to_string_lossy();
-        let bios = [
-            format!("{ws}/cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
-            format!("{ws}/../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
-            "cpp_orig/bochs/bochs/bios/BIOS-bochs-latest".into(),
-        ]
-        .iter()
-        .find_map(|p| std::fs::read(p).ok())
-        .expect("BIOS-bochs-latest not found");
-        let bios_load_addr = !(bios.len() as u64 - 1);
-        emu.load_bios(&bios, bios_load_addr)?;
-        let vga = [
-            format!("{ws}/binaries/bios/VGABIOS-lgpl-latest.bin"),
-            format!("{ws}/../binaries/bios/VGABIOS-lgpl-latest.bin"),
-            "binaries/bios/VGABIOS-lgpl-latest.bin".into(),
-        ]
-        .iter()
-        .find_map(|p| std::fs::read(p).ok());
-        if let Some(ref v) = vga {
-            emu.load_optional_rom(v, 0xC0000)?;
-        }
-        emu.init_cpu_and_devices()?;
-        emu.configure_memory_in_cmos_from_config();
-        emu.configure_boot_sequence(3, 0, 0);
-        emu.attach_cdrom(1, 0, &iso_path).expect("attach CDROM");
-        if headless {
-            emu.set_gui(NoGui::new());
-        } else {
-            emu.set_gui(TermGui::new());
-        }
-        emu.init_gui(0, &[])?;
-        emu.reset(ResetReason::Hardware)?;
-        emu.init_gui_signal_handlers();
-        emu.start();
-        emu.prepare_run();
-    } else {
-        let vmlinuz = extract_from_iso(&iso_data, &["BOOT", "VMLINUZ_VIRT."])
-            .expect("VMLINUZ_VIRT not found");
-        let initramfs = extract_from_iso(&iso_data, &["BOOT", "INITRAMFS_VIRT."])
-            .expect("INITRAMFS_VIRT not found");
-        let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_|
-            "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr modules=loop,squashfs,cdrom,sr_mod,isofs modloop=/boot/modloop-virt".into()
-        );
-        emu.init_cpu_and_devices()?;
-        emu.configure_memory_in_cmos_from_config();
-        emu.attach_cdrom(1, 0, &iso_path).expect("attach CDROM");
-        if headless {
-            emu.set_gui(NoGui::new());
-        } else {
-            emu.set_gui(TermGui::new());
-        }
-        emu.init_gui(0, &[])?;
-        emu.reset(ResetReason::Hardware)?;
-        emu.init_vga_text_mode3();
-        emu.setup_direct_linux_boot(&vmlinuz, Some(&initramfs), &cmdline)?;
-        emu.init_gui_signal_handlers();
-        emu.start();
-    }
-
-    // ─── Execute ───────────────────────────────────────────────────────────
-    let start = Instant::now();
-    let mut executed: u64 = 0;
-    const BATCH: u64 = 500_000;
-    let mut last_drain = Instant::now();
-    let mut enter_injected = !bios_boot;
-
-    while executed < max_instructions {
-        let budget = BATCH.min(max_instructions - executed);
-        match emu.run_interactive(budget) {
-            Ok(n) => executed += n,
-            Err(e) => {
-                tracing::error!("CPU error at {executed}: {e:?}");
-                break;
+    match boot.mode {
+        BootMode::Bios => {
+            let bios = find_file(&["cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"])
+                .expect("BIOS-bochs-latest not found");
+            let bios_load_addr = !(bios.len() as u64 - 1);
+            emu.load_bios(&bios, bios_load_addr)?;
+            if let Some(vga) = find_file(&[
+                "binaries/bios/VGABIOS-lgpl-latest.bin",
+                "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin",
+            ]) {
+                emu.load_optional_rom(&vga, 0xC0000)?;
             }
-        }
-        if emu.cpu.is_in_shutdown() {
-            tracing::info!("CPU shutdown at {executed}");
-            break;
-        }
-        // BIOS boot: press Enter at ISOLINUX around 18M instructions.
-        if !enter_injected && executed >= 18_000_000 {
+            emu.init_cpu_and_devices()?;
+            emu.configure_memory_in_cmos_from_config();
+            emu.configure_boot_sequence(3, 0, 0);
+            emu.attach_cdrom(1, 0, &boot.iso_path).expect("attach CDROM");
+            emu.init_gui(0, &[])?;
+            emu.reset(ResetReason::Hardware)?;
+            emu.init_gui_signal_handlers();
+            emu.start();
+            // Pre-queue Enter at the ISOLINUX prompt to accept the ISO default.
+            emu.prepare_run();
             emu.send_string("\n");
-            enter_injected = true;
         }
-        // Drain serial (kernel printk output) to stdout every 100ms.
-        if last_drain.elapsed().as_millis() >= 100 {
-            let out: Vec<u8> = emu.device_manager.drain_serial_tx(0).collect();
-            if !out.is_empty() {
-                use std::io::Write;
-                let _ = std::io::stdout().write_all(&out);
-                let _ = std::io::stdout().flush();
-            }
-            last_drain = Instant::now();
+        BootMode::Direct => {
+            let iso_data = std::fs::read(&boot.iso_path).expect("read ISO");
+            let vmlinuz = extract_from_iso(&iso_data, &["BOOT", "VMLINUZ_VIRT."])
+                .expect("VMLINUZ_VIRT not found");
+            let initramfs = extract_from_iso(&iso_data, &["BOOT", "INITRAMFS_VIRT."])
+                .expect("INITRAMFS_VIRT not found");
+            let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_|
+                "console=tty0 console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 nomodeset nokaslr modules=loop,squashfs,cdrom,sr_mod,isofs modloop=/boot/modloop-virt".into()
+            );
+            emu.init_cpu_and_devices()?;
+            emu.configure_memory_in_cmos_from_config();
+            emu.attach_cdrom(1, 0, &boot.iso_path).expect("attach CDROM");
+            emu.init_gui(0, &[])?;
+            emu.reset(ResetReason::Hardware)?;
+            emu.init_gui_signal_handlers();
+            emu.init_vga_text_mode3();
+            emu.start();
+            emu.setup_direct_linux_boot(&vmlinuz, Some(&initramfs), &cmdline)?;
         }
     }
 
-    // Final drain.
-    let out: Vec<u8> = emu.device_manager.drain_serial_tx(0).collect();
-    if !out.is_empty() {
-        use std::io::Write;
-        let _ = std::io::stdout().write_all(&out);
-        let _ = std::io::stdout().flush();
+    // run_interactive drives the GUI updates and honors the stop flag internally.
+    let result = emu.run_interactive(boot.max_instructions);
+    match result {
+        Ok(executed) => tracing::info!("Ran {executed} instructions"),
+        Err(ref e) => tracing::error!("Execution error: {e:?}"),
     }
 
-    let elapsed = start.elapsed();
-    tracing::info!(
-        "Ran {executed} instructions in {:.2}s ({:.1} MIPS)",
-        elapsed.as_secs_f64(),
-        executed as f64 / elapsed.as_secs_f64() / 1_000_000.0,
-    );
-    Ok(())
+    if let Ok(mut display) = shared.lock() {
+        display.emu_running = false;
+    }
+    if let Some(gui) = emu.gui_mut() {
+        gui.exit();
+    }
+    result.map(|_| ())
 }

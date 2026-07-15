@@ -6,6 +6,58 @@ use super::{decoder::BX_ISA_EXTENSIONS_ARRAY_SIZE, BxCpuC, Result};
 #[derive(Debug, thiserror::Error)]
 pub enum CpuIdError {}
 
+/// How the CPUID frequency leaves 0x15/0x16 are reported by CPU models that
+/// implement them. Mirrors Bochs `cpu: cpuid_freq=hardware|none|ips`
+/// (Bochs cpuid.cc get_freq_leaf_15/get_freq_leaf_16, added for
+/// bochs-emu/Bochs#791): the leaves declare the TSC frequency of the CPU the
+/// model was dumped from while the emulated TSC advances at the `ips` rate,
+/// and modern kernels trust the leaves without calibrating.
+///
+/// Note: Bochs defaults to `hardware`; rusty_box defaults to `None` to keep
+/// guest timekeeping correct out of the box (deliberate, documented
+/// divergence — the default only, the mode semantics are Bochs-exact).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CpuidFreq {
+    /// Report the values dumped from the modeled hardware (Bochs default).
+    Hardware,
+    /// Report the frequencies as not enumerated (all-zero leaves, the
+    /// SDM-sanctioned opt-out); guests fall back to timer calibration and
+    /// measure the true tick rate.
+    #[default]
+    None,
+    /// Derive the leaves from the emulated tick rate (`ips`) so guests that
+    /// trust CPUID also obtain the true rate.
+    Ips,
+}
+
+/// Register values of one CPUID leaf — Bochs cpuid.h cpuid_function_t.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuidLeaf {
+    pub eax: u32,
+    pub ebx: u32,
+    pub ecx: u32,
+    pub edx: u32,
+}
+
+impl CpuidLeaf {
+    /// All-zero leaf — Bochs cpuid.h bx_cpuid_t::get_reserved_leaf; also the
+    /// SDM encoding for "not enumerated" in the frequency leaves 0x15/0x16.
+    pub const fn zeros() -> Self {
+        Self {
+            eax: 0,
+            ebx: 0,
+            ecx: 0,
+            edx: 0,
+        }
+    }
+
+    /// The (EAX, EBX, ECX, EDX) tuple shape used by
+    /// [`BxCpuIdTrait::get_cpuid_leaf`].
+    pub const fn as_tuple(self) -> (u32, u32, u32, u32) {
+        (self.eax, self.ebx, self.ecx, self.edx)
+    }
+}
+
 pub trait BxCpuIdTrait: core::fmt::Debug {
     fn get_name(&self) -> &'static str;
 
@@ -31,6 +83,11 @@ pub trait BxCpuIdTrait: core::fmt::Debug {
     fn get_cpuid_leaf(&self, _eax: u32, _ecx: u32) -> (u32, u32, u32, u32) {
         (0, 0, 0, 0)
     }
+
+    /// Configure how the CPUID frequency leaves 0x15/0x16 are reported.
+    /// Default is a no-op: models without those leaves ignore the option
+    /// (Bochs parity — only models implementing the leaves consult it).
+    fn set_cpuid_freq(&mut self, _freq: CpuidFreq, _ips: u32) {}
 }
 
 bitflags! {

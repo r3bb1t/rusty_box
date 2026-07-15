@@ -64,6 +64,16 @@ pub struct Args {
 
     #[arg(long = "max-instructions", value_name = "N")]
     pub max_instructions: Option<u64>,
+    #[arg(long = "smp-quantum", value_name = "N")]
+    pub smp_quantum: Option<u32>,
+    /// How CPUID frequency leaves 0x15/0x16 are reported — Bochs
+    /// `cpu: cpuid_freq=` (hardware|none|ips). Default: none.
+    #[arg(long = "cpuid-freq", value_name = "MODE")]
+    pub cpuid_freq: Option<String>,
+    /// Advance PIT/ACPI timers on wall-clock time — Bochs `clock:
+    /// sync=realtime`. Default off (`sync=none`).
+    #[arg(long = "sync-realtime", action = ArgAction::SetTrue)]
+    pub sync_realtime: bool,
     #[arg(long = "cpus", value_name = "N")]
     pub cpus: Option<u32>,
 
@@ -120,7 +130,10 @@ pub enum LogLevel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DiskGeometry {
-    pub cylinders: u16,
+    // Physical cylinder count. Bochs stores this as `unsigned` (hdimage.h), so it can
+    // exceed 65535 for large disks (addressed via LBA); the 16-bit ATA cylinder register
+    // is separate. Kept wide here so 32 GiB+ disks are representable.
+    pub cylinders: u32,
     pub heads: u8,
     pub sectors_per_track: u8,
 }
@@ -163,7 +176,7 @@ impl FromStr for DiskGeometry {
         let cylinders = parts
             .next()
             .ok_or_else(wrong_disk_chs_part_count)?
-            .parse::<u16>()
+            .parse::<u32>()
             .map_err(|error| error.to_string())?;
         let heads = parts
             .next()

@@ -1182,6 +1182,77 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// VPINSRB — insert byte from GPR/memory into a copy of the vvvv source.
+    /// VEX.128.66.0F3A.W0 20 /r ib. Bochs avx.cc `VPINSRB_VdqHdqEbIbR/M`.
+    /// 3-operand: dst = src1(vvvv) with byte at imm8[3:0] replaced by src2 (r/m).
+    /// Decoder maps src2()=vvvv (base), src1()=rm (value), dst()=destination.
+    pub(super) fn vpinsrb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.src2()); // vvvv = base vector
+        let op2 = if instr.mod_c0() {
+            // BX_READ_8BIT_REGL — always low byte, never AH/CH/DH/BH
+            self.gen_reg[instr.src1() as usize].rl()
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_byte(seg, eaddr)?
+        };
+        op1.set_xmmubyte((instr.ib() & 0xF) as usize, op2);
+        self.write_xmm_reg(instr.dst(), op1); // VEX-128 clears bits [255:128]
+        Ok(())
+    }
+
+    /// VPINSRW — insert word from GPR/memory into a copy of the vvvv source.
+    /// VEX.128.66.0F.W0 C4 /r ib. Bochs avx.cc `VPINSRW_VdqHdqEwIbR/M`.
+    pub(super) fn vpinsrw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.src2()); // vvvv = base vector
+        let op2 = if instr.mod_c0() {
+            self.get_gpr16(instr.src1().into())
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_word(seg, eaddr)?
+        };
+        op1.set_xmm16u((instr.ib() & 7) as usize, op2);
+        self.write_xmm_reg(instr.dst(), op1); // VEX-128 clears bits [255:128]
+        Ok(())
+    }
+
+    /// VPINSRD — insert dword from GPR/memory into a copy of the vvvv source.
+    /// VEX.128.66.0F3A.W0 22 /r ib. Bochs avx.cc `VPINSRD_VdqHdqEdIbR/M`.
+    pub(super) fn vpinsrd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.src2()); // vvvv = base vector
+        let op2 = if instr.mod_c0() {
+            self.get_gpr32(instr.src1().into())
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_dword(seg, eaddr)?
+        };
+        op1.set_xmm32u((instr.ib() & 3) as usize, op2);
+        self.write_xmm_reg(instr.dst(), op1); // VEX-128 clears bits [255:128]
+        Ok(())
+    }
+
+    /// VPINSRQ — insert qword from GPR/memory into a copy of the vvvv source.
+    /// VEX.128.66.0F3A.W1 22 /r ib (64-bit mode only). Bochs `VPINSRQ_VdqHdqEqIbR/M`.
+    pub(super) fn vpinsrq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.src2()); // vvvv = base vector
+        let op2 = if instr.mod_c0() {
+            self.get_gpr64(instr.src1().into())
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(seg, eaddr)?
+        };
+        op1.set_xmm64u((instr.ib() & 1) as usize, op2);
+        self.write_xmm_reg(instr.dst(), op1); // VEX-128 clears bits [255:128]
+        Ok(())
+    }
+
     /// VMPSADBW — multiple SADs, per-128-bit lane (Bochs avx2.cc
     /// VMPSADBW_VdqHdqWdqIbR); the upper lane consumes imm8 bits [5:3].
     pub(super) fn vmpsadbw(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -1563,8 +1634,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// VEXTRACTI128 — Extract 128-bit integer value from 256-bit register
-    /// VEX.256.66.0F3A.W0 39 /r ib
+    /// VEXTRACTF128 / VEXTRACTI128 — Extract 128-bit lane from 256-bit register.
+    /// VEX.256.66.0F3A.W0 19 /r ib (F128) and 39 /r ib (I128).
+    /// The two forms are bit-identical lane moves; Bochs `avx.cc` routes both
+    /// `BX_IA_V256_VEXTRACTF128_WdqVdqIb` and `..VEXTRACTI128..` to the single
+    /// `VEXTRACTF128_WdqVdqIb` handler.
     /// If imm8[0]=0: dst = src[127:0]; if imm8[0]=1: dst = src[255:128]
     /// Our decoder: dst() = nnn (source YMM), src1() = rm (destination XMM)
     pub(super) fn vextracti128(&mut self, instr: &Instruction) -> super::Result<()> {

@@ -11,7 +11,6 @@ use crate::cpu::cpuid::BxCpuIdTrait;
 use crate::config::BxPhyAddress as A20Mask;
 use crate::config::{BxPhyAddress, MAX_MEM_BLOCKS};
 use crate::cpu::cpu::BxCpuC;
-use crate::cpu::icache::BxPageWriteStampTable;
 use crate::memory::memory_rusty_box::{
     bx_is_pci_hole_addr, bx_translate_gpa_to_linear, BIOSROMSZ, EXROMSIZE,
 };
@@ -33,40 +32,74 @@ fn is_power_of_2(x: usize) -> bool {
 
 const BX_MEM_VECTOR_ALIGN: usize = 4096;
 
+#[cfg(feature = "alloc")]
+struct OwnedAlignedBuffer {
+    ptr: core::ptr::NonNull<u8>,
+    len: usize,
+    layout: alloc::alloc::Layout,
+}
+
+#[cfg(feature = "alloc")]
+impl OwnedAlignedBuffer {
+    fn allocate(bytes: usize, alignment: usize) -> Result<Self> {
+        let layout = alloc::alloc::Layout::from_size_align(bytes, alignment)
+            .map_err(|_| MemoryError::UnableToAllocateGuestMemory(bytes))?;
+        let ptr = core::ptr::NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) })
+            .ok_or(MemoryError::UnableToAllocateGuestMemory(bytes))?;
+        Ok(Self {
+            ptr,
+            len: bytes,
+            layout,
+        })
+    }
+
+    fn into_raw_parts(self) -> (*mut u8, usize, alloc::alloc::Layout) {
+        let owned = core::mem::ManuallyDrop::new(self);
+        (owned.ptr.as_ptr(), owned.len, owned.layout)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl core::ops::Deref for OwnedAlignedBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl core::ops::DerefMut for OwnedAlignedBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Drop for OwnedAlignedBuffer {
+    fn drop(&mut self) {
+        unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) };
+    }
+}
+
 impl BxMemoryStubC {
     #[cfg(feature = "alloc")]
     pub fn alloc_vector_aligned(bytes: usize, alignment: usize) -> Result<(Vec<u8>, usize)> {
-        let test_mask: usize = alignment - 1;
-        let actual_vector_size = bytes + test_mask;
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let mut actual_vector = Vec::new();
-            actual_vector
-                .try_reserve_exact(actual_vector_size)
-                .map_err(|_| MemoryError::UnableToAllocateGuestMemory(actual_vector_size))?;
-            actual_vector.resize(actual_vector_size, 0);
-            let actual_vector_ptr = actual_vector.as_ptr() as usize;
-            let masked: usize = ((actual_vector_ptr + test_mask) & !test_mask) - actual_vector_ptr;
-            Ok((actual_vector, masked))
+        if !alignment.is_power_of_two() {
+            return Err(MemoryError::UnableToAllocateGuestMemory(bytes).into());
         }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            // Use alloc_zeroed with page alignment to avoid UEFI pool allocator
-            // limitations on large contiguous allocations.
-            let layout = alloc::alloc::Layout::from_size_align(actual_vector_size, alignment)
-                .map_err(|_| MemoryError::UnableToAllocateGuestMemory(actual_vector_size))?;
-            let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
-            if ptr.is_null() {
-                return Err(MemoryError::UnableToAllocateGuestMemory(actual_vector_size).into());
-            }
-            let actual_vector =
-                unsafe { Vec::from_raw_parts(ptr, actual_vector_size, actual_vector_size) };
-            let actual_vector_ptr = actual_vector.as_ptr() as usize;
-            let masked: usize = ((actual_vector_ptr + test_mask) & !test_mask) - actual_vector_ptr;
-            Ok((actual_vector, masked))
-        }
+        let test_mask = alignment - 1;
+        let actual_vector_size = bytes
+            .checked_add(test_mask)
+            .ok_or(MemoryError::UnableToAllocateGuestMemory(bytes))?;
+        let mut actual_vector = Vec::new();
+        actual_vector
+            .try_reserve_exact(actual_vector_size)
+            .map_err(|_| MemoryError::UnableToAllocateGuestMemory(actual_vector_size))?;
+        actual_vector.resize(actual_vector_size, 0);
+        let actual_vector_ptr = actual_vector.as_ptr() as usize;
+        let masked = ((actual_vector_ptr + test_mask) & !test_mask) - actual_vector_ptr;
+        Ok((actual_vector, masked))
     }
 
     pub fn get_memory_len(&self) -> usize {
@@ -89,8 +122,9 @@ impl BxMemoryStubC {
             return Err(MemoryError::BlockSizeIsNotAPowerOfTwo(block_size).into());
         }
 
-        let (mut actual_vector, vector_offset) =
-            Self::alloc_vector_aligned(host + BIOSROMSZ + EXROMSIZE + 4096, BX_MEM_VECTOR_ALIGN)?;
+        let mut actual_vector =
+            OwnedAlignedBuffer::allocate(host + BIOSROMSZ + EXROMSIZE + 4096, BX_MEM_VECTOR_ALIGN)?;
+        let vector_offset = 0;
         tracing::debug!(
             "allocated memory at {:p}. after alignment, vector={:p}, block_size = {}k",
             actual_vector.as_ptr(),
@@ -121,6 +155,21 @@ impl BxMemoryStubC {
         tracing::debug!("{}MB", len / (1024 * 1024));
         tracing::debug!("mem block size = {:8X}, blocks={}", block_size, num_blocks);
 
+        // Complete every fallible auxiliary allocation while `actual_vector`
+        // still owns its buffer. After the raw `Self` allocation below there
+        // are no error exits that could leak either allocation.
+        let mut smc_stamps = Vec::new();
+        smc_stamps
+            .try_reserve_exact(crate::cpu::icache::SMC_STAMP_ENTRIES)
+            .map_err(|_| {
+                MemoryError::UnableToAllocateGuestMemory(
+                    crate::cpu::icache::SMC_STAMP_ENTRIES * core::mem::size_of::<u32>(),
+                )
+            })?;
+        smc_stamps.resize(crate::cpu::icache::SMC_STAMP_ENTRIES, 0u32);
+        #[cfg(feature = "std")]
+        let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
+
         // Allocate BxMemoryStubC on the heap to avoid stack overflow.
         // blocks_offsets is 262KB — too large for UEFI's 128KB stack.
         let layout = alloc::alloc::Layout::new::<Self>();
@@ -129,13 +178,13 @@ impl BxMemoryStubC {
             return Err(MemoryError::UnableToAllocateGuestMemory(layout.size()).into());
         }
 
-        let actual_vector_ptr = actual_vector.as_mut_ptr();
-        let actual_vector_len = actual_vector.len();
-        core::mem::forget(actual_vector);
+        let (actual_vector_ptr, actual_vector_len, actual_vector_layout) =
+            actual_vector.into_raw_parts();
 
         unsafe {
             core::ptr::addr_of_mut!((*ptr).actual_vector).write(actual_vector_ptr);
             core::ptr::addr_of_mut!((*ptr).actual_vector_len).write(actual_vector_len);
+            core::ptr::addr_of_mut!((*ptr).actual_vector_layout).write(Some(actual_vector_layout));
             core::ptr::addr_of_mut!((*ptr).len).write(len);
             core::ptr::addr_of_mut!((*ptr).allocated).write(allocated);
             core::ptr::addr_of_mut!((*ptr).block_size).write(block_size);
@@ -149,10 +198,16 @@ impl BxMemoryStubC {
                 *b = Block::SwappedOut;
             }
             #[cfg(feature = "std")]
-            {
-                let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
-                core::ptr::addr_of_mut!((*ptr).overflow_file).write(UnsafeCell::new(overflow_file));
-            }
+            core::ptr::addr_of_mut!((*ptr).overflow_file).write(UnsafeCell::new(overflow_file));
+            // Machine-wide SMC write-stamp table (Bochs icache.h
+            // bxPageWriteStampTable ctor allocates + resetWriteStamps).
+            core::ptr::addr_of_mut!((*ptr).smc_stamps).write(smc_stamps);
+            core::ptr::addr_of_mut!((*ptr).smc_pending).write(
+                [crate::cpu::icache::PendingSmc::default(); crate::cpu::icache::SMC_PENDING_CAP],
+            );
+            core::ptr::addr_of_mut!((*ptr).smc_pending_len).write(0);
+            core::ptr::addr_of_mut!((*ptr).smc_seq_next).write(0);
+            core::ptr::addr_of_mut!((*ptr).smc_overflow_seq).write(0);
             Ok(alloc::boxed::Box::from_raw(ptr))
         }
     }
@@ -181,9 +236,26 @@ impl BxMemoryStubC {
 
         #[cfg(feature = "std")]
         let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
+        // Machine-wide SMC write-stamp table (Bochs icache.h
+        // bxPageWriteStampTable ctor allocates + resetWriteStamps).
+        #[cfg(feature = "alloc")]
+        let smc_stamps = {
+            let mut v = Vec::new();
+            v.try_reserve_exact(crate::cpu::icache::SMC_STAMP_ENTRIES)
+                .map_err(|_| {
+                    MemoryError::UnableToAllocateGuestMemory(
+                        crate::cpu::icache::SMC_STAMP_ENTRIES * core::mem::size_of::<u32>(),
+                    )
+                })?;
+            v.resize(crate::cpu::icache::SMC_STAMP_ENTRIES, 0u32);
+            v
+        };
+        #[cfg(not(feature = "alloc"))]
+        let smc_stamps = [0u32; crate::cpu::icache::SMC_STAMP_ENTRIES];
         Ok(Self {
             actual_vector: ptr,
             actual_vector_len: len,
+            actual_vector_layout: None,
             len: guest,
             allocated: host,
             block_size,
@@ -193,11 +265,129 @@ impl BxMemoryStubC {
             rom_offset,
             bogus_offset,
             used_blocks: Cell::new(0),
+            smc_stamps,
+            smc_pending: [crate::cpu::icache::PendingSmc::default();
+                crate::cpu::icache::SMC_PENDING_CAP],
+            smc_pending_len: 0,
+            smc_seq_next: 0,
+            smc_overflow_seq: 0,
             apic_scratch: [0u8; 4096],
             next_swapout_idx: Cell::new(0),
             #[cfg(feature = "std")]
             overflow_file: UnsafeCell::new(overflow_file),
         })
+    }
+
+    // ── Machine-wide SMC write-stamp table ─────────────────────────────────
+    // Bochs icache.h bxPageWriteStampTable: ONE shared instance per machine.
+    // Trace creation by any cpu marks lines here; any write hitting marked
+    // lines must invalidate EVERY cpu's icache (Bochs icache.cc handleSMC).
+
+    /// Bochs icache.h `bxPageWriteStampTable::markICacheMask`.
+    #[inline]
+    pub(crate) fn smc_mark_icache_mask(&mut self, p_addr: BxPhyAddress, mask: u32) {
+        self.smc_stamps[crate::cpu::icache::smc_page_index(p_addr)] |= mask;
+    }
+
+    /// Return whether any cached instruction line overlaps this single-page
+    /// physical range. Bulk writers use this non-mutating probe to fall back
+    /// to scalar ordering before consuming externally visible input.
+    #[inline]
+    pub(crate) fn smc_range_has_stamps(&self, p_addr: BxPhyAddress, len: u32) -> bool {
+        let stamps = self.smc_stamps[crate::cpu::icache::smc_page_index(p_addr)];
+        stamps != 0 && stamps & crate::cpu::icache::smc_cache_line_mask(p_addr, len) != 0
+    }
+
+    /// Bochs icache.h `bxPageWriteStampTable::decWriteStamp(pAddr, len)`:
+    /// check a write against the stamp table; on a hit, clear the lines and
+    /// queue the invalidation for every cpu (Bochs calls `handleSMC`
+    /// synchronously; the emulator drains the queue at slice boundaries, and
+    /// cpu-context writers apply it to themselves immediately via their
+    /// `smc_seq_seen` watermark).
+    #[inline]
+    pub(crate) fn smc_dec_write_stamp(&mut self, p_addr: BxPhyAddress, len: u32) {
+        let index = crate::cpu::icache::smc_page_index(p_addr);
+        let stamps = self.smc_stamps[index];
+        if stamps == 0 {
+            return;
+        }
+        let mask = crate::cpu::icache::smc_cache_line_mask(p_addr, len);
+        if stamps & mask == 0 {
+            return;
+        }
+        self.smc_stamps[index] = stamps & !mask;
+        self.smc_push_pending(p_addr, mask);
+    }
+
+    /// Bochs icache.h `bxPageWriteStampTable::decWriteStamp(pAddr)` — the
+    /// whole-page variant used by handler-path and DMA writes (`handleSMC`
+    /// with mask 0xffffffff).
+    #[inline]
+    pub(crate) fn smc_dec_write_stamp_page(&mut self, p_addr: BxPhyAddress) {
+        let index = crate::cpu::icache::smc_page_index(p_addr);
+        if self.smc_stamps[index] == 0 {
+            return;
+        }
+        self.smc_stamps[index] = 0;
+        self.smc_push_pending(p_addr, u32::MAX);
+    }
+
+    fn smc_push_pending(&mut self, p_addr: BxPhyAddress, mask: u32) {
+        if self.smc_pending_len < crate::cpu::icache::SMC_PENDING_CAP {
+            self.smc_pending[self.smc_pending_len] =
+                crate::cpu::icache::PendingSmc { p_addr, mask };
+            self.smc_pending_len += 1;
+        } else {
+            // Queue full: every cpu that has not caught up past this event
+            // must do a full icache flush instead (conservative, correct).
+            self.smc_overflow_seq = self.smc_seq_next + 1;
+        }
+        self.smc_seq_next += 1;
+    }
+
+    /// Sequence number the next SMC event will get. A cpu whose
+    /// `smc_seq_seen` watermark is below this has invalidations to apply.
+    #[inline]
+    pub(crate) fn smc_seq_next(&self) -> u64 {
+        self.smc_seq_next
+    }
+
+    /// Events a watermark of `since` has not seen yet.
+    /// Returns `(needs_full_flush, new_events)`.
+    #[inline]
+    pub(crate) fn smc_pending_since(
+        &self,
+        since: u64,
+    ) -> (bool, &[crate::cpu::icache::PendingSmc]) {
+        let needs_full_flush = since < self.smc_overflow_seq;
+        let base = self.smc_seq_next - self.smc_pending_len as u64;
+        let start = since.saturating_sub(base) as usize;
+        (
+            needs_full_flush,
+            &self.smc_pending[start.min(self.smc_pending_len)..self.smc_pending_len],
+        )
+    }
+
+    /// Drop drained events. Called by the emulator once every cpu's
+    /// watermark has caught up (sequence numbers stay monotonic).
+    #[inline]
+    pub(crate) fn smc_clear_pending(&mut self) {
+        self.smc_pending_len = 0;
+    }
+
+    /// True when SMC events are queued. An empty queue means every cpu is
+    /// caught up (the drain only clears it after catching every cpu up), so
+    /// the per-slice drain can early-out on a single load.
+    #[inline]
+    pub(crate) fn smc_has_pending(&self) -> bool {
+        self.smc_pending_len != 0
+    }
+
+    /// Bochs icache.h `bxPageWriteStampTable::resetWriteStamps` — hardware
+    /// reset only (every cpu's icache is flushed there too).
+    pub(crate) fn smc_reset_stamps(&mut self) {
+        self.smc_stamps.fill(0);
+        self.smc_pending_len = 0;
     }
 
     pub(super) fn get_vector<
@@ -460,7 +650,6 @@ impl BxMemoryStubC {
     >(
         &mut self,
         cpus: &[&BxCpuC<I, T>],
-        page_write_stamp_table: &mut BxPageWriteStampTable,
         addr: BxPhyAddress,
         mut len: usize,
         data: &mut [u8],
@@ -482,28 +671,28 @@ impl BxMemoryStubC {
         if bx_translate_gpa_to_linear(a20_addr) < self.len.try_into()? {
             // all of data is within limits of physical memory
             if len == 8 {
-                page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
+                self.smc_dec_write_stamp(a20_addr, 8);
                 write_host_qword_to_little_endian(
                     self.get_vector(a20_addr, cpus)?,
                     LittleEndian::read_u64(data),
                 );
                 return Ok(());
             } else if len == 4 {
-                page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
+                self.smc_dec_write_stamp(a20_addr, 8);
                 write_host_dword_to_little_endian(
                     self.get_vector(a20_addr, cpus)?,
                     LittleEndian::read_u32(data),
                 );
                 return Ok(());
             } else if len == 2 {
-                page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
+                self.smc_dec_write_stamp(a20_addr, 8);
                 write_host_word_to_little_endian(
                     self.get_vector(a20_addr, cpus)?,
                     LittleEndian::read_u16(data),
                 );
                 return Ok(());
             } else if len == 1 {
-                page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
+                self.smc_dec_write_stamp(a20_addr, 8);
                 self.get_vector(a20_addr, cpus)?[0] = data[0];
                 return Ok(());
             }
@@ -517,7 +706,7 @@ impl BxMemoryStubC {
 
             loop {
                 if (len & 7) == 0 {
-                    page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
+                    self.smc_dec_write_stamp(a20_addr, 8);
                     write_host_qword_to_little_endian(
                         self.get_vector(a20_addr, cpus)?,
                         LittleEndian::read_u64(&data[data_ptr_offset..]),
@@ -536,7 +725,7 @@ impl BxMemoryStubC {
                     }
                 } else {
                     // Single byte write — Bochs misc_mem.cc: *data_ptr++
-                    page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 1);
+                    self.smc_dec_write_stamp(a20_addr, 1);
                     self.get_vector(a20_addr, cpus)?[0] = data[data_ptr_offset];
 
                     if len == 1 {
@@ -548,7 +737,7 @@ impl BxMemoryStubC {
                     data_ptr_offset += 1;
                 }
 
-                page_write_stamp_table.dec_write_stamp(a20_addr);
+                self.smc_dec_write_stamp_page(a20_addr);
             }
         }
         Ok(())

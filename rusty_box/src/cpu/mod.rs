@@ -139,7 +139,7 @@ pub(super) mod vmx;
 pub(super) mod xmm;
 
 pub use cpu::BxCpuC;
-pub use cpuid::BxCpuIdTrait;
+pub use cpuid::{BxCpuIdTrait, CpuidFreq};
 
 pub use cpudb::amd::amd_ryzen::AmdRyzen;
 pub use cpudb::intel::*;

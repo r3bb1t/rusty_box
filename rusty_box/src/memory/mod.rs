@@ -40,6 +40,8 @@ pub struct BxMemoryStubC {
     block_size: usize,
     actual_vector: *mut u8,
     actual_vector_len: usize,
+    /// Allocation layout for owned buffers; `None` for external raw memory.
+    actual_vector_layout: Option<core::alloc::Layout>,
     /// aligned correctly
     vector_offset: usize,
     /// None if swapped out
@@ -51,6 +53,29 @@ pub struct BxMemoryStubC {
     bogus_offset: usize,
 
     used_blocks: Cell<usize>,
+
+    /// Machine-wide SMC page-write-stamp table — Bochs icache.h
+    /// `bxPageWriteStampTable::fineGranularityMapping`. ONE table for the
+    /// whole machine (Bochs has a single global instance): trace creation by
+    /// ANY cpu marks it, and a write hitting marked lines must invalidate
+    /// EVERY cpu's icache (Bochs icache.cc `handleSMC` loops over
+    /// BX_SMP_PROCESSORS).
+    #[cfg(feature = "alloc")]
+    smc_stamps: Vec<u32>,
+    #[cfg(not(feature = "alloc"))]
+    smc_stamps: [u32; crate::cpu::icache::SMC_STAMP_ENTRIES],
+    /// Queued cross-cpu SMC invalidations, drained by the emulator at
+    /// round-robin slice boundaries (no sibling cpu can execute before the
+    /// drain, so deferral is observably identical to Bochs's synchronous
+    /// `handleSMC` loop). `smc_seq_next` is a monotonic event counter; each
+    /// cpu keeps a watermark (`BxCpuC::smc_seq_seen`) so it applies exactly
+    /// the events it has not seen.
+    smc_pending: [crate::cpu::icache::PendingSmc; crate::cpu::icache::SMC_PENDING_CAP],
+    smc_pending_len: usize,
+    smc_seq_next: u64,
+    /// CPUs whose watermark is below this must flush their whole icache
+    /// (an event was dropped on pending-queue overflow).
+    smc_overflow_seq: u64,
 
     /// Zero-initialized 4KB scratch buffer for APIC MMIO (0xFEE00000-0xFEEFFFFF)
     apic_scratch: [u8; 4096],
@@ -65,6 +90,15 @@ pub struct BxMemoryStubC {
 // SAFETY: The raw pointer `actual_vector` is owned exclusively by this struct
 // (allocated once, never aliased). UnsafeCell fields are only accessed single-threaded.
 unsafe impl Send for BxMemoryStubC {}
+
+impl Drop for BxMemoryStubC {
+    fn drop(&mut self) {
+        #[cfg(feature = "alloc")]
+        if let Some(layout) = self.actual_vector_layout.take() {
+            unsafe { alloc::alloc::dealloc(self.actual_vector, layout) };
+        }
+    }
+}
 
 type Unsigned = u32;
 
@@ -141,9 +175,9 @@ pub(super) struct MemoryHandlerStruct {
 
 //#define BIOS_MAP_LAST128K(addr) (((addr) | 0xfff00000) & BIOS_MASK)
 
-static BIOS_ROM_LOWER: u8 = 0x01;
-static BIOS_ROM_EXTENDED: u8 = 0x02;
-static BIOS_ROM_1MEG: u8 = 0x04;
+pub(crate) const BIOS_ROM_LOWER: u8 = 0x01;
+pub(crate) const BIOS_ROM_EXTENDED: u8 = 0x02;
+pub(crate) const BIOS_ROM_1MEG: u8 = 0x04;
 
 #[derive(Debug)]
 pub struct BxMemC<'a> {
@@ -211,12 +245,36 @@ impl BxMemC<'_> {
     /// bypasses the handler layer and writes RAM pages directly.
     /// Writes up to `data.len()` bytes at `addr`, truncated at end of RAM.
     pub fn poke_ram(&mut self, addr: usize, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+
         let stub = &mut self.inherited_memory_stub;
-        let real_addr = stub.vector_offset + addr;
+        let Some(real_addr) = stub.vector_offset.checked_add(addr) else {
+            return;
+        };
         let ram = stub.actual_vector_mut();
-        if real_addr < ram.len() {
-            let end = (real_addr + data.len()).min(ram.len());
-            ram[real_addr..end].copy_from_slice(&data[..end - real_addr]);
+        if real_addr >= ram.len() {
+            return;
+        }
+
+        let copied_len = data.len().min(ram.len() - real_addr);
+        let end = real_addr + copied_len;
+        ram[real_addr..end].copy_from_slice(&data[..copied_len]);
+
+        // Bochs memory.cc dmaWritePhysicalPage:
+        // pageWriteStampTable.decWriteStamp(a20addr) — device writes must
+        // invalidate cached traces on every touched page. Bochs callers
+        // chunk per page; poke_ram accepts multi-page spans, so walk only
+        // the pages that actually received bytes.
+        let mut page = (addr as BxPhyAddress) & !0xFFF;
+        let last_page = ((addr + copied_len - 1) as BxPhyAddress) & !0xFFF;
+        loop {
+            stub.smc_dec_write_stamp_page(page);
+            if page >= last_page {
+                break;
+            }
+            page += 0x1000;
         }
     }
 
@@ -228,6 +286,59 @@ impl BxMemC<'_> {
     /// Get mutable access to the underlying memory stub for snapshot save/restore.
     pub fn get_stub_mut(&mut self) -> &mut BxMemoryStubC {
         &mut self.inherited_memory_stub
+    }
+
+    // ── SMC write-stamp table forwarders (table lives in the stub) ─────────
+
+    /// Bochs icache.h `bxPageWriteStampTable::markICacheMask`.
+    #[inline]
+    pub(crate) fn smc_mark_icache_mask(&mut self, p_addr: BxPhyAddress, mask: u32) {
+        self.inherited_memory_stub
+            .smc_mark_icache_mask(p_addr, mask);
+    }
+
+    /// Whether a single-page physical range overlaps cached instruction lines.
+    #[inline]
+    pub(crate) fn smc_range_has_stamps(&self, p_addr: BxPhyAddress, len: u32) -> bool {
+        self.inherited_memory_stub.smc_range_has_stamps(p_addr, len)
+    }
+
+    /// Bochs icache.h `bxPageWriteStampTable::decWriteStamp(pAddr, len)`.
+    #[inline]
+    pub(crate) fn smc_dec_write_stamp(&mut self, p_addr: BxPhyAddress, len: u32) {
+        self.inherited_memory_stub.smc_dec_write_stamp(p_addr, len);
+    }
+
+    /// Sequence number the next SMC event will get (cpu watermark compare).
+    #[inline]
+    pub(crate) fn smc_seq_next(&self) -> u64 {
+        self.inherited_memory_stub.smc_seq_next()
+    }
+
+    /// Events a watermark of `since` has not seen: `(needs_full_flush, events)`.
+    #[inline]
+    pub(crate) fn smc_pending_since(
+        &self,
+        since: u64,
+    ) -> (bool, &[crate::cpu::icache::PendingSmc]) {
+        self.inherited_memory_stub.smc_pending_since(since)
+    }
+
+    /// Drop drained SMC events (emulator, after every cpu caught up).
+    #[inline]
+    pub(crate) fn smc_clear_pending(&mut self) {
+        self.inherited_memory_stub.smc_clear_pending();
+    }
+
+    /// True when SMC events are queued (per-slice drain early-out).
+    #[inline]
+    pub(crate) fn smc_has_pending(&self) -> bool {
+        self.inherited_memory_stub.smc_has_pending()
+    }
+
+    /// Bochs icache.h `bxPageWriteStampTable::resetWriteStamps` (hardware reset).
+    pub(crate) fn smc_reset_stamps(&mut self) {
+        self.inherited_memory_stub.smc_reset_stamps();
     }
 
     /// Enable SMRAM (System Management RAM) with the given DOPEN/DCLS state.
@@ -256,7 +367,54 @@ impl BxMemC<'_> {
     /// made directly against these flags in misc_mem.rs
     /// (get_host_mem_addr/read_physical_page/write_physical_page), untouched here.
     pub(crate) fn smram_state(&self) -> (bool, bool, bool) {
-        (self.smram_available, self.smram_enable, self.smram_restricted)
+        (
+            self.smram_available,
+            self.smram_enable,
+            self.smram_restricted,
+        )
+    }
+
+    /// Test/diagnostic accessor for the PAM-derived memory type of a shadow
+    /// RAM area. Mirrors `set_memory_type`: `area` is one of the 13 memory
+    /// areas (C0000..F0000), `rw` is 0 = read path, 1 = write path.
+    pub(crate) fn memory_type(&self, area: usize, rw: usize) -> bool {
+        self.memory_type[area][rw]
+    }
+
+    /// Set whether writes to the BIOS ROM region are allowed outside PAM
+    /// shadow RAM (both the C0000-FFFFF non-shadowed path and the
+    /// top-of-address-space BIOS mirror). Driven by the PIIX3 XBCS register
+    /// bit 2 (Bochs pci2isa.cc `pci_write_handler` case 0x4e ->
+    /// `DEV_mem_set_bios_write`); Bochs `BX_MEM_C::set_bios_write`
+    /// (misc_mem.cc).
+    pub fn set_bios_write_enabled(&mut self, enabled: bool) {
+        self.bios_write_enabled = enabled;
+    }
+
+    /// Test/diagnostic accessor for the current BIOS-write-enable state.
+    pub(crate) fn bios_write_enabled(&self) -> bool {
+        self.bios_write_enabled
+    }
+
+    /// Set or clear one region bit of the BIOS ROM access bitmask (`region`
+    /// is one of `BIOS_ROM_LOWER`/`BIOS_ROM_EXTENDED`/`BIOS_ROM_1MEG`).
+    /// Matches Bochs `BX_MEM_C::set_bios_rom_access` (misc_mem.cc), driven by
+    /// PIIX3 XBCS bits 6-7 (pci2isa.cc case 0x4e ->
+    /// `DEV_mem_set_bios_rom_access`). As in upstream Bochs, this bitmask is
+    /// tracked for parity but not consulted by any read/write path — Bochs
+    /// itself logs "BIOS enable switches not supported" when these bits
+    /// change and never reads `bios_rom_access` back anywhere.
+    pub fn set_bios_rom_access(&mut self, region: u8, enabled: bool) {
+        if enabled {
+            self.bios_rom_access |= region;
+        } else {
+            self.bios_rom_access &= !region;
+        }
+    }
+
+    /// Test/diagnostic accessor for the BIOS ROM access bitmask.
+    pub(crate) fn bios_rom_access(&self) -> u8 {
+        self.bios_rom_access
     }
 }
 

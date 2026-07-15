@@ -126,7 +126,7 @@ impl WasmEmulatorApp {
             emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
             emu.configure_boot_sequence(2, 0, 0); // Boot from disk
 
-            emu.attach_disk_data(0, 0, DISK_DATA.to_vec(), DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
+            emu.attach_disk_data(0, 0, DISK_DATA.to_vec(), DLX_CYLINDERS.into(), DLX_HEADS, DLX_SPT);
 
             emu.init_gui(0, &[])?;
             emu.reset(ResetReason::Hardware)?;

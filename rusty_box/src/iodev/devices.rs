@@ -24,12 +24,14 @@ use super::dma::BxDmaC;
 use super::fw_cfg::BxFwCfg;
 use super::harddrv::BxHardDriveC;
 use super::ioapic::BxIoApic;
-use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT, SYSTEM_CONTROL_B};
+use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT};
 use super::pci::BxPciBridge;
 use super::pci2isa::BxPiix3;
 use super::pci_ide::BxPciIde;
 use super::pic::{BxPicC, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA};
-use super::pit::{BxPitC, PIT_CONTROL, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2};
+use super::pit::{
+    BxPitC, PIT_CONTROL, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_SYSTEM_CONTROL_B,
+};
 use super::serial::BxSerialC;
 use super::vga::BxVgaC;
 use super::BxDevicesC;
@@ -151,10 +153,15 @@ pub struct DeviceManager {
     /// routing re-applied to memory (Bochs pci.cc smram_control's
     /// mem->enable_smram()/disable_smram() calls).
     pub smram_needs_update: bool,
+    /// Deferred: the PIIX3 XBCS register (0x4E) changed a bit affecting
+    /// BIOS-ROM write-enable state, needs re-applied to memory (Bochs
+    /// pci2isa.cc pci_write_handler case 0x4e's
+    /// DEV_mem_set_bios_write()/DEV_mem_set_bios_rom_access() calls).
+    pub bios_write_needs_update: bool,
     /// Deferred: a VGA PCI BAR (LFB or MMIO) changed, needs memory-handler
     /// (re)registration at the new base.
     pub(crate) vga_bar_needs_reregister: bool,
-    /// Diagnostic: PIT fire count (check_irq0 returned true)
+    /// Diagnostic: PIT IRQ0 rising edges applied to the PIC
     pub diag_pit_fires: u64,
     /// Diagnostic: raise_irq(0) latched (irq_in was 0)
     pub diag_irq0_latched: u64,
@@ -225,6 +232,7 @@ impl DeviceManager {
             acpi_sm_needs_reregister: false,
             pam_needs_update: false,
             smram_needs_update: false,
+            bios_write_needs_update: false,
             vga_bar_needs_reregister: false,
             diag_pit_fires: 0,
             diag_irq0_latched: 0,
@@ -305,6 +313,8 @@ impl DeviceManager {
         tracing::debug!("Device manager reset: {:?}", reset_type);
 
         self.pic.reset();
+        // Deliberate no-op: Bochs pit82c54.cc reset(type) is empty — the
+        // PIT counters keep their programming across a guest reset.
         self.pit.reset();
         self.cmos.reset();
         self.dma.reset();
@@ -328,6 +338,14 @@ impl DeviceManager {
             // (SMRAME off) and the emulator calls mem.disable_smram()
             // directly on hardware reset, so no deferred re-apply is needed.
             self.smram_needs_update = false;
+            // Bochs pci.cc bx_pci_bridge_c::reset() re-applies memory type
+            // for every PAM area directly (DEV_mem_set_memory_type loop)
+            // right after zeroing the PAM config bytes, so the shadow-RAM
+            // state matches the reset PAM config immediately. rusty_box
+            // can't touch memory here (BxMemC isn't available to
+            // DeviceManager::reset), so defer it the same way pci_write's
+            // PAM branch does; drained by the next process_pci_deferred.
+            self.pam_needs_update = true;
         }
 
         Ok(())
@@ -350,7 +368,15 @@ impl DeviceManager {
 
     /// Register PIT I/O handlers
     fn register_pit_handlers(&mut self, io: &mut BxDevicesC) {
-        for port in [PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_CONTROL] {
+        // Bochs pit.cc bx_pit_c::init registers 0x40-0x43 AND 0x61 (System
+        // Control Port B) for the PIT.
+        for port in [
+            PIT_COUNTER0,
+            PIT_COUNTER1,
+            PIT_COUNTER2,
+            PIT_CONTROL,
+            PIT_SYSTEM_CONTROL_B,
+        ] {
             io.register_io_handler(DeviceId::Pit, port, "8254 PIT", 0x1);
         }
     }
@@ -401,12 +427,8 @@ impl DeviceManager {
             "Keyboard Status/Command",
             0x1,
         );
-        io.register_io_handler(
-            DeviceId::Keyboard,
-            SYSTEM_CONTROL_B,
-            "System Control B",
-            0x1,
-        );
+        // Port 0x61 (System Control B) belongs to the PIT — Bochs pit.cc
+        // bx_pit_c::init registers it; see register_pit_handlers.
     }
 
     /// Register Hard Drive I/O handlers
@@ -638,6 +660,10 @@ impl DeviceManager {
             self.smram_needs_update = false;
             self.pci_bridge.apply_smram_to_memory(mem);
         }
+        if self.bios_write_needs_update {
+            self.bios_write_needs_update = false;
+            self.pci2isa.apply_bios_write_to_memory(mem);
+        }
         if self.vga_bar_needs_reregister {
             self.vga_bar_needs_reregister = false;
             self.reregister_vga_bars(mem);
@@ -715,9 +741,7 @@ impl DeviceManager {
         } = *self;
 
         // Bochs pci_ide.cc timer: engine stopped or no PRD — nothing to do.
-        if (pci_ide.bmdma[channel].status & 0x01) == 0
-            || pci_ide.bmdma[channel].prd_current == 0
-        {
+        if (pci_ide.bmdma[channel].status & 0x01) == 0 || pci_ide.bmdma[channel].prd_current == 0 {
             return;
         }
         let timer_index = match pci_ide.bmdma[channel].timer_index {
@@ -747,8 +771,7 @@ impl DeviceManager {
         if pci_ide.bmdma[channel].cmd_rwcon {
             // READ DMA: drive -> bounce buffer -> guest RAM (pci_ide.cc timer)
             tracing::trace!("BM-DMA read ch={channel} addr={prd_addr:#010x} size={size:#x}");
-            let buffered =
-                pci_ide.bmdma[channel].buffer_top - pci_ide.bmdma[channel].buffer_idx;
+            let buffered = pci_ide.bmdma[channel].buffer_top - pci_ide.bmdma[channel].buffer_idx;
             let mut count = size as i64 - buffered as i64;
             while count > 0 {
                 let mut sector_size = count as u32;
@@ -777,10 +800,7 @@ impl DeviceManager {
             }
             let idx = pci_ide.bmdma[channel].buffer_idx;
             let end = (idx + size).min(pci_ide.bmdma[channel].buffer.len());
-            mem.poke_ram(
-                prd_addr as usize,
-                &pci_ide.bmdma[channel].buffer[idx..end],
-            );
+            mem.poke_ram(prd_addr as usize, &pci_ide.bmdma[channel].buffer[idx..end]);
             pci_ide.bmdma[channel].buffer_idx = end;
         } else {
             // WRITE DMA: guest RAM -> bounce buffer -> drive (pci_ide.cc timer)
@@ -796,14 +816,13 @@ impl DeviceManager {
             pci_ide.bmdma[channel].buffer[top + copied..end].fill(0);
             pci_ide.bmdma[channel].buffer_top = end;
 
-            let mut count = (pci_ide.bmdma[channel].buffer_top
-                - pci_ide.bmdma[channel].buffer_idx) as i64;
+            let mut count =
+                (pci_ide.bmdma[channel].buffer_top - pci_ide.bmdma[channel].buffer_idx) as i64;
             while count > 511 {
                 let idx = pci_ide.bmdma[channel].buffer_idx;
                 bmdma_scratch[..512]
                     .copy_from_slice(&pci_ide.bmdma[channel].buffer[idx..idx + 512]);
-                if harddrv.bmdma_write_sector(channel as u8, &bmdma_scratch[..512], pic, pci_ide)
-                {
+                if harddrv.bmdma_write_sector(channel as u8, &bmdma_scratch[..512], pic, pci_ide) {
                     pci_ide.bmdma[channel].buffer_idx += 512;
                     count -= 512;
                 } else {
@@ -835,16 +854,79 @@ impl DeviceManager {
             pci_ide.bmdma[channel].buffer_top = residue;
             pci_ide.bmdma[channel].buffer_idx = 0;
             pci_ide.bmdma[channel].prd_current += 8;
-            let (_, next_size_raw) =
-                read_bmdma_prd(mem, pci_ide.bmdma[channel].prd_current);
+            let (_, next_size_raw) = read_bmdma_prd(mem, pci_ide.bmdma[channel].prd_current);
             let mut next_size = next_size_raw & 0xfffe;
             if next_size == 0 {
                 next_size = 0x10000;
             }
-            if let Err(error) =
-                pcs.activate_timer_usec(timer_index, (next_size >> 4) | 0x10, false)
+            if let Err(error) = pcs.activate_timer_usec(timer_index, (next_size >> 4) | 0x10, false)
             {
                 tracing::error!("BM-DMA ch={channel}: next-PRD re-arm failed: {error:?}");
+            }
+        }
+    }
+
+    /// Replay pending PIT counter-0 OUT transitions into the PIC as IRQ0
+    /// raise/lower calls — Bochs pit.cc bx_pit_c::irq_handler (raise_irq(0)
+    /// on OUT 0→1, lower_irq(0) on 1→0), which Bochs invokes synchronously
+    /// from pit82c54.cc set_OUT on every transition (clocking, count
+    /// writes, control-word writes, GATE changes alike).
+    ///
+    /// rusty_box records the transitions on the counter and replays them
+    /// here, at the same points Bochs runs periodic()/timer.write(): after
+    /// every PIT port access and every device tick. The CPU never executes
+    /// between the recorded transitions, so replaying them back-to-back is
+    /// observably identical to Bochs's immediate callbacks.
+    ///
+    /// Transitions strictly alternate (set_OUT fires only on an actual
+    /// change), so the sequence is fully determined by (count, final
+    /// level). Replay is capped at the last three transitions: with no CPU
+    /// execution in between, each additional leading lower/raise pair is
+    /// idempotent for the PIC IRR/irq_in state and for the IOAPIC forward
+    /// consumers (repeated edge deliveries re-set the same LAPIC IRR bit).
+    ///
+    /// Returns the number of IRQ0 rising edges in the full (uncapped)
+    /// sequence, for diagnostics.
+    pub(crate) fn service_pit_irq0(pit: &mut BxPitC, pic: &mut BxPicC) -> u32 {
+        let (transitions, level) = pit.drain_irq0_events();
+        if transitions == 0 {
+            return 0;
+        }
+        let replay = transitions.min(3);
+        // The k-th replayed level, ending at `level`, alternating backwards.
+        let mut lvl = if replay % 2 == 1 { level } else { !level };
+        for _ in 0..replay {
+            // raise_irq/lower_irq queue the IOAPIC forward internally
+            // (enqueue_ioapic_forward); every service_pit_irq0 call site
+            // (inp/outp dispatch and DeviceManager::tick) drains
+            // take_ioapic_forwards() afterwards, so the Option return —
+            // the same event for callers that forward synchronously — is
+            // already handled through that queue.
+            if lvl {
+                pic.raise_irq(0);
+            } else {
+                pic.lower_irq(0);
+            }
+            lvl = !lvl;
+        }
+        // Rising edges in an alternating sequence of `transitions` levels
+        // ending at `level`.
+        if level {
+            transitions.div_ceil(2)
+        } else {
+            transitions / 2
+        }
+    }
+
+    /// Drain PIT IRQ0 transitions into the PIC and update diagnostics.
+    pub(crate) fn drain_pit_irq0(&mut self) {
+        let was_high = self.pic.master.irq_in[0] != 0;
+        let rising = Self::service_pit_irq0(&mut self.pit, &mut self.pic);
+        if rising > 0 {
+            self.diag_pit_fires += rising as u64;
+            self.diag_irq0_latched += 1;
+            if was_high {
+                self.diag_irq0_already_high += 1;
             }
         }
     }
@@ -861,24 +943,10 @@ impl DeviceManager {
         self.diag_total_usec += usec;
 
         // Tick PIT/RTC first to generate periodic interrupts (Bochs-like behavior).
-        // PIT drives IRQ0, CMOS/RTC drives IRQ8 when enabled.
-        let _pit_fired = self.pit.tick(usec, icount);
-        if self.pit.check_irq0() {
-            self.diag_pit_fires += 1;
-            // Track whether raise_irq will actually latch
-            let was_high = self.pic.master.irq_in[0] != 0;
-            if was_high {
-                self.diag_irq0_already_high += 1;
-            }
-            // PIT pulses the IRQ line: lower first to reset edge-detect state,
-            // then raise.  Without this, raise_irq(0) is a no-op when irq_in[0]
-            // is still high from a previous fire that the CPU hasn't yet
-            // acknowledged via INTA (common when our coarse batching delays
-            // interrupt delivery).
-            self.pic.lower_irq(0);
-            self.pic.raise_irq(0);
-            self.diag_irq0_latched += 1;
-        }
+        // PIT drives IRQ0 through counter 0's OUT pin (Bochs pit.cc
+        // irq_handler); CMOS/RTC drives IRQ8 when enabled.
+        self.pit.tick(usec, icount);
+        self.drain_pit_irq0();
 
         // CMOS: process IRQ8 lower BEFORE raise (from REG_STAT_C read)
         if self.cmos.check_irq8_lower() {
@@ -1099,7 +1167,10 @@ impl DeviceManager {
                         if let Some((addr, val, len)) =
                             pci_write_common_gate(reg_addr, value, io_len)
                         {
-                            self.pci2isa.pci_write(addr, val, len);
+                            let effects = self.pci2isa.pci_write(addr, val, len);
+                            if effects.bios_write_changed {
+                                self.bios_write_needs_update = true;
+                            }
                         }
                     }
                     0x09 => {
@@ -1344,6 +1415,69 @@ mod tests {
         assert_eq!(port.reset_request, Some(ResetReason::Software));
     }
 
+    #[test]
+    fn pit_irq0_mirrors_counter0_out_level() {
+        // Finding #32d: IRQ0 must mirror counter 0's OUT LEVEL (Bochs
+        // pit.cc irq_handler: raise on 0→1, lower on 1→0) — not a
+        // synthesized lower+raise pulse.
+        let mut pit = BxPitC::new();
+        let mut pic = BxPicC::new();
+
+        // Program counter 0: mode 2 (rate generator), count 10.
+        pit.write(PIT_CONTROL, 0x34, 1, 0);
+        pit.write(PIT_COUNTER0, 10, 1, 0);
+        pit.write(PIT_COUNTER0, 0, 1, 0);
+        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 0);
+
+        // Ticks 1..=10 (pit82c54.cc clock_all domain): OUT pulses LOW.
+        pit.clock_pit_ticks(10);
+        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 0);
+        assert_eq!(pic.master.irq_in[0], 0);
+
+        // Tick 11: reload → OUT HIGH → IRQ0 raised and latched.
+        pit.clock_pit_ticks(1);
+        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 1);
+        assert_eq!(pic.master.irq_in[0], 1);
+        assert_ne!(pic.master.irr & 0x01, 0);
+
+        // A full period in one batch: lower then raise (in order), ending
+        // with the line high and a fresh edge latched.
+        pit.clock_pit_ticks(10);
+        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 1);
+        assert_eq!(pic.master.irq_in[0], 1);
+        assert_ne!(pic.master.irr & 0x01, 0);
+    }
+
+    #[test]
+    fn pit_control_word_write_drives_irq0_edge() {
+        // Finding #32d: OUT transitions caused by CONTROL-WORD writes must
+        // reach the PIC (Bochs pit82c54.cc write_ctrl's set_OUT invokes the
+        // out_handler on any transition).
+        let mut pit = BxPitC::new();
+        let mut pic = BxPicC::new();
+
+        // Mode 0 control word forces OUT low (power-on OUT is high).
+        pit.write(PIT_CONTROL, 0x30, 1, 0);
+        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 0);
+        assert_eq!(pic.master.irq_in[0], 0);
+
+        // Count 5: terminal count at tick 6 → OUT high → IRQ0 raised.
+        pit.write(PIT_COUNTER0, 5, 1, 0);
+        pit.write(PIT_COUNTER0, 0, 1, 0);
+        pit.clock_pit_ticks(6);
+        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 1);
+        assert_eq!(pic.master.irq_in[0], 1);
+        assert_ne!(pic.master.irr & 0x01, 0);
+
+        // A new mode 0 control word forces OUT high→low: the PIC must see
+        // the lower (line drops, IRR bit cleared) purely from the
+        // control-word write.
+        pit.write(PIT_CONTROL, 0x30, 1, 0);
+        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 0);
+        assert_eq!(pic.master.irq_in[0], 0);
+        assert_eq!(pic.master.irr & 0x01, 0);
+    }
+
     // DeviceManager is large (VGA text buffers etc.); build it on a big stack,
     // like the cet.rs tests, to avoid overflowing the small default test stack.
     fn on_big_stack(f: impl FnOnce() + Send + 'static) {
@@ -1410,9 +1544,8 @@ mod tests {
             dm.pci_ide.bmdma[0].timer_index = Some(handle);
 
             // In-memory disk: 2 sectors with a recognizable pattern.
-            let disk: &'static [u8] = alloc::vec::Vec::leak(
-                (0..1024u32).map(|i| (i % 251) as u8).collect(),
-            );
+            let disk: &'static [u8] =
+                alloc::vec::Vec::leak((0..1024u32).map(|i| (i % 251) as u8).collect());
             {
                 let drive = &mut dm.harddrv.channels[0].drives[0];
                 drive.device_type = DeviceType::Disk;
@@ -1851,6 +1984,64 @@ mod tests {
             assert!(dm.smram_needs_update);
             dm.process_pci_deferred(&mut io, &mut mem);
             assert_eq!(mem.smram_state(), (false, false, false));
+        });
+    }
+
+    // ─── Finding #20a: PAM config re-applied to memory after guest reset ─────
+    //
+    // Bochs pci.cc bx_pci_bridge_c::reset() zeroes the PAM config bytes AND
+    // re-applies memory type for every PAM area directly
+    // (DEV_mem_set_memory_type loop), so the shadow-RAM routing tracks the
+    // reset PAM config immediately. rusty_box defers the memory-side effect
+    // via `pam_needs_update`, drained by `process_pci_deferred`.
+
+    #[test]
+    fn pam_config_reapplied_to_memory_after_reset() {
+        on_big_stack(|| {
+            use crate::memory::{BxMemC, BxMemoryStubC};
+
+            fn conf_addr(devfunc: u8, reg: u8) -> u32 {
+                0x8000_0000u32 | ((devfunc as u32) << 8) | (reg as u32 & 0xFC)
+            }
+
+            let mut dm = DeviceManager::new();
+            let mut io = BxDevicesC::new();
+            let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+            let mut mem = BxMemC::new(stub, false);
+
+            // PAM reg 0x59 controls area 12 (F0000): bit4=read, bit5=write.
+            // Enable read+write shadow RAM on it. 0x59 & 0xFC == 0x58, so the
+            // byte lands at data port 0xCFC + (0x59 - 0x58) == 0xCFD.
+            dm.pci_conf_addr = conf_addr(0x00, 0x59);
+            dm.pci_write(0xCFD, 0x30, 1); // area12: read=1, write=1
+            assert!(dm.pam_needs_update);
+            dm.process_pci_deferred(&mut io, &mut mem);
+            assert_eq!(
+                mem.memory_type(12, 1),
+                true,
+                "area 12 (F0000) write-shadow must be enabled before reset"
+            );
+
+            // Guest hardware reset: PAM config bytes go back to 0, and the
+            // memory shadow state must track that -- Bochs re-applies it
+            // synchronously inside bx_pci_bridge_c::reset(); rusty_box must
+            // defer-and-drain the same way pci_write's PAM branch does.
+            dm.reset(ResetReason::Hardware).unwrap();
+            assert_eq!(
+                dm.pci_bridge.pci_conf[0x59], 0x00,
+                "reset must zero the PAM config byte"
+            );
+            assert!(
+                dm.pam_needs_update,
+                "reset must mark PAM for re-application to memory"
+            );
+            dm.process_pci_deferred(&mut io, &mut mem);
+            assert!(!dm.pam_needs_update, "drain must clear the flag");
+            assert_eq!(
+                mem.memory_type(12, 1),
+                false,
+                "area 12 (F0000) write-shadow must be back to the reset default"
+            );
         });
     }
 }

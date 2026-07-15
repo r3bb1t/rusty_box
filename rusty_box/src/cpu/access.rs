@@ -267,7 +267,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// descriptor cache for future fast-path use.
     ///
     /// Bochs: write_virtual_checks (access.cc)
-    fn write_virtual_checks(&mut self, seg_idx: usize, offset: u32, length: u32) -> bool {
+    pub(super) fn write_virtual_checks(
+        &mut self,
+        seg_idx: usize,
+        offset: u32,
+        length: u32,
+    ) -> bool {
         let seg = &self.sregs[seg_idx];
         let cache = &seg.cache;
 
@@ -619,12 +624,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.read_rmw_linear_byte(seg, laddr)
     }
 
+    /// Prepare a word RMW translation without reading physical memory.
+    /// This lets callers complete permission checks before MMIO callbacks.
+    #[inline]
+    pub(super) fn prepare_rmw_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
+        let laddr = self.agen_write32(seg, offset, 2)? as u64;
+        self.prepare_rmw_linear_word(laddr)?;
+        Ok(laddr)
+    }
+
     /// Read phase of a read-modify-write word access.
     /// Bochs: read_RMW_virtual_word_32 (access.h) — thin wrapper
     #[inline]
     pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u16> {
-        let laddr = self.agen_write32(seg, offset, 2)? as u64;
-        self.read_rmw_linear_word(seg, laddr)
+        self.prepare_rmw_virtual_word(seg, offset)?;
+        Ok(self.read_prepared_rmw_word())
     }
 
     /// Read phase of a read-modify-write dword access.
@@ -1039,22 +1053,63 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs: v2h_write_byte (access.h)
     #[inline]
     pub(super) fn get_host_write_ptr(&mut self, laddr: u64) -> Option<(*mut u8, usize)> {
+        let (ptr, remaining, paddr) = self.resolve_host_write_ptr(laddr)?;
+        self.smc_write_check(paddr, remaining as u32);
+        Some((ptr, remaining))
+    }
+
+    /// Resolve direct writable RAM for a bulk operation without invalidating
+    /// cached code yet. The caller must invoke `smc_write_check` with the exact
+    /// byte count that was actually written before returning to the CPU loop.
+    #[inline]
+    pub(super) fn get_host_write_ptr_for_bulk(
+        &mut self,
+        laddr: u64,
+    ) -> Option<(*mut u8, usize, BxPhyAddress)> {
+        self.resolve_host_write_ptr(laddr)
+    }
+
+    #[inline]
+    fn resolve_host_write_ptr(&mut self, laddr: u64) -> Option<(*mut u8, usize, BxPhyAddress)> {
+        // A registered MMIO range may overlap otherwise host-backed RAM.
+        // Without per-range clipping, direct bulk writes could bypass a
+        // callback later in the page; stay scalar whenever MMIO is active.
+        if !self.mmio.is_empty() {
+            return None;
+        }
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 0);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
             let page_offset = (laddr & 0xFFF) as usize;
             let host = tlb.host_page_addr as *mut u8;
-            // SAFETY: host pointer validated during TLB fill; offset within page bounds
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds.
             let ptr = unsafe { host.add(page_offset) };
             let remaining = 0x1000 - page_offset;
-            // SMC check for the page
             let paddr = tlb.ppf | page_offset as BxPhyAddress;
-            self.i_cache.smc_write_check(paddr, remaining as u32);
-            Some((ptr, remaining))
-        } else {
-            None
+            return Some((ptr, remaining, paddr));
         }
+
+        // Paging-off accesses do not populate the DTLB, but Bochs
+        // v2h_write_byte still returns a direct mapping for plain RAM. Use the
+        // same RAM ranges as mem_write_byte's handler-aware fast path; VGA,
+        // BIOS shadow/ROM, and addresses beyond host RAM stay on the slow path.
+        if !self.cr0.pg() {
+            let paddr = (laddr & self.a20_mask) as usize;
+            let host_base = self.mem_host_base;
+            let plain_ram = paddr < self.mem_host_len && (paddr < 0xA0000 || paddr >= 0x100000);
+            if !host_base.is_null() && plain_ram {
+                let page_remaining = 0x1000 - (paddr & 0x0fff);
+                let memory_remaining = self.mem_host_len - paddr;
+                let remaining = page_remaining.min(memory_remaining);
+                // SAFETY: paddr is inside the contiguous host RAM allocation;
+                // remaining is capped to both that allocation and this page.
+                let ptr = unsafe { host_base.add(paddr) };
+                return Some((ptr, remaining, paddr as BxPhyAddress));
+            }
+        }
+
+        None
     }
 
     /// Resolve a linear address to a host read pointer via TLB.
@@ -1135,8 +1190,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// Apply instrumentation-only write permissions to the word translation
+    /// prepared by `read_rmw_virtual_word`, before an external side effect.
     #[inline]
-    fn mmio_read(&mut self, paddr: u64, size: usize) -> Option<u64> {
+    pub(super) fn check_rmw_word_write_permissions(&mut self, laddr: u64) -> Result<()> {
+        #[cfg(feature = "instrumentation")]
+        {
+            if self.address_xlation.pages == 2 {
+                self.check_perm_write(laddr, self.address_xlation.paddress1, 1)?;
+                let next_page = (laddr | 0x0fff).wrapping_add(1);
+                self.check_perm_write(next_page, self.address_xlation.paddress2, 1)?;
+            } else {
+                self.check_perm_write(laddr, self.address_xlation.paddress1, 2)?;
+            }
+        }
+        #[cfg(not(feature = "instrumentation"))]
+        let _ = laddr;
+        Ok(())
+    }
+
+    #[inline]
+    pub(super) fn mmio_read(&mut self, paddr: u64, size: usize) -> Option<u64> {
         if self.mmio.is_empty() {
             return None;
         }
@@ -1147,7 +1221,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     #[inline]
-    fn mmio_write(&mut self, paddr: u64, size: usize, val: u64) -> bool {
+    pub(super) fn mmio_write(&mut self, paddr: u64, size: usize, val: u64) -> bool {
         if self.mmio.is_empty() {
             return false;
         }
@@ -1384,7 +1458,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let host = tlb.host_page_addr as *mut u8;
             #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 1)?;
-            self.i_cache.smc_write_check(paddr, 1);
+            self.smc_write_check(paddr, 1);
             unsafe { *host_at_page_offset_mut(host, laddr) = val };
             #[cfg(feature = "instrumentation")]
             {
@@ -1404,7 +1478,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.mmio_write(paddr, 1, val as u64) {
             return Ok(());
         }
-        self.i_cache.smc_write_check(paddr, 1);
+        self.smc_write_check(paddr, 1);
         self.mem_write_byte(paddr, val);
         #[cfg(feature = "instrumentation")]
         {
@@ -1435,7 +1509,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let host = tlb.host_page_addr as *mut u8;
             #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 2)?;
-            self.i_cache.smc_write_check(paddr, 2);
+            self.smc_write_check(paddr, 2);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u16(ptr, val);
@@ -1459,7 +1533,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if self.mmio_write(paddr, 2, val as u64) {
                 return Ok(());
             }
-            self.i_cache.smc_write_check(paddr, 2);
+            self.smc_write_check(paddr, 2);
             self.mem_write_word(paddr, val);
             #[cfg(feature = "instrumentation")]
             {
@@ -1474,10 +1548,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             let bytes = val.to_le_bytes();
             let p0 = self.translate_data_write(laddr)?;
-            self.i_cache.smc_write_check(p0, 1);
+            self.smc_write_check(p0, 1);
             self.mem_write_byte(p0, bytes[0]);
             let p1 = self.translate_data_write((laddr | 0xFFF).wrapping_add(1))?;
-            self.i_cache.smc_write_check(p1, 1);
+            self.smc_write_check(p1, 1);
             self.mem_write_byte(p1, bytes[1]);
         }
         Ok(())
@@ -1505,7 +1579,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let host = tlb.host_page_addr as *mut u8;
             #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 4)?;
-            self.i_cache.smc_write_check(paddr, 4);
+            self.smc_write_check(paddr, 4);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u32(ptr, val);
@@ -1529,7 +1603,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if self.mmio_write(paddr, 4, val as u64) {
                 return Ok(());
             }
-            self.i_cache.smc_write_check(paddr, 4);
+            self.smc_write_check(paddr, 4);
             self.mem_write_dword(paddr, val);
             #[cfg(feature = "instrumentation")]
             {
@@ -1545,7 +1619,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let bytes = val.to_le_bytes();
             for i in 0..4u64 {
                 let p = self.translate_data_write(laddr.wrapping_add(i))?;
-                self.i_cache.smc_write_check(p, 1);
+                self.smc_write_check(p, 1);
                 self.mem_write_byte(p, bytes[i as usize]);
             }
         }
@@ -1570,7 +1644,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let host = tlb.host_page_addr as *mut u8;
             #[cfg(feature = "instrumentation")]
             self.check_perm_write(laddr, paddr, 8)?;
-            self.i_cache.smc_write_check(paddr, 8);
+            self.smc_write_check(paddr, 8);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u64(ptr, val);
@@ -1594,7 +1668,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if self.mmio_write(paddr, 8, val) {
                 return Ok(());
             }
-            self.i_cache.smc_write_check(paddr, 8);
+            self.smc_write_check(paddr, 8);
             self.mem_write_qword(paddr, val);
             #[cfg(feature = "instrumentation")]
             {
@@ -1610,7 +1684,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let bytes = val.to_le_bytes();
             for i in 0..8u64 {
                 let p = self.translate_data_write(laddr.wrapping_add(i))?;
-                self.i_cache.smc_write_check(p, 1);
+                self.smc_write_check(p, 1);
                 self.mem_write_byte(p, bytes[i as usize]);
             }
         }
@@ -1680,14 +1754,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
-            self.i_cache.smc_write_check(paddr, 4);
+            self.smc_write_check(paddr, 4);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: TLB-validated host pointer; unaligned write OK.
             write_unaligned_u32(ptr, val);
             return Ok(());
         }
         let paddr = self.translate_shadow_stack_write(laddr)?;
-        self.i_cache.smc_write_check(paddr, 4);
+        self.smc_write_check(paddr, 4);
         self.mem_write_dword(paddr, val);
         Ok(())
     }
@@ -1710,13 +1784,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
-            self.i_cache.smc_write_check(paddr, 8);
+            self.smc_write_check(paddr, 8);
             let ptr = host_at_page_offset_mut(host, laddr);
             write_unaligned_u64(ptr, val);
             return Ok(());
         }
         let paddr = self.translate_shadow_stack_write(laddr)?;
-        self.i_cache.smc_write_check(paddr, 8);
+        self.smc_write_check(paddr, 8);
         self.mem_write_qword(paddr, val);
         Ok(())
     }
@@ -1737,7 +1811,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
             let host_addr = tlb.host_page_addr | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            self.i_cache.smc_write_check(paddr, 8);
+            self.smc_write_check(paddr, 8);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let data = addr_read_u64(host_addr);
             self.address_xlation.pages = host_addr;
@@ -1786,7 +1860,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
             let host_addr = tlb.host_page_addr | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            self.i_cache.smc_write_check(paddr, 1);
+            self.smc_write_check(paddr, 1);
             // SAFETY: host pointer validated during TLB fill; offset within page bounds
             let data = addr_read_u8(host_addr);
             self.address_xlation.pages = host_addr;
@@ -1805,42 +1879,77 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Read phase of a RMW word given a pre-computed linear address.
     /// Bochs: read_RMW_linear_word (access2.cc)
     pub(crate) fn read_rmw_linear_word(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u16> {
+        self.prepare_rmw_linear_word(laddr)?;
+        Ok(self.read_prepared_rmw_word())
+    }
+
+    /// Prepare the write translation for a word RMW without reading RAM/MMIO.
+    /// Both pages of a split access are translated before any physical side
+    /// effect, matching Bochs `access_read_linear`.
+    pub(super) fn prepare_rmw_linear_word(&mut self, laddr: u64) -> Result<()> {
         // ---- Inline TLB fast path (Bochs access2.cc) ----
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 1);
-        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+        if self.mmio.is_empty()
+            && tlb.lpf == lpf
+            && (tlb.access_bits & needed_bit) != 0
+            && tlb.host_page_addr != 0
+        {
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
             let host_addr = tlb.host_page_addr | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            self.i_cache.smc_write_check(paddr, 2);
-            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            let data = addr_read_u16(host_addr);
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
-            return Ok(data);
+            return Ok(());
         }
 
         // ---- Slow path ----
         let page_offset = laddr & 0xFFF;
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
-            let data = self.mem_read_word(paddr);
             self.address_xlation.pages = 1;
             self.address_xlation.paddress1 = paddr;
-            Ok(data)
         } else {
             let p0 = self.translate_data_write(laddr)?;
-            let b0 = self.mem_read_byte(p0);
             let next_page = (laddr | 0xFFF).wrapping_add(1);
             let p1 = self.translate_data_write(next_page)?;
-            let b1 = self.mem_read_byte(p1);
             self.address_xlation.pages = 2;
             self.address_xlation.paddress1 = p0;
             self.address_xlation.paddress2 = p1;
             self.address_xlation.len1 = 1;
             self.address_xlation.len2 = 1;
-            Ok(u16::from_le_bytes([b0, b1]))
+        }
+        Ok(())
+    }
+
+    /// Read through the translation prepared by `prepare_rmw_linear_word`.
+    /// The caller may perform permission checks between preparation and this
+    /// physical access.
+    pub(super) fn read_prepared_rmw_word(&mut self) -> u16 {
+        if self.address_xlation.pages > 2 {
+            self.smc_write_check(self.address_xlation.paddress1, 2);
+            // SAFETY: `pages > 2` stores the validated host pointer from the
+            // TLB path above; the unaligned word access is intentional.
+            addr_read_u16(self.address_xlation.pages)
+        } else if self.address_xlation.pages == 1 {
+            let paddr = self.address_xlation.paddress1;
+            self.smc_write_check(paddr, 2);
+            self.mmio_read(paddr, 2)
+                .map_or_else(|| self.mem_read_word(paddr), |value| value as u16)
+        } else {
+            debug_assert_eq!(self.address_xlation.pages, 2);
+            let p0 = self.address_xlation.paddress1;
+            let p1 = self.address_xlation.paddress2;
+            self.smc_write_check(p0, 1);
+            self.smc_write_check(p1, 1);
+            let b0 = self
+                .mmio_read(p0, 1)
+                .map_or_else(|| self.mem_read_byte(p0), |value| value as u8);
+            let b1 = self
+                .mmio_read(p1, 1)
+                .map_or_else(|| self.mem_read_byte(p1), |value| value as u8);
+            u16::from_le_bytes([b0, b1])
         }
     }
 
@@ -1855,7 +1964,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
             let host_addr = tlb.host_page_addr | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-            self.i_cache.smc_write_check(paddr, 4);
+            self.smc_write_check(paddr, 4);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let data = addr_read_u32(host_addr);
             self.address_xlation.pages = host_addr;
@@ -2263,13 +2372,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.read_rmw_linear_byte(seg, laddr)
     }
 
+    /// Prepare a 64-bit-mode word RMW translation without reading memory.
+    #[inline]
+    pub(super) fn prepare_rmw_virtual_word_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: u64,
+    ) -> Result<u64> {
+        let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
+        self.prepare_rmw_linear_word(laddr)?;
+        Ok(laddr)
+    }
+
     /// RMW read word in 64-bit mode.
     /// Bochs: read_RMW_virtual_word (access.h) — thin wrapper
     #[inline]
     pub(crate) fn read_rmw_virtual_word_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u16> {
-        let laddr = self.get_laddr64(seg as usize, offset);
-        self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
-        self.read_rmw_linear_word(seg, laddr)
+        self.prepare_rmw_virtual_word_64(seg, offset)?;
+        Ok(self.read_prepared_rmw_word())
     }
 
     /// RMW read dword in 64-bit mode.

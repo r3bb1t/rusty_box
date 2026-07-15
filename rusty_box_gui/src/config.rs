@@ -1,6 +1,7 @@
 use crate::args::{Args, BootDevice, DiskGeometry, DisplayBackend, LogLevel};
 use crate::error::RunError;
 use rusty_box::params::{BxParamError, BxParams};
+use rusty_box::CpuidFreq;
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
@@ -33,7 +34,15 @@ pub struct EmulatorToml {
     pub ips: Option<u32>,
     pub pci: Option<bool>,
     pub sync_slowdown: Option<bool>,
+    /// Advance PIT/ACPI timers on wall-clock time — Bochs `clock:
+    /// sync=realtime`. Default false (`sync=none`): timers follow emulated
+    /// time, PIT calibration measures exactly `ips`, boots deterministic.
+    pub sync_realtime: Option<bool>,
+    pub smp_quantum: Option<u32>,
     pub max_instructions: Option<u64>,
+    /// How CPUID frequency leaves 0x15/0x16 are reported — Bochs
+    /// `cpu: cpuid_freq=` ("hardware" | "none" | "ips"). Default: "none".
+    pub cpuid_freq: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -107,6 +116,9 @@ pub struct ResolvedConfig {
     pub ips: u32,
     pub pci: bool,
     pub sync_slowdown: bool,
+    pub sync_realtime: bool,
+    pub smp_quantum: u32,
+    pub cpuid_freq: CpuidFreq,
     pub max_instructions: u64,
     pub cpu_params: BxParams,
     pub display: DisplayBackend,
@@ -241,6 +253,37 @@ fn resolve_config_with_base(
         .max_instructions
         .or(file.emulator.max_instructions)
         .unwrap_or(u64::MAX);
+    // Bochs `clock: sync=realtime`; default none (see EmulatorToml docs).
+    let sync_realtime = if args.sync_realtime {
+        true
+    } else {
+        file.emulator.sync_realtime.unwrap_or(false)
+    };
+    // Bochs `cpu: quantum=N` (config.cc BXPN_SMP_QUANTUM): range 1-32
+    // (config.h BX_SMP_QUANTUM_MIN/MAX), default 16.
+    let smp_quantum = args
+        .smp_quantum
+        .or(file.emulator.smp_quantum)
+        .unwrap_or(16);
+    if !(1..=32).contains(&smp_quantum) {
+        return Err(RunError::InvalidSmpQuantum { value: smp_quantum });
+    }
+    // Bochs `cpu: cpuid_freq=hardware|none|ips` (cpuid.cc get_freq_leaf_15/16).
+    // rusty_box defaults to "none" so guests calibrate the true tick rate.
+    let cpuid_freq = match args
+        .cpuid_freq
+        .as_deref()
+        .or(file.emulator.cpuid_freq.as_deref())
+    {
+        None | Some("none") => CpuidFreq::None,
+        Some("hardware") => CpuidFreq::Hardware,
+        Some("ips") => CpuidFreq::Ips,
+        Some(other) => {
+            return Err(RunError::InvalidCpuidFreq {
+                value: other.to_string(),
+            })
+        }
+    };
     let cpu_params = resolve_cpu_topology(&file, args)?;
 
     let display = args
@@ -293,6 +336,9 @@ fn resolve_config_with_base(
         ips,
         pci,
         sync_slowdown,
+        sync_realtime,
+        smp_quantum,
+        cpuid_freq,
         max_instructions,
         cpu_params,
         display,
@@ -369,7 +415,17 @@ impl ResolvedConfig {
             ips: Some(self.ips),
             pci: Some(self.pci),
             sync_slowdown: Some(self.sync_slowdown),
+            // Only persist a non-default value so existing configs stay stable.
+            sync_realtime: self.sync_realtime.then_some(true),
+            // Only persist a non-default quantum so existing configs stay stable.
+            smp_quantum: (self.smp_quantum != 16).then_some(self.smp_quantum),
             max_instructions: (self.max_instructions != u64::MAX).then_some(self.max_instructions),
+            // Only persist a non-default mode so existing configs stay stable.
+            cpuid_freq: match self.cpuid_freq {
+                CpuidFreq::None => None,
+                CpuidFreq::Hardware => Some("hardware".to_string()),
+                CpuidFreq::Ips => Some("ips".to_string()),
+            },
         };
         let display = DisplayToml {
             backend: Some(self.display),
@@ -576,22 +632,19 @@ fn resolve_created_disk(
             .and_then(|create| create.overwrite)
             .unwrap_or(false);
 
+    // `calculate_hard_disk_geometry` already rejects cylinder counts >= BOCHS_MAX_CYLINDERS
+    // (2^24) via `BxImageError::CylinderOverflow`, matching Bochs bximage. Anything it
+    // returns fits the u32 geometry field, so no extra GUI-side cap is needed.
     let geometry = rusty_box_bximage::calculate_hard_disk_geometry(
         size,
         rusty_box_bximage::SectorSize::Bytes512,
     )
     .map_err(|source| RunError::DiskCreateSize { source })?;
-    if geometry.cylinders > u16::MAX as u64 {
-        return Err(RunError::CreatedDiskChsOverflow {
-            path,
-            cylinders: geometry.cylinders,
-        });
-    }
 
     let channel = disk_toml.and_then(|disk| disk.channel).unwrap_or(0);
     let drive = disk_toml.and_then(|disk| disk.drive).unwrap_or(0);
     let geometry = DiskGeometry {
-        cylinders: geometry.cylinders as u16,
+        cylinders: geometry.cylinders as u32,
         heads: geometry.heads as u8,
         sectors_per_track: geometry.sectors_per_track as u8,
     };
@@ -736,7 +789,10 @@ fn auto_detect_chs(path: &Path) -> Result<DiskGeometry, RunError> {
     const SECTOR_SIZE: u64 = 512;
     const HEADS: u64 = 16;
     const SECTORS_PER_TRACK: u64 = 63;
-    const MAX_CYLINDERS: u64 = 16_383;
+    // Bochs auto-geometry (harddrv.cc) derives the physical cylinder count uncapped and
+    // only clamps the *reported* IDENTIFY geometry (word 1) to 16383. Match that: reject
+    // only when the physical cylinder count would exceed the emulator's limit (2^24).
+    const MAX_CYLINDERS: u64 = rusty_box_bximage::BOCHS_MAX_CYLINDERS - 1;
 
     let metadata = fs::metadata(path).map_err(|source| RunError::FileRead {
         kind: "disk",
@@ -762,7 +818,7 @@ fn auto_detect_chs(path: &Path) -> Result<DiskGeometry, RunError> {
     }
 
     Ok(DiskGeometry {
-        cylinders: cylinders as u16,
+        cylinders: cylinders as u32,
         heads: HEADS as u8,
         sectors_per_track: SECTORS_PER_TRACK as u8,
     })
@@ -850,6 +906,55 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
 
         assert_eq!(resolved.bios, PathBuf::from("new.bin"));
         assert_eq!(resolved.memory_mib, 64);
+    }
+
+    #[test]
+    fn cpuid_freq_defaults_to_none_and_parses_all_modes() {
+        let resolved = resolve_config(
+            config("[rom]\nbios = \"bios.bin\"\n"),
+            &args(["rusty_box_gui"]),
+        )
+        .unwrap();
+        assert_eq!(resolved.cpuid_freq, CpuidFreq::None);
+
+        let toml_hardware = r#"
+[emulator]
+cpuid_freq = "hardware"
+
+[rom]
+bios = "bios.bin"
+"#;
+        let resolved = resolve_config(config(toml_hardware), &args(["rusty_box_gui"])).unwrap();
+        assert_eq!(resolved.cpuid_freq, CpuidFreq::Hardware);
+
+        // CLI overrides the TOML value.
+        let resolved = resolve_config(
+            config(toml_hardware),
+            &args(["rusty_box_gui", "--cpuid-freq", "ips"]),
+        )
+        .unwrap();
+        assert_eq!(resolved.cpuid_freq, CpuidFreq::Ips);
+
+        // Save-roundtrip: non-default modes persist, the default stays absent.
+        assert_eq!(
+            resolved.to_file_config().emulator.cpuid_freq.as_deref(),
+            Some("ips")
+        );
+    }
+
+    #[test]
+    fn cpuid_freq_rejects_unknown_mode() {
+        let file = config(
+            r#"
+[emulator]
+cpuid_freq = "fast"
+
+[rom]
+bios = "bios.bin"
+"#,
+        );
+        let error = resolve_config(file, &args(["rusty_box_gui"])).unwrap_err();
+        assert!(matches!(error, RunError::InvalidCpuidFreq { value } if value == "fast"));
     }
 
     #[test]
@@ -976,7 +1081,10 @@ bios = "bios.bin"
     }
 
     #[test]
-    fn rejects_created_disk_that_exceeds_chs_api() {
+    fn resolves_created_disk_larger_than_chs_u16() {
+        // A 32 GiB disk needs 66576 cylinders (16h/63s/512b), which does not fit the
+        // 16-bit ATA cylinder register but is a valid physical geometry in Bochs
+        // (`unsigned cylinders`, addressed via LBA). It must resolve, not be rejected.
         let file = config(
             r#"
 [rom]
@@ -987,15 +1095,19 @@ path = "huge.img"
 size = "32G"
 "#,
         );
-        let error = resolve_config(file, &args(["rusty_box_gui"])).unwrap_err();
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+        let disk = resolved.disk.unwrap();
 
-        assert!(matches!(
-            error,
-            RunError::CreatedDiskChsOverflow {
-                path,
-                cylinders: 66_576
-            } if path == PathBuf::from("huge.img")
-        ));
+        assert_eq!(disk.path, PathBuf::from("huge.img"));
+        assert_eq!(
+            disk.geometry,
+            DiskGeometry {
+                cylinders: 66_576,
+                heads: 16,
+                sectors_per_track: 63,
+            }
+        );
+        assert_eq!(disk.creation.unwrap().size, ImageSize::gib(32));
     }
 
     #[test]
