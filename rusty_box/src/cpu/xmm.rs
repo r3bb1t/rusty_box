@@ -499,4 +499,202 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         Ok(())
     }
+    /// Prepare for AVX instruction — check protected mode, CR4.OSXSAVE,
+    /// XCR0.SSE+YMM, then CR0.TS.
+    /// Returns Ok(()) if AVX is available, or raises #UD/#NM exception.
+    /// Bochs: BX_CPU_C::BxNoAVX().
+    #[inline]
+    pub(super) fn prepare_avx(&mut self) -> super::Result<()> {
+        if !self.protected_mode() || !self.cr4.osxsave() || (self.xcr0.get32() & 0x6) != 0x6 {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if self.cr0.ts() {
+            return self.exception(super::cpu::Exception::Nm, 0);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        cpu::{
+            core_i7_skylake::Corei7SkylakeX,
+            cpu::Exception,
+            CpuSetupMode, X86Reg,
+        },
+        emulator::{Emulator, EmulatorConfig},
+    };
+
+
+    const CODE_BASE: u64 = 0x20_0000;
+    const XSETBV_BASE: u64 = CODE_BASE + 0x100;
+    const IDT_BASE: u64 = 0x28_0000;
+    const UD_HANDLER: u64 = 0x29_0000;
+    const NM_HANDLER: u64 = 0x29_0010;
+    const STACK_TOP: u64 = 0x30_0000;
+
+
+    fn avx_emulator() -> alloc::boxed::Box<Emulator<'static, Corei7SkylakeX>> {
+        Emulator::<Corei7SkylakeX>::new_with_mode(
+            EmulatorConfig::default(),
+            CpuSetupMode::FlatLong64,
+        )
+        .unwrap()
+    }
+
+    fn install_exception_gate(
+        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        vector: u8,
+        handler: u64,
+    ) {
+        let mut gate = [0u8; 16];
+        gate[0..2].copy_from_slice(&(handler as u16).to_le_bytes());
+        gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
+        gate[5] = 0x8e;
+        gate[6..8].copy_from_slice(&((handler >> 16) as u16).to_le_bytes());
+        gate[8..12].copy_from_slice(&((handler >> 32) as u32).to_le_bytes());
+        emu.mem_write(IDT_BASE + u64::from(vector) * 16, &gate)
+            .unwrap();
+        emu.mem_write(handler, &[0xf4]).unwrap();
+    }
+
+    fn install_avx_exception_handlers(emu: &mut Emulator<'static, Corei7SkylakeX>) {
+        emu.reg_write(X86Reg::IdtrBase, IDT_BASE);
+        emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
+        emu.reg_write(X86Reg::Rsp, STACK_TOP);
+        install_exception_gate(emu, Exception::Ud as u8, UD_HANDLER);
+        install_exception_gate(emu, Exception::Nm as u8, NM_HANDLER);
+        // FlatLong64 seeds the live CS cache as 64-bit but deliberately leaves
+        // its minimal GDT's code descriptor 32-bit; exception delivery reloads
+        // CS through the GDT, so make the test gate's target a valid long code
+        // segment.
+        emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
+            .unwrap();
+    }
+
+    fn enable_guest_avx(emu: &mut Emulator<'static, Corei7SkylakeX>) {
+        emu.reg_write(
+            X86Reg::Cr4,
+            emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+        );
+        emu.reg_write(X86Reg::Rax, 0x7);
+        emu.reg_write(X86Reg::Rcx, 0);
+        emu.reg_write(X86Reg::Rdx, 0);
+        emu.mem_write(XSETBV_BASE, &[0x0f, 0x01, 0xd1]).unwrap();
+        emu.emu_start(XSETBV_BASE, Some(XSETBV_BASE + 3), None, Some(1))
+            .unwrap();
+    }
+
+    fn run_one(
+        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        address: u64,
+        code: &[u8],
+    ) -> crate::error::Result<()> {
+        emu.mem_write(address, code).unwrap();
+        emu.emu_start(address, Some(address + code.len() as u64), None, Some(1))
+            .map(|_| ())
+    }
+
+    fn assert_fault_at_original_rip(
+        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        vector: Exception,
+        handler: u64,
+        rip: u64,
+    ) {
+        assert_eq!(emu.cpu().get_exception_diag()[vector as usize], 1);
+        assert_eq!(emu.cpu().rip(), handler + 1);
+        assert_eq!(emu.reg_read(X86Reg::Rsp), STACK_TOP - 40);
+        let mut pushed_rip = [0u8; 8];
+        emu.mem_read(STACK_TOP - 40, &mut pushed_rip).unwrap();
+        assert_eq!(u64::from_le_bytes(pushed_rip), rip);
+    }
+
+    #[test]
+    fn vpinsr_and_vextract_require_avx_state() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+        let forms: [(&str, &[u8]); 6] = [
+            ("VPINSRB", &[0xC4, 0xE3, 0x71, 0x20, 0xC0, 0x05]),
+            ("VPINSRW", &[0xC5, 0xF1, 0xC4, 0xC1, 0x03]),
+            ("VPINSRD", &[0xC4, 0xE3, 0x69, 0x22, 0xC1, 0x02]),
+            ("VPINSRQ", &[0xC4, 0xE3, 0xE9, 0x22, 0xC1, 0x01]),
+            ("VEXTRACTF128", &[0xC4, 0xE3, 0x7D, 0x19, 0xD8, 0x01]),
+            ("VEXTRACTI128", &[0xC4, 0xE3, 0x7D, 0x39, 0xD8, 0x01]),
+        ];
+
+        for (name, code) in forms {
+            let mut emu = avx_emulator();
+            install_avx_exception_handlers(&mut emu);
+            emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | (1 << 3));
+            run_one(&mut emu, CODE_BASE, code).unwrap();
+            assert_fault_at_original_rip(&mut emu, Exception::Ud, UD_HANDLER, CODE_BASE);
+            assert_eq!(
+                emu.cpu().get_exception_diag()[Exception::Nm as usize],
+                0,
+                "{name} must raise #UD before #NM when OSXSAVE is clear"
+            );
+        }
+
+        for (name, code) in forms {
+            let mut emu = avx_emulator();
+            install_avx_exception_handlers(&mut emu);
+            enable_guest_avx(&mut emu);
+            emu.cpu_mut().xcr0.set32(0x1);
+            emu.cpu_mut().handle_avx_mode_change();
+            emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | (1 << 3));
+            run_one(&mut emu, CODE_BASE, code).unwrap();
+            assert_fault_at_original_rip(&mut emu, Exception::Ud, UD_HANDLER, CODE_BASE);
+            assert_eq!(
+                emu.cpu().get_exception_diag()[Exception::Nm as usize],
+                0,
+                "{name} must raise #UD before #NM when XCR0 lacks SSE/YMM"
+            );
+        }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn vextractf128_enabled_extracts_selected_lane() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+        let mut emu = avx_emulator();
+        enable_guest_avx(&mut emu);
+        let source: [u8; 32] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+            0x0C, 0x0D, 0x0E, 0x0F, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+            0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F,
+        ];
+        emu.reg_write_ymm(X86Reg::Ymm3, source);
+
+        for (offset, name, code) in [
+            (
+                0,
+                "VEXTRACTF128",
+                &[0xC4, 0xE3, 0x7D, 0x19, 0xD8, 0x01][..],
+            ),
+            (
+                0x40,
+                "VEXTRACTI128",
+                &[0xC4, 0xE3, 0x7D, 0x39, 0xD8, 0x01][..],
+            ),
+        ] {
+            emu.reg_write_ymm(X86Reg::Ymm0, [0xAA; 32]);
+            let address = CODE_BASE + offset;
+            run_one(&mut emu, address, code).unwrap();
+            let result = emu.reg_read_ymm(X86Reg::Ymm0);
+            assert_eq!(&result[..16], &source[16..], "{name} selected the wrong lane");
+            assert_eq!(&result[16..], &[0; 16], "{name} must clear YMM upper bits");
+        }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

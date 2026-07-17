@@ -28,6 +28,15 @@
 
 use crate::config::BxPhyAddress;
 use crate::memory::BxMemC;
+#[cfg(feature = "std")]
+use std::io::{Error, ErrorKind, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    SNAPSHOT_SECTION_VERSION,
+};
+
 
 // ---------------------------------------------------------------------------
 // Constants — matching Bochs ioapic.h
@@ -894,11 +903,6 @@ impl BxIoApic {
     }
 
     /// Take all pending deliveries, resetting the queue.
-    /// True when deferred deliveries are queued (SMP round servicing gate).
-    #[inline]
-    pub(crate) fn has_pending_deliveries(&self) -> bool {
-        self.num_pending_deliveries > 0
-    }
 
     pub(crate) fn take_pending_deliveries(
         &mut self,
@@ -983,6 +987,252 @@ impl BxIoApic {
     pub fn intin_value(&self) -> u32 {
         self.intin
     }
+}
+
+#[cfg(feature = "std")]
+impl BxIoApic {
+    pub(crate) fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+        validate_ioapic_snapshot_state(self)?;
+        let routes = checked_snapshot_len_mul(24, 8)?;
+        let queue = checked_snapshot_len_mul(
+            u64::try_from(self.num_pending_deliveries)
+                .map_err(|_| ioapic_snapshot_invalid("IOAPIC pending queue count is too large"))?,
+            10,
+        )?;
+        let fields_and_routes = checked_snapshot_len_add(25, routes)?;
+        let queue_prefix = checked_snapshot_len_add(fields_and_routes, 4)?;
+        checked_snapshot_len_add(queue_prefix, queue)
+    }
+
+    pub(crate) fn save_snapshot_v3<W: Write + ?Sized>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        self.snapshot_v3_len()?;
+        writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+        writer.write_bool(self.enabled)?;
+        writer.write_u32(self.base_addr)?;
+        writer.write_u32(self.id)?;
+        writer.write_u32(self.ioregsel)?;
+        writer.write_u32(self.intin)?;
+        writer.write_u32(self.irr)?;
+        for entry in &self.ioredtbl {
+            writer.write_u32(entry.lo)?;
+            writer.write_u32(entry.hi)?;
+        }
+        writer.write_u32(
+            u32::try_from(self.num_pending_deliveries)
+                .map_err(|_| ioapic_snapshot_invalid("IOAPIC pending queue count is too large"))?,
+        )?;
+        let deliveries = self
+            .pending_deliveries
+            .get(..self.num_pending_deliveries)
+            .ok_or_else(|| ioapic_snapshot_invalid("IOAPIC pending queue exceeds capacity"))?;
+        for delivery in deliveries {
+            save_ioapic_delivery(writer, *delivery)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_snapshot_v3<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> std::io::Result<()> {
+        if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
+            return Err(ioapic_snapshot_invalid(
+                "unsupported IOAPIC snapshot section version",
+            ));
+        }
+
+        let enabled = reader.read_bool()?;
+        let base_addr = reader.read_u32()?;
+        let id = reader.read_u32()?;
+        let ioregsel = reader.read_u32()?;
+        let intin = reader.read_u32()?;
+        let irr = reader.read_u32()?;
+        validate_ioapic_configuration(self, enabled, base_addr, id, intin, irr)?;
+
+        let mut ioredtbl = [IoRedirectEntry::default(); IOAPIC_NUM_PINS];
+        for entry in &mut ioredtbl {
+            let lo = reader.read_u32()?;
+            let hi = reader.read_u32()?;
+            validate_ioapic_route(lo, hi)?;
+            *entry = IoRedirectEntry { lo, hi };
+        }
+
+        let pending_count = reader.read_count(ioapic_queue_capacity()?)?;
+        let mut pending_deliveries = [EMPTY_PENDING_DELIVERY; IOAPIC_PENDING_DELIVERY_CAPACITY];
+        for delivery in pending_deliveries.iter_mut().take(pending_count) {
+            *delivery = restore_ioapic_delivery(reader)?;
+        }
+
+        // The configured MMIO registration, its base, and all host-facing
+        // resources remain live. Do not service or drain restored deliveries.
+        self.id = id;
+        self.ioregsel = ioregsel;
+        self.intin = intin;
+        self.irr = irr;
+        self.ioredtbl = ioredtbl;
+        self.pending_deliveries = pending_deliveries;
+        self.num_pending_deliveries = pending_count;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "std")]
+fn ioapic_snapshot_invalid(message: &'static str) -> Error {
+    Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn ioapic_queue_capacity() -> std::io::Result<usize> {
+    if IOAPIC_PENDING_DELIVERY_CAPACITY > bounds::MAX_SNAPSHOT_QUEUE_LEN {
+        return Err(ioapic_snapshot_invalid(
+            "IOAPIC pending queue capacity exceeds snapshot bounds",
+        ));
+    }
+    Ok(IOAPIC_PENDING_DELIVERY_CAPACITY)
+}
+
+#[cfg(feature = "std")]
+fn valid_ioapic_delivery_mode(mode: u8) -> bool {
+    matches!(mode, 0 | 1 | 2 | 4 | 5 | 7)
+}
+
+#[cfg(feature = "std")]
+fn ioapic_mode_requires_vector(mode: u8) -> bool {
+    matches!(mode, 0 | 1)
+}
+
+#[cfg(feature = "std")]
+fn validate_ioapic_configuration(
+    live: &BxIoApic,
+    enabled: bool,
+    base_addr: u32,
+    id: u32,
+    intin: u32,
+    irr: u32,
+) -> std::io::Result<()> {
+    let pin_mask = (1u32 << IOAPIC_NUM_PINS) - 1;
+    if enabled != live.enabled || base_addr != live.base_addr {
+        return Err(ioapic_snapshot_invalid(
+            "IOAPIC MMIO configuration does not match live topology",
+        ));
+    }
+    if id & !APIC_ID_MASK != 0 {
+        return Err(ioapic_snapshot_invalid("IOAPIC ID exceeds capability"));
+    }
+    if intin & !pin_mask != 0 || irr & !pin_mask != 0 {
+        return Err(ioapic_snapshot_invalid("IOAPIC pin state exceeds capability"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn validate_ioapic_route(lo: u32, hi: u32) -> std::io::Result<()> {
+    if lo & !0x0001_FFFF != 0 || hi & 0x00FF_FFFF != 0 {
+        return Err(ioapic_snapshot_invalid(
+            "IOAPIC redirection entry contains reserved bits",
+        ));
+    }
+    let delivery_mode = u8::try_from((lo >> 8) & 0x07)
+        .map_err(|_| ioapic_snapshot_invalid("IOAPIC delivery mode does not fit"))?;
+    let vector = u8::try_from(lo & 0xff)
+        .map_err(|_| ioapic_snapshot_invalid("IOAPIC vector does not fit"))?;
+    let destination = u8::try_from(hi >> 24)
+        .map_err(|_| ioapic_snapshot_invalid("IOAPIC destination does not fit"))?;
+    if !valid_ioapic_delivery_mode(delivery_mode) {
+        return Err(ioapic_snapshot_invalid("IOAPIC delivery mode is reserved"));
+    }
+    if ioapic_mode_requires_vector(delivery_mode) && vector < 0x10 && lo & (1 << 16) == 0 {
+        return Err(ioapic_snapshot_invalid("IOAPIC interrupt vector is invalid"));
+    }
+    if lo & (1 << 14) != 0 && lo & (1 << 15) == 0 {
+        return Err(ioapic_snapshot_invalid(
+            "IOAPIC edge-triggered route has remote IRR set",
+        ));
+    }
+    if u32::from(destination) > APIC_ID_MASK {
+        return Err(ioapic_snapshot_invalid("IOAPIC destination exceeds capability"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn validate_ioapic_snapshot_state(ioapic: &BxIoApic) -> std::io::Result<()> {
+    validate_ioapic_configuration(
+        ioapic,
+        ioapic.enabled,
+        ioapic.base_addr,
+        ioapic.id,
+        ioapic.intin,
+        ioapic.irr,
+    )?;
+    for entry in &ioapic.ioredtbl {
+        validate_ioapic_route(entry.lo, entry.hi)?;
+    }
+    if ioapic.num_pending_deliveries > ioapic_queue_capacity()? {
+        return Err(ioapic_snapshot_invalid(
+            "IOAPIC pending queue exceeds capacity",
+        ));
+    }
+    let deliveries = ioapic
+        .pending_deliveries
+        .get(..ioapic.num_pending_deliveries)
+        .ok_or_else(|| ioapic_snapshot_invalid("IOAPIC pending queue exceeds capacity"))?;
+    for delivery in deliveries {
+        validate_ioapic_delivery(*delivery)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn validate_ioapic_delivery(delivery: PendingIoApicDelivery) -> std::io::Result<()> {
+    if usize::from(delivery.pin) >= IOAPIC_NUM_PINS
+        || !valid_ioapic_delivery_mode(delivery.delivery_mode)
+        || delivery.trigger_mode > 1
+        || delivery.dest_mode > 1
+        || delivery.dest > APIC_ID_MASK
+        || (ioapic_mode_requires_vector(delivery.delivery_mode) && delivery.vector < 0x10)
+        || (delivery.needs_pic_iac && (delivery.delivery_mode != 7 || delivery.vector != 0))
+    {
+        return Err(ioapic_snapshot_invalid(
+            "IOAPIC pending delivery is invalid",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn save_ioapic_delivery<W: Write + ?Sized>(
+    writer: &mut W,
+    delivery: PendingIoApicDelivery,
+) -> std::io::Result<()> {
+    validate_ioapic_delivery(delivery)?;
+    writer.write_u8(delivery.pin)?;
+    writer.write_u8(delivery.vector)?;
+    writer.write_u8(delivery.delivery_mode)?;
+    writer.write_u8(delivery.trigger_mode)?;
+    writer.write_u32(delivery.dest)?;
+    writer.write_u8(delivery.dest_mode)?;
+    writer.write_bool(delivery.needs_pic_iac)
+}
+
+#[cfg(feature = "std")]
+fn restore_ioapic_delivery<R: Read>(
+    reader: &mut SnapshotReader<R>,
+) -> std::io::Result<PendingIoApicDelivery> {
+    let delivery = PendingIoApicDelivery {
+        pin: reader.read_u8()?,
+        vector: reader.read_u8()?,
+        delivery_mode: reader.read_u8()?,
+        trigger_mode: reader.read_u8()?,
+        dest: reader.read_u32()?,
+        dest_mode: reader.read_u8()?,
+        needs_pic_iac: reader.read_bool()?,
+    };
+    validate_ioapic_delivery(delivery)?;
+    Ok(delivery)
 }
 
 // ---------------------------------------------------------------------------

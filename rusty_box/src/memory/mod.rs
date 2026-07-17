@@ -7,8 +7,8 @@ pub mod misc_mem;
 pub mod mmio;
 pub mod permissions;
 
-//#[cfg(test)]
-//mod tests;
+#[cfg(test)]
+mod tests;
 
 pub use super::error::Result;
 use crate::{
@@ -21,6 +21,128 @@ pub use error::*;
 
 use core::cell::{Cell, UnsafeCell};
 
+/// The fixed TLB host-pointer capacities are architectural CPU cache sizes.
+///
+/// They deliberately live with the descriptor rather than the CPU: eviction
+/// checks may run while a CPU is mutably borrowed for instruction execution.
+pub(crate) const CPU_TLB_PIN_DTLB_SLOTS: usize = 4096;
+pub(crate) const CPU_TLB_PIN_ITLB_SLOTS: usize = 1024;
+
+/// Pin-visible host pointers copied out of one CPU.
+///
+/// The emulator is single-threaded. It refreshes this state before wiring a
+/// CPU memory scope and each CPU synchronously updates it after changing a
+/// TLB/VMCB host pointer or invalidating a TLB entry. `UnsafeCell` permits
+/// those updates through a stable descriptor without touching the mutably
+/// borrowed CPU during an allocator eviction check.
+struct CpuTlbPinState {
+    dtlb_hosts: [usize; CPU_TLB_PIN_DTLB_SLOTS],
+    itlb_hosts: [usize; CPU_TLB_PIN_ITLB_SLOTS],
+    vmcb_host: usize,
+}
+
+impl CpuTlbPinState {
+    const fn empty() -> Self {
+        Self {
+            dtlb_hosts: [0; CPU_TLB_PIN_DTLB_SLOTS],
+            itlb_hosts: [0; CPU_TLB_PIN_ITLB_SLOTS],
+            vmcb_host: 0,
+        }
+    }
+}
+
+/// A stable, external view of one CPU's direct host-memory references.
+///
+/// This descriptor never retains a CPU pointer. Its interior state is updated
+/// only by the owning CPU while the emulator has exclusive machine access, and
+/// it remains separately addressable while that CPU has an active `&mut`
+/// borrow. Allocator checks therefore inspect only this sidecar.
+pub(crate) struct CpuTlbPin {
+    state: UnsafeCell<CpuTlbPinState>,
+}
+
+impl CpuTlbPin {
+    pub(crate) fn new<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &BxCpuC<'_, I, T>,
+    ) -> Self {
+        let pin = Self {
+            state: UnsafeCell::new(CpuTlbPinState::empty()),
+        };
+        cpu.refresh_tlb_pin(&pin);
+        pin
+    }
+
+    #[inline]
+    pub(crate) fn clear_tlb_hosts(&self) {
+        // SAFETY: sidecar mutation is serialized by the emulator's
+        // single-threaded CPU/memory scope contract.
+        let state = unsafe { &mut *self.state.get() };
+        state.dtlb_hosts.fill(0);
+        state.itlb_hosts.fill(0);
+        state.vmcb_host = 0;
+    }
+
+    #[inline]
+    pub(crate) fn set_dtlb_host(&self, slot: usize, host: usize) {
+        debug_assert!(slot < CPU_TLB_PIN_DTLB_SLOTS);
+        // SAFETY: see `clear_tlb_hosts`.
+        unsafe { (*self.state.get()).dtlb_hosts[slot] = host };
+    }
+
+    #[inline]
+    pub(crate) fn set_itlb_host(&self, slot: usize, host: usize) {
+        debug_assert!(slot < CPU_TLB_PIN_ITLB_SLOTS);
+        // SAFETY: see `clear_tlb_hosts`.
+        unsafe { (*self.state.get()).itlb_hosts[slot] = host };
+    }
+
+    #[inline]
+    pub(crate) fn set_vmcb_host(&self, host: usize) {
+        // SAFETY: see `clear_tlb_hosts`.
+        unsafe { (*self.state.get()).vmcb_host = host };
+    }
+
+    #[inline]
+    pub(crate) fn is_range_pinned(&self, start: usize, end: usize) -> bool {
+        // SAFETY: eviction checks only read this separately addressable state;
+        // mutation is serialized before/after each CPU instruction operation.
+        let state = unsafe { &*self.state.get() };
+        let contains = |host: usize| host != 0 && host >= start && host < end;
+        contains(state.vmcb_host)
+            || state.dtlb_hosts.iter().copied().any(contains)
+            || state.itlb_hosts.iter().copied().any(contains)
+    }
+}
+/// The only CPU state consumed by handler-aware physical-memory operations.
+///
+/// It is computed while the CPU is ordinarily reborrowed, before memory is
+/// mutably borrowed.  Memory must never need a shared `BxCpuC` reference.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CpuMemoryPolicy {
+    smm_mode: bool,
+    monitor_hit: bool,
+}
+
+impl CpuMemoryPolicy {
+    #[inline]
+    pub(crate) const fn new(smm_mode: bool, monitor_hit: bool) -> Self {
+        Self {
+            smm_mode,
+            monitor_hit,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn smm_mode(self) -> bool {
+        self.smm_mode
+    }
+
+    #[inline]
+    pub(crate) const fn monitor_hit(self) -> bool {
+        self.monitor_hit
+    }
+}
+
 #[cfg(feature = "std")]
 use std::fs::File;
 
@@ -30,12 +152,38 @@ pub(crate) enum Block {
     SwappedOut,
 }
 
+/// Block-logical RAM metadata saved by the snapshot layer.
+///
+/// The backing store deliberately exposes no guest-wide byte slice: an
+/// undersized host allocation can keep arbitrary guest blocks swapped out.
+#[cfg(feature = "std")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MemorySnapshotGeometry {
+    pub guest_len: u64,
+    pub host_ram_len: u64,
+    pub block_size: u64,
+    pub num_blocks: u32,
+    pub resident_capacity: u32,
+    pub used_blocks: u32,
+    pub next_swapout_guest_block: u32,
+}
+
+/// Where a logical guest block resides at the snapshot boundary.
+#[cfg(feature = "std")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MemorySnapshotResidency {
+    Swapped,
+    Resident { slot: u32 },
+}
 #[derive(Debug)]
 pub struct BxMemoryStubC {
     /// could be > 4G
     pub(super) len: usize,
     /// could be > 4G
     allocated: usize,
+    /// Complete block slots available for resident guest RAM. This may exceed
+    /// `allocated` by less than one block when swapped backing is active.
+    resident_backing_len: usize,
     /// individual block size, must be power of 2
     block_size: usize,
     actual_vector: *mut u8,
@@ -225,68 +373,12 @@ impl BxMemC<'_> {
         self.a20_mask = mask;
     }
 
-    /// Peek at raw RAM bytes (no A20 masking, no memory handlers).
-    /// Returns a slice of up to `len` bytes starting at `addr`, or empty if out of bounds.
-    pub fn peek_ram(&self, addr: usize, len: usize) -> &[u8] {
-        let stub = &self.inherited_memory_stub;
-        let real_addr = stub.vector_offset + addr;
-        let ram = stub.actual_vector_slice();
-        if real_addr < ram.len() {
-            let end = (real_addr + len).min(ram.len());
-            &ram[real_addr..end]
-        } else {
-            &[]
-        }
-    }
-
-    /// Write raw RAM bytes (no A20 masking, no memory handlers).
-    /// Mirror of `peek_ram` for device-initiated physical writes (bus-master
-    /// DMA). Bochs `BX_MEM_C::dmaWritePhysicalPage` (memory.cc) likewise
-    /// bypasses the handler layer and writes RAM pages directly.
-    /// Writes up to `data.len()` bytes at `addr`, truncated at end of RAM.
-    pub fn poke_ram(&mut self, addr: usize, data: &[u8]) {
-        if data.is_empty() {
-            return;
-        }
-
-        let stub = &mut self.inherited_memory_stub;
-        let Some(real_addr) = stub.vector_offset.checked_add(addr) else {
-            return;
-        };
-        let ram = stub.actual_vector_mut();
-        if real_addr >= ram.len() {
-            return;
-        }
-
-        let copied_len = data.len().min(ram.len() - real_addr);
-        let end = real_addr + copied_len;
-        ram[real_addr..end].copy_from_slice(&data[..copied_len]);
-
-        // Bochs memory.cc dmaWritePhysicalPage:
-        // pageWriteStampTable.decWriteStamp(a20addr) — device writes must
-        // invalidate cached traces on every touched page. Bochs callers
-        // chunk per page; poke_ram accepts multi-page spans, so walk only
-        // the pages that actually received bytes.
-        let mut page = (addr as BxPhyAddress) & !0xFFF;
-        let last_page = ((addr + copied_len - 1) as BxPhyAddress) & !0xFFF;
-        loop {
-            stub.smc_dec_write_stamp_page(page);
-            if page >= last_page {
-                break;
-            }
-            page += 0x1000;
-        }
-    }
 
     /// Get the current A20 mask
     pub fn a20_mask(&self) -> BxPhyAddress {
         self.a20_mask
     }
 
-    /// Get mutable access to the underlying memory stub for snapshot save/restore.
-    pub fn get_stub_mut(&mut self) -> &mut BxMemoryStubC {
-        &mut self.inherited_memory_stub
-    }
 
     // ── SMC write-stamp table forwarders (table lives in the stub) ─────────
 
@@ -364,8 +456,8 @@ impl BxMemC<'_> {
 
     /// Snapshot of SMRAM control state: (available, enable/DOPEN, restricted/DCLS).
     /// Test/diagnostic accessor — the actual A0000-BFFFF routing decision is
-    /// made directly against these flags in misc_mem.rs
-    /// (get_host_mem_addr/read_physical_page/write_physical_page), untouched here.
+    /// made directly against these flags in misc_mem.rs's pin-aware host
+    /// mapping and physical read/write paths, untouched here.
     pub(crate) fn smram_state(&self) -> (bool, bool, bool) {
         (
             self.smram_available,
@@ -420,18 +512,16 @@ impl BxMemC<'_> {
 
 // implement getters and setters for memory stub
 impl BxMemoryStubC {
-    /// Reconstruct the full backing buffer as a shared slice.
-    pub(crate) fn actual_vector_slice(&self) -> &[u8] {
+    /// Reconstruct the complete owned backing slice for memory-internal
+    /// storage operations only. It is never a guest-linear RAM view.
+    pub(super) fn actual_vector_slice(&self) -> &[u8] {
         unsafe { core::slice::from_raw_parts(self.actual_vector, self.actual_vector_len) }
     }
 
-    /// Reconstruct the full backing buffer as a mutable slice.
-    pub(crate) fn actual_vector_mut(&mut self) -> &mut [u8] {
+    /// Mutable counterpart to `actual_vector_slice`, restricted to memory
+    /// internals such as ROM and resident-slot maintenance.
+    pub(super) fn actual_vector_mut(&mut self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.actual_vector, self.actual_vector_len) }
-    }
-
-    pub fn actual_vector(&mut self) -> &mut [u8] {
-        self.actual_vector_mut()
     }
 
     #[allow(clippy::mut_from_ref)]
@@ -440,29 +530,22 @@ impl BxMemoryStubC {
         &mut arr[..self.num_blocks]
     }
 
-    pub fn vector(&mut self) -> &mut [u8] {
-        let vo = self.vector_offset;
-        &mut self.actual_vector_mut()[vo..]
-    }
-
-    pub fn rom(&mut self) -> &mut [u8] {
+    pub(super) fn rom(&mut self) -> &mut [u8] {
         let ro = self.rom_offset;
         &mut self.actual_vector_mut()[ro..]
     }
 
-    pub fn bogus(&mut self) -> &mut [u8] {
+    pub(super) fn bogus(&mut self) -> &mut [u8] {
         let bo = self.bogus_offset;
         &mut self.actual_vector_mut()[bo..]
     }
 
-    pub fn apic_scratch(&mut self) -> &mut [u8] {
+    pub(super) fn apic_scratch(&mut self) -> &mut [u8] {
         &mut self.apic_scratch
     }
 
-    /// Get a mutable reference to a memory block by index
-    #[cfg(feature = "std")]
     #[allow(clippy::mut_from_ref)]
-    pub fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
+    pub(super) fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
         if let Some(Block::Block { offset }) = self.blocks_offsets().get(index) {
             let start = self.vector_offset + *offset;
             // SAFETY: We're accessing within bounds of actual_vector via interior mutability pattern
@@ -481,54 +564,251 @@ impl BxMemoryStubC {
         unsafe { &mut *self.overflow_file.get() }
     }
 }
-
 impl<'m> BxMemC<'m> {
-    pub(crate) fn get_vector<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+
+    /// Copy RAM through the checked, block-resident backing store. This bypasses
+    /// device handlers just like Bochs's physical DMA RAM path.
+    pub(crate) fn read_ram(
         &mut self,
-        cpus: &[&BxCpuC<I, T>],
+        pins: &[CpuTlbPin],
         addr: BxPhyAddress,
-    ) -> Result<&mut [u8]> {
-        self.inherited_memory_stub.get_vector(addr, cpus)
+        out: &mut [u8],
+    ) -> Result<usize> {
+        let mut copied = 0usize;
+        while copied < out.len() {
+            let logical = addr
+                .checked_add(u64::try_from(copied)?)
+                .ok_or(MemoryError::Internal("RAM read address overflow"))?;
+            let a20 = self.a20_addr(logical);
+            if memory_rusty_box::bx_is_pci_hole_addr(a20) {
+                break;
+            }
+            let Some(span) = memory_rusty_box::bx_guest_ram_span(
+                a20,
+                1,
+                self.inherited_memory_stub.len,
+            ) else {
+                break;
+            };
+            let page_left = 0x1000usize - ((a20 as usize) & 0xfff);
+            let hole_left = if a20 < memory_rusty_box::BX_PCI_HOLE_START {
+                usize::try_from(memory_rusty_box::BX_PCI_HOLE_START - a20).unwrap_or(usize::MAX)
+            } else {
+                usize::MAX
+            };
+            let chunk = {
+                let vector = match self.inherited_memory_stub.get_vector_offset(span.start, pins) {
+                    Ok(vector) => vector,
+                    Err(_) if copied != 0 => return Ok(copied),
+                    Err(error) => return Err(error),
+                };
+                let count = vector
+                    .len()
+                    .min(page_left)
+                    .min(hole_left)
+                    .min(out.len() - copied);
+                out[copied..copied + count].copy_from_slice(&vector[..count]);
+                count
+            };
+            if chunk == 0 {
+                break;
+            }
+            copied += chunk;
+        }
+        Ok(copied)
     }
 
-    pub(super) fn is_monitor<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-        cpus: &[&BxCpuC<I, T>],
-        begin_addr: BxPhyAddress,
-        len: u32,
-    ) -> bool {
-        BxMemoryStubC::is_monitor(cpus, begin_addr, len)
+    /// Copy RAM through the checked, block-resident backing store and stamp
+    /// precisely the A20-adjusted guest bytes actually committed.
+    pub(crate) fn write_ram(
+        &mut self,
+        pins: &[CpuTlbPin],
+        addr: BxPhyAddress,
+        data: &[u8],
+    ) -> Result<usize> {
+        let mut copied = 0usize;
+        while copied < data.len() {
+            let logical = addr
+                .checked_add(u64::try_from(copied)?)
+                .ok_or(MemoryError::Internal("RAM write address overflow"))?;
+            let a20 = self.a20_addr(logical);
+            if memory_rusty_box::bx_is_pci_hole_addr(a20) {
+                break;
+            }
+            let Some(span) = memory_rusty_box::bx_guest_ram_span(
+                a20,
+                1,
+                self.inherited_memory_stub.len,
+            ) else {
+                break;
+            };
+            let page_left = 0x1000usize - ((a20 as usize) & 0xfff);
+            let hole_left = if a20 < memory_rusty_box::BX_PCI_HOLE_START {
+                usize::try_from(memory_rusty_box::BX_PCI_HOLE_START - a20).unwrap_or(usize::MAX)
+            } else {
+                usize::MAX
+            };
+            let chunk = {
+                let vector = match self.inherited_memory_stub.get_vector_offset(span.start, pins) {
+                    Ok(vector) => vector,
+                    Err(_) if copied != 0 => return Ok(copied),
+                    Err(error) => return Err(error),
+                };
+                let count = vector
+                    .len()
+                    .min(page_left)
+                    .min(hole_left)
+                    .min(data.len() - copied);
+                vector[..count].copy_from_slice(&data[copied..copied + count]);
+                count
+            };
+            if chunk == 0 {
+                break;
+            }
+            self.smc_dec_write_stamp(a20, u32::try_from(chunk)?);
+            copied += chunk;
+        }
+        Ok(copied)
     }
+
+    /// Debugger physical write through the block-aware RAM path.
+    ///
+    /// Debugger writes are all-or-nothing from the debugger's perspective:
+    /// a PCI hole, out-of-range address, or short source buffer reports
+    /// failure rather than exposing a partial flat backing write.
+    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
+    pub(crate) fn dbg_set_mem(
+        &mut self,
+        pins: &[CpuTlbPin],
+        addr: BxPhyAddress,
+        len: u32,
+        buf: &[u8],
+    ) -> Result<bool> {
+        let requested = usize::try_from(len)?;
+        if buf.len() < requested {
+            return Ok(false);
+        }
+        Ok(self.write_ram(pins, addr, &buf[..requested])? == requested)
+    }
+
+    /// Compute the Bochs debugger CRC32 through fixed-size block-aware reads.
+    ///
+    /// The first PCI-hole or short/out-of-range read fails the request. This
+    /// deliberately never substitutes `0xff` bytes from a flat host backing.
+    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
+    pub(crate) fn dbg_crc32(
+        &mut self,
+        pins: &[CpuTlbPin],
+        addr1: BxPhyAddress,
+        addr2: BxPhyAddress,
+        crc: &mut u32,
+    ) -> Result<bool> {
+        let mut c = 0xFFFF_FFFFu32;
+        if addr1 > addr2 {
+            *crc = c;
+            return Ok(true);
+        }
+        let mut remaining = addr2
+            .checked_sub(addr1)
+            .and_then(|span| span.checked_add(1))
+            .ok_or(MemoryError::Internal("debugger CRC address range overflow"))?;
+        let mut addr = addr1;
+        let mut scratch = [0u8; 4096];
+        while remaining != 0 {
+            let chunk = usize::try_from(remaining.min(scratch.len() as u64))?;
+            if self.read_ram(pins, addr, &mut scratch[..chunk])? != chunk {
+                return Ok(false);
+            }
+            for &byte in &scratch[..chunk] {
+                c ^= u32::from(byte);
+                for _ in 0..8 {
+                    let mask = 0u32.wrapping_sub(c & 1);
+                    c = (c >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+            remaining -= chunk as u64;
+            if remaining != 0 {
+                addr = addr
+                    .checked_add(chunk as u64)
+                    .ok_or(MemoryError::Internal("debugger CRC address overflow"))?;
+            }
+        }
+        *crc = c;
+        Ok(true)
+    }
+
 
     pub(crate) fn get_memory_len(&self) -> usize {
         self.inherited_memory_stub.len
     }
 
-    /// Direct read access to physical RAM for debug inspection (with vector_offset applied)
-    pub(crate) fn ram_slice(&self) -> &[u8] {
+    /// Return the guest RAM base only when host backing is a full identity map.
+    ///
+    /// The null result deliberately prevents consumers from treating swapped
+    /// guest RAM as a guest-wide host slice.
+    pub(crate) fn identity_guest_base(&mut self) -> (*mut u8, usize) {
         let stub = &self.inherited_memory_stub;
-        let v = stub.actual_vector_slice();
-        &v[stub.vector_offset..]
+        if stub.allocated < stub.len
+            || stub
+                .blocks_offsets()
+                .iter()
+                .enumerate()
+                .any(|(guest_block, block)| {
+                    !matches!(
+                        block,
+                        Block::Block { offset } if *offset == guest_block * stub.block_size
+                    )
+                })
+        {
+            return (core::ptr::null_mut(), 0);
+        }
+        let ptr = unsafe { stub.actual_vector.add(stub.vector_offset) };
+        (ptr, stub.len)
     }
 
-    /// Get raw pointer to memory for direct CPU access
-    /// SAFETY: Caller must ensure the pointer is only used while memory is valid
-    pub fn get_raw_memory_ptr(&mut self) -> (*mut u8, usize) {
-        let ptr = self.inherited_memory_stub.actual_vector;
-        let len = self.inherited_memory_stub.actual_vector_len;
-        (ptr, len)
+    /// Block-logical snapshot geometry; no caller receives the host backing.
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_geometry(&self) -> MemorySnapshotGeometry {
+        self.inherited_memory_stub.snapshot_geometry()
     }
 
-    /// Get a raw pointer to physical address 0 in host memory, plus the usable RAM length.
-    ///
-    /// This accounts for `vector_offset` alignment padding, so
-    /// `returned_ptr.add(phys_addr)` gives the byte at physical address `phys_addr`.
-    ///
-    /// SAFETY: Caller must ensure the pointer is only used while memory is valid.
-    pub fn get_ram_base_ptr(&mut self) -> (*mut u8, usize) {
-        let vo = self.inherited_memory_stub.vector_offset;
-        let ptr = unsafe { self.inherited_memory_stub.actual_vector.add(vo) };
-        let len = self.inherited_memory_stub.len; // guest RAM size
-        (ptr, len)
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_residency(
+        &self,
+        guest_block: u32,
+    ) -> std::io::Result<MemorySnapshotResidency> {
+        self.inherited_memory_stub.snapshot_residency(guest_block)
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn write_snapshot_block<W: std::io::Write>(
+        &self,
+        guest_block: u32,
+        out: &mut W,
+    ) -> std::io::Result<()> {
+        self.inherited_memory_stub
+            .write_snapshot_block(guest_block, out)
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn read_snapshot_block<R: std::io::Read>(
+        &mut self,
+        guest_block: u32,
+        saved: MemorySnapshotResidency,
+        input: &mut R,
+    ) -> std::io::Result<()> {
+        self.inherited_memory_stub
+            .read_snapshot_block(guest_block, saved, input)
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn finish_snapshot_restore(
+        &mut self,
+        geometry: MemorySnapshotGeometry,
+        saved_map: &[MemorySnapshotResidency],
+    ) -> std::io::Result<()> {
+        self.inherited_memory_stub
+            .finish_snapshot_restore(geometry, saved_map)
     }
 
     /// Count how many registered (non-None) memory handlers exist (for diagnostics).
@@ -583,5 +863,608 @@ impl<'m> BxMemC<'m> {
         self.bios_rom_addr = 0xffff0000;
         self.memory_type = [[false, false]; 13];
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod phase1_tests {
+    use super::{
+        memory_rusty_box::*, BxMemC, BxMemoryStubC, CpuMemoryPolicy, CpuTlbPin, MemoryError,
+        MemorySnapshotGeometry, MemorySnapshotResidency,
+    };
+    use std::io::{self, Read, Seek, SeekFrom};
+    use crate::{
+        cpu::{
+            builder::BxCpuBuilder, core_i7_skylake::Corei7SkylakeX,
+            rusty_box::MemoryAccessType,
+        },
+        Error,
+    };
+
+    const MIB: usize = 1024 * 1024;
+
+    fn swapped_memory() -> BxMemC<'static> {
+        let mut memory = BxMemC::new(
+            BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("memory allocation"),
+            false,
+        );
+        memory.set_a20_mask(u64::MAX);
+        memory
+    }
+
+    fn snapshot_map(memory: &BxMemC<'_>) -> (MemorySnapshotGeometry, Vec<MemorySnapshotResidency>) {
+        let stub = &memory.inherited_memory_stub;
+        let geometry = stub.snapshot_geometry();
+        let mut map = Vec::with_capacity(geometry.num_blocks as usize);
+        for guest_block in 0..geometry.num_blocks {
+            map.push(stub.snapshot_residency(guest_block).unwrap());
+        }
+        (geometry, map)
+    }
+
+    struct ShortReader {
+        remaining: usize,
+    }
+
+    impl Read for ShortReader {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            let copied = self.remaining.min(out.len());
+            if copied != 0 {
+                out[..copied].fill(0xa5);
+                self.remaining -= copied;
+            }
+            Ok(copied)
+        }
+    }
+
+    #[test]
+    fn physical_ram_translation_hole_edges() {
+        assert_eq!(bx_guest_ram_span(BX_PCI_HOLE_START - 1, 1, 4 * MIB), None);
+        assert_eq!(bx_guest_ram_span(BX_PCI_HOLE_START, 0, usize::MAX).unwrap().start as u64, BX_PCI_HOLE_START);
+        assert!(bx_guest_ram_span(BX_PCI_HOLE_START, 1, usize::MAX).is_none());
+        assert_eq!(
+            bx_guest_ram_span(BX_PCI_HOLE_END, 1, 3 * 1024 * 1024 * 1024 + 1)
+                .unwrap()
+                .start,
+            3 * 1024 * 1024 * 1024
+        );
+        assert!(bx_guest_ram_span((4 * MIB - 1) as u64, 2, 4 * MIB).is_none());
+    }
+
+    #[test]
+    fn undersized_host_memory_swaps_blocks_without_alias_or_oob() {
+        let mut mem = swapped_memory();
+        assert_eq!(mem.identity_guest_base(), (core::ptr::null_mut(), 0));
+        for block in 0..4usize {
+            let value = [0x40 + block as u8];
+            assert_eq!(mem.write_ram(&[], (block * MIB) as u64, &value).unwrap(), 1);
+        }
+        for block in 0..4usize {
+            let mut value = [0];
+            assert_eq!(mem.read_ram(&[], (block * MIB) as u64, &mut value).unwrap(), 1);
+            assert_eq!(value, [0x40 + block as u8], "guest block {block}");
+        }
+    }
+
+    #[test]
+    fn sub_block_host_memory_rounds_up_one_resident_slot() {
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(4 * MIB, MIB, 2 * MIB).unwrap(),
+            false,
+        );
+        let (geometry, _) = snapshot_map(&mem);
+        assert_eq!(geometry.host_ram_len, MIB as u64);
+        assert_eq!(geometry.resident_capacity, 1);
+        assert_eq!(geometry.used_blocks, 0);
+
+        assert_eq!(mem.write_ram(&[], 0, &[0x11]).unwrap(), 1);
+        assert_eq!(mem.write_ram(&[], (2 * MIB) as u64, &[0x22]).unwrap(), 1);
+
+        let mut first = [0];
+        let mut second = [0];
+        assert_eq!(mem.read_ram(&[], 0, &mut first).unwrap(), 1);
+        assert_eq!(
+            mem.read_ram(&[], (2 * MIB) as u64, &mut second).unwrap(),
+            1
+        );
+        assert_eq!((first, second), ([0x11], [0x22]));
+    }
+
+    #[test]
+    fn undersized_host_first_touch_reads_zero_without_eof() {
+        let mut mem = swapped_memory();
+        let mut bytes = [0xff; 32];
+        assert_eq!(mem.read_ram(&[], (3 * MIB) as u64, &mut bytes).unwrap(), bytes.len());
+        assert_eq!(bytes, [0; 32]);
+    }
+
+    #[test]
+    fn block_aware_ram_copy_crosses_resident_and_swapped_blocks() {
+        let mut mem = swapped_memory();
+        let source = [0x11, 0x22, 0x33, 0x44];
+        assert_eq!(
+            mem.write_ram(&[], (MIB - 2) as u64, &source).unwrap(),
+            source.len()
+        );
+        let mut output = [0; 4];
+        assert_eq!(
+            mem.read_ram(&[], (MIB - 2) as u64, &mut output).unwrap(),
+            output.len()
+        );
+        assert_eq!(output, source);
+    }
+
+    #[test]
+    fn ram_copy_reports_out_of_range_without_partial_overflow() {
+        let mut mem = swapped_memory();
+        let data = [0xaa, 0xbb];
+        assert_eq!(mem.write_ram(&[], (4 * MIB - 1) as u64, &data).unwrap(), 1);
+        let mut last = [0];
+        assert_eq!(mem.read_ram(&[], (4 * MIB - 1) as u64, &mut last).unwrap(), 1);
+        assert_eq!(last, [0xaa]);
+    }
+
+    #[test]
+    fn block_aware_ram_copy_reapplies_a20_across_one_megabyte() {
+        let mut mem = swapped_memory();
+        mem.set_a20_mask(0xFFFF_FFFF_FFEF_FFFF);
+        assert_eq!(mem.write_ram(&[], 0x000f_fffe, &[1, 2, 3, 4]).unwrap(), 4);
+        let mut low = [0; 2];
+        let mut high = [0; 2];
+        assert_eq!(mem.read_ram(&[], 0, &mut low).unwrap(), 2);
+        assert_eq!(mem.read_ram(&[], 0x000f_fffe, &mut high).unwrap(), 2);
+        assert_eq!(low, [3, 4]);
+        assert_eq!(high, [1, 2]);
+    }
+
+    #[test]
+    fn load_ram_above_host_backing_is_complete() {
+        let mut mem = swapped_memory();
+        let data = [7, 8, 9];
+        mem.load_RAM(&[], &data, (3 * MIB) as u64).unwrap();
+        let mut output = [0; 3];
+        assert_eq!(mem.read_ram(&[], (3 * MIB) as u64, &mut output).unwrap(), 3);
+        assert_eq!(output, data);
+        assert!(matches!(
+            mem.load_RAM(&[], &[1, 2], (4 * MIB - 1) as u64),
+            Err(crate::Error::Memory(MemoryError::RamImageOutOfRange))
+        ));
+    }
+    #[test]
+    fn snapshot_streams_and_restores_swapped_guest_blocks_without_flat_ram() {
+        let mut source = BxMemC::new(
+            BxMemoryStubC::create_and_init(5 * MIB, 2 * MIB, 2 * MIB).unwrap(),
+            false,
+        );
+        source.set_a20_mask(u64::MAX);
+        source.write_ram(&[], 0, &[0x31]).unwrap();
+        source.write_ram(&[], (2 * MIB) as u64, &[0x42]).unwrap();
+        source.write_ram(&[], (4 * MIB - 1) as u64, &[0x43]).unwrap();
+        source.write_ram(&[], (4 * MIB) as u64, &[0x51]).unwrap();
+        source.write_ram(&[], (5 * MIB - 1) as u64, &[0x52]).unwrap();
+
+        let (geometry, residency) = snapshot_map(&source);
+        assert_eq!(geometry.guest_len, (5 * MIB) as u64);
+        assert_eq!(geometry.block_size, (2 * MIB) as u64);
+        assert_eq!(
+            residency,
+            vec![
+                MemorySnapshotResidency::Swapped,
+                MemorySnapshotResidency::Swapped,
+                MemorySnapshotResidency::Resident { slot: 0 },
+            ]
+        );
+
+        // Preserve block zero, then expose a sparse EOF in swapped block one.
+        // Snapshot output must include the logical zero tail, not short-read.
+        unsafe {
+            (&mut *source.inherited_memory_stub.overflow_file.get())
+                .set_len((2 * MIB + 1) as u64)
+                .unwrap();
+        }
+        let mut image = tempfile::tempfile().unwrap();
+        for guest_block in 0..geometry.num_blocks {
+            source
+                .inherited_memory_stub
+                .write_snapshot_block(guest_block, &mut image)
+                .unwrap();
+        }
+        assert_eq!(image.metadata().unwrap().len(), (5 * MIB) as u64);
+        image.seek(SeekFrom::Start(0)).unwrap();
+
+        let mut restored = BxMemC::new(
+            BxMemoryStubC::create_and_init(5 * MIB, 2 * MIB, 2 * MIB).unwrap(),
+            false,
+        );
+        restored.set_a20_mask(u64::MAX);
+        restored
+            .inherited_memory_stub
+            .actual_vector_mut()[MIB..2 * MIB]
+            .fill(0xa5);
+        for (guest_block, saved) in residency.iter().copied().enumerate() {
+            restored
+                .inherited_memory_stub
+                .read_snapshot_block(guest_block as u32, saved, &mut image)
+                .unwrap();
+        }
+        restored
+            .inherited_memory_stub
+            .finish_snapshot_restore(geometry, &residency)
+            .unwrap();
+        assert!(restored.inherited_memory_stub.actual_vector_slice()[MIB..2 * MIB]
+            .iter()
+            .all(|&byte| byte == 0));
+
+        let mut value = [0];
+        assert_eq!(restored.read_ram(&[], 0, &mut value).unwrap(), 1);
+        assert_eq!(value, [0x31]);
+        assert_eq!(
+            restored.read_ram(&[], (2 * MIB) as u64, &mut value).unwrap(),
+            1
+        );
+        assert_eq!(value, [0x42]);
+        assert_eq!(
+            restored
+                .read_ram(&[], (4 * MIB - 1) as u64, &mut value)
+                .unwrap(),
+            1
+        );
+        assert_eq!(value, [0]);
+        assert_eq!(
+            restored.read_ram(&[], (4 * MIB) as u64, &mut value).unwrap(),
+            1
+        );
+        assert_eq!(value, [0x51]);
+        assert_eq!(
+            restored
+                .read_ram(&[], (5 * MIB - 1) as u64, &mut value)
+                .unwrap(),
+            1
+        );
+        assert_eq!(value, [0x52]);
+    }
+
+    #[test]
+    fn snapshot_rejects_malformed_geometry_before_metadata_commit() {
+        let mut memory = swapped_memory();
+        let (geometry, residency) = snapshot_map(&memory);
+        let mut malformed = geometry;
+        malformed.guest_len += 1;
+
+        let error = memory
+            .inherited_memory_stub
+            .finish_snapshot_restore(malformed, &residency)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(memory.inherited_memory_stub.snapshot_geometry(), geometry);
+        assert_eq!(snapshot_map(&memory).1, residency);
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_slots_and_used_count_mismatch() {
+        let mut memory = swapped_memory();
+        let (geometry, before) = snapshot_map(&memory);
+        let duplicate_slots = [
+            MemorySnapshotResidency::Resident { slot: 0 },
+            MemorySnapshotResidency::Resident { slot: 0 },
+            MemorySnapshotResidency::Swapped,
+            MemorySnapshotResidency::Swapped,
+        ];
+        let mut duplicate_geometry = geometry;
+        duplicate_geometry.used_blocks = 2;
+        assert_eq!(
+            memory
+                .inherited_memory_stub
+                .finish_snapshot_restore(duplicate_geometry, &duplicate_slots)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(snapshot_map(&memory).1, before);
+
+        let used_count_mismatch = [
+            MemorySnapshotResidency::Resident { slot: 0 },
+            MemorySnapshotResidency::Swapped,
+            MemorySnapshotResidency::Swapped,
+            MemorySnapshotResidency::Swapped,
+        ];
+        assert_eq!(
+            memory
+                .inherited_memory_stub
+                .finish_snapshot_restore(geometry, &used_count_mismatch)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(snapshot_map(&memory).1, before);
+    }
+
+    #[test]
+    fn snapshot_rejects_sparse_unique_resident_slots() {
+        let mut memory = BxMemC::new(
+            BxMemoryStubC::create_and_init(4 * MIB, 3 * MIB, MIB).unwrap(),
+            false,
+        );
+        memory.set_a20_mask(u64::MAX);
+        let (mut geometry, before) = snapshot_map(&memory);
+        geometry.used_blocks = 2;
+        let sparse_map = [
+            MemorySnapshotResidency::Resident { slot: 0 },
+            MemorySnapshotResidency::Swapped,
+            MemorySnapshotResidency::Resident { slot: 2 },
+            MemorySnapshotResidency::Swapped,
+        ];
+
+        assert_eq!(
+            memory
+                .inherited_memory_stub
+                .finish_snapshot_restore(geometry, &sparse_map)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(snapshot_map(&memory).1, before);
+    }
+
+    #[test]
+    fn snapshot_rejects_truncated_swapped_block_input() {
+        let mut memory = swapped_memory();
+        let (geometry, before) = snapshot_map(&memory);
+        let mut input = ShortReader {
+            remaining: MIB - 1,
+        };
+        let error = memory
+            .inherited_memory_stub
+            .read_snapshot_block(0, MemorySnapshotResidency::Swapped, &mut input)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(memory.inherited_memory_stub.snapshot_geometry(), geometry);
+        assert_eq!(snapshot_map(&memory).1, before);
+    }
+
+    #[test]
+    fn typed_physical_access_crosses_subpage_guest_blocks() {
+        std::thread::Builder::new()
+            .stack_size(256 * MIB)
+            .spawn(|| {
+                let mut mem = BxMemC::new(
+                    BxMemoryStubC::create_and_init(MIB, MIB, 1024).unwrap(),
+                    false,
+                );
+                mem.set_a20_mask(u64::MAX);
+                let cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+                let pins = [CpuTlbPin::new(&*cpu)];
+                let mut written = [0x11, 0x22, 0x33, 0x44];
+                mem.write_physical_page(
+                    &pins,
+                    CpuMemoryPolicy::default(),
+                    1022,
+                    written.len(),
+                    &mut written,
+                )
+                .unwrap();
+
+                let mut read = [0; 4];
+                mem.read_physical_page(
+                    &pins,
+                    CpuMemoryPolicy::default(),
+                    1022,
+                    read.len(),
+                    &mut read,
+                )
+                .unwrap();
+                assert_eq!(read, written);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn cpu_tlb_pin_sidecar_refreshes_and_clears_without_cpu_probe() {
+        std::thread::Builder::new()
+            .stack_size(256 * MIB)
+            .spawn(|| {
+                let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+                let mut mem = BxMemC::new(
+                    BxMemoryStubC::create_and_init(MIB, MIB, MIB).unwrap(),
+                    false,
+                );
+                let pin = CpuTlbPin::new(&*cpu);
+                let pins = core::slice::from_ref(&pin);
+
+                cpu.wire_memory_access(core::ptr::NonNull::from(&mut mem), pins, &pin);
+                assert!(!pin.is_range_pinned(0x4000, 0x5000));
+
+                // A batch refresh publishes a mapping installed before the
+                // execution scope; no allocator check dereferences `cpu`.
+                let entry = &mut cpu.dtlb.entries[0];
+                entry.lpf = 0;
+                entry.host_page_addr = 0x4000;
+                cpu.refresh_tlb_pin(&pin);
+                assert!(pin.is_range_pinned(0x4000, 0x5000));
+
+                // The CPU's real invalidation path synchronously removes the
+                // slot, so stale over-pinning does not survive the scope.
+                cpu.tlb_flush();
+                assert!(!pin.is_range_pinned(0x4000, 0x5000));
+
+                cpu.clear_memory_access();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn sibling_tlb_pin_blocks_loader_eviction() {
+        std::thread::Builder::new()
+            .stack_size(256 * MIB)
+            .spawn(|| {
+                let mut mem = BxMemC::new(
+                    BxMemoryStubC::create_and_init(2 * MIB, MIB, MIB).unwrap(),
+                    false,
+                );
+                mem.set_a20_mask(u64::MAX);
+                let mut sibling = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+                mem.write_ram(&[], 0, &[0x5a]).unwrap();
+                let pins = [CpuTlbPin::new(&*sibling)];
+                let host_ptr = mem
+                    .get_host_mem_addr_pinned(
+                        0,
+                        MemoryAccessType::Read,
+                        &pins,
+                        CpuMemoryPolicy::default(),
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .as_ptr() as usize;
+                let entry = &mut sibling.dtlb.entries[0];
+                entry.lpf = 0;
+                entry.host_page_addr = host_ptr as _;
+                sibling.refresh_tlb_pin(&pins[0]);
+
+                assert!(matches!(
+                    mem.load_RAM(&pins, &[0xa5], MIB as u64),
+                    Err(Error::Memory(MemoryError::InsufficientRam))
+                ));
+                let mut retained = [0];
+                assert_eq!(mem.read_ram(&pins, 0, &mut retained).unwrap(), 1);
+                assert_eq!(retained, [0x5a]);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn pinned_cross_block_failure_returns_committed_copy_prefix() {
+        std::thread::Builder::new()
+            .stack_size(256 * MIB)
+            .spawn(|| {
+                let mut mem = BxMemC::new(
+                    BxMemoryStubC::create_and_init(2 * MIB, MIB, MIB).unwrap(),
+                    false,
+                );
+                mem.set_a20_mask(u64::MAX);
+                let start = MIB as u64 - 2;
+                assert_eq!(mem.write_ram(&[], start, &[0x11, 0x22]).unwrap(), 2);
+
+                let mut sibling = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+                let pins = [CpuTlbPin::new(&*sibling)];
+                let resident_base = mem
+                    .get_host_mem_addr_pinned(
+                        0,
+                        MemoryAccessType::Read,
+                        &pins,
+                        CpuMemoryPolicy::default(),
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .as_ptr() as usize;
+                let entry = &mut sibling.dtlb.entries[0];
+                entry.lpf = 0;
+                entry.host_page_addr = resident_base as _;
+                sibling.refresh_tlb_pin(&pins[0]);
+                assert!(pins[0].is_range_pinned(resident_base, resident_base + MIB));
+
+                let mut read = [0xcc; 4];
+                assert_eq!(mem.read_ram(&pins, start, &mut read).unwrap(), 2);
+                assert_eq!(read, [0x11, 0x22, 0xcc, 0xcc]);
+
+                assert_eq!(
+                    mem.write_ram(&pins, start, &[0x33, 0x44, 0x55, 0x66])
+                        .unwrap(),
+                    2
+                );
+                let mut committed = [0; 2];
+                assert_eq!(mem.read_ram(&pins, start, &mut committed).unwrap(), 2);
+                assert_eq!(committed, [0x33, 0x44]);
+
+                let mut unavailable = [0; 1];
+                assert!(matches!(
+                    mem.read_ram(&pins, MIB as u64, &mut unavailable),
+                    Err(Error::Memory(MemoryError::InsufficientRam))
+                ));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
+    fn debugger_reference_crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in bytes {
+            for bit in 0..8 {
+                let feedback = ((crc ^ (u32::from(byte) >> bit)) & 1) != 0;
+                crc >>= 1;
+                if feedback {
+                    crc ^= 0xEDB8_8320;
+                }
+            }
+        }
+        crc
+    }
+
+    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
+    #[test]
+    fn debugger_set_crc_cross_swapped_blocks() {
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(2 * MIB, MIB, MIB).unwrap(),
+            false,
+        );
+        mem.set_a20_mask(u64::MAX);
+
+        let start = (MIB - 47) as u64;
+        let data: Vec<u8> = (0..128).map(|byte| byte as u8 ^ 0xA5).collect();
+        assert!(mem
+            .dbg_set_mem(&[], start, data.len() as u32, &data)
+            .unwrap());
+
+        let mut copied = vec![0; data.len()];
+        assert_eq!(mem.read_ram(&[], start, &mut copied).unwrap(), data.len());
+        assert_eq!(copied, data);
+
+        let mut crc = 0;
+        assert!(mem
+            .dbg_crc32(&[], start, start + data.len() as u64 - 1, &mut crc)
+            .unwrap());
+        assert_eq!(crc, debugger_reference_crc32(&data));
+
+        let mut rejected_crc = 0xA5A5_5A5A;
+        assert!(!mem
+            .dbg_crc32(
+                &[],
+                BX_PCI_HOLE_START,
+                BX_PCI_HOLE_START,
+                &mut rejected_crc,
+            )
+            .unwrap());
+        assert_eq!(rejected_crc, 0xA5A5_5A5A);
+    }
+
+    #[test]
+    fn failed_reload_leaves_target_block_swapped_until_retry() {
+        let mut mem = swapped_memory();
+        mem.write_ram(&[], 0, &[0x5a]).unwrap();
+        unsafe {
+            (&mut *mem.inherited_memory_stub.overflow_file.get())
+                .set_len(0)
+                .unwrap();
+        }
+
+        let mut byte = [0];
+        assert!(mem.read_ram(&[], MIB as u64, &mut byte).is_err());
+        let blocks = unsafe { &*mem.inherited_memory_stub.blocks_offsets.get() };
+        assert!(matches!(blocks[1], super::Block::SwappedOut));
+
+        unsafe {
+            (&mut *mem.inherited_memory_stub.overflow_file.get())
+                .set_len((2 * MIB) as u64)
+                .unwrap();
+        }
+        assert_eq!(mem.read_ram(&[], MIB as u64, &mut byte).unwrap(), 1);
+        assert_eq!(byte, [0]);
     }
 }

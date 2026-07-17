@@ -4508,7 +4508,7 @@ mod tests {
     use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::crregs::BxCr4;
     use crate::cpu::decoder::BxSegregs;
-    use crate::memory::{BxMemC, BxMemoryStubC};
+    use crate::memory::{ BxMemC, BxMemoryStubC, CpuTlbPin };
     use std::ptr::NonNull;
 
     #[derive(Clone, Copy)]
@@ -4752,13 +4752,12 @@ mod tests {
         let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
         let mut mem = BxMemC::new(mem_stub, false);
         cpu.a20_mask = mem.a20_mask();
-        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
-        cpu.mem_ptr = Some(mem_vector);
-        cpu.mem_len = mem_len;
-        let (host_base, host_len) = mem.get_ram_base_ptr();
+        let (host_base, host_len) = mem.identity_guest_base();
+        assert!(!host_base.is_null());
         cpu.mem_host_base = host_base;
         cpu.mem_host_len = host_len;
-        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+        let pin = CpuTlbPin::new(&cpu);
+        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
 
         let mut instr = Instruction::default();
         instr.set_ia_opcode(Opcode::V256VpsadbwVdqHdqWdq);
@@ -4802,6 +4801,7 @@ mod tests {
         for qword in 4..8 {
             assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
         }
+        cpu.clear_memory_access();
     }
 
     #[test]
@@ -4810,13 +4810,12 @@ mod tests {
         let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
         let mut mem = BxMemC::new(mem_stub, false);
         cpu.a20_mask = mem.a20_mask();
-        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
-        cpu.mem_ptr = Some(mem_vector);
-        cpu.mem_len = mem_len;
-        let (host_base, host_len) = mem.get_ram_base_ptr();
+        let (host_base, host_len) = mem.identity_guest_base();
+        assert!(!host_base.is_null());
         cpu.mem_host_base = host_base;
         cpu.mem_host_len = host_len;
-        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+        let pin = CpuTlbPin::new(&cpu);
+        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
         cpu.cpu_mode = CpuMode::Long64;
 
         cpu.linaddr_width = 48;
@@ -4846,6 +4845,7 @@ mod tests {
             0x1234_0000,
             "BTS Ed,Gd in 64-bit address mode must not truncate the memory address"
         );
+        cpu.clear_memory_access();
     }
 
     #[test]
@@ -4854,13 +4854,12 @@ mod tests {
         let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
         let mut mem = BxMemC::new(mem_stub, false);
         cpu.a20_mask = mem.a20_mask();
-        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
-        cpu.mem_ptr = Some(mem_vector);
-        cpu.mem_len = mem_len;
-        let (host_base, host_len) = mem.get_ram_base_ptr();
+        let (host_base, host_len) = mem.identity_guest_base();
+        assert!(!host_base.is_null());
         cpu.mem_host_base = host_base;
         cpu.mem_host_len = host_len;
-        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+        let pin = CpuTlbPin::new(&cpu);
+        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
         cpu.cpu_mode = CpuMode::Long64;
         cpu.linaddr_width = 48;
 
@@ -4890,6 +4889,7 @@ mod tests {
             0x1200,
             "BTS Ew,Gw in 64-bit address mode must not truncate the memory address"
         );
+        cpu.clear_memory_access();
     }
 
     #[derive(Clone, Copy)]
@@ -4969,13 +4969,12 @@ mod tests {
         let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
         let mut mem = BxMemC::new(mem_stub, false);
         cpu.a20_mask = mem.a20_mask();
-        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
-        cpu.mem_ptr = Some(mem_vector);
-        cpu.mem_len = mem_len;
-        let (host_base, host_len) = mem.get_ram_base_ptr();
+        let (host_base, host_len) = mem.identity_guest_base();
+        assert!(!host_base.is_null());
         cpu.mem_host_base = host_base;
         cpu.mem_host_len = host_len;
-        cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+        let pin = CpuTlbPin::new(&cpu);
+        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
 
         let mut instr = Instruction::default();
         instr.set_ia_opcode(Opcode::VxorpsVpsHpsWps);
@@ -5016,6 +5015,7 @@ mod tests {
         for qword in 4..8 {
             assert_eq!(cpu.vmm[1].zmm64u(qword), 0, "upper qword {qword}");
         }
+        cpu.clear_memory_access();
     }
 
     #[test]
@@ -5442,13 +5442,12 @@ mod tests {
             let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
             let mut mem = BxMemC::new(mem_stub, false);
             cpu.a20_mask = mem.a20_mask();
-            let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
-            cpu.mem_ptr = Some(mem_vector);
-            cpu.mem_len = mem_len;
-            let (host_base, host_len) = mem.get_ram_base_ptr();
+            let (host_base, host_len) = mem.identity_guest_base();
+            assert!(!host_base.is_null());
             cpu.mem_host_base = host_base;
             cpu.mem_host_len = host_len;
-            cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+            let pin = CpuTlbPin::new(&cpu);
+            cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
 
             let mut instr = Instruction::default();
             instr.set_ia_opcode(opcode);
@@ -5485,6 +5484,7 @@ mod tests {
                     "{opcode:?} {form:?} upper qword {qword}"
                 );
             }
+            cpu.clear_memory_access();
         }
     }
 

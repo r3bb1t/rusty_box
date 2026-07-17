@@ -1,23 +1,16 @@
 #![allow(dead_code)]
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-use byteorder::{ByteOrder, LittleEndian};
 #[cfg(feature = "std")]
 use tempfile::tempfile;
 
-use super::{Block, BxMemoryStubC, MemoryError, Result};
-use crate::cpu::cpuid::BxCpuIdTrait;
-
+use super::{Block, BxMemoryStubC, CpuTlbPin, MemoryError, Result};
+#[cfg(feature = "std")]
+use super::{MemorySnapshotGeometry, MemorySnapshotResidency};
 use crate::config::BxPhyAddress as A20Mask;
 use crate::config::{BxPhyAddress, MAX_MEM_BLOCKS};
-use crate::cpu::cpu::BxCpuC;
 use crate::memory::memory_rusty_box::{
-    bx_is_pci_hole_addr, bx_translate_gpa_to_linear, BIOSROMSZ, EXROMSIZE,
-};
-use crate::misc::bswap::{
-    read_host_dword_to_little_endian, read_host_qword_to_little_endian,
-    read_host_word_to_little_endian, write_host_dword_to_little_endian,
-    write_host_qword_to_little_endian, write_host_word_to_little_endian,
+    bx_guest_ram_span, bx_is_pci_hole_addr, BIOSROMSZ, EXROMSIZE,
 };
 
 use core::cell::{Cell, UnsafeCell};
@@ -31,6 +24,21 @@ fn is_power_of_2(x: usize) -> bool {
 }
 
 const BX_MEM_VECTOR_ALIGN: usize = 4096;
+
+#[cfg(feature = "std")]
+const SNAPSHOT_IO_CHUNK: usize = 64 * 1024;
+
+#[cfg(feature = "std")]
+#[inline]
+fn snapshot_invalid(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+#[inline]
+fn snapshot_other(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, message)
+}
 
 #[cfg(feature = "alloc")]
 struct OwnedAlignedBuffer {
@@ -83,24 +91,6 @@ impl Drop for OwnedAlignedBuffer {
 }
 
 impl BxMemoryStubC {
-    #[cfg(feature = "alloc")]
-    pub fn alloc_vector_aligned(bytes: usize, alignment: usize) -> Result<(Vec<u8>, usize)> {
-        if !alignment.is_power_of_two() {
-            return Err(MemoryError::UnableToAllocateGuestMemory(bytes).into());
-        }
-        let test_mask = alignment - 1;
-        let actual_vector_size = bytes
-            .checked_add(test_mask)
-            .ok_or(MemoryError::UnableToAllocateGuestMemory(bytes))?;
-        let mut actual_vector = Vec::new();
-        actual_vector
-            .try_reserve_exact(actual_vector_size)
-            .map_err(|_| MemoryError::UnableToAllocateGuestMemory(actual_vector_size))?;
-        actual_vector.resize(actual_vector_size, 0);
-        let actual_vector_ptr = actual_vector.as_ptr() as usize;
-        let masked = ((actual_vector_ptr + test_mask) & !test_mask) - actual_vector_ptr;
-        Ok((actual_vector, masked))
-    }
 
     pub fn get_memory_len(&self) -> usize {
         self.len
@@ -121,9 +111,30 @@ impl BxMemoryStubC {
         if !is_power_of_2(block_size) {
             return Err(MemoryError::BlockSizeIsNotAPowerOfTwo(block_size).into());
         }
+        #[cfg(not(feature = "std"))]
+        if host < guest {
+            return Err(MemoryError::InsufficientRam.into());
+        }
 
-        let mut actual_vector =
-            OwnedAlignedBuffer::allocate(host + BIOSROMSZ + EXROMSIZE + 4096, BX_MEM_VECTOR_ALIGN)?;
+        let resident_backing_len = if host < guest {
+            host.checked_add(block_size - 1)
+                .map(|bytes| bytes & !(block_size - 1))
+                .ok_or(MemoryError::UnableToAllocateGuestMemory(host))?
+        } else {
+            host
+        };
+        if guest != 0 && resident_backing_len == 0 {
+            return Err(MemoryError::InsufficientRam.into());
+        }
+
+        let aux_len = BIOSROMSZ
+            .checked_add(EXROMSIZE)
+            .and_then(|n| n.checked_add(4096))
+            .ok_or(MemoryError::UnableToAllocateGuestMemory(host))?;
+        let total_len = resident_backing_len
+            .checked_add(aux_len)
+            .ok_or(MemoryError::UnableToAllocateGuestMemory(host))?;
+        let mut actual_vector = OwnedAlignedBuffer::allocate(total_len, BX_MEM_VECTOR_ALIGN)?;
         let vector_offset = 0;
         tracing::debug!(
             "allocated memory at {:p}. after alignment, vector={:p}, block_size = {}k",
@@ -134,30 +145,25 @@ impl BxMemoryStubC {
 
         let len = guest;
         let allocated = host;
-        let rom_offset = host;
-        let bogus_offset = host + BIOSROMSZ + EXROMSIZE;
+        let rom_offset = resident_backing_len;
+        let bogus_offset = resident_backing_len
+            .checked_add(BIOSROMSZ)
+            .and_then(|n| n.checked_add(EXROMSIZE))
+            .ok_or(MemoryError::UnableToAllocateGuestMemory(host))?;
 
-        // Initialize ROM and bogus memory with 0xFF (matching C++ memset)
         let rom_start = vector_offset + rom_offset;
-        let rom_end = rom_start + BIOSROMSZ + EXROMSIZE + 4096;
-        if rom_end <= actual_vector.len() {
-            actual_vector[rom_start..rom_end].fill(0xFF);
+        actual_vector[rom_start..].fill(0xFF);
+
+        let num_blocks = len
+            .checked_add(block_size - 1)
+            .ok_or(MemoryError::UnableToAllocateGuestMemory(len))?
+            / block_size;
+        if num_blocks > MAX_MEM_BLOCKS {
+            return Err(MemoryError::UnableToAllocateGuestMemory(len).into());
         }
-
-        assert!((len / block_size) <= 0xffffffff);
-
-        let num_blocks = len / block_size;
-        assert!(
-            num_blocks <= MAX_MEM_BLOCKS,
-            "num_blocks {} exceeds MAX_MEM_BLOCKS",
-            num_blocks
-        );
         tracing::debug!("{}MB", len / (1024 * 1024));
         tracing::debug!("mem block size = {:8X}, blocks={}", block_size, num_blocks);
 
-        // Complete every fallible auxiliary allocation while `actual_vector`
-        // still owns its buffer. After the raw `Self` allocation below there
-        // are no error exits that could leak either allocation.
         let mut smc_stamps = Vec::new();
         smc_stamps
             .try_reserve_exact(crate::cpu::icache::SMC_STAMP_ENTRIES)
@@ -168,9 +174,13 @@ impl BxMemoryStubC {
             })?;
         smc_stamps.resize(crate::cpu::icache::SMC_STAMP_ENTRIES, 0u32);
         #[cfg(feature = "std")]
-        let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
-
-        // Allocate BxMemoryStubC on the heap to avoid stack overflow.
+        let overflow_file = {
+            let file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
+            if host < guest {
+                file.set_len(u64::try_from(guest).map_err(|_| MemoryError::InsufficientRam)?)?;
+            }
+            file
+        };
         // blocks_offsets is 262KB — too large for UEFI's 128KB stack.
         let layout = alloc::alloc::Layout::new::<Self>();
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut Self;
@@ -187,6 +197,7 @@ impl BxMemoryStubC {
             core::ptr::addr_of_mut!((*ptr).actual_vector_layout).write(Some(actual_vector_layout));
             core::ptr::addr_of_mut!((*ptr).len).write(len);
             core::ptr::addr_of_mut!((*ptr).allocated).write(allocated);
+            core::ptr::addr_of_mut!((*ptr).resident_backing_len).write(resident_backing_len);
             core::ptr::addr_of_mut!((*ptr).block_size).write(block_size);
             core::ptr::addr_of_mut!((*ptr).num_blocks).write(num_blocks);
             core::ptr::addr_of_mut!((*ptr).vector_offset).write(vector_offset);
@@ -194,9 +205,20 @@ impl BxMemoryStubC {
             core::ptr::addr_of_mut!((*ptr).bogus_offset).write(bogus_offset);
             // Initialize blocks to SwappedOut in-place on heap
             let blocks = &mut *(*ptr).blocks_offsets.get();
-            for b in blocks.iter_mut().take(num_blocks) {
-                *b = Block::SwappedOut;
+            if allocated >= len {
+                for (guest_block, entry) in blocks.iter_mut().take(num_blocks).enumerate() {
+                    *entry = Block::Block {
+                        offset: guest_block * block_size,
+                    };
+                }
+                core::ptr::addr_of_mut!((*ptr).used_blocks).write(Cell::new(num_blocks));
+            } else {
+                for entry in blocks.iter_mut().take(num_blocks) {
+                    *entry = Block::SwappedOut;
+                }
+                core::ptr::addr_of_mut!((*ptr).used_blocks).write(Cell::new(0));
             }
+            core::ptr::addr_of_mut!((*ptr).next_swapout_idx).write(Cell::new(0));
             #[cfg(feature = "std")]
             core::ptr::addr_of_mut!((*ptr).overflow_file).write(UnsafeCell::new(overflow_file));
             // Machine-wide SMC write-stamp table (Bochs icache.h
@@ -215,8 +237,8 @@ impl BxMemoryStubC {
     /// Create a memory stub from an externally-provided buffer (no-alloc path).
     ///
     /// # Safety
-    /// `ptr` must point to a valid, exclusively-owned buffer of at least `len` bytes
-    /// that remains valid for the lifetime of this struct.
+    /// `ptr` must be a non-null, 4096-byte-aligned, valid, exclusively-owned
+    /// buffer of `len` bytes that outlives the returned stub.
     pub unsafe fn create_from_raw(
         ptr: *mut u8,
         len: usize,
@@ -224,20 +246,60 @@ impl BxMemoryStubC {
         host: usize,
         block_size: usize,
     ) -> Result<Self> {
-        let vector_offset = 0; // caller is responsible for alignment
-        let rom_offset = host;
-        let bogus_offset = host + BIOSROMSZ + EXROMSIZE;
-        let num_blocks = guest / block_size;
-        assert!(
-            num_blocks <= MAX_MEM_BLOCKS,
-            "num_blocks {} exceeds MAX_MEM_BLOCKS",
-            num_blocks
-        );
+        if !is_power_of_2(block_size) {
+            return Err(MemoryError::BlockSizeIsNotAPowerOfTwo(block_size).into());
+        }
+        #[cfg(not(feature = "std"))]
+        if host < guest {
+            return Err(MemoryError::InsufficientRam.into());
+        }
+        if ptr.is_null() || (ptr as usize & (BX_MEM_VECTOR_ALIGN - 1)) != 0 {
+            return Err(MemoryError::Internal("raw memory must be 4K aligned").into());
+        }
+        let resident_backing_len = if host < guest {
+            host.checked_add(block_size - 1)
+                .map(|bytes| bytes & !(block_size - 1))
+                .ok_or(MemoryError::UnableToAllocateGuestMemory(host))?
+        } else {
+            host
+        };
+        if guest != 0 && resident_backing_len == 0 {
+            return Err(MemoryError::InsufficientRam.into());
+        }
+
+        let aux_len = BIOSROMSZ
+            .checked_add(EXROMSIZE)
+            .and_then(|n| n.checked_add(4096))
+            .ok_or(MemoryError::UnableToAllocateGuestMemory(host))?;
+        if len
+            < resident_backing_len
+                .checked_add(aux_len)
+                .ok_or(MemoryError::UnableToAllocateGuestMemory(host))?
+        {
+            return Err(MemoryError::UnableToAllocateGuestMemory(host).into());
+        }
+        let vector_offset = 0;
+        let rom_offset = resident_backing_len;
+        let bogus_offset = resident_backing_len
+            .checked_add(BIOSROMSZ)
+            .and_then(|n| n.checked_add(EXROMSIZE))
+            .ok_or(MemoryError::UnableToAllocateGuestMemory(host))?;
+        let num_blocks = guest
+            .checked_add(block_size - 1)
+            .ok_or(MemoryError::UnableToAllocateGuestMemory(guest))?
+            / block_size;
+        if num_blocks > MAX_MEM_BLOCKS {
+            return Err(MemoryError::UnableToAllocateGuestMemory(guest).into());
+        }
 
         #[cfg(feature = "std")]
-        let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
-        // Machine-wide SMC write-stamp table (Bochs icache.h
-        // bxPageWriteStampTable ctor allocates + resetWriteStamps).
+        let overflow_file = {
+            let file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
+            if host < guest {
+                file.set_len(u64::try_from(guest).map_err(|_| MemoryError::InsufficientRam)?)?;
+            }
+            file
+        };
         #[cfg(feature = "alloc")]
         let smc_stamps = {
             let mut v = Vec::new();
@@ -252,19 +314,31 @@ impl BxMemoryStubC {
         };
         #[cfg(not(feature = "alloc"))]
         let smc_stamps = [0u32; crate::cpu::icache::SMC_STAMP_ENTRIES];
+        let mut blocks = [Block::SwappedOut; MAX_MEM_BLOCKS];
+        let used_blocks = if host >= guest {
+            for (guest_block, entry) in blocks.iter_mut().take(num_blocks).enumerate() {
+                *entry = Block::Block {
+                    offset: guest_block * block_size,
+                };
+            }
+            num_blocks
+        } else {
+            0
+        };
         Ok(Self {
             actual_vector: ptr,
             actual_vector_len: len,
             actual_vector_layout: None,
             len: guest,
             allocated: host,
+            resident_backing_len,
             block_size,
-            blocks_offsets: UnsafeCell::new([Block::SwappedOut; MAX_MEM_BLOCKS]),
+            blocks_offsets: UnsafeCell::new(blocks),
             num_blocks,
             vector_offset,
             rom_offset,
             bogus_offset,
-            used_blocks: Cell::new(0),
+            used_blocks: Cell::new(used_blocks),
             smc_stamps,
             smc_pending: [crate::cpu::icache::PendingSmc::default();
                 crate::cpu::icache::SMC_PENDING_CAP],
@@ -390,365 +464,548 @@ impl BxMemoryStubC {
         self.smc_pending_len = 0;
     }
 
-    pub(super) fn get_vector<
-        'a,
-        I: BxCpuIdTrait,
-        T: crate::cpu::instrumentation::Instrumentation,
-    >(
-        &'a mut self,
-        addr: BxPhyAddress,
-        _cpus: &[&BxCpuC<'_, I, T>],
-    ) -> Result<&'a mut [u8]> {
-        // Memory is contiguous in actual_vector[vector_offset..].
-        // Use the full physical address as the index into the flat memory view.
-        //
-        // BUG FIX: The old code used `addr & (block_size - 1)` (within-block offset)
-        // which mapped ALL addresses to block 0's range. For example, a write to
-        // physical 0x9FF00 with block_size=128KB would go to offset 0x1FF00 instead
-        // of the correct 0x9FF00. This caused the BIOS IPL table (at 0x9FF00) to be
-        // written to the wrong address, and any data above 128KB to be misplaced.
-        let addr_usize = addr as usize;
-        let vo = self.vector_offset;
-        let bo = self.bogus_offset;
-        let ptr = self.actual_vector;
-        let len = self.actual_vector_len;
-        let start = vo + addr_usize;
-        // SAFETY: actual_vector is valid for actual_vector_len bytes (invariant of the struct)
-        let av = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-        if start < av.len() {
-            Ok(&mut av[start..])
+    #[cfg(feature = "std")]
+    fn snapshot_expected_num_blocks(&self) -> std::io::Result<usize> {
+        let last_byte = self
+            .block_size
+            .checked_sub(1)
+            .ok_or_else(|| snapshot_invalid("snapshot block size is zero"))?;
+        self.len
+            .checked_add(last_byte)
+            .ok_or_else(|| snapshot_invalid("snapshot block count overflow"))
+            .map(|bytes| bytes / self.block_size)
+    }
+
+    #[cfg(feature = "std")]
+    #[inline]
+    fn snapshot_resident_capacity(&self) -> usize {
+        // Full backing has an identity resident entry for every logical guest
+        // block, including a partial final block. Swapped backing may use only
+        // complete host slots because eviction always exchanges a full block.
+        if self.allocated >= self.len {
+            self.num_blocks
         } else {
-            Ok(&mut av[bo..])
+            (self.resident_backing_len / self.block_size).min(self.num_blocks)
         }
     }
 
     #[cfg(feature = "std")]
-    fn read_block(&self, block: usize) -> Result<()> {
-        let block_address = block * self.block_size;
-        let chosen_block = self.block_by_index(block).ok_or(MemoryError::Internal(
-            "block_by_index returned None during read",
-        ))?;
-        let overflow_file = self.overflow_file_mut();
+    fn snapshot_logical_block_len(&self, guest_block: usize) -> std::io::Result<usize> {
+        if guest_block >= self.num_blocks {
+            return Err(snapshot_invalid("snapshot guest block is out of range"));
+        }
+        let start = guest_block
+            .checked_mul(self.block_size)
+            .ok_or_else(|| snapshot_invalid("snapshot guest block offset overflow"))?;
+        if start >= self.len {
+            return Err(snapshot_invalid("snapshot guest block starts beyond guest RAM"));
+        }
+        Ok((self.len - start).min(self.block_size))
+    }
 
-        overflow_file.seek(SeekFrom::Start(block_address.try_into()?))?;
-        overflow_file.read_exact(chosen_block)?;
+    #[cfg(feature = "std")]
+    fn snapshot_slot_offset(&self, slot: usize, logical_len: usize) -> std::io::Result<usize> {
+        if slot >= self.snapshot_resident_capacity() {
+            return Err(snapshot_invalid("snapshot resident slot is out of range"));
+        }
+        if logical_len > self.block_size {
+            return Err(snapshot_invalid("snapshot logical block exceeds slot"));
+        }
+        let offset = slot
+            .checked_mul(self.block_size)
+            .ok_or_else(|| snapshot_invalid("snapshot resident slot offset overflow"))?;
+        let end = offset
+            .checked_add(logical_len)
+            .ok_or_else(|| snapshot_invalid("snapshot resident slot length overflow"))?;
+        if end > self.resident_backing_len {
+            return Err(snapshot_invalid("snapshot resident slot exceeds host backing"));
+        }
+        self.vector_offset
+            .checked_add(end)
+            .filter(|end| *end <= self.actual_vector_len)
+            .ok_or_else(|| snapshot_invalid("snapshot resident slot exceeds backing buffer"))?;
+        Ok(offset)
+    }
 
+    #[cfg(feature = "std")]
+    fn snapshot_resident_block(&self, slot: usize, len: usize) -> std::io::Result<&[u8]> {
+        let offset = self.snapshot_slot_offset(slot, len)?;
+        let start = self
+            .vector_offset
+            .checked_add(offset)
+            .ok_or_else(|| snapshot_invalid("snapshot resident block offset overflow"))?;
+        Ok(unsafe { core::slice::from_raw_parts(self.actual_vector.add(start), len) })
+    }
+
+    #[cfg(feature = "std")]
+    fn snapshot_resident_block_mut(
+        &mut self,
+        slot: usize,
+        len: usize,
+    ) -> std::io::Result<&mut [u8]> {
+        let offset = self.snapshot_slot_offset(slot, len)?;
+        let start = self
+            .vector_offset
+            .checked_add(offset)
+            .ok_or_else(|| snapshot_invalid("snapshot resident block offset overflow"))?;
+        Ok(unsafe { core::slice::from_raw_parts_mut(self.actual_vector.add(start), len) })
+    }
+    /// Return the configured block geometry without exposing host backing.
+    #[cfg(feature = "std")]
+    pub(super) fn snapshot_geometry(&self) -> MemorySnapshotGeometry {
+        MemorySnapshotGeometry {
+            guest_len: self.len as u64,
+            host_ram_len: self.allocated as u64,
+            block_size: self.block_size as u64,
+            num_blocks: self.num_blocks as u32,
+            resident_capacity: self.snapshot_resident_capacity() as u32,
+            used_blocks: self.used_blocks.get() as u32,
+            next_swapout_guest_block: self.next_swapout_idx.get() as u32,
+        }
+    }
+
+    /// Describe one guest block's current backing without making it resident.
+    #[cfg(feature = "std")]
+    pub(super) fn snapshot_residency(
+        &self,
+        guest_block: u32,
+    ) -> std::io::Result<MemorySnapshotResidency> {
+        let guest_block = usize::try_from(guest_block)
+            .map_err(|_| snapshot_invalid("snapshot guest block conversion failed"))?;
+        let logical_len = self.snapshot_logical_block_len(guest_block)?;
+        match self.blocks_offsets()[guest_block] {
+            Block::SwappedOut => Ok(MemorySnapshotResidency::Swapped),
+            Block::Block { offset } => {
+                if offset % self.block_size != 0 {
+                    return Err(snapshot_invalid("snapshot resident block offset is unaligned"));
+                }
+                let slot = offset / self.block_size;
+                self.snapshot_slot_offset(slot, logical_len)?;
+                Ok(MemorySnapshotResidency::Resident {
+                    slot: u32::try_from(slot)
+                        .map_err(|_| snapshot_invalid("snapshot resident slot conversion failed"))?,
+                })
+            }
+        }
+    }
+
+    /// Stream one logical guest block in GPA order without changing residency.
+    #[cfg(feature = "std")]
+    pub(super) fn write_snapshot_block<W: Write>(
+        &self,
+        guest_block: u32,
+        out: &mut W,
+    ) -> std::io::Result<()> {
+        let guest_block = usize::try_from(guest_block)
+            .map_err(|_| snapshot_invalid("snapshot guest block conversion failed"))?;
+        let logical_len = self.snapshot_logical_block_len(guest_block)?;
+        match self.snapshot_residency(
+            u32::try_from(guest_block)
+                .map_err(|_| snapshot_invalid("snapshot guest block conversion failed"))?,
+        )? {
+            MemorySnapshotResidency::Resident { slot } => {
+                let slot = usize::try_from(slot)
+                    .map_err(|_| snapshot_invalid("snapshot resident slot conversion failed"))?;
+                out.write_all(self.snapshot_resident_block(slot, logical_len)?)
+            }
+            MemorySnapshotResidency::Swapped => {
+                let offset = guest_block
+                    .checked_mul(self.block_size)
+                    .ok_or_else(|| snapshot_invalid("snapshot overflow offset overflow"))?;
+                // Keep the UnsafeCell-backed file borrow shorter than the
+                // caller-controlled writer callback. Every chunk seeks by
+                // absolute guest-block offset, so dropping the file borrow
+                // between chunks cannot affect stream order.
+                let mut scratch = [0u8; SNAPSHOT_IO_CHUNK];
+                let mut remaining = logical_len;
+                while remaining != 0 {
+                    let chunk_len = remaining.min(scratch.len());
+                    let chunk_offset = offset
+                        .checked_add(logical_len - remaining)
+                        .ok_or_else(|| snapshot_invalid("snapshot overflow offset overflow"))?;
+                    {
+                        let file = self.overflow_file_mut();
+                        file.seek(SeekFrom::Start(
+                            u64::try_from(chunk_offset).map_err(|_| {
+                                snapshot_invalid("snapshot overflow offset conversion failed")
+                            })?,
+                        ))?;
+                        let mut read = 0;
+                        while read != chunk_len {
+                            let count = file.read(&mut scratch[read..chunk_len])?;
+                            if count == 0 {
+                                scratch[read..chunk_len].fill(0);
+                                break;
+                            }
+                            read += count;
+                        }
+                    }
+                    out.write_all(&scratch[..chunk_len])?;
+                    remaining -= chunk_len;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Restore one logical guest block to its saved slot or overflow extent.
+    ///
+    /// The block map itself remains untouched until `finish_snapshot_restore`
+    /// has validated all descriptors and the complete transfer succeeds.
+    #[cfg(feature = "std")]
+    pub(super) fn read_snapshot_block<R: Read>(
+        &mut self,
+        guest_block: u32,
+        saved: MemorySnapshotResidency,
+        input: &mut R,
+    ) -> std::io::Result<()> {
+        let guest_block = usize::try_from(guest_block)
+            .map_err(|_| snapshot_invalid("snapshot guest block conversion failed"))?;
+        let logical_len = self.snapshot_logical_block_len(guest_block)?;
+        match saved {
+            MemorySnapshotResidency::Resident { slot } => {
+                let slot = usize::try_from(slot)
+                    .map_err(|_| snapshot_invalid("snapshot resident slot conversion failed"))?;
+                input.read_exact(self.snapshot_resident_block_mut(slot, logical_len)?)
+            }
+            MemorySnapshotResidency::Swapped => {
+                let offset = guest_block
+                    .checked_mul(self.block_size)
+                    .ok_or_else(|| snapshot_invalid("snapshot overflow offset overflow"))?;
+                let mut scratch = [0u8; SNAPSHOT_IO_CHUNK];
+                let mut remaining = logical_len;
+                while remaining != 0 {
+                    let chunk_len = remaining.min(scratch.len());
+                    input.read_exact(&mut scratch[..chunk_len])?;
+                    let chunk_offset = offset
+                        .checked_add(logical_len - remaining)
+                        .ok_or_else(|| snapshot_invalid("snapshot overflow offset overflow"))?;
+                    {
+                        let file = self.overflow_file_mut();
+                        file.seek(SeekFrom::Start(
+                            u64::try_from(chunk_offset).map_err(|_| {
+                                snapshot_invalid("snapshot overflow offset conversion failed")
+                            })?,
+                        ))?;
+                        file.write_all(&scratch[..chunk_len])?;
+                    }
+                    remaining -= chunk_len;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Validate and atomically install snapshot residency metadata.
+    #[cfg(feature = "std")]
+    pub(super) fn finish_snapshot_restore(
+        &mut self,
+        geometry: MemorySnapshotGeometry,
+        saved_map: &[MemorySnapshotResidency],
+    ) -> std::io::Result<()> {
+        let expected_num_blocks = self.snapshot_expected_num_blocks()?;
+        let resident_capacity = self.snapshot_resident_capacity();
+        if geometry.guest_len != self.len as u64
+            || geometry.host_ram_len != self.allocated as u64
+            || geometry.block_size != self.block_size as u64
+            || usize::try_from(geometry.num_blocks)
+                .map_err(|_| snapshot_invalid("snapshot block count conversion failed"))?
+                != expected_num_blocks
+            || self.num_blocks != expected_num_blocks
+            || usize::try_from(geometry.resident_capacity)
+                .map_err(|_| snapshot_invalid("snapshot resident capacity conversion failed"))?
+                != resident_capacity
+            || saved_map.len() != expected_num_blocks
+        {
+            return Err(snapshot_invalid("snapshot memory geometry does not match machine"));
+        }
+
+        let used_blocks = usize::try_from(geometry.used_blocks)
+            .map_err(|_| snapshot_invalid("snapshot used block count conversion failed"))?;
+        if used_blocks > resident_capacity || used_blocks > expected_num_blocks {
+            return Err(snapshot_invalid("snapshot used block count is out of range"));
+        }
+
+        let next_swapout = usize::try_from(geometry.next_swapout_guest_block)
+            .map_err(|_| snapshot_invalid("snapshot swap cursor conversion failed"))?;
+        if (expected_num_blocks == 0 && next_swapout != 0)
+            || (expected_num_blocks != 0 && next_swapout >= expected_num_blocks)
+        {
+            return Err(snapshot_invalid("snapshot swap cursor is out of range"));
+        }
+
+        // Descriptor storage is O(number of blocks), never O(guest RAM).
+        // Allocate only while validating; byte streaming itself is fixed-size.
+        let mut seen_slots = std::vec::Vec::new();
+        seen_slots
+            .try_reserve_exact(resident_capacity)
+            .map_err(|_| snapshot_other("unable to validate snapshot resident slots"))?;
+        seen_slots.resize(resident_capacity, false);
+
+        let mut resident_count = 0usize;
+        for (guest_block, &saved) in saved_map.iter().enumerate() {
+            if let MemorySnapshotResidency::Resident { slot } = saved {
+                let slot = usize::try_from(slot)
+                    .map_err(|_| snapshot_invalid("snapshot resident slot conversion failed"))?;
+                self.snapshot_slot_offset(slot, self.snapshot_logical_block_len(guest_block)?)?;
+                let seen = seen_slots
+                    .get_mut(slot)
+                    .ok_or_else(|| snapshot_invalid("snapshot resident slot is out of range"))?;
+                if *seen {
+                    return Err(snapshot_invalid("snapshot resident slots are not unique"));
+                }
+                *seen = true;
+                resident_count += 1;
+            }
+        }
+        if resident_count != used_blocks
+            || seen_slots[..used_blocks].iter().any(|seen| !seen)
+        {
+            return Err(snapshot_invalid(
+                "snapshot resident slots do not form a dense used prefix",
+            ));
+        }
+
+        // Flush all transferred swapped bytes before changing ownership.
+        self.overflow_file_mut().flush()?;
+
+        // A partial final guest block never makes physical tail bytes
+        // architectural. Fully backed RAM can have no tail at all, so clear
+        // only the bytes that actually exist in its resident slot.
+        if let Some(MemorySnapshotResidency::Resident { slot }) = saved_map.last().copied() {
+            let final_len = self.snapshot_logical_block_len(expected_num_blocks - 1)?;
+            if final_len < self.block_size {
+                let slot = usize::try_from(slot)
+                    .map_err(|_| snapshot_invalid("snapshot resident slot conversion failed"))?;
+                let slot_offset = self.snapshot_slot_offset(slot, final_len)?;
+                let tail_start_offset = slot_offset
+                    .checked_add(final_len)
+                    .ok_or_else(|| snapshot_invalid("snapshot final slot tail overflow"))?;
+                let tail_len = self
+                    .resident_backing_len
+                    .saturating_sub(tail_start_offset)
+                    .min(self.block_size - final_len);
+                if tail_len != 0 {
+                    let tail_start = self
+                        .vector_offset
+                        .checked_add(tail_start_offset)
+                        .ok_or_else(|| snapshot_invalid("snapshot final slot tail overflow"))?;
+                    unsafe {
+                        core::slice::from_raw_parts_mut(self.actual_vector.add(tail_start), tail_len)
+                    }
+                    .fill(0);
+                }
+            }
+        }
+
+        // Commit only after every descriptor, byte transfer, and overflow flush
+        // succeeded. ROM, bogus/APIC scratch, padding, and CPU TLB pointers are
+        // intentionally outside this block-logical state.
+        for (guest_block, saved) in saved_map.iter().copied().enumerate() {
+            self.blocks_offsets()[guest_block] = match saved {
+                MemorySnapshotResidency::Swapped => Block::SwappedOut,
+                MemorySnapshotResidency::Resident { slot } => Block::Block {
+                    offset: usize::try_from(slot)
+                        .map_err(|_| snapshot_invalid("snapshot resident slot conversion failed"))?
+                        * self.block_size,
+                },
+            };
+        }
+        self.used_blocks.set(used_blocks);
+        self.next_swapout_idx.set(next_swapout);
+        self.smc_stamps.fill(0);
+        self.smc_pending.fill(crate::cpu::icache::PendingSmc::default());
+        self.smc_pending_len = 0;
+        self.smc_seq_next = 0;
+        self.smc_overflow_seq = 0;
         Ok(())
     }
 
-    pub fn allocate_block<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-        &self,
-        block: usize,
-        cpus: &[&BxCpuC<'_, I, T>],
-    ) -> Result<()> {
-        // Without std, block swapping to overflow file is unavailable.
-        // The params are used in the std path below.
+    /// Return the resident host slice for an already translated guest-RAM
+    /// offset. The slice never crosses a guest block.
+    pub(super) fn get_vector_offset<'a>(
+        &'a mut self,
+        addr: usize,
+        pins: &[CpuTlbPin],
+    ) -> Result<&'a mut [u8]> {
+        if addr >= self.len {
+            return Err(MemoryError::Internal("translated RAM offset out of range").into());
+        }
+        let guest_block = addr / self.block_size;
+        if matches!(self.blocks_offsets()[guest_block], Block::SwappedOut) {
+            self.allocate_block(guest_block, pins)?;
+        }
+        let Block::Block { offset } = self.blocks_offsets()[guest_block] else {
+            return Err(MemoryError::Internal("allocated block is not resident").into());
+        };
+        let within = addr & (self.block_size - 1);
+        let start = self
+            .vector_offset
+            .checked_add(offset)
+            .and_then(|n| n.checked_add(within))
+            .ok_or(MemoryError::Internal("resident block offset overflow"))?;
+        let remaining = (self.block_size - within).min(self.len - addr);
+        Ok(unsafe { core::slice::from_raw_parts_mut(self.actual_vector.add(start), remaining) })
+    }
+
+
+    #[inline]
+    fn logical_block_len(&self, block: usize) -> usize {
+        self.len
+            .saturating_sub(block * self.block_size)
+            .min(self.block_size)
+    }
+
+    #[cfg(feature = "std")]
+    fn read_block_into(&self, block: usize, slot_offset: usize) -> Result<()> {
+        let logical_len = self.logical_block_len(block);
+        let slot_end = slot_offset
+            .checked_add(self.block_size)
+            .ok_or(MemoryError::Internal("resident slot overflow"))?;
+        if slot_end > self.resident_backing_len {
+            return Err(MemoryError::Internal("resident slot outside host backing").into());
+        }
+        let chosen = unsafe {
+            core::slice::from_raw_parts_mut(
+                self.actual_vector.add(self.vector_offset + slot_offset),
+                self.block_size,
+            )
+        };
+        chosen.fill(0);
+        let offset = block
+            .checked_mul(self.block_size)
+            .ok_or(MemoryError::Internal("overflow file offset overflow"))?;
+        let file = self.overflow_file_mut();
+        file.seek(SeekFrom::Start(u64::try_from(offset)?))
+            .map_err(|e| MemoryError::CantSeekToAddressOverflowFile(offset, e))?;
+        file.read_exact(&mut chosen[..logical_len])?;
+        Ok(())
+    }
+
+    pub(crate) fn allocate_block(&self, block: usize, pins: &[CpuTlbPin]) -> Result<()> {
+        if block >= self.num_blocks {
+            return Err(MemoryError::Internal("guest block out of range").into());
+        }
+        if !matches!(self.blocks_offsets()[block], Block::SwappedOut) {
+            return Ok(());
+        }
         #[cfg(not(feature = "std"))]
-        let _ = (block, &cpus);
+        {
+            let _ = pins;
+            return Err(MemoryError::InsufficientRam.into());
+        }
         #[cfg(feature = "std")]
         {
-            let max_blocks = self.allocated / self.block_size;
+            let capacity = self.resident_backing_len / self.block_size;
+            if capacity == 0 {
+                return Err(MemoryError::InsufficientRam.into());
+            }
             let used_blocks = self.used_blocks.get();
-            if used_blocks >= max_blocks {
-                let original_replacement_block = self.next_swapout_idx.get();
-                // Find a block to replace
-                let mut used_for_tlb: bool;
-                let mut buffer;
-                loop {
-                    loop {
-                        // Just increment 'next_swapout_idx' before comparison
-                        {
-                            let current_next_swapout_idx = self.next_swapout_idx.get();
-                            self.next_swapout_idx.set(current_next_swapout_idx + 1);
-                        }
-                        if self.next_swapout_idx.get() == self.len / self.block_size {
-                            self.next_swapout_idx.set(0);
-                        }
-
-                        if self.next_swapout_idx.get() == original_replacement_block {
-                            return Err(MemoryError::InsufficientRam.into());
-                        }
-                        //let current_block = self.block_by_index(self.next_swapout_idx.get());
-                        buffer = Block::Block {
-                            offset: self.next_swapout_idx.get(),
-                        };
-                        if buffer == Block::SwappedOut {
-                            break;
-                        }
-                    }
-
-                    used_for_tlb = false;
-
-                    let (buffer_offset, buffer_end) = {
-                        let Block::Block { offset } = buffer else {
-                            unreachable!("expected Block::Block variant for allocated memory")
-                        };
-                        (offset, offset + self.block_size)
+            let (slot_offset, victim, uses_new_slot) = if used_blocks < capacity {
+                (used_blocks * self.block_size, None, true)
+            } else {
+                let mut selected = None;
+                for _ in 0..self.num_blocks {
+                    let guest = self.next_swapout_idx.get();
+                    self.next_swapout_idx.set((guest + 1) % self.num_blocks);
+                    let Block::Block { offset } = self.blocks_offsets()[guest] else {
+                        continue;
                     };
-
-                    for cpu in cpus {
-                        used_for_tlb = cpu.check_addr_in_tlb_buffers(buffer_offset, buffer_end);
-                    }
-
-                    if !used_for_tlb {
+                    let start = unsafe { self.actual_vector.add(self.vector_offset + offset) }
+                        as usize;
+                    if !pins
+                        .iter()
+                        .any(|pin| pin.is_range_pinned(start, start + self.block_size))
+                    {
+                        selected = Some((guest, offset));
                         break;
                     }
                 }
-
-                let address: usize = self.next_swapout_idx.get() + self.block_size;
-
-                // Write swapped out block
-                let overflow_file = &mut self.overflow_file_mut();
-                overflow_file
-                    // FIXME: don't unwrap
-                    .seek(SeekFrom::Start(address as u64))
-                    .map_err(|e| MemoryError::CantSeekToAddressOverflowFile(address, e))?;
-
-                overflow_file
-                    .write_all(self.block_by_index(self.next_swapout_idx.get()).ok_or(
-                        MemoryError::Internal("block_by_index returned None during swap-out"),
-                    )?)
-                    .map_err(|e| MemoryError::FailedToWriteToOverflowFIle(address, e))?;
-
-                // Mark swapped out block
-                self.blocks_offsets()[self.next_swapout_idx.get()] = Block::SwappedOut;
-                // TODO: Continue here
-                self.blocks_offsets()[block] = buffer;
-
-                self.read_block(block)?;
-                tracing::trace!(
-                    "allocate_block: block={:#x}, replaced {:#x}",
-                    block,
-                    self.next_swapout_idx.get()
-                )
+                let (guest, offset) = selected.ok_or(MemoryError::InsufficientRam)?;
+                (offset, Some(guest), false)
+            };
+            if let Some(victim_guest) = victim {
+                let logical_len = self.logical_block_len(victim_guest);
+                let file_offset = victim_guest
+                    .checked_mul(self.block_size)
+                    .ok_or(MemoryError::Internal("overflow file offset overflow"))?;
+                let victim_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        self.actual_vector.add(self.vector_offset + slot_offset),
+                        logical_len,
+                    )
+                };
+                let file = self.overflow_file_mut();
+                file.seek(SeekFrom::Start(u64::try_from(file_offset)?))
+                    .map_err(|e| MemoryError::CantSeekToAddressOverflowFile(file_offset, e))?;
+                file.write_all(victim_bytes)
+                    .map_err(|e| MemoryError::FailedToWriteToOverflowFIle(file_offset, e))?;
             }
-        }
-
-        Ok(())
-    }
-
-    pub fn dbg_fetch_mem<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-        &mut self,
-        _cpu: BxCpuC<I, T>,
-        addr: BxPhyAddress,
-        mut len: u32,
-        buf: &mut [u8],
-        cpus: &[&BxCpuC<I, T>],
-        a20_mask: A20Mask,
-    ) -> Result<bool> {
-        let mut a20_addr: BxPhyAddress = addr & a20_mask;
-        let mut ret = true;
-        let mut buf_offset = 0;
-
-        while len > 0 {
-            if a20_addr < self.len.try_into()? {
-                buf[buf_offset] = *self
-                    .get_vector(a20_addr, cpus)?
-                    .first()
-                    .ok_or(MemoryError::Internal("get_vector returned empty slice"))?;
-            } else {
-                buf[buf_offset] = 0xff;
-                ret = false;
-            }
-            len -= 1;
-
-            buf_offset += 1;
-            // TODO: I'm not sure about 1
-            a20_addr += 1;
-        }
-
-        Ok(ret)
-    }
-
-    /// Write bytes to physical memory for debugger (Bochs memory.cc dbg_set_mem).
-    /// Writes directly to the flat memory vector bypassing device handlers.
-    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
-    pub fn dbg_set_mem(&mut self, addr: BxPhyAddress, len: u32, buf: &[u8]) -> bool {
-        let vo = self.vector_offset;
-        let av = self.actual_vector_mut();
-        for i in 0..len as usize {
-            if i >= buf.len() {
-                break;
-            }
-            let phys = addr as usize + i;
-            let idx = vo + phys;
-            if idx < av.len() {
-                av[idx] = buf[i];
-            }
-        }
-        true
-    }
-
-    /// Compute CRC32 over physical memory range for debugger (Bochs memory.cc dbg_crc32).
-    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
-    pub fn dbg_crc32(&self, addr1: BxPhyAddress, addr2: BxPhyAddress, crc: &mut u32) -> bool {
-        let vo = self.vector_offset;
-        let av = self.actual_vector_slice();
-        let mut c = 0xFFFF_FFFFu32;
-        let mut addr = addr1;
-        while addr <= addr2 {
-            let idx = vo + addr as usize;
-            let byte = if idx < av.len() { av[idx] } else { 0xFF };
-            for bit in 0..8u32 {
-                let b = ((c ^ (byte as u32 >> bit)) & 1) != 0;
-                c >>= 1;
-                if b {
-                    c ^= 0xEDB88320; // CRC32 polynomial
+            if let Err(error) = self.read_block_into(block, slot_offset) {
+                // The victim remains logically resident until target reload has
+                // completed. Restore its slot from the just-persisted bytes.
+                if let Some(victim_guest) = victim {
+                    let _ = self.read_block_into(victim_guest, slot_offset);
                 }
+                return Err(error);
             }
-            addr += 1;
-        }
-        *crc = c;
-        true
-    }
-
-    ///
-    /// Return a host address corresponding to the guest physical memory
-    /// address (with A20 already applied), given that the calling
-    /// code will perform an 'op' operation.  This address will be
-    /// used for direct access to guest memory.
-    /// Values of 'op' are { BX_READ, BX_WRITE, BX_EXECUTE, BX_RW }.
-    ///
-    ///
-    /// The other assumption is that the calling code _only_ accesses memory
-    /// directly within the page that encompasses the address requested.
-    ///
-    fn get_host_mem_addr<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-        &'a mut self,
-        cpus: &[&BxCpuC<I, T>],
-        addr: BxPhyAddress,
-        rw: u32,
-        a20_mask: A20Mask,
-    ) -> Result<Option<&'a mut [u8]>> {
-        let a20_addr = addr & a20_mask;
-
-        let write = rw & 1 != 0;
-
-        if write && Self::is_monitor(cpus, a20_addr & !0xfff, 0xfff) {
-            // TODO: Consider actually returning error
-
-            // Vetoed! Write monitored page!
-            return Ok(None);
-        }
-
-        if !write {
-            if addr < self.len.try_into()? {
-                Ok(Some(self.get_vector(addr, cpus)?))
-            } else {
-                Ok(Some(&mut self.bogus()[a20_addr as usize & 0xfff..]))
+            if let Some(victim_guest) = victim {
+                self.blocks_offsets()[victim_guest] = Block::SwappedOut;
             }
-        } else if a20_addr >= self.len.try_into()? {
-            Ok(None)
-        } else {
-            Ok(Some(self.get_vector(addr, cpus)?))
+            self.blocks_offsets()[block] = Block::Block {
+                offset: slot_offset,
+            };
+            if uses_new_slot {
+                self.used_blocks.set(used_blocks + 1);
+            }
+            Ok(())
         }
     }
 
-    pub(crate) fn write_physical_page<
-        I: BxCpuIdTrait,
-        T: crate::cpu::instrumentation::Instrumentation,
-    >(
+
+    pub(crate) fn write_physical_page(
         &mut self,
-        cpus: &[&BxCpuC<I, T>],
+        pins: &[CpuTlbPin],
         addr: BxPhyAddress,
-        mut len: usize,
+        len: usize,
         data: &mut [u8],
         a20_mask: A20Mask,
     ) -> Result<()> {
-        let mut a20_addr = addr & a20_mask;
+        if data.len() < len {
+            return Err(MemoryError::WritePhysicalPage { addr, len }.into());
+        }
+        if len == 0 {
+            return Ok(());
+        }
+        let a20_addr = addr & a20_mask;
 
         // Note: accesses should always be contained within a single page
         if (addr >> 12) != ((addr + len as u64 - 1) >> 12) {
             return Err(MemoryError::WritePhysicalPage { addr, len }.into());
         }
 
-        Self::is_monitor(cpus, a20_addr, len.try_into()?);
-
         if bx_is_pci_hole_addr(a20_addr) {
             // PCI MMIO hole — writes are silently dropped
             return Ok(());
         }
-        if bx_translate_gpa_to_linear(a20_addr) < self.len.try_into()? {
-            // all of data is within limits of physical memory
-            if len == 8 {
-                self.smc_dec_write_stamp(a20_addr, 8);
-                write_host_qword_to_little_endian(
-                    self.get_vector(a20_addr, cpus)?,
-                    LittleEndian::read_u64(data),
-                );
-                return Ok(());
-            } else if len == 4 {
-                self.smc_dec_write_stamp(a20_addr, 8);
-                write_host_dword_to_little_endian(
-                    self.get_vector(a20_addr, cpus)?,
-                    LittleEndian::read_u32(data),
-                );
-                return Ok(());
-            } else if len == 2 {
-                self.smc_dec_write_stamp(a20_addr, 8);
-                write_host_word_to_little_endian(
-                    self.get_vector(a20_addr, cpus)?,
-                    LittleEndian::read_u16(data),
-                );
-                return Ok(());
-            } else if len == 1 {
-                self.smc_dec_write_stamp(a20_addr, 8);
-                self.get_vector(a20_addr, cpus)?[0] = data[0];
-                return Ok(());
+        if bx_guest_ram_span(a20_addr, len, self.len).is_some() {
+            // A typed physical access may straddle independently resident
+            // guest blocks.  Do not hand a block-short slice to endian helpers.
+            for (offset, byte) in data.iter().copied().take(len).enumerate() {
+                let byte_addr = a20_addr + offset as u64;
+                self.smc_dec_write_stamp(byte_addr, 1);
+                let span = bx_guest_ram_span(byte_addr, 1, self.len)
+                    .ok_or(MemoryError::Internal("physical address is not guest RAM"))?;
+                self.get_vector_offset(span.start, pins)?[0] = byte;
             }
-            // len == other, just fall thru to special cases handling
-
-            let mut data_ptr_offset = if cfg!(target_endian = "little") {
-                0
-            } else {
-                len - 1
-            };
-
-            loop {
-                if (len & 7) == 0 {
-                    self.smc_dec_write_stamp(a20_addr, 8);
-                    write_host_qword_to_little_endian(
-                        self.get_vector(a20_addr, cpus)?,
-                        LittleEndian::read_u64(&data[data_ptr_offset..]),
-                    );
-                    len -= 8;
-                    a20_addr += 8;
-
-                    if cfg!(target_endian = "little") {
-                        data_ptr_offset += 8;
-                    } else {
-                        data_ptr_offset -= 8
-                    }
-
-                    if len == 0 {
-                        return Ok(());
-                    }
-                } else {
-                    // Single byte write — Bochs misc_mem.cc: *data_ptr++
-                    self.smc_dec_write_stamp(a20_addr, 1);
-                    self.get_vector(a20_addr, cpus)?[0] = data[data_ptr_offset];
-
-                    if len == 1 {
-                        return Ok(());
-                    }
-
-                    len -= 1;
-                    a20_addr += 1;
-                    data_ptr_offset += 1;
-                }
-
-                self.smc_dec_write_stamp_page(a20_addr);
-            }
+            return Ok(());
         }
         Ok(())
     }
 
-    pub(crate) fn read_physical_page<
-        I: BxCpuIdTrait,
-        T: crate::cpu::instrumentation::Instrumentation,
-    >(
+    pub(crate) fn read_physical_page(
         &mut self,
-        cpus: &[&BxCpuC<I, T>],
+        pins: &[CpuTlbPin],
         addr: BxPhyAddress,
         len: usize,
         data: &mut [u8],
@@ -756,6 +1013,12 @@ impl BxMemoryStubC {
     ) -> Result<()> {
         let a20_addr = addr & a20_mask;
 
+        if data.len() < len {
+            return Err(MemoryError::ReadPhysicalPage { addr, len }.into());
+        }
+        if len == 0 {
+            return Ok(());
+        }
         // Note: accesses should always be contained within a single page
         if (addr >> 12) != ((addr + len as u64 - 1) >> 12) {
             return Err(MemoryError::ReadPhysicalPage { addr, len }.into());
@@ -766,70 +1029,15 @@ impl BxMemoryStubC {
             data[..len].fill(0xff);
             return Ok(());
         }
-        if bx_translate_gpa_to_linear(a20_addr) < self.len.try_into()? {
-            // all of data is within limits of physical memory
-            if len == 8 {
-                let val = read_host_qword_to_little_endian(self.get_vector(a20_addr, cpus)?);
-                LittleEndian::write_u64(data, val);
-                return Ok(());
-            } else if len == 4 {
-                let val = read_host_dword_to_little_endian(self.get_vector(a20_addr, cpus)?);
-                LittleEndian::write_u32(data, val);
-                return Ok(());
-            } else if len == 2 {
-                let val = read_host_word_to_little_endian(self.get_vector(a20_addr, cpus)?);
-                LittleEndian::write_u16(data, val);
-                return Ok(());
-            } else if len == 1 {
-                let val = self.get_vector(a20_addr, cpus)?[0];
-                data[0] = val;
-                return Ok(());
+        if bx_guest_ram_span(a20_addr, len, self.len).is_some() {
+            // The resident primitive is block-bounded; assemble typed accesses
+            // bytewise when a guest-block boundary lies within the span.
+            for (offset, byte) in data.iter_mut().take(len).enumerate() {
+                let byte_addr = a20_addr + offset as u64;
+                let span = bx_guest_ram_span(byte_addr, 1, self.len)
+                    .ok_or(MemoryError::Internal("physical address is not guest RAM"))?;
+                *byte = self.get_vector_offset(span.start, pins)?[0];
             }
-            // len == other, just fall thru to special cases handling
-            // Handle non-standard lengths by copying byte-by-byte or in chunks
-            let mem_vector = self.get_vector(a20_addr, cpus)?;
-
-            #[cfg(target_endian = "little")]
-            {
-                // For little endian, copy directly
-                let mut remaining = len;
-                let mut offset = 0;
-                let mut addr_offset = 0;
-
-                // Read in chunks of 8 bytes if possible
-                while remaining >= 8 {
-                    let val =
-                        read_host_qword_to_little_endian(&mem_vector[addr_offset..addr_offset + 8]);
-                    LittleEndian::write_u64(&mut data[offset..offset + 8], val);
-                    remaining -= 8;
-                    offset += 8;
-                    addr_offset += 8;
-                }
-
-                // Handle remaining bytes
-                if remaining > 0 {
-                    data[offset..offset + remaining]
-                        .copy_from_slice(&mem_vector[addr_offset..addr_offset + remaining]);
-                }
-            }
-
-            #[cfg(target_endian = "big")]
-            {
-                // For big endian, copy in reverse order
-                let mut remaining = len;
-                let mut data_ptr_offset = len - 1;
-                let mut addr_offset = 0;
-
-                while remaining > 0 {
-                    data[data_ptr_offset] = mem_vector[addr_offset];
-                    remaining -= 1;
-                    if remaining > 0 {
-                        data_ptr_offset -= 1;
-                        addr_offset += 1;
-                    }
-                }
-            }
-
             Ok(())
         } else {
             // access outside limits of physical memory
@@ -843,22 +1051,4 @@ impl BxMemoryStubC {
         }
     }
 
-    pub(super) fn is_monitor<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-        cpus: &[&BxCpuC<I, T>],
-        begin_addr: BxPhyAddress,
-        len: u32,
-    ) -> bool {
-        cpus.iter().any(|cpu| cpu.is_monitor(begin_addr, len))
-    }
-
-    fn check_monitor<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-        cpus: &mut [BxCpuC<I, T>],
-        begin_addr: BxPhyAddress,
-        len: u32,
-    ) -> Result<()> {
-        for cpu in cpus {
-            cpu.check_monitor(begin_addr, len)?
-        }
-        Ok(())
-    }
 }

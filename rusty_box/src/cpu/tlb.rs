@@ -141,6 +141,16 @@ impl<const SIZE: usize> Tlb<SIZE> {
         let i = self.get_index_of(lpf, len);
         &mut self.entries[i]
     }
+    /// Invalidate the direct-mapped slot selected for a prospective mapping.
+    ///
+    /// Unlike `invlpg`, this deliberately clears a colliding entry even when
+    /// it maps a different linear page.  Callers use it before an allocation
+    /// that may need to evict the old host-backed page.
+    #[inline]
+    pub(super) fn invalidate_slot(&mut self, laddr: u64, len: u32) {
+        let slot = self.get_index_of(laddr, len);
+        self.entries[slot].invalidate();
+    }
 
     /// Invalidate all entries
     pub fn flush(&mut self) {
@@ -194,18 +204,19 @@ impl<const SIZE: usize> Tlb<SIZE> {
         }
     }
 
-    /// Check if any TLB entry's host page address falls within the given range
-    /// Used for large RAM file feature to check if address is in TLB buffers
-    pub fn check_addr_in_tlb_buffers(&self, addr_ptr: usize, end_ptr: usize) -> bool {
-        for entry in &self.entries {
-            if entry.valid() {
-                let host_page_addr = entry.host_page_addr as usize;
-                if host_page_addr >= addr_ptr && host_page_addr < end_ptr {
-                    return true;
-                }
-            }
+
+    /// Host page currently visible to the external eviction sidecar.
+    ///
+    /// Invalid entries deliberately contribute zero so an invalidation removes
+    /// the pin immediately instead of retaining stale over-pinning.
+    #[inline]
+    pub(super) fn pinned_host_page(&self, slot: usize) -> usize {
+        let entry = &self.entries[slot];
+        if entry.valid() {
+            entry.host_page_addr as usize
+        } else {
+            0
         }
-        false
     }
 }
 

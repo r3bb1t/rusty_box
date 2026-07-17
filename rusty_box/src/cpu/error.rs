@@ -51,6 +51,9 @@ pub enum CpuError {
     #[error("Unsupported CPU operation: {operation}")]
     UnsupportedCpuOperation { operation: &'static str },
 
+    #[error("machine boundary effect failed")]
+    MachineBoundaryFailed,
+
     /// Bochs-style control flow: exceptions/interrupt delivery longjmp back to the
     /// main decode loop. We model that by unwinding the current instruction/trace
     /// and restarting decode.

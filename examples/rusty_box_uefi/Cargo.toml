@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 description = "Rusty Box x86 emulator — UEFI bootable application (emulator-in-emulator)"
 
+[[bin]]
+name = "rusty_box_uefi"
+path = "src/main.rs"
+test = false
+bench = false
+
 [dependencies]
 rusty_box = { path = "../../rusty_box", default-features = false }
 uefi = { version = "0.33", features = ["logger"] }

@@ -116,7 +116,7 @@ fn run() {
         .expect("init_memory");
     emu.memory.set_a20_mask(emu.pc_system.a20_mask());
     emu.pc_system.initialize(cfg.ips);
-    emu.cpu.reset(ResetReason::Hardware);
+    unsafe { emu.cpu_mut_unchecked() }.reset(ResetReason::Hardware);
     emu.setup_cpu_mode(CpuSetupMode::FlatLong64).expect("mode");
 
     let (mode, code, _ipi) = select_loop();

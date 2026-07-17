@@ -111,14 +111,8 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
     let mut emu =
         Emulator::<Corei7SkylakeX, Tracer>::new_with_instrumentation(cfg.clone(), tracer)?;
-    emu.memory.init_memory(
-        cfg.guest_memory_size,
-        cfg.host_memory_size,
-        cfg.memory_block_size,
-    )?;
-    emu.memory.set_a20_mask(emu.pc_system.a20_mask());
-    emu.pc_system.initialize(cfg.ips);
-    emu.cpu.reset(ResetReason::Hardware);
+    emu.init_memory_and_pc_system()?;
+    unsafe { emu.cpu_mut_unchecked() }.reset(ResetReason::Hardware);
     emu.setup_cpu_mode(CpuSetupMode::FlatLong64)?;
 
     emu.mem_write(SHELLCODE_BASE, SHELLCODE)?;

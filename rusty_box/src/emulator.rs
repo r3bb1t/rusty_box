@@ -24,9 +24,9 @@ use crate::{
     },
     iodev::{
         devices::{DeviceManager, SystemControlPort},
-        BxDevicesC,
+        BxDevicesC, DeviceTimerOwner, TimerRequest,
     },
-    memory::{BxMemC, BxMemoryStubC},
+    memory::{BxMemC, BxMemoryStubC, CpuTlbPin},
     params::BxParams,
     pc_system::{BxPcSystemC, TimerOwner},
     Error, Result,
@@ -34,6 +34,8 @@ use crate::{
 
 #[cfg(feature = "alloc")]
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+#[cfg(not(feature = "alloc"))]
+use core::mem::MaybeUninit;
 use core::sync::atomic::AtomicBool;
 #[cfg(feature = "alloc")]
 use core::sync::atomic::Ordering;
@@ -49,6 +51,81 @@ const BZIMAGE_HEADER_MAGIC_OFFSET: usize = 0x202;
 const BZIMAGE_HEADER_MAGIC: u32 = u32::from_le_bytes(*b"HdrS");
 const BZIMAGE_BOOT_VERSION_OFFSET: usize = 0x206;
 const BZIMAGE_MIN_BOOT_PROTOCOL: u16 = 0x0204;
+
+/// Fixed-width CPU membership bitmap for the accepted 254-CPU topology.
+///
+/// These masks are the scheduler's authoritative no-allocation hot indexes;
+/// full scans are reserved for initialization, reset, restore, and test oracles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CpuMask([u64; 4]);
+
+impl CpuMask {
+    #[inline]
+    const fn bit(index: usize) -> Option<(usize, u64)> {
+        if index < 256 {
+            Some((index / 64, 1u64 << (index % 64)))
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn assign(&mut self, index: usize, enabled: bool) {
+        let Some((word, bit)) = Self::bit(index) else {
+            return;
+        };
+        if enabled {
+            self.0[word] |= bit;
+        } else {
+            self.0[word] &= !bit;
+        }
+    }
+
+    #[inline]
+    fn count(self, limit: usize) -> usize {
+        let limit = limit.min(256);
+        let full_words = limit / 64;
+        let tail_bits = limit % 64;
+        let mut count = 0usize;
+        for word in &self.0[..full_words] {
+            count += word.count_ones() as usize;
+        }
+        if tail_bits != 0 {
+            count += (self.0[full_words] & ((1u64 << tail_bits) - 1)).count_ones() as usize;
+        }
+        count
+    }
+
+    #[inline]
+    fn next_set(self, from: usize, limit: usize) -> Option<usize> {
+        let limit = limit.min(256);
+        if from >= limit {
+            return None;
+        }
+
+        let mut word_index = from / 64;
+        let mut word = self.0[word_index] & (u64::MAX << (from % 64));
+        loop {
+            if word != 0 {
+                let index = word_index * 64 + word.trailing_zeros() as usize;
+                return (index < limit).then_some(index);
+            }
+            word_index += 1;
+            if word_index * 64 >= limit {
+                return None;
+            }
+            word = self.0[word_index];
+        }
+    }
+
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn contains(&self, index: usize) -> bool {
+        Self::bit(index)
+            .map(|(word, bit)| self.0[word] & bit != 0)
+            .unwrap_or(false)
+    }
+}
 
 #[cfg(feature = "alloc")]
 const DIRECT_MADT_HEADER_SIZE: usize = 44;
@@ -212,6 +289,98 @@ impl Default for EmulatorConfig {
     }
 }
 
+#[cfg(feature = "std")]
+const SLOWDOWN_QUANTUM_USEC: u64 = 1_000;
+#[cfg(feature = "std")]
+const SLOWDOWN_MAX_DELAY_USEC: u32 = 1_500;
+#[cfg(feature = "std")]
+const SLOWDOWN_REALTIME_QUANTUM_USEC: u64 = 1_000_000;
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SlowdownAction {
+    next_delay_usec: u32,
+    sleep_one_quantum: bool,
+    next_last_time_usec: u64,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug)]
+struct SlowdownTimerState {
+    start_time: std::time::Instant,
+    start_emulated_time_usec: u64,
+    last_time_usec: u64,
+    timer_handle: Option<usize>,
+}
+
+#[cfg(feature = "std")]
+impl SlowdownTimerState {
+    fn new() -> Self {
+        Self {
+            start_time: std::time::Instant::now(),
+            start_emulated_time_usec: 0,
+            last_time_usec: 0,
+            timer_handle: None,
+        }
+    }
+
+    fn initialize(
+        &mut self,
+        timer_handle: usize,
+        emulated_time_usec: u64,
+        host_time: std::time::Instant,
+    ) {
+        self.start_time = host_time;
+        self.start_emulated_time_usec = emulated_time_usec;
+        self.last_time_usec = 0;
+        self.timer_handle = Some(timer_handle);
+    }
+
+    fn decide(
+        total_emulated_usec: u64,
+        total_realtime_usec: u64,
+        last_time_usec: u64,
+    ) -> SlowdownAction {
+        let want_time = last_time_usec.saturating_add(SLOWDOWN_QUANTUM_USEC);
+        SlowdownAction {
+            next_delay_usec: if total_realtime_usec > total_emulated_usec {
+                SLOWDOWN_MAX_DELAY_USEC
+            } else {
+                SLOWDOWN_QUANTUM_USEC as u32
+            },
+            sleep_one_quantum: want_time
+                > total_realtime_usec.saturating_add(SLOWDOWN_REALTIME_QUANTUM_USEC),
+            next_last_time_usec: want_time.max(total_realtime_usec),
+        }
+    }
+
+    fn handle_timer(
+        &mut self,
+        emulated_time_usec: u64,
+        host_time: std::time::Instant,
+    ) -> SlowdownAction {
+        let total_emulated_usec =
+            emulated_time_usec.saturating_sub(self.start_emulated_time_usec);
+        let total_realtime_usec =
+            u64::try_from(host_time.duration_since(self.start_time).as_micros())
+                .unwrap_or(u64::MAX);
+        let action = Self::decide(
+            total_emulated_usec,
+            total_realtime_usec,
+            self.last_time_usec,
+        );
+        self.last_time_usec = action.next_last_time_usec;
+        action
+    }
+}
+
+#[cfg(feature = "std")]
+impl Default for SlowdownTimerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(feature = "alloc")]
 fn build_direct_boot_madt(num_cpus: u32) -> Vec<u8> {
     let madt_len = DIRECT_MADT_HEADER_SIZE
@@ -304,19 +473,35 @@ fn build_direct_boot_madt(num_cpus: u32) -> Vec<u8> {
 /// emu.initialize()?;
 /// emu.load_bios(&bios_data, 0xfffe0000)?;
 /// emu.reset(ResetReason::Hardware)?;
-/// // Access components directly for cpu_loop:
-/// // emu.cpu.cpu_loop(&mut emu.memory, &[]);
+/// // Read architectural state through `cpu()` and mutate it through targeted
+/// // emulator operations such as `reg_write()` and `reset()`.
+/// assert_eq!(emu.cpu().rip(), 0);
+/// ```
+///
+/// The memory backing is intentionally not publicly replaceable:
+///
+/// ```compile_fail
+/// use rusty_box::cpu::core_i7_skylake::Corei7SkylakeX;
+/// use rusty_box::emulator::{Emulator, EmulatorConfig};
+///
+/// let mut emu = Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
+/// let _ = &mut emu.memory;
 /// ```
 pub struct Emulator<'a, I: BxCpuIdTrait, T: Instrumentation = ()> {
-    /// CPU instance (boxed because BxICache contains ~19MB fixed arrays)
+    /// BSP CPU storage. This stays at a stable address for its own cached
+    /// host mappings; eviction-visible state instead lives in `cpu_tlb_pins`.
     #[cfg(feature = "alloc")]
-    pub cpu: alloc::boxed::Box<BxCpuC<'a, I, T>>,
+    cpu: alloc::boxed::Box<BxCpuC<'a, I, T>>,
     /// Application processors (CPU IDs/APIC IDs 1..N-1).
     #[cfg(feature = "alloc")]
     pub(crate) ap_cpus: Vec<alloc::boxed::Box<BxCpuC<'a, I, T>>>,
-    /// CPU instance (reference for no-alloc environments)
+    /// Stable descriptors for every CPU's direct host-memory references.
+    #[cfg(feature = "alloc")]
+    cpu_tlb_pins: Vec<CpuTlbPin>,
+    /// BSP CPU storage supplied by no-alloc callers. Its external pin sidecar
+    /// is stored separately in the fixed descriptor array below.
     #[cfg(not(feature = "alloc"))]
-    pub cpu: &'a mut BxCpuC<'a, I, T>,
+    cpu: &'a mut BxCpuC<'a, I, T>,
     /// Application processor pointers supplied by no-alloc callers.
     ///
     /// no_std/no-alloc targets can place `BxCpuC` objects in a static, stack,
@@ -327,34 +512,37 @@ pub struct Emulator<'a, I: BxCpuIdTrait, T: Instrumentation = ()> {
     ap_cpu_ptrs: [*mut BxCpuC<'a, I, T>; NO_ALLOC_MAX_AP_CPUS],
     #[cfg(not(feature = "alloc"))]
     ap_cpu_count: usize,
+    #[cfg(not(feature = "alloc"))]
+    cpu_tlb_pins: [MaybeUninit<CpuTlbPin>; NO_ALLOC_MAX_AP_CPUS + 1],
+    #[cfg(not(feature = "alloc"))]
+    cpu_tlb_pin_count: usize,
     /// Memory subsystem
-    pub memory: BxMemC<'a>,
+    pub(crate) memory: BxMemC<'a>,
     /// Device controller (I/O port handlers)
     pub devices: BxDevicesC,
     /// Device manager (actual hardware devices)
     pub device_manager: DeviceManager,
     /// PC system (timers, A20, etc.)
     pub pc_system: BxPcSystemC,
-    /// Last device-visible virtual time in microseconds. Devices advance by
-    /// deltas of total `pc_system.time_usec()`, matching Bochs' unified virtual
-    /// clock instead of per-batch truncation/floors.
-    last_device_time_usec: u64,
+    /// Derived scheduler membership. These masks deliberately remain advisory
+    /// until Phase 8's scan oracle makes them authoritative.
+    runnable_mask: CpuMask,
+    lapic_work_mask: CpuMask,
     /// Bochs SMP scheduler remainder from `executed %= BX_SMP_PROCESSORS`.
     smp_tick_remainder: u64,
-    /// Ticks accumulated since the last full SMP round servicing (timer
-    /// dispatch + device time + event-flag sync). Forces servicing at the
-    /// same ~1 ms cadence the single-CPU batch path uses even when no timer
-    /// fires (keyboard/realtime device pacing).
-    smp_service_accum_ticks: u64,
     /// True when the last `run_cpu_batch` advanced `pc_system` internally.
     /// SMP batches tick at Bochs round boundaries so LAPIC/pc-system timers
     /// fire before the next virtual CPU slice; outer loops must not tick them
     /// a second time.
     batch_advanced_pc_system: bool,
+    #[cfg(feature = "std")]
+    slowdown_timer: SlowdownTimerState,
     /// Configuration
     config: EmulatorConfig,
     /// Whether the emulator has been initialized
     initialized: bool,
+    /// A failed in-place v3 restore may have partially mutated guest state.
+    snapshot_restore_failed: bool,
     /// GUI instance (optional, can be None for headless operation)
     #[cfg(feature = "alloc")]
     gui: Option<Box<dyn BxGui>>,
@@ -426,6 +614,54 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         }
     }
 
+
+    #[cfg(feature = "alloc")]
+    #[inline]
+    fn raw_tlb_pins(&self) -> &[CpuTlbPin] {
+        &self.cpu_tlb_pins
+    }
+
+    #[cfg(not(feature = "alloc"))]
+    #[inline]
+    fn raw_tlb_pins(&self) -> &[CpuTlbPin] {
+        // SAFETY: `init_at_with_ap_cpus` initializes precisely this prefix
+        // before exposing the emulator, and CPU storage outlives it.
+        unsafe {
+            core::slice::from_raw_parts(
+                self.cpu_tlb_pins.as_ptr().cast::<CpuTlbPin>(),
+                self.cpu_tlb_pin_count,
+            )
+        }
+    }
+
+    /// Return the stable all-CPU pin slice after synchronizing any CPU state
+    /// changed outside a wired scope.
+    #[inline]
+    pub(crate) fn tlb_pins(&self) -> &[CpuTlbPin] {
+        self.refresh_dirty_tlb_pins();
+        self.raw_tlb_pins()
+    }
+    /// Refresh every stable external pin sidecar before a CPU/device memory
+    /// scope. This happens while CPUs are only shared-borrowed; afterwards the
+    /// running CPU updates its own sidecar synchronously on every mapping
+    /// install or invalidation.
+    fn refresh_tlb_pins(&self) {
+        let pins = self.raw_tlb_pins();
+        debug_assert_eq!(pins.len(), self.cpu_count());
+        for (index, pin) in pins.iter().enumerate() {
+            self.cpu_ref(index).refresh_tlb_pin(pin);
+        }
+    }
+
+    /// Refresh only sidecars dirtied while their CPU was not wired.
+    #[inline]
+    fn refresh_dirty_tlb_pins(&self) {
+        let pins = self.raw_tlb_pins();
+        debug_assert_eq!(pins.len(), self.cpu_count());
+        for (index, pin) in pins.iter().enumerate() {
+            self.cpu_ref(index).refresh_tlb_pin_if_dirty(pin);
+        }
+    }
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
     fn total_cpu_icount(&self) -> u64 {
         (0..self.cpu_count()).fold(0u64, |total, cpu_index| {
@@ -434,7 +670,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     }
 
     #[cfg(feature = "alloc")]
-    fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<'a, I, T> {
+    pub(crate) fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<'a, I, T> {
         if index == 0 {
             &mut self.cpu
         } else {
@@ -443,7 +679,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     }
 
     #[cfg(not(feature = "alloc"))]
-    fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<'a, I, T> {
+    pub(crate) fn cpu_mut_at(&mut self, index: usize) -> &mut BxCpuC<'a, I, T> {
         if index == 0 {
             self.cpu
         } else {
@@ -452,6 +688,57 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             // concurrently borrow the AP CPU through this pointer.
             unsafe { &mut *self.ap_cpu_ptrs[index - 1] }
         }
+    }
+
+    /// Invalidate every host pointer and decoded trace before memory backing
+    /// can be replaced or restored.
+    pub(crate) fn invalidate_all_cpu_host_mappings(&mut self) {
+        self.clear_scheduler_raw_wiring();
+        for cpu_index in 0..self.cpu_count() {
+            self.cpu_mut_at(cpu_index)
+                .invalidate_host_memory_mappings();
+        }
+        self.refresh_tlb_pins();
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn finish_snapshot_restore_v3(
+        &mut self,
+        live_bmdma: u16,
+        live_pm: u16,
+        live_sm: u16,
+        live_vga: crate::iodev::vga::VgaSnapshotRestoreTarget,
+        platform: crate::iodev::devices::PlatformSnapshotRestore,
+        _keyboard: crate::iodev::keyboard::KeyboardSnapshotRestore,
+        acpi: crate::iodev::acpi::AcpiSnapshotRestore,
+        vga: crate::iodev::vga::VgaSnapshotRestoreTarget,
+        pci: crate::iodev::pci_ide::PciIdeSnapshotTopology,
+    ) -> std::io::Result<()> {
+        self.device_manager
+            .apply_snapshot_v3_restore(
+                &mut self.devices,
+                &mut self.memory,
+                live_bmdma,
+                live_pm,
+                live_sm,
+                live_vga,
+                platform,
+                pci,
+                acpi,
+                vga,
+            )
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+
+        self.device_manager
+            .acpi
+            .post_restore_snapshot_v3(self.pc_system.time_ticks());
+        self.device_manager.serial.after_restore_snapshot_v3()?;
+        self.device_manager.vga.rebuild_snapshot_v3_derived_state()?;
+        self.sync_restored_event_levels();
+        self.rebuild_cpu_masks_from_scan();
+        self.batch_advanced_pc_system = false;
+        self.clear_scheduler_raw_wiring();
+        Ok(())
     }
 
     fn cpu_runnable_for_batch(&self, index: usize) -> bool {
@@ -471,10 +758,70 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         != 0
             }
             _ => {
+
                 cpu.is_unmasked_event_pending(u32::MAX)
                     || (cpu.lapic.intr && cpu.interrupts_enabled())
             }
         }
+    }
+
+    /// Refresh authoritative membership after an observed CPU/LAPIC transition.
+    ///
+    /// Every mutation path that can change runnability or deferred LAPIC work
+    /// must call this before returning to the scheduler.
+    fn refresh_cpu_masks(&mut self, index: usize) {
+        let (runnable, lapic_work) = {
+            let cpu = self.cpu_ref(index);
+            (
+                self.cpu_runnable_for_batch(index),
+                cpu.lapic.has_scheduler_work() || cpu.lapic.timer_fired,
+            )
+        };
+        self.runnable_mask.assign(index, runnable);
+        self.lapic_work_mask.assign(index, lapic_work);
+    }
+
+    /// Rebuild every derived mask from architectural CPU state.
+    pub(crate) fn rebuild_cpu_masks_from_scan(&mut self) {
+        self.runnable_mask = CpuMask::default();
+        self.lapic_work_mask = CpuMask::default();
+        for index in 0..self.cpu_count() {
+            self.refresh_cpu_masks(index);
+        }
+    }
+
+    #[cfg(test)]
+    fn scanned_cpu_masks(&self) -> (CpuMask, CpuMask) {
+        let mut runnable = CpuMask::default();
+        let mut lapic_work = CpuMask::default();
+        for index in 0..self.cpu_count() {
+            runnable.assign(index, self.cpu_runnable_for_batch(index));
+            let lapic = &self.cpu_ref(index).lapic;
+            lapic_work.assign(index, lapic.has_scheduler_work() || lapic.timer_fired);
+        }
+        (runnable, lapic_work)
+    }
+
+    #[cfg(test)]
+    fn assert_cpu_masks_match_scan(&self) {
+        let (runnable, lapic_work) = self.scanned_cpu_masks();
+        assert_eq!(self.runnable_mask, runnable, "runnable CPU mask diverged");
+        assert_eq!(
+            self.lapic_work_mask, lapic_work,
+            "LAPIC work CPU mask diverged"
+        );
+    }
+
+    /// Clear all raw device-side wiring before touching machine-owned state.
+    ///
+    /// CPU wrappers clear their own memory/I/O/pc-system buses. The device
+    /// manager pointers are installed only around an individual CPU slice, so
+    /// every scheduler commit runs with ordinary exclusive borrows.
+    fn clear_scheduler_raw_wiring(&mut self) {
+        self.devices.clear_device_manager();
+        self.device_manager.mem_ptr = None;
+        self.device_manager.active_tlb_pins = None;
+        self.device_manager.active_tlb_pin_count = 0;
     }
 
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
@@ -516,104 +863,110 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// Same invariants as `borrow_memory_for_cpu`: caller must hold `&mut self`
     /// and no other code path may access memory/devices during the batch.
     pub unsafe fn run_cpu_batch(&mut self, batch_size: u64) -> CpuResult<u64> {
-        self.batch_advanced_pc_system = false;
-        self.drain_lapic_bus();
-        self.drain_pending_smc();
-        let batch_size = self.active_batch_step_ticks(batch_size);
-        let cpu_count = self.cpu_count();
-        let has_ap_cpus = cpu_count > 1;
+        unsafe { self.run_cpu_batch_with_strict_limit(batch_size, false) }
+    }
 
+    unsafe fn run_cpu_batch_with_strict_limit(
+        &mut self,
+        batch_size: u64,
+        strict_limit: bool,
+    ) -> CpuResult<u64> {
+        if self.snapshot_restore_failed {
+            return Err(CpuError::CpuNotInitialized);
+        }
+        self.batch_advanced_pc_system = false;
+        self.clear_scheduler_raw_wiring();
+        self.service_scheduler_boundary(0)?;
+        self.refresh_dirty_tlb_pins();
+
+        let cpu_count = self.cpu_count();
+        let smp = cpu_count > 1;
+        let pins_ptr = self.tlb_pins().as_ptr();
+        let pins_len = self.tlb_pins().len();
         let mem_ptr: *mut BxMemC<'a> = &mut self.memory;
         let io_ptr = core::ptr::NonNull::from(&mut self.devices);
         let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
         let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
-        io_ptr
-            .as_ptr()
-            .as_mut()
-            .unwrap_unchecked()
-            .set_device_manager(dm_ptr);
-        let mem_static = self.mem_nonnull_static();
-        io_ptr
-            .as_ptr()
-            .as_mut()
-            .unwrap_unchecked()
-            .set_mem_ptr(mem_static);
-        (*dm_ptr.as_ptr()).mem_ptr = Some(mem_static);
-        (*dm_ptr.as_ptr()).pcs_ptr = Some(ps_ptr);
-
         let pic_ref: *mut _ = &mut self.device_manager.pic;
         let dma_ref: *mut _ = &mut self.device_manager.dma;
         let mut total_elapsed_ticks = 0u64;
+        let mut total_up_executed = 0u64;
         let mut result: CpuResult<()> = Ok(());
+        let initial_deadline_ticks =
+            u64::from(self.pc_system.get_num_cpu_ticks_left_next_event());
+        let strict_up_deadline =
+            !smp && (strict_limit || initial_deadline_ticks <= batch_size);
+        let batch_size = if smp {
+            batch_size
+        } else {
+            batch_size.min(initial_deadline_ticks).max(1)
+        };
 
-        loop {
-            if total_elapsed_ticks >= batch_size {
-                break;
-            }
-
-            let mut runnable_count = 0usize;
-            for cpu_index in 0..cpu_count {
-                if self.cpu_runnable_for_batch(cpu_index) {
-                    runnable_count += 1;
-                }
-            }
-
+        while total_elapsed_ticks < batch_size {
+            let runnable_count = self.runnable_mask.count(cpu_count);
             if runnable_count == 0 {
                 break;
             }
 
-            // Bochs main.cc bx_begin_simulation: SMP scheduling engages
-            // whenever BX_SMP_PROCESSORS > 1, regardless of activity states.
-            // Every CPU is visited each round, the tick denominator is always
-            // the full CPU count, and a CPU that executes nothing (WAIT_FOR_
-            // SIPI, shutdown, idle HLT) is credited one quantum
-            // ("if (n == 0) n = quantum").
-            let smp = has_ap_cpus;
-            let pc_tick_denominator = if smp { cpu_count as u64 } else { 1 };
-
             let remaining = batch_size.saturating_sub(total_elapsed_ticks);
+            let round_deadline_ticks =
+                u64::from(self.pc_system.get_num_cpu_ticks_left_next_event());
+            let unconstrained_per_cpu_batch = self.smp_quantum_ticks().min(remaining.max(1));
+            let strict_smp_deadline =
+                smp && (strict_limit || round_deadline_ticks <= unconstrained_per_cpu_batch);
             let per_cpu_batch = if smp {
-                // Bochs SMP main.cc runs exactly one trace per CPU, and
-                // icache.cc caps each SMP trace by the configured quantum
-                // (BXPN_SMP_QUANTUM, default 16, range 1-32).
-                self.smp_quantum_ticks().min(remaining.max(1))
+                unconstrained_per_cpu_batch
+                    .min(round_deadline_ticks)
+                    .max(1)
             } else {
                 (remaining / runnable_count as u64).max(1)
             };
-
             let mut round_ticks = 0u64;
-            for cpu_index in 0..cpu_count {
-                if !self.cpu_runnable_for_batch(cpu_index) {
+            let mut boundary_reached = false;
+            let idle_credit = self.smp_quantum_ticks();
+            let mut cpu_cursor = 0usize;
+
+            loop {
+                let Some(cpu_index) = self.runnable_mask.next_set(cpu_cursor, cpu_count) else {
                     if smp {
-                        // Bochs main.cc: a CPU that produced no instructions
-                        // (cpu_run_trace returned immediately) is credited the
-                        // SMP quantum before the round average.
-                        round_ticks = round_ticks.saturating_add(self.smp_quantum_ticks());
+                        round_ticks = round_ticks.saturating_add(
+                            (cpu_count - cpu_cursor) as u64 * idle_credit,
+                        );
                     }
-                    continue;
-                }
-                let pc_tick_offset = if smp {
-                    total_elapsed_ticks.saturating_add(
-                        self.smp_tick_remainder.saturating_add(round_ticks) / cpu_count as u64,
-                    )
-                } else {
-                    0
+                    break;
                 };
+                if smp {
+                    round_ticks = round_ticks.saturating_add(
+                        (cpu_index - cpu_cursor) as u64 * idle_credit,
+                    );
+                }
+                cpu_cursor = cpu_index + 1;
+                debug_assert!(self.cpu_runnable_for_batch(cpu_index));
+
                 if smp {
                     self.cpu_mut_at(cpu_index).mark_icount_sync();
                 }
+
+                let mem_static = self.mem_nonnull_static();
+                (*io_ptr.as_ptr()).set_device_manager(dm_ptr);
+                (*dm_ptr.as_ptr()).mem_ptr = Some(mem_static);
+                (*dm_ptr.as_ptr()).active_tlb_pins =
+                    core::ptr::NonNull::new(pins_ptr as *mut CpuTlbPin);
+                (*dm_ptr.as_ptr()).active_tlb_pin_count = pins_len;
+
                 let mem_extended: &'a mut BxMemC<'a> =
                     core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut *mem_ptr);
-                // Bochs main.cc bx_begin_simulation: in SMP mode each CPU
-                // runs exactly one trace per turn (cpu_run_trace); a single
-                // CPU runs the whole batch (cpu_loop).
+                let pins = core::slice::from_raw_parts(pins_ptr, pins_len);
+                let current_pin = &*pins_ptr.add(cpu_index);
+                let icount_before = self.cpu_ref(cpu_index).icount;
                 let slice_result = if smp {
                     self.cpu_mut_at(cpu_index).cpu_run_trace_with_io(
                         mem_extended,
-                        &[],
+                        pins,
+                        current_pin,
                         per_cpu_batch,
-                        pc_tick_denominator,
-                        pc_tick_offset,
+                        strict_smp_deadline,
+                        cpu_count as u64,
                         io_ptr,
                         ps_ptr,
                         Some(&mut *pic_ref),
@@ -622,18 +975,30 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 } else {
                     self.cpu_mut_at(cpu_index).cpu_loop_n_with_io(
                         mem_extended,
-                        &[],
+                        pins,
+                        current_pin,
                         per_cpu_batch,
-                        pc_tick_denominator,
-                        pc_tick_offset,
+                        strict_up_deadline,
+                        1,
                         io_ptr,
                         ps_ptr,
                         Some(&mut *pic_ref),
                         Some(&mut *dma_ref),
                     )
                 };
+
+                // CPU wrappers clear their own buses. Clear every device-side
+                // raw pointer before consuming any queued machine work.
+                self.clear_scheduler_raw_wiring();
+                let boundary_requested =
+                    self.cpu_mut_at(cpu_index).take_scheduler_boundary_request();
+                self.refresh_cpu_masks(cpu_index);
+
                 match slice_result {
                     Ok(executed) => {
+                        if !smp {
+                            total_up_executed = total_up_executed.saturating_add(executed);
+                        }
                         let elapsed = if smp {
                             let delta = self.cpu_ref(cpu_index).icount_delta_since_sync();
                             if delta == 0 {
@@ -642,20 +1007,26 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 delta
                             }
                         } else {
-                            executed
+                            self.cpu_ref(cpu_index)
+                                .icount
+                                .saturating_sub(icount_before)
                         };
                         round_ticks = if smp {
                             round_ticks.saturating_add(elapsed)
                         } else {
                             round_ticks.max(elapsed)
                         };
-                        // Only the cpu that just ran can have queued new IPIs.
-                        self.drain_lapic_bus_from(cpu_count, cpu_index);
-                        // Bochs icache.cc handleSMC loops over every cpu at
-                        // the store; under round-robin no sibling can execute
-                        // before this slice-boundary drain, so it is
-                        // observably identical.
-                        self.drain_pending_smc();
+
+                        // SMP must expose queued work before a sibling runs.
+                        // UP services a distinct boundary immediately; elapsed
+                        // virtual time is committed below.
+                        if smp || boundary_requested {
+                            self.service_scheduler_boundary(0)?;
+                        }
+                        if boundary_requested {
+                            boundary_reached = true;
+                            break;
+                        }
                     }
                     Err(err) => {
                         result = Err(err);
@@ -664,13 +1035,13 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 }
             }
 
+            #[cfg(test)]
+            self.assert_cpu_masks_match_scan();
+
             if result.is_err() {
                 break;
             }
 
-            // Bochs main.cc: BX_TICKN(executed / BX_SMP_PROCESSORS) at the
-            // round-robin wrap, with the sub-CPU remainder carried in
-            // `executed` ("executed %= BX_SMP_PROCESSORS").
             let elapsed_ticks = if smp {
                 let total_ticks = self.smp_tick_remainder.saturating_add(round_ticks);
                 let elapsed = total_ticks / cpu_count as u64;
@@ -679,66 +1050,34 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             } else {
                 round_ticks
             };
-
             if elapsed_ticks == 0 {
                 if round_ticks == 0 {
                     break;
                 }
                 continue;
             }
-            total_elapsed_ticks = total_elapsed_ticks.saturating_add(elapsed_ticks);
-            if smp {
-                // Bochs advances `bx_pc_system` after every SMP processor
-                // round (BX_TICKN(executed / BX_SMP_PROCESSORS)) — the tick
-                // countdown must run per round so timers fire at their exact
-                // virtual-time boundary. The full servicing (timer dispatch,
-                // device time, event-flag sync) measured ~2x the cost of the
-                // guest instructions when run unconditionally per round, so
-                // it only runs when a timer fired / an event flag is raised /
-                // a millisecond quantum of ticks accumulated — the same
-                // cadence the single-CPU batch path services devices at.
-                self.service_lapic_timer_requests();
-                self.pc_system.tickn(elapsed_ticks as u32);
-                self.batch_advanced_pc_system = true;
-                self.smp_service_accum_ticks =
-                    self.smp_service_accum_ticks.saturating_add(elapsed_ticks);
-                let quantum_due = match self.millisecond_timer_quantum_ticks() {
-                    Some(quantum) => self.smp_service_accum_ticks >= quantum,
-                    None => true,
-                };
-                if quantum_due || self.smp_round_service_due() {
-                    self.smp_service_accum_ticks = 0;
-                    self.dispatch_timer_fires();
-                    self.advance_devices_to_pc_time();
-                    self.sync_event_flags();
-                    // Timers fired above may have run device DMA (bus-master
-                    // IDE) into guest RAM — invalidate stale traces before
-                    // the next round's slices (Bochs memory.cc
-                    // dmaWritePhysicalPage → decWriteStamp → handleSMC is
-                    // synchronous).
-                    self.drain_pending_smc();
-                }
-            }
 
+            total_elapsed_ticks = total_elapsed_ticks.saturating_add(elapsed_ticks);
+            self.service_scheduler_boundary(elapsed_ticks)?;
+            self.batch_advanced_pc_system = true;
+            if boundary_reached {
+                break;
+            }
             if !smp {
                 break;
             }
         }
 
-        if has_ap_cpus {
-            // Batch exit: dispatch and sync anything the gated per-round
-            // servicing left pending, so run_interactive resumes from the
-            // same state the ungated path produced.
-            self.dispatch_timer_fires();
-            self.advance_devices_to_pc_time();
-            self.sync_event_flags();
-        }
-        self.drain_pending_smc();
-        self.devices.clear_device_manager();
-        self.devices.clear_mem_ptr();
-        self.device_manager.mem_ptr = None;
-        self.device_manager.pcs_ptr = None;
-        result.map(|_| total_elapsed_ticks)
+        self.clear_scheduler_raw_wiring();
+        #[cfg(test)]
+        self.assert_cpu_masks_match_scan();
+        result.map(|_| {
+            if smp {
+                total_elapsed_ticks
+            } else {
+                total_up_executed
+            }
+        })
     }
 
     /// Bochs `cpu: quantum=N` (BXPN_SMP_QUANTUM), clamped to config.h
@@ -748,31 +1087,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         (self.config.smp_quantum as u64).clamp(1, 32)
     }
 
-    /// True when the per-round SMP servicing actually has work: a timer
-    /// fired, an interrupt flag is raised somewhere, or deferred IOAPIC
-    /// deliveries are queued. Cheap flag reads only — this gate runs every
-    /// 32-tick round, and the full servicing measured ~2x the cost of the
-    /// guest instructions themselves when run unconditionally per round.
-    #[inline]
-    fn smp_round_service_due(&self) -> bool {
-        if self.pc_system.has_fired_timers()
-            || self.pc_system.intr_raised
-            || self.pc_system.intr_cleared
-            || self.pc_system.async_event_pending
-            || self.device_manager.pic.irq_pending
-            || self.device_manager.pic.irq_cleared
-            || self.device_manager.ioapic.has_pending_deliveries()
-            || self.device_manager.keyboard.needs_fast_service()
-        {
-            return true;
-        }
-        for cpu_index in 0..self.cpu_count() {
-            if self.cpu_ref(cpu_index).lapic.intr_pending {
-                return true;
-            }
-        }
-        false
-    }
 
     /// Apply queued SMC invalidations to every cpu, then drop the queue.
     ///
@@ -816,12 +1130,20 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// # Safety
     /// Same invariants as `borrow_memory_for_cpu`.
     pub unsafe fn inject_interrupt(&mut self, vector: u8) -> CpuResult<()> {
+        self.refresh_tlb_pins();
+        let pins_ptr = self.tlb_pins().as_ptr();
+        let pins_len = self.tlb_pins().len();
         let mem_extended = self.borrow_memory_for_cpu();
-        self.cpu
-            .set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
-        let r = self.cpu.inject_external_interrupt(vector);
-        self.cpu.clear_mem_bus();
-        r
+        let pins = core::slice::from_raw_parts(pins_ptr, pins_len);
+        self.cpu.wire_memory_access(
+            core::ptr::NonNull::from(&mut *mem_extended),
+            pins,
+            &*pins_ptr,
+        );
+        let result = self.cpu.inject_external_interrupt(vector);
+        self.cpu.clear_memory_access();
+        self.refresh_cpu_masks(0);
+        result
     }
 }
 
@@ -884,6 +1206,17 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         cpu: alloc::boxed::Box<BxCpuC<'static, I, T>>,
         ap_cpus: Vec<alloc::boxed::Box<BxCpuC<'static, I, T>>>,
     ) -> Result<Box<Self>> {
+        let mut cpu_tlb_pins = Vec::new();
+        cpu_tlb_pins
+            .try_reserve_exact(1 + ap_cpus.len())
+            .map_err(|_| MemoryError::UnableToAllocateGuestMemory(core::mem::size_of::<CpuTlbPin>()))?;
+        // This is the descriptor's final backing allocation. No CPU scope
+        // receives a sidecar pointer until every element is populated, and
+        // this Vec is never grown afterwards.
+        cpu_tlb_pins.push(CpuTlbPin::new(&cpu));
+        for ap_cpu in &ap_cpus {
+            cpu_tlb_pins.push(CpuTlbPin::new(ap_cpu));
+        }
         let pc_system = BxPcSystemC::new();
         let mem_stub = BxMemoryStubC::create_and_init(
             config.guest_memory_size,
@@ -904,15 +1237,18 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         unsafe {
             core::ptr::addr_of_mut!((*ptr).cpu).write(cpu);
             core::ptr::addr_of_mut!((*ptr).ap_cpus).write(ap_cpus);
+            core::ptr::addr_of_mut!((*ptr).cpu_tlb_pins).write(cpu_tlb_pins);
             core::ptr::addr_of_mut!((*ptr).memory).write(memory);
             core::ptr::addr_of_mut!((*ptr).devices).write(devices);
             core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
             core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
-            core::ptr::addr_of_mut!((*ptr).last_device_time_usec).write(0);
             core::ptr::addr_of_mut!((*ptr).smp_tick_remainder).write(0);
             core::ptr::addr_of_mut!((*ptr).batch_advanced_pc_system).write(false);
+            #[cfg(feature = "std")]
+            core::ptr::addr_of_mut!((*ptr).slowdown_timer).write(SlowdownTimerState::new());
             core::ptr::addr_of_mut!((*ptr).config).write(config);
             core::ptr::addr_of_mut!((*ptr).initialized).write(false);
+            core::ptr::addr_of_mut!((*ptr).snapshot_restore_failed).write(false);
             core::ptr::addr_of_mut!((*ptr).gui).write(None);
             #[cfg(feature = "std")]
             core::ptr::addr_of_mut!((*ptr).bios_output_file).write(None);
@@ -990,19 +1326,35 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             ap_cpu.set_cpuid_freq(config.cpuid_freq, config.ips);
             ap_cpu_ptrs[index] = ap_cpu as *mut BxCpuC<'a, I, T>;
         }
-
+        // The descriptor sidecars are 40 KiB each. Initialize only the used
+        // prefix directly in the caller-provided Emulator storage so no-alloc
+        // construction neither allocates nor builds/moves a 254-entry stack
+        // temporary. Sidecar addresses become stable before any CPU scope
+        // wires one into `active_tlb_pin_sidecar`.
+        let bsp_ptr = cpu as *mut BxCpuC<'a, I, T>;
         core::ptr::addr_of_mut!((*ptr).cpu).write(cpu);
         core::ptr::addr_of_mut!((*ptr).ap_cpu_ptrs).write(ap_cpu_ptrs);
         core::ptr::addr_of_mut!((*ptr).ap_cpu_count).write(required_ap_count);
+        let pin_slots = core::ptr::addr_of_mut!((*ptr).cpu_tlb_pins)
+            .cast::<MaybeUninit<CpuTlbPin>>();
+        pin_slots.write(MaybeUninit::new(CpuTlbPin::new(&*bsp_ptr)));
+        for index in 0..required_ap_count {
+            pin_slots
+                .add(index + 1)
+                .write(MaybeUninit::new(CpuTlbPin::new(&*ap_cpu_ptrs[index])));
+        }
+        core::ptr::addr_of_mut!((*ptr).cpu_tlb_pin_count).write(required_ap_count + 1);
         core::ptr::addr_of_mut!((*ptr).memory).write(memory);
         core::ptr::addr_of_mut!((*ptr).devices).write(devices);
         core::ptr::addr_of_mut!((*ptr).device_manager).write(device_manager);
         core::ptr::addr_of_mut!((*ptr).pc_system).write(pc_system);
-        core::ptr::addr_of_mut!((*ptr).last_device_time_usec).write(0);
         core::ptr::addr_of_mut!((*ptr).smp_tick_remainder).write(0);
         core::ptr::addr_of_mut!((*ptr).batch_advanced_pc_system).write(false);
+        #[cfg(feature = "std")]
+        core::ptr::addr_of_mut!((*ptr).slowdown_timer).write(SlowdownTimerState::new());
         core::ptr::addr_of_mut!((*ptr).config).write(config);
         core::ptr::addr_of_mut!((*ptr).initialized).write(false);
+        core::ptr::addr_of_mut!((*ptr).snapshot_restore_failed).write(false);
         core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
         core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
         Ok(&mut *ptr)
@@ -1031,6 +1383,125 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// **IMPORTANT**: For correct BIOS initialization sequence matching original Bochs,
     /// use `init_memory()` + `load_bios()` + `init_cpu_and_devices()` instead of this method.
     /// See main.cc for the correct sequence.
+    fn register_timer_owners(&mut self) -> Result<()> {
+        let pit = self
+            .pc_system
+            .register_timer(TimerOwner::Pit, 0, false, false, "PIT")?;
+        self.device_manager.pit.set_timer_handle(pit);
+
+        let keyboard = self.pc_system.register_timer(
+            TimerOwner::Keyboard,
+            0,
+            false,
+            false,
+            "keyboard",
+        )?;
+        self.device_manager.keyboard.set_timer_handle(keyboard);
+
+        self.device_manager.cmos.periodic_timer_handle = Some(self.pc_system.register_timer(
+            TimerOwner::CmosPeriodic,
+            0,
+            false,
+            false,
+            "CMOS periodic",
+        )?);
+        self.device_manager.cmos.one_second_timer_handle = Some(self.pc_system.register_timer(
+            TimerOwner::CmosOneSecond,
+            0,
+            false,
+            false,
+            "CMOS second",
+        )?);
+        self.device_manager.cmos.uip_timer_handle = Some(self.pc_system.register_timer(
+            TimerOwner::CmosUip,
+            0,
+            false,
+            false,
+            "CMOS UIP",
+        )?);
+
+        self.device_manager.acpi.overflow_timer_handle = Some(self.pc_system.register_timer(
+            TimerOwner::AcpiPmOverflow,
+            0,
+            false,
+            false,
+            "ACPI overflow",
+        )?);
+
+        for port_index in 0..self.device_manager.serial.configured_port_count() {
+            let handle = self.pc_system.register_timer(
+                TimerOwner::SerialFifo(port_index),
+                0,
+                false,
+                false,
+                "serial FIFO",
+            )?;
+            self.device_manager
+                .serial
+                .set_fifo_timer_handle(port_index, Some(handle));
+        }
+
+        for (owner, channel) in [
+            (TimerOwner::PciIdeCh0, 0usize),
+            (TimerOwner::PciIdeCh1, 1usize),
+        ] {
+            let handle = self
+                .pc_system
+                .register_timer(owner, 0, false, false, "PIIX IDE")?;
+            self.device_manager.pci_ide.bmdma[channel].timer_index = Some(handle);
+        }
+
+        for cpu_index in 0..self.cpu_count() {
+            let handle = self.pc_system.register_timer(
+                TimerOwner::Lapic(cpu_index),
+                0,
+                false,
+                false,
+                "lapic",
+            )?;
+            self.cpu_mut_at(cpu_index).lapic.timer_handle = Some(handle);
+        }
+
+        #[cfg(feature = "std")]
+        if self.config.sync_slowdown {
+            let handle = self.pc_system.register_timer(
+                TimerOwner::Slowdown,
+                0,
+                false,
+                false,
+                "slowdown",
+            )?;
+            self.slowdown_timer.initialize(
+                handle,
+                self.pc_system.time_usec(),
+                std::time::Instant::now(),
+            );
+            self.pc_system
+                .activate_timer_usec(handle, SLOWDOWN_QUANTUM_USEC as u32, false)?;
+        }
+        let current_ticks = self.pc_system.time_ticks();
+        self.devices.request_timer_after_usec(
+            DeviceTimerOwner::Pit,
+            current_ticks,
+            self.device_manager.pit.next_event_usec(),
+        );
+        self.devices
+            .apply_cmos_timer_sync(current_ticks, self.device_manager.cmos.timer_sync());
+        self.drain_device_timer_requests();
+        Ok(())
+    }
+
+    fn configure_pci_devices(&mut self) {
+        self.devices.set_pci_enabled(self.config.pci_enabled);
+        let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
+        self.device_manager.pci_bridge.init_dram(ramsize_mb);
+        if self.config.pci_enabled && self.config.pci_vga {
+            self.device_manager.vga.enable_pci();
+            tracing::info!("VGA registered as PCI device (1234:1111, class 0300)");
+        }
+        tracing::trace!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
+    }
+
     #[cfg(feature = "alloc")]
     pub fn initialize(&mut self) -> Result<()> {
         if self.initialized {
@@ -1042,13 +1513,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
 
         // Step 1: Initialize PC system with IPS (line 1201)
         self.pc_system.initialize(self.config.ips);
-        self.last_device_time_usec = 0;
+        self.devices.set_timer_ips(u64::from(self.config.ips));
         self.smp_tick_remainder = 0;
         self.batch_advanced_pc_system = false;
         tracing::trace!("PC system initialized with {} IPS", self.config.ips);
 
         // Step 2: Memory initialization (line 1312)
         // In original: BX_MEM(0)->init_memory(memSize, hostMemSize, memBlockSize);
+        self.invalidate_all_cpu_host_mappings();
         self.memory.init_memory(
             self.config.guest_memory_size,
             self.config.host_memory_size,
@@ -1090,13 +1562,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // Initialize device manager (actual hardware + I/O handler registration)
         self.device_manager
             .init(&mut self.devices, &mut self.memory)?;
-        // Initialize PCI bridge DRAM row boundaries from RAM size,
-        // and wire PCI bridge to memory_type for immediate PAM updates.
-        {
-            let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
-            self.device_manager.pci_bridge.init_dram(ramsize_mb);
-            tracing::trace!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
-        }
+        self.configure_pci_devices();
         // Initialize fw_cfg device and ACPI CPU/APIC tables.
         {
             let ram_size = self.config.guest_memory_size as u64;
@@ -1112,81 +1578,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         }
         tracing::trace!("Devices initialized");
 
-        // Wire DMA→memory for physical DMA transfers
-        let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
-        self.device_manager.dma.set_memory_ptrs(ram_base, ram_len);
-
-        // Register PCI IDE BM-DMA timers (Bochs pci_ide.cc)
-        {
-            // Channel 0 timer
-            match self.pc_system.register_timer(
-                TimerOwner::PciIdeCh0,
-                0,
-                false,
-                false,
-                "PIIX IDE ch0",
-            ) {
-                Ok(handle) => {
-                    self.device_manager.pci_ide.bmdma[0].timer_index = Some(handle);
-                    tracing::trace!("PCI IDE ch0 timer registered with handle {}", handle);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to register PCI IDE ch0 timer: {}", e);
-                }
-            }
-            // Channel 1 timer
-            match self.pc_system.register_timer(
-                TimerOwner::PciIdeCh1,
-                0,
-                false,
-                false,
-                "PIIX IDE ch1",
-            ) {
-                Ok(handle) => {
-                    self.device_manager.pci_ide.bmdma[1].timer_index = Some(handle);
-                    tracing::trace!("PCI IDE ch1 timer registered with handle {}", handle);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to register PCI IDE ch1 timer: {}", e);
-                }
-            }
-        }
-
-        // PIC→IOAPIC forwarding is now handled at call sites: PIC's raise/lower_irq
-        // return forwarding info, and the caller (DeviceManager::tick, etc.) forwards
-        // to IOAPIC. No stored pointers needed.
-
-        // IOAPIC→PIC (ExtINT) and IOAPIC→LAPIC (interrupt delivery) are now passed
-        // as parameters to service_ioapic/set_irq_level/write_aligned.
-        // The MMIO callback path uses fallback stubs (no PIC/LAPIC available).
-
-        // Register one LAPIC timer per CPU (matches Bochs per-local-APIC timers).
-        for cpu_index in 0..self.cpu_count() {
-            let timer_handle = self.pc_system.register_timer(
-                TimerOwner::Lapic(cpu_index),
-                0,     // period=0 (inactive)
-                false, // continuous=false (one-shot, re-armed by periodic())
-                false, // active=false
-                "lapic",
-            );
-            match timer_handle {
-                Ok(handle) => {
-                    self.cpu_mut_at(cpu_index).lapic.timer_handle = Some(handle);
-                    tracing::trace!(
-                        "LAPIC timer registered for CPU {} with handle {}",
-                        cpu_index,
-                        handle
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to register LAPIC timer for CPU {}: {}",
-                        cpu_index,
-                        e
-                    );
-                }
-            }
-        }
+        self.register_timer_owners()?;
 
         // Note: SIM->opt_plugin_ctrl("*", 0) at line 1355 unloads unused optional plugins
         // This is optional plugin management, not yet implemented in Rust version
@@ -1201,6 +1593,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // Note: bx_set_log_actions_by_device(1) at line 1359 sets up logging per device
         // This is only called if not restoring state, and is optional logging setup
 
+        self.rebuild_cpu_masks_from_scan();
+        self.snapshot_restore_failed = false;
         self.initialized = true;
         tracing::debug!("Emulator initialization complete");
 
@@ -1231,13 +1625,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
 
         // Step 1: Initialize PC system with IPS (line 1201)
         self.pc_system.initialize(self.config.ips);
-        self.last_device_time_usec = 0;
+        self.devices.set_timer_ips(u64::from(self.config.ips));
         self.smp_tick_remainder = 0;
         self.batch_advanced_pc_system = false;
         tracing::trace!("PC system initialized with {} IPS", self.config.ips);
 
         // Step 2: Memory initialization (line 1312)
         // In original: BX_MEM(0)->init_memory(memSize, hostMemSize, memBlockSize);
+        self.invalidate_all_cpu_host_mappings();
         self.memory.init_memory(
             self.config.guest_memory_size,
             self.config.host_memory_size,
@@ -1256,7 +1651,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// initialized externally (e.g. via `init_at`).
     pub fn init_pc_system(&mut self) {
         self.pc_system.initialize(self.config.ips);
-        self.last_device_time_usec = 0;
         self.smp_tick_remainder = 0;
         self.memory.set_a20_mask(self.pc_system.a20_mask());
     }
@@ -1301,18 +1695,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.device_manager
             .init(&mut self.devices, &mut self.memory)?;
 
-        // Register the VGA adapter on PCI when configured (experimental KMS path).
-        if self.config.pci_vga && self.config.pci_enabled {
-            self.device_manager.vga.enable_pci();
-            tracing::info!("VGA registered as PCI device (1234:1111, class 0300)");
-        }
-
-        // Initialize PCI bridge DRAM row boundaries from RAM size.
-        {
-            let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
-            self.device_manager.pci_bridge.init_dram(ramsize_mb);
-            tracing::trace!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
-        }
+        self.configure_pci_devices();
         // Initialize fw_cfg device and ACPI CPU/APIC tables.
         {
             let ram_size = self.config.guest_memory_size as u64;
@@ -1331,76 +1714,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         }
         tracing::debug!("Device initialization complete");
 
-        // Wire DMA→memory for physical DMA transfers
-        let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
-        self.device_manager.dma.set_memory_ptrs(ram_base, ram_len);
-
-        // Register PCI IDE BM-DMA timers (Bochs pci_ide.cc)
-        {
-            // Channel 0 timer
-            match self.pc_system.register_timer(
-                TimerOwner::PciIdeCh0,
-                0,
-                false,
-                false,
-                "PIIX IDE ch0",
-            ) {
-                Ok(handle) => {
-                    self.device_manager.pci_ide.bmdma[0].timer_index = Some(handle);
-                    tracing::trace!("PCI IDE ch0 timer registered with handle {}", handle);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to register PCI IDE ch0 timer: {}", e);
-                }
-            }
-            // Channel 1 timer
-            match self.pc_system.register_timer(
-                TimerOwner::PciIdeCh1,
-                0,
-                false,
-                false,
-                "PIIX IDE ch1",
-            ) {
-                Ok(handle) => {
-                    self.device_manager.pci_ide.bmdma[1].timer_index = Some(handle);
-                    tracing::trace!("PCI IDE ch1 timer registered with handle {}", handle);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to register PCI IDE ch1 timer: {}", e);
-                }
-            }
-        }
-
-        // PIC→IOAPIC, IOAPIC→PIC, IOAPIC→LAPIC: pointer wiring removed.
-        // Forwarding is now done via parameters at call sites.
-
-        // Register one LAPIC timer per CPU (matches Bochs per-local-APIC timers).
-        for cpu_index in 0..self.cpu_count() {
-            let timer_handle = self.pc_system.register_timer(
-                TimerOwner::Lapic(cpu_index),
-                0,     // period=0 (inactive)
-                false, // continuous=false (one-shot, re-armed by periodic())
-                false, // active=false
-                "lapic",
-            );
-            match timer_handle {
-                Ok(handle) => {
-                    self.cpu_mut_at(cpu_index).lapic.timer_handle = Some(handle);
-                    tracing::trace!(
-                        "LAPIC timer registered for CPU {} with handle {}",
-                        cpu_index,
-                        handle
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to register LAPIC timer for CPU {}: {}",
-                        cpu_index,
-                        e
-                    );
-                }
-            }
-        }
+        self.register_timer_owners()?;
 
         // Note: SIM->opt_plugin_ctrl("*", 0) at line 1355 unloads unused optional plugins
         // This is optional plugin management, not yet implemented in Rust version
@@ -1415,6 +1729,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // Note: bx_set_log_actions_by_device(1) at line 1359 sets up logging per device
         // This is only called if not restoring state, and is optional logging setup
 
+        self.rebuild_cpu_masks_from_scan();
+        self.snapshot_restore_failed = false;
         self.initialized = true;
         tracing::debug!("Emulator initialization complete");
 
@@ -1469,15 +1785,52 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.gui.as_deref_mut()
     }
 
+    /// Get an immutable reference to the stable BSP CPU allocation.
+    #[inline]
+    pub fn cpu(&self) -> &BxCpuC<'a, I, T> {
+        self.cpu_ref(0)
+    }
+
     #[cfg(feature = "alloc")]
     /// Get reference to GUI (if set)
     pub fn gui(&self) -> Option<&(dyn BxGui + 'static)> {
         self.gui.as_deref()
     }
 
-    /// Get mutable reference to CPU for instrumentation setup.
-    pub fn cpu_mut(&mut self) -> &mut BxCpuC<'a, I, T> {
-        &mut *self.cpu
+    /// Mutably access the BSP CPU for crate-internal emulator operations.
+    ///
+    /// This is crate-visible so the public API can expose targeted operations
+    /// without allowing safe replacement of the pinned CPU storage.
+    #[inline]
+    pub(crate) fn cpu_mut(&mut self) -> &mut BxCpuC<'a, I, T> {
+        self.cpu_mut_at(0)
+    }
+
+    /// Mutably access the pinned BSP CPU without moving it.
+    ///
+    /// Prefer the targeted safe `Emulator` operations whenever one exists.
+    /// This escape hatch is for external integrations that need arbitrary CPU
+    /// state mutation.
+    ///
+    /// # Safety
+    ///
+    /// Pin descriptors do not point at this CPU: their external sidecars are
+    /// refreshed before each memory scope. The caller must not move, replace,
+    /// swap, or retain stale references/raw pointers obtained from the CPU
+    /// beyond their valid borrow and emulator lifetimes.
+    ///
+    /// ```compile_fail
+    /// use rusty_box::cpu::core_i7_skylake::Corei7SkylakeX;
+    /// use rusty_box::emulator::{Emulator, EmulatorConfig};
+    ///
+    /// let mut first = Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
+    /// let mut second = Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
+    /// // Safe code cannot obtain mutable CPU storage to swap it.
+    /// core::mem::swap(first.cpu_mut(), second.cpu_mut());
+    /// ```
+    #[inline]
+    pub unsafe fn cpu_mut_unchecked(&mut self) -> &mut BxCpuC<'a, I, T> {
+        self.cpu_mut_at(0)
     }
 
     #[cfg(feature = "alloc")]
@@ -1587,13 +1940,58 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// * `ram_data` - Raw RAM image data
     /// * `address` - Load address in physical memory
     pub fn load_ram(&mut self, ram_data: &[u8], address: u64) -> Result<()> {
-        self.memory.load_RAM(ram_data, address)?;
+        let pins_ptr = self.tlb_pins().as_ptr();
+        let pins_len = self.tlb_pins().len();
+        // Stable CPU pin storage outlives this exclusive memory borrow.
+        let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
+        self.memory.load_RAM(pins, ram_data, address)?;
         tracing::debug!(
             "Loaded RAM image ({} bytes) at {:#x}",
             ram_data.len(),
             address
         );
         Ok(())
+    }
+
+    fn rearm_device_timers_after_hardware_reset(&mut self) {
+        let current_ticks = self.pc_system.time_ticks();
+        for owner in [
+            DeviceTimerOwner::Pit,
+            DeviceTimerOwner::Keyboard,
+            DeviceTimerOwner::CmosPeriodic,
+            DeviceTimerOwner::CmosOneSecond,
+            DeviceTimerOwner::CmosUip,
+            DeviceTimerOwner::AcpiPmOverflow,
+            DeviceTimerOwner::PciIdeCh0,
+            DeviceTimerOwner::PciIdeCh1,
+        ] {
+            self.devices.request_timer(owner, TimerRequest::Deactivate);
+        }
+        for port_index in 0..self.device_manager.serial.configured_port_count() {
+            self.devices.request_timer(
+                DeviceTimerOwner::SerialFifo(port_index),
+                TimerRequest::Deactivate,
+            );
+        }
+
+        self.devices.request_timer_after_usec(
+            DeviceTimerOwner::Pit,
+            current_ticks,
+            self.device_manager.pit.next_event_usec(),
+        );
+        self.devices.request_timer_after_usec(
+            DeviceTimerOwner::Keyboard,
+            current_ticks,
+            self.device_manager.keyboard.arm_keyboard_timer(),
+        );
+        self.devices
+            .apply_cmos_timer_sync(current_ticks, self.device_manager.cmos.timer_sync());
+        self.devices.request_timer_after_usec(
+            DeviceTimerOwner::AcpiPmOverflow,
+            current_ticks,
+            self.device_manager.acpi.overflow_delay_usec(current_ticks),
+        );
+        self.drain_device_timer_requests();
     }
 
     /// Perform a system reset
@@ -1603,7 +2001,10 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// # Arguments
     /// * `reset_type` - Type of reset (Hardware or Software)
     pub fn reset(&mut self, reset_type: ResetReason) -> Result<()> {
+        let recovering_failed_snapshot = self.snapshot_restore_failed;
         tracing::debug!("Emulator reset ({:?})", reset_type);
+        self.devices.discard_scheduler_boundary_work();
+
 
         // Reset PC system (enables A20)
         self.pc_system.reset(reset_type);
@@ -1660,22 +2061,34 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             // Step 3: Reset all device plugins (matches original line 406: bx_reset_plugins())
             // This resets all devices: PIC, PIT, CMOS, DMA, Keyboard, HardDrive, VGA
             self.device_manager.reset(reset_type)?;
+            self.rearm_device_timers_after_hardware_reset();
 
             // Note: release_keys() at line 407 and paste.stop at line 409 not yet implemented
         }
 
-        // Clear reset request latches. Port 92h is device state, so only a
-        // hardware reset reinitializes its value/A20 latch.
+        // Reset always enables A20. Discard requests made before this reset
+        // and synchronize only the A20 mirrors; software reset must leave all
+        // unrelated controller/device state intact.
         if matches!(reset_type, ResetReason::Hardware) {
             self.device_manager.port92 = SystemControlPort::new();
         } else {
             self.device_manager.port92.reset_request = None;
         }
+        let a20_enabled = self.pc_system.get_enable_a20();
+        self.device_manager.port92.a20_gate = a20_enabled;
+        self.device_manager.port92.a20_change_pending = false;
+        self.device_manager.keyboard.a20_enabled = a20_enabled;
+        self.device_manager.keyboard.a20_change_pending = false;
         self.device_manager.keyboard.reset_requested = None;
 
         // Note: start_timers() is called separately after GUI signal handlers
         // to match original Bochs order: reset -> init_signal_handlers -> start_timers
 
+        self.rebuild_cpu_masks_from_scan();
+        if recovering_failed_snapshot {
+            self.initialized = true;
+        }
+        self.snapshot_restore_failed = false;
         Ok(())
     }
 
@@ -1740,11 +2153,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             self.device_manager.vga.set_icount_sync(ips);
         }
 
-        self.last_device_time_usec = if self.config.ips == 0 {
-            0
-        } else {
-            self.pc_system.time_usec()
-        };
         self.smp_tick_remainder = 0;
         self.batch_advanced_pc_system = false;
         self.start();
@@ -1784,17 +2192,33 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     }
 
     #[cfg(feature = "alloc")]
-    /// Peek at raw RAM at a physical address range (for diagnostics).
-    /// Returns up to `len` bytes from the physical RAM array.
-    pub fn peek_ram_at(&self, addr: usize, len: usize) -> alloc::vec::Vec<u8> {
-        let ram = self.memory.ram_slice();
-        if addr + len <= ram.len() {
-            ram[addr..addr + len].to_vec()
-        } else if addr < ram.len() {
-            ram[addr..].to_vec()
-        } else {
-            alloc::vec::Vec::new()
-        }
+    /// Read up to `len` physical-RAM bytes for diagnostics.
+    ///
+    /// The result is intentionally a requested-size copy: guest RAM can be
+    /// block-backed and swapped, so it is never exposed as a borrowed slice.
+    pub fn peek_ram_at(&mut self, addr: usize, len: usize) -> alloc::vec::Vec<u8> {
+        let mut bytes = alloc::vec![0; len];
+        let pins_ptr = self.tlb_pins().as_ptr();
+        let pins_len = self.tlb_pins().len();
+        // Stable emulator pin storage outlives the exclusive memory borrow.
+        let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
+        let copied = self
+            .memory
+            .read_ram(pins, addr as u64, &mut bytes)
+            .unwrap_or(0);
+        bytes.truncate(copied);
+        bytes
+    }
+
+    #[cfg(feature = "alloc")]
+    #[inline]
+    fn read_physical_u64_or_zero(&mut self, addr: u64) -> u64 {
+        let bytes = self.peek_ram_at(addr as usize, 8);
+        bytes
+            .as_slice()
+            .try_into()
+            .map(u64::from_le_bytes)
+            .unwrap_or(0)
     }
 
     /// Read-only access to this emulator's configuration.
@@ -1807,35 +2231,45 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.initialized
     }
 
+    #[cfg(feature = "std")]
+    pub(crate) fn mark_snapshot_restore_failed(&mut self) {
+        self.initialized = false;
+        self.snapshot_restore_failed = true;
+    }
+
     /// Get the current system tick count
     pub fn ticks(&self) -> u64 {
         self.pc_system.time_ticks()
     }
 
-    /// Sync A20 state from system control port to PC system and memory
-    ///
-    /// Call this after Port 92h writes to update A20 state throughout the system.
-    pub fn sync_a20_state(&mut self) {
-        self.pc_system
-            .set_enable_a20(self.device_manager.port92.a20_gate);
+    /// Apply an A20 transition and invalidate every CPU translation view.
+    fn apply_a20_gate(&mut self, enabled: bool) -> bool {
+        if enabled == self.pc_system.get_enable_a20() {
+            return false;
+        }
+        self.pc_system.set_enable_a20(enabled);
         self.memory.set_a20_mask(self.pc_system.a20_mask());
-        // Bochs pc_system.cc MemoryMappingChanged() calls BX_CPU(0)->TLB_flush()
-        // after A20 changes, since A20 masking affects physical address translation.
-        self.cpu.tlb_flush();
+        true
     }
 
-    /// Process a Port 92h write
-    ///
-    /// This updates the A20 state and checks for reset requests.
-    /// Returns true if a reset was requested.
+    /// Sync A20 state from system control port to PC system and memory.
+    pub fn sync_a20_state(&mut self) {
+        if self.apply_a20_gate(self.device_manager.port92.a20_gate) {
+            self.invalidate_all_cpu_host_mappings();
+        }
+    }
+
+    /// Queue Port 92 A20/reset work through the central machine boundary.
+    /// Returns whether the write requested a reset.
     pub fn write_port_92h(&mut self, value: u8) -> bool {
         let a20_changed = self.device_manager.port92.write(value);
-
-        if a20_changed {
-            self.sync_a20_state();
+        let reset_requested = self.device_manager.port92.reset_request.is_some();
+        if a20_changed || reset_requested {
+            if let Err(error) = self.service_scheduler_boundary(0) {
+                tracing::error!("Port 92 scheduler boundary failed: {error:?}");
+            }
         }
-
-        self.device_manager.port92.reset_request.is_some()
+        reset_requested
     }
 
     /// Read Port 92h value
@@ -1847,39 +2281,13 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// If a reset is pending, clears the request flags and performs that reset type.
     /// Returns true if a reset was performed.
     pub fn check_and_handle_resets(&mut self) -> Result<bool> {
-        let port92_reset = self.device_manager.port92.reset_request.take();
-        let keyboard_reset = self.device_manager.keyboard.reset_requested.take();
-        let pci_reset = self.device_manager.pci2isa.reset_request.take();
-
-        let reset_type = if matches!(port92_reset, Some(ResetReason::Hardware))
-            || matches!(keyboard_reset, Some(ResetReason::Hardware))
-            || matches!(pci_reset, Some(ResetReason::Hardware))
-        {
-            Some(ResetReason::Hardware)
-        } else if port92_reset.is_some() || keyboard_reset.is_some() || pci_reset.is_some() {
-            Some(ResetReason::Software)
-        } else {
-            None
+        let Some(reset_type) = self.device_manager.take_reset_request() else {
+            return Ok(false);
         };
-
-        if let Some(reset_type) = reset_type {
-            self.reset(reset_type)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        self.reset(reset_type)?;
+        Ok(true)
     }
 
-    /// Sync A20 state if port 92h changed. Returns true if A20 was updated.
-    pub fn sync_port92_a20(&mut self, last_value: &mut u8) -> bool {
-        if self.device_manager.port92.value != *last_value {
-            *last_value = self.device_manager.port92.value;
-            self.sync_a20_state();
-            true
-        } else {
-            false
-        }
-    }
 
     /// Set BIOS output file for port 0x402/0x403/0xE9 messages (requires std feature)
     ///
@@ -1944,52 +2352,22 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.device_manager.iac()
     }
 
-    /// Simulate time passing (for timer-based devices)
-    pub fn tick_devices(&mut self, usec: u64) {
-        let icount = self.cpu.icount;
-        self.device_manager.tick(usec, icount, None);
-        // Process deferred ATAPI seek completion (Bochs seek_timer pattern).
-        // In Bochs, start_seek() activates a timer that fires after a seek
-        // delay and calls ready_to_send_atapi(). We process it here during
-        // the next tick, providing the minimum 1-tick delay that separates
-        // the PACKET CDB write from the data-ready interrupt.
-        {
-            let dm = &mut self.device_manager;
-            for ch in 0..2 {
-                if dm.harddrv.seek_complete_pending[ch] {
-                    dm.harddrv.seek_complete_pending[ch] = false;
-                    let crate::iodev::devices::DeviceManager {
-                        ref mut harddrv,
-                        ref mut pic,
-                        ref mut pci_ide,
-                        ..
-                    } = *dm;
-                    harddrv.ready_to_send_atapi(ch, pic, pci_ide);
-                }
+    /// Complete device work explicitly deferred until the issuing I/O
+    /// instruction has retired.
+    fn service_deferred_devices(&mut self) {
+        let dm = &mut self.device_manager;
+        for channel in 0..2 {
+            if dm.harddrv.seek_complete_pending[channel] {
+                dm.harddrv.seek_complete_pending[channel] = false;
+                let crate::iodev::devices::DeviceManager {
+                    harddrv,
+                    pic,
+                    pci_ide,
+                    ..
+                } = dm;
+                harddrv.ready_to_send_atapi(channel, pic, pci_ide);
             }
         }
-        // Drain deferred BM-DMA timer arms (Bochs pci_ide.cc write:
-        // bx_pc_system.activate_timer(timer_index, 1, 0)). Deferred because
-        // the I/O dispatch path has no pc_system access; serviced here like
-        // the deferred seek completion above.
-        for ch in 0..2 {
-            if let Some(usec) = self.device_manager.pci_ide.take_pending_timer_arm(ch) {
-                match self.device_manager.pci_ide.bmdma[ch].timer_index {
-                    Some(handle) => {
-                        if let Err(error) = self.pc_system.activate_timer_usec(handle, usec, false)
-                        {
-                            tracing::error!("BM-DMA ch={ch}: timer arm failed: {error:?}");
-                        }
-                    }
-                    None => {
-                        tracing::error!("BM-DMA ch={ch}: arm requested without a timer handle");
-                    }
-                }
-            }
-        }
-        // Process any deferred PCI port re-registrations and PAM changes
-        self.device_manager
-            .process_pci_deferred(&mut self.devices, &mut self.memory);
     }
 
     /// Drain pending host input (keyboard scancodes, mouse, serial) from the GUI
@@ -2007,12 +2385,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         let mut scancodes_to_send = Vec::new();
         let mut mouse_to_send = Vec::new();
         let mut serial_input = Vec::new();
-        if let Some(ref mut gui) = self.gui {
+        if let Some(gui) = &mut self.gui {
             gui.handle_events();
             scancodes_to_send = gui.get_pending_scancodes();
             mouse_to_send = gui.get_pending_mouse();
             serial_input = gui.get_pending_serial_input();
         }
+        let keyboard_changed = !scancodes_to_send.is_empty() || !mouse_to_send.is_empty();
+        let serial_changed = !serial_input.is_empty();
         for scancode in scancodes_to_send {
             self.device_manager.keyboard.send_scancode(scancode);
         }
@@ -2024,144 +2404,247 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         for byte in serial_input {
             self.device_manager.serial.receive_byte(0, byte);
         }
-    }
-
-    /// Advance devices to the current Bochs virtual time.
-    #[inline]
-    pub fn advance_devices_to_pc_time(&mut self) {
-        if self.config.ips == 0 {
+        if !keyboard_changed && !serial_changed {
             return;
         }
-        let now = self.pc_system.time_usec();
-        let delta = now.wrapping_sub(self.last_device_time_usec);
-        #[cfg(feature = "std")]
-        let realtime_timer_due = self.device_manager.pit.realtime_sync_enabled()
-            || self.device_manager.acpi.realtime_sync_enabled();
-        #[cfg(not(feature = "std"))]
-        let realtime_timer_due = false;
 
-        if delta == 0 && !realtime_timer_due {
-            return;
+        let current_ticks = self.pc_system.time_ticks();
+        if keyboard_changed {
+            if let Some(delay) = self
+                .device_manager
+                .keyboard
+                .take_keyboard_timer_update()
+            {
+                self.devices.request_timer_after_usec(
+                    DeviceTimerOwner::Keyboard,
+                    current_ticks,
+                    delay,
+                );
+            }
         }
-        if realtime_timer_due || delta >= 1_000 || self.device_manager.keyboard.needs_fast_service()
-        {
-            self.tick_devices(delta);
-            self.last_device_time_usec = now;
+        if serial_changed {
+            if let Some(delay) = self.device_manager.serial.take_fifo_timer_update(0) {
+                self.devices.request_timer_after_usec(
+                    DeviceTimerOwner::SerialFifo(0),
+                    current_ticks,
+                    delay,
+                );
+            }
+            for (irq, raise) in self.device_manager.serial.take_pending_irqs() {
+                if raise {
+                    self.device_manager.pic.raise_irq(irq);
+                } else {
+                    self.device_manager.pic.lower_irq(irq);
+                }
+            }
+        }
+        if let Err(error) = self.service_scheduler_boundary(0) {
+            tracing::error!("host-input scheduler boundary failed: {error:?}");
         }
     }
 
     #[inline]
     fn advance_pc_system_after_cpu_ticks(&mut self, ticks: u64) {
-        self.pc_system.tickn(ticks as u32);
-        self.dispatch_timer_fires();
-        self.advance_devices_to_pc_time();
-        self.sync_event_flags();
-    }
-
-    #[inline]
-    fn millisecond_timer_quantum_ticks(&self) -> Option<u64> {
-        const BOCHS_WAIT_STEP_TICKS: u64 = 10;
-        const DEVICE_QUANTUM_USEC: u64 = 1_000;
-
-        let ips = self.config.ips as u64;
-        if ips == 0 {
-            return None;
-        }
-
-        Some((ips * DEVICE_QUANTUM_USEC / 1_000_000).clamp(BOCHS_WAIT_STEP_TICKS, u32::MAX as u64))
-    }
-
-    /// Active CPU batches yield every ~1 ms so pc_system timer fires, LAPIC
-    /// events, GUI status, and device time are serviced promptly. Unlike HLT
-    /// waits, this deliberately does not clamp to the next pc_system countdown:
-    /// a one-tick LAPIC timer would otherwise collapse throughput to trace-sized
-    /// batches.
-    #[inline]
-    fn active_batch_step_ticks(&self, requested: u64) -> u64 {
-        const BIOS_POLL_SAFE_ACTIVE_BATCH_TICKS: u64 = 4_096;
-
-        match self.millisecond_timer_quantum_ticks() {
-            Some(quantum) => requested
-                .min(quantum)
-                .min(BIOS_POLL_SAFE_ACTIVE_BATCH_TICKS),
-            None => requested,
+        if let Err(error) = self.service_scheduler_boundary(ticks) {
+            tracing::error!("scheduler tick commit failed: {error:?}");
         }
     }
 
-    /// HLT/MWAIT wait-loop tick quantum.
-    ///
-    /// Bochs advances halted CPUs with repeated `BX_TICKN(10)`, but our
-    /// usec-driven devices are outside `pc_system` and are expensive to tick
-    /// hundreds of thousands of times per virtual second. Advance up to a
-    /// 1 ms quantum, while still stopping at the next `pc_system` timer so
-    /// LAPIC and other registered timers fire at their exact tick boundary.
+    /// Advance a fully halted machine directly to its earliest exact timer
+    /// deadline. Host input is pumped before each halted step.
     #[inline]
     fn hlt_wait_step_ticks(&self) -> u32 {
-        const BOCHS_WAIT_STEP_TICKS: u32 = 10;
-
-        let ticks_until_pc_event = self.pc_system.get_num_cpu_ticks_left_next_event().max(1);
-        let Some(quantum_ticks) = self.millisecond_timer_quantum_ticks() else {
-            return BOCHS_WAIT_STEP_TICKS.min(ticks_until_pc_event);
-        };
-
-        (quantum_ticks as u32).min(ticks_until_pc_event)
+        self.pc_system.get_num_cpu_ticks_left_next_event().max(1)
     }
 
     /// Dispatch timer fires accumulated by `pc_system.tickn()`.
     ///
-    /// `countdown_event` records fired timer owners instead of calling fn ptrs.
-    /// This method drains them and performs the device-specific action.
     pub fn dispatch_timer_fires(&mut self) {
         let (owners, counts, count) = self.pc_system.take_fired_timers();
+        let current_ticks = self.pc_system.time_ticks();
+        let ips = u64::from(self.config.ips);
         for entry in 0..count {
             match owners[entry] {
                 TimerOwner::NullTimer => {}
                 TimerOwner::PciIdeCh0 => {
                     for _ in 0..counts[entry] {
+                        let pins_ptr = self.tlb_pins().as_ptr();
+                        let pins_len = self.tlb_pins().len();
+                        let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
                         self.device_manager
-                            .pci_ide_timer(0, &mut self.pc_system, &mut self.memory);
+                            .pci_ide_timer(0, &mut self.pc_system, &mut self.memory, pins);
                     }
                 }
                 TimerOwner::PciIdeCh1 => {
                     for _ in 0..counts[entry] {
+                        let pins_ptr = self.tlb_pins().as_ptr();
+                        let pins_len = self.tlb_pins().len();
+                        let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
                         self.device_manager
-                            .pci_ide_timer(1, &mut self.pc_system, &mut self.memory);
+                            .pci_ide_timer(1, &mut self.pc_system, &mut self.memory, pins);
+                    }
+                }
+                TimerOwner::Pit => {
+                    for _ in 0..counts[entry] {
+                        let callback = self
+                            .device_manager
+                            .pit
+                            .timer_callback(current_ticks, ips);
+                        let rising = DeviceManager::replay_pit_irq0_events(
+                            callback.irq0_transitions,
+                            callback.irq0_level,
+                            &mut self.device_manager.pic,
+                        );
+                        if rising != 0 {
+                            self.device_manager.diag_pit_fires += u64::from(rising);
+                        }
+                        self.devices.request_timer_after_usec(
+                            DeviceTimerOwner::Pit,
+                            current_ticks,
+                            callback.rearm_usec,
+                        );
+                    }
+                }
+                TimerOwner::Keyboard => {
+                    for _ in 0..counts[entry] {
+                        let elapsed_usec = self
+                            .device_manager
+                            .keyboard
+                            .arm_keyboard_timer()
+                            .unwrap_or(1);
+                        let callback = self
+                            .device_manager
+                            .keyboard
+                            .timer_callback(elapsed_usec);
+                        if callback.irq_mask & 0x01 != 0 {
+                            self.device_manager.pic.raise_irq(1);
+                        }
+                        if callback.irq_mask & 0x02 != 0 {
+                            self.device_manager.pic.raise_irq(12);
+                        }
+                        self.devices.request_timer_after_usec(
+                            DeviceTimerOwner::Keyboard,
+                            current_ticks,
+                            callback.next_delay_usec,
+                        );
+                    }
+                }
+                TimerOwner::CmosPeriodic => {
+                    for _ in 0..counts[entry] {
+                        self.device_manager.cmos.periodic_timer();
+                    }
+                    if self.device_manager.cmos.check_irq8() {
+                        self.device_manager.pic.raise_irq(8);
+                    }
+                }
+                TimerOwner::CmosOneSecond => {
+                    for _ in 0..counts[entry] {
+                        if self.device_manager.cmos.one_second_timer() {
+                            self.devices.request_timer_after_usec(
+                                DeviceTimerOwner::CmosUip,
+                                current_ticks,
+                                Some(244),
+                            );
+                        }
+                    }
+                }
+                TimerOwner::CmosUip => {
+                    for _ in 0..counts[entry] {
+                        self.device_manager.cmos.uip_timer();
+                    }
+                    if self.device_manager.cmos.check_irq8() {
+                        self.device_manager.pic.raise_irq(8);
+                    }
+                }
+                TimerOwner::AcpiPmOverflow => {
+                    for _ in 0..counts[entry] {
+                        let delay = self.device_manager.acpi.overflow_timer(current_ticks);
+                        self.devices.request_timer_after_usec(
+                            DeviceTimerOwner::AcpiPmOverflow,
+                            current_ticks,
+                            delay,
+                        );
+                    }
+                    if self.device_manager.acpi.irq9_level {
+                        self.device_manager.pic.raise_irq(9);
+                    } else {
+                        self.device_manager.pic.lower_irq(9);
+                    }
+                }
+                TimerOwner::SerialFifo(port_index) => {
+                    for _ in 0..counts[entry] {
+                        self.device_manager.serial.fifo_timer_fired(port_index);
+                    }
+                    for (irq, raise) in self.device_manager.serial.take_pending_irqs() {
+                        if raise {
+                            self.device_manager.pic.raise_irq(irq);
+                        } else {
+                            self.device_manager.pic.lower_irq(irq);
+                        }
                     }
                 }
                 TimerOwner::Lapic(cpu_index) => {
                     if cpu_index < self.cpu_count() {
                         self.cpu_mut_at(cpu_index).lapic.timer_fired = true;
+                        self.refresh_cpu_masks(cpu_index);
+                    }
+                }
+                #[cfg(feature = "std")]
+                TimerOwner::Slowdown => {
+                    for _ in 0..counts[entry] {
+                        let action = self.slowdown_timer.handle_timer(
+                            self.pc_system.time_usec(),
+                            std::time::Instant::now(),
+                        );
+                        if let Some(handle) = self.slowdown_timer.timer_handle {
+                            if let Err(error) = self.pc_system.activate_timer_usec(
+                                handle,
+                                action.next_delay_usec,
+                                false,
+                            ) {
+                                tracing::error!(
+                                    "slowdown timer reactivation failed: {error:?}"
+                                );
+                            }
+                        }
+                        if action.sleep_one_quantum {
+                            std::thread::sleep(std::time::Duration::from_micros(
+                                SLOWDOWN_QUANTUM_USEC,
+                            ));
+                        }
                     }
                 }
             }
         }
+
+        let (fwds, forward_count) = self.device_manager.pic.take_ioapic_forwards();
+        let DeviceManager {
+            ref mut pic,
+            ref mut ioapic,
+            ..
+        } = self.device_manager;
+        for &(irq, level) in &fwds[..forward_count] {
+            ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
+        }
     }
 
-    #[cfg(feature = "alloc")]
     fn drain_lapic_bus(&mut self) {
         let cpu_count = self.cpu_count();
-        for src in 0..cpu_count {
+        let mut cursor = 0usize;
+        while let Some(src) = self.lapic_work_mask.next_set(cursor, cpu_count) {
+            cursor = src + 1;
             self.drain_lapic_bus_from(cpu_count, src);
         }
     }
 
-    /// Drain queued ICR IPIs from ONE cpu. After a round-robin slice only the
-    /// cpu that just executed can have queued new IPIs, so the per-slice
-    /// drain checks that single source instead of sweeping all cpus (the full
-    /// sweep still runs at batch boundaries and in sync_event_flags).
+    /// Drain queued ICR IPIs from one CPU selected by `lapic_work_mask`.
     fn drain_lapic_bus_from(&mut self, cpu_count: usize, src: usize) {
         while let Some(ipi) = { self.cpu_mut_at(src).lapic.take_pending_ipi() } {
             self.deliver_pending_ipi(cpu_count, src, ipi);
         }
+        self.refresh_cpu_masks(src);
     }
 
-    #[cfg(not(feature = "alloc"))]
-    fn drain_lapic_bus(&mut self) {
-        let cpu_count = self.cpu_count();
-        for src in 0..cpu_count {
-            self.drain_lapic_bus_from(cpu_count, src);
-        }
-    }
 
     fn deliver_lapic_bus_interrupt(
         &mut self,
@@ -2185,6 +2668,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             self.cpu_mut_at(target)
                 .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
         }
+        self.refresh_cpu_masks(target);
     }
 
     fn deliver_pending_ipi(&mut self, cpu_count: usize, src: usize, ipi: PendingIpi) {
@@ -2369,7 +2853,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         timer_handle: Option<usize>,
         deactivate: bool,
         activate: Option<LocalApicTimerActivation>,
-        reactivate_from_previous_fire: bool,
+        _reactivate_from_previous_fire: bool,
     ) {
         if deactivate {
             if let Some(handle) = timer_handle {
@@ -2383,24 +2867,26 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
 
         if let Some(activation) = activate {
             if let Some(handle) = timer_handle {
-                let result = if reactivate_from_previous_fire {
-                    self.pc_system
-                        .reactivate_timer_relative(handle, activation.delay_ticks)
-                } else {
-                    self.pc_system
-                        .activate_timer(handle, activation.delay_ticks, false)
-                };
-                if let Err(e) = result {
+                if let Err(e) = self.pc_system.activate_timer_at_ticks(
+                    handle,
+                    activation.deadline_ticks,
+                    false,
+                ) {
                     tracing::error!(
                         "CPU {cpu_index} LAPIC timer activate (handle {handle}) failed: {e:?}"
                     );
                 }
             }
             if activation.update_ticks_initial {
-                let ticks_now = self.pc_system.time_ticks();
+                let programmed_ticks = {
+                    let lapic = &self.cpu_ref(cpu_index).lapic;
+                    activation
+                        .deadline_ticks
+                        .saturating_sub(lapic.timer_period_ticks().unwrap_or(0))
+                };
                 self.cpu_mut_at(cpu_index)
                     .lapic
-                    .set_ticks_initial(ticks_now);
+                    .set_ticks_initial(programmed_ticks);
             }
         }
     }
@@ -2410,7 +2896,10 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// the register write; deferred Rust requests must retain the same epoch.
     fn service_lapic_timer_requests(&mut self) {
         let ticks_now = self.pc_system.time_ticks();
-        for cpu_index in 0..self.cpu_count() {
+        let cpu_count = self.cpu_count();
+        let mut cursor = 0usize;
+        while let Some(cpu_index) = self.lapic_work_mask.next_set(cursor, cpu_count) {
+            cursor = cpu_index + 1;
             let has_request = {
                 let lapic = &self.cpu_ref(cpu_index).lapic;
                 lapic.timer_deactivate_request || lapic.timer_activate_request.is_some()
@@ -2431,11 +2920,15 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 (timer_handle, deactivate, activate)
             };
             self.apply_lapic_timer_request(cpu_index, timer_handle, deactivate, activate, false);
+            self.refresh_cpu_masks(cpu_index);
         }
     }
 
     fn service_lapic_local_events(&mut self) {
-        for cpu_index in 0..self.cpu_count() {
+        let cpu_count = self.cpu_count();
+        let mut cursor = 0usize;
+        while let Some(cpu_index) = self.lapic_work_mask.next_set(cursor, cpu_count) {
+            cursor = cpu_index + 1;
             while let Some(cpu_event) = self.cpu_mut_at(cpu_index).lapic.take_pending_cpu_event() {
                 self.apply_lapic_cpu_event(cpu_index, Some(cpu_event));
             }
@@ -2464,8 +2957,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
 
                 self.apply_lapic_timer_request(cpu_index, timer_handle, deactivate, activate, true);
 
-                self.pc_system.tickn(0);
-                self.dispatch_timer_fires();
             }
 
             let ticks_now = self.pc_system.time_ticks();
@@ -2492,6 +2983,250 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             if let Some(vector) = eoi_vector {
                 self.device_manager.ioapic.receive_eoi(vector);
             }
+            self.refresh_cpu_masks(cpu_index);
+        }
+    }
+
+    /// Commit all deferred machine effects after CPU/device raw borrows end.
+    ///
+    /// A CPU can queue work, but neither it nor a sibling observes the
+    /// resulting machine state until this method has returned.
+    pub fn service_scheduler_boundary(&mut self, elapsed_ticks: u64) -> CpuResult<()> {
+        self.clear_scheduler_raw_wiring();
+
+        // Reset dominates every previously queued effect. Hardware requests
+        // win over software requests from the same boundary.
+        let reset_applied = match self.check_and_handle_resets() {
+            Ok(applied) => applied,
+            Err(error) => {
+                tracing::error!("machine boundary reset handling failed: {error:?}");
+                return Err(CpuError::MachineBoundaryFailed);
+            }
+        };
+
+        // Pre-reset LAPIC work was discarded by reset. Otherwise source bus
+        // work before local control/EOI and captured-epoch timer requests.
+        if !reset_applied {
+            self.drain_lapic_bus();
+            self.service_lapic_local_events();
+            self.service_lapic_timer_requests();
+        }
+        self.service_deferred_devices();
+
+        // Apply A20 and PCI/memory effects until no producer remains. Capture
+        // both simultaneous A20 desires before changing either controller
+        // mirror, then apply the established port92-then-keyboard order.
+        let mut mapping_changed = false;
+        let mut quiesced = false;
+        for _ in 0..16 {
+            let (port92_a20, keyboard_a20) = {
+                let devices = &mut self.device_manager;
+                let port92 = devices
+                    .port92
+                    .a20_change_pending
+                    .then_some(devices.port92.a20_gate);
+                let keyboard = devices
+                    .keyboard
+                    .a20_change_pending
+                    .then_some(devices.keyboard.a20_enabled);
+                devices.port92.a20_change_pending = false;
+                devices.keyboard.a20_change_pending = false;
+                (port92, keyboard)
+            };
+            if let Some(enabled) = port92_a20 {
+                mapping_changed |= self.apply_a20_gate(enabled);
+            }
+            if let Some(enabled) = keyboard_a20 {
+                mapping_changed |= self.apply_a20_gate(enabled);
+            }
+
+            match self.device_manager.apply_pending_machine_boundary(
+                &mut self.devices,
+                &mut self.memory,
+            ) {
+                Ok(effects) => mapping_changed |= effects.memory_mapping_changed,
+                Err(error) => {
+                    tracing::error!("machine boundary application failed: {error:?}");
+                    self.invalidate_all_cpu_host_mappings();
+                    return Err(CpuError::MachineBoundaryFailed);
+                }
+            }
+
+            if !self.device_manager.has_pending_machine_boundary() {
+                quiesced = true;
+                break;
+            }
+        }
+        if !quiesced {
+            #[cfg(test)]
+            eprintln!(
+                "machine boundary failed to quiesce: pending={:?}",
+                (
+                    self.device_manager.pci_ide_bar4_needs_reregister,
+                    self.device_manager.acpi_pm_needs_reregister,
+                    self.device_manager.acpi_sm_needs_reregister,
+                    self.device_manager.pam_needs_update,
+                    self.device_manager.smram_needs_update,
+                    self.device_manager.bios_write_needs_update,
+                    self.device_manager.vga_bar_needs_reregister,
+                    self.device_manager.port92.a20_change_pending,
+                    self.device_manager.keyboard.a20_change_pending,
+                    self.device_manager.port92.reset_request,
+                    self.device_manager.keyboard.reset_requested,
+                    self.device_manager.pci2isa.reset_request,
+                )
+            );
+            self.invalidate_all_cpu_host_mappings();
+            return Err(CpuError::MachineBoundaryFailed);
+        }
+        let a20_enabled = self.pc_system.get_enable_a20();
+        self.device_manager.port92.a20_gate = a20_enabled;
+        self.device_manager.keyboard.a20_enabled = a20_enabled;
+        if mapping_changed {
+            self.invalidate_all_cpu_host_mappings();
+        }
+        self.drain_device_timer_requests();
+        // Step virtual time only to the earliest owner deadline, dispatch
+        // every tied owner in registration order, then recompute. Callback
+        // rearming cannot be skipped by a large tickn leap.
+        let mut remaining = elapsed_ticks;
+        let mut zero_time_passes = 0usize;
+        loop {
+            if self.pc_system.has_fired_timers() {
+                self.dispatch_timer_fires();
+                self.service_lapic_local_events();
+                self.drain_device_timer_requests();
+                zero_time_passes += 1;
+                if zero_time_passes > 256 {
+                    return Err(CpuError::UnsupportedCpuOperation {
+                        operation: "scheduler timer callbacks failed to quiesce",
+                    });
+                }
+                continue;
+            }
+            zero_time_passes = 0;
+            if remaining == 0 {
+                break;
+            }
+
+            let now = self.pc_system.time_ticks();
+            let until_deadline = self
+                .pc_system
+                .next_timer_deadline_ticks()
+                .map(|deadline| deadline.saturating_sub(now).max(1))
+                .unwrap_or(u64::MAX);
+            let step = remaining.min(until_deadline).min(u64::from(u32::MAX));
+            debug_assert_ne!(step, 0);
+            self.pc_system.tickn(step as u32);
+            remaining -= step;
+        }
+
+        self.drain_device_timer_requests();
+        self.drain_pending_smc();
+        self.sync_final_event_levels();
+        #[cfg(test)]
+        self.assert_cpu_masks_match_scan();
+        Ok(())
+    }
+
+    /// Apply fixed I/O owner requests after the raw device manager pointer has
+    /// been cleared. Phase 2 owns the already registered IDE channels; later
+    /// owners retain their table slots until Phase 3 registers their handles.
+    fn drain_device_timer_requests(&mut self) {
+        let _boundary_requested = self.devices.take_scheduler_boundary_requested();
+        let requests = self.devices.take_timer_requests();
+        let owners = [
+            (
+                DeviceTimerOwner::Pit,
+                self.device_manager.pit.timer_handle(),
+                "PIT",
+            ),
+            (
+                DeviceTimerOwner::Keyboard,
+                self.device_manager.keyboard.timer_handle(),
+                "keyboard",
+            ),
+            (
+                DeviceTimerOwner::CmosPeriodic,
+                self.device_manager.cmos.periodic_timer_handle,
+                "CMOS periodic",
+            ),
+            (
+                DeviceTimerOwner::CmosOneSecond,
+                self.device_manager.cmos.one_second_timer_handle,
+                "CMOS one-second",
+            ),
+            (
+                DeviceTimerOwner::CmosUip,
+                self.device_manager.cmos.uip_timer_handle,
+                "CMOS UIP",
+            ),
+            (
+                DeviceTimerOwner::AcpiPmOverflow,
+                self.device_manager.acpi.overflow_timer_handle,
+                "ACPI PM overflow",
+            ),
+            (
+                DeviceTimerOwner::SerialFifo(0),
+                self.device_manager.serial.fifo_timer_handle(0),
+                "serial FIFO 0",
+            ),
+            (
+                DeviceTimerOwner::SerialFifo(1),
+                self.device_manager.serial.fifo_timer_handle(1),
+                "serial FIFO 1",
+            ),
+            (
+                DeviceTimerOwner::SerialFifo(2),
+                self.device_manager.serial.fifo_timer_handle(2),
+                "serial FIFO 2",
+            ),
+            (
+                DeviceTimerOwner::SerialFifo(3),
+                self.device_manager.serial.fifo_timer_handle(3),
+                "serial FIFO 3",
+            ),
+            (
+                DeviceTimerOwner::PciIdeCh0,
+                self.device_manager.pci_ide.bmdma[0].timer_index,
+                "BM-DMA ch0",
+            ),
+            (
+                DeviceTimerOwner::PciIdeCh1,
+                self.device_manager.pci_ide.bmdma[1].timer_index,
+                "BM-DMA ch1",
+            ),
+        ];
+
+        for (owner, handle, label) in owners {
+            let Some(handle) = handle else {
+                continue;
+            };
+            match requests.get(owner) {
+                TimerRequest::Unchanged => {}
+                TimerRequest::Deactivate => {
+                    if let Err(error) = self.pc_system.deactivate_timer(handle) {
+                        tracing::error!("{label}: timer deactivation failed: {error:?}");
+                    }
+                }
+                TimerRequest::Activate {
+                    deadline_ticks,
+                    continuous,
+                } => {
+                    let result = if continuous {
+                        let period_ticks = deadline_ticks
+                            .saturating_sub(self.pc_system.time_ticks())
+                            .max(1);
+                        self.pc_system.activate_timer(handle, period_ticks, true)
+                    } else {
+                        self.pc_system
+                            .activate_timer_at_ticks(handle, deadline_ticks, false)
+                    };
+                    if let Err(error) = result {
+                        tracing::error!("{label}: timer activation failed: {error:?}");
+                    }
+                }
+            }
         }
     }
 
@@ -2511,79 +3246,108 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 // operation, and the exit can walk the VMEXIT MSR store/load
                 // lists. Wire the memory bus for the call so those guest-memory
                 // accesses resolve, then clear it (mirrors inject_interrupt).
+                self.refresh_tlb_pins();
+                let pins_ptr = self.tlb_pins().as_ptr();
+                let pins_len = self.tlb_pins().len();
                 let mem_ptr =
                     core::ptr::NonNull::from(&mut *unsafe { self.borrow_memory_for_cpu() });
+                let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
+                let current_pin = unsafe { &*pins_ptr.add(target) };
                 let cpu = self.cpu_mut_at(target);
-                cpu.set_mem_bus_ptr(mem_ptr);
+                cpu.wire_memory_access(mem_ptr, pins, current_pin);
                 cpu.deliver_sipi(vector);
-                cpu.clear_mem_bus();
+                cpu.clear_memory_access();
             }
         }
     }
-    /// Synchronize device event flags to CPU event fields.
-    ///
-    /// PIC, LAPIC, and pc_system set boolean flags when they need to
-    /// signal the CPU. This method reads those flags, applies the
-    /// corresponding bits to `cpu.pending_event` / `cpu.async_event`,
-    /// and clears the flags.
-    pub fn sync_event_flags(&mut self) {
-        self.drain_lapic_bus();
-        self.service_lapic_local_events();
-        // PIC deferred edges collapse to the final INT pin level. IAC may
-        // queue both a clear and a reassertion while servicing the next
-        // request; the final pin is authoritative, so the later assertion
-        // cannot be erased by the stale clear notification.
-        if self.device_manager.pic.irq_pending || self.device_manager.pic.irq_cleared {
-            let asserted = self.device_manager.pic.has_interrupt();
-            self.device_manager.pic.irq_pending = false;
-            self.device_manager.pic.irq_cleared = false;
-            if asserted {
-                self.cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
-            } else {
-                self.cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
-            }
+    /// Rebuild CPU interrupt-level bits after snapshot restore without
+    /// consuming any restored PIC, IOAPIC, LAPIC, or timer work queues.
+    fn sync_restored_event_levels(&mut self) {
+        let pic_asserted = self.device_manager.pic.has_interrupt()
+            || self.device_manager.pic.irq_pending
+            || self.pc_system.intr_raised;
+        if pic_asserted {
+            self.cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
+        } else {
+            self.cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
         }
-        // IOAPIC: drain pending deliveries to LAPICs
-        {
-            let (deliveries, count) = self.device_manager.ioapic.take_pending_deliveries();
-            if count > 0 {
-                for &delivery in &deliveries[..count] {
-                    let mut delivery = delivery;
-                    if delivery.needs_pic_iac {
-                        delivery.vector = self.device_manager.pic.iac();
-                        delivery.needs_pic_iac = false;
-                    }
-                    let done = self.deliver_ioapic_to_lapics(delivery);
-                    self.device_manager
-                        .ioapic
-                        .complete_deferred_delivery(delivery, done);
-                }
-            }
-        }
-        self.drain_lapic_bus();
-        self.service_lapic_local_events();
-        // LAPIC: BX_EVENT_PENDING_LAPIC_INTR
+
         for cpu_index in 0..self.cpu_count() {
+            let cpu = self.cpu_mut_at(cpu_index);
+            if cpu.lapic.intr || cpu.lapic.intr_pending {
+                cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+            } else {
+                cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+            }
+        }
+    }
+
+    /// Synchronize final physical interrupt levels after all queue owners have
+    /// committed. This is deliberately not a scheduler entry point.
+    fn sync_final_event_levels(&mut self) {
+        // Publish the physical PIC pin on every commit, not only when legacy
+        // edge bookkeeping happens to be present. This restores the level
+        // after CPU reset and prevents lost interrupt state.
+        let asserted = self.device_manager.pic.has_interrupt();
+        self.device_manager.pic.irq_pending = false;
+        self.device_manager.pic.irq_cleared = false;
+        if asserted {
+            self.cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
+        } else {
+            self.cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
+        }
+
+        // PIC forwarding has already changed IOAPIC levels; now route its
+        // deferred deliveries in registration order into the LAPICs.
+        let (deliveries, count) = self.device_manager.ioapic.take_pending_deliveries();
+        for &delivery in &deliveries[..count] {
+            let mut delivery = delivery;
+            if delivery.needs_pic_iac {
+                delivery.vector = self.device_manager.pic.iac();
+                delivery.needs_pic_iac = false;
+            }
+            let done = self.deliver_ioapic_to_lapics(delivery);
+            self.device_manager
+                .ioapic
+                .complete_deferred_delivery(delivery, done);
+        }
+
+        self.drain_lapic_bus();
+        self.service_lapic_local_events();
+        let cpu_count = self.cpu_count();
+        let mut cursor = 0usize;
+        while let Some(cpu_index) = self.lapic_work_mask.next_set(cursor, cpu_count) {
+            cursor = cpu_index + 1;
             let cpu = self.cpu_mut_at(cpu_index);
             if cpu.lapic.intr_pending {
                 cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
                 cpu.lapic.intr_pending = false;
             }
+            self.refresh_cpu_masks(cpu_index);
         }
-        // pc_system: raise_intr
+
         if self.pc_system.intr_raised {
             self.cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
             self.pc_system.intr_raised = false;
         }
-        // pc_system: clear_intr
         if self.pc_system.intr_cleared {
             self.cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
             self.pc_system.intr_cleared = false;
         }
-        // pc_system: async_event (HRQ/timer)
         if self.pc_system.async_event_pending {
             self.cpu.async_event = 1;
             self.pc_system.async_event_pending = false;
+        }
+        if self.cpu_count() != 0 {
+            self.refresh_cpu_masks(0);
+        }
+    }
+
+    /// Legacy public entry point: host/UI callers now join the same central
+    /// zero-time commit used between CPU slices.
+    pub fn sync_event_flags(&mut self) {
+        if let Err(error) = self.service_scheduler_boundary(0) {
+            tracing::error!("scheduler boundary event synchronization failed: {error:?}");
         }
     }
 
@@ -2759,7 +3523,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         for (i, &entry) in gdt.iter().enumerate() {
             gdt_bytes[i * 8..(i + 1) * 8].copy_from_slice(&entry.to_le_bytes());
         }
-        self.memory.load_RAM(&gdt_bytes, GDT_ADDR)?;
+        self.load_ram(&gdt_bytes, GDT_ADDR)?;
 
         // =====================================================================
         // Write boot_params (zero page)
@@ -2857,7 +3621,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 initrd_data.len(), initrd_load_addr, initrd_load_addr + initrd_data.len() as u64,
                 ram_top, initrd_addr_max
             );
-            self.memory.load_RAM(initrd_data, initrd_load_addr)?;
+            self.load_ram(initrd_data, initrd_load_addr)?;
 
             // ramdisk_image = physical address
             boot_params[0x218..0x21C].copy_from_slice(&(initrd_load_addr as u32).to_le_bytes());
@@ -2896,7 +3660,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         boot_params[0x1E8] = e820_idx as u8;
 
         // Write boot_params to memory
-        self.memory.load_RAM(&boot_params, boot_params_addr)?;
+        self.load_ram(&boot_params, boot_params_addr)?;
 
         // =====================================================================
         // Write command line
@@ -2905,7 +3669,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         let cmdline_len = core::cmp::min(cmdline_bytes.len(), 2047);
         let mut cmdline_buf = alloc::vec![0u8; cmdline_len + 1]; // null-terminated
         cmdline_buf[..cmdline_len].copy_from_slice(&cmdline_bytes[..cmdline_len]);
-        self.memory.load_RAM(&cmdline_buf, cmdline_addr)?;
+        self.load_ram(&cmdline_buf, cmdline_addr)?;
         tracing::debug!("Command line: {}", cmdline);
 
         // =====================================================================
@@ -2922,7 +3686,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
 
             let madt = build_direct_boot_madt(self.config.cpu_params.cpu_count());
             let madt_len = madt.len();
-            self.memory.load_RAM(&madt, MADT_ADDR)?;
+            self.load_ram(&madt, MADT_ADDR)?;
 
             // --- XSDT (Extended System Description Table) ---
             // Header: 36 bytes + 1 pointer (8 bytes) = 44 bytes
@@ -2940,7 +3704,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             xsdt[36..44].copy_from_slice(&MADT_ADDR.to_le_bytes());
             let sum: u8 = xsdt.iter().fold(0u8, |a, &b| a.wrapping_add(b));
             xsdt[9] = 0u8.wrapping_sub(sum);
-            self.memory.load_RAM(&xsdt, XSDT_ADDR)?;
+            self.load_ram(&xsdt, XSDT_ADDR)?;
 
             // --- RSDP (Root System Description Pointer) ---
             // RSDP v2.0 = 36 bytes
@@ -2962,7 +3726,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             // v2 extended checksum covers bytes 0-35
             let v2_sum: u8 = rsdp.iter().fold(0u8, |a, &b| a.wrapping_add(b));
             rsdp[32] = 0u8.wrapping_sub(v2_sum);
-            self.memory.load_RAM(&rsdp, RSDP_ADDR)?;
+            self.load_ram(&rsdp, RSDP_ADDR)?;
 
             tracing::debug!(
                 "ACPI tables: RSDP at {:#x}, XSDT at {:#x}, MADT at {:#x} ({}B)",
@@ -3018,7 +3782,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             pm_kernel.len(),
             code32_start
         );
-        self.memory.load_RAM(pm_kernel, code32_start as u64)?;
+        self.load_ram(pm_kernel, code32_start as u64)?;
 
         // =====================================================================
         // Configure CPU for protected mode
@@ -3056,19 +3820,20 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     {
         self.prepare_run();
 
-        // Verify VGA BIOS ROM is accessible
+        // Verify VGA BIOS and IPL diagnostic ranges through block-aware RAM
+        // copies; guest RAM is never borrowed as one flat slice.
         {
-            // Check through ROM area (not RAM)
-            let rom_bytes = self.memory.peek_ram(0xC0000, 4);
+            let rom_bytes = self.peek_ram_at(0xC0000, 4);
             tracing::trace!(
-                "VGA ROM check via peek_ram(0xC0000): {:02X?} (expect [55, AA, ...])",
+                "VGA ROM check at 0xC0000: {:02X?} (expect [55, AA, ...])",
                 rom_bytes
             );
-            // Also verify IPL table area is writable
-            let ipl_bytes = self.memory.peek_ram(0x9FF00, 4);
+            let ipl_count = self.peek_ram_at(0x9FF80, 2);
+            let ipl0_type = self.peek_ram_at(0x9FF00, 2);
             tracing::trace!(
-                "IPL table check at 0x9FF00: {:02X?} (expect zeros before POST)",
-                ipl_bytes
+                "IPL count at 0x9FF80: {:02X?}; IPL0 type at 0x9FF00: {:02X?} (expect zeros before POST)",
+                ipl_count,
+                ipl0_type,
             );
             // Check total memory size
             tracing::trace!("Memory len={:#x}", self.memory.get_memory_len());
@@ -3079,10 +3844,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.update_gui(); // Force initial update
 
         let mut instructions_executed = 0u64;
-        #[cfg(feature = "std")]
-        let mut slowdown_start = std::time::Instant::now();
-        #[cfg(feature = "std")]
-        let mut slowdown_ticks_base = self.pc_system.time_ticks();
         #[cfg(feature = "std")]
         let mut last_gui_update = std::time::Instant::now();
         #[cfg(feature = "std")]
@@ -3103,7 +3864,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         const IPS_SHOW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
         #[cfg(feature = "std")]
         const MIPS_LOG_INTERVAL: u64 = 50_000_000;
-        let mut last_port92_value: u8 = self.device_manager.port92.value;
 
         const INSTRUCTION_BATCH_SIZE: u64 = 100_000;
         const PROGRESS_LOG_INTERVAL: u64 = 10_000_000;
@@ -3124,18 +3884,12 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             self.pump_gui_input();
 
             // 2. Execute CPU instructions in batches
-            let batch_size = (max_instructions - instructions_executed).min(INSTRUCTION_BATCH_SIZE);
+            let remaining_instructions = max_instructions - instructions_executed;
+            let batch_size = remaining_instructions.min(INSTRUCTION_BATCH_SIZE);
             // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
-            let result = unsafe { self.run_cpu_batch(batch_size) };
+            let result =
+                unsafe { self.run_cpu_batch_with_strict_limit(batch_size, true) };
 
-            // Apply PAM/SMRAM/XBCS register changes immediately (BIOS needs this before next batch)
-            if self.device_manager.pam_needs_update
-                || self.device_manager.smram_needs_update
-                || self.device_manager.bios_write_needs_update
-            {
-                self.device_manager
-                    .process_pci_deferred(&mut self.devices, &mut self.memory);
-            }
 
             let _should_update_gui = match result {
                 Ok(executed) => {
@@ -3217,62 +3971,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         break;
                     }
 
-                    // Port 92h (System Control) may have changed A20 during execution.
-                    // Sync PC system + memory masks if any writes occurred.
-                    if self.device_manager.port92.value != last_port92_value {
-                        last_port92_value = self.device_manager.port92.value;
-                        self.sync_a20_state();
-                    }
-
-                    // Check for reset requests: Port 92h, keyboard 0xFE, or PCI CF9
-                    let port92_reset = self.device_manager.port92.reset_request.take();
-                    let keyboard_reset = self.device_manager.keyboard.reset_requested.take();
-                    let pci_reset = self.device_manager.pci2isa.reset_request.take();
-                    let reset_type = if matches!(port92_reset, Some(ResetReason::Hardware))
-                        || matches!(keyboard_reset, Some(ResetReason::Hardware))
-                        || matches!(pci_reset, Some(ResetReason::Hardware))
-                    {
-                        Some(ResetReason::Hardware)
-                    } else if port92_reset.is_some()
-                        || keyboard_reset.is_some()
-                        || pci_reset.is_some()
-                    {
-                        Some(ResetReason::Software)
-                    } else {
-                        None
-                    };
-                    if let Some(reset_type) = reset_type {
-                        if port92_reset.is_some() {
-                            #[cfg(feature = "std")]
-                            log_reset(&format!(
-                                "PORT 92h FAST {:?} RESET at RIP={:#x} icount={}",
-                                reset_type,
-                                self.cpu.rip(),
-                                self.cpu.icount
-                            ));
-                        }
-                        if keyboard_reset.is_some() {
-                            #[cfg(feature = "std")]
-                            log_reset(&format!(
-                                "KEYBOARD {:?} RESET at RIP={:#x} icount={}",
-                                reset_type,
-                                self.cpu.rip(),
-                                self.cpu.icount
-                            ));
-                        }
-                        if let Some(pci_reset) = pci_reset {
-                            #[cfg(feature = "std")]
-                            log_reset(&format!(
-                                "PCI CF9 {:?} RESET at RIP={:#x} icount={}",
-                                pci_reset,
-                                self.cpu.rip(),
-                                self.cpu.icount
-                            ));
-                        }
-                        self.reset(reset_type)?;
-                        last_port92_value = self.device_manager.port92.value;
-                        continue;
-                    }
 
                     // -- Progress tracking --
                     let current_rip = self.cpu.rip();
@@ -3294,17 +3992,16 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     // Log every batch in the critical PM→POST transition range
                     #[cfg(debug_assertions)]
                     if (440_000..480_000).contains(&instructions_executed) {
-                        let mem = self.memory.ram_slice();
-                        let ipl_count = if 0x9FF81 < mem.len() {
-                            u16::from_le_bytes([mem[0x9FF80], mem[0x9FF81]])
-                        } else {
-                            0
-                        };
-                        let ipl0_type = if 0x9FF01 < mem.len() {
-                            u16::from_le_bytes([mem[0x9FF00], mem[0x9FF01]])
-                        } else {
-                            0
-                        };
+                        let ipl_count = self
+                            .peek_ram_at(0x9FF80, 2)
+                            .try_into()
+                            .map(u16::from_le_bytes)
+                            .unwrap_or(0);
+                        let ipl0_type = self
+                            .peek_ram_at(0x9FF00, 2)
+                            .try_into()
+                            .map(u16::from_le_bytes)
+                            .unwrap_or(0);
                         tracing::trace!(
                             "EIP trace: {} instr, CS:IP={:#06x}:{:#06x}, mode={}, IPL_count={}, IPL0_type={}",
                             instructions_executed,
@@ -3326,31 +4023,22 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 let ss_base = self.cpu.get_ss_base() as usize;
                                 let bp_phys = ss_base + bp;
                                 let ax = self.cpu.eax() as u16;
-                                let mem_peek = self.memory.ram_slice();
-                                let bp2 = if bp_phys + 3 < mem_peek.len() {
-                                    u16::from_le_bytes([
-                                        mem_peek[bp_phys + 2],
-                                        mem_peek[bp_phys + 3],
-                                    ])
-                                } else {
-                                    0
-                                };
-                                let bp4 = if bp_phys + 5 < mem_peek.len() {
-                                    u16::from_le_bytes([
-                                        mem_peek[bp_phys + 4],
-                                        mem_peek[bp_phys + 5],
-                                    ])
-                                } else {
-                                    0
-                                };
-                                let bp6 = if bp_phys + 7 < mem_peek.len() {
-                                    u16::from_le_bytes([
-                                        mem_peek[bp_phys + 6],
-                                        mem_peek[bp_phys + 7],
-                                    ])
-                                } else {
-                                    0
-                                };
+                                let mem_peek = self.peek_ram_at(bp_phys, 8);
+                                let bp2 = mem_peek
+                                    .get(2..4)
+                                    .and_then(|bytes| bytes.try_into().ok())
+                                    .map(u16::from_le_bytes)
+                                    .unwrap_or(0);
+                                let bp4 = mem_peek
+                                    .get(4..6)
+                                    .and_then(|bytes| bytes.try_into().ok())
+                                    .map(u16::from_le_bytes)
+                                    .unwrap_or(0);
+                                let bp6 = mem_peek
+                                    .get(6..8)
+                                    .and_then(|bytes| bytes.try_into().ok())
+                                    .map(u16::from_le_bytes)
+                                    .unwrap_or(0);
                                 tracing::trace!(
                                     "STUCK at RIP={:#x} after {}k instructions, last I/O read: port={:#06x} value={:#x}, CS={:#06x} mode={}, BP={:#06x} AX={:#06x} [BP+2]={:#06x} [BP+4]={:#06x} [BP+6]={:#06x}",
                                     current_rip,
@@ -3454,11 +4142,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 }
                                 // 2. Advance halted virtual time in a device-friendly quantum.
                                 let step = self.hlt_wait_step_ticks();
-                                self.pc_system.tickn(step);
-                                self.dispatch_timer_fires();
-                                hlt_budget += step as u64;
-                                self.advance_devices_to_pc_time();
-                                self.sync_event_flags();
+                                self.service_scheduler_boundary(u64::from(step))?;
+                                hlt_budget += u64::from(step);
                                 if !self.can_fast_forward_bsp_hlt() {
                                     break;
                                 }
@@ -3504,14 +4189,16 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 // Don't check activity_state here — LAPIC uses signal_event
                                 // which sets async_event but doesn't change activity_state
                                 // until handle_async_event runs inside the CPU loop.
-                                let batch2 = (max_instructions
-                                    .saturating_sub(instructions_executed))
-                                .min(INSTRUCTION_BATCH_SIZE);
+                                let remaining_instructions =
+                                    max_instructions.saturating_sub(instructions_executed);
+                                let batch2 = remaining_instructions.min(INSTRUCTION_BATCH_SIZE);
                                 if batch2 == 0 {
                                     break;
                                 }
                                 // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
-                                let r2 = unsafe { self.run_cpu_batch(batch2) };
+                                let r2 = unsafe {
+                                    self.run_cpu_batch_with_strict_limit(batch2, true)
+                                };
                                 if let Ok(ex2) = r2 {
                                     instructions_executed += ex2;
                                     if !self.batch_advanced_pc_system {
@@ -3549,12 +4236,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                             .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
                                         break;
                                     }
-                                    let s = self.hlt_wait_step_ticks();
-                                    self.pc_system.tickn(s);
-                                    self.dispatch_timer_fires();
-                                    hlt2 += s as u64;
-                                    self.advance_devices_to_pc_time();
-                                    self.sync_event_flags();
+                                    let step = self.hlt_wait_step_ticks();
+                                    self.service_scheduler_boundary(u64::from(step))?;
+                                    hlt2 += u64::from(step);
                                     if !self.can_fast_forward_bsp_hlt() {
                                         break;
                                     }
@@ -3572,17 +4256,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         self.advance_pc_system_after_cpu_ticks(executed);
                     }
 
-                    // Propagate A20 gate changes from keyboard controller to memory system
-                    // Matching Bochs BX_SET_ENABLE_A20() which immediately updates pc_system and memory
-                    if self.device_manager.keyboard.a20_change_pending {
-                        self.device_manager.keyboard.a20_change_pending = false;
-                        let a20 = self.device_manager.keyboard.a20_enabled;
-                        self.pc_system.set_enable_a20(a20);
-                        self.memory.set_a20_mask(self.pc_system.a20_mask());
-                        // Bochs pc_system.cc MemoryMappingChanged() calls BX_CPU(0)->TLB_flush()
-                        // after A20 changes, since A20 masking affects physical address translation.
-                        self.cpu.tlb_flush();
-                    }
 
                     // Log batch sizes and check if timer ticking works
                     #[cfg(debug_assertions)]
@@ -3590,19 +4263,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         || instructions_executed % 100_000 < INSTRUCTION_BATCH_SIZE
                     {
                         let pit_c0_count = self.device_manager.pit.counters[0].count;
-                        // Read BDA timer tick counter at 0x046C (4 bytes) directly from RAM
-                        let bda_ticks = {
-                            let (ptr, len) = self.memory.get_raw_memory_ptr();
-                            if 0x046C + 4 <= len {
-                                // SAFETY: pointer and length validated by caller; memory region is valid
-                                unsafe {
-                                    let p = ptr.add(0x046C) as *const u32;
-                                    *p
-                                }
-                            } else {
-                                0
-                            }
-                        };
+                        // Read the BDA timer tick counter through a fixed-size
+                        // block-aware copy.
+                        let bda_ticks = self
+                            .peek_ram_at(0x046C, 4)
+                            .as_slice()
+                            .try_into()
+                            .map(u32::from_le_bytes)
+                            .unwrap_or(0);
                         tracing::trace!("BATCH-DIAG: executed={}, total={}k, RIP={:#x}, PIT_count={}, activity={:?}, BDA_ticks={}",
                             executed, instructions_executed / 1000, self.cpu.rip(), pit_c0_count,
                             self.cpu.activity_state, bda_ticks);
@@ -3762,31 +4430,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 }
             }
 
-            // 5. sync=slowdown: interval-based throttle matching Bochs slowdown.cc.
-            // Compares emulated vs wall-clock time over a sliding 1-second window.
-            // Resets the window periodically to prevent unbounded deficit accumulation
-            // (which would cause massive sleeps when transitioning from active to idle).
-            #[cfg(feature = "std")]
-            if self.config.sync_slowdown && self.config.ips > 0 {
-                let wall_elapsed = slowdown_start.elapsed().as_micros() as u64;
-                // Reset window every 1 second to prevent deficit accumulation
-                if wall_elapsed > 1_000_000 {
-                    slowdown_start = std::time::Instant::now();
-                    slowdown_ticks_base = self.pc_system.time_ticks();
-                } else {
-                    let delta_ticks = self
-                        .pc_system
-                        .time_ticks()
-                        .saturating_sub(slowdown_ticks_base);
-                    let emu_usec = delta_ticks.saturating_mul(1_000_000) / (self.config.ips as u64);
-                    // Sleep if emulated time is >50ms ahead within this window.
-                    // 50ms threshold avoids Windows 15.6ms timer granularity issues.
-                    if emu_usec > wall_elapsed + 50_000 {
-                        let sleep_usec = (emu_usec - wall_elapsed).min(50_000);
-                        std::thread::sleep(std::time::Duration::from_micros(sleep_usec));
-                    }
-                }
-            }
 
             // 6. Check if we should exit (e.g., shutdown requested)
             // TODO: Add shutdown flag check
@@ -3881,11 +4524,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         break;
                     }
                     let step = self.hlt_wait_step_ticks();
-                    self.pc_system.tickn(step);
-                    self.dispatch_timer_fires();
-                    hlt_budget += step as u64;
-                    self.advance_devices_to_pc_time();
-                    self.sync_event_flags();
+                    self.service_scheduler_boundary(u64::from(step))?;
+                    hlt_budget += u64::from(step);
                     if !self.can_fast_forward_bsp_hlt() {
                         break;
                     }
@@ -3927,8 +4567,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             break 'batch;
         }
 
-        // Sync A20 state
-        self.sync_a20_state();
 
         // Handle keyboard/mouse/serial input from GUI.
         self.pump_gui_input();
@@ -4276,27 +4914,18 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.cpu.user_pl
     }
 
-    /// Get mem_host_base pointer value for diagnostics.
-    pub fn get_mem_host_base(&self) -> u64 {
-        self.cpu.mem_host_base as u64
-    }
 
     /// Get mem_host_len for diagnostics.
     pub fn get_mem_host_len(&self) -> usize {
         self.cpu.mem_host_len
     }
 
-    /// Read a physical dword directly from host memory (bypassing TLB/paging).
-    /// Returns None if address is out of range.
-    pub fn read_phys_dword(&self, paddr: u64) -> Option<u32> {
-        let addr = paddr as usize;
-        let host_base = self.cpu.mem_host_base;
-        if !host_base.is_null() && addr + 4 <= self.cpu.mem_host_len {
-            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-            Some(unsafe { (host_base.add(addr) as *const u32).read_unaligned() })
-        } else {
-            None
-        }
+    /// Read a physical dword through the block-aware RAM interface.
+    /// Returns `None` when the complete range is unavailable.
+    pub fn read_phys_dword(&mut self, paddr: u64) -> Option<u32> {
+        let mut bytes = [0; 4];
+        self.mem_read(paddr, &mut bytes).ok()?;
+        Some(u32::from_le_bytes(bytes))
     }
 }
 
@@ -4394,12 +5023,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> Emulator<'_, I, T> {
             pit_c0.gate,
             pit_c0.output
         );
-        // Device tick diagnostics
-        tracing::trace!("--- Device Tick Diag ---");
+        tracing::trace!("--- Exact Timer Diag ---");
         tracing::trace!(
-            "  tick_count={} total_usec={} pit_fires={} irq0_latched={} iac_count={}",
-            self.device_manager.diag_tick_count,
-            self.device_manager.diag_total_usec,
+            "  pit_fires={} irq0_latched={} iac_count={}",
             self.device_manager.diag_pit_fires,
             self.device_manager.diag_irq0_latched,
             self.device_manager.diag_iac_count
@@ -4431,9 +5057,8 @@ impl<I: BxCpuIdTrait, T: Instrumentation> Emulator<'_, I, T> {
         for (ch, cmd, lba) in &hist[start..] {
             tracing::trace!("    ch={} cmd={:#04x} lba={}", ch, cmd, lba);
         }
-        // Dump key code addresses from memory
+        // Dump key code addresses through requested-size block-aware copies.
         {
-            let ram = self.memory.ram_slice();
             let addrs: &[(u64, &str)] = &[
                 (0x01e1d340, "delay_loop_entry"),
                 (0x01e38ef0, "jmp_target_after_delay"),
@@ -4442,9 +5067,8 @@ impl<I: BxCpuIdTrait, T: Instrumentation> Emulator<'_, I, T> {
                 (0x012074e0, "stack_ret_addr_2"),
             ];
             for (paddr, label) in addrs {
-                let p = *paddr as usize;
-                if p + 48 <= ram.len() {
-                    let code = &ram[p..p + 48];
+                let code = self.peek_ram_at(*paddr as usize, 48);
+                if code.len() == 48 {
                     tracing::trace!("--- {} (phys={:#010x}) ---", label, paddr);
                     for row in 0..3 {
                         let off = row * 16;
@@ -4458,58 +5082,55 @@ impl<I: BxCpuIdTrait, T: Instrumentation> Emulator<'_, I, T> {
                 }
             }
         }
-        // Dump stack (16 qwords)
+        // Dump stack (16 qwords) through a manual page walk that reads only
+        // the individual page-table entries and stack words it needs.
         let rsp = self.cpu.rsp();
         if rsp > 0xffffffff80000000 {
             let cr3 = self.cpu.cr3 & !0xFFF;
-            let ram = self.memory.ram_slice();
-            let ram_len = ram.len();
-            let read_u64 = |addr: u64| -> u64 {
+            let mut read_stack_qword = |addr: u64| -> u64 {
                 let pml4_idx = (addr >> 39) & 0x1FF;
                 let pdpt_idx = (addr >> 30) & 0x1FF;
                 let pd_idx = (addr >> 21) & 0x1FF;
                 let pt_idx = (addr >> 12) & 0x1FF;
                 let page_off = addr & 0xFFF;
-                let safe_read = |phys: u64| -> u64 {
-                    let off = phys as usize;
-                    if off + 8 > ram_len {
-                        return 0;
-                    }
-                    u64::from_le_bytes(
-                        ram[off..off + 8]
-                            .try_into()
-                            .expect("8-byte slice converts to [u8; 8]"),
-                    )
-                };
-                let pml4e = safe_read(cr3 + pml4_idx * 8);
+                let pml4e = self.read_physical_u64_or_zero(cr3 + pml4_idx * 8);
                 if pml4e & 1 == 0 {
                     return 0;
                 }
-                let pdpte = safe_read((pml4e & 0xFFFFF_FFFFF000) + pdpt_idx * 8);
-
+                let pdpte = self.read_physical_u64_or_zero(
+                    (pml4e & 0xFFFFF_FFFFF000) + pdpt_idx * 8,
+                );
                 if pdpte & 1 == 0 {
                     return 0;
                 }
                 if pdpte & 0x80 != 0 {
-                    return safe_read((pdpte & 0xFFFFF_C0000000) | (addr & 0x3FFFFFFF));
+                    return self.read_physical_u64_or_zero(
+                        (pdpte & 0xFFFFF_C0000000) | (addr & 0x3FFFFFFF),
+                    );
                 }
-                let pde = safe_read((pdpte & 0xFFFFF_FFFFF000) + pd_idx * 8);
+                let pde = self.read_physical_u64_or_zero(
+                    (pdpte & 0xFFFFF_FFFFF000) + pd_idx * 8,
+                );
                 if pde & 1 == 0 {
                     return 0;
                 }
                 if pde & 0x80 != 0 {
-                    return safe_read((pde & 0xFFFFF_FFE00000) | (addr & 0x1FFFFF));
+                    return self.read_physical_u64_or_zero(
+                        (pde & 0xFFFFF_FFE00000) | (addr & 0x1FFFFF),
+                    );
                 }
-                let pte = safe_read((pde & 0xFFFFF_FFFFF000) + pt_idx * 8);
+                let pte = self.read_physical_u64_or_zero(
+                    (pde & 0xFFFFF_FFFFF000) + pt_idx * 8,
+                );
                 if pte & 1 == 0 {
                     return 0;
                 }
-                safe_read((pte & 0xFFFFF_FFFFF000) | page_off)
+                self.read_physical_u64_or_zero((pte & 0xFFFFF_FFFFF000) | page_off)
             };
             tracing::trace!("--- Stack at RSP={:#018x} ---", rsp);
             for i in 0..16 {
                 let addr = rsp.wrapping_add(i * 8);
-                let val = read_u64(addr);
+                let val = read_stack_qword(addr);
                 let marker = if val > 0xffffffff81000000 && val < 0xffffffff82000000 {
                     " <-- kernel text?"
                 } else {
@@ -4518,40 +5139,34 @@ impl<I: BxCpuIdTrait, T: Instrumentation> Emulator<'_, I, T> {
                 tracing::trace!("  [{:+4}] {:#018x}{}", i * 8, val, marker);
             }
         }
-        // Dump 64 bytes of code at current RIP via manual page walk
+        // Dump 64 bytes of code at current RIP via the same requested-size
+        // physical reads used above.
         let rip = self.cpu.rip();
         if rip > 0xffffffff80000000 {
             let cr3 = self.cpu.cr3 & !0xFFF;
-            let ram = self.memory.ram_slice();
-            let read_u64 = |paddr: u64| -> u64 {
-                let p = paddr as usize;
-                if p + 8 <= ram.len() {
-                    u64::from_le_bytes(
-                        ram[p..p + 8]
-                            .try_into()
-                            .expect("8-byte slice converts to [u8; 8]"),
-                    )
-                } else {
-                    0
-                }
-            };
             let pml4_idx = (rip >> 39) & 0x1FF;
             let pdpt_idx = (rip >> 30) & 0x1FF;
             let pd_idx = (rip >> 21) & 0x1FF;
             let pt_idx = (rip >> 12) & 0x1FF;
-            let pml4e = read_u64(cr3 + pml4_idx * 8);
+            let pml4e = self.read_physical_u64_or_zero(cr3 + pml4_idx * 8);
             if pml4e & 1 != 0 {
-                let pdpte = read_u64((pml4e & 0x000FFFFF_FFFFF000) + pdpt_idx * 8);
+                let pdpte = self.read_physical_u64_or_zero(
+                    (pml4e & 0x000FFFFF_FFFFF000) + pdpt_idx * 8,
+                );
                 if pdpte & 1 != 0 {
                     let paddr = if pdpte & 0x80 != 0 {
                         (pdpte & 0x000FFFFF_C0000000) | (rip & 0x3FFFFFFF)
                     } else {
-                        let pde = read_u64((pdpte & 0x000FFFFF_FFFFF000) + pd_idx * 8);
+                        let pde = self.read_physical_u64_or_zero(
+                            (pdpte & 0x000FFFFF_FFFFF000) + pd_idx * 8,
+                        );
                         if pde & 1 != 0 {
                             if pde & 0x80 != 0 {
                                 (pde & 0x000FFFFF_FFE00000) | (rip & 0x1FFFFF)
                             } else {
-                                let pte = read_u64((pde & 0x000FFFFF_FFFFF000) + pt_idx * 8);
+                                let pte = self.read_physical_u64_or_zero(
+                                    (pde & 0x000FFFFF_FFFFF000) + pt_idx * 8,
+                                );
                                 if pte & 1 != 0 {
                                     (pte & 0x000FFFFF_FFFFF000) | (rip & 0xFFF)
                                 } else {
@@ -4562,8 +5177,8 @@ impl<I: BxCpuIdTrait, T: Instrumentation> Emulator<'_, I, T> {
                             0
                         }
                     };
-                    if paddr != 0 && (paddr as usize) + 64 <= ram.len() {
-                        let code = &ram[paddr as usize..(paddr as usize) + 64];
+                    let code = self.peek_ram_at(paddr as usize, 64);
+                    if paddr != 0 && code.len() == 64 {
                         tracing::trace!("--- Code at RIP={:#018x} (phys={:#010x}) ---", rip, paddr);
                         for row in 0..4 {
                             let off = row * 16;
@@ -4606,7 +5221,11 @@ mod tests {
     use super::*;
     use crate::cpu::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::decoder::Instruction;
-    use crate::cpu::instrumentation::{CpuSetupMode, X86Reg};
+    use crate::cpu::{
+        instrumentation::{CpuSetupMode, X86Reg},
+        rusty_box::MemoryAccessType,
+    };
+    use crate::memory::CpuMemoryPolicy;
     use crate::pc_system::TimerOwner;
     const TEST_SMP_PACKAGES: u32 = 2;
     const TEST_SMP_CORES: u32 = 1;
@@ -4646,6 +5265,23 @@ mod tests {
     const CPUID_TOPOLOGY_LEVEL_TYPE_SMT: u32 = 1;
     const CPUID_TOPOLOGY_LEVEL_TYPE_CORE: u32 = 2;
 
+    fn resident_host_base(emu: &mut Emulator<'_, Corei7SkylakeX>) -> *mut u8 {
+        let pins_ptr = emu.tlb_pins().as_ptr();
+        let pins_len = emu.tlb_pins().len();
+        // Stable CPU pin storage outlives the exclusive memory borrow.
+        let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
+        emu.memory
+            .get_host_mem_addr_pinned(
+                0,
+                MemoryAccessType::RW,
+                pins,
+                CpuMemoryPolicy::default(),
+            )
+            .unwrap()
+            .expect("resident block must have a pinned direct span")
+            .as_mut_ptr()
+    }
+
     fn topology_level_ecx(subleaf: u32, level_type: u32) -> u32 {
         subleaf | (level_type << CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT)
     }
@@ -4658,28 +5294,21 @@ mod tests {
 
     fn send_bsp_icr_init(emu: &mut Emulator<'_, Corei7SkylakeX, ()>) {
         let bsp = emu.cpu_mut_at(BSP_INDEX);
-        bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24);
-        bsp.lapic.write_aligned(
-            ICR_LOW,
-            ((crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8)
-                | ICR_LEVEL_ASSERT
-                | ICR_TRIGGER_LEVEL,
-        );
-        bsp.lapic.write_aligned(
-            ICR_LOW,
-            (crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8 | ICR_TRIGGER_LEVEL,
-        );
+        bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24, 0);
+        bsp.lapic.write_aligned(ICR_LOW, ((crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8)
+            | ICR_LEVEL_ASSERT
+            | ICR_TRIGGER_LEVEL, 0);
+        bsp.lapic.write_aligned(ICR_LOW, (crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8 | ICR_TRIGGER_LEVEL, 0);
+        emu.refresh_cpu_masks(BSP_INDEX);
     }
 
     fn send_bsp_icr_sipi(emu: &mut Emulator<'_, Corei7SkylakeX, ()>, vector: u8) {
         let bsp = emu.cpu_mut_at(BSP_INDEX);
-        bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24);
-        bsp.lapic.write_aligned(
-            ICR_LOW,
-            vector as u32
-                | ((crate::cpu::apic::ApicDeliveryMode::Sipi as u32) << 8)
-                | ICR_LEVEL_ASSERT,
-        );
+        bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24, 0);
+        bsp.lapic.write_aligned(ICR_LOW, vector as u32
+            | ((crate::cpu::apic::ApicDeliveryMode::Sipi as u32) << 8)
+            | ICR_LEVEL_ASSERT, 0);
+        emu.refresh_cpu_masks(BSP_INDEX);
     }
 
     fn read_fw_cfg_u16(fw_cfg: &mut crate::iodev::fw_cfg::BxFwCfg, key: u16) -> u16 {
@@ -4688,6 +5317,7 @@ mod tests {
             key as u32,
             FW_CFG_SELECTOR_WRITE_BYTES,
             None,
+            &[],
         );
         let lo = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, FW_CFG_DATA_READ_BYTES) as u16;
         let hi = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, FW_CFG_DATA_READ_BYTES) as u16;
@@ -4832,63 +5462,36 @@ mod tests {
             .unwrap();
     }
 
+
     #[test]
-    fn hlt_wait_batches_device_ticks_even_when_pc_timer_is_due_each_tick() {
-        std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
-            .spawn(|| {
-                let config = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
-                emu.pc_system.initialize(emu.config.ips);
-                emu.pc_system
-                    .register_timer(TimerOwner::NullTimer, 1, true, true, "one_tick")
-                    .unwrap();
-
-                let mut hlt_budget = 0u64;
-                while hlt_budget < emu.config.ips as u64 / 1_000 {
-                    let step = emu.hlt_wait_step_ticks();
-                    emu.pc_system.tickn(step);
-                    emu.dispatch_timer_fires();
-                    hlt_budget += step as u64;
-                    emu.advance_devices_to_pc_time();
-                }
-
-                assert_eq!(emu.device_manager.diag_total_usec, 1_000);
-                assert!(
-                    emu.device_manager.diag_tick_count <= 1,
-                    "device ticks should be batched to 1ms, got {} calls",
-                    emu.device_manager.diag_tick_count
-                );
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn realtime_pit_service_runs_before_virtual_millisecond_delta() {
+    fn strict_smp_deadline_keeps_bochs_idle_cpu_quantum_credit() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
-                config.ips = 300_000_000;
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
-                emu.pc_system.initialize(emu.config.ips);
-                emu.device_manager
-                    .pit
-                    .init_icount_sync(emu.cpu.icount, emu.config.ips as u64);
-                emu.device_manager.pit.enable_realtime_sync();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.load_ram(&[0x90; 32], 0x1000).unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
 
-                let before = emu.device_manager.pit.total_ticks;
-                emu.pc_system.tickn(4_096);
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                emu.advance_devices_to_pc_time();
+                let quantum = emu.smp_quantum_ticks();
+                assert!(quantum > 1);
+                emu.pc_system
+                    .register_timer(TimerOwner::NullTimer, 1, true, false, "one_tick")
+                    .unwrap();
 
-                assert!(
-                    emu.device_manager.pit.total_ticks > before,
-                    "realtime PIT must be serviced even when configured IPS keeps virtual delta below 1 ms"
-                );
+                let elapsed = unsafe { emu.run_cpu_batch(quantum / 2) }.unwrap();
+
+                assert_eq!(elapsed, (1 + quantum) / 2);
+                assert_eq!(emu.pc_system.time_ticks(), elapsed);
+                assert_eq!(emu.smp_tick_remainder, (1 + quantum) % 2);
             })
             .unwrap()
             .join()
@@ -4896,7 +5499,56 @@ mod tests {
     }
 
     #[test]
-    fn run_cpu_batch_does_not_collapse_to_trace_sized_batches_when_timer_is_due_each_tick() {
+    fn equal_smp_deadline_truncates_a_short_final_round() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.load_ram(&[0x90; 32], 0x1000).unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+
+                let quantum = emu.smp_quantum_ticks();
+                let short_round = quantum / 2;
+                assert!(short_round > 1);
+                let _ = unsafe { emu.run_cpu_batch(quantum) }.unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+                emu.pc_system.initialize(1_000_000);
+                emu.pc_system
+                    .register_timer(
+                        TimerOwner::NullTimer,
+                        short_round,
+                        false,
+                        true,
+                        "equal_short_round",
+                    )
+                    .unwrap();
+                let icount_before = emu.cpu_ref(BSP_INDEX).icount;
+
+                let elapsed = unsafe { emu.run_cpu_batch(short_round) }.unwrap();
+
+                assert_eq!(
+                    emu.cpu_ref(BSP_INDEX).icount - icount_before,
+                    short_round,
+                    "an equal deadline must make the shortened round strict"
+                );
+                assert_eq!(elapsed, (short_round + quantum) / 2);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn run_cpu_batch_stops_at_the_next_exact_timer_deadline() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
@@ -4914,9 +5566,429 @@ mod tests {
 
                 let executed = unsafe { emu.run_cpu_batch(4096) }.unwrap();
                 assert!(
-                    executed >= 1024,
-                    "near timer collapsed CPU batch to {executed} instructions"
+                    (1..128).contains(&executed),
+                    "one-tick deadline did not stop the active batch promptly: {executed}"
                 );
+                assert_eq!(emu.pc_system.time_ticks(), executed);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn keyboard_one_usec_deadline_ends_up_batch_and_raises_irq1() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.virt_write(0x1000, &[0x90; 64]).unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+                emu.pc_system.initialize(1_000_000);
+                emu.devices.set_timer_ips(1_000_000);
+                emu.register_timer_owners().unwrap();
+                emu.device_manager.keyboard.send_scancode(0x1E);
+                emu.devices.request_timer_after_usec(
+                    DeviceTimerOwner::Keyboard,
+                    0,
+                    Some(1),
+                );
+                emu.drain_device_timer_requests();
+
+                let executed = unsafe { emu.run_cpu_batch(4_096) }.unwrap();
+
+                assert_eq!(executed, 1);
+                assert_ne!(emu.device_manager.pic.master.irq_in[1], 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn deadline_scheduler_preserves_windows_timer_order() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu =
+                    Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
+                emu.pc_system.initialize(1_000_000);
+                emu.devices.set_timer_ips(1_000_000);
+                emu.register_timer_owners().unwrap();
+                emu.device_manager.keyboard.send_scancode(0x1E);
+                emu.devices.request_timer(
+                    DeviceTimerOwner::Keyboard,
+                    TimerRequest::Activate {
+                        deadline_ticks: 1,
+                        continuous: false,
+                    },
+                );
+                emu.devices.request_timer(
+                    DeviceTimerOwner::CmosOneSecond,
+                    TimerRequest::Activate {
+                        deadline_ticks: 2,
+                        continuous: false,
+                    },
+                );
+                emu.drain_device_timer_requests();
+                let uip_handle = emu.device_manager.cmos.uip_timer_handle.unwrap();
+
+                emu.service_scheduler_boundary(1).unwrap();
+                assert!(emu.device_manager.keyboard.kbd_controller.outb);
+                assert!(!emu.pc_system.is_timer_active(uip_handle));
+
+                emu.service_scheduler_boundary(1).unwrap();
+                assert!(emu.pc_system.is_timer_active(uip_handle));
+                assert_eq!(emu.pc_system.next_timer_deadline_ticks(), Some(246));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn no_fixed_device_polling_state_remains() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const CODE: u64 = 0x1000;
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.virt_write(CODE, &[0x90; 512]).unwrap();
+                emu.reg_write(X86Reg::Rip, CODE);
+                emu.pc_system.initialize(1_000_000);
+                emu.devices.set_timer_ips(1_000_000);
+                emu.register_timer_owners().unwrap();
+                let keyboard_handle = emu.device_manager.keyboard.timer_handle().unwrap();
+                let one_second_handle =
+                    emu.device_manager.cmos.one_second_timer_handle.unwrap();
+                let uip_handle = emu.device_manager.cmos.uip_timer_handle.unwrap();
+
+                // Keyboard, CMOS one-second, and CMOS UIP owners share the
+                // first exact deadline. Registration order must deliver the
+                // one-second owner before UIP, then rearm UIP for its distinct
+                // later deadline. Running this through the CPU loop makes
+                // duplicate fixed polling observable as a reordered or
+                // replaced UIP arm.
+                emu.device_manager.keyboard.send_scancode(0x1E);
+                for owner in [
+                    DeviceTimerOwner::Keyboard,
+                    DeviceTimerOwner::CmosOneSecond,
+                    DeviceTimerOwner::CmosUip,
+                ] {
+                    emu.devices.request_timer(
+                        owner,
+                        TimerRequest::Activate {
+                            deadline_ticks: 1,
+                            continuous: false,
+                        },
+                    );
+                }
+                emu.drain_device_timer_requests();
+
+                let executed = unsafe { emu.run_cpu_batch(512) }.unwrap();
+                assert_eq!(executed, 1, "the tied exact deadline must end the batch");
+                assert_eq!(emu.pc_system.time_ticks(), 1);
+                assert!(emu.device_manager.keyboard.kbd_controller.outb);
+                assert!(!emu.pc_system.is_timer_active(keyboard_handle));
+                assert!(!emu.pc_system.is_timer_active(one_second_handle));
+                assert!(emu.pc_system.is_timer_active(uip_handle));
+                assert_eq!(emu.pc_system.timer_countdown(uip_handle), 244);
+                let _ = emu.device_manager.cmos.write(
+                    0x70,
+                    crate::iodev::cmos::REG_STAT_A as u32,
+                    1,
+                );
+                assert_eq!(
+                    emu.device_manager.cmos.read(0x71, 1) & 0x80,
+                    0,
+                    "tied CMOS owners must fire in one-second-then-UIP order"
+                );
+
+                let executed = unsafe { emu.run_cpu_batch(512) }.unwrap();
+                assert_eq!(executed, 244, "the mixed owner must fire at its exact deadline");
+                assert_eq!(emu.pc_system.time_ticks(), 245);
+                assert!(!emu.pc_system.is_timer_active(uip_handle));
+                assert_eq!(
+                    emu.device_manager.keyboard.kbd_controller.outb as u8,
+                    1,
+                    "the tied keyboard owner must fire exactly once"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn phase1_tests_subpage_guest_blocks_fetch_sequential_instructions() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const BLOCK_SIZE: usize = 1024;
+                const START: u64 = (BLOCK_SIZE - 2) as u64;
+                let mut config = EmulatorConfig::default();
+                config.guest_memory_size = 1024 * 1024;
+                config.host_memory_size = 1024 * 1024;
+                config.memory_block_size = BLOCK_SIZE;
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                // Four NOPs cross the 1 KiB guest-block edge.  The following
+                // self-loop ends the trace without executing unrelated zero RAM.
+                emu.virt_write(START, &[0x90, 0x90, 0x90, 0x90, 0xeb, 0xfe])
+                    .unwrap();
+                emu.reg_write(X86Reg::Rip, START);
+
+                let before = emu.cpu_ref(BSP_INDEX).icount;
+                let executed = unsafe { emu.run_cpu_batch(4) }.unwrap();
+                assert!(executed >= 5);
+                assert!(emu.cpu_ref(BSP_INDEX).icount - before >= 5);
+                assert_eq!(emu.reg_read(X86Reg::Rip), START + 4);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+
+    #[test]
+    fn strict_cpu_batch_limit_does_not_execute_trace_tail() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const START: u64 = 0x1000;
+                let mut emu =
+                    Emulator::<Corei7SkylakeX>::new_with_mode(
+                        EmulatorConfig::default(),
+                        CpuSetupMode::FlatProtected32,
+                    )
+                    .unwrap();
+                emu.virt_write(START, &[0x90, 0x90, 0x90, 0x90, 0xeb, 0xfe])
+                    .unwrap();
+                emu.reg_write(X86Reg::Rip, START);
+
+                let before = emu.cpu_ref(BSP_INDEX).icount;
+                let executed =
+                    unsafe { emu.run_cpu_batch_with_strict_limit(4, true) }.unwrap();
+
+                assert_eq!(executed, 4);
+                assert_eq!(emu.cpu_ref(BSP_INDEX).icount - before, 4);
+                assert_eq!(emu.reg_read(X86Reg::Rip), START + 4);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+    #[test]
+    fn memory_reinitialization_invalidates_every_cpu_host_pin() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                let mut config = EmulatorConfig::default();
+                config.guest_memory_size = 2 * MIB;
+                config.host_memory_size = 2 * MIB;
+                config.memory_block_size = MIB;
+                config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let old_host_base = resident_host_base(&mut emu) as usize;
+
+                for cpu_index in 0..emu.cpu_count() {
+                    let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
+                    entry.lpf = 0;
+                    entry.host_page_addr = old_host_base as _;
+                }
+                emu.refresh_tlb_pins();
+                for pin in emu.tlb_pins() {
+                    assert!(pin.is_range_pinned(old_host_base, old_host_base + MIB));
+                }
+
+                emu.init_memory_and_pc_system().unwrap();
+
+                for pin in emu.tlb_pins() {
+                    assert!(!pin.is_range_pinned(old_host_base, old_host_base + MIB));
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+
+    #[test]
+    fn run_interactive_stops_at_exact_instruction_limit_across_batches() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const START: u64 = 0x1000;
+                const LIMIT: u64 = 100_000 + 2;
+                let mut emu =
+                    Emulator::<Corei7SkylakeX>::new_with_mode(
+                        EmulatorConfig::default(),
+                        CpuSetupMode::FlatProtected32,
+                    )
+                    .unwrap();
+                emu.virt_write(START, &[0x90, 0x90, 0x90, 0x90, 0xeb, 0xfa])
+                    .unwrap();
+                emu.reg_write(X86Reg::Rip, START);
+
+                let executed = emu.run_interactive(LIMIT).unwrap();
+
+                assert_eq!(executed, LIMIT);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+    #[test]
+    fn phase1_tests_emulator_loader_respects_sibling_tlb_pins() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                let mut config = EmulatorConfig::default();
+                config.guest_memory_size = 2 * MIB;
+                config.host_memory_size = MIB;
+
+                config.memory_block_size = MIB;
+                config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.memory.set_a20_mask(u64::MAX);
+
+                emu.load_ram(&[0x5a], 0).unwrap();
+                let host_base = resident_host_base(&mut emu);
+                let entry = &mut emu.cpu_mut_at(AP_INDEX).dtlb.entries[0];
+                entry.lpf = 0;
+                entry.host_page_addr = host_base as _;
+                assert!(!emu.tlb_pins()[AP_INDEX]
+                    .is_range_pinned(host_base as usize, host_base as usize + MIB));
+                emu.refresh_tlb_pins();
+                assert!(emu.tlb_pins()[AP_INDEX]
+                    .is_range_pinned(host_base as usize, host_base as usize + MIB));
+
+                assert!(matches!(
+                    emu.load_ram(&[0xa5], MIB as u64),
+                    Err(Error::Memory(MemoryError::InsufficientRam))
+                ));
+                let mut retained = [0];
+                emu.mem_read(0, &mut retained).unwrap();
+                assert_eq!(retained, [0x5a]);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+
+    #[test]
+    fn run_cpu_batch_passes_all_cpu_tlb_pins_to_eviction() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                let mut config = EmulatorConfig::default();
+                config.guest_memory_size = 3 * MIB;
+                config.host_memory_size = 2 * MIB;
+                config.memory_block_size = MIB;
+                config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.memory.set_a20_mask(u64::MAX);
+                emu.cpu_mut_at(AP_INDEX).activity_state = CpuActivityState::WaitForSipi;
+                emu.service_scheduler_boundary(0).unwrap();
+
+                // Block 0 is pinned only by the non-running AP.  BSP code
+                // occupies the second resident slot; its fetch pin protects
+                // that slot.  The store targets swapped block 2, so a
+                // current-BSP-only pin set would evict the AP's block 0.
+                emu.load_ram(&[0x5a], 0).unwrap();
+                emu.load_ram(&[0xC6, 0x07, 0xA5, 0xEB, 0xFE], MIB as u64 + 0x1000)
+                    .unwrap();
+                let host_base = resident_host_base(&mut emu);
+                let entry = &mut emu.cpu_mut_at(AP_INDEX).dtlb.entries[0];
+                entry.lpf = 0;
+                entry.host_page_addr = host_base as _;
+                assert!(!emu.tlb_pins()[AP_INDEX]
+                    .is_range_pinned(host_base as usize, host_base as usize + MIB));
+                emu.refresh_tlb_pins();
+                assert!(emu.tlb_pins()[AP_INDEX]
+                    .is_range_pinned(host_base as usize, host_base as usize + MIB));
+
+
+                emu.reg_write(X86Reg::Rip, MIB as u64 + 0x1000);
+                emu.reg_write(X86Reg::Rdi, (2 * MIB) as u64);
+                let executed = unsafe { emu.run_cpu_batch(1) }.unwrap();
+                assert!(executed >= 1);
+                assert!(
+                    emu.tlb_pins()[AP_INDEX]
+                        .is_range_pinned(host_base as usize, host_base as usize + MIB),
+                    "a non-running sibling's direct mapping must survive a BSP slice"
+                );
+
+                // Both resident slots are pinned: AP owns block 0 and the
+                // running BSP owns its code block.  The target remains
+                // unavailable; omitting the AP descriptor makes this read
+                // succeed after block 0 is incorrectly evicted.
+                let mut target = [0];
+                assert!(matches!(
+                    emu.mem_read((2 * MIB) as u64, &mut target),
+                    Err(Error::Memory(MemoryError::InsufficientRam))
+                ));
+                let mut retained = [0];
+                emu.mem_read(0, &mut retained).unwrap();
+                assert_eq!(retained, [0x5a]);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn phase1_tests_unsafe_cpu_mutation_keeps_cached_pin_valid() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                let mut config = EmulatorConfig::default();
+                config.guest_memory_size = 2 * MIB;
+                config.host_memory_size = MIB;
+                config.memory_block_size = MIB;
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.memory.set_a20_mask(u64::MAX);
+
+                emu.load_ram(&[0x5a], 0).unwrap();
+                let host_base = resident_host_base(&mut emu);
+                let cpu_address = emu.cpu() as *const BxCpuC<Corei7SkylakeX>;
+                let entry = &mut unsafe { emu.cpu_mut_unchecked() }.dtlb.entries[0];
+                entry.lpf = 0;
+                entry.host_page_addr = host_base as _;
+
+                assert_eq!(cpu_address, emu.cpu() as *const BxCpuC<Corei7SkylakeX>);
+                assert!(!emu.tlb_pins()[BSP_INDEX]
+                    .is_range_pinned(host_base as usize, host_base as usize + MIB));
+                emu.refresh_tlb_pins();
+                assert!(emu.tlb_pins()[BSP_INDEX]
+                    .is_range_pinned(host_base as usize, host_base as usize + MIB));
+                assert!(matches!(
+                    emu.load_ram(&[0xa5], MIB as u64),
+                    Err(Error::Memory(MemoryError::InsufficientRam))
+                ));
+                let mut retained = [0];
+                emu.mem_read(0, &mut retained).unwrap();
+                assert_eq!(retained, [0x5a]);
             })
             .unwrap()
             .join()
@@ -4945,6 +6017,17 @@ mod tests {
                 emu.reg_write(X86Reg::Rdx, UNMAPPED_PORT);
                 emu.reg_write(X86Reg::Rdi, DEST_ADDR);
                 emu.reg_write(X86Reg::Rcx, COUNT);
+                let timer = emu
+                    .pc_system
+                    .register_timer(
+                        TimerOwner::Keyboard,
+                        COUNT + 1,
+                        false,
+                        true,
+                        "REP deadline",
+                    )
+                    .unwrap();
+                let ticks_before = emu.pc_system.time_ticks();
 
                 let before = emu.cpu_ref(BSP_INDEX).icount;
                 let executed = unsafe { emu.run_cpu_batch(1) }.unwrap();
@@ -4954,8 +6037,82 @@ mod tests {
                 // The REP contributes exactly COUNT retirements.
                 assert_eq!(executed, 2);
                 assert_eq!(retired, COUNT + 1);
+                assert_eq!(emu.pc_system.time_ticks() - ticks_before, retired);
+                assert_eq!(
+                    emu.pc_system.timer_countdown(timer),
+                    0,
+                    "the timer due on the final REP retirement must fire in this batch"
+                );
                 assert_eq!(emu.reg_read(X86Reg::Rcx), 0);
                 assert_eq!(emu.reg_read(X86Reg::Rdi), DEST_ADDR + COUNT * 2);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn rep_insw32_stops_at_event_budget_across_page_boundary() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const CODE_ADDR: u64 = 0x1000;
+                const DEST_ADDR: u64 = 0x2ff0;
+                const EVENT_BUDGET: u64 = 16;
+                const COUNT: u64 = 24;
+                const IDE_DATA_PORT: u64 = 0x1f0;
+
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.devices.init(&mut emu.memory).unwrap();
+                emu.device_manager
+                    .init(&mut emu.devices, &mut emu.memory)
+                    .unwrap();
+                emu.attach_disk_data(0, 0, vec![0xa5; 512], 1, 1, 1);
+                let drive = &mut emu.device_manager.harddrv.channels[0].drives[0];
+                drive
+                    .controller
+                    .status
+                    .insert(crate::iodev::harddrv::AtaStatus::DRQ);
+                drive.controller.buffer[..512].fill(0xa5);
+                drive.controller.buffer_size = 512;
+                drive.controller.buffer_index = 0;
+                emu.pc_system.initialize(1_000_000);
+                emu.cpu.mmio = crate::memory::mmio::MmioRegistry::new();
+
+                // REP INSW crosses from 0x2fff to 0x3000 before the timer
+                // deadline. The initialized IDE data buffer makes both chunks
+                // use the real bulk-port path.
+                emu.virt_write(CODE_ADDR, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
+                    .unwrap();
+                emu.reg_write(X86Reg::Rip, CODE_ADDR);
+                emu.reg_write(X86Reg::Rdx, IDE_DATA_PORT);
+                emu.reg_write(X86Reg::Rdi, DEST_ADDR);
+                emu.reg_write(X86Reg::Rcx, COUNT);
+                emu.pc_system
+                    .register_timer(
+                        TimerOwner::NullTimer,
+                        EVENT_BUDGET,
+                        false,
+                        true,
+                        "rep_insw_deadline",
+                    )
+                    .unwrap();
+                assert_eq!(
+                    emu.pc_system.get_num_cpu_ticks_left_next_event(),
+                    EVENT_BUDGET as u32
+                );
+
+                unsafe { emu.run_cpu_batch(1) }.unwrap();
+
+                assert_eq!(emu.reg_read(X86Reg::Rcx), COUNT - EVENT_BUDGET);
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rdi),
+                    DEST_ADDR + EVENT_BUDGET * 2
+                );
             })
             .unwrap()
             .join()
@@ -5124,6 +6281,66 @@ mod tests {
             .unwrap();
     }
 
+    /// The final fw_cfg DMA OUT in this cached trace overwrites the next
+    /// decoded `inc ecx` with HLT.  The issuing CPU must abandon its stale
+    /// trace tail before it executes that original instruction.
+    #[test]
+    fn fw_cfg_dma_out_stops_cached_trace_before_following_instruction() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const CODE: u64 = 0x1000;
+                const DESCRIPTOR: u64 = 0x3000;
+                const KEY: u16 = 0x1234;
+
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                // `new_with_mode` skips device initialization, so register the
+                // real fw_cfg port handler before running guest OUTs.
+                emu.devices.init(&mut emu.memory).unwrap();
+                emu.device_manager
+                    .init(&mut emu.devices, &mut emu.memory)
+                    .unwrap();
+                emu.device_manager.fw_cfg.add_bytes(KEY, &[0xF4]);
+
+                // mov edx,0x514; xor eax,eax; out dx,eax;
+                // add edx,4; mov eax,bswap(0x3000); out dx,eax;
+                // inc ecx; hlt
+                let mut code = vec![
+                    0xBA, 0x14, 0x05, 0x00, 0x00, 0x31, 0xC0, 0xEF, 0x83, 0xC2, 0x04, 0xB8,
+                    0x00, 0x00, 0x30, 0x00, 0xEF,
+                ];
+                let patched_inc = CODE + code.len() as u64;
+                code.extend_from_slice(&[0x41, 0xF4]);
+
+                let control = ((KEY as u32) << 16) | 0x08 | 0x02;
+                let mut descriptor = [0u8; 16];
+                descriptor[..4].copy_from_slice(&control.to_be_bytes());
+                descriptor[4..8].copy_from_slice(&(1u32).to_be_bytes());
+                descriptor[8..].copy_from_slice(&patched_inc.to_be_bytes());
+                emu.load_ram(&descriptor, DESCRIPTOR).unwrap();
+                emu.virt_write(CODE, &code).unwrap();
+                emu.reg_write(X86Reg::Rcx, 0);
+                emu.reg_write(X86Reg::Rip, CODE);
+
+                unsafe { emu.run_cpu_batch(4096) }.unwrap();
+
+                assert_eq!(emu.mem_read_vec(patched_inc, 1).unwrap(), [0xF4]);
+                assert_eq!(emu.cpu_ref(0).activity_state, CpuActivityState::Hlt);
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rcx),
+                    0,
+                    "the stale inc ecx after OUT executed before fw_cfg SMC was applied"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     /// Bochs icache.cc handleSMC loops over BX_SMP_PROCESSORS: a write by one
     /// CPU to a page with cached traces must flush EVERY cpu's icache, not just
     /// the writer's. The AP spins on a nop-sled loop whose jmp sits past the
@@ -5158,6 +6375,7 @@ mod tests {
                 emu.virt_write(0x1000, &bsp_code).unwrap();
                 emu.reg_write(X86Reg::Rip, 0x1000);
                 emu.cpu_mut_at(AP_INDEX).deliver_sipi(0x09);
+                emu.rebuild_cpu_masks_from_scan();
 
                 for _ in 0..100 {
                     unsafe { emu.run_cpu_batch(4096) }.unwrap();
@@ -5177,13 +6395,23 @@ mod tests {
     }
 
     /// Bochs memory.cc dmaWritePhysicalPage -> pageWriteStampTable.decWriteStamp:
-    /// device-initiated physical writes (bus-master DMA) must invalidate cached
-    /// traces exactly like CPU stores. poke_ram is our dmaWritePhysicalPage.
+    /// a real legacy-DMA physical write must invalidate cached traces exactly
+    /// like CPU stores.
     #[test]
     fn dma_write_to_cached_code_page_invalidates_icache() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
+                fn dma_read(_data: &[u8], _maxlen: u16) -> u16 {
+                    0
+                }
+                fn dma_write(data: &mut [u8], maxlen: u16) -> u16 {
+                    let patch = [0xF4, 0xF4];
+                    let len = patch.len().min(maxlen as usize);
+                    data[..len].copy_from_slice(&patch[..len]);
+                    len as u16
+                }
+
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
@@ -5197,8 +6425,20 @@ mod tests {
 
                 // Let the CPU cache and spin the loop trace.
                 unsafe { emu.run_cpu_batch(4096) }.unwrap();
-                // Device DMA patches the jmp to hlt;hlt.
-                emu.memory.poke_ram(0x1008, &[0xF4, 0xF4]);
+                // A real DMA controller write patches the jmp to hlt;hlt.
+                let pins_ptr = emu.tlb_pins().as_ptr();
+                let pins_len = emu.tlb_pins().len();
+                let pins = unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) };
+                let dma = &mut emu.device_manager.dma;
+                assert!(dma.register_dma8_channel(2, dma_read, dma_write, "SMC test"));
+                dma.s[0].mask[2] = false;
+                dma.s[1].mask[0] = false;
+                dma.s[0].status_reg |= 1 << 6;
+                dma.s[1].status_reg |= 1 << 4;
+                dma.s[0].chan[2].current_address = 0x1008;
+                dma.s[0].chan[2].current_count = 1;
+                dma.s[0].chan[2].mode.transfer_type = 1;
+                dma.raise_hlda(Some(&mut emu.memory), pins);
 
                 for _ in 0..50 {
                     unsafe { emu.run_cpu_batch(4096) }.unwrap();
@@ -5218,7 +6458,7 @@ mod tests {
     }
 
     #[test]
-    fn active_cpu_batch_returns_at_millisecond_quantum_for_timer_service() {
+    fn active_cpu_batch_has_no_fixed_millisecond_polling_cap() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
@@ -5233,8 +6473,8 @@ mod tests {
 
                 let executed = unsafe { emu.run_cpu_batch(100_000) }.unwrap();
                 assert!(
-                    (1_024..10_000).contains(&executed),
-                    "active batch should yield near the 1ms timer-service quantum, got {executed}"
+                    executed >= 100_000,
+                    "active batch retained a fixed polling cap: {executed}"
                 );
 
                 let mut high_ips_config = EmulatorConfig::default();
@@ -5247,12 +6487,10 @@ mod tests {
                 high_ips_emu.virt_write(0x1000, &code).unwrap();
                 high_ips_emu.reg_write(X86Reg::Rip, 0x1000);
 
-                assert_eq!(high_ips_emu.active_batch_step_ticks(100_000), 4_096);
-
                 let executed = unsafe { high_ips_emu.run_cpu_batch(100_000) }.unwrap();
                 assert!(
-                    (1_024..=8_192).contains(&executed),
-                    "high-IPS active batch should still yield before BIOS poll loops can time out, got {executed}"
+                    executed >= 100_000,
+                    "configured IPS reintroduced an active polling cap: {executed}"
                 );
             })
             .unwrap()
@@ -5313,14 +6551,14 @@ mod tests {
         );
     }
     #[test]
-    fn hlt_wait_step_uses_millisecond_quantum_without_near_pc_timer() {
+    fn hlt_wait_step_uses_exact_next_timer_deadline() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
 
-                assert_eq!(emu.hlt_wait_step_ticks(), 4_000);
+                assert_eq!(emu.hlt_wait_step_ticks(), u32::MAX);
             })
             .unwrap()
             .join()
@@ -5346,6 +6584,79 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(feature = "std")]
+    #[test]
+    fn slowdown_policy_matches_bochs_quantum() {
+        let behind = SlowdownTimerState::decide(500, 600, 0);
+        assert_eq!(behind.next_delay_usec, 1_500);
+        assert!(!behind.sleep_one_quantum);
+        assert_eq!(behind.next_last_time_usec, 1_000);
+
+        let normal = SlowdownTimerState::decide(600, 500, 0);
+        assert_eq!(normal.next_delay_usec, 1_000);
+        assert!(!normal.sleep_one_quantum);
+
+        let one_second_ahead = SlowdownTimerState::decide(2_000_000, 0, 1_001_000);
+        assert_eq!(one_second_ahead.next_delay_usec, 1_000);
+        assert!(one_second_ahead.sleep_one_quantum);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn slowdown_owner_bounds_hlt_wait() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut config = EmulatorConfig::default();
+                config.sync_slowdown = true;
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.pc_system.initialize(emu.config.ips);
+                emu.devices.set_timer_ips(u64::from(emu.config.ips));
+                emu.register_timer_owners().unwrap();
+
+                let slowdown_ticks = emu
+                    .pc_system
+                    .usec_to_ticks(SLOWDOWN_QUANTUM_USEC)
+                    .unwrap() as u32;
+                assert_eq!(emu.hlt_wait_step_ticks(), slowdown_ticks);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn hardware_reset_rearms_exact_device_owners() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu =
+                    Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
+                emu.pc_system.initialize(emu.config.ips);
+                emu.devices.set_timer_ips(u64::from(emu.config.ips));
+                emu.register_timer_owners().unwrap();
+                let keyboard_handle = emu.device_manager.keyboard.timer_handle().unwrap();
+                let one_second_handle =
+                    emu.device_manager.cmos.one_second_timer_handle.unwrap();
+                emu.pc_system
+                    .activate_timer_usec(keyboard_handle, 7, false)
+                    .unwrap();
+                assert!(emu.pc_system.is_timer_active(keyboard_handle));
+
+                emu.reset(ResetReason::Hardware).unwrap();
+
+                assert_eq!(
+                    emu.device_manager.keyboard.timer_handle(),
+                    Some(keyboard_handle)
+                );
+                assert!(!emu.pc_system.is_timer_active(keyboard_handle));
+                assert!(emu.pc_system.is_timer_active(one_second_handle));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn software_reset_requests_preserve_device_state() {
         std::thread::Builder::new()
@@ -5356,14 +6667,34 @@ mod tests {
                 emu.reset(ResetReason::Hardware).unwrap();
                 emu.device_manager.pic.master.imr = 0x00;
 
-                assert!(emu.write_port_92h(0x03));
-                assert!(emu.check_and_handle_resets().unwrap());
+                // Port 92 bit 0 requests software reset while bit 1 requests
+                // A20 disable. Reset must discard the queued disable.
+                assert!(emu.write_port_92h(0x01));
+                assert!(emu.pc_system.get_enable_a20());
+                assert!(!emu.device_manager.port92.a20_change_pending);
+                assert!(!emu.device_manager.keyboard.a20_change_pending);
+
+                // The keyboard output-port form has the same reset-dominates
+                // rule, while the PIC remains untouched by software reset.
+                emu.device_manager
+                    .keyboard
+                    .write(crate::iodev::keyboard::KBD_COMMAND_PORT, 0xD1, 1);
+                emu.device_manager
+                    .keyboard
+                    .write(crate::iodev::keyboard::KBD_DATA_PORT, 0x00, 1);
+                emu.service_scheduler_boundary(0).unwrap();
 
                 assert_eq!(
                     emu.device_manager.pic.master.imr, 0x00,
                     "Bochs software reset must not reset devices"
                 );
+                assert!(emu.pc_system.get_enable_a20());
+                assert!(emu.device_manager.port92.a20_gate);
+                assert!(emu.device_manager.keyboard.a20_enabled);
+                assert!(!emu.device_manager.port92.a20_change_pending);
+                assert!(!emu.device_manager.keyboard.a20_change_pending);
                 assert!(emu.device_manager.port92.reset_request.is_none());
+                assert!(emu.device_manager.keyboard.reset_requested.is_none());
             })
             .unwrap()
             .join()
@@ -5387,6 +6718,216 @@ mod tests {
                     emu.device_manager.pic.master.imr, 0xFF,
                     "Bochs hardware reset resets devices"
                 );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn pam_boundary_flushes_all_cpu_mappings() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                let mut config = EmulatorConfig::default();
+                config.guest_memory_size = 2 * MIB;
+                config.host_memory_size = 2 * MIB;
+                config.memory_block_size = MIB;
+                config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                let host_base = resident_host_base(&mut emu) as usize;
+
+                for cpu_index in 0..emu.cpu_count() {
+                    let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
+                    entry.lpf = 0;
+                    entry.host_page_addr = host_base as _;
+                }
+                emu.refresh_tlb_pins();
+                assert!(emu
+                    .tlb_pins()
+                    .iter()
+                    .all(|pin| pin.is_range_pinned(host_base, host_base + MIB)));
+
+                emu.device_manager.pci_conf_addr = 0x8000_0058;
+                emu.device_manager.pci_write(0x0CFD, 0x30, 1);
+                assert!(emu.device_manager.pam_needs_update);
+                emu.service_scheduler_boundary(0).unwrap();
+
+                assert!(emu
+                    .tlb_pins()
+                    .iter()
+                    .all(|pin| !pin.is_range_pinned(host_base, host_base + MIB)));
+                assert!(emu.memory.memory_type(12, 1));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn a20_port92_and_keyboard_transitions_flush_all_cpu_mappings() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const MIB: usize = 1024 * 1024;
+                let mut config = EmulatorConfig::default();
+                config.guest_memory_size = 2 * MIB;
+                config.host_memory_size = 2 * MIB;
+                config.memory_block_size = MIB;
+                config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                let host_base = resident_host_base(&mut emu) as usize;
+
+                for cpu_index in 0..emu.cpu_count() {
+                    let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
+                    entry.lpf = 0;
+                    entry.host_page_addr = host_base as _;
+                }
+                emu.refresh_tlb_pins();
+                emu.write_port_92h(0x00);
+                assert!(!emu.pc_system.get_enable_a20());
+                assert!(emu
+                    .tlb_pins()
+                    .iter()
+                    .all(|pin| !pin.is_range_pinned(host_base, host_base + MIB)));
+
+                for cpu_index in 0..emu.cpu_count() {
+                    let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
+                    entry.lpf = 0;
+                    entry.host_page_addr = host_base as _;
+                }
+                emu.refresh_tlb_pins();
+                emu.device_manager.keyboard.write(
+                    crate::iodev::keyboard::KBD_COMMAND_PORT,
+                    0xDF,
+                    1,
+                );
+                assert!(emu.device_manager.keyboard.a20_change_pending);
+                emu.service_scheduler_boundary(0).unwrap();
+                assert!(emu.pc_system.get_enable_a20());
+                assert!(emu
+                    .tlb_pins()
+                    .iter()
+                    .all(|pin| !pin.is_range_pinned(host_base, host_base + MIB)));
+
+                // Regression for independent controller mirrors. Before the
+                // boundary synchronization, each second write matched its own
+                // stale mirror and was dropped instead of reaching the global
+                // A20 gate.
+                emu.device_manager.keyboard.write(
+                    crate::iodev::keyboard::KBD_COMMAND_PORT,
+                    0xDD,
+                    1,
+                );
+                emu.service_scheduler_boundary(0).unwrap();
+                assert!(!emu.pc_system.get_enable_a20());
+                assert!(emu.device_manager.port92.write(0x02));
+                emu.service_scheduler_boundary(0).unwrap();
+                assert!(emu.pc_system.get_enable_a20());
+
+                assert!(emu.device_manager.port92.write(0x00));
+                emu.service_scheduler_boundary(0).unwrap();
+                assert!(!emu.pc_system.get_enable_a20());
+                emu.device_manager.keyboard.write(
+                    crate::iodev::keyboard::KBD_COMMAND_PORT,
+                    0xD1,
+                    1,
+                );
+                emu.device_manager.keyboard.write(
+                    crate::iodev::keyboard::KBD_DATA_PORT,
+                    0x03,
+                    1,
+                );
+                emu.service_scheduler_boundary(0).unwrap();
+                assert!(emu.pc_system.get_enable_a20());
+                assert!(emu.device_manager.port92.a20_gate);
+                assert!(emu.device_manager.keyboard.a20_enabled);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn all_reset_ports_stop_before_the_next_instruction() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const CODE: u64 = 0x1000;
+                let reset_guest = |code: &[u8]| {
+                    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                        EmulatorConfig::default(),
+                        CpuSetupMode::FlatProtected32,
+                    )
+                    .unwrap();
+                    // `new_with_mode` deliberately omits device initialization.
+                    emu.devices.init(&mut emu.memory).unwrap();
+                    emu.device_manager
+                        .init(&mut emu.devices, &mut emu.memory)
+                        .unwrap();
+                    emu.virt_write(CODE, code).unwrap();
+                    emu.reg_write(X86Reg::Rip, CODE);
+                    let executed = unsafe { emu.run_cpu_batch(64) }.unwrap();
+                    assert!(executed > 0);
+                    assert!(
+                        emu.devices.take_port_e9_output().is_empty(),
+                        "the visible marker OUT after the reset request executed"
+                    );
+                    emu
+                };
+
+                // mov edx,0x92; mov al,0x01; out dx,al; out 0xe9,al; hlt
+                let emu = reset_guest(&[
+                    0xBA, 0x92, 0x00, 0x00, 0x00, 0xB0, 0x01, 0xEE, 0xE6, 0xE9, 0xF4,
+                ]);
+                assert!(emu.pc_system.get_enable_a20());
+                assert!(emu.device_manager.port92.a20_gate);
+                assert!(emu.device_manager.keyboard.a20_enabled);
+                assert!(emu.device_manager.port92.reset_request.is_none());
+
+                // mov edx,0x64; mov al,0xfe; out dx,al; out 0xe9,al; hlt
+                let emu = reset_guest(&[
+                    0xBA, 0x64, 0x00, 0x00, 0x00, 0xB0, 0xFE, 0xEE, 0xE6, 0xE9, 0xF4,
+                ]);
+                assert!(emu.device_manager.keyboard.reset_requested.is_none());
+
+                // mov edx,0xcf9; mov al,0x02; out dx,al; mov al,0x06;
+                // out dx,al; out 0xe9,al; hlt
+                let emu = reset_guest(&[
+                    0xBA, 0xF9, 0x0C, 0x00, 0x00, 0xB0, 0x02, 0xEE, 0xB0, 0x06, 0xEE,
+                    0xE6, 0xE9, 0xF4,
+                ]);
+                assert!(emu.device_manager.pci2isa.reset_request.is_none());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn initialize_enables_configured_pci_vga() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                for (pci_enabled, pci_vga) in
+                    [(false, false), (false, true), (true, false), (true, true)]
+                {
+                    let mut config = EmulatorConfig::default();
+                    config.pci_enabled = pci_enabled;
+                    config.pci_vga = pci_vga;
+                    let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                    emu.initialize().unwrap();
+
+                    let expected = pci_enabled && pci_vga;
+                    assert_eq!(emu.device_manager.vga.pci_enabled(), expected);
+                    assert_eq!(
+                        emu.device_manager.vga.pci_read(0x04, 1),
+                        if expected { 0x03 } else { 0xFFFF_FFFF }
+                    );
+                }
             })
             .unwrap()
             .join()
@@ -5616,6 +7157,205 @@ mod tests {
     }
 
     #[test]
+    fn cpu_masks_preserve_indices_32_and_253_across_scan_oracle() {
+        let mut runnable = CpuMask::default();
+        let mut lapic_work = CpuMask::default();
+        runnable.assign(32, true);
+        runnable.assign(253, true);
+        lapic_work.assign(32, true);
+        lapic_work.assign(253, true);
+
+        let mut scanned_runnable = CpuMask::default();
+        let mut scanned_lapic_work = CpuMask::default();
+        for index in 0..MAX_SUPPORTED_TEST_CPUS as usize {
+            scanned_runnable.assign(index, index == 32 || index == 253);
+            scanned_lapic_work.assign(index, index == 32 || index == 253);
+        }
+
+        assert_eq!(runnable, scanned_runnable);
+        assert_eq!(lapic_work, scanned_lapic_work);
+        assert_eq!(runnable.count(MAX_SUPPORTED_TEST_CPUS as usize), 2);
+        assert_eq!(runnable.next_set(0, MAX_SUPPORTED_TEST_CPUS as usize), Some(32));
+        assert_eq!(runnable.next_set(33, MAX_SUPPORTED_TEST_CPUS as usize), Some(253));
+        assert_eq!(runnable.next_set(254, MAX_SUPPORTED_TEST_CPUS as usize), None);
+    }
+
+    #[test]
+    fn cpu_masks_match_scan_oracle_for_scheduler_transition_matrix() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const FIXED_VECTOR: u32 = 0x42;
+                const LEVEL_VECTOR: u8 = 0xE0;
+                const ICR_SELF: u32 = 1 << 18;
+                const ICR_ALL_INCLUDING_SELF: u32 = 2 << 18;
+
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+
+                // Reset leaves the BSP runnable and the AP waiting for SIPI.
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).activity_state,
+                    CpuActivityState::WaitForSipi
+                );
+                emu.assert_cpu_masks_match_scan();
+
+                // HLT and a local wake event update only the affected CPU bit.
+                {
+                    let bsp = emu.cpu_mut_at(BSP_INDEX);
+                    bsp.activity_state = CpuActivityState::Hlt;
+                    bsp.pending_event = 0;
+                    bsp.async_event = 0;
+                }
+                emu.refresh_cpu_masks(BSP_INDEX);
+                emu.assert_cpu_masks_match_scan();
+                assert!(!emu.runnable_mask.contains(BSP_INDEX));
+
+                emu.apply_lapic_cpu_event(BSP_INDEX, Some(LocalApicCpuEvent::Nmi));
+                emu.refresh_cpu_masks(BSP_INDEX);
+                emu.assert_cpu_masks_match_scan();
+                assert!(emu.runnable_mask.contains(BSP_INDEX));
+
+                // A reset clears the local wake and reinstates WAIT_FOR_SIPI.
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.assert_cpu_masks_match_scan();
+                emu.apply_lapic_cpu_event(
+                    AP_INDEX,
+                    Some(LocalApicCpuEvent::Sipi(AP_TRAMPOLINE_VECTOR)),
+                );
+                emu.refresh_cpu_masks(AP_INDEX);
+                emu.assert_cpu_masks_match_scan();
+                assert!(emu.runnable_mask.contains(AP_INDEX));
+
+                for cpu_index in 0..emu.cpu_count() {
+                    let cpu = emu.cpu_mut_at(cpu_index);
+                    cpu.activity_state = CpuActivityState::Hlt;
+                    cpu.set_rflags_for_api(0x202);
+                    cpu.pending_event = 0;
+                    cpu.async_event = 0;
+                    cpu.lapic.intr = false;
+                    cpu.lapic.intr_pending = false;
+                    cpu.lapic.write_aligned(0xF0, 0x1FF, 0);
+                    emu.refresh_cpu_masks(cpu_index);
+                }
+                emu.assert_cpu_masks_match_scan();
+
+                // A physical-destination IPI exercises one remote LAPIC.
+                emu.cpu_mut_at(BSP_INDEX)
+                    .lapic
+                    .write_aligned(0x310, (AP_INDEX as u32) << 24, 0);
+                emu.cpu_mut_at(BSP_INDEX)
+                    .lapic
+                    .write_aligned(0x300, FIXED_VECTOR, 0);
+                emu.refresh_cpu_masks(BSP_INDEX);
+                emu.assert_cpu_masks_match_scan();
+                emu.drain_lapic_bus();
+                emu.assert_cpu_masks_match_scan();
+                assert!(emu.runnable_mask.contains(AP_INDEX));
+
+                // Self shorthand keeps routing and membership local to the BSP.
+                {
+                    let bsp = emu.cpu_mut_at(BSP_INDEX);
+                    bsp.activity_state = CpuActivityState::Hlt;
+                    bsp.pending_event = 0;
+                    bsp.async_event = 0;
+                    bsp.lapic.intr = false;
+                    bsp.lapic.intr_pending = false;
+                    bsp.lapic
+                        .write_aligned(0x300, ICR_SELF | (FIXED_VECTOR + 1), 0);
+                }
+                emu.refresh_cpu_masks(BSP_INDEX);
+                emu.assert_cpu_masks_match_scan();
+                emu.drain_lapic_bus();
+                emu.assert_cpu_masks_match_scan();
+                assert!(emu.runnable_mask.contains(BSP_INDEX));
+
+                // All-including-self shorthand updates both target bits.
+                for cpu_index in 0..emu.cpu_count() {
+                    let cpu = emu.cpu_mut_at(cpu_index);
+                    cpu.activity_state = CpuActivityState::Hlt;
+                    cpu.pending_event = 0;
+                    cpu.async_event = 0;
+                    cpu.lapic.intr = false;
+                    cpu.lapic.intr_pending = false;
+                    emu.refresh_cpu_masks(cpu_index);
+                }
+                emu.cpu_mut_at(BSP_INDEX).lapic.write_aligned(
+                    0x300,
+                    ICR_ALL_INCLUDING_SELF | (FIXED_VECTOR + 2),
+                    0,
+                );
+                emu.refresh_cpu_masks(BSP_INDEX);
+                emu.assert_cpu_masks_match_scan();
+                emu.drain_lapic_bus();
+                emu.assert_cpu_masks_match_scan();
+                assert!(emu.runnable_mask.contains(BSP_INDEX));
+                assert!(emu.runnable_mask.contains(AP_INDEX));
+
+                // EOI is deferred local LAPIC work until the central boundary.
+                {
+                    let lapic = &mut emu.cpu_mut_at(BSP_INDEX).lapic;
+                    lapic.deliver(LEVEL_VECTOR, 0, crate::cpu::apic::APIC_LEVEL_TRIGGERED);
+                    assert_eq!(lapic.acknowledge_int(), LEVEL_VECTOR);
+                    lapic.receive_eoi(0);
+                    assert_eq!(lapic.pending_eoi_vector, Some(LEVEL_VECTOR));
+                }
+                emu.refresh_cpu_masks(BSP_INDEX);
+                emu.assert_cpu_masks_match_scan();
+                emu.service_lapic_local_events();
+                emu.assert_cpu_masks_match_scan();
+                assert_eq!(emu.cpu_ref(BSP_INDEX).lapic.pending_eoi_vector, None);
+
+                // Timer programming and fire are both represented as LAPIC work.
+                {
+                    let ap = emu.cpu_mut_at(AP_INDEX);
+                    ap.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR, 0);
+                    ap.lapic.set_initial_timer_count(1, 0);
+                }
+                emu.refresh_cpu_masks(AP_INDEX);
+                emu.assert_cpu_masks_match_scan();
+                emu.service_lapic_timer_requests();
+                emu.assert_cpu_masks_match_scan();
+                emu.cpu_mut_at(AP_INDEX).lapic.timer_fired = true;
+                emu.refresh_cpu_masks(AP_INDEX);
+                emu.assert_cpu_masks_match_scan();
+                emu.service_lapic_local_events();
+                emu.assert_cpu_masks_match_scan();
+
+                // Mixed two-CPU state: halted BSP, active AP, AP-only LAPIC work.
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.apply_lapic_cpu_event(
+                    AP_INDEX,
+                    Some(LocalApicCpuEvent::Sipi(AP_TRAMPOLINE_VECTOR)),
+                );
+                {
+                    let bsp = emu.cpu_mut_at(BSP_INDEX);
+                    bsp.activity_state = CpuActivityState::Hlt;
+                    bsp.pending_event = 0;
+                    bsp.async_event = 0;
+                }
+                emu.cpu_mut_at(AP_INDEX).lapic.timer_fired = true;
+                emu.refresh_cpu_masks(BSP_INDEX);
+                emu.refresh_cpu_masks(AP_INDEX);
+                emu.assert_cpu_masks_match_scan();
+                assert!(!emu.runnable_mask.contains(BSP_INDEX));
+                assert!(emu.runnable_mask.contains(AP_INDEX));
+                assert!(!emu.lapic_work_mask.contains(BSP_INDEX));
+                assert!(emu.lapic_work_mask.contains(AP_INDEX));
+
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.assert_cpu_masks_match_scan();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn run_cpu_batch_executes_application_processor_after_sipi() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
@@ -5626,15 +7366,12 @@ mod tests {
                     .unwrap();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                emu.memory
-                    .load_RAM(
-                        &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
-                        AP_TRAMPOLINE_ADDR,
-                    )
+                emu.load_ram(&[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN], AP_TRAMPOLINE_ADDR)
                     .unwrap();
 
-                emu.cpu.activity_state = CpuActivityState::WaitForSipi;
+                emu.cpu_mut().activity_state = CpuActivityState::WaitForSipi;
                 emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                emu.rebuild_cpu_masks_from_scan();
                 let before = emu.cpu_ref(AP_INDEX).icount;
 
                 let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
@@ -5671,36 +7408,24 @@ mod tests {
                 )
                 .unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                emu.memory
-                    .load_RAM(
-                        &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
-                        AP_TRAMPOLINE_ADDR,
-                    )
+                emu.load_ram(&[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN], AP_TRAMPOLINE_ADDR)
                     .unwrap();
 
                 let before = emu.cpu_ref(AP_INDEX).icount;
 
                 {
                     let bsp = emu.cpu_mut_at(BSP_INDEX);
-                    bsp.lapic.write_aligned(ICR_HIGH, TARGET_APIC_ID << 24);
-                    bsp.lapic.write_aligned(
-                        ICR_LOW,
-                        ((crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8)
-                            | ICR_LEVEL_ASSERT
-                            | ICR_TRIGGER_LEVEL,
-                    );
-                    bsp.lapic.write_aligned(
-                        ICR_LOW,
-                        (crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8 | ICR_TRIGGER_LEVEL,
-                    );
-                    bsp.lapic.write_aligned(ICR_HIGH, TARGET_APIC_ID << 24);
-                    bsp.lapic.write_aligned(
-                        ICR_LOW,
-                        AP_TRAMPOLINE_VECTOR as u32
-                            | ((crate::cpu::apic::ApicDeliveryMode::Sipi as u32) << 8)
-                            | ICR_LEVEL_ASSERT,
-                    );
+                    bsp.lapic.write_aligned(ICR_HIGH, TARGET_APIC_ID << 24, 0);
+                    bsp.lapic.write_aligned(ICR_LOW, ((crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8)
+                        | ICR_LEVEL_ASSERT
+                        | ICR_TRIGGER_LEVEL, 0);
+                    bsp.lapic.write_aligned(ICR_LOW, (crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8 | ICR_TRIGGER_LEVEL, 0);
+                    bsp.lapic.write_aligned(ICR_HIGH, TARGET_APIC_ID << 24, 0);
+                    bsp.lapic.write_aligned(ICR_LOW, AP_TRAMPOLINE_VECTOR as u32
+                        | ((crate::cpu::apic::ApicDeliveryMode::Sipi as u32) << 8)
+                        | ICR_LEVEL_ASSERT, 0);
                 }
+                emu.refresh_cpu_masks(BSP_INDEX);
 
                 let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
 
@@ -5739,17 +7464,9 @@ mod tests {
                 )
                 .unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                emu.memory
-                    .load_RAM(
-                        &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
-                        AP_TRAMPOLINE_ADDR,
-                    )
+                emu.load_ram(&[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN], AP_TRAMPOLINE_ADDR)
                     .unwrap();
-                emu.memory
-                    .load_RAM(
-                        &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
-                        SECOND_TRAMPOLINE_ADDR,
-                    )
+                emu.load_ram(&[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN], SECOND_TRAMPOLINE_ADDR)
                     .unwrap();
 
                 emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
@@ -5815,9 +7532,10 @@ mod tests {
 
                 {
                     let ap = emu.cpu_mut_at(AP_INDEX);
-                    ap.lapic.write_aligned(0x310, (BSP_INDEX as u32) << 24);
-                    ap.lapic.write_aligned(0x300, IN_FLIGHT_VECTOR);
+                    ap.lapic.write_aligned(0x310, (BSP_INDEX as u32) << 24, 0);
+                    ap.lapic.write_aligned(0x300, IN_FLIGHT_VECTOR, 0);
                 }
+                emu.refresh_cpu_masks(AP_INDEX);
                 assert!(!emu.cpu_ref(BSP_INDEX).lapic.intr);
 
                 send_bsp_icr_init(&mut emu);
@@ -5913,11 +7631,8 @@ mod tests {
 
                 {
                     let bsp = emu.cpu_mut_at(BSP_INDEX);
-                    bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24);
-                    bsp.lapic.write_aligned(
-                        ICR_LOW,
-                        (crate::cpu::apic::ApicDeliveryMode::Smi as u32) << 8,
-                    );
+                    bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24, 0);
+                    bsp.lapic.write_aligned(ICR_LOW, (crate::cpu::apic::ApicDeliveryMode::Smi as u32) << 8, 0);
                 }
                 send_bsp_icr_init(&mut emu);
                 emu.drain_lapic_bus();
@@ -5956,19 +7671,16 @@ mod tests {
                 )
                 .unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                emu.memory
-                    .load_RAM(
-                        &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
-                        AP_TRAMPOLINE_ADDR,
-                    )
+                emu.load_ram(&[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN], AP_TRAMPOLINE_ADDR)
                     .unwrap();
 
-                emu.cpu.activity_state = CpuActivityState::Hlt;
-                emu.cpu.pending_event = 0;
-                emu.cpu.async_event = 0;
-                emu.cpu.lapic.intr = false;
-                emu.cpu.lapic.intr_pending = false;
+                emu.cpu_mut().activity_state = CpuActivityState::Hlt;
+                emu.cpu_mut().pending_event = 0;
+                emu.cpu_mut().async_event = 0;
+                emu.cpu_mut().lapic.intr = false;
+                emu.cpu_mut().lapic.intr_pending = false;
                 emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                emu.rebuild_cpu_masks_from_scan();
 
                 assert!(
                     !emu.cpu_runnable_for_batch(BSP_INDEX),
@@ -5997,7 +7709,7 @@ mod tests {
     }
 
     #[test]
-    fn smp_batch_exposes_elapsed_peer_quantum_to_guest_time_reads() {
+    fn smp_batch_keeps_guest_time_at_the_frozen_round_epoch() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
@@ -6011,22 +7723,23 @@ mod tests {
                 )
                 .unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                emu.memory
-                    .load_RAM(&[0x0F, 0x31, 0xF4], AP_TRAMPOLINE_ADDR)
+                emu.load_ram(&[0x0F, 0x31, 0xF4], AP_TRAMPOLINE_ADDR)
                     .unwrap();
 
-                emu.cpu.activity_state = CpuActivityState::Hlt;
-                emu.cpu.pending_event = 0;
-                emu.cpu.async_event = 0;
-                emu.cpu.lapic.intr = false;
-                emu.cpu.lapic.intr_pending = false;
+                emu.cpu_mut().activity_state = CpuActivityState::Hlt;
+                emu.cpu_mut().pending_event = 0;
+                emu.cpu_mut().async_event = 0;
+                emu.cpu_mut().lapic.intr = false;
+                emu.cpu_mut().lapic.intr_pending = false;
                 emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                emu.rebuild_cpu_masks_from_scan();
 
                 let quantum = emu.smp_quantum_ticks();
                 let _elapsed = unsafe { emu.run_cpu_batch(quantum) }.unwrap();
-                assert!(
-                    emu.cpu_ref(AP_INDEX).rax() > 0,
-                    "AP RDTSC did not observe halted peer quantum elapsed earlier in the SMP round"
+                assert_eq!(
+                    emu.cpu_ref(AP_INDEX).rax(),
+                    0,
+                    "AP RDTSC observed peer elapsed time before the round boundary"
                 );
             })
             .unwrap()
@@ -6049,11 +7762,7 @@ mod tests {
                 )
                 .unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                emu.memory
-                    .load_RAM(
-                        &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
-                        AP_TRAMPOLINE_ADDR,
-                    )
+                emu.load_ram(&[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN], AP_TRAMPOLINE_ADDR)
                     .unwrap();
 
                 let handle = emu
@@ -6061,20 +7770,21 @@ mod tests {
                     .register_timer(TimerOwner::Lapic(AP_INDEX), 1, false, false, "ap_lapic")
                     .unwrap();
 
-                emu.cpu.activity_state = CpuActivityState::Hlt;
-                emu.cpu.pending_event = 0;
-                emu.cpu.async_event = 0;
-                emu.cpu.lapic.intr = false;
-                emu.cpu.lapic.intr_pending = false;
+                emu.cpu_mut().activity_state = CpuActivityState::Hlt;
+                emu.cpu_mut().pending_event = 0;
+                emu.cpu_mut().async_event = 0;
+                emu.cpu_mut().lapic.intr = false;
+                emu.cpu_mut().lapic.intr_pending = false;
 
                 {
                     let ap = emu.cpu_mut_at(AP_INDEX);
                     ap.lapic.timer_handle = Some(handle);
-                    ap.lapic.write_aligned(0xF0, 0x1FF);
-                    ap.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR);
-                    ap.lapic.set_initial_timer_count(1);
+                    ap.lapic.write_aligned(0xF0, 0x1FF, 0);
+                    ap.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR, 0);
+                    ap.lapic.set_initial_timer_count(1, 0);
                     ap.deliver_sipi(AP_TRAMPOLINE_VECTOR);
                 }
+                emu.rebuild_cpu_masks_from_scan();
                 emu.service_lapic_local_events();
 
                 let quantum = emu.smp_quantum_ticks();
@@ -6139,7 +7849,7 @@ mod tests {
 
                 for cpu_index in 0..emu.cpu_count() {
                     let cpu = emu.cpu_mut_at(cpu_index);
-                    cpu.lapic.write_aligned(0xF0, 0x1FF);
+                    cpu.lapic.write_aligned(0xF0, 0x1FF, 0);
                     if cpu_index != BSP_INDEX {
                         cpu.activity_state = CpuActivityState::Hlt;
                         cpu.set_rflags_for_api(0x202);
@@ -6150,9 +7860,8 @@ mod tests {
                     }
                 }
 
-                emu.cpu_mut_at(BSP_INDEX)
-                    .lapic
-                    .write_aligned(0x300, ICR_ALL_BUT_SELF | FIXED_IPI_VECTOR);
+                emu.cpu_mut_at(BSP_INDEX).lapic.write_aligned(0x300, ICR_ALL_BUT_SELF | FIXED_IPI_VECTOR, 0);
+                emu.refresh_cpu_masks(BSP_INDEX);
                 emu.drain_lapic_bus();
 
                 for cpu_index in 1..emu.cpu_count() {
@@ -6200,11 +7909,11 @@ mod tests {
                     (NMI_HANDLER_SEG & 0xFF) as u8,
                     (NMI_HANDLER_SEG >> 8) as u8,
                 ];
-                emu.memory.load_RAM(&ivt_entry, 8).unwrap();
-                emu.memory.load_RAM(&[0xF4], NMI_HANDLER_ADDR).unwrap();
+                emu.load_ram(&ivt_entry, 8).unwrap();
+                emu.load_ram(&[0xF4], NMI_HANDLER_ADDR).unwrap();
 
                 for cpu_index in 0..emu.cpu_count() {
-                    emu.cpu_mut_at(cpu_index).lapic.write_aligned(0xF0, 0x1FF);
+                    emu.cpu_mut_at(cpu_index).lapic.write_aligned(0xF0, 0x1FF, 0);
                 }
 
                 // SIPI-start the AP (unmasks NMI per Bochs deliver_SIPI), then
@@ -6216,9 +7925,9 @@ mod tests {
                     ap.pending_event = 0;
                     ap.async_event = 0;
                 }
-                emu.cpu.activity_state = CpuActivityState::Hlt;
-                emu.cpu.pending_event = 0;
-                emu.cpu.async_event = 0;
+                emu.cpu_mut().activity_state = CpuActivityState::Hlt;
+                emu.cpu_mut().pending_event = 0;
+                emu.cpu_mut().async_event = 0;
 
                 assert!(
                     !emu.cpu_runnable_for_batch(AP_INDEX),
@@ -6230,12 +7939,9 @@ mod tests {
                 );
 
                 // BSP sends a physical-destination NMI IPI to the AP.
-                emu.cpu_mut_at(BSP_INDEX)
-                    .lapic
-                    .write_aligned(0x310, (AP_INDEX as u32) << 24);
-                emu.cpu_mut_at(BSP_INDEX)
-                    .lapic
-                    .write_aligned(0x300, ICR_DELIVERY_NMI);
+                emu.cpu_mut_at(BSP_INDEX).lapic.write_aligned(0x310, (AP_INDEX as u32) << 24, 0);
+                emu.cpu_mut_at(BSP_INDEX).lapic.write_aligned(0x300, ICR_DELIVERY_NMI, 0);
+                emu.refresh_cpu_masks(BSP_INDEX);
                 emu.drain_lapic_bus();
 
                 assert!(
@@ -6278,26 +7984,6 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn smp_service_gate_honors_pending_keyboard_work() {
-        std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
-            .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
-                for cpu_index in 0..emu.cpu_count() {
-                    emu.cpu_mut_at(cpu_index).async_event = 0;
-                }
-                emu.device_manager.pic.irq_pending = false;
-                emu.device_manager.pic.irq_cleared = false;
-                assert!(!emu.smp_round_service_due());
-
-                emu.device_manager.keyboard.kbd_controller.timer_pending = 1;
-                assert!(emu.smp_round_service_due());
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
 
     #[test]
     fn lapic_timer_request_is_activated_before_round_ticks_advance() {
@@ -6323,13 +8009,13 @@ mod tests {
                 {
                     let cpu = emu.cpu_mut_at(BSP_INDEX);
                     cpu.lapic.timer_handle = Some(handle);
-                    cpu.lapic.write_aligned(0xF0, 0x1FF);
-                    cpu.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR);
-                    cpu.lapic
-                        .set_initial_timer_count(TEST_LAPIC_TIMER_PERIOD_TICKS as u32);
+                    cpu.lapic.write_aligned(0xF0, 0x1FF, 0);
+                    cpu.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR, 0);
+                    cpu.lapic.set_initial_timer_count(TEST_LAPIC_TIMER_PERIOD_TICKS as u32, 0);
                     assert!(cpu.lapic.timer_activate_request.is_some());
                 }
 
+                emu.rebuild_cpu_masks_from_scan();
                 emu.service_lapic_timer_requests();
 
                 assert!(emu
@@ -6348,6 +8034,138 @@ mod tests {
     }
 
     #[test]
+    fn self_ipi_control_event_ends_up_batch() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const CODE: u64 = 0x1000;
+                const SELF_NMI_IPI: u32 =
+                    (crate::cpu::apic::ApicDeliveryMode::Nmi as u32) << 8;
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.cpu_mut_at(BSP_INDEX)
+                    .lapic
+                    .write_aligned(0xF0, 0x1FF, 0);
+                // mov dword ptr [FEE00300], SELF_NMI_IPI; inc ebx; hlt
+                emu.virt_write(
+                    CODE,
+                    &[
+                        0xC7,
+                        0x05,
+                        0x00,
+                        0x03,
+                        0xE0,
+                        0xFE,
+                        SELF_NMI_IPI as u8,
+                        (SELF_NMI_IPI >> 8) as u8,
+                        (SELF_NMI_IPI >> 16) as u8,
+                        (SELF_NMI_IPI >> 24) as u8,
+                        0xFF,
+                        0xC3,
+                        0xF4,
+                    ],
+                )
+                .unwrap();
+                emu.reg_write(X86Reg::Rip, CODE);
+                emu.reg_write(X86Reg::Rbx, 0);
+
+                unsafe { emu.run_cpu_batch(64) }.unwrap();
+
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rbx),
+                    0,
+                    "sentinel after the self-targeted NMI IPI executed before the boundary"
+                );
+                assert_ne!(
+                    emu.cpu_ref(BSP_INDEX).pending_event
+                        & BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI,
+                    0,
+                    "the queued self-targeted NMI was not committed at the boundary"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn up_lapic_timer_uses_programming_instruction_epoch() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const CODE: u64 = 0x1000;
+                const INITIAL_COUNT: u32 = 4;
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                let handle = emu
+                    .pc_system
+                    .register_timer(TimerOwner::Lapic(BSP_INDEX), 1, false, false, "lapic")
+                    .unwrap();
+                {
+                    let cpu = emu.cpu_mut_at(BSP_INDEX);
+                    cpu.lapic.timer_handle = Some(handle);
+                    cpu.lapic.write_aligned(0xF0, 0x1FF, 0);
+                    cpu.lapic
+                        .write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR, 0);
+                }
+                // mov dword ptr [FEE00380], INITIAL_COUNT; inc ebx; hlt
+                emu.virt_write(
+                    CODE,
+                    &[
+                        0xC7,
+                        0x05,
+                        0x80,
+                        0x03,
+                        0xE0,
+                        0xFE,
+                        INITIAL_COUNT as u8,
+                        (INITIAL_COUNT >> 8) as u8,
+                        (INITIAL_COUNT >> 16) as u8,
+                        (INITIAL_COUNT >> 24) as u8,
+                        0xFF,
+                        0xC3,
+                        0xF4,
+                    ],
+                )
+                .unwrap();
+                emu.reg_write(X86Reg::Rip, CODE);
+                emu.reg_write(X86Reg::Rbx, 0);
+
+                unsafe { emu.run_cpu_batch(64) }.unwrap();
+
+                let timer_period = emu
+                    .cpu_ref(BSP_INDEX)
+                    .lapic
+                    .timer_period_ticks()
+                    .expect("guest initial count must arm the LAPIC timer");
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rbx),
+                    0,
+                    "sentinel after timer programming executed before the boundary"
+                );
+                assert_eq!(
+                    emu.pc_system.timers[handle].time_to_fire,
+                    timer_period,
+                    "LAPIC deadline must be based on the programming instruction epoch"
+                );
+                assert_eq!(
+                    emu.pc_system.time_ticks(),
+                    1,
+                    "only the programming instruction may retire before the boundary"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn halted_application_processor_lapic_timer_disables_bsp_hlt_fast_forward() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
@@ -6358,18 +8176,19 @@ mod tests {
                     .unwrap();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
-                emu.cpu.activity_state = CpuActivityState::Hlt;
+                emu.cpu_mut().activity_state = CpuActivityState::Hlt;
 
                 {
                     let ap = emu.cpu_mut_at(AP_INDEX);
                     ap.activity_state = CpuActivityState::Hlt;
                     ap.set_rflags_for_api(0x202);
-                    ap.lapic.write_aligned(0xF0, 0x1FF);
-                    ap.lapic.write_aligned(0x320, 0x30);
-                    ap.lapic.set_initial_timer_count(1);
+                    ap.lapic.write_aligned(0xF0, 0x1FF, 0);
+                    ap.lapic.write_aligned(0x320, 0x30, 0);
+                    ap.lapic.set_initial_timer_count(1, 0);
                     ap.lapic.timer_fired = true;
                 }
 
+                emu.rebuild_cpu_masks_from_scan();
                 emu.sync_event_flags();
 
                 assert!(
@@ -6414,17 +8233,15 @@ mod tests {
                 {
                     let ap = emu.cpu_mut_at(AP_INDEX);
                     ap.lapic.timer_handle = Some(handle);
-                    ap.lapic.write_aligned(0xF0, 0x1FF);
-                    ap.lapic
-                        .write_aligned(0x320, LVT_TIMER_PERIODIC_MODE | TEST_LAPIC_TIMER_VECTOR);
-                    ap.lapic
-                        .set_initial_timer_count(TEST_LAPIC_TIMER_PERIOD_TICKS as u32);
+                    ap.lapic.write_aligned(0xF0, 0x1FF, 0);
+                    ap.lapic.write_aligned(0x320, LVT_TIMER_PERIODIC_MODE | TEST_LAPIC_TIMER_VECTOR, 0);
+                    ap.lapic.set_initial_timer_count(TEST_LAPIC_TIMER_PERIOD_TICKS as u32, 0);
                 }
 
+                emu.rebuild_cpu_masks_from_scan();
                 emu.service_lapic_local_events();
-                emu.pc_system.tickn(TEST_LAPIC_TIMER_ELAPSED_TICKS);
-                emu.dispatch_timer_fires();
-                emu.service_lapic_local_events();
+                emu.service_scheduler_boundary(TEST_LAPIC_TIMER_ELAPSED_TICKS as u64)
+                    .unwrap();
 
                 assert_eq!(
                     emu.cpu_ref(AP_INDEX).lapic.diag_timer_fires,
@@ -6472,17 +8289,15 @@ mod tests {
                 {
                     let ap = emu.cpu_mut_at(AP_INDEX);
                     ap.lapic.timer_handle = Some(handle);
-                    ap.lapic.write_aligned(0xF0, 0x1FF);
-                    ap.lapic
-                        .write_aligned(0x320, LVT_TIMER_PERIODIC_MODE | TEST_LAPIC_TIMER_VECTOR);
-                    ap.lapic
-                        .set_initial_timer_count(TEST_LAPIC_TIMER_PERIOD_TICKS as u32);
+                    ap.lapic.write_aligned(0xF0, 0x1FF, 0);
+                    ap.lapic.write_aligned(0x320, LVT_TIMER_PERIODIC_MODE | TEST_LAPIC_TIMER_VECTOR, 0);
+                    ap.lapic.set_initial_timer_count(TEST_LAPIC_TIMER_PERIOD_TICKS as u32, 0);
                 }
 
+                emu.rebuild_cpu_masks_from_scan();
                 emu.service_lapic_local_events();
-                emu.pc_system.tickn(ELAPSED_TICKS);
-                emu.dispatch_timer_fires();
-                emu.service_lapic_local_events();
+                emu.service_scheduler_boundary(ELAPSED_TICKS as u64)
+                    .unwrap();
 
                 assert_eq!(emu.cpu_ref(AP_INDEX).lapic.diag_timer_fires, EXPECTED_FIRES);
                 assert_eq!(
@@ -6525,12 +8340,12 @@ mod tests {
                 {
                     let bsp = emu.cpu_mut_at(BSP_INDEX);
                     bsp.lapic.timer_handle = Some(handle);
-                    bsp.lapic.write_aligned(0xF0, 0x1FF);
-                    bsp.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR);
-                    bsp.lapic
-                        .set_initial_timer_count(TEST_LAPIC_TIMER_PERIOD_TICKS as u32);
+                    bsp.lapic.write_aligned(0xF0, 0x1FF, 0);
+                    bsp.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR, 0);
+                    bsp.lapic.set_initial_timer_count(TEST_LAPIC_TIMER_PERIOD_TICKS as u32, 0);
                 }
 
+                emu.rebuild_cpu_masks_from_scan();
                 emu.service_lapic_local_events();
                 assert!(emu.pc_system.is_timer_active(handle));
 
@@ -6563,7 +8378,7 @@ mod tests {
 
                 {
                     let lapic = &mut emu.cpu_mut_at(BSP_INDEX).lapic;
-                    lapic.write_aligned(0xF0, 0x1FF);
+                    lapic.write_aligned(0xF0, 0x1FF, 0);
                     lapic.deliver(VECTOR, 0, crate::cpu::apic::APIC_LEVEL_TRIGGERED);
                     assert_eq!(lapic.read_aligned(0x220, 0) & VECTOR_BIT, VECTOR_BIT);
                     assert_eq!(lapic.read_aligned(0x1A0, 0) & VECTOR_BIT, VECTOR_BIT);
@@ -6580,6 +8395,7 @@ mod tests {
                     assert_eq!(lapic.pending_eoi_vector, Some(VECTOR));
                 }
 
+                emu.rebuild_cpu_masks_from_scan();
                 emu.service_lapic_local_events();
 
                 assert_eq!(emu.cpu_ref(BSP_INDEX).lapic.pending_eoi_vector, None);
@@ -6682,11 +8498,39 @@ mod tests {
                 emu.sync_event_flags();
 
                 assert_ne!(
-                    emu.cpu.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_INTR,
+                    emu.cpu().pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_INTR,
                     0
                 );
                 assert!(!emu.device_manager.pic.irq_pending);
                 assert!(!emu.device_manager.pic.irq_cleared);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn scheduler_boundary_republishes_asserted_pic_without_edge_history() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.device_manager.pic.master.int_pin = true;
+                emu.device_manager.pic.irq_pending = false;
+                emu.device_manager.pic.irq_cleared = false;
+                emu.cpu
+                    .clear_event(BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_INTR);
+
+                emu.sync_event_flags();
+
+                assert_ne!(
+                    emu.cpu().pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_INTR,
+                    0
+                );
             })
             .unwrap()
             .join()
@@ -6890,8 +8734,851 @@ mod tests {
             .unwrap();
     }
 
+    const PHASE6_FW_CFG_KEY: u16 = 0x1234;
+
+    fn phase6_large_stack(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+    fn phase6_lock<T>(lock: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        match lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+
+    fn phase6_flat32() -> Box<Emulator<'static, Corei7SkylakeX>> {
+        Emulator::<Corei7SkylakeX>::new_with_mode(
+            EmulatorConfig::default(),
+            CpuSetupMode::FlatProtected32,
+        )
+        .unwrap()
+    }
+
+    fn phase6_prepare_fw_cfg<T: crate::cpu::instrumentation::Instrumentation>(
+        emu: &mut Emulator<'_, Corei7SkylakeX, T>,
+        stream: &[u8],
+    ) {
+        emu.devices.init(&mut emu.memory).unwrap();
+        emu.device_manager
+            .init(&mut emu.devices, &mut emu.memory)
+            .unwrap();
+        emu.device_manager.fw_cfg.add_bytes(PHASE6_FW_CFG_KEY, stream);
+        emu.device_manager.fw_cfg.write_port(
+            FW_CFG_IO_BASE,
+            PHASE6_FW_CFG_KEY as u32,
+            FW_CFG_SELECTOR_WRITE_BYTES,
+            None,
+            &[],
+        );
+    }
+
+    fn phase6_next_fw_cfg_byte<T: crate::cpu::instrumentation::Instrumentation>(
+        emu: &mut Emulator<'_, Corei7SkylakeX, T>,
+    ) -> u8 {
+        emu.device_manager
+            .fw_cfg
+            .read_port_mut(FW_CFG_DATA_PORT, FW_CFG_DATA_READ_BYTES) as u8
+    }
+
+    fn phase6_run<T: crate::cpu::instrumentation::Instrumentation>(
+        emu: &mut Emulator<'_, Corei7SkylakeX, T>,
+    ) {
+        unsafe { emu.run_cpu_batch(1) }.unwrap();
+    }
+
+    #[cfg(feature = "instrumentation")]
+    #[derive(Clone)]
+    struct Phase6RepeatTrace(std::sync::Arc<std::sync::Mutex<Vec<u64>>>);
+
+    #[cfg(feature = "instrumentation")]
+    impl crate::cpu::instrumentation::Instrumentation for Phase6RepeatTrace {
+        fn active_hooks(&self) -> crate::cpu::instrumentation::HookMask {
+            crate::cpu::instrumentation::HookMask::EXEC
+        }
+
+        fn repeat_iteration(&mut self, rip: u64, _instr: &Instruction) {
+            phase6_lock(&self.0).push(rip);
+        }
+    }
+
+    #[cfg(feature = "instrumentation")]
+    fn phase6_repeat_trace() -> (
+        Phase6RepeatTrace,
+        std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    ) {
+        let repeats = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        (Phase6RepeatTrace(std::sync::Arc::clone(&repeats)), repeats)
+    }
+
+    #[cfg(feature = "instrumentation")]
     #[test]
-    fn empty_dma_write_is_a_no_op() {
+    fn ins_byte_and_dword_prefault_before_destructive_port_read() {
+        phase6_large_stack(|| {
+            const CODE: u64 = 0x1000;
+            const DEST: u64 = 0x2000;
+
+            for (code, width, stream) in [
+                (
+                    &[0xF3, 0x67, 0x6C, 0xEB, 0xFE][..],
+                    1usize,
+                    &[0xA1, 0xB2][..],
+                ),
+                (
+                    &[0xF3, 0x67, 0x6D, 0xEB, 0xFE][..],
+                    4usize,
+                    &[0x11, 0x22, 0x33, 0x44, 0x55][..],
+                ),
+            ] {
+                let mut emu = phase6_flat32();
+                phase6_prepare_fw_cfg(&mut emu, stream);
+                let port = if width == 1 {
+                    FW_CFG_DATA_PORT
+                } else {
+                    crate::iodev::keyboard::KBD_DATA_PORT
+                };
+                if width == 4 {
+                    emu.device_manager.keyboard.kbd_controller.kbd_output_buffer = stream[0];
+                    emu.device_manager.keyboard.kbd_controller.outb = true;
+                }
+                let before = vec![0xCC; width];
+                emu.virt_write(CODE, code).unwrap();
+                emu.mem_write(DEST, &before).unwrap();
+                emu.mem_protect(
+                    DEST,
+                    0x1000,
+                    crate::cpu::instrumentation::MemPerms::READ,
+                );
+                emu.reg_write(X86Reg::Rip, CODE);
+                emu.reg_write(X86Reg::Rdx, u64::from(port));
+                emu.reg_write(X86Reg::Rdi, DEST);
+                emu.reg_write(X86Reg::Rcx, 1);
+
+                phase6_run(&mut emu);
+
+                assert_eq!(emu.mem_read_vec(DEST, width).unwrap(), before);
+                assert_eq!(emu.reg_read(X86Reg::Rdi), DEST);
+                assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
+                if width == 1 {
+                    assert_eq!(
+                        phase6_next_fw_cfg_byte(&mut emu),
+                        stream[0],
+                        "the faulting byte input consumed destructive fw_cfg data"
+                    );
+                } else {
+                    assert!(
+                        emu.device_manager.keyboard.kbd_controller.outb,
+                        "the faulting dword input consumed the keyboard output byte"
+                    );
+                }
+
+                let mut emu = phase6_flat32();
+                phase6_prepare_fw_cfg(&mut emu, stream);
+                if width == 4 {
+                    emu.device_manager.keyboard.kbd_controller.kbd_output_buffer = stream[0];
+                    emu.device_manager.keyboard.kbd_controller.outb = true;
+                }
+                emu.virt_write(CODE, code).unwrap();
+                emu.mem_write(DEST, &before).unwrap();
+                emu.reg_write(X86Reg::Rip, CODE);
+                emu.reg_write(X86Reg::Rdx, u64::from(port));
+                emu.reg_write(X86Reg::Rdi, DEST);
+                emu.reg_write(X86Reg::Rcx, 1);
+                phase6_run(&mut emu);
+
+                let expected = if width == 1 {
+                    vec![stream[0]]
+                } else {
+                    vec![stream[0], 0, 0, 0]
+                };
+                assert_eq!(emu.mem_read_vec(DEST, width).unwrap(), expected);
+                assert_eq!(emu.reg_read(X86Reg::Rdi), DEST + width as u64);
+                assert_eq!(emu.reg_read(X86Reg::Rcx), 0);
+                if width == 1 {
+                    assert_eq!(
+                        phase6_next_fw_cfg_byte(&mut emu),
+                        stream[1],
+                        "the successful byte input consumed the wrong fw_cfg span"
+                    );
+                } else {
+                    assert!(
+                        !emu.device_manager.keyboard.kbd_controller.outb,
+                        "the successful dword input did not consume the keyboard output byte"
+                    );
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "instrumentation")]
+    #[test]
+    fn rep_string_io_checks_permission_once_even_when_count_zero() {
+        phase6_large_stack(|| {
+
+            const CODE: u64 = 0x1000;
+            const HIGH_ZERO_ECX: u64 = 0xDEAD_BEEF_0000_0000;
+            const PORT: u16 = 0x80;
+            const IO_BITMAP_BASE: u16 = 0x100;
+            const GP_VECTOR: u64 = 13;
+            const GDT_BASE: u64 = 0x0800;
+            const USER_CODE_SELECTOR: u16 = 0x001B;
+            const GP_HANDLER: u64 = 0x2000;
+            const IDT_BASE: u64 = 0x3000;
+            const STACK_TOP: u64 = 0x5000;
+            const FORMS: [&[u8]; 6] = [
+                &[0xF3, 0x6C, 0xEB, 0xFE],
+                &[0xF3, 0x66, 0x6D, 0xEB, 0xFE],
+                &[0xF3, 0x6D, 0xEB, 0xFE],
+                &[0xF3, 0x6E, 0xEB, 0xFE],
+                &[0xF3, 0x66, 0x6F, 0xEB, 0xFE],
+                &[0xF3, 0x6F, 0xEB, 0xFE],
+            ];
+
+            for code in FORMS {
+                let mut emu = phase6_flat32();
+                emu.virt_write(CODE, code).unwrap();
+                emu.mem_write(GP_HANDLER, &[0xEB, 0xFE]).unwrap();
+                emu.mem_write(
+                    GDT_BASE + 0x18,
+                    &0x00CF_FA00_0000_FFFFu64.to_le_bytes(),
+                )
+                .unwrap();
+                let mut gate = [0u8; 8];
+                gate[0..2].copy_from_slice(&(GP_HANDLER as u16).to_le_bytes());
+                gate[2..4].copy_from_slice(&USER_CODE_SELECTOR.to_le_bytes());
+                gate[5] = 0x8E;
+                gate[6..8].copy_from_slice(&((GP_HANDLER >> 16) as u16).to_le_bytes());
+                emu.mem_write(IDT_BASE + GP_VECTOR * 8, &gate).unwrap();
+                emu.reg_write(X86Reg::IdtrBase, IDT_BASE);
+                emu.reg_write(X86Reg::IdtrLimit, GP_VECTOR * 8 + 7);
+                emu.reg_write(X86Reg::Rsp, STACK_TOP);
+                // The reset task register is a valid 386 TSS at base zero.
+                // Install a real denying I/O bitmap entry.  The instruction
+                // must raise exactly one #GP before its zero-count exit.
+                emu.mem_write(102, &IO_BITMAP_BASE.to_le_bytes()).unwrap();
+                emu.mem_write(
+                    u64::from(IO_BITMAP_BASE) + u64::from(PORT / 8),
+                    &[0xFF, 0xFF],
+                )
+                .unwrap();
+                emu.reg_write(X86Reg::Cs, u64::from(USER_CODE_SELECTOR));
+                emu.reg_write(X86Reg::Eflags, 0x2);
+                emu.reg_write(X86Reg::Rip, CODE);
+                emu.reg_write(X86Reg::Rdx, u64::from(PORT));
+                emu.reg_write(X86Reg::Rcx, HIGH_ZERO_ECX);
+
+                phase6_run(&mut emu);
+
+                assert_eq!(
+                    emu.cpu().get_exception_diag()[crate::cpu::cpu::Exception::Gp as usize],
+                    1,
+                    "string I/O permission must be checked once before the zero-count exit"
+                );
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rcx),
+                    HIGH_ZERO_ECX,
+                    "a zero 32-bit REP count must not clear high RCX"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn rep_bulk_respects_32bit_source_and_destination_segment_limits() {
+        phase6_large_stack(|| {
+            const CODE: u64 = 0x1000;
+            const SRC: u64 = 0x3000;
+            const DST: u64 = 0x5000;
+            const COUNT: u64 = 3;
+            const SOURCE: [u8; 12] = [
+                0x10, 0x11, 0x12, 0x13, 0x20, 0x21, 0x22, 0x23, 0x30, 0x31, 0x32, 0x33,
+            ];
+
+            let run_movsd = |ds_limit, es_limit| {
+                let mut emu = phase6_flat32();
+                emu.virt_write(CODE, &[0xF3, 0xA5, 0xEB, 0xFE]).unwrap();
+                emu.mem_write(SRC, &SOURCE).unwrap();
+                emu.mem_fill(DST, SOURCE.len(), 0xCC).unwrap();
+                emu.cpu_mut()
+                    .set_seg_for_api(X86Reg::Ds, 0x10, 0, ds_limit, false, false);
+                emu.cpu_mut()
+                    .set_seg_for_api(X86Reg::Es, 0x10, 0, es_limit, false, false);
+                emu.reg_write(X86Reg::Rip, CODE);
+                emu.reg_write(X86Reg::Rsi, SRC);
+                emu.reg_write(X86Reg::Rdi, DST);
+                emu.reg_write(X86Reg::Rcx, COUNT);
+                phase6_run(&mut emu);
+                (
+                    emu.mem_read_vec(DST, SOURCE.len()).unwrap(),
+                    emu.reg_read(X86Reg::Rcx),
+                    emu.reg_read(X86Reg::Rsi),
+                    emu.reg_read(X86Reg::Rdi),
+                )
+            };
+
+            let source_limited = run_movsd((SRC + 7) as u32, u32::MAX);
+            assert_eq!(&source_limited.0[..8], &SOURCE[..8]);
+            assert_eq!(&source_limited.0[8..], &[0xCC; 4]);
+            assert_eq!(source_limited.1, 1);
+            assert_eq!(source_limited.2, SRC + 8);
+            assert_eq!(source_limited.3, DST + 8);
+
+            let destination_limited = run_movsd(u32::MAX, (DST + 7) as u32);
+            assert_eq!(&destination_limited.0[..8], &SOURCE[..8]);
+            assert_eq!(&destination_limited.0[8..], &[0xCC; 4]);
+            assert_eq!(destination_limited.1, 1);
+            assert_eq!(destination_limited.2, SRC + 8);
+            assert_eq!(destination_limited.3, DST + 8);
+
+            let mut emu = phase6_flat32();
+            emu.virt_write(CODE, &[0xF3, 0xAB, 0xEB, 0xFE]).unwrap();
+            emu.mem_fill(DST, 12, 0xCC).unwrap();
+            emu.cpu_mut()
+                .set_seg_for_api(X86Reg::Es, 0x10, 0, (DST + 7) as u32, false, false);
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rax, 0x4433_2211);
+            emu.reg_write(X86Reg::Rdi, DST);
+            emu.reg_write(X86Reg::Rcx, COUNT);
+            phase6_run(&mut emu);
+            assert_eq!(
+                emu.mem_read_vec(DST, 12).unwrap(),
+                [0x11, 0x22, 0x33, 0x44, 0x11, 0x22, 0x33, 0x44, 0xCC, 0xCC, 0xCC, 0xCC]
+            );
+            assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
+            assert_eq!(emu.reg_read(X86Reg::Rdi), DST + 8);
+        });
+    }
+
+    #[cfg(feature = "instrumentation")]
+    #[test]
+    fn rep_bulk_falls_back_for_hooks_and_page_permissions() {
+        phase6_large_stack(|| {
+            use crate::cpu::instrumentation::{IoHookType, MemHookType};
+            use std::sync::{Arc, Mutex};
+
+            const CODE: u64 = 0x1000;
+            const SRC: u64 = 0x2000;
+            const DST: u64 = 0x3000;
+            const COUNT: u64 = 3;
+            const PCI_CONFIG_DATA: u16 = 0x0CFC;
+
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let (trace, repeats) = phase6_repeat_trace();
+            let exec_events = Arc::clone(&events);
+            let mut emu =
+                Emulator::<Corei7SkylakeX, Phase6RepeatTrace>::new_with_mode_and_instrumentation(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                    trace,
+                )
+                .unwrap();
+            let _ = emu.hook_add_code(CODE..=CODE, move |_rip, _instr| {
+                phase6_lock(&exec_events).push("exec");
+            });
+            emu.virt_write(CODE, &[0xF3, 0xA4, 0xEB, 0xFE]).unwrap();
+            emu.mem_write(SRC, &[1, 2, 3]).unwrap();
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rsi, SRC);
+            emu.reg_write(X86Reg::Rdi, DST);
+            emu.reg_write(X86Reg::Rcx, COUNT);
+            phase6_run(&mut emu);
+            assert_eq!(emu.mem_read_vec(DST, 3).unwrap(), [1, 2, 3]);
+            assert_eq!(phase6_lock(&events).as_slice(), ["exec"]);
+            assert_eq!(phase6_lock(&repeats).len(), COUNT as usize);
+
+            let writes = Arc::new(Mutex::new(Vec::new()));
+            let observed_writes = Arc::clone(&writes);
+            let mut emu = phase6_flat32();
+            let _ = emu.hook_add_mem(MemHookType::Write, DST..=DST + COUNT - 1, move |ev| {
+                phase6_lock(&observed_writes).push((ev.addr, ev.size));
+            });
+            emu.virt_write(CODE, &[0xF3, 0xA4, 0xEB, 0xFE]).unwrap();
+            emu.mem_write(SRC, &[4, 5, 6]).unwrap();
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rsi, SRC);
+            emu.reg_write(X86Reg::Rdi, DST);
+            emu.reg_write(X86Reg::Rcx, COUNT);
+            phase6_run(&mut emu);
+            assert_eq!(
+                phase6_lock(&writes).as_slice(),
+                &[(DST, 1), (DST + 1, 1), (DST + 2, 1)]
+            );
+
+            let inputs = Arc::new(Mutex::new(Vec::new()));
+            let observed_inputs = Arc::clone(&inputs);
+            let mut emu = phase6_flat32();
+            phase6_prepare_fw_cfg(&mut emu, &[]);
+            emu.device_manager.pci_conf_addr = 0x8000_0000;
+            let expected_word = emu.device_manager.pci_read(PCI_CONFIG_DATA, 2) as u16;
+            let word_bytes = expected_word.to_le_bytes();
+            let _ = emu.hook_add_io(IoHookType::In, PCI_CONFIG_DATA..=PCI_CONFIG_DATA, move |ev| {
+                phase6_lock(&observed_inputs).push((ev.port, ev.size, ev.value));
+            });
+            emu.virt_write(CODE, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
+                .unwrap();
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rdx, u64::from(PCI_CONFIG_DATA));
+            emu.reg_write(X86Reg::Rdi, DST);
+            emu.reg_write(X86Reg::Rcx, COUNT);
+            phase6_run(&mut emu);
+            assert_eq!(
+                emu.mem_read_vec(DST, 6).unwrap(),
+                [
+                    word_bytes[0],
+                    word_bytes[1],
+                    word_bytes[0],
+                    word_bytes[1],
+                    word_bytes[0],
+                    word_bytes[1],
+                ]
+            );
+            assert_eq!(
+                phase6_lock(&inputs).as_slice(),
+                &[(PCI_CONFIG_DATA, 2, u32::from(expected_word)); 3]
+            );
+
+            let mut emu = phase6_flat32();
+            emu.virt_write(CODE, &[0xF3, 0xA4, 0xEB, 0xFE]).unwrap();
+            emu.mem_write(SRC, &[0x7A, 0x7B, 0x7C]).unwrap();
+            emu.mem_fill(DST, COUNT as usize, 0xCC).unwrap();
+            emu.mem_protect(
+                DST,
+                0x1000,
+                crate::cpu::instrumentation::MemPerms::READ,
+            );
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rsi, SRC);
+            emu.reg_write(X86Reg::Rdi, DST);
+            emu.reg_write(X86Reg::Rcx, COUNT);
+            phase6_run(&mut emu);
+            assert_eq!(emu.mem_read_vec(DST, COUNT as usize).unwrap(), [0xCC; 3]);
+            assert_eq!(emu.reg_read(X86Reg::Rcx), COUNT);
+        });
+    }
+
+    #[cfg(feature = "instrumentation")]
+    #[test]
+    fn repeat_iteration_is_not_reported_for_faulting_element() {
+        phase6_large_stack(|| {
+            const CODE: u64 = 0x1000;
+            const FIRST_PAGE_END: u64 = 0x2FFF;
+            const SECOND_PAGE: u64 = 0x3000;
+
+            let (trace, repeats) = phase6_repeat_trace();
+            let mut emu =
+                Emulator::<Corei7SkylakeX, Phase6RepeatTrace>::new_with_mode_and_instrumentation(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                    trace,
+                )
+                .unwrap();
+            emu.virt_write(CODE, &[0xF3, 0xA4, 0xEB, 0xFE]).unwrap();
+            emu.mem_write(0x2000, &[0x41, 0x42]).unwrap();
+            emu.mem_protect(
+                SECOND_PAGE,
+                0x1000,
+                crate::cpu::instrumentation::MemPerms::READ,
+            );
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rsi, 0x2000);
+            emu.reg_write(X86Reg::Rdi, FIRST_PAGE_END);
+            emu.reg_write(X86Reg::Rcx, 2);
+            phase6_run(&mut emu);
+            assert_eq!(emu.mem_read_vec(FIRST_PAGE_END, 1).unwrap(), [0x41]);
+            assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
+            assert_eq!(phase6_lock(&repeats).len(), 1);
+
+            let (trace, repeats) = phase6_repeat_trace();
+            let mut emu =
+                Emulator::<Corei7SkylakeX, Phase6RepeatTrace>::new_with_mode_and_instrumentation(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                    trace,
+                )
+                .unwrap();
+            emu.virt_write(CODE, &[0xF3, 0xAE, 0xEB, 0xFE]).unwrap();
+            emu.mem_write(FIRST_PAGE_END, &[0x55]).unwrap();
+            emu.mem_protect(
+                SECOND_PAGE,
+                0x1000,
+                crate::cpu::instrumentation::MemPerms::WRITE,
+            );
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rax, 0x55);
+            emu.reg_write(X86Reg::Rdi, FIRST_PAGE_END);
+            emu.reg_write(X86Reg::Rcx, 2);
+            phase6_run(&mut emu);
+            assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
+            assert_eq!(emu.reg_read(X86Reg::Rdi), SECOND_PAGE);
+            assert_eq!(phase6_lock(&repeats).len(), 1);
+
+            let (trace, repeats) = phase6_repeat_trace();
+            let mut emu =
+                Emulator::<Corei7SkylakeX, Phase6RepeatTrace>::new_with_mode_and_instrumentation(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                    trace,
+                )
+                .unwrap();
+            phase6_prepare_fw_cfg(&mut emu, &[0xA5, 0xB6]);
+            emu.virt_write(CODE, &[0xF3, 0x6C, 0xEB, 0xFE]).unwrap();
+            emu.mem_protect(
+                SECOND_PAGE,
+                0x1000,
+                crate::cpu::instrumentation::MemPerms::READ,
+            );
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rdx, u64::from(FW_CFG_DATA_PORT));
+            emu.reg_write(X86Reg::Rdi, FIRST_PAGE_END);
+            emu.reg_write(X86Reg::Rcx, 2);
+            phase6_run(&mut emu);
+            assert_eq!(emu.mem_read_vec(FIRST_PAGE_END, 1).unwrap(), [0xA5]);
+            assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
+            assert_eq!(phase6_lock(&repeats).len(), 1);
+            assert_eq!(phase6_next_fw_cfg_byte(&mut emu), 0xB6);
+        });
+    }
+    #[test]
+    fn word_mmio_access_preserves_callback_width() {
+        phase6_large_stack(|| {
+            use std::sync::{Arc, Mutex};
+
+            const CODE: u64 = 0x1000;
+            const MMIO: u64 = 0x4000;
+
+            let writes = Arc::new(Mutex::new(Vec::new()));
+            let observed = Arc::clone(&writes);
+            let mut emu = phase6_flat32();
+            emu.mmio_map(
+                MMIO,
+                0x2000,
+                Box::new(|_addr, _size| 0),
+                Box::new(move |addr, size, value| {
+                    phase6_lock(&observed).push((addr, size, value));
+                }),
+            );
+            emu.virt_write(CODE, &[0x66, 0xAB, 0xEB, 0xFE]).unwrap();
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rax, 0x1234);
+            emu.reg_write(X86Reg::Rdi, MMIO);
+            phase6_run(&mut emu);
+            assert_eq!(
+                phase6_lock(&writes).as_slice(),
+                &[(MMIO, 2, 0x1234)],
+                "a same-page STOSW must be one width-2 memory-handler transaction"
+            );
+
+            let writes = Arc::new(Mutex::new(Vec::new()));
+            let observed = Arc::clone(&writes);
+            let mut emu = phase6_flat32();
+            emu.mmio_map(
+                MMIO,
+                0x2000,
+                Box::new(|_addr, _size| 0),
+                Box::new(move |addr, size, value| {
+                    phase6_lock(&observed).push((addr, size, value));
+                }),
+            );
+            emu.virt_write(CODE, &[0x66, 0xAB, 0xEB, 0xFE]).unwrap();
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rax, 0x1234);
+            emu.reg_write(X86Reg::Rdi, MMIO + 0xFFF);
+            phase6_run(&mut emu);
+            assert_eq!(
+                phase6_lock(&writes).as_slice(),
+                &[(MMIO + 0xFFF, 1, 0x34), (MMIO + 0x1000, 1, 0x12)],
+                "only a real 4 KiB crossing may split a word handler access"
+            );
+
+            let mut emu = phase6_flat32();
+            emu.virt_write(MMIO, &[0x90, 0xEB, 0xFE]).unwrap();
+            emu.reg_write(X86Reg::Rip, MMIO);
+            phase6_run(&mut emu);
+            let smc_before = emu.memory.smc_seq_next();
+            emu.mmio_map(
+                MMIO,
+                0x1000,
+                Box::new(|_addr, _size| 0),
+                Box::new(|_addr, _size, _value| {}),
+            );
+            emu.virt_write(CODE, &[0x66, 0xAB, 0xEB, 0xFE]).unwrap();
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rax, 0xBEEF);
+            emu.reg_write(X86Reg::Rdi, MMIO);
+            phase6_run(&mut emu);
+            assert_eq!(
+                emu.memory.smc_seq_next(),
+                smc_before + 1,
+                "one successful same-page word span must enqueue one SMC invalidation"
+            );
+        });
+    }
+
+    #[test]
+    fn rep_insw_smc_preflight_consumes_only_scalar_committed_word() {
+        phase6_large_stack(|| {
+            const CODE_AND_DEST: u64 = 0x1000;
+
+            let mut emu = phase6_flat32();
+            phase6_prepare_fw_cfg(&mut emu, &[]);
+            emu.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0xA5;
+            emu.device_manager.keyboard.kbd_controller.outb = true;
+            emu.virt_write(CODE_AND_DEST, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
+                .unwrap();
+            emu.reg_write(X86Reg::Rip, CODE_AND_DEST);
+            emu.reg_write(
+                X86Reg::Rdx,
+                u64::from(crate::iodev::keyboard::KBD_DATA_PORT),
+            );
+            emu.reg_write(X86Reg::Rdi, CODE_AND_DEST);
+            emu.reg_write(X86Reg::Rcx, 1);
+            let smc_before = emu.memory.smc_seq_next();
+            let io_reads_before = emu.devices.diag_io_reads;
+
+            phase6_run(&mut emu);
+
+            assert_eq!(emu.mem_read_vec(CODE_AND_DEST, 2).unwrap(), [0xA5, 0]);
+            assert_eq!(emu.reg_read(X86Reg::Rcx), 0);
+            assert_eq!(emu.reg_read(X86Reg::Rdi), CODE_AND_DEST + 2);
+            assert_eq!(
+                emu.devices.diag_io_reads,
+                io_reads_before + 1,
+                "an SMC preflight must not read the device before scalar commit"
+            );
+            assert!(!emu.device_manager.keyboard.kbd_controller.outb);
+            assert_eq!(emu.memory.smc_seq_next(), smc_before + 1);
+        });
+    }
+
+    #[test]
+    fn rep_insd_obeys_one_element_event_budget() {
+        phase6_large_stack(|| {
+            const CODE: u64 = 0x1000;
+            const DEST: u64 = 0x3000;
+
+            let mut emu = phase6_flat32();
+            phase6_prepare_fw_cfg(&mut emu, &[]);
+            emu.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0xA5;
+            emu.device_manager.keyboard.kbd_controller.outb = true;
+            emu.pc_system
+                .register_timer(TimerOwner::NullTimer, 1, true, true, "phase6 insd deadline")
+                .unwrap();
+            emu.virt_write(CODE, &[0xF3, 0x6D, 0xEB, 0xFE]).unwrap();
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(
+                X86Reg::Rdx,
+                u64::from(crate::iodev::keyboard::KBD_DATA_PORT),
+            );
+            emu.reg_write(X86Reg::Rdi, DEST);
+            emu.reg_write(X86Reg::Rcx, 1);
+
+            phase6_run(&mut emu);
+
+            assert_eq!(emu.mem_read_vec(DEST, 4).unwrap(), [0xA5, 0, 0, 0]);
+            assert_eq!(emu.reg_read(X86Reg::Rcx), 0);
+            assert_eq!(emu.reg_read(X86Reg::Rdi), DEST + 4);
+            assert!(!emu.device_manager.keyboard.kbd_controller.outb);
+            assert_eq!(emu.reg_read(X86Reg::Rflags) & (1 << 16), 0);
+        });
+    }
+
+    #[cfg(feature = "instrumentation")]
+    #[test]
+    fn fast_rep_icount_and_ticks_match_scalar_n_elements() {
+        phase6_large_stack(|| {
+            const CODE: u64 = 0x1000;
+            const SRC: u64 = 0x2FF8;
+            const DST: u64 = 0x4FF8;
+            const COUNT: u64 = 8;
+
+            let mut fast = phase6_flat32();
+            fast.pc_system
+                .register_timer(TimerOwner::NullTimer, COUNT, true, true, "phase6 fast")
+                .unwrap();
+            fast.virt_write(CODE, &[0xF3, 0x66, 0xA5, 0xEB, 0xFE])
+                .unwrap();
+            fast.mem_fill(SRC, (COUNT * 2) as usize, 0x5A).unwrap();
+            fast.reg_write(X86Reg::Rip, CODE);
+            fast.reg_write(X86Reg::Rsi, SRC);
+            fast.reg_write(X86Reg::Rdi, DST);
+            fast.reg_write(X86Reg::Rcx, COUNT);
+            let fast_before = fast.cpu_ref(BSP_INDEX).icount;
+            phase6_run(&mut fast);
+            let fast_retired = fast.cpu_ref(BSP_INDEX).icount - fast_before;
+            let fast_ticks = fast.ticks();
+
+            let (trace, repeats) = phase6_repeat_trace();
+            let mut scalar =
+                Emulator::<Corei7SkylakeX, Phase6RepeatTrace>::new_with_mode_and_instrumentation(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                    trace,
+                )
+                .unwrap();
+            scalar
+                .pc_system
+                .register_timer(TimerOwner::NullTimer, COUNT, true, true, "phase6 scalar")
+                .unwrap();
+            scalar
+                .virt_write(CODE, &[0xF3, 0x66, 0xA5, 0xEB, 0xFE])
+                .unwrap();
+            scalar.mem_fill(SRC, (COUNT * 2) as usize, 0x5A).unwrap();
+            scalar.reg_write(X86Reg::Rip, CODE);
+            scalar.reg_write(X86Reg::Rsi, SRC);
+            scalar.reg_write(X86Reg::Rdi, DST);
+            scalar.reg_write(X86Reg::Rcx, COUNT);
+            let scalar_before = scalar.cpu_ref(BSP_INDEX).icount;
+            phase6_run(&mut scalar);
+            let scalar_retired = scalar.cpu_ref(BSP_INDEX).icount - scalar_before;
+
+            assert_eq!(fast.mem_read_vec(DST, (COUNT * 2) as usize).unwrap(), scalar.mem_read_vec(DST, (COUNT * 2) as usize).unwrap());
+            assert_eq!(fast.reg_read(X86Reg::Rcx), 0);
+            assert_eq!(scalar.reg_read(X86Reg::Rcx), 0);
+            assert_eq!(fast_retired, scalar_retired);
+            assert_eq!(fast_ticks, scalar.ticks());
+            assert_eq!(phase6_lock(&repeats).len(), COUNT as usize);
+        });
+    }
+
+    #[test]
+    fn fast_rep_element_budget_uses_elements_not_bytes() {
+        phase6_large_stack(|| {
+            const CODE: u64 = 0x1000;
+            const SRC: u64 = 0x2000;
+            const DST: u64 = 0x4000;
+            const DEADLINE: u64 = 3;
+            const COUNT: u64 = 7;
+
+            for (code, width, stores) in [
+                (&[0xF3, 0x66, 0xA5, 0xEB, 0xFE][..], 2u64, false),
+                (&[0xF3, 0xA5, 0xEB, 0xFE][..], 4u64, false),
+                (&[0xF3, 0x66, 0xAB, 0xEB, 0xFE][..], 2u64, true),
+                (&[0xF3, 0xAB, 0xEB, 0xFE][..], 4u64, true),
+            ] {
+                let mut emu = phase6_flat32();
+                emu.pc_system
+                    .register_timer(TimerOwner::NullTimer, DEADLINE, true, true, "phase6 element budget")
+                    .unwrap();
+                emu.virt_write(CODE, code).unwrap();
+                emu.mem_fill(SRC, (COUNT * width) as usize, 0x6D).unwrap();
+                emu.reg_write(X86Reg::Rip, CODE);
+                emu.reg_write(X86Reg::Rax, 0x1122_3344);
+                emu.reg_write(X86Reg::Rsi, SRC);
+                emu.reg_write(X86Reg::Rdi, DST);
+                emu.reg_write(X86Reg::Rcx, COUNT);
+                phase6_run(&mut emu);
+                assert_eq!(emu.reg_read(X86Reg::Rcx), COUNT - DEADLINE);
+                assert_eq!(emu.reg_read(X86Reg::Rdi), DST + DEADLINE * width);
+                if !stores {
+                    assert_eq!(emu.reg_read(X86Reg::Rsi), SRC + DEADLINE * width);
+                }
+            }
+
+            const LONG_CODE: u64 = 0x10_000;
+            const LONG_SRC: u64 = 0x12_000;
+            const LONG_DST: u64 = 0x14_000;
+            for (code, stores) in [
+                (&[0xF3, 0x48, 0xA5, 0xEB, 0xFE][..], false),
+                (&[0xF3, 0x48, 0xAB, 0xEB, 0xFE][..], true),
+            ] {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatLong64,
+                )
+                .unwrap();
+                emu.pc_system
+                    .register_timer(TimerOwner::NullTimer, DEADLINE, true, true, "phase6 qword budget")
+                    .unwrap();
+                emu.mem_write(LONG_CODE, code).unwrap();
+                emu.mem_fill(LONG_SRC, (COUNT * 8) as usize, 0x7E).unwrap();
+                emu.reg_write(X86Reg::Rip, LONG_CODE);
+                emu.reg_write(X86Reg::Rax, 0x1122_3344_5566_7788);
+                emu.reg_write(X86Reg::Rsi, LONG_SRC);
+                emu.reg_write(X86Reg::Rdi, LONG_DST);
+                emu.reg_write(X86Reg::Rcx, COUNT);
+                phase6_run(&mut emu);
+                assert_eq!(emu.reg_read(X86Reg::Rcx), COUNT - DEADLINE);
+                assert_eq!(emu.reg_read(X86Reg::Rdi), LONG_DST + DEADLINE * 8);
+                if !stores {
+                    assert_eq!(emu.reg_read(X86Reg::Rsi), LONG_SRC + DEADLINE * 8);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn cold_tlb_rep_movsb_propagates_one_page_fault_without_committing() {
+        phase6_large_stack(|| {
+            const CODE: u64 = 0x10_0000;
+            const SRC: u64 = 0x10_1000;
+            const DEST: u64 = 0x20_0000;
+            const SECOND_LARGE_PAGE_PDE: u64 = 0x3008;
+
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                EmulatorConfig::default(),
+                CpuSetupMode::FlatLong64,
+            )
+            .unwrap();
+            emu.mem_write(CODE, &[0xF3, 0xA4, 0xEB, 0xFE]).unwrap();
+            emu.mem_write(SRC, &[0x5A]).unwrap();
+            emu.mem_write(SECOND_LARGE_PAGE_PDE, &0u64.to_le_bytes())
+                .unwrap();
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rsi, SRC);
+            emu.reg_write(X86Reg::Rdi, DEST);
+            emu.reg_write(X86Reg::Rcx, 1);
+
+            let page_faults_before = emu.cpu().get_exception_diag()[14];
+            phase6_run(&mut emu);
+
+            assert_eq!(emu.reg_read(X86Reg::Cr2), DEST);
+            assert_eq!(emu.cpu().get_exception_diag()[14], page_faults_before + 1);
+            assert_eq!(emu.reg_read(X86Reg::Rsi), SRC);
+            assert_eq!(emu.reg_read(X86Reg::Rdi), DEST);
+            assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
+        });
+    }
+
+    #[test]
+    fn cold_tlb_rep_insw_propagates_one_fault_without_consuming_port_input() {
+        phase6_large_stack(|| {
+            const CODE: u64 = 0x10_0000;
+            const DEST: u64 = 0x20_0000;
+            const SECOND_LARGE_PAGE_PDE: u64 = 0x3008;
+
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                EmulatorConfig::default(),
+                CpuSetupMode::FlatLong64,
+            )
+            .unwrap();
+            phase6_prepare_fw_cfg(&mut emu, &[0xA1, 0xB2]);
+            emu.mem_write(CODE, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
+                .unwrap();
+            emu.mem_write(SECOND_LARGE_PAGE_PDE, &0u64.to_le_bytes())
+                .unwrap();
+            emu.reg_write(X86Reg::Rip, CODE);
+            emu.reg_write(X86Reg::Rdx, FW_CFG_DATA_PORT as u64);
+            emu.reg_write(X86Reg::Rdi, DEST);
+            emu.reg_write(X86Reg::Rcx, 1);
+
+            let page_faults_before = emu.cpu().get_exception_diag()[14];
+            phase6_run(&mut emu);
+
+            assert_eq!(emu.reg_read(X86Reg::Cr2), DEST);
+            assert_eq!(emu.cpu().get_exception_diag()[14], page_faults_before + 1);
+            assert_eq!(emu.reg_read(X86Reg::Rdi), DEST);
+            assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
+            assert_eq!(phase6_next_fw_cfg_byte(&mut emu), 0xA1);
+        });
+    }
+
+    #[test]
+    fn empty_memory_write_is_a_no_op() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
             .spawn(|| {
@@ -6902,7 +9589,7 @@ mod tests {
                 .unwrap();
                 let before = emu.mem_read_vec(0x1000, 4).unwrap();
 
-                emu.memory.poke_ram(0x1000, &[]);
+                emu.mem_write(0x1000, &[]).unwrap();
 
                 assert_eq!(emu.mem_read_vec(0x1000, 4).unwrap(), before);
             })
@@ -6910,4 +9597,47 @@ mod tests {
             .join()
             .unwrap();
     }
+    #[cfg(feature = "std")]
+    #[test]
+    fn snapshot_rebuilds_runnable_and_lapic_work_masks_before_resume() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig {
+                    guest_memory_size: 4 * 1024 * 1024,
+                    host_memory_size: 4 * 1024 * 1024,
+                    cpu_params: BxParams::default().with_topology(2, 1, 1).unwrap(),
+                    ..EmulatorConfig::default()
+                };
+                let mut source = Emulator::<Corei7SkylakeX>::new(config.clone()).unwrap();
+                source.initialize().unwrap();
+                source.reset(ResetReason::Hardware).unwrap();
+                source.cpu_mut_at(BSP_INDEX).activity_state = CpuActivityState::Active;
+                source.cpu_mut_at(AP_INDEX).activity_state = CpuActivityState::WaitForSipi;
+                source.cpu_mut_at(BSP_INDEX).lapic.timer_fired = true;
+                source.runnable_mask = CpuMask::default();
+                source.lapic_work_mask = CpuMask::default();
+
+                let mut snapshot = Vec::new();
+                source.save_snapshot(&mut snapshot).unwrap();
+
+                let mut restored = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                restored.initialize().unwrap();
+                restored.reset(ResetReason::Hardware).unwrap();
+                restored.runnable_mask.assign(AP_INDEX, true);
+                restored.lapic_work_mask.assign(AP_INDEX, true);
+                restored
+                    .restore_snapshot(&mut std::io::Cursor::new(snapshot))
+                    .unwrap();
+
+                assert!(restored.runnable_mask.contains(BSP_INDEX));
+                assert!(!restored.runnable_mask.contains(AP_INDEX));
+                assert!(restored.lapic_work_mask.contains(BSP_INDEX));
+                assert!(!restored.lapic_work_mask.contains(AP_INDEX));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
 }

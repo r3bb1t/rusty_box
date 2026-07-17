@@ -159,10 +159,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     #[inline]
     pub(crate) fn set_cr8_for_api(&mut self, v: u64) {
-        {
-            self.lapic.set_tpr(((v & 0xF) << 4) as u8);
-            self.sync_lapic_intr_event();
-        }
+        self.lapic.set_tpr(((v & 0xF) << 4) as u8);
+        self.sync_lapic_events();
     }
 
     // ── CR0 / CR3 raw writes (for `reg_write`) ─────────────────────────
@@ -353,6 +351,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_TSC_DEADLINE => {
                 let current_ticks = self.system_ticks();
                 self.lapic.set_tsc_deadline(val, current_ticks);
+                self.sync_lapic_events();
             }
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr = val as u32,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr = val,
@@ -758,12 +757,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             X86Reg::R14b => self.set_gpr8(14, trunc_u8(val)),
             X86Reg::R15b => self.set_gpr8(15, trunc_u8(val)),
 
-            X86Reg::Rip => self.set_rip(val),
-            X86Reg::Eip => self.set_eip(trunc_u32(val)),
+            X86Reg::Rip => {
+                self.set_rip(val);
+                self.prev_rip = self.rip();
+            }
+            X86Reg::Eip => {
+                self.set_eip(trunc_u32(val));
+                self.prev_rip = self.rip();
+            }
             X86Reg::Ip => {
                 // Preserve upper bits of RIP when writing 16-bit IP.
                 let upper = self.rip() & !0xFFFF;
                 self.set_rip(upper | (val & 0xFFFF));
+                self.prev_rip = self.rip();
             }
 
             X86Reg::Rflags => self.set_rflags_for_api(val),

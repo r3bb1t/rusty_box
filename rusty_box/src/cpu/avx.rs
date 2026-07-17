@@ -1187,7 +1187,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// 3-operand: dst = src1(vvvv) with byte at imm8[3:0] replaced by src2 (r/m).
     /// Decoder maps src2()=vvvv (base), src1()=rm (value), dst()=destination.
     pub(super) fn vpinsrb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let mut op1 = self.read_xmm_reg(instr.src2()); // vvvv = base vector
         let op2 = if instr.mod_c0() {
             // BX_READ_8BIT_REGL — always low byte, never AH/CH/DH/BH
@@ -1205,7 +1205,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPINSRW — insert word from GPR/memory into a copy of the vvvv source.
     /// VEX.128.66.0F.W0 C4 /r ib. Bochs avx.cc `VPINSRW_VdqHdqEwIbR/M`.
     pub(super) fn vpinsrw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let mut op1 = self.read_xmm_reg(instr.src2()); // vvvv = base vector
         let op2 = if instr.mod_c0() {
             self.get_gpr16(instr.src1().into())
@@ -1222,7 +1222,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPINSRD — insert dword from GPR/memory into a copy of the vvvv source.
     /// VEX.128.66.0F3A.W0 22 /r ib. Bochs avx.cc `VPINSRD_VdqHdqEdIbR/M`.
     pub(super) fn vpinsrd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let mut op1 = self.read_xmm_reg(instr.src2()); // vvvv = base vector
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src1().into())
@@ -1239,7 +1239,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPINSRQ — insert qword from GPR/memory into a copy of the vvvv source.
     /// VEX.128.66.0F3A.W1 22 /r ib (64-bit mode only). Bochs `VPINSRQ_VdqHdqEqIbR/M`.
     pub(super) fn vpinsrq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let mut op1 = self.read_xmm_reg(instr.src2()); // vvvv = base vector
         let op2 = if instr.mod_c0() {
             self.get_gpr64(instr.src1().into())
@@ -1642,7 +1642,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// If imm8[0]=0: dst = src[127:0]; if imm8[0]=1: dst = src[255:128]
     /// Our decoder: dst() = nnn (source YMM), src1() = rm (destination XMM)
     pub(super) fn vextracti128(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let src_idx = instr.dst(); // nnn — source YMM register
         let imm = instr.ib();
         let src = self.read_ymm_reg(src_idx);

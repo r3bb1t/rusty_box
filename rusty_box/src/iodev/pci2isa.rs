@@ -14,6 +14,36 @@
 //! based on PIRQ routing registers. Each PIRQ can be mapped to any
 //! ISA IRQ or disabled (bit 7 = 1).
 
+#[cfg(feature = "std")]
+use std::io::{self, Error, ErrorKind, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+};
+
+#[cfg(feature = "std")]
+const PIIX3_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0e];
+
+#[cfg(feature = "std")]
+fn invalid_piix3_snapshot(message: &'static str) -> io::Error {
+    Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn validate_piix3_snapshot_identity(
+    saved: &[u8; PCI_CONF_SIZE],
+    live: &[u8; PCI_CONF_SIZE],
+) -> io::Result<()> {
+    for index in PIIX3_SNAPSHOT_IDENTITY_BYTES {
+        if saved[index] != live[index] {
+            return Err(invalid_piix3_snapshot(
+                "snapshot PIIX3 PCI identity does not match live configuration",
+            ));
+        }
+    }
+    Ok(())
+}
 use crate::cpu::ResetReason;
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
@@ -37,9 +67,9 @@ const VALID_PCI_IRQ_MASK: u16 = 0xDEF8;
 /// Bochs applies the BIOS-write-enable state to the memory object
 /// synchronously inside `pci_write_handler` (pci2isa.cc case 0x4e); here the
 /// memory system lives outside the bridge (borrow-separated), so
-/// `devices.rs` defers via `bios_write_needs_update` and drains it once both
-/// `&mut BxPiix3` and `&mut BxMemC` are available (`process_pci_deferred`) --
-/// same pattern as `PciBridgeWriteEffects` in `pci.rs`.
+/// `devices.rs` defers via `bios_write_needs_update` and drains it at the
+/// shared machine boundary once memory is available, matching
+/// `PciBridgeWriteEffects` in `pci.rs`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Piix3WriteEffects {
     /// The XBCS register (0x4E) changed a bit that affects BIOS-ROM
@@ -346,7 +376,7 @@ impl BxPiix3 {
     /// 0x4e's `DEV_mem_set_bios_write`/`DEV_mem_set_bios_rom_access` calls.
     /// Idempotent: derives state from the already-committed
     /// `pci_conf[0x4E]`, so it is safe to call any number of times from the
-    /// deferred drain (`devices.rs process_pci_deferred`).
+    /// shared machine-boundary drain.
     pub fn apply_bios_write_to_memory<'c>(&self, mem: &mut crate::memory::BxMemC<'c>) {
         let v = self.pci_conf[0x4E];
         mem.set_bios_write_enabled((v & 0x04) != 0);
@@ -429,6 +459,128 @@ impl BxPiix3 {
         }
 
         None
+    }
+
+    /// Exact byte count for this ISA bridge's contribution to the combined
+    /// PCI payload. The enclosing PCI codec owns the section-version prefix.
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+        let config_len = u64::try_from(PCI_CONF_SIZE)
+            .map_err(|_| invalid_piix3_snapshot("PIIX3 config size does not fit u64"))?;
+        let irq_cells = checked_snapshot_len_mul(4, 16)?;
+        let irq_bytes = checked_snapshot_len_mul(irq_cells, 4)?;
+        let mut len = checked_snapshot_len_add(1, config_len)?;
+        len = checked_snapshot_len_add(len, 4)?;
+        len = checked_snapshot_len_add(len, irq_bytes)?;
+        len = checked_snapshot_len_add(len, 4)?;
+        if len > bounds::MAX_SNAPSHOT_SECTION_LEN {
+            return Err(invalid_piix3_snapshot(
+                "PIIX3 snapshot body exceeds section bound",
+            ));
+        }
+        Ok(len)
+    }
+
+    /// Stream the mutable PIIX3 configuration, PIC-routing, and reset state.
+    #[cfg(feature = "std")]
+    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_u8(self.devfunc)?;
+        writer.write_bytes(&self.pci_conf)?;
+        writer.write_u8(self.elcr1)?;
+        writer.write_u8(self.elcr2)?;
+        writer.write_u8(self.apmc)?;
+        writer.write_u8(self.apms)?;
+        for pirq_levels in &self.irq_level {
+            for &level in pirq_levels {
+                writer.write_u32(level)?;
+            }
+        }
+        writer.write_u8(self.pci_reset)?;
+        writer.write_bool(self.elcr1_changed)?;
+        writer.write_bool(self.elcr2_changed)?;
+        writer.write_u8(match self.reset_request {
+            None => 0,
+            Some(ResetReason::Software) => 1,
+            Some(ResetReason::Hardware) => 2,
+        })
+    }
+
+    /// Restore PIIX3 state without applying ELCR modes, reset requests, or
+    /// PCI interrupt edges. Those effects are restored once every component
+    /// of the enclosing PCI section has validated.
+    #[cfg(feature = "std")]
+    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> io::Result<()> {
+        let devfunc = reader.read_u8()?;
+        let mut pci_conf = [0u8; PCI_CONF_SIZE];
+        reader.read_bytes(&mut pci_conf)?;
+        let elcr1 = reader.read_u8()?;
+        let elcr2 = reader.read_u8()?;
+        let apmc = reader.read_u8()?;
+        let apms = reader.read_u8()?;
+        let mut irq_level = [[0u32; 16]; 4];
+        for pirq_levels in &mut irq_level {
+            for level in pirq_levels {
+                *level = reader.read_u32()?;
+            }
+        }
+        let pci_reset = reader.read_u8()?;
+        let elcr1_changed = reader.read_bool()?;
+        let elcr2_changed = reader.read_bool()?;
+        let reset_request = match reader.read_u8()? {
+            0 => None,
+            1 => Some(ResetReason::Software),
+            2 => Some(ResetReason::Hardware),
+            _ => return Err(invalid_piix3_snapshot("snapshot PIIX3 reset reason is invalid")),
+        };
+
+        let expected_devfunc = super::pci::pci_device(1, 0);
+        if self.devfunc != expected_devfunc || devfunc != self.devfunc {
+            return Err(invalid_piix3_snapshot(
+                "snapshot PIIX3 device/function does not match live topology",
+            ));
+        }
+        validate_piix3_snapshot_identity(&pci_conf, &self.pci_conf)?;
+        for &pirq_route in &pci_conf[0x60..0x64] {
+            if (pirq_route & 0x70) != 0 {
+                return Err(invalid_piix3_snapshot(
+                    "snapshot PIIX3 PIRQ route uses reserved bits",
+                ));
+            }
+            if (pirq_route & 0x80) == 0 {
+                let irq = pirq_route & 0x0f;
+                if (VALID_PCI_IRQ_MASK & (1u16 << u32::from(irq))) == 0 {
+                    return Err(invalid_piix3_snapshot(
+                        "snapshot PIIX3 PIRQ route selects an invalid IRQ",
+                    ));
+                }
+            }
+        }
+        if (elcr1 & 0x07) != 0 || (elcr2 & !0xDE) != 0 {
+            return Err(invalid_piix3_snapshot(
+                "snapshot PIIX3 ELCR contains fixed edge-triggered bits",
+            ));
+        }
+        if (pci_reset & !0x02) != 0 {
+            return Err(invalid_piix3_snapshot(
+                "snapshot PIIX3 reset register contains reserved bits",
+            ));
+        }
+
+        self.devfunc = devfunc;
+        self.pci_conf = pci_conf;
+        self.elcr1 = elcr1;
+        self.elcr2 = elcr2;
+        self.apmc = apmc;
+        self.apms = apms;
+        self.irq_level = irq_level;
+        self.pci_reset = pci_reset;
+        self.elcr1_changed = elcr1_changed;
+        self.elcr2_changed = elcr2_changed;
+        self.reset_request = reset_request;
+        Ok(())
     }
 }
 

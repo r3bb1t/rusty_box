@@ -345,7 +345,7 @@ fn run_alpine() -> Result<()> {
         emu.init_gui_signal_handlers();
         emu.start();
 
-        println!("  Boot: direct kernel (EIP={:#010x})", emu.cpu.rip());
+        println!("  Boot: direct kernel (EIP={:#010x})", emu.cpu().rip());
     }
 
     println!(
@@ -414,7 +414,7 @@ fn run_alpine() -> Result<()> {
         }
 
         // Check for shutdown
-        if emu.cpu.is_in_shutdown() {
+        if emu.cpu().is_in_shutdown() {
             println!("CPU shutdown at {} instructions", total_executed);
             break;
         }
@@ -457,7 +457,7 @@ fn run_alpine() -> Result<()> {
                 total_executed / 1_000_000,
                 elapsed,
                 mips,
-                emu.cpu.rip(),
+                emu.cpu().rip(),
                 emu.get_cpu_mode_str(),
                 io_r, io_w,
                 ata_ch0,

@@ -13,6 +13,36 @@
 //! The host bridge is the root of the PCI bus and handles configuration
 //! space routing for all PCI devices.
 
+#[cfg(feature = "std")]
+use std::io::{self, Error, ErrorKind, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+};
+
+#[cfg(feature = "std")]
+const PCI_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0e];
+
+#[cfg(feature = "std")]
+fn invalid_pci_snapshot(message: &'static str) -> io::Error {
+    Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn validate_bridge_snapshot_identity(
+    saved: &[u8; PCI_CONF_SIZE],
+    live: &[u8; PCI_CONF_SIZE],
+) -> io::Result<()> {
+    for index in PCI_SNAPSHOT_IDENTITY_BYTES {
+        if saved[index] != live[index] {
+            return Err(invalid_pci_snapshot(
+                "snapshot i440FX PCI identity does not match live configuration",
+            ));
+        }
+    }
+    Ok(())
+}
 /// PCI configuration space size (256 bytes per device/function)
 const PCI_CONF_SIZE: usize = 256;
 
@@ -31,8 +61,8 @@ pub const fn pci_device(device: u8, function: u8) -> u8 {
 /// requires. Bochs applies PAM/SMRAM to the memory object synchronously
 /// inside `pci_write_handler` (pci.cc); here the memory system lives outside
 /// the bridge (borrow-separated), so `devices.rs` defers via
-/// `pam_needs_update`/`smram_needs_update` and drains these flags once both
-/// `&mut BxPciBridge` and `&mut BxMemC` are available (`process_pci_deferred`).
+/// `pam_needs_update`/`smram_needs_update` and drains these flags at the next
+/// shared machine boundary once memory is available.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PciBridgeWriteEffects {
     /// A PAM register (0x59-0x5F) changed; memory shadow-RAM types must be re-applied.
@@ -304,8 +334,8 @@ impl BxPciBridge {
     /// Bochs: bx_pci_bridge_c::smram_control() (pci.cc) — the
     /// mem->enable_smram()/disable_smram() half of that function. Idempotent:
     /// derives state from the already-committed `pci_conf[0x72]`, so it is
-    /// safe to call any number of times from the deferred drain
-    /// (`devices.rs process_pci_deferred`).
+    /// safe to call any number of times from the shared machine-boundary
+    /// drain.
     pub fn apply_smram_to_memory<'c>(&self, mem: &mut crate::memory::BxMemC<'c>) {
         let v = self.pci_conf[0x72];
         if (v & 0x08) == 0 {
@@ -386,6 +416,73 @@ impl BxPciBridge {
 
         tracing::debug!("SMRAM control register set to {:#04x}", v);
         self.pci_conf[0x72] = v;
+    }
+
+    /// Exact byte count for this bridge's contribution to the combined PCI
+    /// payload. The enclosing PCI codec owns the section-version prefix.
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+        let config_len = u64::try_from(PCI_CONF_SIZE)
+            .map_err(|_| invalid_pci_snapshot("i440FX config size does not fit u64"))?;
+        let drba_len = u64::try_from(self.drba.len())
+            .map_err(|_| invalid_pci_snapshot("i440FX DRBA size does not fit u64"))?;
+        let mut len = checked_snapshot_len_mul(1, config_len)?;
+        len = checked_snapshot_len_add(len, drba_len)?;
+        len = checked_snapshot_len_add(len, 1)?;
+        if len > bounds::MAX_SNAPSHOT_SECTION_LEN {
+            return Err(invalid_pci_snapshot(
+                "i440FX snapshot body exceeds section bound",
+            ));
+        }
+        Ok(len)
+    }
+
+    /// Stream the mutable i440FX configuration and DRAM-detection state.
+    #[cfg(feature = "std")]
+    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_bytes(&self.pci_conf)?;
+        writer.write_bytes(&self.drba)?;
+        writer.write_u8(self.dram_detect)
+    }
+
+    /// Restore this bridge's contribution to the combined PCI payload.
+    ///
+    /// This deliberately does not apply PAM or SMRAM side effects; the
+    /// machine-level restore hook applies those only after the complete
+    /// snapshot has been accepted.
+    #[cfg(feature = "std")]
+    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> io::Result<()> {
+        let mut pci_conf = [0u8; PCI_CONF_SIZE];
+        let mut drba = [0u8; 8];
+        reader.read_bytes(&mut pci_conf)?;
+        reader.read_bytes(&mut drba)?;
+        let dram_detect = reader.read_u8()?;
+
+        validate_bridge_snapshot_identity(&pci_conf, &self.pci_conf)?;
+
+        let mut expected_dram_detect = 0u8;
+        for ((&configured, &row_boundary), bit) in pci_conf[0x60..0x68]
+            .iter()
+            .zip(drba.iter())
+            .zip([1u8, 2, 4, 8, 16, 32, 64, 128])
+        {
+            if configured != row_boundary {
+                expected_dram_detect |= bit;
+            }
+        }
+        if dram_detect != expected_dram_detect {
+            return Err(invalid_pci_snapshot(
+                "i440FX DRAM-detection bits do not match DRBA state",
+            ));
+        }
+
+        self.pci_conf = pci_conf;
+        self.drba = drba;
+        self.dram_detect = dram_detect;
+        Ok(())
     }
 }
 

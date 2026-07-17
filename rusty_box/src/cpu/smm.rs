@@ -760,31 +760,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     fn smram_read_physical_dword(&mut self, paddr: u64) -> u32 {
-        if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
-            let mut data = [0u8; 4];
-            if mem
-                .read_physical_page(&[cpu_ref], paddr as _, 4, &mut data)
-                .is_ok()
-            {
-                return u32::from_le_bytes(data);
-            }
-        }
+        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } { let mut data = [0u8; 4];
+        if mem.read_physical_page(self.active_tlb_pins(), policy, paddr as _, 4, &mut data)
+            .is_ok()
+        {
+            return u32::from_le_bytes(data);
+        } }
         0 // Return 0 if memory not accessible
     }
 
     fn smram_write_physical_dword(&mut self, paddr: u64, value: u32) {
-        if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
-            let mut data = value.to_le_bytes();
-            // SMM state save write — physical RAM write cannot meaningfully fail
-            let _ = mem.write_physical_page(
-                &[cpu_ref],
-                paddr as _,
-                4,
-                &mut data,
-            );
-            // Bochs handleSMC flushes the writer synchronously at the store.
-            self.smc_sync_after_phys_write();
-        }
+        if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } { let mut data = value.to_le_bytes();
+        // SMM state save write — physical RAM write cannot meaningfully fail
+        let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr as _, 4, &mut data);
+        // Bochs handleSMC flushes the writer synchronously at the store.
+        self.smc_sync_after_phys_write(); }
     }
 }
 

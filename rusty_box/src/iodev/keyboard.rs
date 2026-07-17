@@ -151,6 +151,14 @@
 //! 0xFF: Reset (returns ACK + 0xAA + device ID 0x00)
 //! ```
 
+#[cfg(feature = "std")]
+use std::io::{Error, ErrorKind, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, SnapshotReader, SnapshotWriteExt, SNAPSHOT_SECTION_VERSION,
+};
+
 // I/O Ports
 pub const KBD_DATA_PORT: u16 = 0x0060;
 pub const KBD_STATUS_PORT: u16 = 0x0064;
@@ -254,6 +262,23 @@ const OUT_PORT_CPU_RESET: u8 = 0x01;
 // ---- Periodic return bitmask ----
 const KBD_IRQ_BIT_KBD: u8 = 0x01;
 const KBD_IRQ_BIT_MOUSE: u8 = 0x02;
+
+/// Data returned after servicing the keyboard's one-shot owner timer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KeyboardTimerCallback {
+    pub(crate) irq_mask: u8,
+    pub(crate) next_delay_usec: Option<u64>,
+    pub(crate) rearm: bool,
+}
+
+/// Result of consuming port 0x60 through the DeviceManager-owned PIC path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KeyboardPort60Read {
+    pub(crate) value: u32,
+    pub(crate) consumed: bool,
+    pub(crate) irq_to_lower: Option<u8>,
+}
+
 
 // ---- Typematic sub-command masks ----
 const TYPEMATIC_DELAY_MASK: u8 = 0x03;
@@ -525,22 +550,22 @@ pub struct BxKeyboardC {
     /// Source of bytes in controller_q (0=keyboard, 1=mouse).
     /// All entries in the queue must be from the same source.
     pub(crate) controller_q_source: u8,
+    /// One-shot PC-system owner timer handle for keyboard serial transfers.
+    pub(crate) timer_handle: Option<usize>,
+    /// Latched when `timer_pending` transitions from idle to armed. I/O
+    /// consumers drain this once so unrelated status polling cannot postpone
+    /// an already-established one-shot deadline.
+    timer_update_pending: bool,
     /// A20 gate state. Controlled via output port (command 0xD1) bit 1 or
     /// dedicated commands 0xDD (disable) / 0xDF (enable).
     pub(crate) a20_enabled: bool,
     /// Flag set when A20 state changes, cleared by emulator after propagation
     /// to the memory subsystem.
     pub(crate) a20_change_pending: bool,
-    /// IRQ1 lower pending — set when port 0x60 read clears keyboard output buffer.
-    /// Bochs calls DEV_pic_lower_irq(1) immediately; we defer to tick().
-    pub(crate) irq1_lower_pending: bool,
     /// Diagnostic: count of port 0x60 reads (keyboard data reads)
     pub(crate) diag_port60_read_count: u64,
     /// Diagnostic: last value returned from port 0x60
     pub(crate) diag_port60_last_value: u8,
-    /// IRQ12 lower pending — set when port 0x60 read clears mouse output buffer.
-    /// Bochs calls DEV_pic_lower_irq(12) immediately; we defer to tick().
-    pub(crate) irq12_lower_pending: bool,
     /// First self-test flag (Bochs static `kbd_initialized`).
     /// Prevents double-initialization.
     kbd_initialized: bool,
@@ -627,12 +652,12 @@ impl BxKeyboardC {
             controller_q: [0; BX_KBD_CONTROLLER_QSIZE],
             controller_q_size: 0,
             controller_q_source: 0,
+            timer_handle: None,
+            timer_update_pending: false,
             a20_enabled: true,
             a20_change_pending: false,
-            irq1_lower_pending: false,
             diag_port60_read_count: 0,
             diag_port60_last_value: 0,
-            irq12_lower_pending: false,
             kbd_initialized: false,
             scancode_escaped: false,
             reset_requested: None,
@@ -693,10 +718,23 @@ impl BxKeyboardC {
         }
     }
 
+    /// Consume port 0x60 while preserving the pre-consumption OBF/AUX state
+    /// so the DeviceManager can lower the corresponding PIC input immediately.
+    pub(crate) fn read_data_port_for_device_manager(&mut self) -> KeyboardPort60Read {
+        let consumed = self.kbd_controller.outb;
+        let irq_to_lower = consumed.then_some(if self.kbd_controller.auxb { 12 } else { 1 });
+        let value = self.read_port_60();
+        KeyboardPort60Read {
+            value,
+            consumed,
+            irq_to_lower,
+        }
+    }
+
     /// Port 0x60 read — keyboard.cc
     fn read_port_60(&mut self) -> u32 {
         self.diag_port60_read_count += 1;
-        if self.kbd_controller.auxb {
+        if self.kbd_controller.outb && self.kbd_controller.auxb {
             // Mouse byte available
             let val = self.kbd_controller.aux_output_buffer;
             self.kbd_controller.aux_output_buffer = 0;
@@ -717,8 +755,6 @@ impl BxKeyboardC {
                 self.controller_q_size -= 1;
             }
 
-            // Bochs keyboard.cc: DEV_pic_lower_irq(12)
-            self.irq12_lower_pending = true;
             self.activate_timer();
             tracing::trace!("Keyboard: Read port 0x60 [mouse] = {:#04x}", val);
             val as u32
@@ -744,8 +780,6 @@ impl BxKeyboardC {
                 self.controller_q_size -= 1;
             }
 
-            // Bochs keyboard.cc: DEV_pic_lower_irq(1)
-            self.irq1_lower_pending = true;
             self.activate_timer();
             self.diag_port60_last_value = val;
             tracing::trace!("Keyboard: Read port 0x60 [kbd] = {:#04x}", val);
@@ -851,16 +885,18 @@ impl BxKeyboardC {
                     tracing::trace!("Keyboard: Write controller mode {:#04x}", value);
                 }
                 CTRL_CMD_WRITE_OUTPUT_PORT => {
-                    // Write output port — keyboard.cc
+                    // Bochs keyboard.cc applies the requested bit directly to
+                    // the machine gate. Queue every desired value so this
+                    // controller's stale mirror cannot suppress a transition
+                    // made by port 92h.
                     tracing::trace!("Keyboard: Write output port {:#04x}", value);
-                    let new_a20 = (value & OUT_PORT_A20_GATE) != 0;
-                    if self.a20_enabled != new_a20 {
-                        self.a20_enabled = new_a20;
-                        self.a20_change_pending = true;
-                        tracing::trace!("Keyboard: A20 gate = {} via output port", new_a20);
-                    }
+                    self.a20_enabled = (value & OUT_PORT_A20_GATE) != 0;
+                    self.a20_change_pending = true;
+                    tracing::trace!(
+                        "Keyboard: A20 gate = {} via output port",
+                        self.a20_enabled
+                    );
                     if (value & OUT_PORT_CPU_RESET) == 0 {
-                        tracing::warn!("Keyboard: Processor reset requested via output port!");
                         self.reset_requested = Some(crate::cpu::ResetReason::Software);
                     }
                 }
@@ -1347,6 +1383,49 @@ impl BxKeyboardC {
     fn activate_timer(&mut self) {
         if self.kbd_controller.timer_pending == 0 {
             self.kbd_controller.timer_pending = 1;
+            self.timer_update_pending = true;
+        }
+    }
+
+    /// Store the scheduler's single keyboard owner timer handle.
+    pub(crate) fn set_timer_handle(&mut self, handle: usize) {
+        self.timer_handle = Some(handle);
+    }
+
+    /// Return the scheduler's keyboard owner timer handle, if registered.
+    pub(crate) fn timer_handle(&self) -> Option<usize> {
+        self.timer_handle
+    }
+
+    /// Relative delay for a keyboard owner timer request.
+    ///
+    /// Bochs `activate_timer()` sets `timer_pending` to one microsecond; a
+    /// zero countdown means the owner must be deactivated rather than polled.
+    pub(crate) fn arm_keyboard_timer(&self) -> Option<u64> {
+        (self.kbd_controller.timer_pending != 0)
+            .then_some(u64::from(self.kbd_controller.timer_pending))
+    }
+
+    /// Drain the timer transition caused by keyboard I/O or host input.
+    ///
+    /// Returning no update for an already-armed timer preserves its original
+    /// absolute deadline across status-register polling.
+    pub(crate) fn take_keyboard_timer_update(&mut self) -> Option<Option<u64>> {
+        core::mem::take(&mut self.timer_update_pending).then(|| self.arm_keyboard_timer())
+    }
+
+    /// Service a keyboard owner callback and return PIC work plus the next
+    /// one-shot delay. Registered delays originate from `timer_pending` and
+    /// therefore fit the exact `u32` periodic interface; a larger defensive
+    /// input is necessarily already sufficient to expire that countdown.
+    pub(crate) fn timer_callback(&mut self, elapsed_usec: u64) -> KeyboardTimerCallback {
+        self.timer_update_pending = false;
+        let irq_mask = self.periodic(elapsed_usec.min(u64::from(u32::MAX)) as u32);
+        let next_delay_usec = self.arm_keyboard_timer();
+        KeyboardTimerCallback {
+            irq_mask,
+            next_delay_usec,
+            rearm: next_delay_usec.is_some(),
         }
     }
 
@@ -1789,8 +1868,8 @@ impl BxKeyboardC {
 
     /// Timer-driven transfer from internal device buffers to the output buffer.
     ///
-    /// This is the core data pump of the PS/2 controller. Called from
-    /// `DeviceManager::tick()` on each timer tick with the elapsed microseconds.
+    /// This is the core data pump of the PS/2 controller. The registered
+    /// keyboard owner invokes it at the exact scheduler deadline.
     ///
     /// Returns an IRQ bitmask: bit 0 = raise IRQ1 (keyboard), bit 1 = raise IRQ12 (mouse).
     ///
@@ -1908,13 +1987,6 @@ impl BxKeyboardC {
         }
     }
 
-    pub(crate) fn needs_fast_service(&self) -> bool {
-        self.kbd_controller.timer_pending != 0
-            || self.kbd_controller.irq1_requested
-            || self.kbd_controller.irq12_requested
-            || self.irq1_lower_pending
-            || self.irq12_lower_pending
-    }
 
     /// Get A20 gate state
     pub fn get_a20_enabled(&self) -> bool {
@@ -1937,24 +2009,558 @@ impl BxKeyboardC {
         pending
     }
 
-    /// Check and clear IRQ1 lower pending (set on port 0x60 keyboard read)
-    /// Bochs calls DEV_pic_lower_irq(1) immediately; we defer to tick().
-    #[inline]
-    pub fn check_irq1_lower(&mut self) -> bool {
-        let pending = self.irq1_lower_pending;
-        self.irq1_lower_pending = false;
-        pending
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct KeyboardSnapshotRestore {
+    pub(crate) led_status: u8,
+    pub(crate) irq1_level: bool,
+    pub(crate) irq12_level: bool,
+    pub(crate) timer_handle: Option<usize>,
+    pub(crate) timer_pending: u32,
+    pub(crate) timer_armed: bool,
+    pub(crate) a20_source_enabled: bool,
+    pub(crate) a20_change_pending: bool,
+    pub(crate) reset_requested: Option<crate::cpu::ResetReason>,
+}
+
+#[cfg(feature = "std")]
+impl BxKeyboardC {
+    pub(crate) fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+        validate_keyboard_ring(
+            self.kbd_internal_buffer.head,
+            self.kbd_internal_buffer.num_elements,
+            BX_KBD_ELEMENTS,
+        )?;
+        validate_keyboard_ring(
+            self.mouse_internal_buffer.head,
+            self.mouse_internal_buffer.num_elements,
+            BX_MOUSE_BUFF_SIZE,
+        )?;
+        if self.controller_q_size > controller_queue_capacity()? {
+            return Err(keyboard_snapshot_invalid(
+                "keyboard controller queue exceeds capacity",
+            ));
+        }
+        if self.controller_q_source > 1 {
+            return Err(keyboard_snapshot_invalid(
+                "keyboard controller queue source is invalid",
+            ));
+        }
+        validate_keyboard_controller(&self.kbd_controller)?;
+        validate_keyboard_timer_state(&self.kbd_controller, self.timer_handle)?;
+        validate_keyboard_buffer_state(&self.kbd_internal_buffer)?;
+        validate_mouse_state(&self.mouse)?;
+
+        let mut length = 82u64;
+        if self.timer_handle.is_some() {
+            length = checked_snapshot_len_add(length, 8)?;
+        }
+        length = checked_snapshot_len_add(
+            length,
+            u64::try_from(self.kbd_internal_buffer.num_elements)
+                .map_err(|_| keyboard_snapshot_invalid("keyboard ring count is too large"))?,
+        )?;
+        length = checked_snapshot_len_add(
+            length,
+            u64::try_from(self.mouse_internal_buffer.num_elements)
+                .map_err(|_| keyboard_snapshot_invalid("mouse ring count is too large"))?,
+        )?;
+        checked_snapshot_len_add(
+            length,
+            u64::try_from(self.controller_q_size)
+                .map_err(|_| keyboard_snapshot_invalid("controller queue count is too large"))?,
+        )
     }
 
-    /// Check and clear IRQ12 lower pending (set on port 0x60 mouse read)
-    /// Bochs calls DEV_pic_lower_irq(12) immediately; we defer to tick().
-    #[inline]
-    pub fn check_irq12_lower(&mut self) -> bool {
-        let pending = self.irq12_lower_pending;
-        self.irq12_lower_pending = false;
-        pending
+    pub(crate) fn save_snapshot_v3<W: Write + ?Sized>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        self.snapshot_v3_len()?;
+        writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+        save_keyboard_controller(writer, &self.kbd_controller)?;
+        save_keyboard_ring(
+            writer,
+            &self.kbd_internal_buffer.buffer,
+            self.kbd_internal_buffer.head,
+            self.kbd_internal_buffer.num_elements,
+        )?;
+        writer.write_bool(self.kbd_internal_buffer.expecting_typematic)?;
+        writer.write_bool(self.kbd_internal_buffer.expecting_led_write)?;
+        writer.write_u8(self.kbd_internal_buffer.delay)?;
+        writer.write_u8(self.kbd_internal_buffer.repeat_rate)?;
+        writer.write_u8(self.kbd_internal_buffer.led_status)?;
+        writer.write_bool(self.kbd_internal_buffer.scanning_enabled)?;
+
+        save_keyboard_ring(
+            writer,
+            &self.mouse_internal_buffer.buffer,
+            self.mouse_internal_buffer.head,
+            self.mouse_internal_buffer.num_elements,
+        )?;
+        save_mouse_state(writer, &self.mouse)?;
+
+        writer.write_u32(
+            u32::try_from(self.controller_q_size)
+                .map_err(|_| keyboard_snapshot_invalid("controller queue count is too large"))?,
+        )?;
+        writer.write_u8(self.controller_q_source)?;
+        let queue = self
+            .controller_q
+            .get(..self.controller_q_size)
+            .ok_or_else(|| keyboard_snapshot_invalid("controller queue exceeds capacity"))?;
+        for value in queue {
+            writer.write_u8(*value)?;
+        }
+
+        match self.timer_handle {
+            Some(handle) => {
+                writer.write_bool(true)?;
+                writer.write_u64(
+                    u64::try_from(handle)
+                        .map_err(|_| keyboard_snapshot_invalid("timer handle is too large"))?,
+                )?;
+            }
+            None => writer.write_bool(false)?,
+        }
+        writer.write_bool(self.a20_enabled)?;
+        writer.write_bool(self.a20_change_pending)?;
+        writer.write_bool(self.kbd_initialized)?;
+        writer.write_bool(self.scancode_escaped)?;
+        save_reset_request(writer, self.reset_requested)
+    }
+
+    pub(crate) fn restore_snapshot_v3<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> std::io::Result<KeyboardSnapshotRestore> {
+        if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
+            return Err(keyboard_snapshot_invalid(
+                "unsupported keyboard snapshot section version",
+            ));
+        }
+
+        let mut restored = Self::new();
+        restored.kbd_controller = restore_keyboard_controller(reader)?;
+        let (kbd_head, kbd_count) =
+            restore_keyboard_ring(reader, &mut restored.kbd_internal_buffer.buffer)?;
+        restored.kbd_internal_buffer.head = kbd_head;
+        restored.kbd_internal_buffer.num_elements = kbd_count;
+        restored.kbd_internal_buffer.expecting_typematic = reader.read_bool()?;
+        restored.kbd_internal_buffer.expecting_led_write = reader.read_bool()?;
+        restored.kbd_internal_buffer.delay = reader.read_u8()?;
+        restored.kbd_internal_buffer.repeat_rate = reader.read_u8()?;
+        restored.kbd_internal_buffer.led_status = reader.read_u8()?;
+        restored.kbd_internal_buffer.scanning_enabled = reader.read_bool()?;
+
+        let (mouse_head, mouse_count) =
+            restore_keyboard_ring(reader, &mut restored.mouse_internal_buffer.buffer)?;
+        restored.mouse_internal_buffer.head = mouse_head;
+        restored.mouse_internal_buffer.num_elements = mouse_count;
+        restored.mouse = restore_mouse_state(reader)?;
+
+        restored.controller_q_size = reader.read_count(controller_queue_capacity()?)?;
+        restored.controller_q_source = reader.read_u8()?;
+        if restored.controller_q_source > 1 {
+            return Err(keyboard_snapshot_invalid(
+                "keyboard controller queue source is invalid",
+            ));
+        }
+        restored.controller_q.fill(0);
+        for slot in restored
+            .controller_q
+            .iter_mut()
+            .take(restored.controller_q_size)
+        {
+            *slot = reader.read_u8()?;
+        }
+
+        restored.timer_handle = if reader.read_bool()? {
+            Some(
+                usize::try_from(reader.read_u64()?)
+                    .map_err(|_| keyboard_snapshot_invalid("timer handle does not fit usize"))?,
+            )
+        } else {
+            None
+        };
+        restored.a20_enabled = reader.read_bool()?;
+        restored.a20_change_pending = reader.read_bool()?;
+        restored.kbd_initialized = reader.read_bool()?;
+        restored.scancode_escaped = reader.read_bool()?;
+        restored.reset_requested = restore_reset_request(reader)?;
+
+        validate_keyboard_controller(&restored.kbd_controller)?;
+        validate_keyboard_buffer_state(&restored.kbd_internal_buffer)?;
+        validate_mouse_state(&restored.mouse)?;
+        validate_keyboard_timer_state(&restored.kbd_controller, restored.timer_handle)?;
+        if restored.kbd_controller.kbd_type != self.kbd_controller.kbd_type {
+            return Err(keyboard_snapshot_invalid(
+                "keyboard type does not match live topology",
+            ));
+        }
+        if restored.mouse.mouse_type != self.mouse.mouse_type {
+            return Err(keyboard_snapshot_invalid(
+                "mouse type does not match live topology",
+            ));
+        }
+
+        let timer_armed = restored.kbd_controller.timer_pending == 1;
+
+        let restore = KeyboardSnapshotRestore {
+            led_status: restored.kbd_internal_buffer.led_status,
+            irq1_level: restored.kbd_controller.outb
+                && !restored.kbd_controller.auxb
+                && restored.kbd_controller.allow_irq1,
+            irq12_level: restored.kbd_controller.outb
+                && restored.kbd_controller.auxb
+                && restored.kbd_controller.allow_irq12,
+            timer_handle: restored.timer_handle,
+            timer_pending: restored.kbd_controller.timer_pending,
+            timer_armed,
+            a20_source_enabled: restored.a20_enabled,
+            a20_change_pending: restored.a20_change_pending,
+            reset_requested: restored.reset_requested,
+        };
+
+        // The central restore hook owns timer rearming, LED updates, A20
+        // propagation, reset handling, and final PIC levels. This assignment
+        // intentionally performs none of those effects.
+        self.kbd_controller = restored.kbd_controller;
+        self.kbd_internal_buffer = restored.kbd_internal_buffer;
+        self.mouse_internal_buffer = restored.mouse_internal_buffer;
+        self.mouse = restored.mouse;
+        self.controller_q = restored.controller_q;
+        self.controller_q_size = restored.controller_q_size;
+        self.controller_q_source = restored.controller_q_source;
+        self.timer_handle = restored.timer_handle;
+        self.a20_enabled = restored.a20_enabled;
+        self.a20_change_pending = restored.a20_change_pending;
+        self.kbd_initialized = restored.kbd_initialized;
+        self.scancode_escaped = restored.scancode_escaped;
+        self.reset_requested = restored.reset_requested;
+        Ok(restore)
     }
 }
+
+#[cfg(feature = "std")]
+fn keyboard_snapshot_invalid(message: &'static str) -> Error {
+    Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn keyboard_ring_capacity(capacity: usize) -> std::io::Result<usize> {
+    if capacity == 0 || capacity > bounds::MAX_SNAPSHOT_QUEUE_LEN {
+        return Err(keyboard_snapshot_invalid(
+            "keyboard ring capacity exceeds snapshot bounds",
+        ));
+    }
+    Ok(capacity)
+}
+
+#[cfg(feature = "std")]
+fn controller_queue_capacity() -> std::io::Result<usize> {
+    keyboard_ring_capacity(BX_KBD_CONTROLLER_QSIZE)
+}
+
+#[cfg(feature = "std")]
+fn validate_keyboard_ring(head: usize, count: usize, capacity: usize) -> std::io::Result<()> {
+    let capacity = keyboard_ring_capacity(capacity)?;
+    if head >= capacity || count > capacity {
+        return Err(keyboard_snapshot_invalid(
+            "keyboard ring head or count exceeds capacity",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn keyboard_ring_index(head: usize, offset: usize, capacity: usize) -> std::io::Result<usize> {
+    validate_keyboard_ring(head, offset, capacity)?;
+    head.checked_add(offset)
+        .map(|index| index % capacity)
+        .ok_or_else(|| keyboard_snapshot_invalid("keyboard ring index overflows"))
+}
+
+#[cfg(feature = "std")]
+fn save_keyboard_ring<W: Write + ?Sized>(
+    writer: &mut W,
+    buffer: &[u8],
+    head: usize,
+    count: usize,
+) -> std::io::Result<()> {
+    validate_keyboard_ring(head, count, buffer.len())?;
+    writer.write_u32(
+        u32::try_from(head)
+            .map_err(|_| keyboard_snapshot_invalid("keyboard ring head is too large"))?,
+    )?;
+    writer.write_u32(
+        u32::try_from(count)
+            .map_err(|_| keyboard_snapshot_invalid("keyboard ring count is too large"))?,
+    )?;
+    for offset in 0..count {
+        let index = keyboard_ring_index(head, offset, buffer.len())?;
+        let value = buffer
+            .get(index)
+            .ok_or_else(|| keyboard_snapshot_invalid("keyboard ring index is invalid"))?;
+        writer.write_u8(*value)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn restore_keyboard_ring<R: Read>(
+    reader: &mut SnapshotReader<R>,
+    buffer: &mut [u8],
+) -> std::io::Result<(usize, usize)> {
+    let capacity = keyboard_ring_capacity(buffer.len())?;
+    let head = reader.read_count(capacity)?;
+    let count = reader.read_count(capacity)?;
+    validate_keyboard_ring(head, count, capacity)?;
+    buffer.fill(0);
+    for offset in 0..count {
+        let index = keyboard_ring_index(head, offset, capacity)?;
+        let slot = buffer
+            .get_mut(index)
+            .ok_or_else(|| keyboard_snapshot_invalid("keyboard ring index is invalid"))?;
+        *slot = reader.read_u8()?;
+    }
+    Ok((head, count))
+}
+
+#[cfg(feature = "std")]
+fn validate_keyboard_controller(controller: &KbdController) -> std::io::Result<()> {
+    if controller.expecting_port60h > 1 || controller.expecting_mouse_parameter > 1 {
+        return Err(keyboard_snapshot_invalid(
+            "keyboard command parameter state is invalid",
+        ));
+    }
+    if controller.current_scancodes_set > 2 {
+        return Err(keyboard_snapshot_invalid("keyboard scancode set is invalid"));
+    }
+    if !matches!(controller.kbd_type, BX_KBD_XT_TYPE | BX_KBD_MF_TYPE) {
+        return Err(keyboard_snapshot_invalid("keyboard type is invalid"));
+    }
+    if controller.timer_pending > 1 {
+        return Err(keyboard_snapshot_invalid(
+            "keyboard timer pending state is invalid",
+        ));
+    }
+    if controller.auxb && !controller.outb {
+        return Err(keyboard_snapshot_invalid(
+            "keyboard auxiliary buffer flag requires output data",
+        ));
+    }
+    if controller.expecting_mouse_parameter != 0
+        && !matches!(
+            controller.last_mouse_command,
+            MOUSE_CMD_SET_SAMPLE_RATE | MOUSE_CMD_SET_RESOLUTION
+        )
+    {
+        return Err(keyboard_snapshot_invalid(
+            "keyboard mouse parameter command is invalid",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn validate_keyboard_timer_state(
+    controller: &KbdController,
+    timer_handle: Option<usize>,
+) -> std::io::Result<()> {
+    if controller.timer_pending == 1 && timer_handle.is_none() {
+        return Err(keyboard_snapshot_invalid(
+            "keyboard armed timer has no registered handle",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn validate_keyboard_buffer_state(buffer: &KbdInternalBuffer) -> std::io::Result<()> {
+    validate_keyboard_ring(buffer.head, buffer.num_elements, BX_KBD_ELEMENTS)?;
+    if buffer.delay > TYPEMATIC_DELAY_MASK || buffer.repeat_rate > TYPEMATIC_RATE_MASK {
+        return Err(keyboard_snapshot_invalid("keyboard typematic state is invalid"));
+    }
+    if buffer.led_status & !0x07 != 0 {
+        return Err(keyboard_snapshot_invalid("keyboard LED state is invalid"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn valid_mouse_mode(mode: u8) -> bool {
+    matches!(
+        mode,
+        MOUSE_MODE_RESET | MOUSE_MODE_STREAM | MOUSE_MODE_REMOTE | MOUSE_MODE_WRAP
+    )
+}
+
+#[cfg(feature = "std")]
+fn validate_mouse_state(mouse: &MouseState) -> std::io::Result<()> {
+    if !matches!(mouse.mouse_type, BX_MOUSE_TYPE_PS2 | BX_MOUSE_TYPE_IMPS2) {
+        return Err(keyboard_snapshot_invalid("mouse type is invalid"));
+    }
+    if !matches!(mouse.resolution_cpmm, 1 | 2 | 4 | 8)
+        || !matches!(mouse.scaling, 1 | 2)
+        || !valid_mouse_mode(mouse.mode)
+        || !(mouse.saved_mode == 0 || valid_mouse_mode(mouse.saved_mode))
+        || mouse.button_status & !0x07 != 0
+        || mouse.im_request > 2
+        || (mouse.im_mode && mouse.mouse_type != BX_MOUSE_TYPE_IMPS2)
+    {
+        return Err(keyboard_snapshot_invalid("mouse state is invalid"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn save_keyboard_controller<W: Write + ?Sized>(
+    writer: &mut W,
+    controller: &KbdController,
+) -> std::io::Result<()> {
+    validate_keyboard_controller(controller)?;
+    writer.write_bool(controller.pare)?;
+    writer.write_bool(controller.tim)?;
+    writer.write_bool(controller.auxb)?;
+    writer.write_bool(controller.keyl)?;
+    writer.write_bool(controller.c_d)?;
+    writer.write_bool(controller.sysf)?;
+    writer.write_bool(controller.inpb)?;
+    writer.write_bool(controller.outb)?;
+    writer.write_bool(controller.kbd_clock_enabled)?;
+    writer.write_bool(controller.aux_clock_enabled)?;
+    writer.write_bool(controller.allow_irq1)?;
+    writer.write_bool(controller.allow_irq12)?;
+    writer.write_u8(controller.kbd_output_buffer)?;
+    writer.write_u8(controller.aux_output_buffer)?;
+    writer.write_u8(controller.last_comm)?;
+    writer.write_u8(controller.expecting_port60h)?;
+    writer.write_u8(controller.expecting_mouse_parameter)?;
+    writer.write_u8(controller.last_mouse_command)?;
+    writer.write_u32(controller.timer_pending)?;
+    writer.write_bool(controller.irq1_requested)?;
+    writer.write_bool(controller.irq12_requested)?;
+    writer.write_bool(controller.scancodes_translate)?;
+    writer.write_bool(controller.expecting_scancodes_set)?;
+    writer.write_u8(controller.current_scancodes_set)?;
+    writer.write_bool(controller.bat_in_progress)?;
+    writer.write_u8(controller.kbd_type)
+}
+
+#[cfg(feature = "std")]
+fn restore_keyboard_controller<R: Read>(
+    reader: &mut SnapshotReader<R>,
+) -> std::io::Result<KbdController> {
+    let controller = KbdController {
+        pare: reader.read_bool()?,
+        tim: reader.read_bool()?,
+        auxb: reader.read_bool()?,
+        keyl: reader.read_bool()?,
+        c_d: reader.read_bool()?,
+        sysf: reader.read_bool()?,
+        inpb: reader.read_bool()?,
+        outb: reader.read_bool()?,
+        kbd_clock_enabled: reader.read_bool()?,
+        aux_clock_enabled: reader.read_bool()?,
+        allow_irq1: reader.read_bool()?,
+        allow_irq12: reader.read_bool()?,
+        kbd_output_buffer: reader.read_u8()?,
+        aux_output_buffer: reader.read_u8()?,
+        last_comm: reader.read_u8()?,
+        expecting_port60h: reader.read_u8()?,
+        expecting_mouse_parameter: reader.read_u8()?,
+        last_mouse_command: reader.read_u8()?,
+        timer_pending: reader.read_u32()?,
+        irq1_requested: reader.read_bool()?,
+        irq12_requested: reader.read_bool()?,
+        scancodes_translate: reader.read_bool()?,
+        expecting_scancodes_set: reader.read_bool()?,
+        current_scancodes_set: reader.read_u8()?,
+        bat_in_progress: reader.read_bool()?,
+        kbd_type: reader.read_u8()?,
+    };
+    validate_keyboard_controller(&controller)?;
+    Ok(controller)
+}
+
+#[cfg(feature = "std")]
+fn save_mouse_state<W: Write + ?Sized>(
+    writer: &mut W,
+    mouse: &MouseState,
+) -> std::io::Result<()> {
+    validate_mouse_state(mouse)?;
+    writer.write_u8(mouse.mouse_type)?;
+    writer.write_u8(mouse.sample_rate)?;
+    writer.write_u8(mouse.resolution_cpmm)?;
+    writer.write_u8(mouse.scaling)?;
+    writer.write_u8(mouse.mode)?;
+    writer.write_u8(mouse.saved_mode)?;
+    writer.write_bool(mouse.enable)?;
+    writer.write_u8(mouse.button_status)?;
+    writer.write_u16(u16::from_le_bytes(mouse.delayed_dx.to_le_bytes()))?;
+    writer.write_u16(u16::from_le_bytes(mouse.delayed_dy.to_le_bytes()))?;
+    writer.write_u16(u16::from_le_bytes(mouse.delayed_dz.to_le_bytes()))?;
+    writer.write_u8(mouse.im_request)?;
+    writer.write_bool(mouse.im_mode)
+}
+
+#[cfg(feature = "std")]
+fn restore_mouse_state<R: Read>(
+    reader: &mut SnapshotReader<R>,
+) -> std::io::Result<MouseState> {
+    let mouse = MouseState {
+        mouse_type: reader.read_u8()?,
+        sample_rate: reader.read_u8()?,
+        resolution_cpmm: reader.read_u8()?,
+        scaling: reader.read_u8()?,
+        mode: reader.read_u8()?,
+        saved_mode: reader.read_u8()?,
+        enable: reader.read_bool()?,
+        button_status: reader.read_u8()?,
+        delayed_dx: i16::from_le_bytes(reader.read_u16()?.to_le_bytes()),
+        delayed_dy: i16::from_le_bytes(reader.read_u16()?.to_le_bytes()),
+        delayed_dz: i16::from_le_bytes(reader.read_u16()?.to_le_bytes()),
+        im_request: reader.read_u8()?,
+        im_mode: reader.read_bool()?,
+    };
+    validate_mouse_state(&mouse)?;
+    Ok(mouse)
+}
+
+#[cfg(feature = "std")]
+fn save_reset_request<W: Write + ?Sized>(
+    writer: &mut W,
+    reset: Option<crate::cpu::ResetReason>,
+) -> std::io::Result<()> {
+    let tag = match reset {
+        None => 0,
+        Some(crate::cpu::ResetReason::Software) => 10,
+        Some(crate::cpu::ResetReason::Hardware) => {
+            return Err(keyboard_snapshot_invalid(
+                "keyboard hardware reset request is invalid",
+            ));
+        }
+    };
+    writer.write_u8(tag)
+}
+
+#[cfg(feature = "std")]
+fn restore_reset_request<R: Read>(
+    reader: &mut SnapshotReader<R>,
+) -> std::io::Result<Option<crate::cpu::ResetReason>> {
+    match reader.read_u8()? {
+        0 => Ok(None),
+        10 => Ok(Some(crate::cpu::ResetReason::Software)),
+        11 => Err(keyboard_snapshot_invalid(
+            "keyboard hardware reset request is invalid",
+        )),
+        _ => Err(keyboard_snapshot_invalid("keyboard reset reason is invalid")),
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -2201,4 +2807,25 @@ mod tests {
         assert_eq!(kbd.mouse_internal_buffer.num_elements, 0);
         assert_eq!(kbd.mouse.button_status, 0);
     }
+    #[test]
+    fn owner_timer_arms_and_delivers_a_keyboard_byte_after_one_usec() {
+        let mut kbd = BxKeyboardC::new();
+        kbd.set_timer_handle(11);
+        assert_eq!(kbd.timer_handle(), Some(11));
+
+        kbd.kbd_enq(0x1E);
+        assert_eq!(kbd.arm_keyboard_timer(), Some(1));
+
+        let callback = kbd.timer_callback(1);
+        assert_eq!(callback.irq_mask, KBD_IRQ_BIT_KBD);
+        assert_eq!(callback.next_delay_usec, None);
+        assert!(!callback.rearm);
+        assert!(kbd.kbd_controller.outb);
+
+        let read = kbd.read_data_port_for_device_manager();
+        assert_eq!(read.value, 0x1E);
+        assert!(read.consumed);
+        assert_eq!(read.irq_to_lower, Some(1));
+    }
+
 }

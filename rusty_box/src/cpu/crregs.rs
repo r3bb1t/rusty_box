@@ -1330,7 +1330,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         let tpr = ((val as u8) & 0xF) << 4;
         self.lapic.set_tpr(tpr);
-        self.sync_lapic_intr_event();
+        self.sync_lapic_events();
         Ok(())
     }
 
@@ -1851,7 +1851,7 @@ mod tests {
     fn write_cr8_lowering_tpr_signals_pending_lapic_event() {
         let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
         cpu.reset(ResetReason::Hardware);
-        cpu.lapic.write_aligned(0x0F0, 0x1FF);
+        cpu.lapic.write_aligned(0x0F0, 0x1FF, 0);
         cpu.lapic.set_tpr(0x40);
         cpu.lapic.trigger_irq(0x30, APIC_EDGE_TRIGGERED, false);
         assert!(!cpu.lapic.intr);

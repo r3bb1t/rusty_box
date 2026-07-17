@@ -860,7 +860,7 @@ mod tests {
     use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::crregs::BxCr4;
     use crate::cpu::decoder::BxSegregs;
-    use crate::memory::{BxMemC, BxMemoryStubC};
+    use crate::memory::{BxMemC, BxMemoryStubC, CpuTlbPin};
     use core::ptr::NonNull;
 
     /// Build a fresh CPU and switch it into protected mode with CET enabled in CR4.
@@ -1018,15 +1018,19 @@ mod tests {
                 let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
                 let mut mem = BxMemC::new(mem_stub, false);
 
-                // Wire the bus pointers cpu_loop normally sets up.
+                // Mirror the execution scope: even this one-CPU fixture has
+                // a complete stable pin set for any physical fallback.
                 cpu.a20_mask = mem.a20_mask();
-                let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
-                cpu.mem_ptr = Some(mem_vector);
-                cpu.mem_len = mem_len;
-                let (host_base, host_len) = mem.get_ram_base_ptr();
+                let (host_base, host_len) = mem.identity_guest_base();
+                assert!(!host_base.is_null());
                 cpu.mem_host_base = host_base;
                 cpu.mem_host_len = host_len;
-                cpu.set_mem_bus_ptr(NonNull::from(&mut mem));
+                let pin = CpuTlbPin::new(&cpu);
+                cpu.wire_memory_access(
+                    NonNull::from(&mut mem),
+                    core::slice::from_ref(&pin),
+                    &pin,
+                );
 
                 // Place SSP somewhere inside the 1 MiB RAM region, 16-byte aligned,
                 // away from the BIOS shadow region (0xA0000+) and low IVT.
@@ -1070,6 +1074,7 @@ mod tests {
                 let cs_token = cpu.shadow_stack_pop_64().unwrap();
                 assert_eq!(cs_token, 0x0008, "third pop yields CS");
                 assert_eq!(cpu.ssp(), INITIAL_SSP, "SSP back to start after three pops");
+                cpu.clear_memory_access();
             })
             .unwrap()
             .join()

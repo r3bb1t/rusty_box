@@ -113,6 +113,15 @@
 //! the device deasserts the line. IRQ0-2 and IRQ8,13 are always edge-triggered.
 
 
+#[cfg(feature = "std")]
+use std::io::{self, ErrorKind, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader,
+    SnapshotWriteExt, SNAPSHOT_SECTION_VERSION,
+};
+
 /// PIC I/O port addresses
 pub const PIC_MASTER_CMD: u16 = 0x0020;
 pub const PIC_MASTER_DATA: u16 = 0x0021;
@@ -347,8 +356,8 @@ pub struct BxPicC {
     /// Flag: set when PIC wants to clear the pending interrupt signal.
     /// The emulator reads and clears this, removing BX_EVENT_PENDING_INTR from the CPU.
     pub(crate) irq_cleared: bool,
-    /// IOAPIC forwarding queue: (irq, level) pairs from raise_irq/lower_irq.
-    /// Drained by I/O dispatch and DeviceManager::tick() to forward to IOAPIC.
+    /// IOAPIC forwarding queue: (irq, level) pairs from raise_irq/lower_irq,
+    /// drained at the central scheduler boundary.
     pub(crate) ioapic_forwards: [(u8, bool); PIC_IOAPIC_FORWARD_CAPACITY],
     /// Number of pending IOAPIC forwarding entries.
     pub(crate) num_ioapic_forwards: usize,
@@ -892,6 +901,8 @@ impl BxPicC {
     /// `is_master`: true = master PIC, false = slave PIC
     /// `mode`: bitmap where each bit represents an IRQ line (0=edge, 1=level)
     pub fn set_mode(&mut self, is_master: bool, mode: u8) {
+        let index = usize::from(!is_master);
+        self.elcr[index] = mode;
         if is_master {
             self.master.edge_level = mode;
         } else {
@@ -980,6 +991,246 @@ impl BxPicC {
 
         vector
     }
+}
+
+#[cfg(feature = "std")]
+impl BxPicC {
+    /// Exact length of the versioned PIC v3 section payload.
+    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+        const CHIP_LEN: u64 = 28;
+        let chips = checked_snapshot_len_mul(2, CHIP_LEN)?;
+        let fixed = checked_snapshot_len_add(4, chips)?;
+        let fixed = checked_snapshot_len_add(fixed, 2)?; // ELCR
+        let fixed = checked_snapshot_len_add(fixed, 2)?; // CPU IRQ latches
+        let fixed = checked_snapshot_len_add(fixed, 4)?; // forwarding count
+        if self.num_ioapic_forwards > self.ioapic_forwards.len()
+            || self.ioapic_forwards.len() > bounds::MAX_SNAPSHOT_QUEUE_LEN
+        {
+            return Err(pic_snapshot_invalid("PIC forwarding queue exceeds its capacity"));
+        }
+        let queue_len = checked_snapshot_len_mul(
+            u64::try_from(self.ioapic_forwards.len())
+                .map_err(|_| pic_snapshot_invalid("PIC forwarding capacity does not fit u64"))?,
+            2,
+        )?;
+        checked_snapshot_len_add(fixed, queue_len)
+    }
+
+    /// Stream the complete mutable PIC state without serializing its live I/O
+    /// topology.
+    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.validate_snapshot_state()?;
+        writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+        write_pic_chip(writer, &self.master)?;
+        write_pic_chip(writer, &self.slave)?;
+        writer.write_bytes(&self.elcr)?;
+        writer.write_bool(self.irq_pending)?;
+        writer.write_bool(self.irq_cleared)?;
+        writer.write_u32(
+            u32::try_from(self.num_ioapic_forwards)
+                .map_err(|_| pic_snapshot_invalid("PIC forwarding count does not fit u32"))?,
+        )?;
+        for &(irq, level) in &self.ioapic_forwards {
+            writer.write_u8(irq)?;
+            writer.write_bool(level)?;
+        }
+        Ok(())
+    }
+
+    /// Restore the complete mutable PIC state.  This does not service the
+    /// chips or signal either the CPU or IOAPIC; those live effects are
+    /// reconciled after every section has been restored.
+    pub(crate) fn restore_snapshot_v3<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> io::Result<()> {
+        if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
+            return Err(pic_snapshot_invalid("unsupported PIC section version"));
+        }
+
+        let master = read_pic_chip(reader, true)?;
+        let slave = read_pic_chip(reader, false)?;
+        let mut elcr = [0u8; 2];
+        reader.read_bytes(&mut elcr)?;
+        let irq_pending = reader.read_bool()?;
+        let irq_cleared = reader.read_bool()?;
+        let forwarding_count = reader.read_count(
+            PIC_IOAPIC_FORWARD_CAPACITY.min(bounds::MAX_SNAPSHOT_QUEUE_LEN),
+        )?;
+        let mut ioapic_forwards = [(0u8, false); PIC_IOAPIC_FORWARD_CAPACITY];
+        for slot in &mut ioapic_forwards {
+            let irq = reader.read_u8()?;
+            if irq >= 16 {
+                return Err(pic_snapshot_invalid("PIC forwarding IRQ is out of range"));
+            }
+            *slot = (irq, reader.read_bool()?);
+        }
+
+        validate_pic_controller(&master, &slave, &elcr, forwarding_count)?;
+        reader.finish_exact()?;
+
+        self.master = master;
+        self.slave = slave;
+        self.elcr = elcr;
+        self.irq_pending = irq_pending;
+        self.irq_cleared = irq_cleared;
+        self.ioapic_forwards = ioapic_forwards;
+        self.num_ioapic_forwards = forwarding_count;
+        Ok(())
+    }
+
+    fn validate_snapshot_state(&self) -> io::Result<()> {
+        validate_pic_controller(
+            &self.master,
+            &self.slave,
+            &self.elcr,
+            self.num_ioapic_forwards,
+        )?;
+        for &(irq, _) in &self.ioapic_forwards {
+            if irq >= 16 {
+                return Err(pic_snapshot_invalid("PIC forwarding IRQ is out of range"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "std")]
+fn pic_snapshot_invalid(message: &'static str) -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn write_pic_chip<W: Write>(writer: &mut W, chip: &Pic8259State) -> io::Result<()> {
+    writer.write_bool(chip.master)?;
+    writer.write_u8(chip.interrupt_offset)?;
+    writer.write_bool(chip.sfnm)?;
+    writer.write_bool(chip.buffered_mode)?;
+    writer.write_bool(chip.master_slave)?;
+    writer.write_bool(chip.auto_eoi)?;
+    writer.write_u8(chip.imr)?;
+    writer.write_u8(chip.isr)?;
+    writer.write_u8(chip.irr)?;
+    writer.write_bool(chip.read_reg_select)?;
+    writer.write_u8(chip.irq)?;
+    writer.write_u8(chip.lowest_priority)?;
+    writer.write_bool(chip.int_pin)?;
+    writer.write_bytes(&chip.irq_in)?;
+    writer.write_bool(chip.init.in_init)?;
+    writer.write_bool(chip.init.requires_4)?;
+    writer.write_u8(chip.init.byte_expected)?;
+    writer.write_bool(chip.special_mask)?;
+    writer.write_bool(chip.polled)?;
+    writer.write_bool(chip.rotate_on_autoeoi)?;
+    writer.write_u8(chip.edge_level)
+}
+
+#[cfg(feature = "std")]
+fn read_pic_chip<R: Read>(
+    reader: &mut SnapshotReader<R>,
+    expected_master: bool,
+) -> io::Result<Pic8259State> {
+    let master = reader.read_bool()?;
+    if master != expected_master {
+        return Err(pic_snapshot_invalid("PIC chip identity does not match live topology"));
+    }
+
+    let mut chip = Pic8259State {
+        master,
+        interrupt_offset: reader.read_u8()?,
+        sfnm: reader.read_bool()?,
+        buffered_mode: reader.read_bool()?,
+        master_slave: reader.read_bool()?,
+        auto_eoi: reader.read_bool()?,
+        imr: reader.read_u8()?,
+        isr: reader.read_u8()?,
+        irr: reader.read_u8()?,
+        read_reg_select: reader.read_bool()?,
+        irq: reader.read_u8()?,
+        lowest_priority: reader.read_u8()?,
+        int_pin: reader.read_bool()?,
+        irq_in: [0; 8],
+        init: PicInitState {
+            in_init: false,
+            requires_4: false,
+            byte_expected: 0,
+        },
+        special_mask: false,
+        polled: false,
+        rotate_on_autoeoi: false,
+        edge_level: 0,
+    };
+    reader.read_bytes(&mut chip.irq_in)?;
+    chip.init.in_init = reader.read_bool()?;
+    chip.init.requires_4 = reader.read_bool()?;
+    chip.init.byte_expected = reader.read_u8()?;
+    chip.special_mask = reader.read_bool()?;
+    chip.polled = reader.read_bool()?;
+    chip.rotate_on_autoeoi = reader.read_bool()?;
+    chip.edge_level = reader.read_u8()?;
+
+    validate_pic_chip(&chip, expected_master)?;
+    Ok(chip)
+}
+
+#[cfg(feature = "std")]
+fn validate_pic_controller(
+    master: &Pic8259State,
+    slave: &Pic8259State,
+    elcr: &[u8; 2],
+    forwarding_count: usize,
+) -> io::Result<()> {
+    validate_pic_chip(master, true)?;
+    validate_pic_chip(slave, false)?;
+    let [master_elcr, slave_elcr] = *elcr;
+    if master_elcr & !0xF8 != 0 || slave_elcr & !0xDE != 0 {
+        return Err(pic_snapshot_invalid("PIC ELCR has reserved trigger bits set"));
+    }
+    if master.edge_level != master_elcr || slave.edge_level != slave_elcr {
+        return Err(pic_snapshot_invalid(
+            "PIC ELCR and chip trigger modes disagree",
+        ));
+    }
+    if forwarding_count > PIC_IOAPIC_FORWARD_CAPACITY
+        || forwarding_count > bounds::MAX_SNAPSHOT_QUEUE_LEN
+    {
+        return Err(pic_snapshot_invalid("PIC forwarding queue exceeds its capacity"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn validate_pic_chip(chip: &Pic8259State, expected_master: bool) -> io::Result<()> {
+    if chip.master != expected_master {
+        return Err(pic_snapshot_invalid("PIC chip identity does not match live topology"));
+    }
+    if chip.interrupt_offset & 0x07 != 0 {
+        return Err(pic_snapshot_invalid("PIC interrupt offset is not vector aligned"));
+    }
+    if chip.irq >= 8 || chip.lowest_priority >= 8 {
+        return Err(pic_snapshot_invalid("PIC IRQ selector is out of range"));
+    }
+    if chip.irq_in.iter().any(|&level| level > 1) {
+        return Err(pic_snapshot_invalid("PIC input level is not boolean"));
+    }
+    if chip.edge_level & !(if expected_master { 0xF8 } else { 0xDE }) != 0 {
+        return Err(pic_snapshot_invalid("PIC trigger mode has reserved bits set"));
+    }
+    match chip.init.byte_expected {
+        0 | 2 | 3 | 4 => {}
+        _ => return Err(pic_snapshot_invalid("PIC initialization byte is out of range")),
+    }
+    if chip.init.in_init {
+        let valid_wait_state = chip.init.byte_expected == 2
+            || chip.init.byte_expected == 3
+            || (chip.init.byte_expected == 4 && chip.init.requires_4);
+        if !valid_wait_state {
+            return Err(pic_snapshot_invalid("PIC initialization state is inconsistent"));
+        }
+    } else if chip.init.byte_expected == 2 {
+        return Err(pic_snapshot_invalid("PIC initialization state is inconsistent"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

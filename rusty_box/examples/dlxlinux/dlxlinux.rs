@@ -573,23 +573,23 @@ fn run_dlxlinux() -> Result<()> {
     println!("╠════════════════════════════════════════════════════════════╣");
     println!(
         "║  Final RIP:   {:#018x}  CS={:04x} mode={}          ║",
-        emu.cpu.rip(),
-        emu.cpu.get_cs_selector(),
-        emu.cpu.get_cpu_mode()
+        emu.cpu().rip(),
+        emu.cpu().get_cs_selector(),
+        emu.cpu().get_cpu_mode()
     );
     println!(
         "║  EAX={:08x} EBX={:08x} ECX={:08x} EDX={:08x}  ║",
-        emu.cpu.eax(),
-        emu.cpu.ebx(),
-        emu.cpu.ecx(),
-        emu.cpu.edx()
+        emu.cpu().eax(),
+        emu.cpu().ebx(),
+        emu.cpu().ecx(),
+        emu.cpu().edx()
     );
     println!(
         "║  ESP={:08x} EBP={:08x} ESI={:08x} EDI={:08x}  ║",
-        emu.cpu.esp(),
-        emu.cpu.ebp(),
-        emu.cpu.esi(),
-        emu.cpu.edi()
+        emu.cpu().esp(),
+        emu.cpu().ebp(),
+        emu.cpu().esi(),
+        emu.cpu().edi()
     );
     println!("╚════════════════════════════════════════════════════════════╝");
 

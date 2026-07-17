@@ -11,9 +11,18 @@
 //!   COM4: 0x2E8-0x2EF, IRQ 3
 
 use crate::ring_buffer::RingBuffer;
+#[cfg(feature = "std")]
+use std::io::{self, Error, ErrorKind, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    SNAPSHOT_SECTION_VERSION,
+};
+
 
 /// UART crystal oscillator frequency (Hz) — Bochs BX_PC_CLOCK_XTL
-const UART_CLOCK_XTL: f64 = 1_843_200.0;
+const UART_CLOCK_HZ: u32 = 1_843_200;
 
 /// COM port base addresses
 const COM_BASES: [u16; 4] = [0x03F8, 0x02F8, 0x03E8, 0x02E8];
@@ -22,6 +31,9 @@ const COM_IRQS: [u8; 4] = [4, 3, 4, 3];
 
 /// FIFO size (16550A standard)
 const FIFO_SIZE: usize = 16;
+
+/// Bounded host-visible output retained when no consumer has drained it yet.
+const TX_OUTPUT_CAPACITY: usize = 4096;
 
 /// RX FIFO trigger levels indexed by 2-bit rxtrigger field
 const RX_FIFO_TRIGGERS: [u8; 4] = [1, 4, 8, 14];
@@ -190,20 +202,20 @@ struct SerialPort {
     /// Default: 87 usec at 115200 baud, 8-bit word (Bochs serial.cc).
     databyte_usec: u32,
 
-    // Timer handles for Bochs-compatible timer integration (Bochs serial.h).
-    // Bochs registers tx/rx/fifo timers via bx_pc_system.register_timer().
-    // Our TX is immediate (no timer pacing). Timer integration deferred.
-    tx_timer_handle: Option<usize>,
-    rx_timer_handle: Option<usize>,
+    // Each configured UART owns one FIFO-timeout timer. TX/RX stay immediate.
+    // The handle survives reset because the pc-system registration does too.
     fifo_timer_handle: Option<usize>,
 
-    // FIFO timeout: 16550 fires timeout interrupt after 4 character times
-    // with no new data and RX FIFO below trigger level. We track ticks since
-    // last RX byte; tick() checks and fires the timeout.
-    fifo_timeout_ticks: u32,
+    // `Some` means the scheduler must arm/rearm the one-shot after this I/O
+    // operation. The value is captured when the byte arrives so a later baud
+    // rate change cannot alter its already-established deadline.
+    fifo_timeout_delay_usec: Option<u64>,
+    /// True when the scheduler must consume the current activate/deactivate
+    /// state. Unrelated UART I/O must not restart an existing deadline.
+    fifo_timer_request_pending: bool,
 
     // TX output buffer — bytes written by guest, drained by host
-    tx_output: RingBuffer<u8, 4096>,
+    tx_output: RingBuffer<u8, TX_OUTPUT_CAPACITY>,
 }
 
 impl SerialPort {
@@ -244,13 +256,9 @@ impl SerialPort {
             baudrate: 115200,
             databyte_usec: 87,
 
-            // Bochs registers tx/rx/fifo timers here with bx_pc_system.register_timer().
-            // Our TX is immediate (no timer pacing). Timer integration deferred.
-            tx_timer_handle: None,
-            rx_timer_handle: None,
             fifo_timer_handle: None,
-
-            fifo_timeout_ticks: 0,
+            fifo_timeout_delay_usec: None,
+            fifo_timer_request_pending: false,
 
             tx_output: RingBuffer::new(),
         };
@@ -290,13 +298,554 @@ impl SerialPort {
         self.divisor_msb = 0;
         self.baudrate = 115200;
         self.databyte_usec = 87;
-        // Timer handles are not reset — they persist across soft resets
-        // (Bochs serial.cc only registers timers if handle == BX_NULL_TIMER_HANDLE)
-        self.fifo_timeout_ticks = 0;
+        // Timer handles persist across soft resets; timeout scheduling does not.
+        self.fifo_timeout_delay_usec = None;
+        self.fifo_timer_request_pending = true;
 
         // Simulate connected device
         self.modem_status.cts = true;
         self.modem_status.dsr = true;
+    }
+}
+
+/// Computes the timing derived from the UART's architectural divisor and line
+/// format. A zero divisor has no representable baud rate.
+#[inline]
+fn serial_timing_from_registers(
+    divisor_lsb: u8,
+    divisor_msb: u8,
+    wordlen_sel: u8,
+) -> Option<(u32, u32)> {
+    if wordlen_sel > 0x03 {
+        return None;
+    }
+
+    let divisor = u16::from_le_bytes([divisor_lsb, divisor_msb]);
+    if divisor == 0 {
+        return None;
+    }
+
+    let baudrate = UART_CLOCK_HZ / (u32::from(divisor) * 16);
+    if baudrate == 0 {
+        return None;
+    }
+
+    let frame_bits = u32::from(wordlen_sel) + 7;
+    let databyte_usec = 1_000_000u32.checked_mul(frame_bits)? / baudrate;
+    Some((baudrate, databyte_usec))
+}
+
+#[cfg(feature = "std")]
+const SERIAL_SNAPSHOT_HEADER_LEN: u64 = 8;
+
+/// Per-port bytes excluding logical FIFO/output contents and present optional
+/// `u64` timer values. FIFO and output counts are included in this fixed part.
+#[cfg(feature = "std")]
+const SERIAL_SNAPSHOT_PORT_FIXED_LEN: u64 = 71;
+
+#[cfg(feature = "std")]
+fn invalid_serial_snapshot(message: &'static str) -> io::Error {
+    Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn checked_serial_count(count: usize) -> io::Result<u32> {
+    if count > bounds::MAX_SNAPSHOT_QUEUE_LEN {
+        return Err(invalid_serial_snapshot(
+            "serial snapshot count exceeds implementation bound",
+        ));
+    }
+    u32::try_from(count)
+        .map_err(|_| invalid_serial_snapshot("serial snapshot count does not fit u32"))
+}
+
+#[cfg(feature = "std")]
+fn validate_serial_ring_len<const N: usize>(ring: &RingBuffer<u8, N>) -> io::Result<()> {
+    if ring.len() > N.min(bounds::MAX_SNAPSHOT_QUEUE_LEN) {
+        return Err(invalid_serial_snapshot(
+            "serial snapshot ring length exceeds live capacity",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn write_serial_ring<W: Write, const N: usize>(
+    writer: &mut W,
+    ring: &RingBuffer<u8, N>,
+) -> io::Result<()> {
+    validate_serial_ring_len(ring)?;
+    writer.write_u32(checked_serial_count(ring.len())?)?;
+    for byte in ring.iter() {
+        writer.write_u8(byte)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn read_serial_ring<R: Read, const N: usize>(
+    reader: &mut SnapshotReader<R>,
+) -> io::Result<RingBuffer<u8, N>> {
+    let count = reader.read_count(N.min(bounds::MAX_SNAPSHOT_QUEUE_LEN))?;
+    let mut ring = RingBuffer::new();
+    for _ in 0..count {
+        ring.push_back(reader.read_u8()?);
+    }
+    Ok(ring)
+}
+
+#[cfg(feature = "std")]
+fn write_optional_handle<W: Write>(writer: &mut W, handle: Option<usize>) -> io::Result<()> {
+    match handle {
+        Some(handle) => {
+            writer.write_bool(true)?;
+            writer.write_u64(
+                u64::try_from(handle)
+                    .map_err(|_| invalid_serial_snapshot("serial timer handle does not fit u64"))?,
+            )
+        }
+        None => writer.write_bool(false),
+    }
+}
+
+#[cfg(feature = "std")]
+fn read_optional_handle<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Option<usize>> {
+    if !reader.read_bool()? {
+        return Ok(None);
+    }
+    usize::try_from(reader.read_u64()?)
+        .map(Some)
+        .map_err(|_| invalid_serial_snapshot("serial timer handle does not fit usize"))
+}
+
+#[cfg(feature = "std")]
+fn write_optional_u64<W: Write>(writer: &mut W, value: Option<u64>) -> io::Result<()> {
+    match value {
+        Some(value) => {
+            writer.write_bool(true)?;
+            writer.write_u64(value)
+        }
+        None => writer.write_bool(false),
+    }
+}
+
+#[cfg(feature = "std")]
+fn read_optional_u64<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Option<u64>> {
+    if reader.read_bool()? {
+        Ok(Some(reader.read_u64()?))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "std")]
+fn valid_interrupt_id(value: u8) -> bool {
+    matches!(value, 0 | 1 | 2 | 3 | 6)
+}
+
+#[cfg(feature = "std")]
+fn validate_fifo_timeout_state(
+    fifo_cntl: FifoControl,
+    rx_fifo: &RingBuffer<u8, FIFO_SIZE>,
+    fifo_timeout_delay_usec: Option<u64>,
+) -> io::Result<()> {
+    let Some(delay) = fifo_timeout_delay_usec else {
+        return Ok(());
+    };
+    if delay == 0 {
+        return Err(invalid_serial_snapshot(
+            "serial FIFO timeout delay must be nonzero",
+        ));
+    }
+    if !fifo_cntl.enable || rx_fifo.is_empty() {
+        return Err(invalid_serial_snapshot(
+            "serial FIFO timeout is armed without receive data",
+        ));
+    }
+    let trigger = RX_FIFO_TRIGGERS
+        .get(usize::from(fifo_cntl.rxtrigger))
+        .copied()
+        .ok_or_else(|| invalid_serial_snapshot("serial FIFO trigger is invalid"))?;
+    if rx_fifo.len() >= usize::from(trigger) {
+        return Err(invalid_serial_snapshot(
+            "serial FIFO timeout is armed at receive trigger",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn validate_serial_port_for_snapshot(port: &SerialPort) -> io::Result<()> {
+    validate_serial_ring_len(&port.rx_fifo)?;
+    validate_serial_ring_len(&port.tx_fifo)?;
+    validate_serial_ring_len(&port.tx_output)?;
+    if !port.fifo_cntl.enable && (!port.rx_fifo.is_empty() || !port.tx_fifo.is_empty()) {
+        return Err(invalid_serial_snapshot(
+            "serial FIFOs contain data while FIFO mode is disabled",
+        ));
+    }
+    if !valid_interrupt_id(port.int_ident.int_id) {
+        return Err(invalid_serial_snapshot(
+            "serial interrupt identifier is invalid",
+        ));
+    }
+    if port.fifo_cntl.rxtrigger > 0x03 {
+        return Err(invalid_serial_snapshot("serial FIFO trigger is invalid"));
+    }
+    if serial_timing_from_registers(
+        port.divisor_lsb,
+        port.divisor_msb,
+        port.line_cntl.wordlen_sel,
+    )
+    .is_none()
+    {
+        return Err(invalid_serial_snapshot(
+            "serial divisor or line format is invalid",
+        ));
+    }
+    validate_fifo_timeout_state(
+        port.fifo_cntl,
+        &port.rx_fifo,
+        port.fifo_timeout_delay_usec,
+    )
+}
+
+#[cfg(feature = "std")]
+fn serial_port_snapshot_v3_len(port: &SerialPort) -> io::Result<u64> {
+    validate_serial_port_for_snapshot(port)?;
+    let rx_len = checked_snapshot_len_mul(
+        u64::try_from(port.rx_fifo.len())
+            .map_err(|_| invalid_serial_snapshot("serial RX FIFO length does not fit u64"))?,
+        1,
+    )?;
+    let tx_len = checked_snapshot_len_mul(
+        u64::try_from(port.tx_fifo.len())
+            .map_err(|_| invalid_serial_snapshot("serial TX FIFO length does not fit u64"))?,
+        1,
+    )?;
+    let output_len = checked_snapshot_len_mul(
+        u64::try_from(port.tx_output.len())
+            .map_err(|_| invalid_serial_snapshot("serial TX output length does not fit u64"))?,
+        1,
+    )?;
+
+    let mut len = checked_snapshot_len_add(SERIAL_SNAPSHOT_PORT_FIXED_LEN, rx_len)?;
+    len = checked_snapshot_len_add(len, tx_len)?;
+    len = checked_snapshot_len_add(len, output_len)?;
+    if port.fifo_timer_handle.is_some() {
+        len = checked_snapshot_len_add(len, 8)?;
+    }
+    if port.fifo_timeout_delay_usec.is_some() {
+        len = checked_snapshot_len_add(len, 8)?;
+    }
+    Ok(len)
+}
+
+#[cfg(feature = "std")]
+fn save_serial_port_snapshot_v3<W: Write>(
+    port: &SerialPort,
+    pending_irq_raise: bool,
+    pending_irq_lower: bool,
+    writer: &mut W,
+) -> io::Result<()> {
+    validate_serial_port_for_snapshot(port)?;
+
+    writer.write_u16(port.base)?;
+    writer.write_u8(port.irq)?;
+
+    writer.write_bool(port.ls_interrupt)?;
+    writer.write_bool(port.ms_interrupt)?;
+    writer.write_bool(port.rx_interrupt)?;
+    writer.write_bool(port.tx_interrupt)?;
+    writer.write_bool(port.fifo_interrupt)?;
+    writer.write_bool(port.ls_ipending)?;
+    writer.write_bool(port.ms_ipending)?;
+    writer.write_bool(port.rx_ipending)?;
+    writer.write_bool(port.fifo_ipending)?;
+
+    write_serial_ring(writer, &port.rx_fifo)?;
+    write_serial_ring(writer, &port.tx_fifo)?;
+
+    writer.write_u8(port.rxbuffer)?;
+    writer.write_u8(port.thrbuffer)?;
+    writer.write_u8(port.tsrbuffer)?;
+
+    writer.write_bool(port.int_enable.rxdata_enable)?;
+    writer.write_bool(port.int_enable.txhold_enable)?;
+    writer.write_bool(port.int_enable.rxlstat_enable)?;
+    writer.write_bool(port.int_enable.modstat_enable)?;
+
+    writer.write_bool(port.int_ident.ipending)?;
+    writer.write_u8(port.int_ident.int_id)?;
+
+    writer.write_bool(port.fifo_cntl.enable)?;
+    writer.write_u8(port.fifo_cntl.rxtrigger)?;
+
+    writer.write_u8(port.line_cntl.wordlen_sel)?;
+    writer.write_bool(port.line_cntl.stopbits)?;
+    writer.write_bool(port.line_cntl.parity_enable)?;
+    writer.write_bool(port.line_cntl.evenparity_sel)?;
+    writer.write_bool(port.line_cntl.stick_parity)?;
+    writer.write_bool(port.line_cntl.break_cntl)?;
+    writer.write_bool(port.line_cntl.dlab)?;
+
+    writer.write_bool(port.modem_cntl.dtr)?;
+    writer.write_bool(port.modem_cntl.rts)?;
+    writer.write_bool(port.modem_cntl.out1)?;
+    writer.write_bool(port.modem_cntl.out2)?;
+    writer.write_bool(port.modem_cntl.local_loopback)?;
+
+    writer.write_bool(port.line_status.rxdata_ready)?;
+    writer.write_bool(port.line_status.overrun_error)?;
+    writer.write_bool(port.line_status.parity_error)?;
+    writer.write_bool(port.line_status.framing_error)?;
+    writer.write_bool(port.line_status.break_int)?;
+    writer.write_bool(port.line_status.thr_empty)?;
+    writer.write_bool(port.line_status.tsr_empty)?;
+    writer.write_bool(port.line_status.fifo_error)?;
+
+    writer.write_bool(port.modem_status.delta_cts)?;
+    writer.write_bool(port.modem_status.delta_dsr)?;
+    writer.write_bool(port.modem_status.ri_trailedge)?;
+    writer.write_bool(port.modem_status.delta_dcd)?;
+    writer.write_bool(port.modem_status.cts)?;
+    writer.write_bool(port.modem_status.dsr)?;
+    writer.write_bool(port.modem_status.ri)?;
+    writer.write_bool(port.modem_status.dcd)?;
+
+    writer.write_u8(port.scratch)?;
+    writer.write_u8(port.divisor_lsb)?;
+    writer.write_u8(port.divisor_msb)?;
+    write_optional_handle(writer, port.fifo_timer_handle)?;
+    write_optional_u64(writer, port.fifo_timeout_delay_usec)?;
+    writer.write_bool(port.fifo_timer_request_pending)?;
+    write_serial_ring(writer, &port.tx_output)?;
+    writer.write_bool(pending_irq_raise)?;
+    writer.write_bool(pending_irq_lower)
+}
+
+#[cfg(feature = "std")]
+struct SerialPortSnapshot {
+    ls_interrupt: bool,
+    ms_interrupt: bool,
+    rx_interrupt: bool,
+    tx_interrupt: bool,
+    fifo_interrupt: bool,
+    ls_ipending: bool,
+    ms_ipending: bool,
+    rx_ipending: bool,
+    fifo_ipending: bool,
+    rx_fifo: RingBuffer<u8, FIFO_SIZE>,
+    tx_fifo: RingBuffer<u8, FIFO_SIZE>,
+    rxbuffer: u8,
+    thrbuffer: u8,
+    tsrbuffer: u8,
+    int_enable: IntEnable,
+    int_ident: IntIdent,
+    fifo_cntl: FifoControl,
+    line_cntl: LineControl,
+    modem_cntl: ModemControl,
+    line_status: LineStatus,
+    modem_status: ModemStatus,
+    scratch: u8,
+    divisor_lsb: u8,
+    divisor_msb: u8,
+    fifo_timer_handle: Option<usize>,
+    fifo_timeout_delay_usec: Option<u64>,
+    fifo_timer_request_pending: bool,
+    tx_output: RingBuffer<u8, TX_OUTPUT_CAPACITY>,
+    pending_irq_raise: bool,
+    pending_irq_lower: bool,
+}
+
+#[cfg(feature = "std")]
+impl SerialPortSnapshot {
+    fn read<R: Read>(
+        reader: &mut SnapshotReader<R>,
+        expected_base: u16,
+        expected_irq: u8,
+    ) -> io::Result<Self> {
+        let base = reader.read_u16()?;
+        let irq = reader.read_u8()?;
+        if base != expected_base || irq != expected_irq {
+            return Err(invalid_serial_snapshot(
+                "serial port topology does not match live configuration",
+            ));
+        }
+
+        let ls_interrupt = reader.read_bool()?;
+        let ms_interrupt = reader.read_bool()?;
+        let rx_interrupt = reader.read_bool()?;
+        let tx_interrupt = reader.read_bool()?;
+        let fifo_interrupt = reader.read_bool()?;
+        let ls_ipending = reader.read_bool()?;
+        let ms_ipending = reader.read_bool()?;
+        let rx_ipending = reader.read_bool()?;
+        let fifo_ipending = reader.read_bool()?;
+        let rx_fifo = read_serial_ring(reader)?;
+        let tx_fifo = read_serial_ring(reader)?;
+
+        let rxbuffer = reader.read_u8()?;
+        let thrbuffer = reader.read_u8()?;
+        let tsrbuffer = reader.read_u8()?;
+
+        let int_enable = IntEnable {
+            rxdata_enable: reader.read_bool()?,
+            txhold_enable: reader.read_bool()?,
+            rxlstat_enable: reader.read_bool()?,
+            modstat_enable: reader.read_bool()?,
+        };
+        let int_ident_ipending = reader.read_bool()?;
+        let int_ident_id = reader.read_u8()?;
+        if !valid_interrupt_id(int_ident_id) {
+            return Err(invalid_serial_snapshot(
+                "serial interrupt identifier is invalid",
+            ));
+        }
+        let int_ident = IntIdent {
+            ipending: int_ident_ipending,
+            int_id: int_ident_id,
+        };
+
+        let fifo_enable = reader.read_bool()?;
+        let fifo_rxtrigger = reader.read_u8()?;
+        if fifo_rxtrigger > 0x03 {
+            return Err(invalid_serial_snapshot("serial FIFO trigger is invalid"));
+        }
+        let fifo_cntl = FifoControl {
+            enable: fifo_enable,
+            rxtrigger: fifo_rxtrigger,
+        };
+        if !fifo_enable && (!rx_fifo.is_empty() || !tx_fifo.is_empty()) {
+            return Err(invalid_serial_snapshot(
+                "serial FIFOs contain data while FIFO mode is disabled",
+            ));
+        }
+
+        let line_wordlen_sel = reader.read_u8()?;
+        if line_wordlen_sel > 0x03 {
+            return Err(invalid_serial_snapshot(
+                "serial line word length selector is invalid",
+            ));
+        }
+        let line_cntl = LineControl {
+            wordlen_sel: line_wordlen_sel,
+            stopbits: reader.read_bool()?,
+            parity_enable: reader.read_bool()?,
+            evenparity_sel: reader.read_bool()?,
+            stick_parity: reader.read_bool()?,
+            break_cntl: reader.read_bool()?,
+            dlab: reader.read_bool()?,
+        };
+
+        let modem_cntl = ModemControl {
+            dtr: reader.read_bool()?,
+            rts: reader.read_bool()?,
+            out1: reader.read_bool()?,
+            out2: reader.read_bool()?,
+            local_loopback: reader.read_bool()?,
+        };
+        let line_status = LineStatus {
+            rxdata_ready: reader.read_bool()?,
+            overrun_error: reader.read_bool()?,
+            parity_error: reader.read_bool()?,
+            framing_error: reader.read_bool()?,
+            break_int: reader.read_bool()?,
+            thr_empty: reader.read_bool()?,
+            tsr_empty: reader.read_bool()?,
+            fifo_error: reader.read_bool()?,
+        };
+        let modem_status = ModemStatus {
+            delta_cts: reader.read_bool()?,
+            delta_dsr: reader.read_bool()?,
+            ri_trailedge: reader.read_bool()?,
+            delta_dcd: reader.read_bool()?,
+            cts: reader.read_bool()?,
+            dsr: reader.read_bool()?,
+            ri: reader.read_bool()?,
+            dcd: reader.read_bool()?,
+        };
+
+        let scratch = reader.read_u8()?;
+        let divisor_lsb = reader.read_u8()?;
+        let divisor_msb = reader.read_u8()?;
+        if serial_timing_from_registers(divisor_lsb, divisor_msb, line_wordlen_sel).is_none() {
+            return Err(invalid_serial_snapshot(
+                "serial divisor or line format is invalid",
+            ));
+        }
+
+        let fifo_timer_handle = read_optional_handle(reader)?;
+        let fifo_timeout_delay_usec = read_optional_u64(reader)?;
+        validate_fifo_timeout_state(fifo_cntl, &rx_fifo, fifo_timeout_delay_usec)?;
+        let fifo_timer_request_pending = reader.read_bool()?;
+        let tx_output = read_serial_ring(reader)?;
+        let pending_irq_raise = reader.read_bool()?;
+        let pending_irq_lower = reader.read_bool()?;
+
+        Ok(Self {
+            ls_interrupt,
+            ms_interrupt,
+            rx_interrupt,
+            tx_interrupt,
+            fifo_interrupt,
+            ls_ipending,
+            ms_ipending,
+            rx_ipending,
+            fifo_ipending,
+            rx_fifo,
+            tx_fifo,
+            rxbuffer,
+            thrbuffer,
+            tsrbuffer,
+            int_enable,
+            int_ident,
+            fifo_cntl,
+            line_cntl,
+            modem_cntl,
+            line_status,
+            modem_status,
+            scratch,
+            divisor_lsb,
+            divisor_msb,
+            fifo_timer_handle,
+            fifo_timeout_delay_usec,
+            fifo_timer_request_pending,
+            tx_output,
+            pending_irq_raise,
+            pending_irq_lower,
+        })
+    }
+
+    fn apply_to(self, port: &mut SerialPort) {
+        port.ls_interrupt = self.ls_interrupt;
+        port.ms_interrupt = self.ms_interrupt;
+        port.rx_interrupt = self.rx_interrupt;
+        port.tx_interrupt = self.tx_interrupt;
+        port.fifo_interrupt = self.fifo_interrupt;
+        port.ls_ipending = self.ls_ipending;
+        port.ms_ipending = self.ms_ipending;
+        port.rx_ipending = self.rx_ipending;
+        port.fifo_ipending = self.fifo_ipending;
+        port.rx_fifo = self.rx_fifo;
+        port.tx_fifo = self.tx_fifo;
+        port.rxbuffer = self.rxbuffer;
+        port.thrbuffer = self.thrbuffer;
+        port.tsrbuffer = self.tsrbuffer;
+        port.int_enable = self.int_enable;
+        port.int_ident = self.int_ident;
+        port.fifo_cntl = self.fifo_cntl;
+        port.line_cntl = self.line_cntl;
+        port.modem_cntl = self.modem_cntl;
+        port.line_status = self.line_status;
+        port.modem_status = self.modem_status;
+        port.scratch = self.scratch;
+        port.divisor_lsb = self.divisor_lsb;
+        port.divisor_msb = self.divisor_msb;
+        port.fifo_timer_handle = self.fifo_timer_handle;
+        port.fifo_timeout_delay_usec = self.fifo_timeout_delay_usec;
+        port.fifo_timer_request_pending = self.fifo_timer_request_pending;
+        port.tx_output = self.tx_output;
     }
 }
 
@@ -381,6 +930,87 @@ impl BxSerialC {
         self.ports[port_index].tx_output.len()
     }
 
+    /// Number of UARTs that were configured at construction time.
+    #[inline]
+    pub(crate) const fn configured_port_count(&self) -> usize {
+        self.num_ports
+    }
+
+    /// Attach or clear this port's fixed `TimerOwner::SerialFifo` handle.
+    ///
+    /// The central scheduler owns registration. Keeping the handle here makes
+    /// serial state snapshot-able and lets it verify the owner-to-port mapping.
+    #[inline]
+    pub(crate) fn set_fifo_timer_handle(&mut self, port_index: usize, handle: Option<usize>) {
+        if port_index < self.num_ports {
+            self.ports[port_index].fifo_timer_handle = handle;
+        }
+    }
+
+    /// Return the registered fixed FIFO-timeout handle for one configured port.
+    #[inline]
+    pub(crate) fn fifo_timer_handle(&self, port_index: usize) -> Option<usize> {
+        self.ports
+            .get(port_index)
+            .filter(|_| port_index < self.num_ports)
+            .and_then(|port| port.fifo_timer_handle)
+    }
+
+    /// Return the relative delay for the port's pending FIFO timeout.
+    ///
+    /// `Some(delay)` directs the scheduler to activate/restart the fixed
+    /// one-shot owner; `None` directs it to deactivate the owner.
+    #[inline]
+    pub(crate) fn fifo_timeout_delay_usec(&self, port_index: usize) -> Option<u64> {
+        self.ports
+            .get(port_index)
+            .filter(|_| port_index < self.num_ports)
+            .and_then(|port| port.fifo_timeout_delay_usec)
+    }
+    /// Drain one scheduler update without restarting the deadline on unrelated I/O.
+    #[inline]
+    pub(crate) fn take_fifo_timer_update(
+        &mut self,
+        port_index: usize,
+    ) -> Option<Option<u64>> {
+        let port = self
+            .ports
+            .get_mut(port_index)
+            .filter(|_| port_index < self.num_ports)?;
+        if !core::mem::take(&mut port.fifo_timer_request_pending) {
+            return None;
+        }
+        Some(port.fifo_timeout_delay_usec)
+    }
+
+    /// Service a fixed `TimerOwner::SerialFifo(port_index)` callback.
+    ///
+    /// A stale or canceled callback is harmless. A live timeout only becomes a
+    /// FIFO interrupt while data remains below its configured RX trigger.
+    pub(crate) fn fifo_timer_fired(&mut self, port_index: usize) -> bool {
+        if port_index >= self.num_ports {
+            return false;
+        }
+
+        let should_assert = {
+            let port = &mut self.ports[port_index];
+            let was_armed = port.fifo_timeout_delay_usec.take().is_some();
+            port.fifo_timer_request_pending = false;
+            let trigger = RX_FIFO_TRIGGERS[port.fifo_cntl.rxtrigger as usize] as usize;
+            was_armed
+                && port.fifo_cntl.enable
+                && !port.rx_fifo.is_empty()
+                && port.rx_fifo.len() < trigger
+        };
+
+        if should_assert {
+            self.ports[port_index].line_status.rxdata_ready = true;
+            self.raise_interrupt(port_index, IntSource::Fifo);
+        }
+
+        should_assert
+    }
+
     /// Check if any IRQ actions are pending, and return them.
     /// Returns (irq_number, raise) pairs to process.
     /// Uses a fixed-size buffer to avoid heap allocation on every tick.
@@ -401,6 +1031,12 @@ impl BxSerialC {
             }
         }
         PendingIrqs { buf, len, pos: 0 }
+    }
+
+    /// Return the configured UART index which owns an I/O address.
+    #[inline]
+    pub(crate) fn port_index_for_address(&self, port: u16) -> Option<usize> {
+        self.port_for_addr(port)
     }
 
     /// Identify which COM port a given I/O address belongs to
@@ -485,46 +1121,47 @@ impl BxSerialC {
     // ========================================================================
 
     fn rx_fifo_enq(&mut self, port_idx: usize, data: u8) {
-        let s = &mut self.ports[port_idx];
-
-        if s.fifo_cntl.enable {
-            if s.rx_fifo.len() >= FIFO_SIZE {
-                s.line_status.overrun_error = true;
+        if self.ports[port_idx].fifo_cntl.enable {
+            if self.ports[port_idx].rx_fifo.len() >= FIFO_SIZE {
+                self.ports[port_idx].line_status.overrun_error = true;
                 self.raise_interrupt(port_idx, IntSource::RxLstat);
                 return;
             }
-            s.rx_fifo.push_back(data);
-            let trigger = RX_FIFO_TRIGGERS[s.fifo_cntl.rxtrigger as usize] as usize;
-            if s.rx_fifo.len() >= trigger {
-                s.line_status.rxdata_ready = true;
+
+            let reached_trigger = {
+                let port = &mut self.ports[port_idx];
+                port.rx_fifo.push_back(data);
+                let trigger = RX_FIFO_TRIGGERS[port.fifo_cntl.rxtrigger as usize] as usize;
+                let reached_trigger = port.rx_fifo.len() >= trigger;
+
+                if reached_trigger {
+                    // A receive-data interrupt supersedes a pending timeout.
+                    port.fifo_timeout_delay_usec = None;
+                    port.line_status.rxdata_ready = true;
+                } else {
+                    // Bochs arms a fresh one-shot for every byte below trigger.
+                    port.fifo_timeout_delay_usec =
+                        Some(u64::from(port.databyte_usec) * 3);
+                }
+                port.fifo_timer_request_pending = true;
+
+                reached_trigger
+            };
+
+            if reached_trigger {
                 self.raise_interrupt(port_idx, IntSource::RxData);
             }
-            // FIFO timeout: 16550 fires timeout after 4 character times with no new
-            // data when FIFO has data below trigger level. Since we're not cycle-accurate,
-            // fire timeout immediately — data is available for the guest to read.
-            // Note: must drop borrow of `s` before calling raise_interrupt
-            else if !s.rx_fifo.is_empty() {
-                s.line_status.rxdata_ready = true;
-                s.fifo_ipending = true;
-                if s.int_enable.rxdata_enable {
-                    s.fifo_interrupt = true;
-                }
-                // Drop s borrow, then raise interrupt
-                let need_raise = self.ports[port_idx].int_enable.rxdata_enable;
-                if need_raise {
-                    self.raise_interrupt(port_idx, IntSource::Fifo);
-                }
-            }
-        } else {
-            if s.line_status.rxdata_ready {
-                s.line_status.overrun_error = true;
-                self.raise_interrupt(port_idx, IntSource::RxLstat);
-                return;
-            }
-            s.rxbuffer = data;
-            s.line_status.rxdata_ready = true;
-            self.raise_interrupt(port_idx, IntSource::RxData);
+            return;
         }
+
+        if self.ports[port_idx].line_status.rxdata_ready {
+            self.ports[port_idx].line_status.overrun_error = true;
+            self.raise_interrupt(port_idx, IntSource::RxLstat);
+            return;
+        }
+        self.ports[port_idx].rxbuffer = data;
+        self.ports[port_idx].line_status.rxdata_ready = true;
+        self.raise_interrupt(port_idx, IntSource::RxData);
     }
 
     /// Feed data into a COM port's RX path (called from outside to inject serial input)
@@ -554,6 +1191,10 @@ impl BxSerialC {
                     self.ports[port_idx].divisor_lsb as u32
                 } else {
                     let data = if self.ports[port_idx].fifo_cntl.enable {
+                        // Any receive-data read cancels the outstanding timeout;
+                        // a later byte below trigger starts a fresh one-shot.
+                        self.ports[port_idx].fifo_timeout_delay_usec = None;
+                        self.ports[port_idx].fifo_timer_request_pending = true;
                         let d = self.ports[port_idx].rx_fifo.pop_front().unwrap_or(0);
                         if self.ports[port_idx].rx_fifo.is_empty() {
                             self.ports[port_idx].line_status.rxdata_ready = false;
@@ -937,6 +1578,14 @@ impl BxSerialC {
                 }
 
                 s.fifo_cntl.rxtrigger = (val >> 6) & 0x03;
+                let trigger = RX_FIFO_TRIGGERS[s.fifo_cntl.rxtrigger as usize] as usize;
+                if !s.fifo_cntl.enable
+                    || s.rx_fifo.is_empty()
+                    || s.rx_fifo.len() >= trigger
+                {
+                    s.fifo_timeout_delay_usec = None;
+                    s.fifo_timer_request_pending = true;
+                }
             }
 
             REG_LCR => {
@@ -954,7 +1603,6 @@ impl BxSerialC {
                 // Bochs serial.cc: break in loopback mode
                 let need_break_enq = s.modem_cntl.local_loopback && s.line_cntl.break_cntl;
                 let check_dlab = prev_dlab && !s.line_cntl.dlab;
-                let divisor = ((s.divisor_msb as u16) << 8) | (s.divisor_lsb as u16);
                 if need_break_enq {
                     s.line_status.break_int = true;
                     s.line_status.framing_error = true;
@@ -962,28 +1610,24 @@ impl BxSerialC {
                 }
 
                 // When DLAB transitions from 1→0, recalculate baud rate and
-                // databyte_usec (Bochs serial.cc)
+                // databyte_usec (Bochs serial.cc).
                 if check_dlab {
-                    if divisor > 0 {
-                        let new_baudrate = (UART_CLOCK_XTL / (16.0 * divisor as f64)) as u32;
-                        let s = &mut self.ports[port_idx];
+                    let s = &mut self.ports[port_idx];
+                    if let Some((new_baudrate, databyte_usec)) = serial_timing_from_registers(
+                        s.divisor_lsb,
+                        s.divisor_msb,
+                        s.line_cntl.wordlen_sel,
+                    ) {
                         if new_baudrate != s.baudrate {
                             s.baudrate = new_baudrate;
                             tracing::trace!(
-                                "COM{}: baud rate set to {} (divisor={})",
+                                "COM{}: baud rate set to {}",
                                 port_idx + 1,
-                                new_baudrate,
-                                divisor
+                                new_baudrate
                             );
                         }
-                        // Bochs serial.cc:
-                        //   databyte_usec = (1000000.0 / baudrate) * (wordlen_sel + 7)
-                        // wordlen_sel + 7 gives total bits per character frame
-                        // (start bit + data bits + stop bit)
-                        s.databyte_usec = (1_000_000.0 / s.baudrate as f64
-                            * (s.line_cntl.wordlen_sel as f64 + 7.0))
-                            as u32;
-                        tracing::trace!("COM{}: databyte_usec={}", port_idx + 1, s.databyte_usec);
+                        s.databyte_usec = databyte_usec;
+                        tracing::trace!("COM{}: databyte_usec={}", port_idx + 1, databyte_usec);
                     } else {
                         tracing::trace!("COM{}: ignoring invalid baud rate divisor", port_idx + 1);
                     }
@@ -1076,6 +1720,132 @@ impl BxSerialC {
     }
 }
 
+#[cfg(feature = "std")]
+impl BxSerialC {
+    /// Encoded byte length of the complete SERIAL v3 section payload.
+    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+        if self.num_ports > self.ports.len() {
+            return Err(invalid_serial_snapshot(
+                "serial live port count exceeds controller capacity",
+            ));
+        }
+        checked_serial_count(self.num_ports)?;
+
+        let mut len = SERIAL_SNAPSHOT_HEADER_LEN;
+        for port in self.ports.iter().take(self.num_ports) {
+            len = checked_snapshot_len_add(len, serial_port_snapshot_v3_len(port)?)?;
+        }
+        Ok(len)
+    }
+
+    /// Streams the complete SERIAL v3 section payload without staging a
+    /// payload buffer or changing host output/callback wiring.
+    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.snapshot_v3_len()?;
+        writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+        writer.write_u32(checked_serial_count(self.num_ports)?)?;
+
+        for ((port, pending_irq_raise), pending_irq_lower) in self
+            .ports
+            .iter()
+            .take(self.num_ports)
+            .zip(self.pending_irq_raise.iter())
+            .zip(self.pending_irq_lower.iter())
+        {
+            save_serial_port_snapshot_v3(
+                port,
+                *pending_irq_raise,
+                *pending_irq_lower,
+                writer,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Decodes the complete SERIAL v3 section payload. Timer owner validation
+    /// and derived timing are deliberately deferred to the restore hooks.
+    pub(crate) fn restore_snapshot_v3<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> io::Result<()> {
+        if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
+            return Err(invalid_serial_snapshot(
+                "serial snapshot section version is unsupported",
+            ));
+        }
+        let saved_num_ports = usize::try_from(reader.read_u32()?)
+            .map_err(|_| invalid_serial_snapshot("serial port count does not fit usize"))?;
+        if saved_num_ports != self.num_ports || saved_num_ports > self.ports.len() {
+            return Err(invalid_serial_snapshot(
+                "serial configured port count does not match live configuration",
+            ));
+        }
+
+        let mut slots = self
+            .ports
+            .iter_mut()
+            .take(self.num_ports)
+            .zip(self.pending_irq_raise.iter_mut())
+            .zip(self.pending_irq_lower.iter_mut());
+        for _ in 0..saved_num_ports {
+            let ((port, pending_irq_raise), pending_irq_lower) = slots.next().ok_or_else(|| {
+                invalid_serial_snapshot("serial live port topology is incomplete")
+            })?;
+            let snapshot = SerialPortSnapshot::read(reader, port.base, port.irq)?;
+            let restored_pending_irq_raise = snapshot.pending_irq_raise;
+            let restored_pending_irq_lower = snapshot.pending_irq_lower;
+            snapshot.apply_to(port);
+            *pending_irq_raise = restored_pending_irq_raise;
+            *pending_irq_lower = restored_pending_irq_lower;
+        }
+
+        reader.finish_exact()
+    }
+
+    /// Validates decoded FIFO-timeout handles after PC_SYSTEM owns have been
+    /// restored. The closure must reject non-SerialFifo(port) owners.
+    pub(crate) fn validate_snapshot_v3_timer_handles<F>(
+        &self,
+        mut validate_owner: F,
+    ) -> io::Result<()>
+    where
+        F: FnMut(usize, usize) -> io::Result<()>,
+    {
+        if self.num_ports > self.ports.len() {
+            return Err(invalid_serial_snapshot(
+                "serial live port count exceeds controller capacity",
+            ));
+        }
+        for (port_index, port) in self.ports.iter().take(self.num_ports).enumerate() {
+            if let Some(handle) = port.fifo_timer_handle {
+                validate_owner(port_index, handle)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuilds deterministic UART timing once every section and timer owner
+    /// has restored. It does not schedule timers or emit IRQ edges.
+    pub(crate) fn after_restore_snapshot_v3(&mut self) -> io::Result<()> {
+        if self.num_ports > self.ports.len() {
+            return Err(invalid_serial_snapshot(
+                "serial live port count exceeds controller capacity",
+            ));
+        }
+        for port in self.ports.iter_mut().take(self.num_ports) {
+            let (baudrate, databyte_usec) = serial_timing_from_registers(
+                port.divisor_lsb,
+                port.divisor_msb,
+                port.line_cntl.wordlen_sel,
+            )
+            .ok_or_else(|| invalid_serial_snapshot("serial divisor or line format is invalid"))?;
+            port.baudrate = baudrate;
+            port.databyte_usec = databyte_usec;
+        }
+        Ok(())
+    }
+}
+
 // ============================================================================
 // I/O port handler functions for the device infrastructure
 #[cfg(test)]
@@ -1088,6 +1858,8 @@ mod tests {
         assert_eq!(serial.num_ports, 1);
         assert_eq!(serial.ports[0].base, 0x03F8);
         assert_eq!(serial.ports[0].irq, 4);
+        assert_eq!(serial.port_index_for_address(0x03F8), Some(0));
+        assert_eq!(serial.port_index_for_address(0x02F8), None);
     }
 
     #[test]
@@ -1193,5 +1965,170 @@ mod tests {
                                           // CTS and DSR should be set (simulated connected device)
         assert_ne!(msr & 0x10, 0, "CTS should be set");
         assert_ne!(msr & 0x20, 0, "DSR should be set");
+    }
+
+    #[test]
+    fn serial_configured_ports_keep_fifo_owner_handles() {
+        let mut serial = BxSerialC::new(4);
+
+        assert_eq!(serial.configured_port_count(), 4);
+        for port_index in 0..serial.configured_port_count() {
+            assert_eq!(serial.fifo_timer_handle(port_index), None);
+            serial.set_fifo_timer_handle(port_index, Some(100 + port_index));
+            assert_eq!(
+                serial.fifo_timer_handle(port_index),
+                Some(100 + port_index)
+            );
+        }
+    }
+
+    fn fifo_serial_with_four_byte_trigger() -> BxSerialC {
+        let mut serial = BxSerialC::new(1);
+        serial.write(COM_BASES[0] + REG_IIR_FCR, 0x41, 1);
+        serial.write(COM_BASES[0] + REG_MCR, 0x08, 1);
+        serial.write(COM_BASES[0] + REG_IER_DLM, 0x01, 1);
+        let _ = serial.take_pending_irqs().count();
+        serial
+    }
+
+    #[test]
+    fn serial_fifo_timeout_uses_three_character_deadline() {
+        let mut serial = fifo_serial_with_four_byte_trigger();
+
+        serial.receive_byte(0, 0x11);
+
+        assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
+        assert_eq!(serial.read(COM_BASES[0] + REG_IIR_FCR, 1) & 0x01, 0x01);
+
+        let _ = serial.take_pending_irqs().count();
+        assert!(serial.fifo_timer_fired(0));
+        let mut irqs = serial.take_pending_irqs();
+        assert_eq!(irqs.next(), Some((COM_IRQS[0], true)));
+        assert_eq!(irqs.next(), None);
+        assert_eq!(serial.fifo_timeout_delay_usec(0), None);
+        assert_eq!(
+            serial.read(COM_BASES[0] + REG_IIR_FCR, 1) & 0x0e,
+            0x0c
+        );
+    }
+
+    #[test]
+    fn serial_fifo_byte_rearms_three_character_timeout() {
+        let mut serial = fifo_serial_with_four_byte_trigger();
+
+        serial.receive_byte(0, 0x11);
+        assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
+
+        serial.receive_byte(0, 0x22);
+        assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
+        assert_eq!(serial.read(COM_BASES[0] + REG_IIR_FCR, 1) & 0x01, 0x01);
+    }
+
+    #[test]
+    fn serial_fifo_trigger_cancels_timeout() {
+        let mut serial = fifo_serial_with_four_byte_trigger();
+
+        for byte in 0..4 {
+            serial.receive_byte(0, byte);
+        }
+
+        assert_eq!(serial.fifo_timeout_delay_usec(0), None);
+        assert!(!serial.fifo_timer_fired(0));
+        assert_eq!(
+            serial.read(COM_BASES[0] + REG_IIR_FCR, 1) & 0x0e,
+            0x04
+        );
+    }
+
+    #[test]
+    fn serial_fifo_drain_cancels_timeout() {
+        let mut serial = fifo_serial_with_four_byte_trigger();
+
+        serial.receive_byte(0, 0x11);
+        assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
+
+        assert_eq!(serial.read(COM_BASES[0] + REG_RBR_THR, 1), 0x11);
+        assert_eq!(serial.fifo_timeout_delay_usec(0), None);
+        assert!(!serial.fifo_timer_fired(0));
+        assert_eq!(serial.read(COM_BASES[0] + REG_IIR_FCR, 1) & 0x01, 0x01);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn serial_snapshot_resumes_partial_fifo_and_irq_state() {
+        let mut serial = BxSerialC::new(1);
+        let base = COM_BASES[0];
+
+        serial.set_fifo_timer_handle(0, Some(73));
+        serial.write(base + REG_LCR, 0x9b, 1);
+        serial.write(base + REG_RBR_THR, 12, 1);
+        serial.write(base + REG_IER_DLM, 0, 1);
+        serial.write(base + REG_LCR, 0x1b, 1);
+        serial.write(base + REG_IIR_FCR, 0x41, 1);
+        serial.write(base + REG_MCR, 0x0b, 1);
+        serial.write(base + REG_IER_DLM, 0x0f, 1);
+        assert_eq!(serial.read(base + REG_IIR_FCR, 1) & 0x0e, 0x02);
+
+        serial.receive_byte(0, 0x10);
+        serial.receive_byte(0, 0x11);
+        serial.receive_byte(0, 0x12);
+        assert_eq!(serial.read(base + REG_RBR_THR, 1), 0x10);
+        serial.receive_byte(0, 0x13);
+
+        serial.write(base + REG_RBR_THR, b'a' as u32, 1);
+        serial.write(base + REG_RBR_THR, b'b' as u32, 1);
+        serial.write(base + REG_RBR_THR, b'c' as u32, 1);
+        assert_eq!(serial.ports[0].tx_output.pop_front(), Some(b'a'));
+        serial.write(base + REG_RBR_THR, b'd' as u32, 1);
+
+        let port = &mut serial.ports[0];
+        port.tx_fifo.push_back(0x20);
+        port.tx_fifo.push_back(0x21);
+        port.tx_fifo.push_back(0x22);
+        assert_eq!(port.tx_fifo.pop_front(), Some(0x20));
+        port.tx_fifo.push_back(0x23);
+
+        assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3_123));
+        assert!(serial.pending_irq_raise[0]);
+        assert!(serial.pending_irq_lower[0]);
+
+        let mut saved = Vec::new();
+        serial.save_snapshot_v3(&mut saved).unwrap();
+        assert_eq!(saved.len() as u64, serial.snapshot_v3_len().unwrap());
+
+        serial.reset();
+        serial.write(base + REG_SCR, 0xff, 1);
+        serial.receive_byte(0, 0xee);
+
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        serial.restore_snapshot_v3(&mut reader).unwrap();
+        serial.after_restore_snapshot_v3().unwrap();
+
+        assert_eq!(serial.fifo_timer_handle(0), Some(73));
+        assert_eq!(serial.ports[0].baudrate, 9_600);
+        assert_eq!(serial.ports[0].databyte_usec, 1_041);
+        assert_eq!(serial.read(base + REG_LCR, 1), 0x1b);
+        assert_eq!(serial.read(base + REG_IER_DLM, 1), 0x0f);
+        assert_eq!(serial.read(base + REG_MCR, 1), 0x0b);
+        assert_eq!(serial.read(base + REG_SCR, 1), 0);
+        assert_eq!(
+            serial.ports[0].tx_fifo.iter().collect::<Vec<_>>(),
+            vec![0x21, 0x22, 0x23]
+        );
+        assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3_123));
+        assert_eq!(serial.take_fifo_timer_update(0), Some(Some(3_123)));
+
+        assert_eq!(serial.read(base + REG_RBR_THR, 1), 0x11);
+        assert_eq!(serial.read(base + REG_RBR_THR, 1), 0x12);
+        assert_eq!(serial.read(base + REG_RBR_THR, 1), 0x13);
+        assert_eq!(serial.fifo_timeout_delay_usec(0), None);
+        assert_eq!(
+            serial.drain_tx_output(0).collect::<Vec<_>>(),
+            vec![b'b', b'c', b'd']
+        );
+        assert_eq!(
+            serial.take_pending_irqs().collect::<Vec<_>>(),
+            vec![(COM_IRQS[0], true), (COM_IRQS[0], false)]
+        );
     }
 }

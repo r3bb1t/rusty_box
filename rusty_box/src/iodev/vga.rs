@@ -26,6 +26,15 @@
 use alloc::{string::String, vec, vec::Vec};
 
 use crate::{config::BxPhyAddress, memory::BxMemC, Result};
+#[cfg(feature = "std")]
+use std::io::{self, Error, ErrorKind, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    SNAPSHOT_SECTION_VERSION,
+};
+
 
 use super::BxDevicesC;
 
@@ -453,6 +462,67 @@ impl Default for VbeState {
     }
 }
 
+/// The desired VGA BAR bases decoded from a snapshot.
+///
+/// The decoder deliberately leaves the live handler identity committed at its
+/// existing bases.  The machine-level restore path must relocate the handlers
+/// atomically, then call [`BxVgaC::commit_snapshot_v3_mapping_target`].
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VgaSnapshotRestoreTarget {
+    pub(crate) lfb_base: u32,
+    pub(crate) mmio_base: u32,
+}
+
+#[cfg(feature = "std")]
+#[derive(Clone, Copy)]
+struct VgaSnapshotVbeState {
+    cur_dispi: u16,
+    max_xres: u16,
+    max_yres: u16,
+    max_bpp: u16,
+    xres: u16,
+    yres: u16,
+    bpp: u16,
+    bank: [u16; 2],
+    bank_granularity_kb: u16,
+    enabled: u16,
+    curindex: u16,
+    offset_x: u16,
+    offset_y: u16,
+    virtual_xres: u16,
+    virtual_yres: u16,
+    get_capabilities: bool,
+    dac_8bit: bool,
+    ddc_enabled: bool,
+}
+
+#[cfg(feature = "std")]
+impl From<&VbeState> for VgaSnapshotVbeState {
+    fn from(vbe: &VbeState) -> Self {
+        Self {
+            cur_dispi: vbe.cur_dispi,
+            max_xres: vbe.max_xres,
+            max_yres: vbe.max_yres,
+            max_bpp: vbe.max_bpp,
+            xres: vbe.xres,
+            yres: vbe.yres,
+            bpp: vbe.bpp,
+            bank: vbe.bank,
+            bank_granularity_kb: vbe.bank_granularity_kb,
+            enabled: vbe.enabled,
+            curindex: vbe.curindex,
+            offset_x: vbe.offset_x,
+            offset_y: vbe.offset_y,
+            virtual_xres: vbe.virtual_xres,
+            virtual_yres: vbe.virtual_yres,
+            get_capabilities: vbe.get_capabilities,
+            dac_8bit: vbe.dac_8bit,
+            ddc_enabled: vbe.ddc_enabled,
+        }
+    }
+}
+
 /// VGA controller state
 #[derive(Debug)]
 pub(crate) struct BxVgaC {
@@ -665,10 +735,11 @@ pub(crate) struct BxVgaC {
     pci_enabled: bool,
     /// Committed BAR2 (VBE MMIO) base, or 0 when unmapped.
     mmio_base: u32,
-    /// A BAR0 commit that still needs the deferred LFB re-registration:
-    /// `(old_base, new_base)`. Drained by the emulator's PCI-deferred pass.
+    /// A BAR0 relocation awaiting successful LFB handler re-registration:
+    /// `(old_base, new_base)`.
     pending_lfb_relocate: Option<(u32, u32)>,
-    /// A BAR2 commit that still needs the deferred MMIO registration: the new base.
+    /// A BAR2 relocation awaiting successful MMIO handler registration. Its old
+    /// base remains in `mmio_base` until commit.
     pending_mmio_base: Option<u32>,
 }
 
@@ -980,6 +1051,627 @@ impl BxVgaC {
     pub(crate) fn set_icount_sync(&mut self, ips: u64) {
         self.has_icount_sync = true;
         self.ips = if ips > 0 { ips } else { 15_000_000 };
+    }
+
+    /// Returns the exact byte length of the standalone VGA v3 section payload.
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+        self.validate_snapshot_v3_source()?;
+
+        let text_len = snapshot_v3_usize_len(VGA_TEXT_MEM_SIZE)?;
+        let planar_len = snapshot_v3_usize_len(VGA_MEM_SIZE)?;
+        let pci_len = snapshot_v3_usize_len(self.pci_conf.len())?;
+        let palette_len = checked_snapshot_len_mul(
+            snapshot_v3_usize_len(self.pel_data.len())?,
+            snapshot_v3_usize_len(usize::from(PEL_CYCLES_PER_COLOR))?,
+        )?;
+        let vbe_len = snapshot_v3_usize_len(self.vbe_memory.len())?;
+
+        // Section version plus the scalar state written before every array.
+        let mut len = checked_snapshot_len_add(4, 84)?;
+        for array_len in [
+            pci_len,
+            snapshot_v3_usize_len(self.crtc_regs.len())?,
+            snapshot_v3_usize_len(self.attr_regs.len())?,
+            snapshot_v3_usize_len(self.seq_regs.len())?,
+            snapshot_v3_usize_len(self.graphics_regs.len())?,
+            text_len,
+            palette_len,
+            snapshot_v3_usize_len(self.latch.len())?,
+            planar_len,
+        ] {
+            len = checked_snapshot_len_add(len, 4)?;
+            len = checked_snapshot_len_add(len, array_len)?;
+        }
+
+        // VBE backing storage is configured, not guest-sized, but its length is
+        // encoded as u64 to prevent a format-dependent host-size conversion.
+        len = checked_snapshot_len_add(len, 8)?;
+        checked_snapshot_len_add(len, vbe_len)
+    }
+
+    /// Streams the complete standalone VGA v3 section, including its version.
+    ///
+    /// Fixed buffers are written straight to the destination; this method never
+    /// creates a payload vector or a copy of the framebuffer.
+    #[cfg(feature = "std")]
+    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.validate_snapshot_v3_source()?;
+
+        writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+        writer.write_u8(self.crtc_index)?;
+        writer.write_u8(self.attr_index)?;
+        writer.write_bool(self.attr_flip_flop)?;
+        writer.write_bool(self.video_enabled)?;
+        writer.write_u8(self.seq_index)?;
+        writer.write_u8(self.graphics_index)?;
+        writer.write_u8(self.status_reg)?;
+        writer.write_u8(self.misc_output)?;
+        writer.write_bool(self.vga_enabled)?;
+
+        writer.write_u8(self.pel_mask)?;
+        writer.write_u8(self.dac_state)?;
+        writer.write_u8(self.pel_write_addr)?;
+        writer.write_u8(self.pel_read_addr)?;
+        writer.write_u8(self.pel_write_cycle)?;
+        writer.write_u8(self.pel_read_cycle)?;
+
+        writer.write_bool(self.has_icount_sync)?;
+        writer.write_u64(self.ips)?;
+        writer.write_u32(self.vbe_memsize)?;
+        writer.write_bool(self.preferred_mode.is_some())?;
+        let preferred_mode = self.preferred_mode.unwrap_or((0, 0, 0));
+        writer.write_u16(preferred_mode.0)?;
+        writer.write_u16(preferred_mode.1)?;
+        writer.write_u16(preferred_mode.2)?;
+
+        let vbe = VgaSnapshotVbeState::from(&self.vbe);
+        writer.write_u16(vbe.cur_dispi)?;
+        writer.write_u16(vbe.max_xres)?;
+        writer.write_u16(vbe.max_yres)?;
+        writer.write_u16(vbe.max_bpp)?;
+        writer.write_u16(vbe.xres)?;
+        writer.write_u16(vbe.yres)?;
+        writer.write_u16(vbe.bpp)?;
+        writer.write_u16(vbe.bank[0])?;
+        writer.write_u16(vbe.bank[1])?;
+        writer.write_u16(vbe.bank_granularity_kb)?;
+        writer.write_u16(vbe.enabled)?;
+        writer.write_u16(vbe.curindex)?;
+        writer.write_u16(vbe.offset_x)?;
+        writer.write_u16(vbe.offset_y)?;
+        writer.write_u16(vbe.virtual_xres)?;
+        writer.write_u16(vbe.virtual_yres)?;
+        writer.write_bool(vbe.get_capabilities)?;
+        writer.write_bool(vbe.dac_8bit)?;
+        writer.write_bool(vbe.ddc_enabled)?;
+
+        writer.write_u32(self.ext_start_addr)?;
+        let mapping_target = self.snapshot_v3_mapping_target();
+        writer.write_bool(self.ext_y_dblsize)?;
+        writer.write_bool(self.pci_enabled)?;
+        writer.write_u32(mapping_target.lfb_base)?;
+        writer.write_u32(mapping_target.mmio_base)?;
+
+        write_snapshot_u32_len(writer, self.pci_conf.len())?;
+        writer.write_bytes(&self.pci_conf)?;
+        write_snapshot_u32_len(writer, self.crtc_regs.len())?;
+        writer.write_bytes(&self.crtc_regs)?;
+        write_snapshot_u32_len(writer, self.attr_regs.len())?;
+        writer.write_bytes(&self.attr_regs)?;
+        write_snapshot_u32_len(writer, self.seq_regs.len())?;
+        writer.write_bytes(&self.seq_regs)?;
+        write_snapshot_u32_len(writer, self.graphics_regs.len())?;
+        writer.write_bytes(&self.graphics_regs)?;
+        write_snapshot_u32_len(writer, self.text_memory.len())?;
+        writer.write_bytes(&self.text_memory)?;
+
+        let palette_len = checked_snapshot_len_mul(
+            snapshot_v3_usize_len(self.pel_data.len())?,
+            snapshot_v3_usize_len(usize::from(PEL_CYCLES_PER_COLOR))?,
+        )?;
+        writer.write_u32(
+            u32::try_from(palette_len)
+                .map_err(|_| invalid_vga_snapshot("VGA palette length does not fit u32"))?,
+        )?;
+        for color in &self.pel_data {
+            writer.write_bytes(color)?;
+        }
+
+        write_snapshot_u32_len(writer, self.latch.len())?;
+        writer.write_bytes(&self.latch)?;
+        write_snapshot_u32_len(writer, self.vga_memory.len())?;
+        writer.write_bytes(&self.vga_memory)?;
+        writer.write_u64(snapshot_v3_usize_len(self.vbe_memory.len())?)?;
+        writer.write_bytes(&self.vbe_memory)
+    }
+
+    /// Restores one bounded VGA v3 section and returns its desired BAR bases.
+    ///
+    /// Decoding never changes `vbe.base_address` or `mmio_base`, nor does it
+    /// register a memory handler.  The caller must use the returned target only
+    /// after the machine-level atomic relocation succeeds.
+    #[cfg(feature = "std")]
+    pub(crate) fn restore_snapshot_v3<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> io::Result<VgaSnapshotRestoreTarget> {
+        if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
+            return Err(invalid_vga_snapshot("unsupported VGA snapshot section version"));
+        }
+
+        let crtc_index = reader.read_u8()?;
+        let attr_index = reader.read_u8()?;
+        let attr_flip_flop = reader.read_bool()?;
+        let video_enabled = reader.read_bool()?;
+        let seq_index = reader.read_u8()?;
+        let graphics_index = reader.read_u8()?;
+        let status_reg = reader.read_u8()?;
+        let misc_output = reader.read_u8()?;
+        let vga_enabled = reader.read_bool()?;
+
+        let pel_mask = reader.read_u8()?;
+        let dac_state = reader.read_u8()?;
+        let pel_write_addr = reader.read_u8()?;
+        let pel_read_addr = reader.read_u8()?;
+        let pel_write_cycle = reader.read_u8()?;
+        let pel_read_cycle = reader.read_u8()?;
+
+        let has_icount_sync = reader.read_bool()?;
+        let ips = reader.read_u64()?;
+        let vbe_memsize = reader.read_u32()?;
+        let preferred_mode = if reader.read_bool()? {
+            Some((reader.read_u16()?, reader.read_u16()?, reader.read_u16()?))
+        } else {
+            let ignored = (reader.read_u16()?, reader.read_u16()?, reader.read_u16()?);
+            if ignored != (0, 0, 0) {
+                return Err(invalid_vga_snapshot("absent preferred VBE mode is nonzero"));
+            }
+            None
+        };
+        let saved_vbe = VgaSnapshotVbeState {
+            cur_dispi: reader.read_u16()?,
+            max_xres: reader.read_u16()?,
+            max_yres: reader.read_u16()?,
+            max_bpp: reader.read_u16()?,
+            xres: reader.read_u16()?,
+            yres: reader.read_u16()?,
+            bpp: reader.read_u16()?,
+            bank: [reader.read_u16()?, reader.read_u16()?],
+            bank_granularity_kb: reader.read_u16()?,
+            enabled: reader.read_u16()?,
+            curindex: reader.read_u16()?,
+            offset_x: reader.read_u16()?,
+            offset_y: reader.read_u16()?,
+            virtual_xres: reader.read_u16()?,
+            virtual_yres: reader.read_u16()?,
+            get_capabilities: reader.read_bool()?,
+            dac_8bit: reader.read_bool()?,
+            ddc_enabled: reader.read_bool()?,
+        };
+        let ext_start_addr = reader.read_u32()?;
+        let ext_y_dblsize = reader.read_bool()?;
+        let pci_enabled = reader.read_bool()?;
+        let target = VgaSnapshotRestoreTarget {
+            lfb_base: reader.read_u32()?,
+            mmio_base: reader.read_u32()?,
+        };
+
+        self.validate_snapshot_v3_scalars(
+            crtc_index,
+            attr_index,
+            dac_state,
+            pel_write_cycle,
+            pel_read_cycle,
+            has_icount_sync,
+            ips,
+            vbe_memsize,
+            preferred_mode,
+            &saved_vbe,
+            pci_enabled,
+            target,
+        )?;
+
+        let pci_len = read_snapshot_u32_len(reader, self.pci_conf.len(), "PCI config")?;
+        if pci_len != self.pci_conf.len() {
+            return Err(invalid_vga_snapshot("VGA PCI config length mismatch"));
+        }
+        let mut saved_bar0 = 0u32;
+        let mut saved_bar2 = 0u32;
+        let expected_bar0_low = self.pci_conf[0x10] & 0x0f;
+        let expected_bar2_low = self.pci_conf[0x18] & 0x0f;
+        for index in 0..self.pci_conf.len() {
+            let saved = reader.read_u8()?;
+            let live = self.pci_conf[index];
+            if !vga_snapshot_pci_byte_is_mutable(index) && saved != live {
+                return Err(invalid_vga_snapshot("VGA immutable PCI config mismatch"));
+            }
+            if index == 0x10 && saved & 0x0f != expected_bar0_low {
+                return Err(invalid_vga_snapshot("VGA BAR0 type bits changed"));
+            }
+            if index == 0x18 && saved & 0x0f != expected_bar2_low {
+                return Err(invalid_vga_snapshot("VGA BAR2 type bits changed"));
+            }
+            match index {
+                0x10 => saved_bar0 |= u32::from(saved),
+                0x11 => saved_bar0 |= u32::from(saved) << 8,
+                0x12 => saved_bar0 |= u32::from(saved) << 16,
+                0x13 => saved_bar0 |= u32::from(saved) << 24,
+                0x18 => saved_bar2 |= u32::from(saved),
+                0x19 => saved_bar2 |= u32::from(saved) << 8,
+                0x1a => saved_bar2 |= u32::from(saved) << 16,
+                0x1b => saved_bar2 |= u32::from(saved) << 24,
+                _ => {}
+            }
+            self.pci_conf[index] = saved;
+        }
+        if pci_enabled
+            && (saved_bar0 & !(self.vbe_memsize - 1) != target.lfb_base
+                || saved_bar2 & !(PCI_VGA_MMIO_SIZE - 1) != target.mmio_base)
+        {
+            return Err(invalid_vga_snapshot(
+                "VGA desired BAR target disagrees with PCI configuration",
+            ));
+        }
+
+        self.crtc_index = crtc_index;
+        self.attr_index = attr_index;
+        self.attr_flip_flop = attr_flip_flop;
+        self.video_enabled = video_enabled;
+        self.seq_index = seq_index;
+        self.graphics_index = graphics_index;
+        self.status_reg = status_reg;
+        self.misc_output = misc_output;
+        self.vga_enabled = vga_enabled;
+        self.pel_mask = pel_mask;
+        self.dac_state = dac_state;
+        self.pel_write_addr = pel_write_addr;
+        self.pel_read_addr = pel_read_addr;
+        self.pel_write_cycle = pel_write_cycle;
+        self.pel_read_cycle = pel_read_cycle;
+        self.vbe.cur_dispi = saved_vbe.cur_dispi;
+        self.vbe.max_xres = saved_vbe.max_xres;
+        self.vbe.max_yres = saved_vbe.max_yres;
+        self.vbe.max_bpp = saved_vbe.max_bpp;
+        self.vbe.xres = saved_vbe.xres;
+        self.vbe.yres = saved_vbe.yres;
+        self.vbe.bpp = saved_vbe.bpp;
+        self.vbe.bank = saved_vbe.bank;
+        self.vbe.bank_granularity_kb = saved_vbe.bank_granularity_kb;
+        self.vbe.enabled = saved_vbe.enabled;
+        self.vbe.curindex = saved_vbe.curindex;
+        self.vbe.offset_x = saved_vbe.offset_x;
+        self.vbe.offset_y = saved_vbe.offset_y;
+        self.vbe.virtual_xres = saved_vbe.virtual_xres;
+        self.vbe.virtual_yres = saved_vbe.virtual_yres;
+        self.vbe.get_capabilities = saved_vbe.get_capabilities;
+        self.vbe.dac_8bit = saved_vbe.dac_8bit;
+        self.vbe.ddc_enabled = saved_vbe.ddc_enabled;
+        self.ext_start_addr = ext_start_addr;
+        self.ext_y_dblsize = ext_y_dblsize;
+        self.pending_lfb_relocate = None;
+        self.pending_mmio_base = None;
+
+        read_snapshot_fixed_array(reader, &mut self.crtc_regs, "CRTC registers")?;
+        read_snapshot_fixed_array(reader, &mut self.attr_regs, "attribute registers")?;
+        read_snapshot_fixed_array(reader, &mut self.seq_regs, "sequencer registers")?;
+        read_snapshot_fixed_array(reader, &mut self.graphics_regs, "graphics registers")?;
+        read_snapshot_fixed_array(reader, &mut self.text_memory, "text memory")?;
+
+        let palette_len = read_snapshot_u32_len(
+            reader,
+            self.pel_data
+                .len()
+                .checked_mul(usize::from(PEL_CYCLES_PER_COLOR))
+                .ok_or_else(|| invalid_vga_snapshot("VGA palette length overflows"))?,
+            "DAC palette",
+        )?;
+        if palette_len
+            != self
+                .pel_data
+                .len()
+                .checked_mul(usize::from(PEL_CYCLES_PER_COLOR))
+                .ok_or_else(|| invalid_vga_snapshot("VGA palette length overflows"))?
+        {
+            return Err(invalid_vga_snapshot("VGA DAC palette length mismatch"));
+        }
+        for color in &mut self.pel_data {
+            reader.read_bytes(color)?;
+        }
+
+        read_snapshot_fixed_array(reader, &mut self.latch, "graphics latch")?;
+        read_snapshot_fixed_array(reader, &mut self.vga_memory, "planar VGA memory")?;
+
+        let vbe_len = reader.read_len(self.vbe_memory.len())?;
+        if vbe_len != self.vbe_memory.len() {
+            return Err(invalid_vga_snapshot("VBE memory length does not match configuration"));
+        }
+        reader.read_bytes(&mut self.vbe_memory)?;
+
+        Ok(target)
+    }
+
+    /// Returns the desired VGA BAR targets encoded in PCI configuration without
+    /// changing handler registration or committing a queued relocation.
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_v3_mapping_target(&self) -> VgaSnapshotRestoreTarget {
+        if !self.pci_enabled {
+            return self.snapshot_v3_committed_mapping_target();
+        }
+
+        let lfb_bar = u32::from_le_bytes([
+            self.pci_conf[0x10],
+            self.pci_conf[0x11],
+            self.pci_conf[0x12],
+            self.pci_conf[0x13],
+        ]);
+        let mmio_bar = u32::from_le_bytes([
+            self.pci_conf[0x18],
+            self.pci_conf[0x19],
+            self.pci_conf[0x1a],
+            self.pci_conf[0x1b],
+        ]);
+        VgaSnapshotRestoreTarget {
+            lfb_base: lfb_bar & !(self.vbe_memsize - 1),
+            mmio_base: mmio_bar & !(PCI_VGA_MMIO_SIZE - 1),
+        }
+    }
+
+    /// Returns the current handler identity for restore topology capture.
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_v3_committed_mapping_target(&self) -> VgaSnapshotRestoreTarget {
+        VgaSnapshotRestoreTarget {
+            lfb_base: self.vbe.base_address,
+            mmio_base: self.mmio_base,
+        }
+    }
+
+    /// Commits desired BAR identities after the parent has relocated its live
+    /// memory handlers from their captured old ranges.
+    #[cfg(feature = "std")]
+    pub(crate) fn commit_snapshot_v3_mapping_target(&mut self, target: VgaSnapshotRestoreTarget) {
+        self.vbe.base_address = target.lfb_base;
+        self.mmio_base = target.mmio_base;
+        self.pending_lfb_relocate = None;
+        self.pending_mmio_base = None;
+    }
+
+    /// Rebuilds parsed VGA state and invalidates all GUI-facing caches after a
+    /// successful whole-machine snapshot restore.
+    #[cfg(feature = "std")]
+    pub(crate) fn rebuild_snapshot_v3_derived_state(&mut self) -> io::Result<()> {
+        self.validate_vbe_snapshot_state(&VgaSnapshotVbeState::from(&self.vbe))?;
+        self.validate_snapshot_v3_cache_topology()?;
+
+        self.misc_color_emulation = (self.misc_output & MISC_OUT_COLOR_EMULATION) != 0;
+        self.misc_enable_ram = (self.misc_output & MISC_OUT_ENABLE_RAM) != 0;
+        self.misc_clock_select =
+            (self.misc_output >> MISC_OUT_CLOCK_SEL_SHIFT) & MISC_OUT_CLOCK_SEL_MASK;
+        self.misc_select_high_bank = (self.misc_output & MISC_OUT_HIGH_BANK) != 0;
+        self.misc_horiz_sync_pol = (self.misc_output & MISC_OUT_HORIZ_POL) != 0;
+        self.misc_vert_sync_pol = (self.misc_output & MISC_OUT_VERT_POL) != 0;
+        self.seq_chain_four = (self.seq_regs[SEQ_REG_MEMORY_MODE] & 0x08) != 0;
+        self.seq_odd_even_dis = (self.seq_regs[SEQ_REG_MEMORY_MODE] & 0x04) != 0;
+
+        let (bpp_multiplier, line_offset) = vga_snapshot_vbe_layout(
+            self.vbe.bpp,
+            self.vbe.virtual_xres,
+        )?;
+        self.vbe.bpp_multiplier = bpp_multiplier;
+        self.vbe.line_offset = line_offset;
+        self.vbe.visible_screen_size = u32::from(line_offset)
+            .checked_mul(u32::from(self.vbe.yres))
+            .ok_or_else(|| invalid_vga_snapshot("VBE visible-screen size overflows"))?;
+        self.vga_mem_mask = if self.vbe.enabled == VBE_DISPI_ENABLED {
+            self.vbe_memsize
+                .checked_sub(1)
+                .ok_or_else(|| invalid_vga_snapshot("VBE memory size is zero"))?
+        } else {
+            u32::try_from(VGA_MEM_SIZE - 1)
+                .map_err(|_| invalid_vga_snapshot("legacy VGA memory mask does not fit u32"))?
+        };
+        self.ext_offset = vga_snapshot_bank_offset(
+            self.vbe.bank[0],
+            self.vbe.bank_granularity_kb,
+        )?;
+        self.ext_read_offset = vga_snapshot_bank_offset(
+            self.vbe.bank[1],
+            self.vbe.bank_granularity_kb,
+        )?;
+        self.recompute_vbe_virtual_start();
+        self.calculate_retrace_timing();
+
+        let cursor_addr = (usize::from(self.crtc_regs[CRTC_CURSOR_LOC_HIGH]) << 8)
+            | usize::from(self.crtc_regs[CRTC_CURSOR_LOC_LOW]);
+        self.cursor_pos = (
+            cursor_addr / BYTES_PER_ROW,
+            (cursor_addr % BYTES_PER_ROW) / BYTES_PER_CHAR,
+        );
+
+        self.text_buffer.fill(0);
+        self.text_snapshot.fill(0);
+        self.text_dirty = true;
+        self.text_buffer_update = true;
+        self.vga_mem_updated = 1;
+        self.last_xres = 0;
+        self.last_yres = 0;
+        self.last_fw = 0;
+        self.last_fh = 0;
+        self.last_bpp = 0;
+        self.vga_tile_updated.fill(true);
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    fn validate_snapshot_v3_source(&self) -> io::Result<()> {
+        self.validate_vbe_snapshot_state(&VgaSnapshotVbeState::from(&self.vbe))?;
+        self.validate_snapshot_v3_cache_topology()?;
+        if snapshot_v3_usize_len(self.vbe_memory.len())?
+            != u64::from(self.vbe_memsize)
+        {
+            return Err(invalid_vga_snapshot(
+                "live VBE backing storage does not match configured size",
+            ));
+        }
+        if self.pel_data.len() > bounds::MAX_SNAPSHOT_COUNT {
+            return Err(invalid_vga_snapshot("VGA palette exceeds snapshot count bound"));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    #[allow(clippy::too_many_arguments)]
+    fn validate_snapshot_v3_scalars(
+        &self,
+        crtc_index: u8,
+        attr_index: u8,
+        dac_state: u8,
+        pel_write_cycle: u8,
+        pel_read_cycle: u8,
+        has_icount_sync: bool,
+        ips: u64,
+        vbe_memsize: u32,
+        preferred_mode: Option<(u16, u16, u16)>,
+        vbe: &VgaSnapshotVbeState,
+        pci_enabled: bool,
+        target: VgaSnapshotRestoreTarget,
+    ) -> io::Result<()> {
+        if crtc_index > CRTC_INDEX_MASK {
+            return Err(invalid_vga_snapshot("VGA CRTC index is out of range"));
+        }
+        if attr_index > ATTR_INDEX_MASK {
+            return Err(invalid_vga_snapshot("VGA attribute index is out of range"));
+        }
+        if !matches!(
+            dac_state,
+            DAC_STATE_WRITE_MODE | DAC_STATE_READ_MODE | 0x01
+        ) {
+            return Err(invalid_vga_snapshot("VGA DAC state is invalid"));
+        }
+        if pel_write_cycle >= PEL_CYCLES_PER_COLOR || pel_read_cycle >= PEL_CYCLES_PER_COLOR {
+            return Err(invalid_vga_snapshot("VGA DAC cycle is out of range"));
+        }
+        if has_icount_sync != self.has_icount_sync || ips != self.ips {
+            return Err(invalid_vga_snapshot("VGA retrace clock configuration mismatch"));
+        }
+        if vbe_memsize != self.vbe_memsize {
+            return Err(invalid_vga_snapshot("VBE memory configuration mismatch"));
+        }
+        if preferred_mode != self.preferred_mode {
+            return Err(invalid_vga_snapshot("VBE preferred-mode configuration mismatch"));
+        }
+        if pci_enabled != self.pci_enabled {
+            return Err(invalid_vga_snapshot("VGA PCI enable configuration mismatch"));
+        }
+        self.validate_vbe_snapshot_state(vbe)?;
+        validate_vga_snapshot_bar_base(target.lfb_base, self.vbe_memsize)?;
+        validate_vga_snapshot_bar_base(target.mmio_base, PCI_VGA_MMIO_SIZE)
+    }
+
+    #[cfg(feature = "std")]
+    fn validate_vbe_snapshot_state(&self, vbe: &VgaSnapshotVbeState) -> io::Result<()> {
+        if self.vbe_memsize == 0 || !self.vbe_memsize.is_power_of_two() {
+            return Err(invalid_vga_snapshot("VBE memory configuration is not a power of two"));
+        }
+        if vbe.max_xres != self.vbe.max_xres
+            || vbe.max_yres != self.vbe.max_yres
+            || vbe.max_bpp != self.vbe.max_bpp
+        {
+            return Err(invalid_vga_snapshot("VBE capability configuration mismatch"));
+        }
+        if vbe.cur_dispi < VBE_DISPI_ID0 || vbe.cur_dispi > VBE_DISPI_ID5 {
+            return Err(invalid_vga_snapshot("VBE DISPI identifier is invalid"));
+        }
+        if vbe.xres == 0
+            || vbe.yres == 0
+            || vbe.xres > vbe.max_xres
+            || vbe.yres > vbe.max_yres
+            || !vga_snapshot_bpp_is_valid(vbe.bpp)
+            || vbe.bpp > vbe.max_bpp
+        {
+            return Err(invalid_vga_snapshot("VBE resolution or bpp is invalid"));
+        }
+        if vbe.enabled != VBE_DISPI_DISABLED && vbe.enabled != VBE_DISPI_ENABLED {
+            return Err(invalid_vga_snapshot("VBE enable value is invalid"));
+        }
+        if vbe.bank_granularity_kb != 32 && vbe.bank_granularity_kb != 64 {
+            return Err(invalid_vga_snapshot("VBE bank granularity is invalid"));
+        }
+        if vbe.virtual_xres == 0
+            || vbe.virtual_yres == 0
+            || vbe.virtual_xres < vbe.xres
+            || vbe.virtual_yres < vbe.yres
+        {
+            return Err(invalid_vga_snapshot("VBE virtual resolution is invalid"));
+        }
+
+        let (_, line_offset) = vga_snapshot_vbe_layout(vbe.bpp, vbe.virtual_xres)?;
+        let virtual_size = u32::from(line_offset)
+            .checked_mul(u32::from(vbe.virtual_yres))
+            .ok_or_else(|| invalid_vga_snapshot("VBE virtual-screen size overflows"))?;
+        let visible_size = u32::from(line_offset)
+            .checked_mul(u32::from(vbe.yres))
+            .ok_or_else(|| invalid_vga_snapshot("VBE visible-screen size overflows"))?;
+        if virtual_size > self.vbe_memsize || visible_size > self.vbe_memsize {
+            return Err(invalid_vga_snapshot("VBE screen geometry exceeds configured memory"));
+        }
+        if u32::from(vbe.offset_x)
+            .checked_add(u32::from(vbe.xres))
+            .ok_or_else(|| invalid_vga_snapshot("VBE horizontal offset overflows"))?
+            > u32::from(vbe.virtual_xres)
+            || u32::from(vbe.offset_y)
+                .checked_add(u32::from(vbe.yres))
+                .ok_or_else(|| invalid_vga_snapshot("VBE vertical offset overflows"))?
+                > u32::from(vbe.virtual_yres)
+        {
+            return Err(invalid_vga_snapshot("VBE display offset is outside the virtual screen"));
+        }
+
+        let bank_granularity = u32::from(vbe.bank_granularity_kb)
+            .checked_mul(1024)
+            .ok_or_else(|| invalid_vga_snapshot("VBE bank granularity overflows"))?;
+        let mut bank_count = self.vbe_memsize / bank_granularity;
+        if vbe.bpp == VBE_DISPI_BPP_4 {
+            bank_count /= 4;
+        }
+        if bank_count == 0
+            || u32::from(vbe.bank[0]) >= bank_count
+            || u32::from(vbe.bank[1]) >= bank_count
+        {
+            return Err(invalid_vga_snapshot("VBE bank is outside configured memory"));
+        }
+        for bank in vbe.bank {
+            if vga_snapshot_bank_offset(bank, vbe.bank_granularity_kb)? >= self.vbe_memsize {
+                return Err(invalid_vga_snapshot("VBE bank offset is outside configured memory"));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    fn validate_snapshot_v3_cache_topology(&self) -> io::Result<()> {
+        let expected_x_tiles = (u32::from(self.vbe.max_xres)
+            .checked_add(VGA_X_TILESIZE - 1)
+            .ok_or_else(|| invalid_vga_snapshot("VGA horizontal tile count overflows"))?)
+            / VGA_X_TILESIZE;
+        let expected_y_tiles = (u32::from(self.vbe.max_yres)
+            .checked_add(VGA_Y_TILESIZE - 1)
+            .ok_or_else(|| invalid_vga_snapshot("VGA vertical tile count overflows"))?)
+            / VGA_Y_TILESIZE;
+        if u32::from(self.num_x_tiles) != expected_x_tiles
+            || u32::from(self.num_y_tiles) != expected_y_tiles
+        {
+            return Err(invalid_vga_snapshot("VGA tile topology does not match configuration"));
+        }
+        let tile_count = expected_x_tiles
+            .checked_mul(expected_y_tiles)
+            .ok_or_else(|| invalid_vga_snapshot("VGA tile count overflows"))?;
+        let tile_count = usize::try_from(tile_count)
+            .map_err(|_| invalid_vga_snapshot("VGA tile count does not fit usize"))?;
+        if self.vga_tile_updated.len() != tile_count {
+            return Err(invalid_vga_snapshot("VGA tile cache capacity mismatch"));
+        }
+        Ok(())
     }
 
     /// Calculate retrace timing from CRTC registers.
@@ -3233,8 +3925,8 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
 // commit; mem_read/mem_write detect the MMIO range (is_mmio_addr) and route to
 // vbe_mmio_read / vbe_mmio_write. BAR0 is the linear framebuffer.
 
-/// Result of a PCI config write: which BAR (if any) committed a new base and so
-/// needs a deferred memory-handler (re)registration.
+/// Result of a PCI config write: which BAR (if any) queued a new base for
+/// transactional memory-handler relocation.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct VgaBarChange {
     pub lfb: bool,
@@ -3300,10 +3992,9 @@ impl BxVgaC {
         value
     }
 
-    /// Write the PCI config space, handling BAR0 (LFB) and BAR2 (MMIO) sizing and
-    /// commit. Mirrors Bochs `pci_write_handler_common` + vga.cc
-    /// `pci_write_handler`. Returns which BAR committed a new base so the caller
-    /// schedules the deferred memory (re)registration.
+    /// Write PCI config space, handling BAR0 (LFB) and BAR2 (MMIO) sizing and
+    /// queuing relocation. Mirrors Bochs `pci_write_handler_common` + vga.cc
+    /// `pci_write_handler`. The caller must relocate memory handlers, then commit.
     pub(crate) fn pci_write(&mut self, address: u8, mut value: u32, io_len: u8) -> VgaBarChange {
         if !self.pci_enabled {
             return VgaBarChange::default();
@@ -3342,9 +4033,8 @@ impl BxVgaC {
                 }
                 Some(_) => {} // upper BAR bytes: stored verbatim
                 None => match addr {
-                    0x04 => value8 &= 0x03,  // command: io + mem enable only
                     0x0C | 0x0D | 0x3C => {} // cache-line, latency, interrupt-line: writable
-                    // Everything else (ids/status/class/header, unimplemented
+                    // Everything else (ids/status/class/header, command, unimplemented
                     // BARs, expansion ROM) is read-only.
                     _ => continue,
                 },
@@ -3367,8 +4057,7 @@ impl BxVgaC {
                 let new_base = raw & !(size - 1);
                 if base_reg == 0x10 {
                     if new_base != self.vbe.base_address {
-                        // Defer the LFB handler move (needs memory access);
-                        // vbe.base_address is updated by the deferred handler.
+                        // Defer the LFB handler move until memory re-registration succeeds.
                         self.pending_lfb_relocate = Some((self.vbe.base_address, new_base));
                         change.lfb = true;
                     }
@@ -3381,24 +4070,30 @@ impl BxVgaC {
         change
     }
 
-    /// Drain a pending LFB relocation `(old_base, new_base)`.
-    pub(crate) fn take_pending_lfb_relocate(&mut self) -> Option<(u32, u32)> {
-        self.pending_lfb_relocate.take()
+    /// Inspect the LFB relocation awaiting memory-handler re-registration.
+    pub(crate) fn peek_pending_lfb_relocate(&self) -> Option<(u32, u32)> {
+        self.pending_lfb_relocate
     }
 
-    /// Drain a pending BAR2 MMIO base assignment.
-    pub(crate) fn take_pending_mmio_base(&mut self) -> Option<u32> {
-        self.pending_mmio_base.take()
+    /// Commit the LFB relocation after memory-handler re-registration succeeds.
+    pub(crate) fn commit_pending_lfb_relocate(&mut self) -> Option<(u32, u32)> {
+        let relocate = self.pending_lfb_relocate.take()?;
+        self.vbe.base_address = relocate.1;
+        Some(relocate)
     }
 
-    /// Record the committed LFB base after the deferred relocation registered it.
-    pub(crate) fn set_lfb_base(&mut self, base: u32) {
-        self.vbe.base_address = base;
+    /// Inspect the BAR2 relocation awaiting memory-handler re-registration.
+    pub(crate) fn peek_pending_mmio_relocate(&self) -> Option<(u32, u32)> {
+        self.pending_mmio_base
+            .map(|new_base| (self.mmio_base, new_base))
     }
 
-    /// Record the committed BAR2 MMIO base after the deferred registration.
-    pub(crate) fn set_mmio_base(&mut self, base: u32) {
-        self.mmio_base = base;
+    /// Commit the BAR2 relocation after memory-handler re-registration succeeds.
+    pub(crate) fn commit_pending_mmio_relocate(&mut self) -> Option<(u32, u32)> {
+        let new_base = self.pending_mmio_base.take()?;
+        let relocate = (self.mmio_base, new_base);
+        self.mmio_base = new_base;
+        Some(relocate)
     }
 
     /// Whether `addr` falls in the committed BAR2 MMIO window.
@@ -3791,9 +4486,124 @@ impl BxVgaC {
     }
 }
 
+#[cfg(feature = "std")]
+fn invalid_vga_snapshot(message: &'static str) -> Error {
+    Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn snapshot_v3_usize_len(len: usize) -> io::Result<u64> {
+    let len = u64::try_from(len)
+        .map_err(|_| invalid_vga_snapshot("VGA buffer length does not fit u64"))?;
+    if len > bounds::MAX_SNAPSHOT_SECTION_LEN {
+        return Err(invalid_vga_snapshot(
+            "VGA buffer length exceeds snapshot section bound",
+        ));
+    }
+    Ok(len)
+}
+
+#[cfg(feature = "std")]
+fn write_snapshot_u32_len<W: Write>(writer: &mut W, len: usize) -> io::Result<()> {
+    let len = snapshot_v3_usize_len(len)?;
+    writer.write_u32(
+        u32::try_from(len)
+            .map_err(|_| invalid_vga_snapshot("VGA fixed-buffer length does not fit u32"))?,
+    )
+}
+
+#[cfg(feature = "std")]
+fn read_snapshot_u32_len<R: Read>(
+    reader: &mut SnapshotReader<R>,
+    maximum: usize,
+    _description: &'static str,
+) -> io::Result<usize> {
+    reader.read_count(maximum)
+}
+
+#[cfg(feature = "std")]
+fn read_snapshot_fixed_array<R: Read, const N: usize>(
+    reader: &mut SnapshotReader<R>,
+    bytes: &mut [u8; N],
+    description: &'static str,
+) -> io::Result<()> {
+    let len = read_snapshot_u32_len(reader, N, description)?;
+    if len != N {
+        return Err(invalid_vga_snapshot("VGA fixed-buffer length mismatch"));
+    }
+    reader.read_bytes(bytes)
+}
+
+#[cfg(feature = "std")]
+fn vga_snapshot_pci_byte_is_mutable(index: usize) -> bool {
+    matches!(index, 0x0c | 0x0d | 0x3c) || (0x10..=0x13).contains(&index) || (0x18..=0x1b).contains(&index)
+}
+
+#[cfg(feature = "std")]
+fn vga_snapshot_bpp_is_valid(bpp: u16) -> bool {
+    matches!(
+        bpp,
+        VBE_DISPI_BPP_4
+            | VBE_DISPI_BPP_8
+            | VBE_DISPI_BPP_15
+            | VBE_DISPI_BPP_16
+            | VBE_DISPI_BPP_24
+            | VBE_DISPI_BPP_32
+    )
+}
+
+#[cfg(feature = "std")]
+fn vga_snapshot_vbe_layout(bpp: u16, virtual_xres: u16) -> io::Result<(u8, u16)> {
+    let bpp_multiplier = match bpp {
+        VBE_DISPI_BPP_4 | VBE_DISPI_BPP_8 => 1,
+        VBE_DISPI_BPP_15 | VBE_DISPI_BPP_16 => 2,
+        VBE_DISPI_BPP_24 => 3,
+        VBE_DISPI_BPP_32 => 4,
+        _ => return Err(invalid_vga_snapshot("VBE bpp is invalid")),
+    };
+    let line_offset = if bpp == VBE_DISPI_BPP_4 {
+        virtual_xres / 8
+    } else {
+        virtual_xres
+            .checked_mul(u16::from(bpp_multiplier))
+            .ok_or_else(|| invalid_vga_snapshot("VBE line offset overflows"))?
+    };
+    if line_offset == 0 {
+        return Err(invalid_vga_snapshot("VBE line offset is zero"));
+    }
+    Ok((bpp_multiplier, line_offset))
+}
+
+#[cfg(feature = "std")]
+fn vga_snapshot_bank_offset(bank: u16, bank_granularity_kb: u16) -> io::Result<u32> {
+    u32::from(bank)
+        .checked_mul(
+            u32::from(bank_granularity_kb)
+                .checked_mul(1024)
+                .ok_or_else(|| invalid_vga_snapshot("VBE bank granularity overflows"))?,
+        )
+        .ok_or_else(|| invalid_vga_snapshot("VBE bank offset overflows"))
+}
+
+#[cfg(feature = "std")]
+fn validate_vga_snapshot_bar_base(base: u32, span: u32) -> io::Result<()> {
+    if span == 0 || !span.is_power_of_two() {
+        return Err(invalid_vga_snapshot("VGA BAR span is invalid"));
+    }
+    if base & (span - 1) != 0 {
+        return Err(invalid_vga_snapshot("VGA BAR base is misaligned"));
+    }
+    base.checked_add(span - 1)
+        .ok_or_else(|| invalid_vga_snapshot("VGA BAR range overflows"))?;
+    Ok(())
+}
+
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
+    #[cfg(feature = "std")]
+    use std::io::Cursor;
+
 
     fn write_vbe(vga: &mut BxVgaC, index: u16, value: u16) {
         vga.write_port(VBE_DISPI_IOPORT_INDEX, index as u32, 2);
@@ -3831,8 +4641,8 @@ mod tests {
         vga.pci_write(0x10, 0xFFFF_FFFF, 4);
         assert_eq!(vga.pci_read(0x10, 4), 0xFF00_0008); // ~(16MiB-1) | prefetchable
         assert!(
-            vga.take_pending_lfb_relocate().is_none(),
-            "probe must not commit"
+            vga.peek_pending_lfb_relocate().is_none(),
+            "probe must not queue a relocation"
         );
     }
 
@@ -3841,16 +4651,16 @@ mod tests {
         let mut vga = pci_vga();
         vga.pci_write(0x18, 0xFFFF_FFFF, 4);
         assert_eq!(vga.pci_read(0x18, 4), 0xFFFF_F000); // ~(4KiB-1)
-        assert!(vga.take_pending_mmio_base().is_none());
+        assert!(vga.peek_pending_mmio_relocate().is_none());
     }
 
     #[test]
-    fn bar0_commit_relocates_lfb_and_preserves_type_bits() {
+    fn bar0_write_queues_lfb_relocation_and_preserves_type_bits() {
         let mut vga = pci_vga();
         let change = vga.pci_write(0x10, 0xE800_0000, 4);
         assert!(change.lfb && !change.mmio);
         assert_eq!(
-            vga.take_pending_lfb_relocate(),
+            vga.peek_pending_lfb_relocate(),
             Some((0xE000_0000, 0xE800_0000))
         );
         assert_eq!(vga.pci_read(0x10, 4), 0xE800_0008); // base + preserved type nibble
@@ -3861,16 +4671,78 @@ mod tests {
         let mut vga = pci_vga();
         let change = vga.pci_write(0x10, 0xE000_0000, 4); // equals the seeded init base
         assert!(!change.lfb);
-        assert!(vga.take_pending_lfb_relocate().is_none());
+        assert!(vga.peek_pending_lfb_relocate().is_none());
     }
 
     #[test]
-    fn bar2_commit_signals_mmio_registration() {
+    fn bar2_write_queues_mmio_registration() {
         let mut vga = pci_vga();
         let change = vga.pci_write(0x18, 0xF000_0000, 4);
         assert!(change.mmio && !change.lfb);
-        assert_eq!(vga.take_pending_mmio_base(), Some(0xF000_0000));
+        assert_eq!(vga.peek_pending_mmio_relocate(), Some((0, 0xF000_0000)));
         assert_eq!(vga.pci_read(0x18, 4), 0xF000_0000);
+    }
+    #[test]
+    fn lfb_relocation_stays_pending_until_commit() {
+        let mut vga = pci_vga();
+        vga.pci_write(0x10, 0xE800_0000, 4);
+
+        assert_eq!(
+            vga.peek_pending_lfb_relocate(),
+            Some((0xE000_0000, 0xE800_0000))
+        );
+        assert_eq!(vga.vbe.base_address, 0xE000_0000);
+
+        assert_eq!(
+            vga.commit_pending_lfb_relocate(),
+            Some((0xE000_0000, 0xE800_0000))
+        );
+        assert_eq!(vga.vbe.base_address, 0xE800_0000);
+        assert!(vga.peek_pending_lfb_relocate().is_none());
+    }
+
+    #[test]
+    fn pending_bar2_move_keeps_old_mapping_until_commit() {
+        let mut vga = pci_vga();
+        vga.pci_write(0x18, 0xF000_0000, 4);
+        assert_eq!(
+            vga.commit_pending_mmio_relocate(),
+            Some((0, 0xF000_0000))
+        );
+
+        vga.pci_write(0x18, 0xF010_0000, 4);
+        assert_eq!(
+            vga.peek_pending_mmio_relocate(),
+            Some((0xF000_0000, 0xF010_0000))
+        );
+        assert!(vga.is_mmio_addr(0xF000_0500));
+        assert!(!vga.is_mmio_addr(0xF010_0500));
+
+        assert_eq!(
+            vga.commit_pending_mmio_relocate(),
+            Some((0xF000_0000, 0xF010_0000))
+        );
+        assert!(!vga.is_mmio_addr(0xF000_0500));
+        assert!(vga.is_mmio_addr(0xF010_0500));
+    }
+
+
+    #[test]
+    fn pci_command_register_is_read_only() {
+        let mut vga = pci_vga();
+        vga.pci_write(0x04, 0x00, 1);
+        assert_eq!(vga.pci_read(0x04, 1), 0x03);
+        vga.pci_write(0x04, 0xFF, 1);
+        assert_eq!(vga.pci_read(0x04, 1), 0x03);
+    }
+
+    #[test]
+    fn pci_non_command_writable_config_bytes_remain_writable() {
+        let mut vga = pci_vga();
+        for (address, value) in [(0x0C, 0xA5), (0x0D, 0x5A), (0x3C, 0x0B)] {
+            vga.pci_write(address, value, 1);
+            assert_eq!(vga.pci_read(address, 1), value);
+        }
     }
 
     #[test]
@@ -3895,8 +4767,7 @@ mod tests {
     fn pci_state_survives_reset() {
         let mut vga = pci_vga();
         vga.pci_write(0x10, 0xE800_0000, 4);
-        let _ = vga.take_pending_lfb_relocate();
-        vga.set_lfb_base(0xE800_0000); // as the deferred handler would
+        let _ = vga.commit_pending_lfb_relocate(); // as the deferred handler would
         vga.reset();
         assert!(vga.pci_enabled());
         assert_eq!(vga.pci_read(0x00, 4), 0x1111_1234);
@@ -4335,5 +5206,133 @@ mod tests {
         vga.write_port(VGA_CRTC_INDEX, 0, 1);
         vga.write_port(VGA_CRTC_DATA, 0x99, 1);
         assert_eq!(vga.crtc_regs[0], 0x99);
+    }
+    #[cfg(feature = "std")]
+    #[test]
+    fn vga_snapshot_restores_planar_vbe_palette_and_forces_redraw() {
+        let mut source = pci_vga();
+        source.pci_write(0x10, 0xE800_0000, 4);
+        source.pci_write(0x18, 0xF010_0000, 4);
+        write_vbe(&mut source, VBE_DISPI_INDEX_XRES, 320);
+        write_vbe(&mut source, VBE_DISPI_INDEX_YRES, 200);
+        write_vbe(&mut source, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_8);
+        write_vbe(
+            &mut source,
+            VBE_DISPI_INDEX_ENABLE,
+            VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED | VBE_DISPI_NOCLEARMEM,
+        );
+        write_vbe(&mut source, VBE_DISPI_INDEX_VIRT_WIDTH, 640);
+        write_vbe(&mut source, VBE_DISPI_INDEX_X_OFFSET, 7);
+        write_vbe(&mut source, VBE_DISPI_INDEX_Y_OFFSET, 9);
+
+        source.seq_regs[SEQ_REG_MEMORY_MODE] = 0x04;
+        source.graphics_regs[GFX_REG_MISC] =
+            GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
+        source.graphics_regs[GFX_REG_READ_MAP_SELECT] = 2;
+        source.vga_memory[0x24 * 4 + 2] = 0xA1;
+        source.text_memory[0x42] = b'V';
+        source.vbe_memory[0x1234] = 0xB2;
+        source.latch = [0x11, 0x22, 0x33, 0x44];
+        source.status_reg = 0xA0;
+        source.write_port(VGA_PEL_ADDR_WRITE, 0x4D, 1);
+        source.write_port(VGA_PEL_DATA, 0x12, 1);
+        source.write_port(VGA_PEL_DATA, 0x23, 1);
+        source.write_port(VGA_PEL_DATA, 0x34, 1);
+
+        let mut saved = Vec::new();
+        source.save_snapshot_v3(&mut saved).unwrap();
+        assert_eq!(source.snapshot_v3_len().unwrap(), saved.len() as u64);
+
+        let mut restored = pci_vga();
+        restored.pci_write(0x10, 0xD000_0000, 4);
+        restored.commit_pending_lfb_relocate();
+        restored.pci_write(0x18, 0xF100_0000, 4);
+        restored.commit_pending_mmio_relocate();
+        let live_mapping = restored.snapshot_v3_committed_mapping_target();
+        restored.vga_memory[0x24 * 4 + 2] = 0;
+        restored.text_memory[0x42] = 0;
+        restored.vbe_memory[0x1234] = 0;
+        restored.latch = [0; 4];
+        restored.status_reg = 0;
+        restored.text_dirty = false;
+        restored.text_buffer_update = false;
+        restored.vga_mem_updated = 0;
+        restored.text_buffer.fill(0xFF);
+        restored.text_snapshot.fill(0xFF);
+        restored.last_xres = 1;
+        restored.last_yres = 1;
+        restored.last_fw = 1;
+        restored.last_fh = 1;
+        restored.last_bpp = 1;
+        restored.vga_tile_updated.fill(false);
+
+        let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
+        let target = restored.restore_snapshot_v3(&mut reader).unwrap();
+        reader.finish_exact().unwrap();
+
+        assert_eq!(
+            restored.snapshot_v3_committed_mapping_target(),
+            live_mapping,
+            "decode must leave the live handler mapping untouched"
+        );
+        assert_eq!(
+            target,
+            VgaSnapshotRestoreTarget {
+                lfb_base: 0xE800_0000,
+                mmio_base: 0xF010_0000,
+            }
+        );
+        restored.commit_snapshot_v3_mapping_target(target);
+        restored.rebuild_snapshot_v3_derived_state().unwrap();
+
+        assert_eq!(restored.snapshot_v3_committed_mapping_target(), target);
+        assert!(restored.text_dirty);
+        assert!(restored.text_buffer_update);
+        assert_eq!(restored.vga_mem_updated, 1);
+        assert!(restored.vga_tile_updated.iter().all(|dirty| *dirty));
+        assert!(restored.text_buffer.iter().all(|byte| *byte == 0));
+        assert!(restored.text_snapshot.iter().all(|byte| *byte == 0));
+        assert_eq!(
+            (
+                restored.last_xres,
+                restored.last_yres,
+                restored.last_fw,
+                restored.last_fh,
+                restored.last_bpp,
+            ),
+            (0, 0, 0, 0, 0)
+        );
+
+        let mut value = [0];
+        restored.mem_read(target.lfb_base as BxPhyAddress + 0x1234, 1, &mut value);
+        assert_eq!(value, [0xB2], "VBE backing memory must survive restore");
+
+        restored.write_port(VGA_DAC_STATE, 0x4D, 1);
+        assert_eq!(restored.read_port(VGA_PEL_DATA, 1, 0), 0x12);
+        assert_eq!(restored.read_port(VGA_PEL_DATA, 1, 0), 0x23);
+        assert_eq!(restored.read_port(VGA_PEL_DATA, 1, 0), 0x34);
+        restored.write_port(VGA_CRTC_INDEX, 0x22, 1);
+        assert_eq!(restored.read_port(VGA_CRTC_DATA, 1, 0), 0x33);
+        assert_eq!(restored.read_port(VGA_STATUS, 1, 0), 0xA9);
+
+        write_vbe(&mut restored, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+        restored.mem_read(VGA_WINDOW_GRAPHICS_BASE + 0x24, 1, &mut value);
+        assert_eq!(value, [0xA1], "planar memory must survive restore");
+        assert_eq!(restored.get_text_memory()[0x42], b'V');
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn vga_snapshot_rejects_oversized_pci_config_length() {
+        let source = BxVgaC::new();
+        let mut saved = Vec::new();
+        source.save_snapshot_v3(&mut saved).unwrap();
+        // The PCI config length immediately follows the fixed 84-byte scalar prefix.
+        saved[88..92].copy_from_slice(&257u32.to_le_bytes());
+
+        let mut restored = BxVgaC::new();
+        let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
+        let error = restored.restore_snapshot_v3(&mut reader).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
     }
 }

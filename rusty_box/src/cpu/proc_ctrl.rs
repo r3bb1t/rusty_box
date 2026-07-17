@@ -115,7 +115,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs proc_ctrl.cc — update AVX permission
     pub(super) fn handle_avx_mode_change(&mut self) {
         use super::opcodes_table::FetchModeMask;
-        if self.cr0.ts() || !self.protected_mode() || !self.cr4.osxsave() {
+        if self.cr0.ts()
+            || !self.protected_mode()
+            || !self.cr4.osxsave()
+            || (self.xcr0.get32() & 0x6) != 0x6
+        {
             self.fetch_mode_mask.remove(FetchModeMask::AVX_OK);
         } else {
             self.fetch_mode_mask.insert(FetchModeMask::AVX_OK);
@@ -192,17 +196,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Get current system ticks from pc_system (Bochs: bx_pc_system.time_ticks()).
     /// Falls back to icount when pc_system is not wired (unit tests).
     ///
-    /// Single-CPU batches expose live icount deltas. SMP scales those deltas by
-    /// the scheduler's participating CPU count; Bochs only advances global time
-    /// by `executed / BX_SMP_PROCESSORS` after a full SMP round.
+    /// UP observes the live pc-system clock plus instructions retired in the
+    /// wired batch. SMP freezes every CPU's view at the round-start epoch and
+    /// advances global time only when the emulator completes that full round.
     #[inline]
     pub(crate) fn system_ticks(&self) -> u64 {
-        if self.pc_system_ptr.is_some() {
-            let delta = self.icount.wrapping_sub(self.pc_system_icount_at_sync);
-            self.pc_system_ticks_at_sync
-                .wrapping_add(delta / self.pc_system_tick_denominator.max(1))
+        let Some(pc_system) = self.pc_system_ptr else {
+            return self.icount;
+        };
+        if self.pc_system_tick_denominator == 1 {
+            // SAFETY: pc_system_ptr is wired only for the active execution
+            // scope and cleared before the emulator regains this borrow.
+            let live_ticks = unsafe { pc_system.as_ref().time_ticks() };
+            live_ticks.wrapping_add(self.icount.wrapping_sub(self.pc_system_icount_at_sync))
         } else {
-            self.icount
+            self.pc_system_ticks_at_sync
         }
     }
 
@@ -308,6 +316,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.invalidate_stack_cache();
         self.dtlb.invlpg(laddr);
         self.itlb.invlpg(laddr);
+        self.sync_active_tlb_pin();
         // Bochs paging.cc — iCache.breakLinks()
         self.i_cache.break_links();
 
@@ -419,7 +428,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs mwait.cc: validate monitored address has valid host mapping.
         // MMIO addresses (host_page_addr=0) cannot be monitored — MWAIT may
         // never wake. MONITOR still succeeds (acceptable — just warn).
-        if self.get_host_write_ptr(laddr).is_none() {
+        if self.get_host_write_ptr(laddr)?.is_none() {
             tracing::warn!(
                 "MONITOR: laddr={:#x} paddr={:#x} has no host mapping (MMIO?), MWAIT may never trigger",
                 laddr, paddr
@@ -581,7 +590,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Bochs mwait.cc: skip arm for non-WB memory types.
         // We don't track MTRR memory types per-page, so always arm. Warn only on
         // MMIO-like addresses (no host mapping) to match MONITOR's behavior.
-        if self.get_host_write_ptr(laddr).is_none() {
+        if self.get_host_write_ptr(laddr)?.is_none() {
             tracing::warn!(
                 "UMONITOR: laddr={:#x} paddr={:#x} has no host mapping (MMIO?), UMWAIT may never wake",
                 laddr, paddr
@@ -1100,12 +1109,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
             let index = (msr - 0x800) << 4;
-            if self.lapic.write_x2apic(index, val) {
-                self.sync_lapic_intr_event();
-                if index == 0x300 {
-                    self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                    self.instrumentation.stop_request = true;
-                }
+            let current_ticks = self.system_ticks();
+            if self.lapic.write_x2apic(index, val, current_ticks) {
+                self.sync_lapic_events();
                 return Ok(());
             }
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -1115,6 +1121,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_APICBASE => {
                 self.msr.apicbase = val as _;
                 self.lapic.set_base(self.msr.apicbase);
+                self.sync_lapic_events();
             }
             BX_MSR_PLATFORM_ID => {
                 tracing::trace!("WRMSR: PLATFORM_ID is read-only");
@@ -1125,6 +1132,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             BX_MSR_TSC_DEADLINE => {
                 let current_ticks = self.system_ticks();
                 self.lapic.set_tsc_deadline(val, current_ticks);
+                self.sync_lapic_events();
             }
             // Bochs msr.cc — stores low 32 bits of value.
             BX_MSR_IA32_UMWAIT_CONTROL => self.msr.ia32_umwait_ctrl = val as u32,
@@ -1448,6 +1456,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 // Bochs: TLB_invlpg at breakpoint address
                 self.dtlb.invlpg(val as u64);
                 self.itlb.invlpg(val as u64);
+                self.sync_active_tlb_pin();
             }
             4 | 6 => {
                 // DR6: preserve reserved bits, only allow bits 0-3 (B0-B3) and bits 13-15 (BD,BS,BT)
@@ -4169,7 +4178,7 @@ mod tests {
     }
 
     #[test]
-    fn wired_system_ticks_scale_live_icount_delta_for_smp() {
+    fn wired_smp_system_ticks_remain_at_round_epoch() {
         let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
         let mut pc_system = BxPcSystemC::new();
         pc_system.initialize(1_000_000);
@@ -4179,8 +4188,11 @@ mod tests {
         cpu.set_pc_system_ptr_with_tick_denominator(NonNull::from(&mut pc_system), 8);
         assert_eq!(cpu.system_ticks(), 1_234);
 
+        // A sibling may not observe this round's batch time before the
+        // emulator wraps the full CPU round.
+        pc_system.tickn(71);
         cpu.icount = 780;
-        assert_eq!(cpu.system_ticks(), 1_269);
+        assert_eq!(cpu.system_ticks(), 1_234);
         cpu.clear_pc_system();
     }
 
@@ -4192,8 +4204,11 @@ mod tests {
         pc_system.tickn(2_000);
         cpu.set_pc_system_ptr(NonNull::from(&mut pc_system));
 
-        assert!(cpu.lapic.write_x2apic(0x320, 0x0004_0030));
-        let deadline = cpu.system_ticks() + 123;
+        let current_ticks = cpu.system_ticks();
+        assert!(cpu
+            .lapic
+            .write_x2apic(0x320, 0x0004_0030, current_ticks));
+        let deadline = current_ticks + 123;
 
         cpu.wrmsr_value(BX_MSR_TSC_DEADLINE, deadline).unwrap();
 
@@ -4203,6 +4218,14 @@ mod tests {
         assert!(active);
         assert_eq!(vector, 0x30);
         assert!(activate_pending);
+        assert_eq!(
+            cpu.lapic.timer_activate_request,
+            Some(super::super::apic::LocalApicTimerActivation {
+                deadline_ticks: deadline,
+                update_ticks_initial: false,
+            })
+        );
+        assert!(cpu.take_scheduler_boundary_request());
         cpu.clear_pc_system();
     }
 

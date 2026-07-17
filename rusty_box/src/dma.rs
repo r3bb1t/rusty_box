@@ -22,6 +22,17 @@
 //!
 //! Currently no devices register DMA handlers (IDE uses PIO, floppy not implemented),
 //! so the machinery exists structurally but no actual data transfers occur.
+use crate::memory::{BxMemC, CpuTlbPin};
+#[cfg(feature = "std")]
+use std::io::{Error, ErrorKind, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    SNAPSHOT_SECTION_VERSION,
+};
+
+
 
 /// DMA buffer size for transfers (Bochs dma.h BX_DMA_BUFFER_SIZE = 512)
 const BX_DMA_BUFFER_SIZE: usize = 512;
@@ -159,11 +170,8 @@ pub struct BxDmaC {
     pub(crate) ext_page_reg: [u8; 16],
     /// Per-channel DMA handlers (Bochs dma.h, h[4])
     handlers: [DmaHandlers; 4],
-    /// Pointer to emulator RAM for DMA physical read/write.
-    /// Matches Bochs DEV_MEM_READ_PHYSICAL_DMA / DEV_MEM_WRITE_PHYSICAL_DMA.
-    memory_base: Option<core::ptr::NonNull<u8>>,
-    /// Length of the memory region pointed to by memory_base.
-    memory_len: usize,
+    // DMA physical transfers borrow the checked block-aware memory path at
+    // the CPU event boundary. No guest-wide host pointer is retained.
 }
 
 impl Default for BxDmaC {
@@ -186,8 +194,6 @@ impl BxDmaC {
                 DmaHandlers::default(),
                 DmaHandlers::default(),
             ],
-            memory_base: None,
-            memory_len: 0,
         }
     }
 
@@ -226,13 +232,8 @@ impl BxDmaC {
         tracing::debug!("DMA: channel 4 used by cascade");
     }
 
-    /// Set RAM pointer for physical DMA transfers.
-    /// Must be called after init() with valid pointer to emulator RAM.
-    /// Matches Bochs DEV_MEM_READ_PHYSICAL_DMA / DEV_MEM_WRITE_PHYSICAL_DMA.
-    pub fn set_memory_ptrs(&mut self, mem_base: *mut u8, mem_len: usize) {
-        self.memory_base = core::ptr::NonNull::new(mem_base);
-        self.memory_len = mem_len;
-    }
+    /// No persistent memory wiring is needed: the CPU supplies the checked
+    /// block-aware memory borrow for each HLDA transfer.
 
     /// Reset the DMA controllers (Bochs dma.cc)
     pub fn reset(&mut self) {
@@ -417,10 +418,12 @@ impl BxDmaC {
     /// Finds the highest-priority channel with active DRQ, performs data transfer
     /// via registered handlers, and updates address/count.
     ///
-    /// The `mem_read_physical` and `mem_write_physical` closures provide access
-    /// to physical memory for DMA transfers (matching Bochs DEV_MEM_READ_PHYSICAL_DMA
-    /// and DEV_MEM_WRITE_PHYSICAL_DMA).
-    pub fn raise_hlda(&mut self) {
+    /// The caller supplies memory only while the exclusive CPU batch owns it.
+    /// Without that context, HRQ remains asserted and no DMA state advances.
+    pub(crate) fn raise_hlda(&mut self, mem: Option<&mut BxMemC<'_>>, pins: &[CpuTlbPin]) {
+        let Some(mem) = mem else {
+            return;
+        };
         let mut ma_sl: usize = 0;
 
         self.hlda = true;
@@ -470,7 +473,7 @@ impl BxDmaC {
             maxlen = 1 << (ma_sl as u16);
         }
 
-        let mut buffer = [0u8; BX_DMA_BUFFER_SIZE];
+        let mut buffer = [0xffu8; BX_DMA_BUFFER_SIZE];
         let len: u16;
 
         let transfer_type = self.s[ma_sl].chan[channel].mode.transfer_type;
@@ -496,15 +499,20 @@ impl BxDmaC {
                     }
                 }
 
-                // Write buffer to physical memory
-                self.mem_write_physical_dma(phy_addr, len as u32, &buffer);
+                // Short writes intentionally commit only the guest-RAM prefix.
+                // `write_ram` emits the matching SMC stamps for that prefix.
+                if let Err(error) = mem.write_ram(pins, phy_addr as u64, &buffer[..len as usize]) {
+                    tracing::error!("DMA: physical write at {phy_addr:#x} failed: {error:?}");
+                }
             }
             2 => {
                 // Read: DMA controlled transfer of bytes from Memory to I/O
                 // (Bochs dma.cc)
 
-                // Read from physical memory into buffer
-                self.mem_read_physical_dma(phy_addr, maxlen as u32, &mut buffer);
+                // Preserve the 0xff fill for an unavailable guest-RAM tail.
+                if let Err(error) = mem.read_ram(pins, phy_addr as u64, &mut buffer[..maxlen as usize]) {
+                    tracing::error!("DMA: physical read at {phy_addr:#x} failed: {error:?}");
+                }
 
                 if ma_sl == 0 {
                     if let Some(handler) = self.handlers[channel].dma_read8 {
@@ -592,83 +600,28 @@ impl BxDmaC {
             }
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Physical memory access for DMA transfers
-    // Matches Bochs DEV_MEM_READ_PHYSICAL_DMA / DEV_MEM_WRITE_PHYSICAL_DMA
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // Safe memory accessors — centralize all raw pointer arithmetic here
-    // -----------------------------------------------------------------------
-
-    /// Read a single byte from emulator RAM at `offset`.
-    /// Returns 0xFF if out of bounds or no memory is attached.
-    #[inline]
-    fn read_memory_byte(&self, offset: usize) -> u8 {
-        match self.memory_base {
-            Some(ptr) if offset < self.memory_len => {
-                // SAFETY: bounds checked above; pointer valid for emulator lifetime.
-                unsafe { *ptr.as_ptr().add(offset) }
-            }
-            _ => 0xFF,
-        }
-    }
-
-    /// Write a single byte to emulator RAM at `offset`.
-    /// Silently drops the write if out of bounds or no memory is attached.
-    #[inline]
-    fn write_memory_byte(&mut self, offset: usize, value: u8) {
-        match self.memory_base {
-            Some(ptr) if offset < self.memory_len => {
-                // SAFETY: bounds checked above; pointer valid for emulator lifetime.
-                unsafe {
-                    *ptr.as_ptr().add(offset) = value;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Reinterpret a `&[u8; BX_DMA_BUFFER_SIZE]` as `&[u16]` for 16-bit DMA.
+    /// Reinterpret a byte DMA buffer as 16-bit words for DMA2 handlers.
     #[inline]
     fn buffer_as_word_slice(buffer: &[u8; BX_DMA_BUFFER_SIZE]) -> &[u16] {
-        // SAFETY: BX_DMA_BUFFER_SIZE is 512, even and power-of-two aligned on stack.
-        // The array is stack-allocated with natural alignment >= 2 for u16.
-        // Length BX_DMA_BUFFER_SIZE / 2 stays within the buffer.
+        // SAFETY: the stack buffer has sufficient alignment and an even size.
         unsafe {
             core::slice::from_raw_parts(buffer.as_ptr() as *const u16, BX_DMA_BUFFER_SIZE / 2)
         }
     }
 
-    /// Reinterpret a `&mut [u8; BX_DMA_BUFFER_SIZE]` as `&mut [u16]` for 16-bit DMA.
+    /// Mutable 16-bit view of the byte DMA buffer for DMA2 handlers.
     #[inline]
     fn buffer_as_word_slice_mut(buffer: &mut [u8; BX_DMA_BUFFER_SIZE]) -> &mut [u16] {
-        // SAFETY: same as buffer_as_word_slice; mutable borrow is exclusive.
+        // SAFETY: the caller exclusively owns the stack buffer.
         unsafe {
-            core::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u16, BX_DMA_BUFFER_SIZE / 2)
+            core::slice::from_raw_parts_mut(
+                buffer.as_mut_ptr() as *mut u16,
+                BX_DMA_BUFFER_SIZE / 2,
+            )
         }
     }
 
-    /// Read physical memory for DMA transfer.
-    /// Uses raw memory pointer set during init. Safe because the pointer
-    /// is valid for the lifetime of the emulator and DMA only accesses
-    /// conventional memory (< 16MB).
-    fn mem_read_physical_dma(&self, addr: u32, len: u32, buffer: &mut [u8]) {
-        for i in 0..(len as usize).min(buffer.len()) {
-            buffer[i] = self.read_memory_byte(addr as usize + i);
-        }
-    }
 
-    /// Write physical memory for DMA transfer.
-    fn mem_write_physical_dma(&mut self, addr: u32, len: u32, buffer: &[u8]) {
-        for (i, &byte) in buffer[..(len as usize).min(buffer.len())]
-            .iter()
-            .enumerate()
-        {
-            self.write_memory_byte(addr as usize + i, byte);
-        }
-    }
 
     // -----------------------------------------------------------------------
     // I/O port read handler (Bochs dma.cc)
@@ -925,6 +878,175 @@ impl BxDmaC {
     }
 }
 
+#[cfg(feature = "std")]
+impl BxDmaC {
+    pub(crate) fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+        for controller in &self.s {
+            validate_dma_controller(controller)?;
+        }
+
+        let channels = checked_snapshot_len_mul(4, 14)?;
+        let controller = checked_snapshot_len_add(16, channels)?;
+        let controllers = checked_snapshot_len_mul(2, controller)?;
+        let prefix_and_controllers = checked_snapshot_len_add(4, controllers)?;
+        checked_snapshot_len_add(prefix_and_controllers, 18)
+    }
+
+    pub(crate) fn save_snapshot_v3<W: Write + ?Sized>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        self.snapshot_v3_len()?;
+        writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+
+        for controller in &self.s {
+            save_dma_controller(writer, controller)?;
+        }
+        writer.write_bool(self.hlda)?;
+        writer.write_bool(self.tc)?;
+        writer.write_bytes(&self.ext_page_reg)
+    }
+
+    pub(crate) fn restore_snapshot_v3<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> std::io::Result<()> {
+        if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
+            return Err(dma_snapshot_invalid("unsupported DMA snapshot section version"));
+        }
+
+        let mut controllers = [Dma8237::new(), Dma8237::new()];
+        for controller in &mut controllers {
+            *controller = restore_dma_controller(reader)?;
+        }
+        let hlda = reader.read_bool()?;
+        let tc = reader.read_bool()?;
+        let mut ext_page_reg = [0u8; 16];
+        reader.read_bytes(&mut ext_page_reg)?;
+
+        for (controller_index, (saved, live)) in
+            controllers.iter().zip(self.s.iter()).enumerate()
+        {
+            for (channel_index, (saved_channel, live_channel)) in
+                saved.chan.iter().zip(live.chan.iter()).enumerate()
+            {
+                if saved_channel.used != live_channel.used {
+                    return Err(dma_snapshot_invalid(
+                        if controller_index == 0 || channel_index != 0 {
+                            "DMA snapshot channel ownership does not match live handlers"
+                        } else {
+                            "DMA snapshot cascade ownership is invalid"
+                        },
+                    ));
+                }
+            }
+        }
+
+        // Handler registrations and memory/TLB pins are deliberately retained
+        // from the live instance; only guest-visible controller registers move.
+        self.s = controllers;
+        self.hlda = hlda;
+        self.tc = tc;
+        self.ext_page_reg = ext_page_reg;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "std")]
+fn dma_snapshot_invalid(message: &'static str) -> Error {
+    Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn validate_dma_controller(controller: &Dma8237) -> std::io::Result<()> {
+    if controller.ctrl_disabled != (controller.command_reg & 0x04 != 0) {
+        return Err(dma_snapshot_invalid(
+            "DMA disabled flag disagrees with command register",
+        ));
+    }
+
+    for channel in &controller.chan {
+        if channel.mode.mode_type > DMA_MODE_CASCADE {
+            return Err(dma_snapshot_invalid("DMA transfer mode is invalid"));
+        }
+        if channel.mode.transfer_type > 2 {
+            return Err(dma_snapshot_invalid("DMA transfer type is invalid"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn save_dma_controller<W: Write + ?Sized>(
+    writer: &mut W,
+    controller: &Dma8237,
+) -> std::io::Result<()> {
+    validate_dma_controller(controller)?;
+    for value in &controller.drq {
+        writer.write_bool(*value)?;
+    }
+    for value in &controller.dack {
+        writer.write_bool(*value)?;
+    }
+    for value in &controller.mask {
+        writer.write_bool(*value)?;
+    }
+    writer.write_bool(controller.flip_flop)?;
+    writer.write_u8(controller.status_reg)?;
+    writer.write_u8(controller.command_reg)?;
+    writer.write_bool(controller.ctrl_disabled)?;
+
+    for channel in &controller.chan {
+        writer.write_u8(channel.mode.mode_type)?;
+        writer.write_bool(channel.mode.address_decrement)?;
+        writer.write_bool(channel.mode.autoinit_enable)?;
+        writer.write_u8(channel.mode.transfer_type)?;
+        writer.write_u16(channel.base_address)?;
+        writer.write_u16(channel.current_address)?;
+        writer.write_u16(channel.base_count)?;
+        writer.write_u16(channel.current_count)?;
+        writer.write_u8(channel.page_reg)?;
+        writer.write_bool(channel.used)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn restore_dma_controller<R: Read>(
+    reader: &mut SnapshotReader<R>,
+) -> std::io::Result<Dma8237> {
+    let mut controller = Dma8237::new();
+    for value in &mut controller.drq {
+        *value = reader.read_bool()?;
+    }
+    for value in &mut controller.dack {
+        *value = reader.read_bool()?;
+    }
+    for value in &mut controller.mask {
+        *value = reader.read_bool()?;
+    }
+    controller.flip_flop = reader.read_bool()?;
+    controller.status_reg = reader.read_u8()?;
+    controller.command_reg = reader.read_u8()?;
+    controller.ctrl_disabled = reader.read_bool()?;
+
+    for channel in &mut controller.chan {
+        channel.mode.mode_type = reader.read_u8()?;
+        channel.mode.address_decrement = reader.read_bool()?;
+        channel.mode.autoinit_enable = reader.read_bool()?;
+        channel.mode.transfer_type = reader.read_u8()?;
+        channel.base_address = reader.read_u16()?;
+        channel.current_address = reader.read_u16()?;
+        channel.base_count = reader.read_u16()?;
+        channel.current_count = reader.read_u16()?;
+        channel.page_reg = reader.read_u8()?;
+        channel.used = reader.read_bool()?;
+    }
+    validate_dma_controller(&controller)?;
+    Ok(controller)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,5 +1214,75 @@ mod tests {
         // Unregister
         assert!(dma.unregister_dma_channel(2));
         assert!(!dma.s[0].chan[2].used);
+    }
+
+    #[test]
+    fn dma_snapshot_preserves_state_but_rejects_handler_ownership_change() {
+        let mut source = BxDmaC::new();
+        source.init();
+        source.s[0].chan[0].current_address = 0x1234;
+        source.s[0].chan[0].current_count = 0x5678;
+        let mut saved = Vec::new();
+        source.save_snapshot_v3(&mut saved).unwrap();
+
+        let mut restored = BxDmaC::new();
+        restored.init();
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        restored.restore_snapshot_v3(&mut reader).unwrap();
+        reader.finish_exact().unwrap();
+        assert_eq!(restored.s[0].chan[0].current_address, 0x1234);
+        assert_eq!(restored.s[0].chan[0].current_count, 0x5678);
+
+        const FIRST_CHANNEL_USED_OFFSET: usize = 4 + 16 + 13;
+        saved[FIRST_CHANNEL_USED_OFFSET] = 1;
+        let mut target = BxDmaC::new();
+        target.init();
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        let error = target.restore_snapshot_v3(&mut reader).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(error.to_string().contains("ownership"));
+    }
+    #[test]
+    fn legacy_dma_swapped_block_round_trip_and_smc() {
+        use crate::memory::{BxMemC, BxMemoryStubC};
+
+        fn dma_write(data: &mut [u8], maxlen: u16) -> u16 {
+            let payload = [0xd1, 0xa5, 0x5e, 0x33];
+            let len = payload.len().min(maxlen as usize);
+            data[..len].copy_from_slice(&payload[..len]);
+            len as u16
+        }
+        fn dma_read(_data: &[u8], _maxlen: u16) -> u16 {
+            0
+        }
+
+        const MIB: usize = 1024 * 1024;
+        let mut memory = BxMemC::new(
+            BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("swapped memory"),
+            false,
+        );
+        memory.set_a20_mask(u64::MAX);
+        memory.smc_mark_icache_mask(2 * MIB as u64, u32::MAX);
+        let before_smc = memory.smc_seq_next();
+
+        let mut dma = BxDmaC::new();
+        dma.init();
+        assert!(dma.register_dma8_channel(2, dma_read, dma_write, "phase1 test"));
+        dma.s[0].mask[2] = false;
+        dma.s[1].mask[0] = false;
+        dma.s[0].chan[2].page_reg = 0x20;
+        dma.s[0].chan[2].current_count = 3;
+        dma.s[0].chan[2].mode.transfer_type = 1;
+        dma.set_drq(2, true);
+
+        dma.raise_hlda(Some(&mut memory), &[]);
+
+        let mut received = [0; 4];
+        assert_eq!(memory.read_ram(&[], 2 * MIB as u64, &mut received).unwrap(), 4);
+        assert_eq!(received, [0xd1, 0xa5, 0x5e, 0x33]);
+        assert!(
+            memory.smc_seq_next() > before_smc,
+            "legacy DMA must stamp the exact guest write"
+        );
     }
 }

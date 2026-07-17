@@ -250,11 +250,10 @@ fn run() -> Status {
     let max: u64 = 20_000_000_000;
     let mut total: u64 = 0;
     let mut login_sent = false;
-    let mut last_port92: u8 = 0;
 
     while total < max {
-        let n = match unsafe { emu.run_cpu_batch(batch) } {
-            Ok(n) => n,
+        let (n, shutdown) = match emu.step_batch(batch) {
+            Ok(result) => result,
             Err(e) => {
                 error!("CPU error at {}M: {:?}", total / 1_000_000, e);
                 break;
@@ -262,11 +261,6 @@ fn run() -> Status {
         };
         total += n;
 
-        // Process PAM register changes (BIOS needs this)
-        if emu.device_manager.pam_needs_update {
-            emu.device_manager
-                .process_pci_deferred(&mut emu.devices, &mut emu.memory);
-        }
 
         // Drain and print BIOS/serial output (no Vec allocation)
         {
@@ -281,73 +275,16 @@ fn run() -> Status {
         }
         drain_and_print(emu.device_manager.drain_serial_tx(0));
 
-        // Tick devices every batch (keyboard, PIT, etc. need periodic updates)
-        let dev_usec = (n * 1_000_000 / 300_000_000u64).max(1);
-        emu.tick_devices(dev_usec);
-
-        // Sync PIC/LAPIC interrupt flags to CPU async_event
-        emu.sync_event_flags();
-
-        // Deliver PIC interrupt between batches if pending.
-        // Inhibition window (MOV SS/STI) expired during the batch.
-        if emu.device_manager.has_interrupt() && emu.cpu.interrupts_enabled() {
-            let vec = emu.iac();
-            unsafe {
-                let _ = emu.inject_interrupt(vec);
-            }
+        if shutdown {
+            info!(
+                "SHUTDOWN at {}k instr, RIP={:#x}",
+                total / 1000,
+                emu.cpu().rip()
+            );
+            break;
         }
 
-        // Port 92h A20 sync
-        emu.sync_port92_a20(&mut last_port92);
 
-        // Handle reset requests (keyboard 0xFE, port 92h, PCI CF9)
-        match emu.check_and_handle_resets() {
-            Ok(true) => {
-                info!("RESET at {}k instr, RIP={:#x}", total / 1000, emu.cpu.rip());
-                last_port92 = 0;
-                continue;
-            }
-            Err(e) => {
-                error!("Reset failed: {:?}", e);
-                break;
-            }
-            _ => {}
-        }
-
-        // HLT handling — advance virtual clock to next timer event
-        if n == 0 {
-            use rusty_box::cpu::cpu::CpuActivityState;
-            if matches!(
-                emu.cpu.activity_state,
-                CpuActivityState::Hlt | CpuActivityState::Mwait | CpuActivityState::MwaitIf
-            ) {
-                let mut hlt_budget = 0u64;
-                while hlt_budget < 10_000_000 {
-                    if emu.has_interrupt() && emu.cpu.interrupts_enabled() {
-                        break;
-                    }
-                    let step = emu
-                        .pc_system
-                        .get_num_ticks_left_next_event()
-                        .clamp(1, 100_000);
-                    emu.pc_system.tickn(step);
-                    emu.dispatch_timer_fires();
-                    hlt_budget += step as u64;
-                    let usec = (step as u64 * 1_000_000 / 300_000_000u64).max(1);
-                    emu.tick_devices(usec);
-                    emu.sync_event_flags();
-                }
-            }
-
-            if emu.cpu.is_in_shutdown() {
-                info!(
-                    "SHUTDOWN at {}k instr, RIP={:#x}",
-                    total / 1000,
-                    emu.cpu.rip()
-                );
-                break;
-            }
-        }
 
         // Auto-login after kernel boots
         if !login_sent && total > 50_000_000 {
@@ -362,9 +299,9 @@ fn run() -> Status {
             info!(
                 "  {}k instr, RIP={:#x}, batch={}, IF={}",
                 total / 1000,
-                emu.cpu.rip(),
+                emu.cpu().rip(),
                 n,
-                emu.cpu.interrupts_enabled()
+                emu.cpu().interrupts_enabled()
             );
         }
     }

@@ -1,5 +1,6 @@
 #![allow(private_interfaces, unused_assignments, dead_code)]
 
+
 //! 8254 PIT (Programmable Interval Timer) Emulation
 //!
 //! Based on Bochs pit82c54.cc (counter state machines) and pit.cc (port
@@ -15,6 +16,15 @@
 //! Bochs (pit.cc bx_pit_c::init registers 0x0061): bit 0 = counter 2 GATE,
 //! bit 1 = speaker data enable, bit 4 = refresh clock divided by 2 (derived
 //! from the microsecond clock), bit 5 = counter 2 OUT.
+
+#[cfg(feature = "std")]
+use std::io::{self, ErrorKind, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader,
+    SnapshotWriteExt, SNAPSHOT_SECTION_VERSION,
+};
 
 /// PIT I/O port addresses
 pub const PIT_COUNTER0: u16 = 0x0040;
@@ -34,6 +44,28 @@ pub const PIT_FREQUENCY: u32 = TICKS_PER_SECOND;
 
 /// Microseconds per second — Bochs pit.cc USEC_PER_SECOND
 pub const USEC_PER_SECOND: u32 = 1_000_000;
+/// Data returned to the scheduler after a PIT owner timer callback.
+///
+/// The PIC is intentionally not borrowed here: the owner dispatcher replays
+/// the recorded IRQ0 transitions after releasing the PIT borrow, then uses
+/// `rearm_usec` to schedule the next one-shot owner deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PitTimerCallback {
+    pub(crate) irq0_transitions: u32,
+    pub(crate) irq0_level: bool,
+    pub(crate) rearm_usec: Option<u64>,
+}
+
+/// Counter-derived state that the machine applies only after all snapshot
+/// sections have validated.  In particular, `irq0_level` is a level baseline,
+/// never a request to replay saved transitions.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PitSnapshotRestoreState {
+    pub(crate) timer_handle: Option<usize>,
+    pub(crate) irq0_level: bool,
+}
+
 
 /// Number of PIT counters
 const PIT_NUM_COUNTERS: usize = 3;
@@ -794,8 +826,8 @@ pub struct BxPitC {
     pub(crate) counters: [PitCounter; 3],
     /// Total ticks elapsed
     pub(crate) total_ticks: u64,
-    /// Timer handles for scheduling
-    pub(crate) timer_handles: [Option<usize>; 3],
+    /// One-shot PC-system owner timer handle for all PIT counter events.
+    pub(crate) timer_handle: Option<usize>,
     /// Bochs pit.cc s.speaker_data_on — port 0x61 bit 1 (write) / bit 1 (read)
     pub(crate) speaker_data_on: bool,
     /// Bochs pit.cc s.speaker_active — tracks (port 0x61 & 3) == 3 while
@@ -821,13 +853,6 @@ pub struct BxPitC {
     /// equivalent of Bochs pit.cc periodic()'s
     /// `USEC_TO_TICKS(total_usec) - total_ticks` derivation.
     pit_usec_accumulator: u128,
-    /// Snapshot of `total_usec` at the last DeviceManager tick, used to
-    /// reconcile the two feeds of the single PIT clock: executed
-    /// instructions arrive via icount (port-access syncs), while HLT
-    /// fast-forward time arrives only through the emulator's usec delta
-    /// (Bochs advances pc_system ticks during HLT — event.cc
-    /// handleWaitForEvent BX_TICKN — which its virt_timer usec includes).
-    usec_at_last_device_tick: u64,
     /// Last host timestamp for Bochs-style realtime PIT synchronization.
     #[cfg(feature = "std")]
     realtime_last: Option<std::time::Instant>,
@@ -846,7 +871,7 @@ impl BxPitC {
         let mut pit = Self {
             counters: [PitCounter::new(0), PitCounter::new(1), PitCounter::new(2)],
             total_ticks: 0,
-            timer_handles: [None; 3],
+            timer_handle: None,
             speaker_data_on: false,
             speaker_active: false,
             speaker_level: false,
@@ -855,7 +880,6 @@ impl BxPitC {
             total_usec: 0,
             usec_remainder: 0,
             pit_usec_accumulator: 0,
-            usec_at_last_device_tick: 0,
             #[cfg(feature = "std")]
             realtime_last: None,
         };
@@ -884,7 +908,6 @@ impl BxPitC {
         self.icount_at_last_sync = 0;
         self.usec_remainder = 0;
         self.pit_usec_accumulator = 0;
-        self.usec_at_last_device_tick = 0;
         #[cfg(feature = "std")]
         if self.realtime_last.is_some() {
             self.realtime_last = Some(std::time::Instant::now());
@@ -897,9 +920,19 @@ impl BxPitC {
     /// init() programs the counters.
     pub fn reset(&mut self) {}
 
+    /// Store the scheduler's single PIT owner timer handle.
+    pub(crate) fn set_timer_handle(&mut self, handle: usize) {
+        self.timer_handle = Some(handle);
+    }
+
+    /// Return the scheduler's PIT owner timer handle, if registered.
+    pub(crate) fn timer_handle(&self) -> Option<usize> {
+        self.timer_handle
+    }
+
     /// Initialize icount synchronization for fine-grained PIT timing.
-    /// Stores IPS and the initial icount baseline so that subsequent
-    /// `sync_to_icount()` and `tick()` calls can compute elapsed time.
+    /// Stores IPS and the initial icount baseline for port-access syncs and
+    /// exact owner callbacks.
     pub fn init_icount_sync(&mut self, icount: u64, ips: u64) {
         self.ips = ips;
         self.icount_at_last_sync = icount;
@@ -911,13 +944,6 @@ impl BxPitC {
         self.realtime_last = Some(std::time::Instant::now());
         self.usec_remainder = 0;
         self.pit_usec_accumulator = 0;
-        self.usec_at_last_device_tick = self.total_usec;
-    }
-
-    /// Returns true when PIT uses host realtime instead of icount-derived time.
-    #[cfg(feature = "std")]
-    pub(crate) fn realtime_sync_enabled(&self) -> bool {
-        self.realtime_last.is_some()
     }
 
     /// Bochs pit82c54.cc get_next_event_time — including the Bit32u quirk:
@@ -936,6 +962,24 @@ impl BxPitC {
             out = time2;
         }
         out
+    }
+
+    /// Relative microsecond delay for the next PIT state change.
+    ///
+    /// This is Bochs `TICKS_TO_USEC(get_next_event_time())`, with Bochs's
+    /// `BX_MAX(1, ...)` scheduling rule. A zero event time deactivates the
+    /// one-shot owner instead of scheduling a spurious poll.
+    pub(crate) fn next_event_usec(&self) -> Option<u64> {
+        let event_ticks = self.get_next_event_time();
+        if event_ticks == 0 {
+            return None;
+        }
+
+        Some(
+            ((u64::from(event_ticks) * u64::from(USEC_PER_SECOND))
+                / u64::from(TICKS_PER_SECOND))
+            .max(1),
+        )
     }
 
     /// Advance all three counters by `ticks_delta` PIT input clocks —
@@ -988,6 +1032,30 @@ impl BxPitC {
         self.advance_by_usec(elapsed);
     }
 
+    /// Remaining host-time prediction for a realtime PIT owner deadline.
+    ///
+    /// A PC-system callback may arrive at its virtual prediction before the
+    /// wall clock reached the corresponding PIT event. In that case the
+    /// dispatcher rearms this delay and does not mutate PIT state.
+    pub(crate) fn host_remaining_usec(&self) -> Option<u64> {
+        #[cfg(feature = "std")]
+        {
+            let last = self.realtime_last?;
+            let elapsed = std::time::Instant::now()
+                .saturating_duration_since(last)
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64;
+            return self
+                .next_event_usec()
+                .map(|deadline| deadline.saturating_sub(elapsed));
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            None
+        }
+    }
+
     /// Monotonic emulated-microsecond clock — the icount/realtime-sync
     /// equivalent of Bochs bx_virt_timer.time_usec() as consumed by pit.cc.
     /// Single conversion from the time source (no tick round-trip), so the
@@ -1030,6 +1098,60 @@ impl BxPitC {
         self.usec_remainder %= self.ips as u128;
         if usec != 0 {
             self.advance_by_usec(usec);
+        }
+    }
+
+    /// Synchronize the PIT to an absolute PC-system tick epoch.
+    ///
+    /// The conversion is cumulative (`floor(system_ticks * 1_000_000 / IPS)`)
+    /// like `BxPcSystemC::time_usec_at_ticks`, rather than a per-callback
+    /// relative conversion that could lose fractional microseconds.
+    pub(crate) fn sync_to_system_ticks(&mut self, system_ticks: u64, ips: u64) {
+        #[cfg(feature = "std")]
+        if self.realtime_last.is_some() {
+            self.sync_to_realtime();
+            return;
+        }
+
+        if ips == 0 {
+            return;
+        }
+
+        let target_usec = ((u128::from(system_ticks) * u128::from(USEC_PER_SECOND))
+            / u128::from(ips))
+        .min(u128::from(u64::MAX)) as u64;
+        if target_usec > self.total_usec {
+            self.advance_by_usec(target_usec - self.total_usec);
+        }
+    }
+
+    /// Service the PIT's one-shot owner callback without borrowing the PC
+    /// system or PIC. The dispatcher consumes the IRQ replay data and arms
+    /// `rearm_usec` as the next absolute owner deadline.
+    pub(crate) fn timer_callback(
+        &mut self,
+        system_ticks: u64,
+        ips: u64,
+    ) -> PitTimerCallback {
+        #[cfg(feature = "std")]
+        if self.realtime_last.is_some() {
+            if let Some(remaining) = self.host_remaining_usec() {
+                if remaining > 0 {
+                    return PitTimerCallback {
+                        irq0_transitions: 0,
+                        irq0_level: self.counters[0].output,
+                        rearm_usec: Some(remaining),
+                    };
+                }
+            }
+        }
+
+        self.sync_to_system_ticks(system_ticks, ips);
+        let (irq0_transitions, irq0_level) = self.drain_irq0_events();
+        PitTimerCallback {
+            irq0_transitions,
+            irq0_level,
+            rearm_usec: self.next_event_usec(),
         }
     }
 
@@ -1237,38 +1359,271 @@ impl BxPitC {
         (transitions, self.counters[0].output)
     }
 
-    /// Simulate time passing (in microseconds). OUT transitions produced by
-    /// the elapsed ticks are recorded on the counters; the caller drains
-    /// them via drain_irq0_events / DeviceManager::service_pit_irq0.
-    #[inline]
-    pub fn tick(&mut self, usec: u64, icount: u64) {
-        #[cfg(feature = "std")]
-        if self.realtime_last.is_some() {
-            // Wall clock is the authority; the realtime arm of
-            // sync_to_icount also refreshes the icount baseline.
-            self.sync_to_icount(icount);
-            return;
+}
+
+#[cfg(feature = "std")]
+impl BxPitC {
+    /// Exact length of the versioned PIT v3 section payload.
+    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+        const COUNTER_LEN: u64 = 33;
+        if PIT_NUM_COUNTERS > bounds::MAX_SNAPSHOT_COUNT {
+            return Err(pit_snapshot_invalid("PIT counter count exceeds implementation bound"));
         }
-        if self.ips > 0 {
-            // Single PIT clock, two feeds: fold executed instructions first
-            // (same icount→usec conversion the port-access path uses), then
-            // top up with the emulator's usec delta MINUS what those syncs
-            // already advanced within this span. The remainder covers HLT
-            // fast-forward time, where icount stands still but virtual time
-            // does not (Bochs event.cc handleWaitForEvent ticks pc_system
-            // during HLT, and pit.cc periodic runs on that clock). Any
-            // sub-microsecond phase surplus carries to the next span —
-            // nothing is double-counted or dropped.
-            self.sync_to_icount(icount);
-            let already = self.total_usec - self.usec_at_last_device_tick;
-            if usec > already {
-                self.advance_by_usec(usec - already);
-            }
-            self.usec_at_last_device_tick = self.total_usec - already.saturating_sub(usec);
-            return;
-        }
-        self.advance_by_usec(usec);
+        let counters = checked_snapshot_len_mul(
+            u64::try_from(PIT_NUM_COUNTERS)
+                .map_err(|_| pit_snapshot_invalid("PIT counter count does not fit u64"))?,
+            COUNTER_LEN,
+        )?;
+        let len = checked_snapshot_len_add(4, counters)?;
+        let len = checked_snapshot_len_add(len, 8)?; // total ticks
+        let len = checked_snapshot_len_add(len, 1)?; // timer-handle presence
+        let len = if self.timer_handle.is_some() {
+            checked_snapshot_len_add(len, 8)?
+        } else {
+            len
+        };
+        let len = checked_snapshot_len_add(len, 3)?; // speaker state
+        let len = checked_snapshot_len_add(len, 8)?; // icount phase
+        let len = checked_snapshot_len_add(len, 8)?; // usec phase
+        let len = checked_snapshot_len_add(len, 16)?; // icount remainder
+        let len = checked_snapshot_len_add(len, 16)?; // PIT-tick remainder
+        checked_snapshot_len_add(len, 1) // realtime topology
     }
+
+    /// Stream all mutable PIT counter and phase state.  Registered handlers,
+    /// host-time anchors, and the configured instruction rate remain live.
+    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        validate_pit_phase(
+            self.ips,
+            self.usec_remainder,
+            self.pit_usec_accumulator,
+        )?;
+        writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+        for counter in &self.counters {
+            validate_pit_counter(counter)?;
+            write_pit_counter(writer, counter)?;
+        }
+        writer.write_u64(self.total_ticks)?;
+        write_snapshot_handle(writer, self.timer_handle)?;
+        writer.write_bool(self.speaker_data_on)?;
+        writer.write_bool(self.speaker_active)?;
+        writer.write_bool(self.speaker_level)?;
+        writer.write_u64(self.icount_at_last_sync)?;
+        writer.write_u64(self.total_usec)?;
+        writer.write_bytes(&self.usec_remainder.to_le_bytes())?;
+        writer.write_bytes(&self.pit_usec_accumulator.to_le_bytes())?;
+        writer.write_bool(self.realtime_last.is_some())
+    }
+
+    /// Restore mutable PIT state without touching its callback topology or
+    /// generating IRQ0 edges.  PC-system owner validation is intentionally
+    /// deferred until its full timer table has been restored.
+    pub(crate) fn restore_snapshot_v3<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> io::Result<()> {
+        if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
+            return Err(pit_snapshot_invalid("unsupported PIT section version"));
+        }
+
+        let mut counters = self.counters.clone();
+        for counter in &mut counters {
+            read_pit_counter(reader, counter)?;
+            validate_pit_counter(counter)?;
+        }
+        let total_ticks = reader.read_u64()?;
+        let timer_handle = read_snapshot_handle(reader)?;
+        let speaker_data_on = reader.read_bool()?;
+        let speaker_active = reader.read_bool()?;
+        let speaker_level = reader.read_bool()?;
+        let icount_at_last_sync = reader.read_u64()?;
+        let total_usec = reader.read_u64()?;
+        let mut usec_remainder = [0u8; 16];
+        reader.read_bytes(&mut usec_remainder)?;
+        let usec_remainder = u128::from_le_bytes(usec_remainder);
+        let mut pit_usec_accumulator = [0u8; 16];
+        reader.read_bytes(&mut pit_usec_accumulator)?;
+        let pit_usec_accumulator = u128::from_le_bytes(pit_usec_accumulator);
+        let realtime_sync = reader.read_bool()?;
+        if realtime_sync != self.realtime_last.is_some() {
+            return Err(pit_snapshot_invalid("PIT realtime configuration does not match"));
+        }
+        validate_pit_phase(self.ips, usec_remainder, pit_usec_accumulator)?;
+        reader.finish_exact()?;
+
+        self.counters = counters;
+        self.total_ticks = total_ticks;
+        self.timer_handle = timer_handle;
+        self.speaker_data_on = speaker_data_on;
+        self.speaker_active = speaker_active;
+        self.speaker_level = speaker_level;
+        self.icount_at_last_sync = icount_at_last_sync;
+        self.total_usec = total_usec;
+        self.usec_remainder = usec_remainder;
+        self.pit_usec_accumulator = pit_usec_accumulator;
+        Ok(())
+    }
+
+    /// Re-anchor host-only realtime state and report the final IRQ0 level
+    /// after every section is restored.  The PC-system deadline already holds
+    /// the exact PIT phase, so this deliberately neither arms nor replays it.
+    pub(crate) fn post_restore_snapshot_v3(&mut self) -> PitSnapshotRestoreState {
+        if self.realtime_last.is_some() {
+            self.realtime_last = Some(std::time::Instant::now());
+        }
+        let [counter0, _, _] = &self.counters;
+        PitSnapshotRestoreState {
+            timer_handle: self.timer_handle,
+            irq0_level: counter0.output,
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+fn pit_snapshot_invalid(message: &'static str) -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn write_snapshot_handle<W: Write>(
+    writer: &mut W,
+    handle: Option<usize>,
+) -> io::Result<()> {
+    writer.write_bool(handle.is_some())?;
+    if let Some(handle) = handle {
+        writer.write_u64(
+            u64::try_from(handle)
+                .map_err(|_| pit_snapshot_invalid("PIT timer handle does not fit u64"))?,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn read_snapshot_handle<R: Read>(
+    reader: &mut SnapshotReader<R>,
+) -> io::Result<Option<usize>> {
+    if !reader.read_bool()? {
+        return Ok(None);
+    }
+    usize::try_from(reader.read_u64()?)
+        .map(Some)
+        .map_err(|_| pit_snapshot_invalid("PIT timer handle does not fit usize"))
+}
+
+#[cfg(feature = "std")]
+fn write_pit_counter<W: Write>(writer: &mut W, counter: &PitCounter) -> io::Result<()> {
+    writer.write_u8(counter.mode)?;
+    writer.write_u16(counter.inlatch)?;
+    writer.write_u16(counter.count)?;
+    writer.write_u16(counter.count_binary)?;
+    writer.write_u16(counter.outlatch)?;
+    writer.write_u8(counter.rw_mode)?;
+    writer.write_u8(rw_state_wire(counter.read_state))?;
+    writer.write_u8(rw_state_wire(counter.write_state))?;
+    writer.write_bool(counter.count_lsb_latched)?;
+    writer.write_bool(counter.count_msb_latched)?;
+    writer.write_bool(counter.status_latched)?;
+    writer.write_u8(counter.latched_status)?;
+    writer.write_bool(counter.null_count)?;
+    writer.write_bool(counter.gate)?;
+    writer.write_bool(counter.output)?;
+    writer.write_bool(counter.trigger_gate)?;
+    writer.write_bool(counter.bcd_mode)?;
+    writer.write_bool(counter.count_written)?;
+    writer.write_bool(counter.first_pass)?;
+    writer.write_bool(counter.state_bit_1)?;
+    writer.write_bool(counter.state_bit_2)?;
+    writer.write_u32(counter.next_change_time)?;
+    writer.write_u32(counter.out_transitions)
+}
+
+#[cfg(feature = "std")]
+fn read_pit_counter<R: Read>(
+    reader: &mut SnapshotReader<R>,
+    counter: &mut PitCounter,
+) -> io::Result<()> {
+    counter.mode = reader.read_u8()?;
+    counter.inlatch = reader.read_u16()?;
+    counter.count = reader.read_u16()?;
+    counter.count_binary = reader.read_u16()?;
+    counter.outlatch = reader.read_u16()?;
+    counter.rw_mode = reader.read_u8()?;
+    counter.read_state = rw_state_from_wire(reader.read_u8()?)?;
+    counter.write_state = rw_state_from_wire(reader.read_u8()?)?;
+    counter.count_lsb_latched = reader.read_bool()?;
+    counter.count_msb_latched = reader.read_bool()?;
+    counter.status_latched = reader.read_bool()?;
+    counter.latched_status = reader.read_u8()?;
+    counter.null_count = reader.read_bool()?;
+    counter.gate = reader.read_bool()?;
+    counter.output = reader.read_bool()?;
+    counter.trigger_gate = reader.read_bool()?;
+    counter.bcd_mode = reader.read_bool()?;
+    counter.count_written = reader.read_bool()?;
+    counter.first_pass = reader.read_bool()?;
+    counter.state_bit_1 = reader.read_bool()?;
+    counter.state_bit_2 = reader.read_bool()?;
+    counter.next_change_time = reader.read_u32()?;
+    counter.out_transitions = reader.read_u32()?;
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn rw_state_wire(state: RWState) -> u8 {
+    match state {
+        RWState::LsByte => 0,
+        RWState::MsByte => 1,
+        RWState::LsByteMultiple => 2,
+        RWState::MsByteMultiple => 3,
+    }
+}
+
+#[cfg(feature = "std")]
+fn rw_state_from_wire(value: u8) -> io::Result<RWState> {
+    match value {
+        0 => Ok(RWState::LsByte),
+        1 => Ok(RWState::MsByte),
+        2 => Ok(RWState::LsByteMultiple),
+        3 => Ok(RWState::MsByteMultiple),
+        _ => Err(pit_snapshot_invalid("PIT read/write state is out of range")),
+    }
+}
+
+#[cfg(feature = "std")]
+fn validate_pit_counter(counter: &PitCounter) -> io::Result<()> {
+    if counter.mode > 5 {
+        return Err(pit_snapshot_invalid("PIT mode is out of range"));
+    }
+    if !(1..=3).contains(&counter.rw_mode) {
+        return Err(pit_snapshot_invalid("PIT read/write mode is out of range"));
+    }
+    if counter.status_latched {
+        let status_rw_mode = (counter.latched_status >> 4) & 0x03;
+        let status_mode = (counter.latched_status >> 1) & 0x07;
+        if counter.latched_status & 0x08 != 0 || status_rw_mode == 0 || status_mode > 5 {
+            return Err(pit_snapshot_invalid("PIT latched status is invalid"));
+        }
+    }
+    if counter.bcd_mode && counter.count_binary > 16_665 {
+        return Err(pit_snapshot_invalid("PIT BCD count is out of range"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn validate_pit_phase(
+    ips: u64,
+    usec_remainder: u128,
+    pit_usec_accumulator: u128,
+) -> io::Result<()> {
+    if (ips == 0 && usec_remainder != 0) || (ips != 0 && usec_remainder >= u128::from(ips)) {
+        return Err(pit_snapshot_invalid("PIT icount remainder is invalid"));
+    }
+    if pit_usec_accumulator >= u128::from(USEC_PER_SECOND) {
+        return Err(pit_snapshot_invalid("PIT tick remainder is invalid"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1319,7 +1674,7 @@ mod tests {
         // Derived math: exactly one second of usec yields exactly one
         // second of PIT ticks (Bochs USEC_TO_TICKS).
         let mut pit = BxPitC::new();
-        pit.tick(1_000_000, 0);
+        pit.advance_by_usec(1_000_000);
         assert_eq!(pit.total_ticks, 1_193_181);
     }
 
@@ -1705,4 +2060,59 @@ mod tests {
             "zero-elapsed realtime polling must not discard the sub-microsecond baseline"
         );
     }
+    #[test]
+    fn pit_irq0_fires_at_submillisecond_owner_deadline() {
+        let mut pit = BxPitC::new();
+        assert_eq!(pit.next_event_usec(), None);
+        pit.set_timer_handle(7);
+        assert_eq!(pit.timer_handle(), Some(7));
+
+        // Counter 0, LSB/MSB, mode 0. Programming drives OUT low. Its load
+        // and terminal-count phases both remain exact owner deadlines.
+        pit.write(PIT_CONTROL, 0x30, 1, 0);
+        pit.write(PIT_COUNTER0, 1, 1, 0);
+        pit.write(PIT_COUNTER0, 0, 1, 0);
+        let _ = pit.drain_irq0_events();
+        assert_eq!(pit.next_event_usec(), Some(1));
+
+        let mut transitions = 0;
+        let mut final_level = false;
+        let mut fired_at_usec = None;
+        for current_usec in 1..=4 {
+            let callback =
+                pit.timer_callback(current_usec, u64::from(USEC_PER_SECOND));
+            transitions += callback.irq0_transitions;
+            final_level = callback.irq0_level;
+            if callback.irq0_transitions != 0 {
+                fired_at_usec = Some(current_usec);
+                break;
+            }
+            assert!(callback.rearm_usec.is_some());
+        }
+        assert_eq!(transitions, 1);
+        assert!(final_level);
+        assert!(fired_at_usec.is_some_and(|deadline| deadline < 1_000));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn realtime_owner_callback_rearms_early_without_mutating_pit() {
+        let mut pit = BxPitC::new();
+        pit.enable_realtime_sync();
+        pit.counters[0].next_change_time = u32::MAX;
+
+        let before_usec = pit.total_usec;
+        let before_ticks = pit.total_ticks;
+        let before_event = pit.counters[0].next_change_time;
+        let callback = pit.timer_callback(1_000_000, u64::from(USEC_PER_SECOND));
+
+        assert!(
+            callback.rearm_usec.is_some_and(|delay| delay > 0),
+            "a host-early callback must rearm for the predicted remaining time"
+        );
+        assert_eq!(pit.total_usec, before_usec);
+        assert_eq!(pit.total_ticks, before_ticks);
+        assert_eq!(pit.counters[0].next_change_time, before_event);
+    }
+
 }

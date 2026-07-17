@@ -103,6 +103,11 @@ use bitflags::bitflags;
 use std::fs::File;
 #[cfg(feature = "std")]
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    SNAPSHOT_SECTION_VERSION,
+};
 
 /// Sector size in bytes
 pub const SECTOR_SIZE: usize = 512;
@@ -1958,6 +1963,27 @@ impl BxHardDriveC {
             return false;
         }
         true
+    }
+
+    /// Abort a BM-DMA transfer after an unrecoverable guest-memory failure.
+    ///
+    /// The ATA command reports ABRT and the bus-master status reports ERROR;
+    /// unlike `bmdma_complete`, this never presents a short DMA write as a
+    /// normal successful command completion.
+    pub fn bmdma_abort(
+        &mut self,
+        channel: u8,
+        pic: &mut super::pic::BxPicC,
+        pci_ide: &mut super::pci_ide::BxPciIde,
+    ) {
+        let ch = channel as usize;
+        if ch >= 2 {
+            return;
+        }
+        let command = self.channels[ch].selected_drive().controller.current_command;
+        self.command_aborted(ch, command, pic, pci_ide);
+        pci_ide.bmdma[ch].status &= !0x01;
+        pci_ide.bmdma[ch].status |= 0x02;
     }
 
     /// Complete a BM-DMA transfer — set final status and raise interrupt.
@@ -4454,12 +4480,753 @@ impl BxHardDriveC {
     }
 }
 
+#[cfg(feature = "std")]
+const SNAPSHOT_MEDIA_NONE: u8 = 0;
+#[cfg(feature = "std")]
+const SNAPSHOT_MEDIA_OWNED: u8 = 1;
+#[cfg(feature = "std")]
+const SNAPSHOT_MEDIA_STATIC: u8 = 2;
+#[cfg(feature = "std")]
+const SNAPSHOT_MEDIA_DISK_FILE: u8 = 3;
+#[cfg(feature = "std")]
+const SNAPSHOT_MEDIA_CDROM_FILE: u8 = 4;
+
+#[cfg(feature = "std")]
+#[derive(Clone, Copy)]
+struct SnapshotMediaDescriptor {
+    tag: u8,
+    len: u64,
+    identity_scheme: u8,
+    identity_a: u64,
+    identity_b: u64,
+}
+
+#[cfg(feature = "std")]
+struct SnapshotControllerState {
+    status: AtaStatus,
+    error: AtaError,
+    features: u8,
+    sector_count: u8,
+    sector_no: u8,
+    cylinder_no: u16,
+    head_no: u8,
+    lba_mode: bool,
+    control: u8,
+    interrupt_pending: bool,
+    current_command: u8,
+    multiple_sectors: u8,
+    buffer_index: usize,
+    drq_index: u32,
+    buffer_size: usize,
+    num_sectors: u32,
+    lba48: bool,
+    reset_in_progress: bool,
+    index_pulse_count: u8,
+    hob: AtaHob,
+    packet_dma: bool,
+    mdma_mode: u8,
+    udma_mode: u8,
+}
+
+#[cfg(feature = "std")]
+struct SnapshotDriveState {
+    controller: SnapshotControllerState,
+    sense: SenseInfo,
+    atapi: AtapiState,
+    cdrom: CdromState,
+    status_changed: i32,
+    identify_set: bool,
+}
+
+#[cfg(feature = "std")]
+fn snapshot_invalid(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn snapshot_add_len(total: &mut u64, part: u64) -> std::io::Result<()> {
+    *total = checked_snapshot_len_add(*total, part)?;
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn snapshot_usize_to_u64(value: usize) -> std::io::Result<u64> {
+    u64::try_from(value).map_err(|_| snapshot_invalid("ATA snapshot length does not fit u64"))
+}
+
+#[cfg(feature = "std")]
+fn snapshot_u64_to_usize(value: u64, maximum: usize) -> std::io::Result<usize> {
+    let value = usize::try_from(value)
+        .map_err(|_| snapshot_invalid("ATA snapshot index does not fit usize"))?;
+    if value > maximum {
+        return Err(snapshot_invalid("ATA snapshot index exceeds fixed buffer"));
+    }
+    Ok(value)
+}
+
+#[cfg(feature = "std")]
+fn snapshot_read_i32<R: Read>(reader: &mut SnapshotReader<R>) -> std::io::Result<i32> {
+    i32::try_from(reader.read_i64()?)
+        .map_err(|_| snapshot_invalid("ATA snapshot signed value does not fit i32"))
+}
+
+#[cfg(feature = "std")]
+fn snapshot_device_type(value: u8) -> std::io::Result<DeviceType> {
+    match value {
+        0 => Ok(DeviceType::None),
+        1 => Ok(DeviceType::Disk),
+        2 => Ok(DeviceType::Cdrom),
+        _ => Err(snapshot_invalid("ATA snapshot has an invalid device type")),
+    }
+}
+
+#[cfg(feature = "std")]
+fn snapshot_device_type_tag(device_type: DeviceType) -> u8 {
+    match device_type {
+        DeviceType::None => 0,
+        DeviceType::Disk => 1,
+        DeviceType::Cdrom => 2,
+    }
+}
+
+#[cfg(feature = "std")]
+fn snapshot_media_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+#[cfg(feature = "std")]
+fn snapshot_file_identity(
+    metadata: &std::fs::Metadata,
+    path: &str,
+) -> std::io::Result<(u8, u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return Ok((1, metadata.dev(), metadata.ino()));
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = metadata;
+        Ok((3, snapshot_media_hash(path.as_bytes()), 0))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok((3, snapshot_media_hash(path.as_bytes()), 0))
+    }
+}
+
+#[cfg(feature = "std")]
+impl SnapshotDriveState {
+    fn read<R: Read>(reader: &mut SnapshotReader<R>) -> std::io::Result<Self> {
+        let status_bits = reader.read_u8()?;
+        let status = AtaStatus::from_bits(status_bits)
+            .ok_or_else(|| snapshot_invalid("ATA snapshot has invalid status flags"))?;
+        let error_bits = reader.read_u8()?;
+        if error_bits & !0x77 != 0 {
+            return Err(snapshot_invalid("ATA snapshot has invalid error flags"));
+        }
+
+        let controller = SnapshotControllerState {
+            status,
+            error: AtaError::from_bits_retain(error_bits),
+            features: reader.read_u8()?,
+            sector_count: reader.read_u8()?,
+            sector_no: reader.read_u8()?,
+            cylinder_no: reader.read_u16()?,
+            head_no: reader.read_u8()?,
+            lba_mode: reader.read_bool()?,
+            control: reader.read_u8()?,
+            interrupt_pending: reader.read_bool()?,
+            current_command: reader.read_u8()?,
+            multiple_sectors: reader.read_u8()?,
+            buffer_index: snapshot_u64_to_usize(reader.read_u64()?, SECTOR_SIZE * 256)?,
+            drq_index: reader.read_u32()?,
+            buffer_size: snapshot_u64_to_usize(reader.read_u64()?, SECTOR_SIZE * 256)?,
+            num_sectors: reader.read_u32()?,
+            lba48: reader.read_bool()?,
+            reset_in_progress: reader.read_bool()?,
+            index_pulse_count: reader.read_u8()?,
+            hob: AtaHob {
+                feature: reader.read_u8()?,
+                nsector: reader.read_u8()?,
+                sector: reader.read_u8()?,
+                lcyl: reader.read_u8()?,
+                hcyl: reader.read_u8()?,
+            },
+            packet_dma: reader.read_bool()?,
+            mdma_mode: reader.read_u8()?,
+            udma_mode: reader.read_u8()?,
+        };
+
+        let mut information = [0u8; 4];
+        let mut specific_inf = [0u8; 4];
+        let mut key_spec = [0u8; 3];
+        let sense_key = reader.read_u8()?;
+        reader.read_bytes(&mut information)?;
+        reader.read_bytes(&mut specific_inf)?;
+        reader.read_bytes(&mut key_spec)?;
+        let sense = SenseInfo {
+            sense_key,
+            information,
+            specific_inf,
+            key_spec,
+            fruc: reader.read_u8()?,
+            asc: reader.read_u8()?,
+            ascq: reader.read_u8()?,
+        };
+
+        let atapi = AtapiState {
+            command: reader.read_u8()?,
+            drq_bytes: snapshot_read_i32(reader)?,
+            total_bytes_remaining: snapshot_read_i32(reader)?,
+        };
+        let cdrom = CdromState {
+            ready: reader.read_bool()?,
+            locked: reader.read_bool()?,
+            max_lba: reader.read_u32()?,
+            curr_lba: reader.read_u32()?,
+            next_lba: reader.read_u32()?,
+            remaining_blocks: snapshot_read_i32(reader)?,
+        };
+        let state = Self {
+            controller,
+            sense,
+            atapi,
+            cdrom,
+            status_changed: snapshot_read_i32(reader)?,
+            identify_set: reader.read_bool()?,
+        };
+        state.validate()?;
+        Ok(state)
+    }
+
+    fn validate(&self) -> std::io::Result<()> {
+        let controller = &self.controller;
+        if controller.buffer_index > controller.buffer_size {
+            return Err(snapshot_invalid("ATA snapshot buffer index exceeds buffer size"));
+        }
+        if controller.control & !0x86 != 0 {
+            return Err(snapshot_invalid("ATA snapshot has reserved control bits set"));
+        }
+        if controller.head_no > 0x0f {
+            return Err(snapshot_invalid("ATA snapshot head number exceeds taskfile width"));
+        }
+        if controller.multiple_sectors != 0
+            && (!controller.multiple_sectors.is_power_of_two()
+                || controller.multiple_sectors > 128)
+        {
+            return Err(snapshot_invalid("ATA snapshot has invalid multiple-sector count"));
+        }
+        if controller.index_pulse_count >= 10 {
+            return Err(snapshot_invalid("ATA snapshot index pulse counter is out of range"));
+        }
+        if (controller.mdma_mode != 0 && !controller.mdma_mode.is_power_of_two())
+            || (controller.udma_mode != 0 && !controller.udma_mode.is_power_of_two())
+        {
+            return Err(snapshot_invalid("ATA snapshot has invalid DMA mode bits"));
+        }
+        if self.atapi.drq_bytes < 0 || self.atapi.total_bytes_remaining < 0 {
+            return Err(snapshot_invalid("ATA snapshot has negative ATAPI transfer state"));
+        }
+        let atapi_drq_len = usize::try_from(self.atapi.drq_bytes)
+            .map_err(|_| snapshot_invalid("ATA snapshot ATAPI DRQ length is invalid"))?;
+        if atapi_drq_len > SECTOR_SIZE * 256 {
+            return Err(snapshot_invalid("ATA snapshot ATAPI DRQ length exceeds buffer"));
+        }
+        let atapi_drq_cursor = u32::try_from(self.atapi.drq_bytes)
+            .map_err(|_| snapshot_invalid("ATA snapshot ATAPI DRQ cursor is invalid"))?;
+        if controller.current_command == ATA_CMD_PACKET && controller.drq_index > atapi_drq_cursor {
+            return Err(snapshot_invalid("ATA snapshot ATAPI DRQ cursor exceeds cycle"));
+        }
+        if self.cdrom.remaining_blocks < 0 {
+            return Err(snapshot_invalid("ATA snapshot has negative CD block count"));
+        }
+        let max_cursor_lba = self.cdrom.max_lba.saturating_add(1);
+        if self.cdrom.curr_lba > max_cursor_lba || self.cdrom.next_lba > max_cursor_lba {
+            return Err(snapshot_invalid("ATA snapshot CD LBA cursor exceeds media"));
+        }
+        if !matches!(self.status_changed, -1..=1) {
+            return Err(snapshot_invalid("ATA snapshot media-change state is invalid"));
+        }
+        if !matches!(self.sense.sense_key, 0 | 2 | 3 | 5 | 6) {
+            return Err(snapshot_invalid("ATA snapshot has invalid SCSI sense key"));
+        }
+        if !matches!(
+            self.sense.asc,
+            0 | 0x11 | 0x20 | 0x21 | 0x24 | 0x28 | 0x3a
+        ) {
+            return Err(snapshot_invalid("ATA snapshot has invalid SCSI ASC"));
+        }
+        if self.sense.ascq > 1 {
+            return Err(snapshot_invalid("ATA snapshot has invalid SCSI ASCQ"));
+        }
+        Ok(())
+    }
+
+    fn apply(self, drive: &mut AtaDrive) {
+        let controller = self.controller;
+        drive.controller.status = controller.status;
+        drive.controller.error = controller.error;
+        drive.controller.features = controller.features;
+        drive.controller.sector_count = controller.sector_count;
+        drive.controller.sector_no = controller.sector_no;
+        drive.controller.cylinder_no = controller.cylinder_no;
+        drive.controller.head_no = controller.head_no;
+        drive.controller.lba_mode = controller.lba_mode;
+        drive.controller.control = controller.control;
+        drive.controller.interrupt_pending = controller.interrupt_pending;
+        drive.controller.current_command = controller.current_command;
+        drive.controller.multiple_sectors = controller.multiple_sectors;
+        drive.controller.buffer_index = controller.buffer_index;
+        drive.controller.drq_index = controller.drq_index;
+        drive.controller.buffer_size = controller.buffer_size;
+        drive.controller.num_sectors = controller.num_sectors;
+        drive.controller.lba48 = controller.lba48;
+        drive.controller.reset_in_progress = controller.reset_in_progress;
+        drive.controller.index_pulse_count = controller.index_pulse_count;
+        drive.controller.hob = controller.hob;
+        drive.controller.packet_dma = controller.packet_dma;
+        drive.controller.mdma_mode = controller.mdma_mode;
+        drive.controller.udma_mode = controller.udma_mode;
+        drive.sense = self.sense;
+        drive.atapi = self.atapi;
+        drive.cdrom = self.cdrom;
+        drive.status_changed = self.status_changed;
+        drive.identify_set = self.identify_set;
+    }
+}
+
+#[cfg(feature = "std")]
+impl AtaDrive {
+    fn snapshot_media_descriptor(&self) -> std::io::Result<SnapshotMediaDescriptor> {
+        #[cfg(feature = "alloc")]
+        let owned = self.disk_data.as_deref();
+        #[cfg(not(feature = "alloc"))]
+        let owned: Option<&[u8]> = None;
+        let static_data = self.disk_data_ref;
+        let has_disk_file = self.image_file.is_some();
+        let has_cdrom_file = self.cdrom_file.is_some();
+        let media_count = usize::from(u8::from(owned.is_some()))
+            + usize::from(u8::from(static_data.is_some()))
+            + usize::from(u8::from(has_disk_file))
+            + usize::from(u8::from(has_cdrom_file));
+        if media_count > 1 {
+            return Err(snapshot_invalid("ATA drive has multiple live media backings"));
+        }
+        if self.device_type == DeviceType::None && media_count != 0 {
+            return Err(snapshot_invalid("ATA absent drive has live media"));
+        }
+        if media_count == 0 {
+            if self.image_path.is_some() {
+                return Err(snapshot_invalid("ATA drive path exists without an open media resource"));
+            }
+            return Ok(SnapshotMediaDescriptor {
+                tag: SNAPSHOT_MEDIA_NONE,
+                len: 0,
+                identity_scheme: 0,
+                identity_a: 0,
+                identity_b: 0,
+            });
+        }
+
+        if let Some(data) = owned {
+            let len = snapshot_usize_to_u64(data.len())?;
+            return Ok(SnapshotMediaDescriptor {
+                tag: SNAPSHOT_MEDIA_OWNED,
+                len,
+                identity_scheme: 0,
+                identity_a: 0,
+                identity_b: 0,
+            });
+        }
+        if let Some(data) = static_data {
+            let len = snapshot_usize_to_u64(data.len())?;
+            return Ok(SnapshotMediaDescriptor {
+                tag: SNAPSHOT_MEDIA_STATIC,
+                len,
+                identity_scheme: 0,
+                identity_a: snapshot_media_hash(data),
+                identity_b: 0,
+            });
+        }
+
+        let path = self
+            .image_path
+            .as_deref()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| snapshot_invalid("ATA file media has no configured identity"))?;
+        let (tag, file) = if let Some(file) = self.image_file.as_ref() {
+            if self.device_type != DeviceType::Disk {
+                return Err(snapshot_invalid("ATA disk file does not match drive type"));
+            }
+            (SNAPSHOT_MEDIA_DISK_FILE, file)
+        } else {
+            if self.device_type != DeviceType::Cdrom {
+                return Err(snapshot_invalid("ATA CD-ROM file does not match drive type"));
+            }
+            (
+                SNAPSHOT_MEDIA_CDROM_FILE,
+                self.cdrom_file
+                    .as_ref()
+                    .ok_or_else(|| snapshot_invalid("ATA file backing disappeared"))?,
+            )
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|_| snapshot_invalid("ATA cannot inspect live file media"))?;
+        let len = metadata.len();
+        let (identity_scheme, identity_a, identity_b) = snapshot_file_identity(&metadata, path)?;
+        Ok(SnapshotMediaDescriptor {
+            tag,
+            len,
+            identity_scheme,
+            identity_a,
+            identity_b,
+        })
+    }
+
+    fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+        let media = self.snapshot_media_descriptor()?;
+        let mut len = 0;
+        // Immutable drive identity: type, geometry, strings, and slot number.
+        snapshot_add_len(&mut len, 87)?;
+        // Taskfile/controller scalar state, ATAPI state, CD state, and flags.
+        snapshot_add_len(&mut len, 48)?;
+        snapshot_add_len(&mut len, 15)?;
+        snapshot_add_len(&mut len, 17)?;
+        snapshot_add_len(&mut len, 22)?;
+        snapshot_add_len(&mut len, 8)?;
+        snapshot_add_len(&mut len, 1)?;
+        snapshot_add_len(
+            &mut len,
+            checked_snapshot_len_mul(512, 256)?,
+        )?;
+        snapshot_add_len(&mut len, checked_snapshot_len_mul(256, 2)?)?;
+        let media_len = match media.tag {
+            SNAPSHOT_MEDIA_NONE => 1,
+            SNAPSHOT_MEDIA_OWNED => {
+                if media.len > bounds::MAX_SNAPSHOT_SECTION_LEN.saturating_sub(9) {
+                    return Err(snapshot_invalid("ATA owned media exceeds snapshot bound"));
+                }
+                checked_snapshot_len_add(9, media.len)?
+            }
+            SNAPSHOT_MEDIA_STATIC => 17,
+            SNAPSHOT_MEDIA_DISK_FILE | SNAPSHOT_MEDIA_CDROM_FILE => 26,
+            _ => return Err(snapshot_invalid("ATA drive has invalid live media tag")),
+        };
+        snapshot_add_len(&mut len, media_len)?;
+        Ok(len)
+    }
+
+    fn save_snapshot_v3<W: Write + ?Sized>(&self, writer: &mut W) -> std::io::Result<()> {
+        let media = self.snapshot_media_descriptor()?;
+        if usize::from(self.model_len) > self.model.len()
+            || usize::from(self.serial_len) > self.serial.len()
+            || usize::from(self.firmware_len) > self.firmware.len()
+        {
+            return Err(snapshot_invalid("ATA drive identity length exceeds fixed field"));
+        }
+        writer.write_u8(snapshot_device_type_tag(self.device_type))?;
+        writer.write_u32(self.geometry.cylinders)?;
+        writer.write_u8(self.geometry.heads)?;
+        writer.write_u8(self.geometry.sectors_per_track)?;
+        writer.write_u64(self.geometry.total_sectors)?;
+        writer.write_u8(self.model_len)?;
+        writer.write_bytes(&self.model)?;
+        writer.write_u8(self.serial_len)?;
+        writer.write_bytes(&self.serial)?;
+        writer.write_u8(self.firmware_len)?;
+        writer.write_bytes(&self.firmware)?;
+        writer.write_u8(self.device_num)?;
+
+        let controller = &self.controller;
+        writer.write_u8(controller.status.bits())?;
+        writer.write_u8(controller.error.bits())?;
+        writer.write_u8(controller.features)?;
+        writer.write_u8(controller.sector_count)?;
+        writer.write_u8(controller.sector_no)?;
+        writer.write_u16(controller.cylinder_no)?;
+        writer.write_u8(controller.head_no)?;
+        writer.write_bool(controller.lba_mode)?;
+        writer.write_u8(controller.control)?;
+        writer.write_bool(controller.interrupt_pending)?;
+        writer.write_u8(controller.current_command)?;
+        writer.write_u8(controller.multiple_sectors)?;
+        writer.write_u64(snapshot_usize_to_u64(controller.buffer_index)?)?;
+        writer.write_u32(controller.drq_index)?;
+        writer.write_u64(snapshot_usize_to_u64(controller.buffer_size)?)?;
+        writer.write_u32(controller.num_sectors)?;
+        writer.write_bool(controller.lba48)?;
+        writer.write_bool(controller.reset_in_progress)?;
+        writer.write_u8(controller.index_pulse_count)?;
+        writer.write_u8(controller.hob.feature)?;
+        writer.write_u8(controller.hob.nsector)?;
+        writer.write_u8(controller.hob.sector)?;
+        writer.write_u8(controller.hob.lcyl)?;
+        writer.write_u8(controller.hob.hcyl)?;
+        writer.write_bool(controller.packet_dma)?;
+        writer.write_u8(controller.mdma_mode)?;
+        writer.write_u8(controller.udma_mode)?;
+
+        writer.write_u8(self.sense.sense_key)?;
+        writer.write_bytes(&self.sense.information)?;
+        writer.write_bytes(&self.sense.specific_inf)?;
+        writer.write_bytes(&self.sense.key_spec)?;
+        writer.write_u8(self.sense.fruc)?;
+        writer.write_u8(self.sense.asc)?;
+        writer.write_u8(self.sense.ascq)?;
+        writer.write_u8(self.atapi.command)?;
+        writer.write_i64(i64::from(self.atapi.drq_bytes))?;
+        writer.write_i64(i64::from(self.atapi.total_bytes_remaining))?;
+        writer.write_bool(self.cdrom.ready)?;
+        writer.write_bool(self.cdrom.locked)?;
+        writer.write_u32(self.cdrom.max_lba)?;
+        writer.write_u32(self.cdrom.curr_lba)?;
+        writer.write_u32(self.cdrom.next_lba)?;
+        writer.write_i64(i64::from(self.cdrom.remaining_blocks))?;
+        writer.write_i64(i64::from(self.status_changed))?;
+        writer.write_bool(self.identify_set)?;
+        writer.write_bytes(&controller.buffer)?;
+        for word in &self.id_drive {
+            writer.write_u16(*word)?;
+        }
+        self.save_snapshot_media(writer, media)
+    }
+
+    fn save_snapshot_media<W: Write + ?Sized>(
+        &self,
+        writer: &mut W,
+        media: SnapshotMediaDescriptor,
+    ) -> std::io::Result<()> {
+        writer.write_u8(media.tag)?;
+        match media.tag {
+            SNAPSHOT_MEDIA_NONE => Ok(()),
+            SNAPSHOT_MEDIA_OWNED => {
+                if media.len > bounds::MAX_SNAPSHOT_SECTION_LEN.saturating_sub(9) {
+                    return Err(snapshot_invalid("ATA owned media exceeds snapshot bound"));
+                }
+                checked_snapshot_len_add(9, media.len)?;
+                writer.write_u64(media.len)?;
+                #[cfg(feature = "alloc")]
+                {
+                    let data = self
+                        .disk_data
+                        .as_deref()
+                        .ok_or_else(|| snapshot_invalid("ATA owned media disappeared"))?;
+                    writer.write_bytes(data)
+                }
+                #[cfg(not(feature = "alloc"))]
+                {
+                    Err(snapshot_invalid("ATA owned media is unavailable without allocation"))
+                }
+            }
+            SNAPSHOT_MEDIA_STATIC => {
+                writer.write_u64(media.len)?;
+                writer.write_u64(media.identity_a)
+            }
+            SNAPSHOT_MEDIA_DISK_FILE | SNAPSHOT_MEDIA_CDROM_FILE => {
+                writer.write_u64(media.len)?;
+                writer.write_u8(media.identity_scheme)?;
+                writer.write_u64(media.identity_a)?;
+                writer.write_u64(media.identity_b)
+            }
+            _ => Err(snapshot_invalid("ATA drive has invalid live media tag")),
+        }
+    }
+
+    fn restore_snapshot_v3<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> std::io::Result<()> {
+        let device_type = snapshot_device_type(reader.read_u8()?)?;
+        let geometry = DriveGeometry {
+            cylinders: reader.read_u32()?,
+            heads: reader.read_u8()?,
+            sectors_per_track: reader.read_u8()?,
+            total_sectors: reader.read_u64()?,
+        };
+        let model_len = reader.read_u8()?;
+        if usize::from(model_len) > self.model.len() {
+            return Err(snapshot_invalid("ATA snapshot model length exceeds fixed field"));
+        }
+        let mut model = [0u8; 40];
+        reader.read_bytes(&mut model)?;
+        let serial_len = reader.read_u8()?;
+        if usize::from(serial_len) > self.serial.len() {
+            return Err(snapshot_invalid("ATA snapshot serial length exceeds fixed field"));
+        }
+        let mut serial = [0u8; 20];
+        reader.read_bytes(&mut serial)?;
+        let firmware_len = reader.read_u8()?;
+        if usize::from(firmware_len) > self.firmware.len() {
+            return Err(snapshot_invalid("ATA snapshot firmware length exceeds fixed field"));
+        }
+        let mut firmware = [0u8; 8];
+        reader.read_bytes(&mut firmware)?;
+        let device_num = reader.read_u8()?;
+        if device_type != self.device_type
+            || geometry.cylinders != self.geometry.cylinders
+            || geometry.heads != self.geometry.heads
+            || geometry.sectors_per_track != self.geometry.sectors_per_track
+            || geometry.total_sectors != self.geometry.total_sectors
+            || model_len != self.model_len
+            || model != self.model
+            || serial_len != self.serial_len
+            || serial != self.serial
+            || firmware_len != self.firmware_len
+            || firmware != self.firmware
+            || device_num != self.device_num
+        {
+            return Err(snapshot_invalid("ATA snapshot drive identity does not match live configuration"));
+        }
+
+        let state = SnapshotDriveState::read(reader)?;
+        reader.read_bytes(&mut self.controller.buffer)?;
+        for word in &mut self.id_drive {
+            *word = reader.read_u16()?;
+        }
+        self.restore_snapshot_media(reader)?;
+        state.apply(self);
+        Ok(())
+    }
+
+    fn restore_snapshot_media<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> std::io::Result<()> {
+        let saved_tag = reader.read_u8()?;
+        let live = self.snapshot_media_descriptor()?;
+        if saved_tag != live.tag {
+            return Err(snapshot_invalid("ATA snapshot media backing does not match live media"));
+        }
+        match saved_tag {
+            SNAPSHOT_MEDIA_NONE => Ok(()),
+            SNAPSHOT_MEDIA_OWNED => {
+                let saved_len = reader.read_u64()?;
+                if saved_len != live.len {
+                    return Err(snapshot_invalid("ATA snapshot owned media length does not match"));
+                }
+                #[cfg(feature = "alloc")]
+                {
+                    let data = self
+                        .disk_data
+                        .as_deref_mut()
+                        .ok_or_else(|| snapshot_invalid("ATA owned media disappeared"))?;
+                    reader.read_bytes(data)
+                }
+                #[cfg(not(feature = "alloc"))]
+                {
+                    Err(snapshot_invalid("ATA owned media is unavailable without allocation"))
+                }
+            }
+            SNAPSHOT_MEDIA_STATIC => {
+                let saved_len = reader.read_u64()?;
+                let saved_hash = reader.read_u64()?;
+                if saved_len != live.len || saved_hash != live.identity_a {
+                    return Err(snapshot_invalid("ATA snapshot static media does not match live media"));
+                }
+                Ok(())
+            }
+            SNAPSHOT_MEDIA_DISK_FILE | SNAPSHOT_MEDIA_CDROM_FILE => {
+                let saved_len = reader.read_u64()?;
+                let saved_scheme = reader.read_u8()?;
+                let saved_a = reader.read_u64()?;
+                let saved_b = reader.read_u64()?;
+                if saved_len != live.len
+                    || saved_scheme != live.identity_scheme
+                    || saved_a != live.identity_a
+                    || saved_b != live.identity_b
+                {
+                    return Err(snapshot_invalid("ATA snapshot file media does not match live resource"));
+                }
+                Ok(())
+            }
+            _ => Err(snapshot_invalid("ATA snapshot has invalid media tag")),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl BxHardDriveC {
+    /// Exact payload length for the HARDDRV v3 section, including its version.
+    pub(crate) fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+        let mut len = 4u64;
+        for channel in &self.channels {
+            snapshot_add_len(&mut len, 6)?;
+            for drive in &channel.drives {
+                snapshot_add_len(&mut len, drive.snapshot_v3_len()?)?;
+            }
+        }
+        snapshot_add_len(&mut len, 2)?;
+        Ok(len)
+    }
+
+    /// Streams the complete HARDDRV v3 section without staging its fixed buffers or media.
+    pub(crate) fn save_snapshot_v3<W: Write + ?Sized>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+        for channel in &self.channels {
+            if usize::from(channel.drive_select) >= channel.drives.len() {
+                return Err(snapshot_invalid("ATA live drive selection is out of range"));
+            }
+            writer.write_u16(channel.ioaddr1)?;
+            writer.write_u16(channel.ioaddr2)?;
+            writer.write_u8(channel.irq)?;
+            writer.write_u8(channel.drive_select)?;
+            for drive in &channel.drives {
+                drive.save_snapshot_v3(writer)?;
+            }
+        }
+        let [primary_seek_complete, secondary_seek_complete] = self.seek_complete_pending;
+        writer.write_bool(primary_seek_complete)?;
+        writer.write_bool(secondary_seek_complete)
+    }
+
+    /// Restores the HARDDRV v3 section while retaining the live media resources.
+    pub(crate) fn restore_snapshot_v3<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> std::io::Result<()> {
+        if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
+            return Err(snapshot_invalid("unsupported ATA snapshot section version"));
+        }
+        for channel in &mut self.channels {
+            let ioaddr1 = reader.read_u16()?;
+            let ioaddr2 = reader.read_u16()?;
+            let irq = reader.read_u8()?;
+            let drive_select = reader.read_u8()?;
+            if ioaddr1 != channel.ioaddr1 || ioaddr2 != channel.ioaddr2 || irq != channel.irq {
+                return Err(snapshot_invalid("ATA snapshot channel configuration does not match"));
+            }
+            if usize::from(drive_select) >= channel.drives.len() {
+                return Err(snapshot_invalid("ATA snapshot drive selection is out of range"));
+            }
+            for drive in &mut channel.drives {
+                drive.restore_snapshot_v3(reader)?;
+            }
+            channel.drive_select = drive_select;
+        }
+        let seek_complete_pending = [reader.read_bool()?, reader.read_bool()?];
+        self.seek_complete_pending = seek_complete_pending;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{
         fs::{self, File},
-        io::{Read, Seek, SeekFrom, Write},
+        io::{Cursor, ErrorKind, Read, Seek, SeekFrom, Write},
     };
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
@@ -4773,5 +5540,79 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn ata_snapshot_resumes_mid_pio_transfer_with_owned_media() {
+        let mut hd = BxHardDriveC::new();
+        let mut pic = crate::iodev::pic::BxPicC::new();
+        let mut pci_ide = crate::iodev::pci_ide::BxPciIde::new();
+        let mut media = vec![0u8; SECTOR_SIZE * 2];
+        media[..SECTOR_SIZE].fill(0x31);
+        media[SECTOR_SIZE..].fill(0xa7);
+        hd.attach_disk_data(0, 0, media, 1, 1, 2);
+
+        for (port, value) in [
+            (0x1f2, 2),
+            (0x1f3, 0),
+            (0x1f4, 0),
+            (0x1f5, 0),
+            (0x1f6, 0xe0),
+            (0x1f7, ATA_CMD_READ_SECTORS),
+        ] {
+            hd.write(port, value as u32, 1, &mut pic, &mut pci_ide);
+        }
+        assert_eq!(hd.read(0x1f0, 2, &mut pic, &mut pci_ide), 0x3131);
+
+        let saved_len = hd.snapshot_v3_len().unwrap();
+        let mut saved = Vec::with_capacity(saved_len as usize);
+        hd.save_snapshot_v3(&mut saved).unwrap();
+        assert_eq!(saved.len() as u64, saved_len);
+
+        let drive = &mut hd.channels[0].drives[0];
+        drive.controller.status = AtaStatus::DRDY;
+        drive.controller.current_command = 0;
+        drive.controller.buffer_index = 0;
+        drive.controller.buffer[..SECTOR_SIZE].fill(0);
+        drive.disk_data.as_mut().unwrap().fill(0xff);
+
+        let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
+        hd.restore_snapshot_v3(&mut reader).unwrap();
+        reader.finish_exact().unwrap();
+
+        let drive = &hd.channels[0].drives[0];
+        assert_eq!(drive.controller.current_command, ATA_CMD_READ_SECTORS);
+        assert!(drive.controller.status.contains(AtaStatus::DRQ));
+        assert_eq!(drive.controller.buffer_index, 2);
+        assert_eq!(drive.controller.num_sectors, 1);
+        assert_eq!(&drive.controller.buffer[..2], &[0x31, 0x31]);
+        assert_eq!(drive.disk_data.as_deref().unwrap()[SECTOR_SIZE], 0xa7);
+
+        for _ in 0..255 {
+            assert_eq!(hd.read(0x1f0, 2, &mut pic, &mut pci_ide), 0x3131);
+        }
+        let drive = &hd.channels[0].drives[0];
+        assert_eq!(drive.controller.current_command, ATA_CMD_READ_SECTORS);
+        assert!(drive.controller.status.contains(AtaStatus::DRQ));
+        assert_eq!(drive.controller.buffer_index, 0);
+        assert_eq!(drive.controller.num_sectors, 0);
+        assert_eq!(hd.read(0x1f0, 2, &mut pic, &mut pci_ide), 0xa7a7);
+    }
+
+    #[test]
+    fn ata_snapshot_rejects_different_static_media() {
+        static SOURCE_MEDIA: [u8; SECTOR_SIZE] = [0x11; SECTOR_SIZE];
+        static DIFFERENT_MEDIA: [u8; SECTOR_SIZE] = [0x22; SECTOR_SIZE];
+
+        let mut source = BxHardDriveC::new();
+        source.attach_disk_data_ref(0, 0, &SOURCE_MEDIA, 1, 1, 1);
+        let mut saved = Vec::new();
+        source.save_snapshot_v3(&mut saved).unwrap();
+
+        let mut target = BxHardDriveC::new();
+        target.attach_disk_data_ref(0, 0, &DIFFERENT_MEDIA, 1, 1, 1);
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        let error = target.restore_snapshot_v3(&mut reader).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
     }
 }
