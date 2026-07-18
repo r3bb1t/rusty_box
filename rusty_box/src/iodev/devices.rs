@@ -2316,6 +2316,7 @@ mod tests {
                 requests.get(DeviceTimerOwner::PciIdeCh0),
                 TimerRequest::Activate {
                     deadline_ticks: 42,
+                    period_ticks: 1,
                     continuous: false,
                 }
             );

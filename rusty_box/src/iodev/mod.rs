@@ -122,6 +122,7 @@ pub(crate) enum TimerRequest {
     Deactivate,
     Activate {
         deadline_ticks: u64,
+        period_ticks: u64,
         continuous: bool,
     },
 }
@@ -340,6 +341,7 @@ impl BxDevicesC {
                     .min(u128::from(u64::MAX)) as u64;
                 TimerRequest::Activate {
                     deadline_ticks: current_ticks.saturating_add(ticks),
+                    period_ticks: ticks,
                     continuous,
                 }
             }
@@ -600,6 +602,7 @@ impl BxDevicesC {
                         owner,
                         TimerRequest::Activate {
                             deadline_ticks: current_ticks.saturating_add(u64::from(delay_ticks)),
+                            period_ticks: u64::from(delay_ticks),
                             continuous: false,
                         },
                     );
@@ -942,7 +945,7 @@ fn invalid_bx_devices_snapshot(message: &'static str) -> Error {
 fn timer_request_snapshot_len(request: TimerRequest) -> io::Result<u64> {
     match request {
         TimerRequest::Unchanged | TimerRequest::Deactivate => Ok(1),
-        TimerRequest::Activate { .. } => checked_snapshot_len_add(1, 9),
+        TimerRequest::Activate { .. } => checked_snapshot_len_add(1, 17),
     }
 }
 
@@ -956,10 +959,12 @@ fn write_timer_request_snapshot<W: Write>(
         TimerRequest::Deactivate => writer.write_u8(1),
         TimerRequest::Activate {
             deadline_ticks,
+            period_ticks,
             continuous,
         } => {
             writer.write_u8(2)?;
             writer.write_u64(deadline_ticks)?;
+            writer.write_u64(period_ticks)?;
             writer.write_bool(continuous)
         }
     }
@@ -974,6 +979,7 @@ fn read_timer_request_snapshot<R: Read>(
         1 => Ok(TimerRequest::Deactivate),
         2 => Ok(TimerRequest::Activate {
             deadline_ticks: reader.read_u64()?,
+            period_ticks: reader.read_u64()?,
             continuous: reader.read_bool()?,
         }),
         _ => Err(invalid_bx_devices_snapshot(
@@ -1197,6 +1203,7 @@ mod tests {
             DeviceTimerOwner::PciIdeCh0,
             TimerRequest::Activate {
                 deadline_ticks: 17,
+                period_ticks: 17,
                 continuous: false,
             },
         );
@@ -1205,6 +1212,7 @@ mod tests {
             DeviceTimerOwner::PciIdeCh1,
             TimerRequest::Activate {
                 deadline_ticks: 23,
+                period_ticks: 23,
                 continuous: true,
             },
         );
@@ -1220,6 +1228,7 @@ mod tests {
             requests.get(DeviceTimerOwner::PciIdeCh1),
             TimerRequest::Activate {
                 deadline_ticks: 23,
+                period_ticks: 23,
                 continuous: true,
             }
         );
@@ -1239,6 +1248,7 @@ mod tests {
             DeviceTimerOwner::PciIdeCh0,
             TimerRequest::Activate {
                 deadline_ticks: 17,
+                period_ticks: 17,
                 continuous: false,
             },
         );
@@ -1299,6 +1309,7 @@ mod tests {
                 io.take_timer_requests().get(DeviceTimerOwner::Keyboard),
                 TimerRequest::Activate {
                     deadline_ticks: 78,
+                    period_ticks: 1,
                     continuous: false,
                 }
             );
@@ -1331,6 +1342,7 @@ mod tests {
                 io.take_timer_requests().get(DeviceTimerOwner::Keyboard),
                 TimerRequest::Activate {
                     deadline_ticks: 220,
+                    period_ticks: 120,
                     continuous: false,
                 }
             );

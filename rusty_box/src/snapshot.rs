@@ -17,6 +17,8 @@ const SNAPSHOT_MAGIC: &[u8; 8] = b"RBXSNAP1";
 pub(crate) const SNAPSHOT_V3_VERSION: u32 = 3;
 #[cfg(feature = "std")]
 pub(crate) const SNAPSHOT_SECTION_VERSION: u32 = 1;
+#[cfg(feature = "std")]
+const PLATFORM_SNAPSHOT_SECTION_VERSION: u32 = 2;
 
 #[cfg(feature = "std")]
 pub(crate) const MAX_SNAPSHOT_SECTION_LEN: u64 = 4 * 1024 * 1024 * 1024;
@@ -331,7 +333,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
         write_section_with_limit(writer, SEC_MEMORY, memory_len, memory_len, |s| save_memory(&self.memory, s))?;
         write_section(writer, SEC_PC_SYSTEM, self.pc_system.snapshot_v3_len()?, |s| self.pc_system.save_snapshot_v3(s))?;
         let platform_len = checked_snapshot_len_add(4, checked_snapshot_len_add(self.device_manager.fw_cfg.snapshot_v3_body_len()?, checked_snapshot_len_add(self.devices.snapshot_v3_body_len()?, self.device_manager.snapshot_v3_body_len()?)?)?)?;
-        write_section(writer, SEC_PLATFORM, platform_len, |s| { s.write_u32(SNAPSHOT_SECTION_VERSION)?; self.device_manager.fw_cfg.save_snapshot_v3_body(s)?; self.devices.save_snapshot_v3_body(s)?; self.device_manager.save_snapshot_v3_body(s) })?;
+        write_section(writer, SEC_PLATFORM, platform_len, |s| { s.write_u32(PLATFORM_SNAPSHOT_SECTION_VERSION)?; self.device_manager.fw_cfg.save_snapshot_v3_body(s)?; self.devices.save_snapshot_v3_body(s)?; self.device_manager.save_snapshot_v3_body(s) })?;
         write_section(writer, SEC_CPU, cpu_len(self)?, |s| save_cpus(self, s))?;
         write_section(writer, SEC_PIC, self.device_manager.pic.snapshot_v3_len()?, |s| self.device_manager.pic.save_snapshot_v3(s))?;
         write_section(writer, SEC_PIT, self.device_manager.pit.snapshot_v3_len()?, |s| self.device_manager.pit.save_snapshot_v3(s))?;
@@ -399,7 +401,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
                     SEC_MEMORY => restore_memory(&mut self.memory, &mut section)?,
                     SEC_PC_SYSTEM => self.pc_system.restore_snapshot_v3(&mut section)?,
                     SEC_PLATFORM => {
-                        if section.read_u32()? != SNAPSHOT_SECTION_VERSION {
+                        if section.read_u32()? != PLATFORM_SNAPSHOT_SECTION_VERSION {
                             return Err(invalid_snapshot(
                                 "unsupported platform snapshot section version",
                             ));
@@ -720,6 +722,41 @@ mod tests {
     }
 
     #[test]
+    fn same_instance_restore_does_not_lose_the_next_smc_invalidation() {
+        on_large_stack(|| {
+            const CODE_PAGE: u64 = 0x1000;
+            let mut emu = machine();
+
+            for _ in 0..2 {
+                emu.memory.smc_mark_icache_mask(CODE_PAGE, u32::MAX);
+                emu.memory.smc_dec_write_stamp(CODE_PAGE, 4096);
+                emu.service_scheduler_boundary(0).unwrap();
+            }
+            assert_eq!(emu.cpu_ref(0).smc_seq_seen, 2);
+
+            let mut saved = Vec::new();
+            emu.save_snapshot(&mut saved).unwrap();
+            emu.restore_snapshot(&mut Cursor::new(saved)).unwrap();
+            assert_eq!(emu.memory.smc_seq_next(), 0);
+            assert_eq!(
+                emu.cpu_ref(0).smc_seq_seen,
+                0,
+                "restoring reset memory SMC sequence must reset the CPU watermark"
+            );
+
+            emu.memory.smc_mark_icache_mask(CODE_PAGE, u32::MAX);
+            emu.memory.smc_dec_write_stamp(CODE_PAGE, 4096);
+            emu.service_scheduler_boundary(0).unwrap();
+
+            assert_eq!(
+                emu.cpu_ref(0).smc_seq_seen,
+                emu.memory.smc_seq_next(),
+                "the first post-restore SMC event must reach every CPU"
+            );
+        });
+    }
+
+    #[test]
     fn snapshot_memory_section_accepts_four_gib_guest_stream() {
         const MIB: u64 = 1024 * 1024;
         const FOUR_GIB: u64 = 4 * 1024 * MIB;
@@ -935,6 +972,27 @@ mod tests {
             assert!(!restored.device_manager.acpi_pm_needs_reregister);
             assert!(!restored.device_manager.acpi_sm_needs_reregister);
             assert!(!restored.device_manager.vga_bar_needs_reregister);
+        });
+    }
+
+    #[test]
+    fn snapshot_v3_rejects_old_platform_section_layout() {
+        on_large_stack(|| {
+            let mut source = machine();
+            source.service_scheduler_boundary(0).unwrap();
+            let mut saved = Vec::new();
+            source.save_snapshot(&mut saved).unwrap();
+            let platform = snapshot_sections(&saved)
+                .into_iter()
+                .find(|section| section.id == SEC_PLATFORM)
+                .unwrap();
+            write_u32_at(&mut saved, platform.payload, 1);
+
+            assert_restore_error(
+                &saved,
+                io::ErrorKind::InvalidData,
+                "unsupported platform snapshot section version",
+            );
         });
     }
 

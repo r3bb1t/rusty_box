@@ -694,9 +694,13 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// can be replaced or restored.
     pub(crate) fn invalidate_all_cpu_host_mappings(&mut self) {
         self.clear_scheduler_raw_wiring();
+        let smc_seq = self.memory.smc_seq_next();
         for cpu_index in 0..self.cpu_count() {
-            self.cpu_mut_at(cpu_index)
-                .invalidate_host_memory_mappings();
+            let cpu = self.cpu_mut_at(cpu_index);
+            cpu.invalidate_host_memory_mappings();
+            // A full icache flush consumes every memory-side SMC event,
+            // including a snapshot restore that restarted the sequence.
+            cpu.smc_seq_seen = smc_seq;
         }
         self.refresh_tlb_pins();
     }
@@ -3211,17 +3215,15 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 }
                 TimerRequest::Activate {
                     deadline_ticks,
+                    period_ticks,
                     continuous,
                 } => {
-                    let result = if continuous {
-                        let period_ticks = deadline_ticks
-                            .saturating_sub(self.pc_system.time_ticks())
-                            .max(1);
-                        self.pc_system.activate_timer(handle, period_ticks, true)
-                    } else {
-                        self.pc_system
-                            .activate_timer_at_ticks(handle, deadline_ticks, false)
-                    };
+                    let result = self.pc_system.activate_timer_at_ticks_with_period(
+                        handle,
+                        deadline_ticks,
+                        period_ticks,
+                        continuous,
+                    );
                     if let Err(error) = result {
                         tracing::error!("{label}: timer activation failed: {error:?}");
                     }
@@ -5610,6 +5612,54 @@ mod tests {
     }
 
     #[test]
+    fn deferred_continuous_timer_keeps_its_programmed_period() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const PROGRAMMING_TICKS: u64 = 100;
+                const PERIOD_TICKS: u64 = 10;
+                let mut emu =
+                    Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
+                emu.pc_system.initialize(1_000_000);
+                emu.devices.set_timer_ips(1_000_000);
+                let handle = emu
+                    .pc_system
+                    .register_timer(
+                        TimerOwner::CmosPeriodic,
+                        1,
+                        false,
+                        false,
+                        "deferred continuous",
+                    )
+                    .unwrap();
+                emu.device_manager.cmos.periodic_timer_handle = Some(handle);
+
+                emu.devices.request_timer_after_usec_with_mode(
+                    DeviceTimerOwner::CmosPeriodic,
+                    PROGRAMMING_TICKS,
+                    Some(PERIOD_TICKS),
+                    true,
+                );
+                emu.drain_device_timer_requests();
+
+                assert_eq!(
+                    emu.pc_system.next_timer_deadline_ticks(),
+                    Some(PROGRAMMING_TICKS + PERIOD_TICKS)
+                );
+                emu.service_scheduler_boundary(PROGRAMMING_TICKS + PERIOD_TICKS)
+                    .unwrap();
+                assert_eq!(
+                    emu.pc_system.next_timer_deadline_ticks(),
+                    Some(PROGRAMMING_TICKS + 2 * PERIOD_TICKS),
+                    "repeat interval must exclude ticks elapsed before programming"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn deadline_scheduler_preserves_windows_timer_order() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
@@ -5624,6 +5674,7 @@ mod tests {
                     DeviceTimerOwner::Keyboard,
                     TimerRequest::Activate {
                         deadline_ticks: 1,
+                        period_ticks: 1,
                         continuous: false,
                     },
                 );
@@ -5631,6 +5682,7 @@ mod tests {
                     DeviceTimerOwner::CmosOneSecond,
                     TimerRequest::Activate {
                         deadline_ticks: 2,
+                        period_ticks: 2,
                         continuous: false,
                     },
                 );
@@ -5687,6 +5739,7 @@ mod tests {
                         owner,
                         TimerRequest::Activate {
                             deadline_ticks: 1,
+                            period_ticks: 1,
                             continuous: false,
                         },
                     );

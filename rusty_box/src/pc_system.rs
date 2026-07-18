@@ -1001,6 +1001,22 @@ impl BxPcSystemC {
         Ok(())
     }
 
+    /// Activate at an absolute first deadline while replacing the repeat period.
+    ///
+    /// Deferred device requests carry both values because the PC-system clock
+    /// can still reflect the start of the CPU batch in which the request arose.
+    pub(crate) fn activate_timer_at_ticks_with_period(
+        &mut self,
+        timer_index: usize,
+        deadline_ticks: u64,
+        period: u64,
+        continuous: bool,
+    ) -> Result<(), PcSystemError> {
+        self.validate_timer_index(timer_index)?;
+        self.timers[timer_index].period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
+        self.activate_timer_at_ticks(timer_index, deadline_ticks, continuous)
+    }
+
     /// Activate a timer with a period relative to the current tick epoch.
     ///
     /// Corresponds to `bx_pc_system_c::activate_timer_ticks()` in Bochs
