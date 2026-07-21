@@ -417,7 +417,7 @@ impl RustyBoxApp {
                         .fill(bar_bg)
                         .inner_margin(egui::Margin::symmetric(12, 4)),
                 )
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     ui.horizontal_centered(|ui| {
                         ui.spacing_mut().item_spacing.x = 20.0;
 
@@ -505,7 +505,7 @@ impl RustyBoxApp {
                         .fill(console_bg)
                         .inner_margin(egui::Margin::same(6)),
                 )
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     ui.label(
                         egui::RichText::new("Serial Console (ttyS0)")
                             .monospace()
@@ -552,7 +552,7 @@ impl RustyBoxApp {
         // Main display area — deep dark background
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(0x0D, 0x0D, 0x1A)))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 let mut image_rect = None;
                 if let Some(status) = self.cached_startup_status.clone() {
                     // A startup step (e.g. allocating the disk image) is running.
