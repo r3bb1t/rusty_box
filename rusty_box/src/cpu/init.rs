@@ -646,7 +646,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Register state for save/restore functionality.
     /// Called after initialize() and sanity_checks() in original Bochs.
     /// In Bochs this registers parameter tree nodes for save/restore.
-    /// Our snapshot mechanism uses cpu/snapshot.rs save_snapshot_state() instead.
+    /// Our snapshot mechanism uses the bounded v3 codec in cpu/snapshot.rs
+    /// (`save_snapshot_v3_body`/`restore_snapshot_v3_body`) instead.
     pub fn register_state(&self) {
         tracing::trace!("CPU state registered");
     }

@@ -1591,16 +1591,25 @@ mod tests {
 
         let before = cmos.timeval;
 
-        // BCD mode (default): 0x30 = 30 seconds.
+        // Pick a seconds value guaranteed to differ from the wall-clock
+        // second `new()` seeded, so the timeval comparison below cannot
+        // spuriously match (the fixed 0x30 flaked whenever the host second
+        // happened to be 30).
+        let mut current = BrokenTime::default();
+        assert!(utctime_ext(before, &mut current));
+        let target_sec = (current.sec + 15) % 60;
+        let target_bcd = ((target_sec / 10) << 4) | (target_sec % 10);
+
+        // BCD mode (default).
         cmos.write(CMOS_ADDR, REG_SEC as u32, 1);
-        cmos.write(CMOS_DATA, 0x30, 1);
+        cmos.write(CMOS_DATA, target_bcd as u32, 1);
 
         // Finding #9: previously only the SET-mode branch existed, so a
         // write outside SET mode had no effect on timeval at all.
         assert_ne!(cmos.timeval, before, "update_timeval() did not run");
         let mut bt = BrokenTime::default();
         assert!(utctime_ext(cmos.timeval, &mut bt));
-        assert_eq!(bt.sec, 30);
+        assert_eq!(bt.sec, target_sec);
     }
 
     // =========================================================================

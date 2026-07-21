@@ -517,7 +517,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{
         cpu::{
             core_i7_skylake::Corei7SkylakeX,

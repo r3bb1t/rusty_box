@@ -789,7 +789,7 @@ fn run_aeshash_cases() {
     let seed0 = 0x243F_6A88_85A3_08D3_1319_8A2E_0370_7344_u128; // arbitrary
     let seed1 = 0xA409_3822_299F_31D0_082E_FA98_EC4E_6C89_u128;
 
-    let mut hash_at = |emu: &mut Emulator<'static, Corei7SkylakeX>, addr: u64| -> [u8; 16] {
+    let hash_at = |emu: &mut Emulator<'static, Corei7SkylakeX>, addr: u64| -> [u8; 16] {
         emu.mem_write(addr, key).expect("write key");
         emu.reg_write(X86Reg::Rax, addr);
         emu.reg_write(X86Reg::Rcx, key.len() as u64);
