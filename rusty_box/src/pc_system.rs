@@ -354,7 +354,6 @@ fn validate_snapshot_state_fields(
     }
 
     let null_timer_flags = TimerFlags::IN_USE | TimerFlags::ACTIVE | TimerFlags::CONTINUOUS;
-    let mut timer_at_next_countdown_event = false;
     for (index, timer) in timers.iter().enumerate() {
         if index >= num_timers {
             if !timer.flags.is_empty()
@@ -411,20 +410,24 @@ fn validate_snapshot_state_fields(
             if timer.time_to_fire <= now {
                 return Err(snapshot_invalid_data("active timer deadline is not in the future"));
             }
+            // The countdown never overshoots the earliest active deadline: it
+            // is only ever shortened toward a timer, so no active timer may
+            // sit strictly before it.
             if timer.time_to_fire < next_countdown_event {
                 return Err(snapshot_invalid_data(
                     "active timer precedes the next countdown event",
                 ));
             }
-            timer_at_next_countdown_event |= timer.time_to_fire == next_countdown_event;
         }
     }
 
-    if !timer_at_next_countdown_event {
-        return Err(snapshot_invalid_data(
-            "no active timer is scheduled at the next countdown event",
-        ));
-    }
+    // The countdown may point exactly at the earliest active timer, or before
+    // it: `deactivate_timer` clears a timer's ACTIVE flag without re-narrowing
+    // the countdown (matching Bochs pc_system.cc), so after the timer that set
+    // the current countdown is deactivated, the countdown legitimately points
+    // at a since-departed deadline until the next `countdown_event` recomputes
+    // it. Requiring an active timer exactly at `next_countdown_event` would
+    // reject that valid, reachable running state — as a real Windows boot hits.
 
     let triggered = timers
         .get(triggered_timer)
@@ -1961,4 +1964,53 @@ mod tests {
         assert_eq!(counts[0], 1);
     }
 
+    #[cfg(feature = "std")]
+    #[test]
+    fn snapshot_saves_after_countdown_timer_is_deactivated() {
+        // `deactivate_timer` clears the ACTIVE flag without re-narrowing the
+        // countdown (matching Bochs), so the countdown legitimately points at
+        // a since-departed deadline until the next `countdown_event`. Saving
+        // in that state — reached by every real long boot — must succeed and
+        // round-trip, and the machine must still recompute correctly.
+        use std::io::Cursor;
+
+        let mut source = BxPcSystemC::new();
+        source.initialize(1_000_000);
+
+        // A near timer sets the countdown, a farther timer stays active.
+        let near = source
+            .register_timer(TimerOwner::Keyboard, 0, false, false, "kbd")
+            .unwrap();
+        let far = source
+            .register_timer(TimerOwner::CmosPeriodic, 0, false, false, "cmos")
+            .unwrap();
+        source.activate_timer_at_ticks(far, source.time_ticks() + 500, true).unwrap();
+        source.activate_timer_at_ticks(near, source.time_ticks() + 40, false).unwrap();
+        assert_eq!(source.next_timer_deadline_ticks(), Some(source.time_ticks() + 40));
+
+        // Deactivate the timer the countdown points at; the countdown is NOT
+        // re-narrowed, so it now precedes the earliest active deadline (500).
+        source.deactivate_timer(near).unwrap();
+
+        let mut payload = Vec::new();
+        source.save_snapshot_v3(&mut payload).unwrap();
+
+        let mut restored = BxPcSystemC::new();
+        restored.initialize(1_000_000);
+        let mut reader =
+            SnapshotReader::new(Cursor::new(payload.as_slice()), payload.len() as u64).unwrap();
+        restored.restore_snapshot_v3(&mut reader).unwrap();
+        assert_eq!(restored.time_ticks(), source.time_ticks());
+
+        // The stale countdown wakes early, fires nothing, and recomputes to
+        // the true remaining deadline; the far timer fires exactly on time.
+        restored.tickn(40);
+        assert!(!restored.has_fired_timers());
+        restored.tickn(459);
+        assert!(!restored.has_fired_timers());
+        restored.tickn(1);
+        let (owners, _counts, count) = restored.take_fired_timers();
+        assert_eq!(count, 1);
+        assert_eq!(owners[0], TimerOwner::CmosPeriodic);
+    }
 }
