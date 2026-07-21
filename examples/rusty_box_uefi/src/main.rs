@@ -17,7 +17,9 @@ use rusty_box::{
 };
 
 static BIOS_ROM: &[u8] = include_bytes!("../../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
-static VGA_BIOS: &[u8] = include_bytes!("../../../binaries/bios/VGABIOS-lgpl-latest.bin");
+static VGA_BIOS: &[u8] = include_bytes!(
+    "../../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"
+);
 static DLX_DISK: &[u8] = include_bytes!("../../../dlxlinux/hd10meg.img");
 
 const DLX_CYLINDERS: u16 = 306;

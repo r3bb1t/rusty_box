@@ -81,6 +81,11 @@ name = "perfbench"
 path = "examples/perfbench/perfbench.rs"
 required-features = ["std"]
 
+[[example]]
+name = "snapshot_resume"
+path = "examples/snapshot_resume/snapshot_resume.rs"
+required-features = ["std"]
+
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

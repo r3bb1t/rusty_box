@@ -14,7 +14,7 @@ bench = false
 
 [dependencies]
 rusty_box = { path = "../../rusty_box", default-features = false }
-uefi = { version = "0.33", features = ["logger"] }
+uefi = { version = "0.33", features = ["logger", "panic_handler"] }
 log = "0.4"
 
 [features]

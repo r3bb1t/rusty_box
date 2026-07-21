@@ -13,7 +13,9 @@ use rusty_box::{
 
 // Embedded binary assets (compiled into the WASM)
 const BIOS_DATA: &[u8] = include_bytes!("../../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
-const VGA_BIOS_DATA: &[u8] = include_bytes!("../../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin");
+const VGA_BIOS_DATA: &[u8] = include_bytes!(
+    "../../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"
+);
 const DISK_DATA: &[u8] = include_bytes!("../../../dlxlinux/hd10meg.img");
 
 /// DLX Linux disk geometry
@@ -47,7 +49,9 @@ enum BootMode {
     Launcher,
     /// DLX Linux from embedded disk image
     Dlx,
-    /// Alpine Linux from user-uploaded ISO
+    /// Alpine Linux from user-uploaded ISO. Constructed only by the wasm
+    /// file-upload flow; host builds still match on it.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Alpine,
 }
 
@@ -210,21 +214,21 @@ impl WasmEmulatorApp {
         visuals.faint_bg_color = BG_SURFACE;
 
         visuals.widgets.noninteractive.bg_fill = BG_SURFACE;
-        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_DIM);
-        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5, BORDER_SUBTLE);
+        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_DIM);
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5_f32, BORDER_SUBTLE);
 
         visuals.widgets.inactive.bg_fill = BG_SURFACE;
-        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
-        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(0.5, BORDER_SUBTLE);
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_PRIMARY);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(0.5_f32, BORDER_SUBTLE);
 
         visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x2E, 0x2E, 0x4A);
-        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
+        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_PRIMARY);
 
         visuals.widgets.active.bg_fill = ACCENT_BLUE;
-        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
+        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_PRIMARY);
 
         visuals.selection.bg_fill = egui::Color32::from_rgba_premultiplied(0x56, 0x9C, 0xD6, 0x40);
-        visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT_BLUE);
+        visuals.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT_BLUE);
 
         ctx.set_visuals(visuals);
     }
@@ -402,7 +406,7 @@ impl WasmEmulatorApp {
                     .color(TEXT_PRIMARY),
             )
             .fill(BG_SURFACE)
-            .stroke(egui::Stroke::new(1.0, ACCENT_GREEN))
+            .stroke(egui::Stroke::new(1.0_f32, ACCENT_GREEN))
             .min_size(egui::vec2(280.0, 48.0));
 
             if ui.add(dlx_btn).clicked() {
@@ -424,7 +428,7 @@ impl WasmEmulatorApp {
                     .color(TEXT_PRIMARY),
             )
             .fill(BG_SURFACE)
-            .stroke(egui::Stroke::new(1.0, ACCENT_BLUE))
+            .stroke(egui::Stroke::new(1.0_f32, ACCENT_BLUE))
             .min_size(egui::vec2(280.0, 48.0));
 
             if ui.add(alpine_btn).clicked() {
@@ -450,7 +454,7 @@ impl WasmEmulatorApp {
                 egui::Frame::NONE
                     .fill(BG_DARK)
                     .inner_margin(egui::Margin::symmetric(16, 0))
-                    .stroke(egui::Stroke::new(0.5, BORDER_SUBTLE)),
+                    .stroke(egui::Stroke::new(0.5_f32, BORDER_SUBTLE)),
             )
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
@@ -497,7 +501,7 @@ impl WasmEmulatorApp {
                 egui::Frame::NONE
                     .fill(BG_DARK)
                     .inner_margin(egui::Margin::symmetric(16, 0))
-                    .stroke(egui::Stroke::new(0.5, BORDER_SUBTLE)),
+                    .stroke(egui::Stroke::new(0.5_f32, BORDER_SUBTLE)),
             )
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
@@ -591,7 +595,7 @@ impl WasmEmulatorApp {
                     ui.painter().rect_stroke(
                         display_rect.expand(1.0),
                         0.0,
-                        egui::Stroke::new(1.0, BORDER_SUBTLE),
+                        egui::Stroke::new(1.0_f32, BORDER_SUBTLE),
                         egui::StrokeKind::Outside,
                     );
 
