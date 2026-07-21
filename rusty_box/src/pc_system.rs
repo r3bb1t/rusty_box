@@ -22,6 +22,15 @@ use thiserror::Error;
 use crate::config::BxPhyAddress;
 use crate::cpu::ResetReason;
 
+#[cfg(feature = "std")]
+use std::io::{self, Error, ErrorKind, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    SNAPSHOT_SECTION_VERSION,
+};
+
 bitflags! {
     /// Timer state flags (replaces individual `in_use`, `active`, `continuous` bools).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,13 +59,21 @@ pub enum PcSystemError {
     NoFreeTimerSlots,
     #[error("cannot unregister active timer {0} — deactivate first")]
     TimerStillActive(usize),
+    #[error("timer deadline cannot be represented")]
+    TimerDeadlineOverflow,
+    #[error("timer time conversion cannot be represented")]
+    TimeConversionOverflow,
 }
 
 /// Maximum length for timer ID strings
 const BX_MAX_TIMER_ID_LEN: usize = 32;
 
-/// Maximum number of timers per PC system instance
-const BX_MAX_TIMERS: usize = 64;
+/// Fixed-capacity owner slots: null, PIT, keyboard, three CMOS timers,
+/// ACPI overflow, four UART FIFO timers, two PCI-IDE channels, and slowdown.
+pub const BX_FIXED_TIMER_OWNER_COUNT: usize = 14;
+/// One LAPIC timer per supported CPU plus every fixed device owner.
+pub const BX_MAX_TIMERS: usize =
+    crate::params::BX_MAX_SMP_THREADS_SUPPORTED as usize + BX_FIXED_TIMER_OWNER_COUNT;
 
 /// Default null timer interval (in ticks).
 /// Bochs pc_system.cc — `const Bit64u NullTimerInterval = 0xffffffff;`
@@ -77,8 +94,25 @@ pub enum TimerOwner {
     PciIdeCh0,
     /// PCI IDE BM-DMA channel 1.
     PciIdeCh1,
+    /// Programmable interval timer.
+    Pit,
+    /// 8042 keyboard serial-transfer timer.
+    Keyboard,
+    /// CMOS periodic interrupt timer.
+    CmosPeriodic,
+    /// CMOS one-second clock timer.
+    CmosOneSecond,
+    /// CMOS update-in-progress completion timer.
+    CmosUip,
+    /// ACPI PM-timer overflow.
+    AcpiPmOverflow,
+    /// Receive FIFO timeout for the UART index.
+    SerialFifo(usize),
     /// Local APIC timer for the CPU index.
     Lapic(usize),
+    /// Bochs host/virtual-time slowdown pacing timer.
+    #[cfg(feature = "std")]
+    Slowdown,
 }
 
 /// Individual timer structure
@@ -106,6 +140,323 @@ impl Default for Timer {
             id: [0; BX_MAX_TIMER_ID_LEN],
         }
     }
+}
+
+#[cfg(feature = "std")]
+const TIMER_OWNER_NULL: u8 = 0;
+#[cfg(feature = "std")]
+const TIMER_OWNER_PCI_IDE_CH0: u8 = 1;
+#[cfg(feature = "std")]
+const TIMER_OWNER_PCI_IDE_CH1: u8 = 2;
+#[cfg(feature = "std")]
+const TIMER_OWNER_PIT: u8 = 3;
+#[cfg(feature = "std")]
+const TIMER_OWNER_KEYBOARD: u8 = 4;
+#[cfg(feature = "std")]
+const TIMER_OWNER_CMOS_PERIODIC: u8 = 5;
+#[cfg(feature = "std")]
+const TIMER_OWNER_CMOS_ONE_SECOND: u8 = 6;
+#[cfg(feature = "std")]
+const TIMER_OWNER_CMOS_UIP: u8 = 7;
+#[cfg(feature = "std")]
+const TIMER_OWNER_ACPI_PM_OVERFLOW: u8 = 8;
+#[cfg(feature = "std")]
+const TIMER_OWNER_SERIAL_FIFO: u8 = 9;
+#[cfg(feature = "std")]
+const TIMER_OWNER_LAPIC: u8 = 10;
+#[cfg(feature = "std")]
+const TIMER_OWNER_SLOWDOWN: u8 = 11;
+
+#[cfg(feature = "std")]
+const TIMER_OWNER_WIRE_LEN: u64 = 5;
+#[cfg(feature = "std")]
+const TIMER_WIRE_FIXED_LEN: u64 = 17;
+#[cfg(feature = "std")]
+const FIRED_OWNER_WIRE_LEN: u64 = TIMER_OWNER_WIRE_LEN + 4;
+
+#[cfg(feature = "std")]
+fn snapshot_invalid_data(message: &'static str) -> Error {
+    Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn snapshot_usize_to_u32(value: usize) -> io::Result<u32> {
+    u32::try_from(value).map_err(|_| snapshot_invalid_data("snapshot value does not fit in u32"))
+}
+
+#[cfg(feature = "std")]
+fn snapshot_usize_to_u64(value: usize) -> io::Result<u64> {
+    u64::try_from(value).map_err(|_| snapshot_invalid_data("snapshot value does not fit in u64"))
+}
+
+#[cfg(feature = "std")]
+fn max_lapic_timer_owners() -> io::Result<usize> {
+    usize::try_from(crate::params::BX_MAX_SMP_THREADS_SUPPORTED)
+        .map_err(|_| snapshot_invalid_data("LAPIC timer capacity does not fit in usize"))
+}
+
+#[cfg(feature = "std")]
+fn timer_owner_wire_parts(owner: TimerOwner) -> io::Result<(u8, u32)> {
+    let fixed = |tag| Ok((tag, 0));
+
+    match owner {
+        TimerOwner::NullTimer => fixed(TIMER_OWNER_NULL),
+        TimerOwner::PciIdeCh0 => fixed(TIMER_OWNER_PCI_IDE_CH0),
+        TimerOwner::PciIdeCh1 => fixed(TIMER_OWNER_PCI_IDE_CH1),
+        TimerOwner::Pit => fixed(TIMER_OWNER_PIT),
+        TimerOwner::Keyboard => fixed(TIMER_OWNER_KEYBOARD),
+        TimerOwner::CmosPeriodic => fixed(TIMER_OWNER_CMOS_PERIODIC),
+        TimerOwner::CmosOneSecond => fixed(TIMER_OWNER_CMOS_ONE_SECOND),
+        TimerOwner::CmosUip => fixed(TIMER_OWNER_CMOS_UIP),
+        TimerOwner::AcpiPmOverflow => fixed(TIMER_OWNER_ACPI_PM_OVERFLOW),
+        TimerOwner::SerialFifo(port) => {
+            if port >= crate::iodev::BX_FIXED_SERIAL_TIMER_OWNERS {
+                return Err(snapshot_invalid_data("serial timer owner is out of range"));
+            }
+            Ok((TIMER_OWNER_SERIAL_FIFO, snapshot_usize_to_u32(port)?))
+        }
+        TimerOwner::Lapic(cpu) => {
+            if cpu >= max_lapic_timer_owners()? {
+                return Err(snapshot_invalid_data("LAPIC timer owner is out of range"));
+            }
+            Ok((TIMER_OWNER_LAPIC, snapshot_usize_to_u32(cpu)?))
+        }
+        TimerOwner::Slowdown => fixed(TIMER_OWNER_SLOWDOWN),
+    }
+}
+
+#[cfg(feature = "std")]
+fn write_timer_owner<W: Write>(writer: &mut W, owner: TimerOwner) -> io::Result<()> {
+    let (tag, argument) = timer_owner_wire_parts(owner)?;
+    writer.write_u8(tag)?;
+    writer.write_u32(argument)
+}
+
+#[cfg(feature = "std")]
+fn read_timer_owner<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<TimerOwner> {
+    let tag = reader.read_u8()?;
+    let argument = reader.read_u32()?;
+
+    let fixed = |owner| {
+        if argument == 0 {
+            Ok(owner)
+        } else {
+            Err(snapshot_invalid_data("fixed timer owner has an argument"))
+        }
+    };
+
+    match tag {
+        TIMER_OWNER_NULL => fixed(TimerOwner::NullTimer),
+        TIMER_OWNER_PCI_IDE_CH0 => fixed(TimerOwner::PciIdeCh0),
+        TIMER_OWNER_PCI_IDE_CH1 => fixed(TimerOwner::PciIdeCh1),
+        TIMER_OWNER_PIT => fixed(TimerOwner::Pit),
+        TIMER_OWNER_KEYBOARD => fixed(TimerOwner::Keyboard),
+        TIMER_OWNER_CMOS_PERIODIC => fixed(TimerOwner::CmosPeriodic),
+        TIMER_OWNER_CMOS_ONE_SECOND => fixed(TimerOwner::CmosOneSecond),
+        TIMER_OWNER_CMOS_UIP => fixed(TimerOwner::CmosUip),
+        TIMER_OWNER_ACPI_PM_OVERFLOW => fixed(TimerOwner::AcpiPmOverflow),
+        TIMER_OWNER_SERIAL_FIFO => {
+            let port = usize::try_from(argument)
+                .map_err(|_| snapshot_invalid_data("serial timer owner argument is too large"))?;
+            if port >= crate::iodev::BX_FIXED_SERIAL_TIMER_OWNERS {
+                return Err(snapshot_invalid_data("serial timer owner is out of range"));
+            }
+            Ok(TimerOwner::SerialFifo(port))
+        }
+        TIMER_OWNER_LAPIC => {
+            let cpu = usize::try_from(argument)
+                .map_err(|_| snapshot_invalid_data("LAPIC timer owner argument is too large"))?;
+            if cpu >= max_lapic_timer_owners()? {
+                return Err(snapshot_invalid_data("LAPIC timer owner is out of range"));
+            }
+            Ok(TimerOwner::Lapic(cpu))
+        }
+        TIMER_OWNER_SLOWDOWN => fixed(TimerOwner::Slowdown),
+        _ => Err(snapshot_invalid_data("unknown timer owner tag")),
+    }
+}
+
+#[cfg(feature = "std")]
+fn validate_timer_id(id: &[u8; BX_MAX_TIMER_ID_LEN]) -> io::Result<()> {
+    let mut terminated = false;
+    for &byte in id {
+        if byte == 0 {
+            terminated = true;
+        } else if terminated {
+            return Err(snapshot_invalid_data(
+                "timer identifier has nonzero bytes after its terminator",
+            ));
+        }
+    }
+    if !terminated {
+        return Err(snapshot_invalid_data("timer identifier is not terminated"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn timer_owner_is_registered(timers: &[Timer; BX_MAX_TIMERS], owner: TimerOwner) -> bool {
+    timers
+        .iter()
+        .any(|timer| timer.flags.contains(TimerFlags::IN_USE) && timer.owner == owner)
+}
+
+#[cfg(feature = "std")]
+#[allow(clippy::too_many_arguments)]
+fn validate_snapshot_state_fields(
+    ips: u64,
+    curr_countdown: u32,
+    curr_countdown_period: u32,
+    ticks_total: u64,
+    timers: &[Timer; BX_MAX_TIMERS],
+    num_timers: usize,
+    triggered_timer: usize,
+    fired_owners: &[TimerOwner; BX_MAX_TIMERS],
+    fired_owner_counts: &[u32; BX_MAX_TIMERS],
+    num_fired: usize,
+    enable_a20: bool,
+    a20_mask: BxPhyAddress,
+) -> io::Result<()> {
+    if ips == 0 {
+        return Err(snapshot_invalid_data("configured IPS is zero"));
+    }
+    if num_timers == 0
+        || num_timers > BX_MAX_TIMERS
+        || num_timers > bounds::MAX_SNAPSHOT_COUNT
+    {
+        return Err(snapshot_invalid_data("timer count is out of range"));
+    }
+    if num_fired > BX_MAX_TIMERS || num_fired > bounds::MAX_SNAPSHOT_QUEUE_LEN {
+        return Err(snapshot_invalid_data("fired timer queue count is out of range"));
+    }
+    if curr_countdown == 0
+        || curr_countdown_period == 0
+        || curr_countdown > curr_countdown_period
+    {
+        return Err(snapshot_invalid_data("countdown state is inconsistent"));
+    }
+
+    let elapsed = u64::from(curr_countdown_period - curr_countdown);
+    let now = ticks_total
+        .checked_add(elapsed)
+        .ok_or_else(|| snapshot_invalid_data("timer epoch overflows"))?;
+    let next_countdown_event = ticks_total
+        .checked_add(u64::from(curr_countdown_period))
+        .ok_or_else(|| snapshot_invalid_data("next countdown event overflows"))?;
+
+    let expected_a20_mask = if enable_a20 {
+        0xFFFF_FFFF_FFFF_FFFFu64
+    } else {
+        0xFFFF_FFFF_FFEF_FFFFu64
+    };
+    if a20_mask != expected_a20_mask {
+        return Err(snapshot_invalid_data("A20 state and mask disagree"));
+    }
+
+    let null_timer_flags = TimerFlags::IN_USE | TimerFlags::ACTIVE | TimerFlags::CONTINUOUS;
+    let mut timer_at_next_countdown_event = false;
+    for (index, timer) in timers.iter().enumerate() {
+        if index >= num_timers {
+            if !timer.flags.is_empty()
+                || timer.owner != TimerOwner::NullTimer
+                || timer.id != [0; BX_MAX_TIMER_ID_LEN]
+            {
+                return Err(snapshot_invalid_data(
+                    "timer outside registered range carries live state",
+                ));
+            }
+            continue;
+        }
+
+        if index == 0 {
+            if timer.flags != null_timer_flags
+                || timer.period != NULL_TIMER_INTERVAL
+                || timer.owner != TimerOwner::NullTimer
+                || timer.id != [0; BX_MAX_TIMER_ID_LEN]
+            {
+                return Err(snapshot_invalid_data("null timer state is inconsistent"));
+            }
+        }
+
+        let in_use = timer.flags.contains(TimerFlags::IN_USE);
+        if !in_use {
+            if !timer.flags.is_empty()
+                || timer.owner != TimerOwner::NullTimer
+                || timer.id != [0; BX_MAX_TIMER_ID_LEN]
+            {
+                return Err(snapshot_invalid_data("unused timer has live state"));
+            }
+            continue;
+        }
+
+        validate_timer_id(&timer.id)?;
+        timer_owner_wire_parts(timer.owner)?;
+        if index != 0 && timer.owner == TimerOwner::NullTimer {
+            return Err(snapshot_invalid_data("non-null timer uses null owner"));
+        }
+        if index != 0
+            && timers
+                .iter()
+                .take(index)
+                .any(|previous| {
+                    previous.flags.contains(TimerFlags::IN_USE) && previous.owner == timer.owner
+                })
+        {
+            return Err(snapshot_invalid_data("timer owner is registered more than once"));
+        }
+        if timer.period < MIN_ALLOWABLE_TIMER_PERIOD {
+            return Err(snapshot_invalid_data("timer period is zero"));
+        }
+        if timer.flags.contains(TimerFlags::ACTIVE) {
+            if timer.time_to_fire <= now {
+                return Err(snapshot_invalid_data("active timer deadline is not in the future"));
+            }
+            if timer.time_to_fire < next_countdown_event {
+                return Err(snapshot_invalid_data(
+                    "active timer precedes the next countdown event",
+                ));
+            }
+            timer_at_next_countdown_event |= timer.time_to_fire == next_countdown_event;
+        }
+    }
+
+    if !timer_at_next_countdown_event {
+        return Err(snapshot_invalid_data(
+            "no active timer is scheduled at the next countdown event",
+        ));
+    }
+
+    let triggered = timers
+        .get(triggered_timer)
+        .ok_or_else(|| snapshot_invalid_data("triggered timer is out of range"))?;
+    if triggered_timer >= num_timers || !triggered.flags.contains(TimerFlags::IN_USE) {
+        return Err(snapshot_invalid_data("triggered timer is not registered"));
+    }
+
+    for (index, (&owner, &count)) in fired_owners
+        .iter()
+        .zip(fired_owner_counts.iter())
+        .take(num_fired)
+        .enumerate()
+    {
+        timer_owner_wire_parts(owner)?;
+        if owner == TimerOwner::NullTimer {
+            return Err(snapshot_invalid_data("null timer cannot be pending for dispatch"));
+        }
+        if count == 0 {
+            return Err(snapshot_invalid_data("fired timer count is zero"));
+        }
+        if fired_owners.iter().take(index).any(|previous| *previous == owner) {
+            return Err(snapshot_invalid_data("fired timer owner is duplicated"));
+        }
+        if !timer_owner_is_registered(timers, owner) {
+            return Err(snapshot_invalid_data(
+                "fired timer owner does not map to a registered timer",
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// PC System controller - manages timers, A20 line, and system-level operations
@@ -225,7 +576,7 @@ impl BxPcSystemC {
         self.kill_bochs_request = false;
 
         // Convert IPS to millions for timing calculations
-        self.ips = ips as u64;
+        self.ips = u64::from(ips.max(1));
 
         tracing::trace!("PC system initialized with ips = {}", ips);
     }
@@ -311,11 +662,14 @@ impl BxPcSystemC {
                 }
             }
         }
-
-        // Step 3: Calculate next countdown period BEFORE recording fires.
-        // Timer reactivation during dispatch needs the new countdown.
-        // Bochs pc_system.cc
-        let next_period = (min_time_to_fire - self.ticks_total) as u32;
+        // Step 3: Calculate the next countdown period before recording fires.
+        // A timer farther than the u32 countdown horizon is revisited at the
+        // horizon; an active timer must never leave a zero countdown behind.
+        // Bochs pc_system.cc performs the same countdown narrowing.
+        let next_period = min_time_to_fire
+            .checked_sub(self.ticks_total)
+            .unwrap_or(MIN_ALLOWABLE_TIMER_PERIOD)
+            .clamp(MIN_ALLOWABLE_TIMER_PERIOD, NULL_TIMER_INTERVAL) as u32;
         self.curr_countdown = next_period;
         self.curr_countdown_period = next_period;
 
@@ -417,16 +771,33 @@ impl BxPcSystemC {
         self.ticks_total + (self.curr_countdown_period - self.curr_countdown) as u64
     }
 
-    /// Convert ticks to microseconds using IPS setting.
-    /// Matches Bochs pc_system.cc.
+    /// Convert an absolute tick epoch to microseconds without intermediate
+    /// u64 multiplication overflow.
+    pub fn time_usec_at_ticks(&self, ticks: u64) -> Result<u64, PcSystemError> {
+        let usec = (u128::from(ticks) * 1_000_000u128) / u128::from(self.ips);
+        u64::try_from(usec).map_err(|_| PcSystemError::TimeConversionOverflow)
+    }
+
+    /// Convert microseconds to ticks without intermediate u64 multiplication
+    /// overflow.
+    pub fn usec_to_ticks(&self, useconds: u64) -> Result<u64, PcSystemError> {
+        let ticks = (u128::from(useconds) * u128::from(self.ips)) / 1_000_000u128;
+        u64::try_from(ticks).map_err(|_| PcSystemError::TimeConversionOverflow)
+    }
+
+    /// Convert the current tick epoch to microseconds using IPS setting.
+    /// The legacy non-fallible view saturates rather than wrapping; callers
+    /// that need error reporting use `time_usec_at_ticks`.
     pub fn time_usec(&self) -> u64 {
-        self.time_ticks() * 1_000_000 / self.ips
+        self.time_usec_at_ticks(self.time_ticks())
+            .unwrap_or(u64::MAX)
     }
 
     /// Convert ticks to nanoseconds using IPS setting.
-    /// Matches Bochs pc_system.cc.
+    /// Matches Bochs pc_system.cc for representable values.
     pub fn time_nsec(&self) -> u64 {
-        self.time_ticks() * 1_000_000_000 / self.ips
+        let nsec = (u128::from(self.time_ticks()) * 1_000_000_000u128) / u128::from(self.ips);
+        u64::try_from(nsec).unwrap_or(u64::MAX)
     }
 
     // ========================================================================
@@ -478,6 +849,14 @@ impl BxPcSystemC {
 
         // Clear DMA pending flag
         self.hrq_pending = false;
+
+        // Discard fired-but-undispatched timer callbacks. Bochs pc_system.cc
+        // dispatches timer handlers synchronously inside tickn, so a queued
+        // pre-reset callback can never be carried across Reset into the
+        // fresh machine.
+        self.num_fired = 0;
+        self.fired_owner_counts = [0; BX_MAX_TIMERS];
+        self.fired_owners = [TimerOwner::NullTimer; BX_MAX_TIMERS];
     }
 
     /// Register state for save/restore functionality.
@@ -509,6 +888,29 @@ impl BxPcSystemC {
         }
         Ok(())
     }
+    #[inline]
+    fn deadline_from_now(&self, ticks: u64) -> Result<u64, PcSystemError> {
+        self.time_ticks()
+            .checked_add(ticks)
+            .ok_or(PcSystemError::TimerDeadlineOverflow)
+    }
+
+    /// Move the countdown only when `deadline_ticks` is earlier than the
+    /// already scheduled countdown event. This preserves the current epoch.
+    fn shorten_countdown_to(&mut self, deadline_ticks: u64) {
+        let now = self.time_ticks();
+        let Some(ticks_until_fire) = deadline_ticks.checked_sub(now) else {
+            return;
+        };
+        if ticks_until_fire == 0 || ticks_until_fire >= u64::from(self.curr_countdown) {
+            return;
+        }
+
+        let ticks_until_fire = ticks_until_fire as u32;
+        let elapsed = self.curr_countdown_period - self.curr_countdown;
+        self.curr_countdown = ticks_until_fire;
+        self.curr_countdown_period = elapsed + ticks_until_fire;
+    }
 
     /// Register a new timer with period in ticks.
     ///
@@ -522,42 +924,36 @@ impl BxPcSystemC {
         active: bool,
         id: &str,
     ) -> Result<usize, PcSystemError> {
-        // Enforce minimum timer period (Bochs pc_system.cc)
         let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
 
-        // Search for free timer slot (i = 0 is reserved for NullTimer)
-        // Bochs pc_system.cc
         for i in 1..BX_MAX_TIMERS {
-            if !self.timers[i].flags.contains(TimerFlags::IN_USE) {
-                self.timers[i].flags = TimerFlags::IN_USE;
-                self.timers[i].flags.set(TimerFlags::ACTIVE, active);
-                self.timers[i].flags.set(TimerFlags::CONTINUOUS, continuous);
-                self.timers[i].period = period;
-                // Bochs pc_system.cc:
-                // timeToFire = (ticksTotal + Bit64u(currCountdownPeriod-currCountdown)) + ticks
-                self.timers[i].time_to_fire = self.time_ticks() + period;
-                self.timers[i].owner = owner;
-
-                // Copy ID string
-                let id_bytes = id.as_bytes();
-                let copy_len = id_bytes.len().min(BX_MAX_TIMER_ID_LEN - 1);
-                self.timers[i].id[..copy_len].copy_from_slice(&id_bytes[..copy_len]);
-                self.timers[i].id[copy_len] = 0;
-
-                // Adjust countdown if this timer fires sooner than current countdown
-                // Bochs pc_system.cc
-                if active && period < self.curr_countdown as u64 {
-                    self.curr_countdown_period -= self.curr_countdown - period as u32;
-                    self.curr_countdown = period as u32;
-                }
-
-                if i >= self.num_timers {
-                    self.num_timers = i + 1;
-                }
-
-                tracing::trace!("Registered timer {} with id '{}'", i, id);
-                return Ok(i);
+            if self.timers[i].flags.contains(TimerFlags::IN_USE) {
+                continue;
             }
+
+            let deadline_ticks = self.deadline_from_now(period)?;
+            self.timers[i].flags = TimerFlags::IN_USE;
+            self.timers[i]
+                .flags
+                .set(TimerFlags::CONTINUOUS, continuous);
+            self.timers[i].period = period;
+            self.timers[i].time_to_fire = deadline_ticks;
+            self.timers[i].owner = owner;
+            self.timers[i].id = [0; BX_MAX_TIMER_ID_LEN];
+
+            let id_bytes = id.as_bytes();
+            let copy_len = id_bytes.len().min(BX_MAX_TIMER_ID_LEN - 1);
+            self.timers[i].id[..copy_len].copy_from_slice(&id_bytes[..copy_len]);
+
+            if i >= self.num_timers {
+                self.num_timers = i + 1;
+            }
+            if active {
+                self.activate_timer_at_ticks(i, deadline_ticks, continuous)?;
+            }
+
+            tracing::trace!("Registered timer {} with id '{}'", i, id);
+            return Ok(i);
         }
 
         Err(PcSystemError::NoFreeTimerSlots)
@@ -575,14 +971,64 @@ impl BxPcSystemC {
         active: bool,
         id: &str,
     ) -> Result<usize, PcSystemError> {
-        // Convert useconds to number of ticks (Bochs pc_system.cc)
-        let ticks = useconds as u64 * self.ips / 1_000_000;
-        self.register_timer(owner, ticks, continuous, active, id)
+        self.register_timer(
+            owner,
+            self.usec_to_ticks(u64::from(useconds))?,
+            continuous,
+            active,
+            id,
+        )
     }
 
-    /// Activate a timer with period in ticks.
+    /// Activate a timer at an absolute tick epoch.
     ///
-    /// Corresponds to `bx_pc_system_c::activate_timer_ticks()` in Bochs (pc_system.cc).
+    /// Deadlines that are already due are made observable on the next tick,
+    /// never as a zero-countdown re-entry. Absolute activation preserves the
+    /// timer's registered repeat period.
+    pub fn activate_timer_at_ticks(
+        &mut self,
+        timer_index: usize,
+        deadline_ticks: u64,
+        continuous: bool,
+    ) -> Result<(), PcSystemError> {
+        self.validate_timer_index(timer_index)?;
+        let now = self.time_ticks();
+        let deadline_ticks = if deadline_ticks <= now {
+            now.checked_add(MIN_ALLOWABLE_TIMER_PERIOD)
+                .ok_or(PcSystemError::TimerDeadlineOverflow)?
+        } else {
+            deadline_ticks
+        };
+
+        self.timers[timer_index].time_to_fire = deadline_ticks;
+        self.timers[timer_index].flags.insert(TimerFlags::ACTIVE);
+        self.timers[timer_index]
+            .flags
+            .set(TimerFlags::CONTINUOUS, continuous);
+        self.shorten_countdown_to(deadline_ticks);
+        Ok(())
+    }
+
+    /// Activate at an absolute first deadline while replacing the repeat period.
+    ///
+    /// Deferred device requests carry both values because the PC-system clock
+    /// can still reflect the start of the CPU batch in which the request arose.
+    pub(crate) fn activate_timer_at_ticks_with_period(
+        &mut self,
+        timer_index: usize,
+        deadline_ticks: u64,
+        period: u64,
+        continuous: bool,
+    ) -> Result<(), PcSystemError> {
+        self.validate_timer_index(timer_index)?;
+        self.timers[timer_index].period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
+        self.activate_timer_at_ticks(timer_index, deadline_ticks, continuous)
+    }
+
+    /// Activate a timer with a period relative to the current tick epoch.
+    ///
+    /// Corresponds to `bx_pc_system_c::activate_timer_ticks()` in Bochs
+    /// (pc_system.cc).
     pub fn activate_timer(
         &mut self,
         timer_index: usize,
@@ -590,24 +1036,10 @@ impl BxPcSystemC {
         continuous: bool,
     ) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
-        // Enforce minimum timer period (Bochs pc_system.cc)
         let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
+        let deadline_ticks = self.deadline_from_now(period)?;
         self.timers[timer_index].period = period;
-        // Bochs pc_system.cc:
-        // timeToFire = (ticksTotal + Bit64u(currCountdownPeriod-currCountdown)) + ticks
-        self.timers[timer_index].time_to_fire = self.time_ticks() + period;
-        self.timers[timer_index].flags.insert(TimerFlags::ACTIVE);
-        self.timers[timer_index]
-            .flags
-            .set(TimerFlags::CONTINUOUS, continuous);
-
-        // Adjust countdown if this timer fires sooner than current countdown
-        // Bochs pc_system.cc
-        if period < self.curr_countdown as u64 {
-            self.curr_countdown_period -= self.curr_countdown - period as u32;
-            self.curr_countdown = period as u32;
-        }
-        Ok(())
+        self.activate_timer_at_ticks(timer_index, deadline_ticks, continuous)
     }
 
     /// Activate a timer with period in microseconds.
@@ -624,9 +1056,8 @@ impl BxPcSystemC {
         let ticks = if useconds == 0 {
             self.timers[timer_index].period
         } else {
-            // Convert useconds to ticks (Bochs pc_system.cc)
-            let t = useconds as u64 * self.ips / 1_000_000;
-            t.max(MIN_ALLOWABLE_TIMER_PERIOD)
+            self.usec_to_ticks(u64::from(useconds))?
+                .max(MIN_ALLOWABLE_TIMER_PERIOD)
         };
         self.activate_timer(timer_index, ticks, continuous)
     }
@@ -645,46 +1076,31 @@ impl BxPcSystemC {
         let ticks = if nseconds == 0 {
             self.timers[timer_index].period
         } else {
-            // Convert nseconds to ticks (Bochs pc_system.cc)
-            let t = nseconds * self.ips / 1_000_000_000;
-            t.max(MIN_ALLOWABLE_TIMER_PERIOD)
+            let ticks = (u128::from(nseconds) * u128::from(self.ips)) / 1_000_000_000u128;
+            u64::try_from(ticks)
+                .map_err(|_| PcSystemError::TimeConversionOverflow)?
+                .max(MIN_ALLOWABLE_TIMER_PERIOD)
         };
         self.activate_timer(timer_index, ticks, continuous)
     }
 
-    /// Reactivate a periodic timer relative to its previous fire time.
+    /// Reactivate a timer relative to its previous fire epoch.
     ///
-    /// Unlike `activate_timer` which sets `time_to_fire = time_ticks() + period`,
-    /// this adds `period` to the existing `time_to_fire`. Used for LAPIC catch-up:
-    /// after processing a timer fire, re-arm relative to the previous fire point.
+    /// This retains the prior-deadline phase for catch-up while using the
+    /// absolute primitive to keep a late reactivation nonzero.
     pub fn reactivate_timer_relative(
         &mut self,
         timer_index: usize,
         period: u64,
     ) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
-        debug_assert_ne!(
-            self.timers[timer_index].time_to_fire, 0,
-            "relative timer reactivation requires an established deadline"
-        );
         let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
-        self.timers[timer_index].period = period;
-        self.timers[timer_index].time_to_fire += period;
-        self.timers[timer_index].flags.insert(TimerFlags::ACTIVE);
-        self.timers[timer_index]
-            .flags
-            .remove(TimerFlags::CONTINUOUS);
-
-        // Adjust countdown if this timer fires sooner
-        let ticks_until_fire = self.timers[timer_index]
+        let deadline_ticks = self.timers[timer_index]
             .time_to_fire
-            .saturating_sub(self.time_ticks());
-        if ticks_until_fire < self.curr_countdown as u64 {
-            let ticks_u32 = ticks_until_fire as u32;
-            self.curr_countdown_period -= self.curr_countdown - ticks_u32;
-            self.curr_countdown = ticks_u32;
-        }
-        Ok(())
+            .checked_add(period)
+            .ok_or(PcSystemError::TimerDeadlineOverflow)?;
+        self.timers[timer_index].period = period;
+        self.activate_timer_at_ticks(timer_index, deadline_ticks, false)
     }
 
     /// Deactivate a timer.
@@ -781,6 +1197,25 @@ impl BxPcSystemC {
         min
     }
 
+    /// Return the earliest active non-null timer deadline in absolute ticks.
+    ///
+    /// The central scheduler uses this fixed-storage query to cap an elapsed
+    /// step before a device callback can rearm another owner.
+    pub fn next_timer_deadline_ticks(&self) -> Option<u64> {
+        let mut deadline: Option<u64> = None;
+        for timer in self.timers[..self.num_timers].iter() {
+            if !timer.flags.contains(TimerFlags::ACTIVE) || timer.owner == TimerOwner::NullTimer {
+                continue;
+            }
+            deadline = Some(match deadline {
+                Some(current) => current.min(timer.time_to_fire),
+                None => timer.time_to_fire,
+            });
+        }
+        deadline
+    }
+
+
     /// Emulate ISA bus timing delay (Bochs pc_system.cc).
     /// ISA bus runs at ~8 MHz. Each ISA cycle takes ~125ns.
     /// At typical IPS rates, this advances the tick counter to simulate bus delay.
@@ -815,6 +1250,266 @@ impl BxPcSystemC {
         }
         self.num_fired = 0;
         (owners, counts, count)
+    }
+
+    /// Return the exact v3 payload length for this PC-system object.
+    ///
+    /// The payload owns its section-version prefix and streams every timer
+    /// slot, so the section writer never needs a staging buffer.
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+        self.validate_snapshot_v3_state()?;
+
+        let mut len = 0u64;
+        for field_len in [
+            4u64, // section version
+            8,    // configured IPS
+            4,    // current countdown
+            4,    // current countdown period
+            8,    // total ticks
+            8,    // last usec clock
+            8,    // usec since last clock
+            1,    // A20 enabled
+            8,    // A20 mask
+            1,    // HRQ
+            1,    // HRQ pending
+            1,    // async event pending
+            1,    // interrupt raised
+            1,    // interrupt cleared
+            1,    // kill request
+            4,    // timer capacity
+            4,    // timer high-water count
+            4,    // triggered slot
+        ] {
+            len = checked_snapshot_len_add(len, field_len)?;
+        }
+
+        let timer_wire_len =
+            checked_snapshot_len_add(TIMER_WIRE_FIXED_LEN, TIMER_OWNER_WIRE_LEN)?;
+        let timer_wire_len = checked_snapshot_len_add(
+            timer_wire_len,
+            snapshot_usize_to_u64(BX_MAX_TIMER_ID_LEN)?,
+        )?;
+        len = checked_snapshot_len_add(
+            len,
+            checked_snapshot_len_mul(timer_wire_len, snapshot_usize_to_u64(BX_MAX_TIMERS)?)?,
+        )?;
+        len = checked_snapshot_len_add(len, 4)?; // fired-owner queue count
+        len = checked_snapshot_len_add(
+            len,
+            checked_snapshot_len_mul(
+                FIRED_OWNER_WIRE_LEN,
+                snapshot_usize_to_u64(self.num_fired)?,
+            )?,
+        )?;
+        Ok(len)
+    }
+
+    /// Stream the complete v3 PC-system state, including all timer ownership
+    /// and pending timer-dispatch work.
+    #[cfg(feature = "std")]
+    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.validate_snapshot_v3_state()?;
+
+        writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+        writer.write_u64(self.ips)?;
+        writer.write_u32(self.curr_countdown)?;
+        writer.write_u32(self.curr_countdown_period)?;
+        writer.write_u64(self.ticks_total)?;
+        writer.write_u64(self.last_time_usec)?;
+        writer.write_u64(self.usec_since_last)?;
+        writer.write_bool(self.enable_a20)?;
+        writer.write_u64(self.a20_mask)?;
+        writer.write_bool(self.hrq)?;
+        writer.write_bool(self.hrq_pending)?;
+        writer.write_bool(self.async_event_pending)?;
+        writer.write_bool(self.intr_raised)?;
+        writer.write_bool(self.intr_cleared)?;
+        writer.write_bool(self.kill_bochs_request)?;
+        writer.write_u32(snapshot_usize_to_u32(BX_MAX_TIMERS)?)?;
+        writer.write_u32(snapshot_usize_to_u32(self.num_timers)?)?;
+        writer.write_u32(snapshot_usize_to_u32(self.triggered_timer)?)?;
+
+        for timer in &self.timers {
+            writer.write_u8(timer.flags.bits())?;
+            writer.write_u64(timer.period)?;
+            writer.write_u64(timer.time_to_fire)?;
+            write_timer_owner(writer, timer.owner)?;
+            writer.write_bytes(&timer.id)?;
+        }
+
+        writer.write_u32(snapshot_usize_to_u32(self.num_fired)?)?;
+        for (&owner, &count) in self
+            .fired_owners
+            .iter()
+            .zip(self.fired_owner_counts.iter())
+            .take(self.num_fired)
+        {
+            write_timer_owner(writer, owner)?;
+            writer.write_u32(count)?;
+        }
+        Ok(())
+    }
+
+    /// Restore the complete v3 PC-system payload without changing live state
+    /// until its bounds, topology, and clock invariants have all validated.
+    ///
+    /// Callback topology is intentionally not represented here: device codecs
+    /// retain their host anchors and validate their saved timer handles through
+    /// `validate_timer_handle_owner` after this object has restored.
+    #[cfg(feature = "std")]
+    pub(crate) fn restore_snapshot_v3<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> io::Result<()> {
+        let section_version = reader.read_u32()?;
+        if section_version != SNAPSHOT_SECTION_VERSION {
+            return Err(snapshot_invalid_data("unsupported PC-system section version"));
+        }
+
+        let ips = reader.read_u64()?;
+        if ips == 0 || ips != self.ips {
+            return Err(snapshot_invalid_data("configured IPS does not match"));
+        }
+        let curr_countdown = reader.read_u32()?;
+        let curr_countdown_period = reader.read_u32()?;
+        let ticks_total = reader.read_u64()?;
+        let last_time_usec = reader.read_u64()?;
+        let usec_since_last = reader.read_u64()?;
+        let enable_a20 = reader.read_bool()?;
+        let a20_mask = reader.read_u64()?;
+        let hrq = reader.read_bool()?;
+        let hrq_pending = reader.read_bool()?;
+        let async_event_pending = reader.read_bool()?;
+        let intr_raised = reader.read_bool()?;
+        let intr_cleared = reader.read_bool()?;
+        let kill_bochs_request = reader.read_bool()?;
+
+        let saved_timer_capacity = reader.read_count(BX_MAX_TIMERS)?;
+        if saved_timer_capacity != BX_MAX_TIMERS {
+            return Err(snapshot_invalid_data("timer capacity does not match"));
+        }
+        let num_timers = reader.read_count(BX_MAX_TIMERS)?;
+        let triggered_timer = reader.read_count(BX_MAX_TIMERS - 1)?;
+
+        let mut timers = core::array::from_fn(|_| Timer::default());
+        for timer in &mut timers {
+            let flags = reader.read_u8()?;
+            timer.flags = TimerFlags::from_bits(flags)
+                .ok_or_else(|| snapshot_invalid_data("timer flags contain unknown bits"))?;
+            timer.period = reader.read_u64()?;
+            timer.time_to_fire = reader.read_u64()?;
+            timer.owner = read_timer_owner(reader)?;
+            reader.read_bytes(&mut timer.id)?;
+        }
+
+        let num_fired = reader.read_count(BX_MAX_TIMERS.min(bounds::MAX_SNAPSHOT_QUEUE_LEN))?;
+        let mut fired_owners = [TimerOwner::NullTimer; BX_MAX_TIMERS];
+        let mut fired_owner_counts = [0u32; BX_MAX_TIMERS];
+        for (owner, count) in fired_owners
+            .iter_mut()
+            .zip(fired_owner_counts.iter_mut())
+            .take(num_fired)
+        {
+            *owner = read_timer_owner(reader)?;
+            *count = reader.read_u32()?;
+        }
+        reader.finish_exact()?;
+
+        validate_snapshot_state_fields(
+            ips,
+            curr_countdown,
+            curr_countdown_period,
+            ticks_total,
+            &timers,
+            num_timers,
+            triggered_timer,
+            &fired_owners,
+            &fired_owner_counts,
+            num_fired,
+            enable_a20,
+            a20_mask,
+        )?;
+
+        self.timers = timers;
+        self.num_timers = num_timers;
+        self.triggered_timer = triggered_timer;
+        self.curr_countdown = curr_countdown;
+        self.curr_countdown_period = curr_countdown_period;
+        self.ticks_total = ticks_total;
+        self.last_time_usec = last_time_usec;
+        self.usec_since_last = usec_since_last;
+        self.enable_a20 = enable_a20;
+        self.a20_mask = a20_mask;
+        self.hrq = hrq;
+        self.hrq_pending = hrq_pending;
+        self.async_event_pending = async_event_pending;
+        self.intr_raised = intr_raised;
+        self.intr_cleared = intr_cleared;
+        self.kill_bochs_request = kill_bochs_request;
+        self.fired_owners = fired_owners;
+        self.fired_owner_counts = fired_owner_counts;
+        self.num_fired = num_fired;
+        Ok(())
+    }
+
+    /// Locate the registered slot owned by `owner`, if any.
+    #[cfg(feature = "std")]
+    pub(crate) fn find_timer_slot_by_owner(&self, owner: TimerOwner) -> Option<usize> {
+        (0..self.num_timers).find(|&index| {
+            self.timers[index].flags.contains(TimerFlags::IN_USE)
+                && self.timers[index].owner == owner
+        })
+    }
+
+    /// Whether a fired-but-undispatched callback for `owner` is queued.
+    #[cfg(feature = "std")]
+    pub(crate) fn has_fired_owner(&self, owner: TimerOwner) -> bool {
+        self.fired_owners[..self.num_fired].contains(&owner)
+    }
+
+    /// Validate that a decoded device timer handle still names the fixed
+    /// scheduler owner it expects. Device callbacks and host resources remain
+    /// live; this verifies the restored data did not redirect either one.
+    #[cfg(feature = "std")]
+    pub(crate) fn validate_timer_handle_owner(
+        &self,
+        handle: usize,
+        expected: TimerOwner,
+    ) -> io::Result<()> {
+        timer_owner_wire_parts(expected)?;
+        if handle >= self.num_timers {
+            return Err(snapshot_invalid_data("timer handle is outside the registered range"));
+        }
+        let timer = self
+            .timers
+            .get(handle)
+            .ok_or_else(|| snapshot_invalid_data("timer handle is out of range"))?;
+        if !timer.flags.contains(TimerFlags::IN_USE) {
+            return Err(snapshot_invalid_data("timer handle names an unused slot"));
+        }
+        if timer.owner != expected {
+            return Err(snapshot_invalid_data("timer handle owner does not match"));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    fn validate_snapshot_v3_state(&self) -> io::Result<()> {
+        validate_snapshot_state_fields(
+            self.ips,
+            self.curr_countdown,
+            self.curr_countdown_period,
+            self.ticks_total,
+            &self.timers,
+            self.num_timers,
+            self.triggered_timer,
+            &self.fired_owners,
+            &self.fired_owner_counts,
+            self.num_fired,
+            self.enable_a20,
+            self.a20_mask,
+        )
     }
 }
 
@@ -1072,4 +1767,198 @@ mod tests {
         assert_eq!(pc.curr_countdown, 500);
         assert!(pc.timers[t2].flags.contains(TimerFlags::ACTIVE));
     }
+
+    #[test]
+    fn absolute_activation_clamps_due_deadline_to_next_tick() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(1_000_000);
+        pc.tickn(7);
+        let timer = pc
+            .register_timer(TimerOwner::PciIdeCh0, 10, false, false, "clamped")
+            .unwrap();
+
+        let now = pc.time_ticks();
+        pc.activate_timer_at_ticks(timer, now - 1, false).unwrap();
+        assert_eq!(pc.timers[timer].time_to_fire, now + 1);
+        assert_eq!(pc.get_num_ticks_left_next_event(), 1);
+        assert_eq!(pc.time_ticks(), now);
+
+        pc.tick1();
+        let (owners, counts, count) = pc.take_fired_timers();
+        assert_eq!(count, 1);
+        assert_eq!(owners[0], TimerOwner::PciIdeCh0);
+        assert_eq!(counts[0], 1);
+    }
+
+
+    #[test]
+    fn continuous_absolute_activation_preserves_registered_period() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(1_000_000);
+        pc.tickn(7);
+        let timer = pc
+            .register_timer(TimerOwner::CmosOneSecond, 50, true, false, "second")
+            .unwrap();
+
+        let now = pc.time_ticks();
+        pc.activate_timer_at_ticks(timer, now + 10, true).unwrap();
+        assert_eq!(pc.timers[timer].period, 50);
+
+        pc.tickn(10);
+        let (_, counts, count) = pc.take_fired_timers();
+        assert_eq!(count, 1);
+        assert_eq!(counts[0], 1);
+
+        pc.tickn(49);
+        assert!(!pc.has_fired_timers());
+        pc.tick1();
+        let (owners, counts, count) = pc.take_fired_timers();
+        assert_eq!(count, 1);
+        assert_eq!(owners[0], TimerOwner::CmosOneSecond);
+        assert_eq!(counts[0], 1);
+    }
+    #[test]
+    fn absolute_time_conversions_report_overflow_without_wrapping() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(u32::MAX);
+
+        assert!(matches!(
+            pc.usec_to_ticks(u64::MAX),
+            Err(PcSystemError::TimeConversionOverflow)
+        ));
+
+        pc.initialize(1);
+        assert!(matches!(
+            pc.time_usec_at_ticks(u64::MAX),
+            Err(PcSystemError::TimeConversionOverflow)
+        ));
+    }
+
+    #[test]
+    fn tied_absolute_deadlines_fire_in_registration_order() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(1_000_000);
+        let first = pc
+            .register_timer(TimerOwner::PciIdeCh0, 100, false, false, "first")
+            .unwrap();
+        let second = pc
+            .register_timer(TimerOwner::PciIdeCh1, 100, false, false, "second")
+            .unwrap();
+        let deadline = pc.time_ticks() + 25;
+
+        pc.activate_timer_at_ticks(first, deadline, false).unwrap();
+        pc.activate_timer_at_ticks(second, deadline, false).unwrap();
+        pc.tickn(25);
+
+        let (owners, counts, count) = pc.take_fired_timers();
+        assert_eq!(count, 2);
+        assert_eq!(owners[..count], [TimerOwner::PciIdeCh0, TimerOwner::PciIdeCh1]);
+        assert_eq!(counts[..count], [1, 1]);
+    }
+
+    #[test]
+    fn absolute_activation_updates_countdown_and_deadline_query() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(1_000_000);
+        pc.tickn(10);
+        let now = pc.time_ticks();
+        let later = pc
+            .register_timer(TimerOwner::PciIdeCh0, 100, false, false, "later")
+            .unwrap();
+        let earlier = pc
+            .register_timer(TimerOwner::PciIdeCh1, 50, false, false, "earlier")
+            .unwrap();
+
+        pc.activate_timer_at_ticks(later, now + 100, false).unwrap();
+        assert_eq!(pc.get_num_ticks_left_next_event(), 100);
+        pc.activate_timer_at_ticks(earlier, now + 50, false).unwrap();
+        assert_eq!(pc.get_num_ticks_left_next_event(), 50);
+        assert_eq!(pc.next_timer_deadline_ticks(), Some(now + 50));
+        assert_eq!(pc.time_ticks(), now);
+
+        pc.tickn(50);
+        assert_eq!(pc.time_ticks(), now + 50);
+        assert_eq!(pc.get_num_ticks_left_next_event(), 50);
+    }
+    #[test]
+    fn maximum_topology_registers_every_lapic_and_fixed_owner() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(1_000_000);
+        let fixed = [
+            TimerOwner::Pit,
+            TimerOwner::Keyboard,
+            TimerOwner::CmosPeriodic,
+            TimerOwner::CmosOneSecond,
+            TimerOwner::CmosUip,
+            TimerOwner::AcpiPmOverflow,
+            TimerOwner::SerialFifo(0),
+            TimerOwner::SerialFifo(1),
+            TimerOwner::SerialFifo(2),
+            TimerOwner::SerialFifo(3),
+            TimerOwner::PciIdeCh0,
+            TimerOwner::PciIdeCh1,
+            #[cfg(feature = "std")]
+            TimerOwner::Slowdown,
+        ];
+        for owner in fixed {
+            pc.register_timer(owner, 0, false, false, "fixed")
+                .unwrap();
+        }
+        for cpu_index in 0..crate::params::BX_MAX_SMP_THREADS_SUPPORTED as usize {
+            pc.register_timer(
+                TimerOwner::Lapic(cpu_index),
+                0,
+                false,
+                false,
+                "lapic",
+            )
+            .unwrap();
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn snapshot_timer_owner_phase_roundtrip_rejects_owner_mismatch() {
+        use std::io::Cursor;
+
+        let mut source = BxPcSystemC::new();
+        source.initialize(1_000_000);
+        source.tickn(15);
+        let handle = source
+            .register_timer(TimerOwner::CmosPeriodic, 29, true, false, "CMOS periodic")
+            .unwrap();
+        let deadline = source.time_ticks() + 41;
+        source
+            .activate_timer_at_ticks(handle, deadline, true)
+            .unwrap();
+
+        let mut payload = Vec::new();
+        source.save_snapshot_v3(&mut payload).unwrap();
+
+        let mut restored = BxPcSystemC::new();
+        restored.initialize(1_000_000);
+        let mut reader =
+            SnapshotReader::new(Cursor::new(payload.as_slice()), payload.len() as u64).unwrap();
+        restored.restore_snapshot_v3(&mut reader).unwrap();
+
+        assert_eq!(restored.time_ticks(), source.time_ticks());
+        assert_eq!(restored.next_timer_deadline_ticks(), Some(deadline));
+        assert_eq!(restored.timer_countdown(handle), 41);
+        restored
+            .validate_timer_handle_owner(handle, TimerOwner::CmosPeriodic)
+            .unwrap();
+        let mismatch = restored
+            .validate_timer_handle_owner(handle, TimerOwner::CmosOneSecond)
+            .unwrap_err();
+        assert_eq!(mismatch.kind(), ErrorKind::InvalidData);
+
+        restored.tickn(40);
+        assert!(!restored.has_fired_timers());
+        restored.tickn(1);
+        let (owners, counts, count) = restored.take_fired_timers();
+        assert_eq!(count, 1);
+        assert_eq!(owners[0], TimerOwner::CmosPeriodic);
+        assert_eq!(counts[0], 1);
+    }
+
 }

@@ -463,11 +463,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.invalidate_stack_cache();
         self.dtlb.flush();
         self.itlb.flush();
+        self.sync_active_tlb_pin();
         // Bochs paging.cc — iCache.breakLinks()
         // Invalidates page-split icache entries and increments trace link timestamp.
         // Without this, page-boundary instructions survive TLB flush and serve
         // stale bytes from old physical pages after page remapping.
         self.i_cache.break_links();
+    }
+
+    /// Drop every CPU-held host-memory reference before machine backing is
+    /// replaced or restored.
+    pub(crate) fn invalidate_host_memory_mappings(&mut self) {
+        self.vmcbhostptr = 0;
+        self.tlb_flush();
+        self.i_cache.flush_all();
+        self.sync_vmcb_pin();
     }
 
     /// Flush non-global TLB entries only (preserves entries with G bit set).
@@ -478,6 +488,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.invalidate_stack_cache();
         self.dtlb.flush_non_global();
         self.itlb.flush_non_global();
+        self.sync_active_tlb_pin();
         // Bochs paging.cc — iCache.breakLinks()
         self.i_cache.break_links();
     }
@@ -635,7 +646,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Register state for save/restore functionality.
     /// Called after initialize() and sanity_checks() in original Bochs.
     /// In Bochs this registers parameter tree nodes for save/restore.
-    /// Our snapshot mechanism uses cpu/snapshot.rs save_snapshot_state() instead.
+    /// Our snapshot mechanism uses the bounded v3 codec in cpu/snapshot.rs
+    /// (`save_snapshot_v3_body`/`restore_snapshot_v3_body`) instead.
     pub fn register_state(&self) {
         tracing::trace!("CPU state registered");
     }
@@ -649,11 +661,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // guest-physical address, so the host mapping is not maintained here.
     }
 
-    /// Sets the VMCB pointer for SVM mode
-    /// Mirrors the C++ BX_CPU_C::set_VMCBPTR behavior
-    fn set_VMCBPTR(&mut self, _vmcb_ptr: u64) {
-        // Bochs set_VMCBPTR additionally maintains a host-side VMCB pointer
-        // and SVM memory type; rusty_box accesses the VMCB by guest-physical
-        // address, so the host mapping is not maintained here.
+    /// Reset the cached VMCB mapping with the architectural VMCB address.
+    ///
+    /// A reset has no live VMCB host mapping; publish that transition before
+    /// allocator checks can run again.
+    fn set_VMCBPTR(&mut self, vmcb_ptr: u64) {
+        self.vmcbptr = vmcb_ptr;
+        self.vmcbhostptr = 0;
+        self.sync_vmcb_pin();
     }
 }

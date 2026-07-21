@@ -23,7 +23,11 @@ use super::{
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedZmmRegister,
 };
+// Load-bearing in pure no-std builds (core f32/f64 lack these inherent
+// methods there); redundant in unit graphs where std is linked, so the
+// unused-import lint is allowed rather than losing the no-std resolution.
 #[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
 use crate::cpu::float::FloatExt;
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16

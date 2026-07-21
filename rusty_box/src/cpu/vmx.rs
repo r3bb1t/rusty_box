@@ -1595,11 +1595,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     fn read_phys_word(&mut self, paddr: u64) -> u16 {
-        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else {
-            return 0xffff;
-        };
+        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return 0xffff; };
         let mut data = [0u8; 2];
-        if let Err(e) = mem.read_physical_page(&[cpu_ref], paddr, 2, &mut data) {
+        if let Err(e) = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 2, &mut data) {
             tracing::warn!("read_phys_word({:#018x}) failed: {:?}", paddr, e);
             return 0xffff;
         }
@@ -1607,11 +1605,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     fn read_phys_dword(&mut self, paddr: u64) -> u32 {
-        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else {
-            return 0xffff_ffff;
-        };
+        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return 0xffff_ffff; };
         let mut data = [0u8; 4];
-        if let Err(e) = mem.read_physical_page(&[cpu_ref], paddr, 4, &mut data) {
+        if let Err(e) = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data) {
             tracing::warn!("read_phys_dword({:#018x}) failed: {:?}", paddr, e);
             return 0xffff_ffff;
         }
@@ -1619,11 +1615,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     fn read_phys_qword(&mut self, paddr: u64) -> u64 {
-        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else {
-            return u64::MAX;
-        };
+        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return u64::MAX; };
         let mut data = [0u8; 8];
-        if let Err(e) = mem.read_physical_page(&[cpu_ref], paddr, 8, &mut data) {
+        if let Err(e) = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 8, &mut data) {
             tracing::warn!("read_phys_qword({:#018x}) failed: {:?}", paddr, e);
             return u64::MAX;
         }
@@ -1631,11 +1625,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     fn write_phys_word(&mut self, paddr: u64, val: u16) {
-        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else {
-            return;
-        };
+        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return; };
         let mut data = val.to_le_bytes();
-        if let Err(e) = mem.write_physical_page(&[cpu_ref], paddr, 2, &mut data) {
+        if let Err(e) = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 2, &mut data) {
             tracing::warn!("write_phys_word({:#018x}) failed: {:?}", paddr, e);
         }
         // Bochs handleSMC flushes the writer synchronously at the store.
@@ -1643,11 +1635,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     fn write_phys_dword(&mut self, paddr: u64, val: u32) {
-        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else {
-            return;
-        };
+        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return; };
         let mut data = val.to_le_bytes();
-        if let Err(e) = mem.write_physical_page(&[cpu_ref], paddr, 4, &mut data) {
+        if let Err(e) = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data) {
             tracing::warn!("write_phys_dword({:#018x}) failed: {:?}", paddr, e);
         }
         // Bochs handleSMC flushes the writer synchronously at the store.
@@ -1655,11 +1645,9 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     fn write_phys_qword(&mut self, paddr: u64, val: u64) {
-        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else {
-            return;
-        };
+        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return; };
         let mut data = val.to_le_bytes();
-        if let Err(e) = mem.write_physical_page(&[cpu_ref], paddr, 8, &mut data) {
+        if let Err(e) = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 8, &mut data) {
             tracing::warn!("write_phys_qword({:#018x}) failed: {:?}", paddr, e);
         }
         // Bochs handleSMC flushes the writer synchronously at the store.
@@ -4468,12 +4456,10 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     /// atomic RMW. Logs and continues on failure to match the lenient
     /// posture of `read_physical_byte`.
     fn write_physical_byte(&mut self, paddr: u64, val: u8) {
-        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else {
-            tracing::warn!("write_physical_byte({:#018x}): no mem bus", paddr);
-            return;
-        };
+        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { tracing::warn!("write_physical_byte({:#018x}): no mem bus", paddr);
+        return; };
         let mut data = [val];
-        if let Err(e) = mem.write_physical_page(&[cpu_ref], paddr, 1, &mut data) {
+        if let Err(e) = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data) {
             tracing::warn!(
                 "write_physical_byte({:#018x}) failed: {:?}; byte dropped",
                 paddr,

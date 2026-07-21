@@ -341,18 +341,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Host pointer cached from TLB hit — direct write
             self.address_xlation.write_pages_u32(val);
         } else if self.address_xlation.pages == 1 {
-            // Single-page physical write
-            self.mem_write_dword(self.address_xlation.paddress1, val);
+            let paddr = self.address_xlation.paddress1;
+            if !self.mmio_write(paddr, 4, val as u64) {
+                self.mem_write_dword(paddr, val);
+            }
         } else {
-            // Cross-page (pages == 2): split write (little-endian)
             let bytes = val.to_le_bytes();
             let len1 = self.address_xlation.len1 as usize;
-            for (i, &byte) in bytes[..len1].iter().enumerate() {
-                self.mem_write_byte(self.address_xlation.paddress1 + i as u64, byte);
-            }
             let len2 = self.address_xlation.len2 as usize;
-            for (i, &byte) in bytes[len1..len1 + len2].iter().enumerate() {
-                self.mem_write_byte(self.address_xlation.paddress2 + i as u64, byte);
+            let p0 = self.address_xlation.paddress1;
+            let p1 = self.address_xlation.paddress2;
+            let first_value = (val as u64) & ((1u64 << (len1 * 8)) - 1);
+            if !self.mmio_write(p0, len1, first_value) {
+                for (index, &byte) in bytes[..len1].iter().enumerate() {
+                    self.mem_write_byte(p0 + index as u64, byte);
+                }
+            }
+            let second_value = (val >> (len1 * 8)) as u64;
+            if !self.mmio_write(p1, len2, second_value) {
+                for (index, &byte) in bytes[len1..].iter().enumerate() {
+                    self.mem_write_byte(p1 + index as u64, byte);
+                }
             }
         }
     }

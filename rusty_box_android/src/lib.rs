@@ -21,12 +21,20 @@ use std::{
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Instant,
 };
+#[cfg(target_os = "android")]
+use std::time::Duration;
 
+#[cfg(target_os = "android")]
 const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
+#[cfg(not(target_os = "android"))]
+const BIOS_DATA: &[u8] = &[];
+#[cfg(target_os = "android")]
 const VGA_BIOS_DATA: &[u8] =
     include_bytes!("../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin");
+#[cfg(not(target_os = "android"))]
+const VGA_BIOS_DATA: &[u8] = &[];
 #[cfg(feature = "embedded-alpine")]
 const ALPINE_ISO: &[u8] = include_bytes!("../assets/alpine.iso");
 
@@ -1090,7 +1098,7 @@ fn run_alpine_emulator_worker(
         match emu.run_interactive(interactive_budget) {
             Ok(executed) => {
                 total_instructions.fetch_add(executed, Ordering::Relaxed);
-                if emu.cpu.is_in_shutdown() {
+                if emu.cpu().is_in_shutdown() {
                     break Ok(());
                 }
                 if executed == 0 {

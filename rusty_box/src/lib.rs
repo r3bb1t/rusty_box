@@ -73,7 +73,6 @@ pub use error::{Error, Result};
 pub mod boot;
 pub mod dma;
 pub mod memory;
-mod misc;
 pub mod params;
 pub mod pc_system;
 pub mod pic;

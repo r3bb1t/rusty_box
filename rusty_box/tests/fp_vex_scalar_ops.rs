@@ -266,7 +266,7 @@ fn run_all_cases() {
         "harness: cr0={:#x} cr4={:#x} rip={:#x}",
         emu.reg_read(X86Reg::Cr0),
         emu.reg_read(X86Reg::Cr4),
-        emu.cpu.rip(),
+        emu.cpu().rip(),
     );
 
     // Each case is followed by `jmp $` (EB FE): a branch ends the icache
@@ -295,7 +295,7 @@ fn run_all_cases() {
         // `until` stops the run once RIP sits at the park jump.
         match emu.emu_start(addr, Some(park), None, Some(case.insns + 8)) {
             Ok(stop) => {
-                let end_rip = emu.cpu.rip();
+                let end_rip = emu.cpu().rip();
                 if end_rip != park {
                     failures.push(format!(
                         "{}: did not park — stop={stop:?} rip={end_rip:#x} want {park:#x}",
@@ -406,7 +406,7 @@ fn run_go_runtime_cases() {
         let stop = emu
             .emu_start(addr, Some(park), None, Some(insns + 8))
             .expect("emu_start");
-        assert_eq!(emu.cpu.rip(), park, "{name}: did not park (stop={stop:?})");
+        assert_eq!(emu.cpu().rip(), park, "{name}: did not park (stop={stop:?})");
     }
 
     // Intel AES-NI whitepaper reference vectors (also used by Bochs/QEMU):
@@ -527,7 +527,7 @@ fn run_split_load_cases() {
         let stop = emu
             .emu_start(addr, Some(park), None, Some(insns + 8))
             .expect("emu_start");
-        assert_eq!(emu.cpu.rip(), park, "{name}: did not park (stop={stop:?})");
+        assert_eq!(emu.cpu().rip(), park, "{name}: did not park (stop={stop:?})");
     }
 
     // Recognizable 48-byte pattern.
@@ -617,6 +617,14 @@ fn vex_vpinsrw_sources_vvvv_and_clears_upper() {
                 X86Reg::Cr4,
                 emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
             );
+            // XSETBV ECX=0, EDX:EAX=7 enables guest XCR0 FPU+SSE+YMM state.
+            emu.reg_write(X86Reg::Rax, 0x7);
+            emu.reg_write(X86Reg::Rcx, 0);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+                .expect("write xsetbv");
+            emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                .expect("enable guest AVX state");
 
             // vpinsrw xmm0, xmm1, ecx, 3 (VEX.128.66.0F.W0 C4 /r ib, 2-byte VEX
             // C5 F1: vvvv=~1). modrm C1 → reg=xmm0, rm=ecx. imm=3. Then park.
@@ -638,7 +646,7 @@ fn vex_vpinsrw_sources_vvvv_and_clears_upper() {
                 .emu_start(CASE_BASE, Some(CASE_BASE + 5), None, Some(9))
                 .expect("emu_start");
             assert_eq!(
-                emu.cpu.rip(),
+                emu.cpu().rip(),
                 CASE_BASE + 5,
                 "vpinsrw did not park (stop={stop:?})"
             );
@@ -689,7 +697,7 @@ fn indexbyte_avx2_ingredients() {
                 .emu_start(CASE_BASE, Some(CASE_BASE + 5), None, Some(9))
                 .expect("emu_start");
             assert_eq!(
-                emu.cpu.rip(),
+                emu.cpu().rip(),
                 CASE_BASE + 5,
                 "vpbroadcastb did not park (stop={stop:?})"
             );
@@ -710,7 +718,7 @@ fn indexbyte_avx2_ingredients() {
                 let stop = emu
                     .emu_start(addr2, Some(addr2 + 4), None, Some(9))
                     .expect("emu_start");
-                assert_eq!(emu.cpu.rip(), addr2 + 4, "tzcnt park (stop={stop:?})");
+                assert_eq!(emu.cpu().rip(), addr2 + 4, "tzcnt park (stop={stop:?})");
                 assert_eq!(
                     emu.reg_read(X86Reg::Rax),
                     want,
@@ -781,7 +789,7 @@ fn run_aeshash_cases() {
     let seed0 = 0x243F_6A88_85A3_08D3_1319_8A2E_0370_7344_u128; // arbitrary
     let seed1 = 0xA409_3822_299F_31D0_082E_FA98_EC4E_6C89_u128;
 
-    let mut hash_at = |emu: &mut Emulator<'static, Corei7SkylakeX>, addr: u64| -> [u8; 16] {
+    let hash_at = |emu: &mut Emulator<'static, Corei7SkylakeX>, addr: u64| -> [u8; 16] {
         emu.mem_write(addr, key).expect("write key");
         emu.reg_write(X86Reg::Rax, addr);
         emu.reg_write(X86Reg::Rcx, key.len() as u64);
@@ -792,7 +800,7 @@ fn run_aeshash_cases() {
         let stop = emu
             .emu_start(CASE_BASE, Some(park), None, Some(insns + 8))
             .expect("emu_start");
-        assert_eq!(emu.cpu.rip(), park, "hash run did not park (stop={stop:?})");
+        assert_eq!(emu.cpu().rip(), park, "hash run did not park (stop={stop:?})");
         emu.reg_read_xmm(X86Reg::Xmm2)
     };
 
@@ -909,7 +917,7 @@ fn run_packed_cases() {
         let stop = emu
             .emu_start(addr, Some(park), None, Some(9))
             .expect("emu_start");
-        assert_eq!(emu.cpu.rip(), park, "{name}: did not park (stop={stop:?})");
+        assert_eq!(emu.cpu().rip(), park, "{name}: did not park (stop={stop:?})");
     }
 
     // 0: vaddpd ymm — 4 lanes, host-IEEE exact match.
@@ -1201,7 +1209,7 @@ fn run_hadd_blend_dpp_cases() {
         let stop = emu
             .emu_start(addr, Some(park), None, Some(9))
             .expect("emu_start");
-        assert_eq!(emu.cpu.rip(), park, "{name}: did not park (stop={stop:?})");
+        assert_eq!(emu.cpu().rip(), park, "{name}: did not park (stop={stop:?})");
     }
 
     // 0: haddps xmm0,xmm1 (legacy):
@@ -1418,7 +1426,7 @@ fn run_vex_integer_cases() {
         let stop = emu
             .emu_start(addr, Some(park), None, Some(12))
             .expect("emu_start");
-        assert_eq!(emu.cpu.rip(), park, "{name}: did not park (stop={stop:?})");
+        assert_eq!(emu.cpu().rip(), park, "{name}: did not park (stop={stop:?})");
     }
 
     // 0: vptest — the only overlapping bits sit in the UPPER 128-bit lane.
@@ -1707,7 +1715,7 @@ fn run_cvt_boundary_cases() {
         let stop = emu
             .emu_start(addr, Some(park), None, Some(9))
             .expect("emu_start");
-        assert_eq!(emu.cpu.rip(), park, "{name}: did not park (stop={stop:?})");
+        assert_eq!(emu.cpu().rip(), park, "{name}: did not park (stop={stop:?})");
     }
 
     // 0: truncation of f64 values in (i32::MAX, 2^31) is VALID and yields
@@ -1845,7 +1853,7 @@ fn run_remap_gap_cases() {
         let stop = emu
             .emu_start(addr, Some(park), None, Some(insns + 8))
             .expect("emu_start");
-        assert_eq!(emu.cpu.rip(), park, "{name}: no park (stop={stop:?})");
+        assert_eq!(emu.cpu().rip(), park, "{name}: no park (stop={stop:?})");
     }
 
     // 0: vptest — overlap ONLY in the upper 128-bit lane. A 128-bit-only

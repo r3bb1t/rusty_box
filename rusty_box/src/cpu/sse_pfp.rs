@@ -15,7 +15,11 @@
 //! uses SoftFloat3e, native FP is sufficient since we run on x86 host with
 //! the same FP behavior. SoftFloat integration can be added later if needed.
 
+// Load-bearing in pure no-std builds (core f32/f64 lack these inherent
+// methods there); redundant in unit graphs where std is linked, so the
+// unused-import lint is allowed rather than losing the no-std resolution.
 #[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
 use crate::cpu::float::FloatExt;
 
 /// Round-to-nearest-ties-even for f64 (no_std compatible).

@@ -173,8 +173,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Host pointer cached from TLB hit — direct write (fastest path)
             self.address_xlation.write_pages_u8(val);
         } else {
-            // pages == 1: single-page physical write
-            self.mem_write_byte(self.address_xlation.paddress1, val);
+            let paddr = self.address_xlation.paddress1;
+            if !self.mmio_write(paddr, 1, val as u64) {
+                self.mem_write_byte(paddr, val);
+            }
         }
     }
 

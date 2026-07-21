@@ -4,7 +4,7 @@ use crate::{
     config::BxPhyAddress,
     cpu::{
         cpu::BX_ASYNC_EVENT_STOP_TRACE,
-        decoder::{decode32, decode64, Instruction, Opcode},
+        decoder::{decode32, decode64, DecodeError, Instruction, Opcode},
         tlb::{lpf_of, page_offset, ppf_of},
         BxCpuC, BxCpuIdTrait, Result,
     },
@@ -92,18 +92,12 @@ pub struct BxICacheEntry {
     /// copy used to be kept here for an ilen validity check — removed; validity now
     /// comes from the `p_addr` sentinel, exactly like Bochs `find_entry`.)
     pub(super) mpool_start_idx: usize,
-    /// First 8 bytes of this trace's instruction stream (for SMC detection).
-    /// Compared against current memory on icache lookup to detect stale entries
-    /// when code memory has been overwritten (e.g., LILO loading kernel via REP INSW).
-    /// Bochs uses per-page write stamps; this is a simpler but effective alternative.
-    pub(super) first_bytes: [u8; 8],
 }
 
 // This entry is loaded on every icache lookup (a top hot-path cost), so its size
-// drives the lookup cache-miss rate. It mirrors Bochs `bxICacheEntry_c` (24 bytes:
-// pAddr + traceMask + tlen + the `i` pointer, which our `mpool_start_idx` stands in
-// for) plus our 8-byte `first_bytes` SMC guard. Guard against accidental bloat.
-const _: () = assert!(core::mem::size_of::<BxICacheEntry>() == 32);
+// drives the lookup cache-miss rate. It mirrors Bochs `bxICacheEntry_c`:
+// pAddr + traceMask + tlen + the `i` pointer, which our `mpool_start_idx` stands in.
+const _: () = assert!(core::mem::size_of::<BxICacheEntry>() == 24);
 
 pub struct BxICache {
     pub(crate) entry: [BxICacheEntry; BX_ICACHE_ENTRIES],
@@ -116,21 +110,18 @@ pub struct BxICache {
 
 #[derive(Clone, Debug)]
 struct PageSplitEntry {
+    /// Physical address of the second page of the trace.
     ppf: BxPhyAddress,
-    e: BxICacheEntry,
+    /// Rust equivalent of Bochs's `bxICacheEntry_c *e`: an index into the
+    /// primary direct-mapped entry array, never a detached entry copy.
+    entry_idx: usize,
 }
 
 impl Default for PageSplitEntry {
     fn default() -> Self {
         Self {
             ppf: BX_ICACHE_INVALID_PHY_ADDRESS,
-            e: BxICacheEntry {
-                p_addr: BX_ICACHE_INVALID_PHY_ADDRESS,
-                trace_mask: 0,
-                tlen: 0,
-                mpool_start_idx: 0,
-                first_bytes: [0; 8],
-            },
+            entry_idx: 0,
         }
     }
 }
@@ -149,7 +140,6 @@ impl BxICache {
                 trace_mask: 0,
                 tlen: 0,
                 mpool_start_idx: 0,
-                first_bytes: [0; 8],
             }),
             mpool: core::array::from_fn(|_| Instruction::default()),
             mpindex: 0,
@@ -171,12 +161,19 @@ impl BxICache {
         // Here, we track it explicitly with mpindex
     }
 
-    pub fn commit_page_split_trace(&mut self, p_addr: BxPhyAddress, e: BxICacheEntry) {
-        // Store the page split entry
-        self.page_split_index[self.next_page_split_index].ppf = p_addr;
-        self.page_split_index[self.next_page_split_index].e = e.clone();
-        self.next_page_split_index =
-            (self.next_page_split_index + 1) % BX_ICACHE_PAGE_SPLIT_ENTRIES;
+    pub fn commit_page_split_trace(&mut self, p_addr: BxPhyAddress, entry_idx: usize) {
+        debug_assert!(entry_idx < BX_ICACHE_ENTRIES);
+
+        // Bochs commitPageSplitTrace invalidates the entry referenced by the
+        // evicted split-link before registering the new live link.
+        let split_idx = self.next_page_split_index;
+        if self.page_split_index[split_idx].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+            let old_entry_idx = self.page_split_index[split_idx].entry_idx;
+            flush_smc(&mut self.entry[old_entry_idx]);
+        }
+        self.page_split_index[split_idx].ppf = p_addr;
+        self.page_split_index[split_idx].entry_idx = entry_idx;
+        self.next_page_split_index = (split_idx + 1) % BX_ICACHE_PAGE_SPLIT_ENTRIES;
     }
 
     pub fn get_entry(&self, p_addr: BxPhyAddress, fetch_mode_mask: u64) -> BxICacheEntry {
@@ -220,12 +217,14 @@ impl BxICache {
             flush_smc(entry);
         }
 
-        // Flush page split entries
+        // Flush page split entries through their live primary-cache links.
         for i in 0..BX_ICACHE_PAGE_SPLIT_ENTRIES {
             if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS
                 && ppf_of(self.page_split_index[i].ppf) == ppf
             {
-                flush_smc(&mut self.page_split_index[i].e);
+                let entry_idx = self.page_split_index[i].entry_idx;
+                self.page_split_index[i].ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                flush_smc(&mut self.entry[entry_idx]);
             }
         }
     }
@@ -236,10 +235,11 @@ impl BxICache {
     /// don't serve stale bytes from old physical pages after remapping.
     pub fn break_links(&mut self) {
         // Bochs: invalidatePageSplitICacheEntries()
-        for entry in &mut self.page_split_index {
-            if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                flush_smc(&mut entry.e);
+        for i in 0..BX_ICACHE_PAGE_SPLIT_ENTRIES {
+            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                let entry_idx = self.page_split_index[i].entry_idx;
+                self.page_split_index[i].ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                flush_smc(&mut self.entry[entry_idx]);
             }
         }
         self.next_page_split_index = 0;
@@ -252,7 +252,6 @@ impl BxICache {
         for entry in &mut self.page_split_index {
             if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
                 entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                flush_smc(&mut entry.e);
             }
         }
 
@@ -272,13 +271,14 @@ impl BxICache {
             entry.p_addr = BX_ICACHE_INVALID_PHY_ADDRESS;
         }
 
-        // Invalidate page split entries
+        // Invalidate page split entries through their live primary-cache links.
         for i in 0..BX_ICACHE_PAGE_SPLIT_ENTRIES {
             if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS
                 && ppf_of(self.page_split_index[i].ppf) == ppf
             {
+                let entry_idx = self.page_split_index[i].entry_idx;
                 self.page_split_index[i].ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                flush_smc(&mut self.page_split_index[i].e);
+                flush_smc(&mut self.entry[entry_idx]);
             }
         }
     }
@@ -290,7 +290,6 @@ impl BxICache {
         for entry in &mut self.page_split_index {
             if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
                 entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                flush_smc(&mut entry.e);
             }
         }
     }
@@ -370,6 +369,37 @@ fn flush_smc(e: &mut BxICacheEntry) {
     if e.p_addr != BX_ICACHE_INVALID_PHY_ADDRESS {
         e.p_addr = BX_ICACHE_INVALID_PHY_ADDRESS;
     }
+}
+
+/// Convert decoder-reported architectural errors into the instruction Bochs
+/// places in the trace.  Buffer exhaustion and host conversion failures stay
+/// errors so callers can fetch across a page boundary or surface the failure.
+fn normalize_decode_result(
+    instr: &mut Instruction,
+    result: core::result::Result<(), DecodeError>,
+) -> core::result::Result<(), DecodeError> {
+    match result {
+        Err(DecodeError::Decoder(_)) | Err(DecodeError::InvalidSegmentRegister { .. }) => {
+            instr.set_ia_opcode(Opcode::IaError);
+            instr.set_ilen(1);
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+#[inline]
+fn is_incomplete_decode_error(error: &DecodeError) -> bool {
+    matches!(
+        error,
+        DecodeError::BufferUnderflow
+            | DecodeError::PrefixBufferUnderflow
+            | DecodeError::OpcodeBufferUnderflow
+            | DecodeError::ModRmBufferUnderflow
+            | DecodeError::SibBufferUnderflow
+            | DecodeError::DisplacementBufferUnderflow
+            | DecodeError::ImmediateBufferUnderflow
+    )
 }
 
 fn gen_dummy_icache_entry(i: &mut Instruction) {
@@ -465,7 +495,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         eip_biased: u32,
         p_addr: BxPhyAddress,
         mem: &'c mut BxMemC<'c>,
-        cpus: &[&Self],
+        cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<BxICacheEntry> {
         // Raw pointer for stamp-table marking after `mem` is moved into
         // boundary_fetch below (same reborrow discipline as cpu_loop's
@@ -541,15 +571,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             entry.p_addr = p_addr;
             entry.trace_mask = 0;
             entry.mpool_start_idx = trace_start_idx;
-            // Store first 8 bytes of instruction stream for SMC detection.
-            // Checking just the first byte is insufficient — if code is loaded
-            // at offset+1 (e.g., kernel fill loop at 0x3261 with padding 0x00 at 0x3260),
-            // the first byte matches but subsequent bytes are stale.
-            let copy_len = fetch_ptr.len().min(8);
-            entry.first_bytes[..copy_len].copy_from_slice(&fetch_ptr[..copy_len]);
-            if copy_len < 8 {
-                entry.first_bytes[copy_len..].fill(0);
-            }
         }
 
         let mut current_p_addr = p_addr;
@@ -572,12 +593,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 break;
             }
 
-            // Decode instruction based on CPU mode — Bochs style: write directly into mpool slot
             let long64 = self.long64_mode();
             let decode_result = if long64 {
-                decode64::fetch_decode64(current_fetch_ptr).map(|instr| {
-                    self.i_cache.mpool[current_mpindex] = instr;
-                })
+                match decode64::fetch_decode64(current_fetch_ptr) {
+                    Ok(instr) => {
+                        self.i_cache.mpool[current_mpindex] = instr;
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
             } else {
                 // Bochs fetchDecode32(fetchPtr, &mpool[mpindex], remain) — inplace, no copy
                 decode32::fetch_decode32_inplace(
@@ -586,6 +610,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     &mut self.i_cache.mpool[current_mpindex],
                 )
             };
+            let decode_result =
+                normalize_decode_result(&mut self.i_cache.mpool[current_mpindex], decode_result);
 
             match decode_result {
                 Ok(()) => {
@@ -733,34 +759,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                             &current_fetch_ptr[..core::cmp::min(32, current_fetch_ptr.len())]
                         );
 
-                        // Check if this is an illegal opcode - if so, generate #UD exception
-                        // Based on Bochs exception.cc and cpu.h (Exception::Ud = 6)
-                        use crate::cpu::decoder::DecodeError;
-                        use rusty_box_decoder::decoder::tables::BxDecodeError;
-                        match &decode_err {
-                            DecodeError::Decoder(BxDecodeError::BxIllegalOpcode) => {
-                                // Bochs: store IaError in trace, don't raise #UD here.
-                                // The IaError instruction will be executed normally in the
-                                // inner trace loop, where prev_rip is correctly set.
-                                // This matches Bochs fetchdecode behavior.
-                                tracing::trace!(
-                                    "Illegal opcode at RIP={:#x}, storing IaError in trace",
-                                    self.rip()
-                                );
-                                self.i_cache.mpool[current_mpindex].set_ia_opcode(Opcode::IaError);
-                                self.i_cache.mpool[current_mpindex].set_ilen(1);
-                                let handler = self
-                                    .handler_for_instruction(&self.i_cache.mpool[current_mpindex]);
-                                self.i_cache_handlers[current_mpindex] = handler;
-                                // Set trace length to include this IaError entry
-                                self.i_cache.entry[entry_idx].tlen = 1;
-                                return Ok(self.i_cache.entry[entry_idx].clone());
-                            }
-                            _ => {
-                                // Other decode errors are returned as-is
-                                return Err(crate::cpu::CpuError::Decoder(decode_err));
-                            }
-                        }
+                        return Err(crate::cpu::CpuError::Decoder(decode_err));
                     }
 
                     // First instruction is boundary fetch, leave the trace cache entry
@@ -827,7 +826,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     self.i_cache.mpindex = current_mpindex;
                     let entry = self.i_cache.entry[entry_idx].clone();
                     self.i_cache
-                        .commit_page_split_trace(self.p_addr_fetch_page, entry.clone());
+                        .commit_page_split_trace(self.p_addr_fetch_page, entry_idx);
                     return Ok(entry);
                 }
             }
@@ -872,7 +871,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         fetch_ptr: &[u8],
         remaining_in_page: usize,
         mem: &'c mut BxMemC<'c>,
-        cpus: &[&Self],
+        cpus: &[crate::memory::CpuTlbPin],
     ) -> Result<Instruction> {
         let mut fetch_buffer = [0u8; 32];
 
@@ -924,6 +923,8 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         fetch_buffer[remaining_in_page..remaining_in_page + fetch_buffer_limit]
             .copy_from_slice(&next_page_fetch_ptr[..fetch_buffer_limit]);
 
+        let total_bytes = remaining_in_page + fetch_buffer_limit;
+
         // Get is_32_bit_mode from CS segment descriptor d_b flag
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let is_32_bit_mode = self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
@@ -931,25 +932,40 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             .u
             .segment_d_b();
 
-        // Decode instruction from combined buffer (matching C++ line 291-296)
-        let total_bytes = remaining_in_page + fetch_buffer_limit;
-        let decode_result = if self.long64_mode() {
+        let mut instr = Instruction::default();
+        let decode_result = match if self.long64_mode() {
             decode64::fetch_decode64(&fetch_buffer[..total_bytes])
         } else {
             decode32::fetch_decode32(&fetch_buffer[..total_bytes], is_32_bit_mode)
-        };
-
-        let instr = match decode_result {
-            Ok(i) => i,
-            Err(e) => {
-                tracing::error!(
-                    "boundary_fetch FATAL: total_bytes={} remaining_in_page={} fetch_buffer_limit={} eip_page_window_size={} RIP={:#x} err={:?} bytes={:02x?}",
-                    total_bytes, remaining_in_page, fetch_buffer_limit, self.eip_page_window_size,
-                    self.rip(), e, &fetch_buffer[..total_bytes.min(16)]
-                );
-                return Err(e.into());
+        } {
+            Ok(decoded) => {
+                instr = decoded;
+                Ok(())
             }
+            Err(error) => Err(error),
         };
+        normalize_decode_result(&mut instr, decode_result).map_err(|error| {
+            if is_incomplete_decode_error(&error) {
+                tracing::trace!(
+                    "boundary_fetch incomplete decode: total_bytes={} remaining_in_page={} RIP={:#x} err={:?}",
+                    total_bytes,
+                    remaining_in_page,
+                    self.rip(),
+                    error
+                );
+                return match self.exception(crate::cpu::cpu::Exception::Gp, 0) {
+                    Err(cpu_error) => cpu_error,
+                    Ok(()) => unreachable!("guest exception delivery must restart the CPU loop"),
+                };
+            }
+
+            tracing::error!(
+                "boundary_fetch decode failure: total_bytes={} remaining_in_page={} fetch_buffer_limit={} eip_page_window_size={} RIP={:#x} err={:?} bytes={:02x?}",
+                total_bytes, remaining_in_page, fetch_buffer_limit, self.eip_page_window_size,
+                self.rip(), error, &fetch_buffer[..total_bytes.min(16)]
+            );
+            crate::cpu::CpuError::Decoder(error)
+        })?;
 
         // assignHandler is a no-op in Rust (matching C++ line 303)
         // In C++, assignHandler can return non-zero, but we don't check it here
@@ -1031,7 +1047,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
 #[cfg(test)]
 mod smc_mask_tests {
-    use super::smc_cache_line_mask;
+    use super::{smc_cache_line_mask, BxICache, BxICacheEntry, Opcode, BX_ICACHE_INVALID_PHY_ADDRESS};
+    use crate::{
+        cpu::{core_i7_skylake::Corei7SkylakeX, cpu::Exception, CpuSetupMode, X86Reg},
+        emulator::{Emulator, EmulatorConfig},
+        error::Error,
+    };
 
     #[test]
     fn smc_mask_covers_every_touched_cache_line() {
@@ -1040,5 +1061,114 @@ mod smc_mask_tests {
         assert_eq!(smc_cache_line_mask(0x0180, 0x0180), 0b111 << 3);
         assert_eq!(smc_cache_line_mask(0x0000, 0x1000), u32::MAX);
         assert_eq!(smc_cache_line_mask(0x0f80, 0x0080), 1 << 31);
+    }
+
+    #[test]
+    fn boundary_reserved_vvvv_executes_ia_error_not_decoder_failure() {
+        const CODE: u64 = 0x20_0ffe;
+        const IDT: u64 = 0x28_0000;
+        const HANDLER: u64 = 0x29_0000;
+        const STACK_TOP: u64 = 0x30_0000;
+
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                for opcode in [0x19, 0x39] {
+                    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                        EmulatorConfig::default(),
+                        CpuSetupMode::FlatLong64,
+                    )
+                    .unwrap();
+
+                    // FlatLong64's live CS is 64-bit, but exception delivery
+                    // reloads CS from the test GDT; make that descriptor long.
+                    emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
+                        .unwrap();
+                    emu.reg_write(X86Reg::IdtrBase, IDT);
+                    emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
+                    emu.reg_write(X86Reg::Rsp, STACK_TOP);
+
+                    let mut gate = [0u8; 16];
+                    gate[0..2].copy_from_slice(&(HANDLER as u16).to_le_bytes());
+                    gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
+                    gate[5] = 0x8e;
+                    gate[6..8].copy_from_slice(&((HANDLER >> 16) as u16).to_le_bytes());
+                    gate[8..12].copy_from_slice(&((HANDLER >> 32) as u32).to_le_bytes());
+                    emu.mem_write(IDT + u64::from(Exception::Ud as u8) * 16, &gate)
+                        .unwrap();
+                    emu.mem_write(HANDLER, &[0xf4]).unwrap();
+
+                    let bytes = [0xC4, 0xE3, 0x75, opcode, 0xD8, 0x01];
+                    emu.mem_write(CODE, &bytes).unwrap();
+                    let result = emu.emu_start(CODE, Some(CODE + bytes.len() as u64), None, Some(1));
+                    assert!(
+                        !matches!(result, Err(Error::Cpu(crate::cpu::CpuError::Decoder(_)))),
+                        "reserved-vvvv {opcode:#x} must become guest #UD, not CpuError::Decoder"
+                    );
+                    result.unwrap();
+
+                    assert_eq!(emu.cpu().get_exception_diag()[Exception::Ud as usize], 1);
+                    assert_eq!(emu.cpu().rip(), HANDLER + 1);
+                    assert_eq!(emu.reg_read(X86Reg::Rsp), STACK_TOP - 40);
+                    let mut pushed_rip = [0u8; 8];
+                    emu.mem_read(STACK_TOP - 40, &mut pushed_rip).unwrap();
+                    assert_eq!(u64::from_le_bytes(pushed_rip), CODE);
+                    let cpu = emu.cpu();
+
+                    let entry = cpu
+                        .i_cache
+                        .entry
+                        .iter()
+                        .find(|entry| entry.p_addr == CODE)
+                        .expect("normal page-split cache miss must commit the decoded trace");
+                    let instr = &cpu.i_cache.mpool[entry.mpool_start_idx];
+                    assert_eq!(instr.get_ia_opcode(), Opcode::IaError);
+                    assert_eq!(instr.ilen(), 1);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn page_split_primary_entry_is_invalidated_by_break_links() {
+        std::thread::Builder::new()
+            .stack_size(128 * 1024 * 1024)
+            .spawn(|| {
+                let mut cache = BxICache::new();
+                let trace_start_paddr = 0x1ffe;
+                let fetch_mode_mask = 0;
+                let primary_entry_idx =
+                    BxICache::hash(trace_start_paddr, fetch_mode_mask) as usize;
+                cache.entry[primary_entry_idx] = BxICacheEntry {
+                    p_addr: trace_start_paddr,
+                    trace_mask: 1 << 31,
+                    tlen: 1,
+                    mpool_start_idx: 0,
+                };
+                assert!(
+                    cache
+                        .find_entry(trace_start_paddr, fetch_mode_mask)
+                        .is_some(),
+                    "the split trace must initially hit its primary cache entry"
+                );
+                cache.commit_page_split_trace(0x2000, primary_entry_idx);
+
+                // A TLB remap of the second page calls break_links(); the trace
+                // that starts on the first page must no longer be a cache hit.
+                cache.break_links();
+
+                assert_eq!(cache.page_split_index[0].ppf, BX_ICACHE_INVALID_PHY_ADDRESS);
+                assert!(
+                    cache
+                        .find_entry(trace_start_paddr, fetch_mode_mask)
+                        .is_none(),
+                    "the stale split trace must not survive the TLB link break"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

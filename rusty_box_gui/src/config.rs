@@ -911,7 +911,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
     #[test]
     fn cpuid_freq_defaults_to_none_and_parses_all_modes() {
         let resolved = resolve_config(
-            config("[rom]\nbios = \"bios.bin\"\n"),
+            config("[rom]\nbios = \"bios.bin\"\n\n[cdrom]\npath = \"boot.iso\"\n"),
             &args(["rusty_box_gui"]),
         )
         .unwrap();
@@ -923,6 +923,9 @@ cpuid_freq = "hardware"
 
 [rom]
 bios = "bios.bin"
+
+[cdrom]
+path = "boot.iso"
 "#;
         let resolved = resolve_config(config(toml_hardware), &args(["rusty_box_gui"])).unwrap();
         assert_eq!(resolved.cpuid_freq, CpuidFreq::Hardware);

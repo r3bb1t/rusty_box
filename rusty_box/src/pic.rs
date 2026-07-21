@@ -345,8 +345,8 @@ pub struct BxPicC {
     /// Flag: set when PIC wants to clear the pending interrupt signal.
     /// The emulator reads and clears this, removing BX_EVENT_PENDING_INTR from the CPU.
     pub(crate) irq_cleared: bool,
-    /// IOAPIC forwarding queue: (irq, level) pairs from raise_irq/lower_irq.
-    /// Drained by I/O dispatch and DeviceManager::tick() to forward to IOAPIC.
+    /// IOAPIC forwarding queue: (irq, level) pairs from raise_irq/lower_irq,
+    /// drained at the central scheduler boundary.
     pub(crate) ioapic_forwards: [(u8, bool); PIC_IOAPIC_FORWARD_CAPACITY],
     /// Number of pending IOAPIC forwarding entries.
     pub(crate) num_ioapic_forwards: usize,
@@ -833,6 +833,23 @@ impl BxPicC {
         None
     }
 
+    /// Read the restored input line level of one IRQ (Bochs pic.h `IRQ_in`).
+    ///
+    /// Deliberately reads the line state, not IRR: edge-latch history such as
+    /// an IRR bit consumed by interrupt acknowledge while the line stays high
+    /// must not look like a device/PIC disagreement.
+    #[cfg(feature = "std")]
+    #[inline]
+    pub(crate) fn irq_line_level(&self, irq_no: u8) -> bool {
+        if irq_no < 8 {
+            self.master.irq_in[irq_no as usize] != 0
+        } else if irq_no < 16 {
+            self.slave.irq_in[(irq_no - 8) as usize] != 0
+        } else {
+            false
+        }
+    }
+
     /// Lower an IRQ line (Bochs `bx_pic_c::lower_irq`)
     ///
     /// Clears the IRQ assertion flag and the IRR bit.
@@ -976,6 +993,129 @@ impl BxPicC {
         self.service_pic_dispatch(true);
 
         vector
+    }
+}
+
+#[cfg(feature = "std")]
+impl BxPicC {
+    pub(crate) fn snapshot_v3_len(&self) -> std::io::Result<u64> {
+        if self.num_ioapic_forwards > PIC_IOAPIC_FORWARD_CAPACITY {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "PIC forwarding queue exceeds capacity",
+            ));
+        }
+        let fixed = crate::snapshot::checked_snapshot_len_add(
+            4 + 2 * 28 + 2,
+            4,
+        )?;
+        let queue = crate::snapshot::checked_snapshot_len_mul(
+            u64::try_from(self.num_ioapic_forwards).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "PIC forwarding count does not fit",
+                )
+            })?,
+            2,
+        )?;
+        crate::snapshot::checked_snapshot_len_add(fixed, queue)
+    }
+
+    pub(crate) fn save_snapshot_v3<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        use crate::snapshot::SnapshotWriteExt;
+        self.snapshot_v3_len()?;
+        writer.write_u32(crate::snapshot::SNAPSHOT_SECTION_VERSION)?;
+        for chip in [&self.master, &self.slave] {
+            writer.write_bool(chip.master)?;
+            writer.write_u8(chip.interrupt_offset)?;
+            writer.write_bool(chip.sfnm)?;
+            writer.write_bool(chip.buffered_mode)?;
+            writer.write_bool(chip.master_slave)?;
+            writer.write_bool(chip.auto_eoi)?;
+            writer.write_u8(chip.imr)?;
+            writer.write_u8(chip.isr)?;
+            writer.write_u8(chip.irr)?;
+            writer.write_bool(chip.read_reg_select)?;
+            writer.write_u8(chip.irq)?;
+            writer.write_u8(chip.lowest_priority)?;
+            writer.write_bool(chip.int_pin)?;
+            writer.write_bytes(&chip.irq_in)?;
+            writer.write_bool(chip.init.in_init)?;
+            writer.write_bool(chip.init.requires_4)?;
+            writer.write_u8(chip.init.byte_expected)?;
+            writer.write_bool(chip.special_mask)?;
+            writer.write_bool(chip.polled)?;
+            writer.write_bool(chip.rotate_on_autoeoi)?;
+            writer.write_u8(chip.edge_level)?;
+        }
+        writer.write_bool(self.irq_pending)?;
+        writer.write_bool(self.irq_cleared)?;
+        writer.write_u32(u32::try_from(self.num_ioapic_forwards).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "PIC forwarding count does not fit"))?)?;
+        for &(irq, level) in self.ioapic_forwards.iter().take(self.num_ioapic_forwards) {
+            writer.write_u8(irq)?;
+            writer.write_bool(level)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_snapshot_v3<R: std::io::Read>(&mut self, reader: &mut crate::snapshot::SnapshotReader<R>) -> std::io::Result<()> {
+        if reader.read_u32()? != crate::snapshot::SNAPSHOT_SECTION_VERSION {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unsupported PIC snapshot section version"));
+        }
+        let mut chips = [self.master.clone(), self.slave.clone()];
+        for (index, chip) in chips.iter_mut().enumerate() {
+            let master = reader.read_bool()?;
+            if master != (index == 0) { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "PIC chip topology does not match")); }
+            chip.master = master;
+            chip.interrupt_offset = reader.read_u8()?;
+            chip.sfnm = reader.read_bool()?;
+            chip.buffered_mode = reader.read_bool()?;
+            chip.master_slave = reader.read_bool()?;
+            chip.auto_eoi = reader.read_bool()?;
+            chip.imr = reader.read_u8()?;
+            chip.isr = reader.read_u8()?;
+            chip.irr = reader.read_u8()?;
+            chip.read_reg_select = reader.read_bool()?;
+            chip.irq = reader.read_u8()?;
+            chip.lowest_priority = reader.read_u8()?;
+            chip.int_pin = reader.read_bool()?;
+            reader.read_bytes(&mut chip.irq_in)?;
+            chip.init.in_init = reader.read_bool()?;
+            chip.init.requires_4 = reader.read_bool()?;
+            chip.init.byte_expected = reader.read_u8()?;
+            chip.special_mask = reader.read_bool()?;
+            chip.polled = reader.read_bool()?;
+            chip.rotate_on_autoeoi = reader.read_bool()?;
+            chip.edge_level = reader.read_u8()?;
+            let init_phase_valid = if chip.init.in_init {
+                matches!(chip.init.byte_expected, 2 | 3)
+                    || (chip.init.byte_expected == 4 && chip.init.requires_4)
+            } else {
+                matches!(chip.init.byte_expected, 0 | 3 | 4)
+            };
+            if chip.irq > 7 || chip.lowest_priority > 7 || !init_phase_valid {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "PIC state is malformed",
+                ));
+            }
+        }
+        let irq_pending = reader.read_bool()?;
+        let irq_cleared = reader.read_bool()?;
+        let count = reader.read_count(PIC_IOAPIC_FORWARD_CAPACITY)?;
+        let mut forwards = [(0, false); PIC_IOAPIC_FORWARD_CAPACITY];
+        for entry in forwards.iter_mut().take(count) {
+            let irq = reader.read_u8()?;
+            if irq >= 16 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "PIC forwarding IRQ is invalid")); }
+            *entry = (irq, reader.read_bool()?);
+        }
+        self.master = chips[0].clone();
+        self.slave = chips[1].clone();
+        self.irq_pending = irq_pending;
+        self.irq_cleared = irq_cleared;
+        self.ioapic_forwards = forwards;
+        self.num_ioapic_forwards = count;
+        Ok(())
     }
 }
 

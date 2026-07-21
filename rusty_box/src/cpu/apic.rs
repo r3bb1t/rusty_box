@@ -11,6 +11,14 @@
 use tracing::{debug, error, info};
 
 use crate::config::BxPhyAddress;
+#[cfg(feature = "std")]
+use std::io::{self, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+};
+
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -256,22 +264,18 @@ pub struct ApicBusMessage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LocalApicTimerActivation {
-    pub(crate) delay_ticks: u64,
+    /// Absolute pc-system tick at which the timer must fire.  The emulator
+    /// owns clamping already-due deadlines when it activates the owner.
+    pub(crate) deadline_ticks: u64,
     pub(crate) update_ticks_initial: bool,
 }
 
 impl LocalApicTimerActivation {
-    const fn reload_from_now(delay_ticks: u64) -> Self {
+    #[inline]
+    const fn at_ticks(deadline_ticks: u64, update_ticks_initial: bool) -> Self {
         Self {
-            delay_ticks,
-            update_ticks_initial: true,
-        }
-    }
-
-    const fn tsc_deadline(delay_ticks: u64) -> Self {
-        Self {
-            delay_ticks,
-            update_ticks_initial: false,
+            deadline_ticks,
+            update_ticks_initial,
         }
     }
 }
@@ -279,6 +283,67 @@ impl LocalApicTimerActivation {
 // ─── BxLocalApic struct ──────────────────────────────────────────────────────
 
 /// Local Advanced Programmable Interrupt Controller (LAPIC)
+
+/// LAPIC timer handles deferred for PC-system owner validation after all
+/// scheduler slots have been restored. Decode never creates or rearms them.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalApicSnapshotRestore {
+    pub(crate) timer_handle: Option<usize>,
+    pub(crate) vmx_timer_handle: Option<usize>,
+    pub(crate) mwaitx_timer_handle: Option<usize>,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug)]
+struct LocalApicSnapshotState {
+    base_addr: BxPhyAddress,
+    mode: ApicMode,
+    xapic_ext: u32,
+    software_enabled: bool,
+    spurious_vector: u8,
+    focus_disable: bool,
+    task_priority: u32,
+    ldr: u32,
+    dest_format: u32,
+    isr: [u32; 8],
+    tmr: [u32; 8],
+    irr: [u32; 8],
+    ier: [u32; 8],
+    error_status: u32,
+    shadow_error_status: u32,
+    icr_hi: u32,
+    icr_lo: u32,
+    lvt: [LvtBits; LVT_ENTRY_COUNT],
+    timer_initial: u32,
+    timer_current: u32,
+    ticks_initial: u64,
+    current_ticks: u64,
+    ticks_at_sync: u64,
+    icount_at_sync: u64,
+    intr_pending: bool,
+    timer_divconf: u32,
+    timer_divide_factor: u32,
+    timer_active: bool,
+    timer_handle: Option<usize>,
+    vmx_timer_handle: Option<usize>,
+    vmx_preemption_timer_value: u32,
+    vmx_preemption_timer_initial: u64,
+    vmx_preemption_timer_fire: u64,
+    vmx_preemption_timer_rate: u32,
+    vmx_timer_active: bool,
+    mwaitx_timer_handle: Option<usize>,
+    mwaitx_timer_active: bool,
+    intr: bool,
+    pending_ipis: [Option<PendingIpi>; PENDING_IPI_CAPACITY],
+    pending_ipi_len: usize,
+    pending_cpu_events: [Option<LocalApicCpuEvent>; PENDING_CPU_EVENT_CAPACITY],
+    pending_cpu_event_len: usize,
+    pending_eoi_vector: Option<u8>,
+    timer_fired: bool,
+    timer_activate_request: Option<LocalApicTimerActivation>,
+    timer_deactivate_request: bool,
+}
 ///
 /// Ported from Bochs bx_local_apic_c (apic.h, apic.cc).
 /// Handles interrupts for a single processor core: IPIs, local interrupts,
@@ -666,6 +731,18 @@ impl BxLocalApic {
         event
     }
 
+    /// True when this LAPIC has work that can only be committed at the
+    /// scheduler/machine boundary, after raw CPU and device borrows end.
+    #[inline]
+    pub(crate) fn has_scheduler_work(&self) -> bool {
+        self.pending_ipi_len != 0
+            || self.pending_cpu_event_len != 0
+            || self.timer_activate_request.is_some()
+            || self.timer_deactivate_request
+            || self.pending_eoi_vector.is_some()
+            || self.intr_pending
+    }
+
     #[inline]
     pub(crate) fn matches_logical_dest(&self, dest: ApicDest) -> bool {
         self.match_logical_addr(dest)
@@ -854,8 +931,12 @@ impl BxLocalApic {
 
     /// Write to a 16-byte-aligned APIC register.
     /// Bochs: write_aligned (apic.cc)
-    pub(crate) fn write_aligned(&mut self, addr: BxPhyAddress, value: u32) {
-        debug_assert!((addr & 0xF) == 0);
+    pub(crate) fn write_aligned(
+        &mut self,
+        addr: BxPhyAddress,
+        value: u32,
+        current_ticks: u64,
+    ) {
         let apic_reg = (addr & 0xFF0) as u32;
 
         match apic_reg {
@@ -904,7 +985,6 @@ impl BxLocalApic {
             0x310 => {
                 self.icr_hi = value & 0xFF00_0000;
             }
-            // LVT Timer, Thermal, Perfmon, LINT0, LINT1, Error (apic.cc)
             0x320 | 0x330 | 0x340 | 0x350 | 0x360 | 0x370 => {
                 self.set_lvt_entry(apic_reg, value);
             }
@@ -914,7 +994,7 @@ impl BxLocalApic {
             }
             // Timer initial count (apic.cc)
             0x380 => {
-                self.set_initial_timer_count(value);
+                self.set_initial_timer_count(value, current_ticks);
             }
             // Timer divide configuration (apic.cc)
             0x3E0 => {
@@ -983,9 +1063,13 @@ impl BxLocalApic {
         }
     }
 
-    /// Handle a write to the LAPIC MMIO region.
-    /// Bochs: write (apic.cc)
-    pub(crate) fn write(&mut self, addr: BxPhyAddress, value: u32, len: u32) {
+    pub(crate) fn write(
+        &mut self,
+        addr: BxPhyAddress,
+        value: u32,
+        len: u32,
+        current_ticks: u64,
+    ) {
         if len != 4 {
             error!("APIC write with len={} (should be 4)", len);
             return;
@@ -994,7 +1078,7 @@ impl BxLocalApic {
             error!("APIC write at unaligned address {:#x}", addr);
             return;
         }
-        self.write_aligned(addr, value);
+        self.write_aligned(addr, value, current_ticks);
     }
 
     /// Handle a read from the x2APIC MSR register window.
@@ -1021,9 +1105,7 @@ impl BxLocalApic {
         }
     }
 
-    /// Handle a write to the x2APIC MSR register window.
-    /// Bochs: write_x2apic (apic.cc)
-    pub(crate) fn write_x2apic(&mut self, index: u32, value: u64) -> bool {
+    pub(crate) fn write_x2apic(&mut self, index: u32, value: u64, current_ticks: u64) -> bool {
         let value_hi = (value >> 32) as u32;
         let value_lo = value as u32;
         if index != 0x300 && value_hi != 0 {
@@ -1044,29 +1126,30 @@ impl BxLocalApic {
                 true
             }
             // Legacy-compatible writable registers.
+            // Legacy-compatible writable registers.
             0x080 => {
                 if (value_lo & 0xFFFF_FF00) != 0 {
                     return false;
                 }
-                self.write_aligned(index as BxPhyAddress, value_lo);
+                self.write_aligned(index as BxPhyAddress, value_lo, current_ticks);
                 true
             }
             0x0F0 => {
                 if (value_lo & 0xFFFF_FE00) != 0 {
                     return false;
                 }
-                self.write_aligned(index as BxPhyAddress, value_lo);
+                self.write_aligned(index as BxPhyAddress, value_lo, current_ticks);
                 true
             }
             0x0B0 | 0x280 => {
                 if value_lo != 0 {
                     return false;
                 }
-                self.write_aligned(index as BxPhyAddress, value_lo);
+                self.write_aligned(index as BxPhyAddress, value_lo, current_ticks);
                 true
             }
             0x2F0 | 0x320 | 0x330 | 0x340 | 0x350 | 0x360 | 0x370 | 0x380 | 0x3E0 => {
-                self.write_aligned(index as BxPhyAddress, value_lo);
+                self.write_aligned(index as BxPhyAddress, value_lo, current_ticks);
                 true
             }
             // Read-only or unavailable in x2APIC mode.
@@ -1733,10 +1816,11 @@ impl BxLocalApic {
                 "local apic timer(periodic) triggered int, reset counter to {:#010x}",
                 self.timer_current
             );
-            // Request re-activation with same period
-            // Bochs apic.cc: activate_timer_ticks(handle, Bit64u(initial)*Bit64u(factor), 0)
             let period = self.timer_initial as u64 * self.timer_divide_factor as u64;
-            self.timer_activate_request = Some(LocalApicTimerActivation::reload_from_now(period));
+            self.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(
+                current_ticks.saturating_add(period),
+                true,
+            ));
         } else {
             // One-shot mode — timer is done
             self.timer_current = 0;
@@ -1758,9 +1842,7 @@ impl BxLocalApic {
         debug!("set timer divide factor to {}", self.timer_divide_factor);
     }
 
-    /// Write the initial timer count register. Starts or restarts the timer.
-    /// Bochs: set_initial_timer_count (apic.cc)
-    pub(crate) fn set_initial_timer_count(&mut self, value: u32) {
+    pub(crate) fn set_initial_timer_count(&mut self, value: u32, current_ticks: u64) {
         self.diag_set_initial_count += 1;
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
         let mode = match timervec.timer_mode_field() {
@@ -1800,15 +1882,15 @@ impl BxLocalApic {
             );
             self.timer_current = self.timer_initial;
             self.timer_active = true;
-            // Bochs apic.cc: ticksInitial = bx_pc_system.time_ticks()
-            // We use current_ticks (updated at batch boundary) as best available
-            // approximation. The emulator loop will also call set_ticks_initial()
-            // with the precise value when processing the activate request.
-            self.ticks_initial = self.current_ticks;
-            // Request timer activation: period = initial_count * divide_factor ticks
-            // Bochs apic.cc: activate_timer_ticks(handle, Bit64u(value) * Bit64u(factor), 0)
+            // Bochs records the programming instruction's epoch.  Deferred
+            // owner activation must preserve it instead of rebasing at the
+            // batch boundary.
+            self.ticks_initial = current_ticks;
             let period = value as u64 * self.timer_divide_factor as u64;
-            self.timer_activate_request = Some(LocalApicTimerActivation::reload_from_now(period));
+            self.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(
+                current_ticks.saturating_add(period),
+                true,
+            ));
         }
     }
 
@@ -1887,7 +1969,7 @@ impl BxLocalApic {
 
     /// Set the TSC-Deadline timer value.
     /// Bochs: set_tsc_deadline (apic.cc)
-    pub(crate) fn set_tsc_deadline(&mut self, deadline: u64, current_ticks: u64) {
+    pub(crate) fn set_tsc_deadline(&mut self, deadline: u64, _current_ticks: u64) {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
         if timervec.timer_mode_field() != 2 {
             error!("APIC: TSC-Deadline timer is disabled");
@@ -1904,13 +1986,11 @@ impl BxLocalApic {
         if deadline != 0 {
             debug!("APIC: TSC-Deadline is set to {}", deadline);
             self.timer_active = true;
-            self.timer_activate_request = Some(LocalApicTimerActivation::tsc_deadline(
-                if deadline > current_ticks {
-                    deadline - current_ticks
-                } else {
-                    1
-                },
-            ));
+            // The pc-system absolute activation path clamps due/past deadlines
+            // to its current tick plus one.  Preserve the guest-programmed
+            // absolute deadline here so batching cannot rebase it.
+            self.timer_activate_request =
+                Some(LocalApicTimerActivation::at_ticks(deadline, false));
         }
     }
 
@@ -2168,6 +2248,498 @@ impl BxLocalApic {
     }
 }
 
+#[cfg(feature = "std")]
+impl BxLocalApic {
+    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+        if self.pending_ipi_len > PENDING_IPI_CAPACITY
+            || self.pending_ipi_head >= PENDING_IPI_CAPACITY
+            || self.pending_cpu_event_len > PENDING_CPU_EVENT_CAPACITY
+            || self.pending_cpu_event_head >= PENDING_CPU_EVENT_CAPACITY
+        {
+            return Err(Self::snapshot_invalid("LAPIC FIFO shape is invalid"));
+        }
+        let mut len = 264u64;
+        for handle in [self.timer_handle, self.vmx_timer_handle, self.mwaitx_timer_handle] {
+            len = checked_snapshot_len_add(len, if handle.is_some() { 9 } else { 1 })?;
+        }
+        // VMX state, MWAITX activity, INTR, and the IPI FIFO logical count.
+        len = checked_snapshot_len_add(len, 31)?;
+        len = checked_snapshot_len_add(
+            len,
+            checked_snapshot_len_mul(
+                u64::try_from(self.pending_ipi_len)
+                    .map_err(|_| Self::snapshot_invalid("LAPIC IPI count overflows"))?,
+                11,
+            )?,
+        )?;
+        len = checked_snapshot_len_add(len, 4)?;
+        for offset in 0..self.pending_cpu_event_len {
+            let slot = (self.pending_cpu_event_head + offset) % PENDING_CPU_EVENT_CAPACITY;
+            let event = self.pending_cpu_events.get(slot).copied().flatten().ok_or_else(|| {
+                Self::snapshot_invalid("LAPIC CPU-control FIFO has a hole")
+            })?;
+            len = checked_snapshot_len_add(
+                len,
+                if matches!(event, LocalApicCpuEvent::Sipi(_)) { 2 } else { 1 },
+            )?;
+        }
+        len = checked_snapshot_len_add(
+            len,
+            if self.pending_eoi_vector.is_some() { 2 } else { 1 },
+        )?;
+        len = checked_snapshot_len_add(len, 1)?;
+        len = checked_snapshot_len_add(
+            len,
+            if self.timer_activate_request.is_some() { 10 } else { 1 },
+        )?;
+        checked_snapshot_len_add(len, 1)
+    }
+
+    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.snapshot_v3_body_len()?;
+        writer.write_u64(self.base_addr)?;
+        writer.write_u8(self.mode as u8)?;
+        writer.write_bool(self.xapic)?;
+        writer.write_u32(self.xapic_ext)?;
+        writer.write_u32(self.apic_id)?;
+        writer.write_u32(self.bus_cpu_count)?;
+        writer.write_u32(self.apic_version_id)?;
+        writer.write_bool(self.software_enabled)?;
+        writer.write_u8(self.spurious_vector)?;
+        writer.write_bool(self.focus_disable)?;
+        writer.write_u32(self.task_priority)?;
+        writer.write_u32(self.ldr)?;
+        writer.write_u32(self.dest_format)?;
+        for registers in [&self.isr, &self.tmr, &self.irr, &self.ier] {
+            for value in registers {
+                writer.write_u32(*value)?;
+            }
+        }
+        for value in [
+            self.error_status,
+            self.shadow_error_status,
+            self.icr_hi,
+            self.icr_lo,
+        ] {
+            writer.write_u32(value)?;
+        }
+        for entry in &self.lvt {
+            writer.write_u32(entry.bits())?;
+        }
+        writer.write_u32(self.timer_initial)?;
+        writer.write_u32(self.timer_current)?;
+        for value in [
+            self.ticks_initial,
+            self.current_ticks,
+            self.ticks_at_sync,
+            self.icount_at_sync,
+        ] {
+            writer.write_u64(value)?;
+        }
+        writer.write_bool(self.intr_pending)?;
+        writer.write_u32(self.timer_divconf)?;
+        writer.write_u32(self.timer_divide_factor)?;
+        writer.write_bool(self.tsc_deadline_supported)?;
+        writer.write_bool(self.timer_active)?;
+        Self::write_snapshot_handle(writer, self.timer_handle)?;
+        Self::write_snapshot_handle(writer, self.vmx_timer_handle)?;
+        writer.write_u32(self.vmx_preemption_timer_value)?;
+        writer.write_u64(self.vmx_preemption_timer_initial)?;
+        writer.write_u64(self.vmx_preemption_timer_fire)?;
+        writer.write_u32(self.vmx_preemption_timer_rate)?;
+        writer.write_bool(self.vmx_timer_active)?;
+        Self::write_snapshot_handle(writer, self.mwaitx_timer_handle)?;
+        writer.write_bool(self.mwaitx_timer_active)?;
+        writer.write_bool(self.intr)?;
+        writer.write_u32(u32::try_from(self.pending_ipi_len)
+            .map_err(|_| Self::snapshot_invalid("LAPIC IPI count overflows"))?)?;
+        for offset in 0..self.pending_ipi_len {
+            let slot = (self.pending_ipi_head + offset) % PENDING_IPI_CAPACITY;
+            let ipi = self.pending_ipis.get(slot).copied().flatten().ok_or_else(|| {
+                Self::snapshot_invalid("LAPIC IPI FIFO has a hole")
+            })?;
+            writer.write_u32(ipi.dest)?;
+            writer.write_u32(ipi.lo_cmd)?;
+            writer.write_u8(ipi.shorthand)?;
+            writer.write_bool(ipi.exclude_source)?;
+            writer.write_bool(ipi.accepted)?;
+        }
+        writer.write_u32(u32::try_from(self.pending_cpu_event_len)
+            .map_err(|_| Self::snapshot_invalid("LAPIC CPU-control count overflows"))?)?;
+        for offset in 0..self.pending_cpu_event_len {
+            let slot = (self.pending_cpu_event_head + offset) % PENDING_CPU_EVENT_CAPACITY;
+            match self.pending_cpu_events.get(slot).copied().flatten().ok_or_else(|| {
+                Self::snapshot_invalid("LAPIC CPU-control FIFO has a hole")
+            })? {
+                LocalApicCpuEvent::Smi => writer.write_u8(0)?,
+                LocalApicCpuEvent::Nmi => writer.write_u8(1)?,
+                LocalApicCpuEvent::Init => writer.write_u8(2)?,
+                LocalApicCpuEvent::Sipi(vector) => {
+                    writer.write_u8(3)?;
+                    writer.write_u8(vector)?;
+                }
+            }
+        }
+        writer.write_bool(self.pending_eoi_vector.is_some())?;
+        if let Some(vector) = self.pending_eoi_vector {
+            writer.write_u8(vector)?;
+        }
+        writer.write_bool(self.timer_fired)?;
+        writer.write_bool(self.timer_activate_request.is_some())?;
+        if let Some(request) = self.timer_activate_request {
+            writer.write_u64(request.deadline_ticks)?;
+            writer.write_bool(request.update_ticks_initial)?;
+        }
+        writer.write_bool(self.timer_deactivate_request)
+    }
+
+    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> io::Result<LocalApicSnapshotRestore> {
+        let base_addr = reader.read_u64()?;
+        if base_addr & 0xfff != 0 {
+            return Err(Self::snapshot_invalid("LAPIC base is not page aligned"));
+        }
+        let mode = Self::read_snapshot_mode(reader.read_u8()?)?;
+        if reader.read_bool()? != self.xapic {
+            return Err(Self::snapshot_invalid("LAPIC xAPIC capability mismatch"));
+        }
+        let xapic_ext = reader.read_u32()?;
+        if xapic_ext & !(BX_XAPIC_EXT_SUPPORT_IER | BX_XAPIC_EXT_SUPPORT_SEOI) != 0 {
+            return Err(Self::snapshot_invalid("LAPIC xAPIC extensions are invalid"));
+        }
+        if reader.read_u32()? != self.apic_id {
+            return Err(Self::snapshot_invalid("LAPIC APIC ID mismatch"));
+        }
+        let bus_cpu_count = reader.read_u32()?;
+        if bus_cpu_count == 0 || bus_cpu_count != self.bus_cpu_count {
+            return Err(Self::snapshot_invalid("LAPIC CPU topology mismatch"));
+        }
+        let apic_version_id = reader.read_u32()?;
+        if apic_version_id != self.apic_version_id {
+            return Err(Self::snapshot_invalid("LAPIC version capability mismatch"));
+        }
+        let software_enabled = reader.read_bool()?;
+        let spurious_vector = reader.read_u8()?;
+        if !self.xapic && spurious_vector & 0x0f != 0x0f {
+            return Err(Self::snapshot_invalid("legacy LAPIC spurious vector is invalid"));
+        }
+        let focus_disable = reader.read_bool()?;
+        let task_priority = reader.read_u32()?;
+        if task_priority & !0xff != 0 {
+            return Err(Self::snapshot_invalid("LAPIC TPR has reserved bits"));
+        }
+        let ldr = reader.read_u32()?;
+        if mode != ApicMode::X2apicMode && ldr & !self.apic_id_mask() != 0 {
+            return Err(Self::snapshot_invalid("LAPIC LDR has reserved bits"));
+        }
+        let dest_format = reader.read_u32()?;
+        if dest_format & !0x0f != 0 {
+            return Err(Self::snapshot_invalid("LAPIC DFR has reserved bits"));
+        }
+        let mut isr = [0; 8];
+        let mut tmr = [0; 8];
+        let mut irr = [0; 8];
+        let mut ier = [0; 8];
+        for registers in [&mut isr, &mut tmr, &mut irr, &mut ier] {
+            for value in registers {
+                *value = reader.read_u32()?;
+            }
+        }
+        if isr[0] & 0xffff != 0 || tmr[0] & 0xffff != 0 || irr[0] & 0xffff != 0 {
+            return Err(Self::snapshot_invalid(
+                "LAPIC interrupt registers contain reserved low vectors",
+            ));
+        }
+        let error_status = reader.read_u32()?;
+        let shadow_error_status = reader.read_u32()?;
+        let icr_hi = reader.read_u32()?;
+        let icr_lo = reader.read_u32()?;
+        Self::validate_snapshot_icr(icr_lo)?;
+        let mut lvt = [LvtBits::empty(); LVT_ENTRY_COUNT];
+        for (index, entry) in lvt.iter_mut().enumerate() {
+            let raw = reader.read_u32()?;
+            Self::validate_snapshot_lvt(index, raw)?;
+            *entry = LvtBits::from_raw(raw);
+        }
+        let timer_initial = reader.read_u32()?;
+        let timer_current = reader.read_u32()?;
+        let ticks_initial = reader.read_u64()?;
+        let current_ticks = reader.read_u64()?;
+        let ticks_at_sync = reader.read_u64()?;
+        let icount_at_sync = reader.read_u64()?;
+        let intr_pending = reader.read_bool()?;
+        let timer_divconf = reader.read_u32()?;
+        let timer_divide_factor = reader.read_u32()?;
+        let reset_divisor =
+            timer_divconf == 0 && timer_divide_factor == 1;
+        if timer_divconf & !0x0b != 0
+            || (!reset_divisor
+                && timer_divide_factor != Self::snapshot_timer_divide_factor(timer_divconf))
+        {
+            return Err(Self::snapshot_invalid("LAPIC timer divisor is invalid"));
+        }
+        if reader.read_bool()? != self.tsc_deadline_supported {
+            return Err(Self::snapshot_invalid("LAPIC TSC deadline capability mismatch"));
+        }
+        let timer_active = reader.read_bool()?;
+        let timer_handle = Self::read_snapshot_handle(reader)?;
+        let vmx_timer_handle = Self::read_snapshot_handle(reader)?;
+        let vmx_preemption_timer_value = reader.read_u32()?;
+        let vmx_preemption_timer_initial = reader.read_u64()?;
+        let vmx_preemption_timer_fire = reader.read_u64()?;
+        let vmx_preemption_timer_rate = reader.read_u32()?;
+        if vmx_preemption_timer_rate >= u64::BITS {
+            return Err(Self::snapshot_invalid("LAPIC VMX timer rate is invalid"));
+        }
+        let vmx_timer_active = reader.read_bool()?;
+        let mwaitx_timer_handle = Self::read_snapshot_handle(reader)?;
+        let mwaitx_timer_active = reader.read_bool()?;
+        let intr = reader.read_bool()?;
+        let pending_ipi_len = reader.read_count(PENDING_IPI_CAPACITY.min(bounds::MAX_SNAPSHOT_QUEUE_LEN))?;
+        let mut pending_ipis = [None; PENDING_IPI_CAPACITY];
+        for destination in pending_ipis.iter_mut().take(pending_ipi_len) {
+            let ipi = PendingIpi {
+                dest: reader.read_u32()?,
+                lo_cmd: reader.read_u32()?,
+                shorthand: reader.read_u8()?,
+                exclude_source: reader.read_bool()?,
+                accepted: reader.read_bool()?,
+            };
+            Self::validate_snapshot_ipi(ipi, bus_cpu_count)?;
+            *destination = Some(ipi);
+        }
+        let pending_cpu_event_len =
+            reader.read_count(PENDING_CPU_EVENT_CAPACITY.min(bounds::MAX_SNAPSHOT_QUEUE_LEN))?;
+        let mut pending_cpu_events = [None; PENDING_CPU_EVENT_CAPACITY];
+        for destination in pending_cpu_events.iter_mut().take(pending_cpu_event_len) {
+            *destination = Some(match reader.read_u8()? {
+                0 => LocalApicCpuEvent::Smi,
+                1 => LocalApicCpuEvent::Nmi,
+                2 => LocalApicCpuEvent::Init,
+                3 => LocalApicCpuEvent::Sipi(reader.read_u8()?),
+                _ => return Err(Self::snapshot_invalid("LAPIC CPU-control event tag is invalid")),
+            });
+        }
+        let pending_eoi_vector = if reader.read_bool()? { Some(reader.read_u8()?) } else { None };
+        if matches!(pending_eoi_vector, Some(vector) if vector < 0x10) {
+            return Err(Self::snapshot_invalid(
+                "LAPIC pending EOI contains a reserved low vector",
+            ));
+        }
+        let timer_fired = reader.read_bool()?;
+        let timer_activate_request = if reader.read_bool()? {
+            Some(LocalApicTimerActivation {
+                deadline_ticks: reader.read_u64()?,
+                update_ticks_initial: reader.read_bool()?,
+            })
+        } else {
+            None
+        };
+        let timer_deactivate_request = reader.read_bool()?;
+        if vmx_timer_handle.is_some() || mwaitx_timer_handle.is_some() {
+            return Err(Self::snapshot_invalid(
+                "LAPIC auxiliary timer has no registered scheduler owner",
+            ));
+        }
+        if timer_activate_request.is_some() && timer_deactivate_request {
+            return Err(Self::snapshot_invalid(
+                "LAPIC timer cannot activate and deactivate simultaneously",
+            ));
+        }
+        let timer_mode = lvt[LocalVectorTableEntry::Timer as usize].timer_mode_field();
+        if let Some(request) = timer_activate_request {
+            if !timer_active {
+                return Err(Self::snapshot_invalid(
+                    "LAPIC activation request has no active timer",
+                ));
+            }
+            match timer_mode {
+                0 | 1 => {
+                    let deadline = ticks_initial.saturating_add(
+                        u64::from(timer_initial) * u64::from(timer_divide_factor),
+                    );
+                    if timer_initial == 0
+                        || !request.update_ticks_initial
+                        || request.deadline_ticks != deadline
+                    {
+                        return Err(Self::snapshot_invalid(
+                            "LAPIC timer activation disagrees with its programming epoch",
+                        ));
+                    }
+                }
+                2 => {
+                    if request.update_ticks_initial
+                        || request.deadline_ticks == 0
+                        || request.deadline_ticks != ticks_initial
+                    {
+                        return Err(Self::snapshot_invalid(
+                            "LAPIC TSC-deadline activation is incoherent",
+                        ));
+                    }
+                }
+                _ => unreachable!("validated LAPIC timer mode"),
+            }
+        }
+        if (timer_active && (timer_handle.is_none() || timer_initial == 0 && timer_mode != 2))
+            || mwaitx_timer_active
+            || (timer_current > timer_initial && timer_mode != 2)
+        {
+            return Err(Self::snapshot_invalid("LAPIC timer state is inconsistent"));
+        }
+        if vmx_timer_active {
+            let expected = (vmx_preemption_timer_initial >> vmx_preemption_timer_rate)
+                .checked_add(u64::from(vmx_preemption_timer_value))
+                .and_then(|value| value.checked_shl(vmx_preemption_timer_rate))
+                .ok_or_else(|| Self::snapshot_invalid("LAPIC VMX timer epoch overflows"))?;
+            if vmx_preemption_timer_fire != expected {
+                return Err(Self::snapshot_invalid("LAPIC VMX timer fire epoch is invalid"));
+            }
+        }
+        let state = LocalApicSnapshotState {
+            base_addr, mode, xapic_ext, software_enabled, spurious_vector, focus_disable,
+            task_priority, ldr, dest_format, isr, tmr, irr, ier, error_status,
+            shadow_error_status, icr_hi, icr_lo, lvt, timer_initial, timer_current,
+            ticks_initial, current_ticks, ticks_at_sync, icount_at_sync, intr_pending,
+            timer_divconf, timer_divide_factor, timer_active, timer_handle, vmx_timer_handle,
+            vmx_preemption_timer_value, vmx_preemption_timer_initial, vmx_preemption_timer_fire,
+            vmx_preemption_timer_rate, vmx_timer_active, mwaitx_timer_handle,
+            mwaitx_timer_active, intr, pending_ipis, pending_ipi_len, pending_cpu_events,
+            pending_cpu_event_len, pending_eoi_vector, timer_fired, timer_activate_request,
+            timer_deactivate_request,
+        };
+        let restore = LocalApicSnapshotRestore {
+            timer_handle: state.timer_handle,
+            vmx_timer_handle: state.vmx_timer_handle,
+            mwaitx_timer_handle: state.mwaitx_timer_handle,
+        };
+        self.base_addr = state.base_addr;
+        self.mode = state.mode;
+        self.xapic_ext = state.xapic_ext;
+        self.software_enabled = state.software_enabled;
+        self.spurious_vector = state.spurious_vector;
+        self.focus_disable = state.focus_disable;
+        self.task_priority = state.task_priority;
+        self.ldr = state.ldr;
+        self.dest_format = state.dest_format;
+        self.isr = state.isr;
+        self.tmr = state.tmr;
+        self.irr = state.irr;
+        self.ier = state.ier;
+        self.error_status = state.error_status;
+        self.shadow_error_status = state.shadow_error_status;
+        self.icr_hi = state.icr_hi;
+        self.icr_lo = state.icr_lo;
+        self.lvt = state.lvt;
+        self.timer_initial = state.timer_initial;
+        self.timer_current = state.timer_current;
+        self.ticks_initial = state.ticks_initial;
+        self.current_ticks = state.current_ticks;
+        self.ticks_at_sync = state.ticks_at_sync;
+        self.icount_at_sync = state.icount_at_sync;
+        self.intr_pending = state.intr_pending;
+        self.timer_divconf = state.timer_divconf;
+        self.timer_divide_factor = state.timer_divide_factor;
+        self.timer_active = state.timer_active;
+        self.timer_handle = state.timer_handle;
+        self.vmx_timer_handle = state.vmx_timer_handle;
+        self.vmx_preemption_timer_value = state.vmx_preemption_timer_value;
+        self.vmx_preemption_timer_initial = state.vmx_preemption_timer_initial;
+        self.vmx_preemption_timer_fire = state.vmx_preemption_timer_fire;
+        self.vmx_preemption_timer_rate = state.vmx_preemption_timer_rate;
+        self.vmx_timer_active = state.vmx_timer_active;
+        self.mwaitx_timer_handle = state.mwaitx_timer_handle;
+        self.mwaitx_timer_active = state.mwaitx_timer_active;
+        self.intr = state.intr;
+        self.pending_ipis = state.pending_ipis;
+        self.pending_ipi_head = 0;
+        self.pending_ipi_len = state.pending_ipi_len;
+        self.pending_cpu_events = state.pending_cpu_events;
+        self.pending_cpu_event_head = 0;
+        self.pending_cpu_event_len = state.pending_cpu_event_len;
+        self.pending_eoi_vector = state.pending_eoi_vector;
+        self.timer_fired = state.timer_fired;
+        self.timer_activate_request = state.timer_activate_request;
+        self.timer_deactivate_request = state.timer_deactivate_request;
+        Ok(restore)
+    }
+
+    fn write_snapshot_handle<W: Write>(writer: &mut W, handle: Option<usize>) -> io::Result<()> {
+        writer.write_bool(handle.is_some())?;
+        if let Some(handle) = handle {
+            writer.write_u64(u64::try_from(handle)
+                .map_err(|_| Self::snapshot_invalid("LAPIC timer handle overflows"))?)?;
+        }
+        Ok(())
+    }
+
+    fn read_snapshot_handle<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Option<usize>> {
+        if !reader.read_bool()? {
+            return Ok(None);
+        }
+        usize::try_from(reader.read_u64()?)
+            .map(Some)
+            .map_err(|_| Self::snapshot_invalid("LAPIC timer handle does not fit host"))
+    }
+
+    fn read_snapshot_mode(raw: u8) -> io::Result<ApicMode> {
+        match raw {
+            0 => Ok(ApicMode::GloballyDisabled),
+            1 => Ok(ApicMode::StateInvalid),
+            2 => Ok(ApicMode::XapicMode),
+            3 => Ok(ApicMode::X2apicMode),
+            _ => Err(Self::snapshot_invalid("LAPIC mode is invalid")),
+        }
+    }
+
+    fn snapshot_timer_divide_factor(divconf: u32) -> u32 {
+        let combined = ((divconf & 8) >> 1) | (divconf & 3);
+        if combined == 7 { 1 } else { 2 << combined }
+    }
+
+    fn validate_snapshot_lvt(index: usize, raw: u32) -> io::Result<()> {
+        let mask = *LVT_MASKS.get(index)
+            .ok_or_else(|| Self::snapshot_invalid("LAPIC LVT index is invalid"))?;
+        if raw & !mask != 0 || (index == LocalVectorTableEntry::Timer as usize && (raw >> 17) & 3 == 3) {
+            return Err(Self::snapshot_invalid("LAPIC LVT has invalid reserved state"));
+        }
+        if ((raw >> 8) & 7) == ApicDeliveryMode::Reserved as u32 {
+            return Err(Self::snapshot_invalid("LAPIC LVT delivery mode is reserved"));
+        }
+        Ok(())
+    }
+
+    fn validate_snapshot_icr(icr_lo: u32) -> io::Result<()> {
+        if icr_lo & !0x000c_dfff != 0 || ((icr_lo >> 8) & 7) == ApicDeliveryMode::Reserved as u32 {
+            return Err(Self::snapshot_invalid("LAPIC ICR encoding is invalid"));
+        }
+        Ok(())
+    }
+
+    fn validate_snapshot_ipi(ipi: PendingIpi, bus_cpu_count: u32) -> io::Result<()> {
+        let wire_shorthand = ((ipi.lo_cmd >> 18) & 3) as u8;
+        if ipi.shorthand > 3
+            || ((ipi.lo_cmd >> 8) & 7) == ApicDeliveryMode::Reserved as u32
+            || (ipi.shorthand != wire_shorthand && !(wire_shorthand == 3 && ipi.shorthand == 2))
+        {
+            return Err(Self::snapshot_invalid("LAPIC pending IPI encoding is invalid"));
+        }
+        if wire_shorthand == 0
+            && ((ipi.lo_cmd >> 11) & 1) == 0
+            && (ipi.dest & APIC_BUS_ID_MASK) != APIC_BUS_ID_MASK
+            && ipi.dest >= bus_cpu_count
+        {
+            return Err(Self::snapshot_invalid("LAPIC pending IPI destination is invalid"));
+        }
+        Ok(())
+    }
+
+    fn snapshot_invalid(message: &'static str) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, message)
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2186,6 +2758,10 @@ mod tests {
     const INIT_VECTOR: u8 = 0;
     const NO_DESTINATION_SHORTHAND: u8 = 0;
 
+    use std::io::Cursor;
+
+    use crate::snapshot::SnapshotReader;
+
     use super::*;
 
     fn make_lapic() -> BxLocalApic {
@@ -2193,6 +2769,25 @@ mod tests {
         lapic.xapic = true;
         lapic.set_tsc_deadline_supported(true);
         lapic.reset(0);
+        lapic
+    }
+
+    fn restore_v3(source: &BxLocalApic, target: &mut BxLocalApic) -> std::io::Result<()> {
+        let mut bytes = Vec::new();
+        source.save_snapshot_v3_body(&mut bytes)?;
+        let mut reader = SnapshotReader::new(Cursor::new(bytes.clone()), bytes.len() as u64)?;
+        target.restore_snapshot_v3_body(&mut reader)?;
+        reader.finish_exact()
+    }
+
+    fn lapic_with_pending_oneshot() -> BxLocalApic {
+        let mut lapic = make_lapic();
+        lapic.timer_handle = Some(1);
+        lapic.timer_active = true;
+        lapic.timer_initial = 5;
+        lapic.timer_current = 5;
+        lapic.ticks_initial = 100;
+        lapic.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(105, true));
         lapic
     }
 
@@ -2411,6 +3006,32 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_work_covers_all_deferred_lapic_queues() {
+        let mut lapic = make_lapic();
+        lapic.timer_deactivate_request = false;
+        assert!(!lapic.has_scheduler_work());
+
+        lapic.pending_ipi_len = 1;
+        assert!(lapic.has_scheduler_work());
+        lapic.pending_ipi_len = 0;
+
+        lapic.pending_cpu_event_len = 1;
+        assert!(lapic.has_scheduler_work());
+        lapic.pending_cpu_event_len = 0;
+
+        lapic.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(7, true));
+        assert!(lapic.has_scheduler_work());
+        lapic.timer_activate_request = None;
+
+        lapic.timer_deactivate_request = true;
+        assert!(lapic.has_scheduler_work());
+        lapic.timer_deactivate_request = false;
+
+        lapic.pending_eoi_vector = Some(0x30);
+        assert!(lapic.has_scheduler_work());
+    }
+
+    #[test]
     fn timer_lvt_clears_tsc_deadline_bit_when_unsupported() {
         let mut lapic = BxLocalApic::default();
         lapic.write_spurious_interrupt_register(0x1FF);
@@ -2421,11 +3042,11 @@ mod tests {
         assert_ne!(timer_lvt.timer_mode_field(), 2);
         assert_eq!(timer_lvt.bits() & 0x40000, 0);
 
-        lapic.set_initial_timer_count(4);
+        lapic.set_initial_timer_count(4, 41);
         assert_eq!(
             lapic.timer_activate_request,
             Some(LocalApicTimerActivation {
-                delay_ticks: 4,
+                deadline_ticks: 45,
                 update_ticks_initial: true,
             })
         );
@@ -2436,7 +3057,7 @@ mod tests {
         let mut lapic = make_lapic();
 
         // Write TPR
-        lapic.write_aligned(BX_LAPIC_BASE_ADDR | 0x080, 0x42);
+        lapic.write_aligned(BX_LAPIC_BASE_ADDR | 0x080, 0x42, 0);
         assert_eq!(lapic.task_priority, 0x42);
 
         // Read TPR
@@ -2488,7 +3109,7 @@ mod tests {
         assert_eq!(
             lapic.timer_activate_request,
             Some(LocalApicTimerActivation {
-                delay_ticks: DEADLINE_TICKS - CURRENT_TICKS,
+                deadline_ticks: DEADLINE_TICKS,
                 update_ticks_initial: false,
             })
         );
@@ -2501,19 +3122,20 @@ mod tests {
     }
 
     #[test]
-    fn zero_initial_timer_count_clears_pending_activation() {
+    fn initial_timer_request_captures_programming_epoch_and_zero_clears_it() {
         let mut lapic = make_lapic();
 
-        lapic.set_initial_timer_count(4);
+        const CURRENT_TICKS: u64 = 900;
+        lapic.set_initial_timer_count(4, CURRENT_TICKS);
         assert_eq!(
             lapic.timer_activate_request,
             Some(LocalApicTimerActivation {
-                delay_ticks: 4,
+                deadline_ticks: CURRENT_TICKS + 4,
                 update_ticks_initial: true,
             })
         );
 
-        lapic.set_initial_timer_count(0);
+        lapic.set_initial_timer_count(0, CURRENT_TICKS);
 
         assert_eq!(lapic.timer_activate_request, None);
         assert!(lapic.timer_deactivate_request);
@@ -2525,7 +3147,7 @@ mod tests {
     fn current_timer_count_panics_when_active_timer_is_overdue() {
         let mut lapic = make_lapic();
 
-        lapic.set_initial_timer_count(10);
+        lapic.set_initial_timer_count(10, 0);
         lapic.timer_divide_factor = 1;
         lapic.ticks_initial = 0;
 
@@ -2679,5 +3301,82 @@ mod tests {
             lapic.take_pending_cpu_event(),
             Some(LocalApicCpuEvent::Sipi(SIPI_VECTOR))
         );
+    }
+
+    #[test]
+    fn v3_snapshot_rejects_changed_immutable_apic_version_capability() {
+        let mut source = make_lapic();
+        source.apic_version_id ^= 0x8000_0000;
+
+        assert!(restore_v3(&source, &mut make_lapic()).is_err());
+    }
+
+    #[test]
+    fn v3_snapshot_rejects_low_interrupt_vectors() {
+        let mut source = make_lapic();
+        source.irr[0] = 1;
+        assert!(restore_v3(&source, &mut make_lapic()).is_err());
+        source.irr[0] = 0;
+        source.isr[0] = 1;
+        assert!(restore_v3(&source, &mut make_lapic()).is_err());
+        source.isr[0] = 0;
+        source.tmr[0] = 1;
+        assert!(restore_v3(&source, &mut make_lapic()).is_err());
+    }
+
+    #[test]
+    fn v3_snapshot_rejects_low_pending_eoi_vector() {
+        let mut source = make_lapic();
+        source.pending_eoi_vector = Some(0x0f);
+
+        assert!(restore_v3(&source, &mut make_lapic()).is_err());
+    }
+
+    #[test]
+    fn v3_snapshot_rejects_simultaneous_timer_requests() {
+        let mut source = lapic_with_pending_oneshot();
+        source.timer_deactivate_request = true;
+
+        assert!(restore_v3(&source, &mut make_lapic()).is_err());
+    }
+
+    #[test]
+    fn v3_snapshot_rejects_incoherent_timer_activation_epoch() {
+        let mut source = lapic_with_pending_oneshot();
+        source.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(106, true));
+
+        assert!(restore_v3(&source, &mut make_lapic()).is_err());
+    }
+
+    #[test]
+    fn v3_snapshot_rejects_tsc_deadline_activation_that_rebases_epoch() {
+        let mut source = make_lapic();
+        source.lvt[LocalVectorTableEntry::Timer as usize] = LvtBits::from_raw(0x0004_0030);
+        source.timer_handle = Some(1);
+        source.timer_active = true;
+        source.ticks_initial = 500;
+        source.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(500, true));
+
+        assert!(restore_v3(&source, &mut make_lapic()).is_err());
+    }
+
+    #[test]
+    fn v3_snapshot_rejects_auxiliary_timer_handle_alias() {
+        let mut source = make_lapic();
+        source.timer_handle = Some(1);
+        source.vmx_timer_handle = source.timer_handle;
+
+        assert!(restore_v3(&source, &mut make_lapic()).is_err());
+    }
+
+    #[test]
+    fn v3_snapshot_accepts_active_vmx_timer_without_scheduler_handle() {
+        let mut source = make_lapic();
+        source.vmx_preemption_timer_initial = 100;
+        source.vmx_preemption_timer_value = 5;
+        source.vmx_preemption_timer_fire = 105;
+        source.vmx_timer_active = true;
+
+        assert!(restore_v3(&source, &mut make_lapic()).is_ok());
     }
 }

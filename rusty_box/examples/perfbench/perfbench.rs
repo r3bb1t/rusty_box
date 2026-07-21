@@ -111,16 +111,8 @@ fn run() {
     };
 
     let mut emu = Emulator::<Corei7SkylakeX>::new(cfg.clone()).expect("new");
-    emu.memory
-        .init_memory(
-            cfg.guest_memory_size,
-            cfg.host_memory_size,
-            cfg.memory_block_size,
-        )
-        .expect("init_memory");
-    emu.memory.set_a20_mask(emu.pc_system.a20_mask());
-    emu.pc_system.initialize(cfg.ips);
-    emu.cpu.reset(ResetReason::Hardware);
+    emu.init_memory_and_pc_system().expect("init memory");
+    unsafe { emu.cpu_mut_unchecked() }.reset(ResetReason::Hardware);
     emu.setup_cpu_mode(CpuSetupMode::FlatLong64).expect("mode");
 
     let (mode, code, _ipi) = select_loop();

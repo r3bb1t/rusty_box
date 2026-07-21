@@ -1,9 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::cpu::{builder::BxCpuBuilder, core_i7_skylake::Corei7SkylakeX, BxCpuC, BxCpuIdTrait};
-    use crate::memory::{BxMemC, BxMemoryStubC};
-    use crate::cpu::rusty_box::MemoryAccessType;
-    use crate::config::BxPhyAddress;
+    use crate::cpu::{builder::BxCpuBuilder, core_i7_skylake::Corei7SkylakeX};
+    use crate::memory::{BxMemC, BxMemoryStubC, CpuTlbPin};
 
     #[test]
     fn test_short_unconditional_jump() {
@@ -17,16 +15,11 @@ mod tests {
 
                 let bytes: [u8; 4] = [0xEB, 0x02, 0x90, 0x90];
 
-                {
-                    let cpus: [&BxCpuC<Corei7SkylakeX>; 1] = [&cpu];
-                    let host_opt = mem.get_host_mem_addr(0 as BxPhyAddress, MemoryAccessType::RW, &cpus).unwrap();
-                    assert!(host_opt.is_some());
-                    let host = host_opt.unwrap();
-                    host[..bytes.len()].copy_from_slice(&bytes);
-                }
+                let pins = [CpuTlbPin::new(&cpu)];
+                assert_eq!(mem.write_ram(&pins, 0, &bytes).unwrap(), bytes.len());
 
                 cpu.set_rip(0);
-                cpu.cpu_loop(&mut mem, &[]).ok();
+                cpu.cpu_loop(&mut mem, &pins, &pins[0]).ok();
 
                 assert_eq!(cpu.rip(), 4);
             })
@@ -46,16 +39,11 @@ mod tests {
 
                 let bytes: [u8; 7] = [0x2B, 0xC0, 0x74, 0x02, 0x90, 0x90, 0x90];
 
-                {
-                    let cpus: [&BxCpuC<Corei7SkylakeX>; 1] = [&cpu];
-                    let host_opt = mem.get_host_mem_addr(0 as BxPhyAddress, MemoryAccessType::RW, &cpus).unwrap();
-                    assert!(host_opt.is_some());
-                    let host = host_opt.unwrap();
-                    host[..bytes.len()].copy_from_slice(&bytes);
-                }
+                let pins = [CpuTlbPin::new(&cpu)];
+                assert_eq!(mem.write_ram(&pins, 0, &bytes).unwrap(), bytes.len());
 
                 cpu.set_rip(0);
-                cpu.cpu_loop(&mut mem, &[]).ok();
+                cpu.cpu_loop(&mut mem, &pins, &pins[0]).ok();
 
                 assert_eq!(cpu.rip(), 6);
             })

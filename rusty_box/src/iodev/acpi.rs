@@ -19,6 +19,15 @@
 
 use bitflags::bitflags;
 
+#[cfg(feature = "std")]
+use std::io::{self, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+    SNAPSHOT_SECTION_VERSION,
+};
+
 /// PM timer frequency: 3.579545 MHz (ACPI spec, section 4.7.3.3)
 const PM_FREQ: u64 = 3_579_545;
 
@@ -141,6 +150,11 @@ pub struct BxAcpiCtrl {
     pmcntrl: u16,
     /// Next timer overflow time in PM timer ticks (24-bit wrap boundary)
     tmr_overflow_time: u64,
+    /// Fixed PC-system timer registered for PM timer overflow ownership.
+    ///
+    /// This is initialized by the device manager and deliberately survives a
+    /// soft reset, matching the lifetime of Bochs's virtual timer slot.
+    pub(crate) overflow_timer_handle: Option<usize>,
 
     /// Generic PM register space (56 bytes, Bochs: s.pmreg[0x38])
     pmreg: [u8; 0x38],
@@ -178,6 +192,18 @@ pub struct BxAcpiCtrl {
     pub uefi_enabled: bool,
 }
 
+/// Deferred ACPI topology and timer binding selected by a restored snapshot.
+///
+/// The parent restore transaction validates the timer owner and atomically
+/// relocates from the live PM/SM I/O ranges before committing these bases.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AcpiSnapshotRestore {
+    pub(crate) pm_base: u32,
+    pub(crate) sm_base: u32,
+    pub(crate) overflow_timer_handle: Option<usize>,
+}
+
 impl Default for BxAcpiCtrl {
     fn default() -> Self {
         Self::new()
@@ -185,6 +211,337 @@ impl Default for BxAcpiCtrl {
 }
 
 impl BxAcpiCtrl {
+    #[cfg(feature = "std")]
+    fn invalid_snapshot_v3(message: &'static str) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, message)
+    }
+
+    #[cfg(feature = "std")]
+    fn validate_snapshot_v3_pci_identity(pci_conf: &[u8; PCI_CONF_SIZE]) -> io::Result<()> {
+        const PIIX4_PM_IDENTITY: [(usize, u8); 8] = [
+            (0x00, 0x86),
+            (0x01, 0x80),
+            (0x02, 0x13),
+            (0x03, 0x71),
+            (0x08, 0x03),
+            (0x09, 0x00),
+            (0x0A, 0x80),
+            (0x0B, 0x06),
+        ];
+
+        for &(offset, expected) in &PIIX4_PM_IDENTITY {
+            if pci_conf[offset] != expected {
+                return Err(Self::invalid_snapshot_v3(
+                    "ACPI immutable PCI identity differs",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    fn validate_snapshot_v3_bases(
+        pm_base: u32,
+        sm_base: u32,
+        pci_conf: &[u8; PCI_CONF_SIZE],
+    ) -> io::Result<()> {
+        let pmbar = u32::from_le_bytes([
+            pci_conf[0x40],
+            pci_conf[0x41],
+            pci_conf[0x42],
+            pci_conf[0x43],
+        ]);
+        let smbar = u32::from_le_bytes([
+            pci_conf[0x90],
+            pci_conf[0x91],
+            pci_conf[0x92],
+            pci_conf[0x93],
+        ]);
+
+        let pm_low = pmbar & 0x3F;
+        if (pm_low != 0 && pm_low != 1)
+            || pm_base & 0x3F != 0
+            || pm_base > 0xFFC0
+            || pm_base != pmbar & 0xFFC0
+        {
+            return Err(Self::invalid_snapshot_v3(
+                "ACPI PM base is malformed or does not match its PCI BAR",
+            ));
+        }
+
+        let sm_low = smbar & 0x0F;
+        if (sm_low != 0 && sm_low != 1)
+            || sm_base & 0x0F != 0
+            || sm_base > 0xFFF0
+            || sm_base != smbar & 0xFFF0
+        {
+            return Err(Self::invalid_snapshot_v3(
+                "ACPI SMBus base is malformed or does not match its PCI BAR",
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    #[allow(clippy::too_many_arguments)]
+    fn validate_snapshot_v3_state(
+        &self,
+        devfunc: u8,
+        uefi_enabled: bool,
+        ips: u64,
+        pmsts: u16,
+        pmen: u16,
+        pmcntrl: u16,
+        smbus_index: u8,
+        pci_conf: &[u8; PCI_CONF_SIZE],
+        pm_base: u32,
+        sm_base: u32,
+    ) -> io::Result<()> {
+        const PM_STATUS_MASK: u16 = 0x8731;
+        const PM_ENABLE_MASK: u16 = 0x0521;
+        const PM_CONTROL_MASK: u16 = 0x3C07;
+
+        if devfunc != self.devfunc {
+            return Err(Self::invalid_snapshot_v3(
+                "ACPI PCI device/function differs from live configuration",
+            ));
+        }
+        if uefi_enabled != self.uefi_enabled {
+            return Err(Self::invalid_snapshot_v3(
+                "ACPI UEFI configuration differs from live configuration",
+            ));
+        }
+        if ips != self.ips {
+            return Err(Self::invalid_snapshot_v3(
+                "ACPI instructions-per-second differs from live configuration",
+            ));
+        }
+        if pmsts & !PM_STATUS_MASK != 0
+            || pmen & !PM_ENABLE_MASK != 0
+            || pmcntrl & !PM_CONTROL_MASK != 0
+        {
+            return Err(Self::invalid_snapshot_v3(
+                "ACPI PM register contains reserved bits",
+            ));
+        }
+        if usize::from(smbus_index) >= 32 {
+            return Err(Self::invalid_snapshot_v3("ACPI SMBus block index is invalid"));
+        }
+
+        Self::validate_snapshot_v3_pci_identity(pci_conf)?;
+        Self::validate_snapshot_v3_bases(pm_base, sm_base, pci_conf)
+    }
+
+    /// Exact byte count for the single-section ACPI v3 payload.
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_v3_len(&self) -> io::Result<u64> {
+        self.validate_snapshot_v3_state(
+            self.devfunc,
+            self.uefi_enabled,
+            self.ips,
+            self.pmsts,
+            self.pmen,
+            self.pmcntrl,
+            self.smbus.index,
+            &self.pci_conf,
+            self.pm_base,
+            self.sm_base,
+        )?;
+
+        let pmreg_len = checked_snapshot_len_mul(
+            u64::try_from(self.pmreg.len())
+                .map_err(|_| Self::invalid_snapshot_v3("ACPI PM register length does not fit"))?,
+            1,
+        )?;
+        let smbus_data_len = checked_snapshot_len_mul(
+            u64::try_from(self.smbus.data.len())
+                .map_err(|_| Self::invalid_snapshot_v3("ACPI SMBus data length does not fit"))?,
+            1,
+        )?;
+        let pci_conf_len = checked_snapshot_len_mul(
+            u64::try_from(self.pci_conf.len())
+                .map_err(|_| Self::invalid_snapshot_v3("ACPI PCI config length does not fit"))?,
+            1,
+        )?;
+        let pm_register_len = checked_snapshot_len_mul(3, 2)?;
+        let smbus_register_len = checked_snapshot_len_mul(7, 1)?;
+        let base_len = checked_snapshot_len_mul(2, 4)?;
+
+        let mut len = 0;
+        for component_len in [
+            4,
+            1,
+            1,
+            8,
+            pm_register_len,
+            8,
+            1,
+            pmreg_len,
+            smbus_register_len,
+            smbus_data_len,
+            pci_conf_len,
+            8,
+            1,
+            base_len,
+        ] {
+            len = checked_snapshot_len_add(len, component_len)?;
+        }
+        if let Some(handle) = self.overflow_timer_handle {
+            u64::try_from(handle)
+                .map_err(|_| Self::invalid_snapshot_v3("ACPI timer handle does not fit"))?;
+            len = checked_snapshot_len_add(len, 8)?;
+        }
+        if len > bounds::MAX_SNAPSHOT_SECTION_LEN {
+            return Err(Self::invalid_snapshot_v3(
+                "ACPI snapshot payload exceeds implementation bound",
+            ));
+        }
+        Ok(len)
+    }
+
+    /// Stream all serializable ACPI state into a versioned v3 section payload.
+    #[cfg(feature = "std")]
+    pub(crate) fn save_snapshot_v3<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.snapshot_v3_len()?;
+
+        writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+        writer.write_u8(self.devfunc)?;
+        writer.write_bool(self.uefi_enabled)?;
+        writer.write_u64(self.ips)?;
+        writer.write_u16(self.pmsts)?;
+        writer.write_u16(self.pmen)?;
+        writer.write_u16(self.pmcntrl)?;
+        writer.write_u64(self.tmr_overflow_time)?;
+        writer.write_bool(self.overflow_timer_handle.is_some())?;
+        if let Some(handle) = self.overflow_timer_handle {
+            writer.write_u64(
+                u64::try_from(handle)
+                    .map_err(|_| Self::invalid_snapshot_v3("ACPI timer handle does not fit"))?,
+            )?;
+        }
+        writer.write_bytes(&self.pmreg)?;
+        writer.write_u8(self.smbus.stat)?;
+        writer.write_u8(self.smbus.ctl)?;
+        writer.write_u8(self.smbus.cmd)?;
+        writer.write_u8(self.smbus.addr)?;
+        writer.write_u8(self.smbus.data0)?;
+        writer.write_u8(self.smbus.data1)?;
+        writer.write_u8(self.smbus.index)?;
+        writer.write_bytes(&self.smbus.data)?;
+        writer.write_bytes(&self.pci_conf)?;
+        writer.write_u64(self.time_usec)?;
+        writer.write_bool(self.irq9_level)?;
+        writer.write_u32(self.pm_base)?;
+        writer.write_u32(self.sm_base)
+    }
+
+    /// Restore ACPI state without changing live I/O registrations.
+    ///
+    /// PM/SM bases and the raw timer slot are returned for parent-owned
+    /// validation and atomic topology relocation.
+    #[cfg(feature = "std")]
+    pub(crate) fn restore_snapshot_v3<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> io::Result<AcpiSnapshotRestore> {
+        let section_version = reader.read_u32()?;
+        if section_version != SNAPSHOT_SECTION_VERSION {
+            return Err(Self::invalid_snapshot_v3(
+                "unsupported ACPI snapshot section version",
+            ));
+        }
+
+        let devfunc = reader.read_u8()?;
+        let uefi_enabled = reader.read_bool()?;
+        let ips = reader.read_u64()?;
+        let pmsts = reader.read_u16()?;
+        let pmen = reader.read_u16()?;
+        let pmcntrl = reader.read_u16()?;
+        let tmr_overflow_time = reader.read_u64()?;
+        let overflow_timer_handle = if reader.read_bool()? {
+            Some(
+                usize::try_from(reader.read_u64()?).map_err(|_| {
+                    Self::invalid_snapshot_v3("ACPI timer handle does not fit host index")
+                })?,
+            )
+        } else {
+            None
+        };
+        let mut pmreg = [0; 0x38];
+        reader.read_bytes(&mut pmreg)?;
+        let smbus_stat = reader.read_u8()?;
+        let smbus_ctl = reader.read_u8()?;
+        let smbus_cmd = reader.read_u8()?;
+        let smbus_addr = reader.read_u8()?;
+        let smbus_data0 = reader.read_u8()?;
+        let smbus_data1 = reader.read_u8()?;
+        let smbus_index = reader.read_u8()?;
+        let mut smbus_data = [0; 32];
+        reader.read_bytes(&mut smbus_data)?;
+        let mut pci_conf = [0; PCI_CONF_SIZE];
+        reader.read_bytes(&mut pci_conf)?;
+        let time_usec = reader.read_u64()?;
+        let irq9_level = reader.read_bool()?;
+        let pm_base = reader.read_u32()?;
+        let sm_base = reader.read_u32()?;
+        reader.finish_exact()?;
+
+        self.validate_snapshot_v3_state(
+            devfunc,
+            uefi_enabled,
+            ips,
+            pmsts,
+            pmen,
+            pmcntrl,
+            smbus_index,
+            &pci_conf,
+            pm_base,
+            sm_base,
+        )?;
+
+        self.pmsts = pmsts;
+        self.pmen = pmen;
+        self.pmcntrl = pmcntrl;
+        self.tmr_overflow_time = tmr_overflow_time;
+        self.pmreg = pmreg;
+        self.smbus = SmBusState {
+            stat: smbus_stat,
+            ctl: smbus_ctl,
+            cmd: smbus_cmd,
+            addr: smbus_addr,
+            data0: smbus_data0,
+            data1: smbus_data1,
+            index: smbus_index,
+            data: smbus_data,
+        };
+        self.pci_conf = pci_conf;
+        self.time_usec = time_usec;
+        self.irq9_level = irq9_level;
+
+        Ok(AcpiSnapshotRestore {
+            pm_base,
+            sm_base,
+            overflow_timer_handle,
+        })
+    }
+
+    /// Recreate host-only timer anchors and derive SCI without injecting an edge.
+    #[cfg(feature = "std")]
+    pub(crate) fn post_restore_snapshot_v3(&mut self, system_ticks: u64) -> bool {
+        self.has_icount_sync = self.ips != 0;
+        self.icount_at_sync = system_ticks;
+
+        if self.realtime_start.is_some() {
+            let now = std::time::Instant::now();
+            self.realtime_start =
+                now.checked_sub(std::time::Duration::from_micros(self.time_usec));
+        }
+
+        self.pm_update_sci(system_ticks);
+        self.irq9_level
+    }
+
     /// Create a new ACPI controller instance.
     /// Bochs: bx_acpi_ctrl_c::bx_acpi_ctrl_c() (acpi.cc)
     pub fn new() -> Self {
@@ -196,6 +553,7 @@ impl BxAcpiCtrl {
             pmen: 0,
             pmcntrl: 0,
             tmr_overflow_time: 0xFF_FFFF, // 24-bit max (Bochs acpi.cc)
+            overflow_timer_handle: None,
             pmreg: [0; 0x38],
             smbus: SmBusState::default(),
             pci_conf: [0; PCI_CONF_SIZE],
@@ -359,26 +717,6 @@ impl BxAcpiCtrl {
         self.realtime_start = Some(std::time::Instant::now());
     }
 
-    /// Returns true when the PM timer uses host realtime instead of icount-derived time.
-    #[cfg(feature = "std")]
-    pub(crate) fn realtime_sync_enabled(&self) -> bool {
-        self.realtime_start.is_some()
-    }
-
-    /// Advance the internal time counter by the given microseconds.
-    /// Called from the emulator's tick_devices() path.
-    #[inline]
-    pub fn tick(&mut self, usec: u64, icount: u64) {
-        #[cfg(feature = "std")]
-        if let Some(start) = self.realtime_start {
-            self.time_usec = start.elapsed().as_micros() as u64;
-            self.icount_at_sync = icount;
-            return;
-        }
-
-        self.time_usec += usec;
-        self.icount_at_sync = icount;
-    }
 
     // ─── PM Timer ────────────────────────────────────────────────────────
 
@@ -427,9 +765,55 @@ impl BxAcpiCtrl {
         let sci_level = (pmsts & self.pmen & sci_mask) != 0;
         self.set_irq_level(sci_level);
 
-        // Note: In Bochs, this also schedules/deactivates the virtual timer.
-        // In our architecture, the timer overflow is checked on every tick()
-        // via get_pmsts(), so no explicit timer scheduling is needed.
+    }
+    #[inline]
+    fn pm_timer_ticks_at_usec(time_usec: u64) -> u64 {
+        muldiv64(time_usec, PM_FREQ as u32, 1_000_000)
+    }
+
+    #[inline]
+    fn overflow_armed(&self) -> bool {
+        self.pmen & PmEnable::TMROF_EN.bits() != 0
+            && self.pmsts & PmStatus::TMROF_STS.bits() == 0
+    }
+
+    #[inline]
+    fn overflow_remaining_from_usec(&self, current_usec: u64) -> Option<u64> {
+        if !self.overflow_armed() {
+            return None;
+        }
+
+        // Bochs schedules the first whole microsecond whose PM tick value has
+        // reached the current overflow boundary (acpi.cc:329-332).
+        let expire_usec = muldiv64(self.tmr_overflow_time, 1_000_000, PM_FREQ as u32) + 1;
+        (expire_usec > current_usec).then_some(expire_usec - current_usec)
+    }
+
+    /// Return the relative delay until the enabled PM timer overflow.
+    ///
+    /// The caller converts this microsecond delay to a fixed pc-system owner
+    /// deadline. Re-evaluating after every PM1 register access makes both
+    /// rearming and SCI changes visible before guest execution resumes.
+    pub(crate) fn overflow_delay_usec(&mut self, system_ticks: u64) -> Option<u64> {
+        self.pm_update_sci(system_ticks);
+        self.overflow_remaining_from_usec(self.live_time_usec(system_ticks))
+    }
+
+    /// Service the ACPI PM-overflow timer owner and return a rearm delay.
+    ///
+    /// A realtime pc-system deadline is only a prediction. If its callback is
+    /// early relative to the freshly sampled host clock, leave PM overflow
+    /// state unchanged and return the newly predicted remaining delay.
+    pub(crate) fn overflow_timer(&mut self, system_ticks: u64) -> Option<u64> {
+        #[cfg(feature = "std")]
+        if self.realtime_start.is_some() && self.overflow_armed() {
+            let current_usec = self.live_time_usec(system_ticks);
+            if Self::pm_timer_ticks_at_usec(current_usec) < self.tmr_overflow_time {
+                return self.overflow_remaining_from_usec(current_usec);
+            }
+        }
+
+        self.overflow_delay_usec(system_ticks)
     }
 
     /// Set IRQ 9 level (ACPI SCI).
@@ -600,6 +984,7 @@ impl BxAcpiCtrl {
                             _ => {}
                         }
                     }
+                    self.pm_update_sci(icount);
                 }
                 // Write-ignored registers (acpi.cc)
                 0x0C | 0x0D | 0x14 | 0x15 | 0x18 | 0x19 | 0x1C | 0x1D | 0x1E | 0x1F | 0x30
@@ -966,6 +1351,54 @@ mod tests {
         acpi.time_usec = 100; // ~358 PM ticks at 3.58 MHz
         let pmsts = acpi.get_pmsts(0);
         assert_ne!(pmsts & PmStatus::TMROF_STS.bits(), 0);
+    }
+
+    #[test]
+    fn acpi_tmrof_enable_arms_exact_overflow_sci() {
+        let mut acpi = BxAcpiCtrl::new();
+        acpi.pm_base = 0xB000;
+        acpi.pci_conf[0x80] = 0x01;
+        acpi.init_icount_sync(0, 1_000_000);
+
+        acpi.write(
+            acpi.pm_base as u16 + 0x02,
+            PmEnable::TMROF_EN.bits() as u32,
+            2,
+            0,
+        );
+        let delay = acpi.overflow_delay_usec(0).expect("TMROF should arm");
+        assert_eq!(
+            delay,
+            muldiv64(0xFF_FFFF, 1_000_000, PM_FREQ as u32) + 1
+        );
+        assert!(!acpi.irq9_level);
+
+        assert_eq!(acpi.overflow_timer(delay), None);
+        assert_ne!(acpi.pmsts & PmStatus::TMROF_STS.bits(), 0);
+        assert!(acpi.irq9_level);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn realtime_acpi_overflow_rearms_when_owner_arrives_early() {
+        let mut acpi = BxAcpiCtrl::new();
+        acpi.enable_realtime_sync();
+        acpi.pmen = PmEnable::TMROF_EN.bits();
+
+        let predicted = acpi
+            .overflow_delay_usec(0)
+            .expect("future host overflow should be scheduled");
+        let overflow_time = acpi.tmr_overflow_time;
+        let pmsts = acpi.pmsts;
+
+        let rearmed = acpi
+            .overflow_timer(0)
+            .expect("early callback should rearm from host time");
+        assert!(rearmed > 0);
+        assert!(rearmed <= predicted);
+        assert_eq!(acpi.tmr_overflow_time, overflow_time);
+        assert_eq!(acpi.pmsts, pmsts);
+        assert!(!acpi.irq9_level);
     }
 
     #[cfg(feature = "std")]

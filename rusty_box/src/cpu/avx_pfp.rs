@@ -24,7 +24,11 @@ use super::{
     decoder::{BxSegregs, Instruction},
     xmm::{BxPackedXmmRegister, BxPackedYmmRegister},
 };
+// Load-bearing in pure no-std builds (core f32/f64 lack these inherent
+// methods there); redundant in unit graphs where std is linked, so the
+// unused-import lint is allowed rather than losing the no-std resolution.
 #[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
 use crate::cpu::float::FloatExt;
 
 /// Element operation selector for the packed/scalar FP families.

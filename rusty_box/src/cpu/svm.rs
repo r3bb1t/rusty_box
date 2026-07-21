@@ -388,9 +388,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const u8;
             // SAFETY: vmcbhostptr validated by set_vmcbptr; single-threaded
             unsafe { *host }
-        } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
+        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 1];
-            let _ = mem.read_physical_page(&[cpu_ref], paddr, 1, &mut data);
+            let _ = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data);
             data[0]
         } else {
             0
@@ -403,9 +403,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.vmcbhostptr != 0 {
             let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const [u8; 2];
             u16::from_le_bytes(unsafe { *host })
-        } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
+        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 2];
-            let _ = mem.read_physical_page(&[cpu_ref], paddr, 2, &mut data);
+            let _ = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 2, &mut data);
             u16::from_le_bytes(data)
         } else {
             0
@@ -418,9 +418,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.vmcbhostptr != 0 {
             let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const [u8; 4];
             u32::from_le_bytes(unsafe { *host })
-        } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
+        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 4];
-            let _ = mem.read_physical_page(&[cpu_ref], paddr, 4, &mut data);
+            let _ = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data);
             u32::from_le_bytes(data)
         } else {
             0
@@ -433,9 +433,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.vmcbhostptr != 0 {
             let host = (self.vmcbhostptr | offset as super::tlb::BxHostpageaddr) as *const [u8; 8];
             u64::from_le_bytes(unsafe { *host })
-        } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
+        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [0u8; 8];
-            let _ = mem.read_physical_page(&[cpu_ref], paddr, 8, &mut data);
+            let _ = mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 8, &mut data);
             u64::from_le_bytes(data)
         } else {
             0
@@ -451,9 +451,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             unsafe {
                 *host = val;
             }
-        } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
+        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = [val];
-            let _ = mem.write_physical_page(&[cpu_ref], paddr, 1, &mut data);
+            let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data);
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -467,9 +467,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             unsafe {
                 *host = val.to_le_bytes();
             }
-        } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
+        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = val.to_le_bytes();
-            let _ = mem.write_physical_page(&[cpu_ref], paddr, 2, &mut data);
+            let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 2, &mut data);
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -483,9 +483,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             unsafe {
                 *host = val.to_le_bytes();
             }
-        } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
+        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = val.to_le_bytes();
-            let _ = mem.write_physical_page(&[cpu_ref], paddr, 4, &mut data);
+            let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 4, &mut data);
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -499,9 +499,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             unsafe {
                 *host = val.to_le_bytes();
             }
-        } else if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
+        } else if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
             let mut data = val.to_le_bytes();
-            let _ = mem.write_physical_page(&[cpu_ref], paddr, 8, &mut data);
+            let _ = mem.write_physical_page(self.active_tlb_pins(), policy, paddr, 8, &mut data);
             // Bochs handleSMC flushes the writer synchronously at the store.
             self.smc_sync_after_phys_write();
         }
@@ -568,20 +568,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.vmcbptr = vmcbptr;
         if vmcbptr != 0 {
             // Try to get a direct host pointer for fast VMCB access
-            if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
+            if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(vmcbptr) } {
                 use super::rusty_box::MemoryAccessType;
-                match mem.get_host_mem_addr(vmcbptr, MemoryAccessType::RW, &[cpu_ref]) {
-                    Ok(Some(slice)) => {
+                match mem.get_host_mem_addr_pinned(
+                    vmcbptr,
+                    MemoryAccessType::RW,
+                    self.active_tlb_pins(),
+                    policy,
+                ) {
+                    // VMCB accessors directly offset this pointer through PAT.
+                    // A block-backed span may end sooner, in which case the
+                    // handler-aware physical-access paths remain authoritative.
+                    Ok(Some(slice)) if slice.len() >= (SVM_GUEST_PAT as usize + 8) => {
                         self.vmcbhostptr = slice.as_ptr() as super::tlb::BxHostpageaddr
                     }
                     _ => self.vmcbhostptr = 0,
                 }
-            } else {
-                self.vmcbhostptr = 0;
             }
         } else {
             self.vmcbhostptr = 0;
         }
+        self.sync_vmcb_pin();
     }
 
     // =====================================================================
@@ -1035,6 +1042,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.clear_event(BX_EVENT_SVM_VIRQ_PENDING);
         self.in_svm_guest = false;
         self.svm_gif = false;
+        self.sync_vmcb_pin();
 
         // Write exit reason and info to VMCB
         self.vmcb_write64(SVM_CONTROL64_EXITCODE, reason as i64 as u64);
@@ -1525,11 +1533,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// bitmap regions, with the read failure logged so the cause is
     /// visible in traces.
     pub(super) fn read_physical_byte(&mut self, paddr: u64) -> u8 {
-        let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() else {
-            return 0xff;
-        };
+        let Some((policy, mem)) = (unsafe { self.mem_bus_with_policy(paddr) }) else { return 0xff; };
         let mut data = [0u8; 1];
-        match mem.read_physical_page(&[cpu_ref], paddr, 1, &mut data) {
+        match mem.read_physical_page(self.active_tlb_pins(), policy, paddr, 1, &mut data) {
             Ok(()) => data[0],
             Err(e) => {
                 tracing::warn!(
@@ -1597,6 +1603,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.in_svm_guest = true;
         self.svm_gif = true;
+        self.sync_vmcb_pin();
         self.async_event = 1;
 
         // Step 4: Inject events
@@ -1834,6 +1841,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Invalidate TLB entry
         self.dtlb.invlpg(laddr);
         self.itlb.invlpg(laddr);
+        self.sync_active_tlb_pin();
         Ok(())
     }
 }

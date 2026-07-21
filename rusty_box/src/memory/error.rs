@@ -41,6 +41,8 @@ pub enum MemoryError {
     // ROM loading / BIOS
     #[error("ROM image is too large (max {0} bytes)")]
     RomTooLarge(usize),
+    #[error("RAM image does not fit entirely in guest RAM")]
+    RamImageOutOfRange,
     #[error("System BIOS must end at 0xfffff, but ends at {0:#x}")]
     SystemBiosInvalidEnd(u64),
     #[error("ROM image size must be a multiple of 512 bytes")]

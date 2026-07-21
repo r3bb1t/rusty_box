@@ -11,6 +11,54 @@
 //! - Physical Region Descriptor (PRD) table processing
 //! - Timer-driven DMA transfers (Bochs pci_ide.cc)
 
+#[cfg(feature = "std")]
+use std::io::{self, Error, ErrorKind, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::{
+    pc_system::{BxPcSystemC, TimerOwner},
+    snapshot::{
+        bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader,
+        SnapshotWriteExt,
+    },
+};
+
+#[cfg(feature = "std")]
+const PCI_IDE_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0e];
+
+#[cfg(feature = "std")]
+fn invalid_pci_ide_snapshot(message: &'static str) -> io::Error {
+    Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn validate_pci_ide_snapshot_identity(
+    saved: &[u8; PCI_CONF_SIZE],
+    live: &[u8; PCI_CONF_SIZE],
+) -> io::Result<()> {
+    for index in PCI_IDE_SNAPSHOT_IDENTITY_BYTES {
+        if saved[index] != live[index] {
+            return Err(invalid_pci_ide_snapshot(
+                "snapshot PCI IDE identity does not match live configuration",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+#[derive(Clone, Copy)]
+struct BmDmaSnapshotState {
+    cmd_ssbm: bool,
+    cmd_rwcon: bool,
+    status: u8,
+    dtpr: u32,
+    prd_current: u32,
+    buffer_top: usize,
+    buffer_idx: usize,
+    data_ready: bool,
+    timer_index: Option<usize>,
+}
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
 
@@ -110,6 +158,161 @@ pub struct BxPciIde {
     /// emulator loop, which owns `BxPcSystemC`. The I/O dispatch path has no
     /// pc_system access, so the arm is deferred by at most one CPU batch.
     pub(crate) pending_timer_arm: [Option<u32>; 2],
+}
+
+/// Desired BAR4 mapping decoded from a snapshot.
+///
+/// The snapshot codec intentionally leaves `bmdma_base` unchanged while
+/// decoding so the parent can atomically relocate handlers from the captured
+/// live range to this desired range.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PciIdeSnapshotTopology {
+    pub(crate) bmdma_base: u32,
+}
+
+#[cfg(feature = "std")]
+fn write_bmdma_snapshot_state<W: Write>(
+    writer: &mut W,
+    state: &BmDmaChannel,
+) -> io::Result<()> {
+    writer.write_bool(state.cmd_ssbm)?;
+    writer.write_bool(state.cmd_rwcon)?;
+    writer.write_u8(state.status)?;
+    writer.write_u32(state.dtpr)?;
+    writer.write_u32(state.prd_current)?;
+    writer.write_u64(
+        u64::try_from(state.buffer_top)
+            .map_err(|_| invalid_pci_ide_snapshot("BM-DMA buffer top does not fit u64"))?,
+    )?;
+    writer.write_u64(
+        u64::try_from(state.buffer_idx)
+            .map_err(|_| invalid_pci_ide_snapshot("BM-DMA buffer index does not fit u64"))?,
+    )?;
+    writer.write_bool(state.data_ready)?;
+    writer.write_bool(state.timer_index.is_some())?;
+    writer.write_u32(match state.timer_index {
+        Some(handle) => u32::try_from(handle)
+            .map_err(|_| invalid_pci_ide_snapshot("BM-DMA timer handle does not fit u32"))?,
+        None => 0,
+    })
+}
+
+#[cfg(feature = "std")]
+fn read_bmdma_snapshot_state<R: Read>(
+    reader: &mut SnapshotReader<R>,
+) -> io::Result<BmDmaSnapshotState> {
+    let cmd_ssbm = reader.read_bool()?;
+    let cmd_rwcon = reader.read_bool()?;
+    let status = reader.read_u8()?;
+    let dtpr = reader.read_u32()?;
+    let prd_current = reader.read_u32()?;
+    let buffer_top = reader.read_len(BMDMA_BUFFER_SIZE)?;
+    let buffer_idx = reader.read_len(BMDMA_BUFFER_SIZE)?;
+    let data_ready = reader.read_bool()?;
+    let has_timer = reader.read_bool()?;
+    let raw_timer = reader.read_u32()?;
+    let timer_index = if has_timer {
+        let timer_index = usize::try_from(raw_timer)
+            .map_err(|_| invalid_pci_ide_snapshot("BM-DMA timer handle does not fit usize"))?;
+        if timer_index >= crate::pc_system::BX_MAX_TIMERS {
+            return Err(invalid_pci_ide_snapshot(
+                "BM-DMA timer handle is outside scheduler capacity",
+            ));
+        }
+        Some(timer_index)
+    } else {
+        if raw_timer != 0 {
+            return Err(invalid_pci_ide_snapshot(
+                "absent BM-DMA timer handle has a nonzero value",
+            ));
+        }
+        None
+    };
+
+    Ok(BmDmaSnapshotState {
+        cmd_ssbm,
+        cmd_rwcon,
+        status,
+        dtpr,
+        prd_current,
+        buffer_top,
+        buffer_idx,
+        data_ready,
+        timer_index,
+    })
+}
+
+#[cfg(feature = "std")]
+fn validate_bmdma_snapshot_state(state: &BmDmaSnapshotState) -> io::Result<()> {
+    if (state.status & !0x67) != 0 {
+        return Err(invalid_pci_ide_snapshot(
+            "BM-DMA status contains reserved bits",
+        ));
+    }
+    if ((state.status & 0x01) != 0) != state.cmd_ssbm {
+        return Err(invalid_pci_ide_snapshot(
+            "BM-DMA active status does not match command state",
+        ));
+    }
+    if (state.dtpr & 0x03) != 0 || (state.prd_current & 0x03) != 0 {
+        return Err(invalid_pci_ide_snapshot(
+            "BM-DMA PRD pointer is not dword aligned",
+        ));
+    }
+    if state.buffer_idx > state.buffer_top || state.buffer_top > BMDMA_BUFFER_SIZE {
+        return Err(invalid_pci_ide_snapshot(
+            "BM-DMA buffer cursors are outside the fixed buffer",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn validate_pending_bmdma_timer(request: Option<u32>) -> io::Result<()> {
+    if matches!(request, Some(delay) if delay != 1) {
+        return Err(invalid_pci_ide_snapshot(
+            "BM-DMA deferred timer request delay is invalid",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn write_pending_bmdma_timer<W: Write>(
+    writer: &mut W,
+    owner: u8,
+    request: Option<u32>,
+) -> io::Result<()> {
+    validate_pending_bmdma_timer(request)?;
+    writer.write_u8(owner)?;
+    writer.write_bool(request.is_some())?;
+    writer.write_u32(request.unwrap_or(0))
+}
+
+#[cfg(feature = "std")]
+fn read_pending_bmdma_timer<R: Read>(
+    reader: &mut SnapshotReader<R>,
+    expected_owner: u8,
+) -> io::Result<Option<u32>> {
+    if reader.read_u8()? != expected_owner {
+        return Err(invalid_pci_ide_snapshot(
+            "BM-DMA deferred timer request has the wrong owner",
+        ));
+    }
+    let present = reader.read_bool()?;
+    let delay = reader.read_u32()?;
+    if !present && delay != 0 {
+        return Err(invalid_pci_ide_snapshot(
+            "absent BM-DMA deferred timer request has a nonzero delay",
+        ));
+    }
+    if present && delay != 1 {
+        return Err(invalid_pci_ide_snapshot(
+            "BM-DMA deferred timer request delay is invalid",
+        ));
+    }
+    Ok(present.then_some(delay))
 }
 
 impl Default for BxPciIde {
@@ -427,6 +630,147 @@ impl BxPciIde {
         }
         value
     }
+
+    /// Exact byte count for this controller's contribution to the combined
+    /// PCI payload. The enclosing PCI codec owns the section-version prefix.
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+        let config_len = u64::try_from(PCI_CONF_SIZE)
+            .map_err(|_| invalid_pci_ide_snapshot("PCI IDE config size does not fit u64"))?;
+        let mut channel_state_len = checked_snapshot_len_add(1, 1)?;
+        channel_state_len = checked_snapshot_len_add(channel_state_len, 1)?;
+        channel_state_len = checked_snapshot_len_add(channel_state_len, 4)?;
+        channel_state_len = checked_snapshot_len_add(channel_state_len, 4)?;
+        channel_state_len = checked_snapshot_len_add(channel_state_len, 8)?;
+        channel_state_len = checked_snapshot_len_add(channel_state_len, 8)?;
+        channel_state_len = checked_snapshot_len_add(channel_state_len, 1)?;
+        channel_state_len = checked_snapshot_len_add(channel_state_len, 1)?;
+        channel_state_len = checked_snapshot_len_add(channel_state_len, 4)?;
+        let pending_request_len = checked_snapshot_len_add(2, 4)?;
+        let per_channel_len = checked_snapshot_len_add(channel_state_len, pending_request_len)?;
+        let channels_len = checked_snapshot_len_mul(2, per_channel_len)?;
+        let buffer_len = checked_snapshot_len_mul(
+            2,
+            u64::try_from(BMDMA_BUFFER_SIZE)
+                .map_err(|_| invalid_pci_ide_snapshot("BM-DMA buffer size does not fit u64"))?,
+        )?;
+        let mut len = checked_snapshot_len_add(config_len, 4)?;
+        len = checked_snapshot_len_add(len, channels_len)?;
+        len = checked_snapshot_len_add(len, buffer_len)?;
+        if len > bounds::MAX_SNAPSHOT_SECTION_LEN {
+            return Err(invalid_pci_ide_snapshot(
+                "PCI IDE snapshot body exceeds section bound",
+            ));
+        }
+        Ok(len)
+    }
+
+    /// Stream PCI IDE state, including both fixed BM-DMA bounce buffers.
+    #[cfg(feature = "std")]
+    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_bytes(&self.pci_conf)?;
+        writer.write_u32(self.bmdma_base)?;
+        for channel in &self.bmdma {
+            write_bmdma_snapshot_state(writer, channel)?;
+        }
+        write_pending_bmdma_timer(writer, 0, self.pending_timer_arm[0])?;
+        write_pending_bmdma_timer(writer, 1, self.pending_timer_arm[1])?;
+        for channel in &self.bmdma {
+            writer.write_bytes(&channel.buffer)?;
+        }
+        Ok(())
+    }
+
+    /// Decode PCI IDE state without modifying the currently registered BM-DMA
+    /// I/O base. The parent atomically relocates that live range to the
+    /// returned desired base only after all snapshot sections validate.
+    #[cfg(feature = "std")]
+    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> io::Result<PciIdeSnapshotTopology> {
+        let mut pci_conf = [0u8; PCI_CONF_SIZE];
+        reader.read_bytes(&mut pci_conf)?;
+        let desired_bmdma_base = reader.read_u32()?;
+        let bmdma_state = [
+            read_bmdma_snapshot_state(reader)?,
+            read_bmdma_snapshot_state(reader)?,
+        ];
+        let pending_timer_arm = [
+            read_pending_bmdma_timer(reader, 0)?,
+            read_pending_bmdma_timer(reader, 1)?,
+        ];
+
+        validate_pci_ide_snapshot_identity(&pci_conf, &self.pci_conf)?;
+        if (desired_bmdma_base & 0x0f) != 0 {
+            return Err(invalid_pci_ide_snapshot(
+                "snapshot PCI IDE BAR4 base is not 16-byte aligned",
+            ));
+        }
+        let bar4_low = pci_conf[0x20] & 0x0f;
+        if (desired_bmdma_base != 0 && bar4_low != 0x01)
+            || (desired_bmdma_base == 0 && bar4_low != 0 && bar4_low != 0x01)
+        {
+            return Err(invalid_pci_ide_snapshot(
+                "snapshot PCI IDE BAR4 encoding is invalid",
+            ));
+        }
+        for state in &bmdma_state {
+            validate_bmdma_snapshot_state(state)?;
+        }
+        if let (Some(first), Some(second)) =
+            (bmdma_state[0].timer_index, bmdma_state[1].timer_index)
+        {
+            if first == second {
+                return Err(invalid_pci_ide_snapshot(
+                    "snapshot PCI IDE channels share a timer handle",
+                ));
+            }
+        }
+
+        // All scalar state has validated. Fixed buffers are deliberately read
+        // directly from the section into their live fixed-capacity storage;
+        // a later I/O error therefore makes the instance non-resumable.
+        self.pci_conf = pci_conf;
+        for (channel, state) in self.bmdma.iter_mut().zip(bmdma_state) {
+            channel.cmd_ssbm = state.cmd_ssbm;
+            channel.cmd_rwcon = state.cmd_rwcon;
+            channel.status = state.status;
+            channel.dtpr = state.dtpr;
+            channel.prd_current = state.prd_current;
+            channel.buffer_top = state.buffer_top;
+            channel.buffer_idx = state.buffer_idx;
+            channel.data_ready = state.data_ready;
+            channel.timer_index = state.timer_index;
+        }
+        self.pending_timer_arm = pending_timer_arm;
+        for channel in &mut self.bmdma {
+            reader.read_bytes(&mut channel.buffer)?;
+        }
+
+        Ok(PciIdeSnapshotTopology {
+            bmdma_base: desired_bmdma_base,
+        })
+    }
+
+    /// Validate decoded timer handles against the already-restored scheduler.
+    /// No callback registration or timer activation occurs here.
+    #[cfg(feature = "std")]
+    pub(crate) fn validate_snapshot_v3_timer_owners(
+        &self,
+        pc_system: &BxPcSystemC,
+    ) -> io::Result<()> {
+        for (channel, owner) in self
+            .bmdma
+            .iter()
+            .zip([TimerOwner::PciIdeCh0, TimerOwner::PciIdeCh1])
+        {
+            if let Some(handle) = channel.timer_index {
+                pc_system.validate_timer_handle_owner(handle, owner)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -434,6 +778,8 @@ impl BxPciIde {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
 
     #[test]
     fn test_pci_ide_new() {
@@ -553,5 +899,58 @@ mod tests {
         assert!(!ide.bmdma[0].cmd_ssbm);
         assert_eq!(ide.bmdma[0].status & 0x01, 0x00);
         assert!(!ide.bmdma[0].data_ready);
+    }
+
+    #[test]
+    fn pci_ide_snapshot_resumes_mid_bmdma_transfer() {
+        let mut ide = BxPciIde::new();
+        assert!(ide.pci_write(0x20, 0x0000_c001, 4));
+        ide.bmdma_write(0xc004, 0x0000_1200, 4);
+        ide.bmdma_write(0xc000, 0x09, 1);
+        let channel = &mut ide.bmdma[0];
+        channel.status |= 0x04;
+        channel.prd_current = 0x0000_1240;
+        channel.buffer_top = 64;
+        channel.buffer_idx = 20;
+        channel.data_ready = true;
+        for (index, byte) in channel.buffer[..64].iter_mut().enumerate() {
+            *byte = index as u8 ^ 0x5a;
+        }
+
+        let saved_len = ide.snapshot_v3_body_len().unwrap();
+        let mut saved = Vec::with_capacity(saved_len as usize);
+        ide.save_snapshot_v3_body(&mut saved).unwrap();
+        assert_eq!(saved.len() as u64, saved_len);
+
+        ide.bmdma_base = 0xd000;
+        let channel = &mut ide.bmdma[0];
+        channel.cmd_ssbm = false;
+        channel.cmd_rwcon = false;
+        channel.status = 0;
+        channel.dtpr = 0;
+        channel.prd_current = 0;
+        channel.buffer_top = 0;
+        channel.buffer_idx = 0;
+        channel.data_ready = false;
+        channel.buffer[..64].fill(0);
+        ide.pending_timer_arm = [None; 2];
+
+        let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
+        let topology = ide.restore_snapshot_v3_body(&mut reader).unwrap();
+        reader.finish_exact().unwrap();
+
+        assert_eq!(topology.bmdma_base, 0xc000);
+        assert_eq!(ide.bmdma_base, 0xd000);
+        assert_eq!(ide.bmdma_read(0xd000, 1), 0x09);
+        assert_eq!(ide.bmdma_read(0xd002, 1), 0x05);
+        assert_eq!(ide.bmdma_read(0xd004, 4), 0x0000_1200);
+        let channel = &ide.bmdma[0];
+        assert_eq!(channel.prd_current, 0x0000_1240);
+        assert_eq!((channel.buffer_top, channel.buffer_idx), (64, 20));
+        assert!(channel.data_ready);
+        for (index, &byte) in channel.buffer[..64].iter().enumerate() {
+            assert_eq!(byte, index as u8 ^ 0x5a);
+        }
+        assert_eq!(ide.take_pending_timer_arm(0), Some(1));
     }
 }

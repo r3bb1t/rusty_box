@@ -8,7 +8,14 @@
 //!
 //! Reference: `cpp_orig/bochs/iodev/fw_cfg.cc` (700 lines)
 
-use crate::memory::BxMemC;
+use crate::memory::{BxMemC, CpuTlbPin};
+#[cfg(feature = "std")]
+use std::io::{self, Error, ErrorKind, Read, Write};
+
+#[cfg(feature = "std")]
+use crate::snapshot::{
+    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapshotReader, SnapshotWriteExt,
+};
 
 // ─── I/O Ports ──────────────────────────────────────────────────────────
 
@@ -75,6 +82,8 @@ const FW_CFG_INVALID: u16 = 0xFFFF;
 const FW_CFG_MAX_ENTRIES: usize = 64;
 /// Maximum total data bytes across all entries.
 const FW_CFG_DATA_POOL_SIZE: usize = 32768;
+/// Fixed storage for the serialized firmware file directory.
+const FW_CFG_FILE_DIRECTORY_SIZE: usize = 4096;
 
 // ─── FW_CFG_ID bits ─────────────────────────────────────────────────────
 
@@ -176,7 +185,7 @@ pub struct BxFwCfg {
     /// DMA descriptor address (accumulated across port writes).
     dma_addr: u64,
     /// Serialized file directory (written into entries[FW_CFG_FILE_DIR]).
-    file_dir: [u8; 4096],
+    file_dir: [u8; FW_CFG_FILE_DIRECTORY_SIZE],
     /// Valid length of `file_dir`.
     file_dir_len: usize,
     /// Number of files added.
@@ -211,7 +220,7 @@ impl BxFwCfg {
             cur_entry: FW_CFG_INVALID,
             cur_offset: 0,
             dma_addr: 0,
-            file_dir: [0u8; 4096],
+            file_dir: [0u8; FW_CFG_FILE_DIRECTORY_SIZE],
             file_dir_len: 0,
             file_count: 0,
         }
@@ -290,6 +299,152 @@ impl BxFwCfg {
         self.cur_offset = 0;
         self.dma_addr = 0;
     }
+    /// Number of bytes emitted by the PLATFORM fw_cfg component body.
+    ///
+    /// The parent PLATFORM section owns the section-version prefix.  This
+    /// component intentionally writes only its state body.
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot_v3_body_len(&self) -> io::Result<u64> {
+        self.validate_snapshot_v3_state()?;
+
+        let slot_bytes = checked_snapshot_len_mul(
+            u64::try_from(usize::from(self.slot_count))
+                .map_err(|_| invalid_fw_cfg_snapshot("slot count does not fit u64"))?,
+            6,
+        )?;
+        let with_slots = checked_snapshot_len_add(38, slot_bytes)?;
+        let with_pool = checked_snapshot_len_add(
+            with_slots,
+            u64::try_from(self.data_used)
+                .map_err(|_| invalid_fw_cfg_snapshot("data-pool length does not fit u64"))?,
+        )?;
+        checked_snapshot_len_add(
+            with_pool,
+            u64::try_from(FW_CFG_FILE_DIRECTORY_SIZE)
+                .map_err(|_| invalid_fw_cfg_snapshot("file-directory length does not fit u64"))?,
+        )
+    }
+
+    /// Streams the PLATFORM fw_cfg component body without staging a payload.
+    #[cfg(feature = "std")]
+    pub(crate) fn save_snapshot_v3_body<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.validate_snapshot_v3_state()?;
+
+        writer.write_u32(u32::from(self.slot_count))?;
+        writer.write_u64(
+            u64::try_from(self.data_used)
+                .map_err(|_| invalid_fw_cfg_snapshot("data-pool length does not fit u64"))?,
+        )?;
+        writer.write_u16(self.cur_entry)?;
+        writer.write_u32(self.cur_offset)?;
+        writer.write_u64(self.dma_addr)?;
+        writer.write_u64(
+            u64::try_from(self.file_dir_len)
+                .map_err(|_| invalid_fw_cfg_snapshot("file-directory length does not fit u64"))?,
+        )?;
+        writer.write_u32(u32::from(self.file_count))?;
+
+        for slot in &self.slots[..usize::from(self.slot_count)] {
+            writer.write_u16(slot.key)?;
+            writer.write_u16(slot.offset)?;
+            writer.write_u16(slot.len)?;
+        }
+        writer.write_bytes(&self.data_pool[..self.data_used])?;
+        writer.write_bytes(&self.file_dir)
+    }
+
+    /// Restores the PLATFORM fw_cfg component body.
+    ///
+    /// Descriptor/count validation happens before the pool or directory are
+    /// touched.  The fixed buffers are then read straight from the bounded
+    /// stream; a later I/O error leaves the instance non-resumable, matching
+    /// the parent snapshot restore contract.
+    #[cfg(feature = "std")]
+    pub(crate) fn restore_snapshot_v3_body<R: Read>(
+        &mut self,
+        reader: &mut SnapshotReader<R>,
+    ) -> io::Result<()> {
+        let slot_count = reader.read_count(FW_CFG_MAX_ENTRIES)?;
+        let data_used = reader.read_len(FW_CFG_DATA_POOL_SIZE)?;
+        let cur_entry = reader.read_u16()?;
+        let cur_offset = reader.read_u32()?;
+        let dma_addr = reader.read_u64()?;
+        let file_dir_len = reader.read_len(FW_CFG_FILE_DIRECTORY_SIZE)?;
+        let file_count = reader.read_count(FW_CFG_FILE_SLOTS)?;
+
+        let mut saved_slots = [FwCfgSlot {
+            key: 0,
+            offset: 0,
+            len: 0,
+        }; FW_CFG_MAX_ENTRIES];
+        for slot in &mut saved_slots[..slot_count] {
+            *slot = FwCfgSlot {
+                key: reader.read_u16()?,
+                offset: reader.read_u16()?,
+                len: reader.read_u16()?,
+            };
+        }
+        validate_fw_cfg_slots(
+            &saved_slots[..slot_count],
+            data_used,
+            cur_entry,
+            cur_offset,
+        )?;
+
+        reader.read_bytes(&mut self.data_pool[..data_used])?;
+        reader.read_bytes(&mut self.file_dir)?;
+        validate_fw_cfg_file_directory(
+            &saved_slots[..slot_count],
+            file_dir_len,
+            file_count,
+            &self.data_pool,
+            &self.file_dir,
+        )?;
+
+        self.slots = [FwCfgSlot {
+            key: 0,
+            offset: 0,
+            len: 0,
+        }; FW_CFG_MAX_ENTRIES];
+        self.slots[..slot_count].copy_from_slice(&saved_slots[..slot_count]);
+        self.slot_count = u16::try_from(slot_count)
+            .map_err(|_| invalid_fw_cfg_snapshot("slot count does not fit u16"))?;
+        self.data_used = data_used;
+        self.cur_entry = cur_entry;
+        self.cur_offset = cur_offset;
+        self.dma_addr = dma_addr;
+        self.file_dir_len = file_dir_len;
+        self.file_count = u16::try_from(file_count)
+            .map_err(|_| invalid_fw_cfg_snapshot("file count does not fit u16"))?;
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    fn validate_snapshot_v3_state(&self) -> io::Result<()> {
+        let slot_count = usize::from(self.slot_count);
+        let file_count = usize::from(self.file_count);
+        if slot_count > FW_CFG_MAX_ENTRIES
+            || file_count > FW_CFG_FILE_SLOTS
+            || slot_count > bounds::MAX_SNAPSHOT_COUNT
+            || file_count > bounds::MAX_SNAPSHOT_COUNT
+        {
+            return Err(invalid_fw_cfg_snapshot("fw_cfg count exceeds capacity"));
+        }
+        validate_fw_cfg_slots(
+            &self.slots[..slot_count],
+            self.data_used,
+            self.cur_entry,
+            self.cur_offset,
+        )?;
+        validate_fw_cfg_file_directory(
+            &self.slots[..slot_count],
+            self.file_dir_len,
+            file_count,
+            &self.data_pool,
+            &self.file_dir,
+        )
+    }
+
 
     // ─── Slot Lookup ────────────────────────────────────────────────────
 
@@ -374,12 +529,13 @@ impl BxFwCfg {
     /// - 0x510: selector (2-byte write sets cur_entry, resets offset)
     /// - 0x511: data write (ignored)
     /// - 0x514-0x51B: DMA address accumulation; writing low 32 bits triggers DMA
-    pub fn write_port(
+    pub(crate) fn write_port(
         &mut self,
         address: u16,
         value: u32,
         io_len: u8,
         mem: Option<&mut BxMemC<'_>>,
+        pins: &[CpuTlbPin],
     ) {
         match address {
             FW_CFG_IO_BASE => {
@@ -408,7 +564,7 @@ impl BxFwCfg {
                     } else if offset == 4 {
                         // Low 32 bits → port 0x518 — triggers DMA
                         self.dma_addr = (self.dma_addr & 0xFFFF_FFFF_0000_0000) | swapped as u64;
-                        self.trigger_dma(mem);
+                        self.trigger_dma(mem, pins);
                     }
                 } else if io_len == 1 {
                     // Byte-by-byte write (big-endian)
@@ -418,7 +574,7 @@ impl BxFwCfg {
 
                     // Trigger when last byte (offset 7) is written
                     if offset == 7 {
-                        self.trigger_dma(mem);
+                        self.trigger_dma(mem, pins);
                     }
                 }
             }
@@ -427,10 +583,10 @@ impl BxFwCfg {
     }
 
     /// Trigger DMA processing if memory is available, then clear dma_addr.
-    fn trigger_dma(&mut self, mem: Option<&mut BxMemC<'_>>) {
+    fn trigger_dma(&mut self, mem: Option<&mut BxMemC<'_>>, pins: &[CpuTlbPin]) {
         let addr = self.dma_addr;
         if let Some(m) = mem {
-            self.process_dma(addr, m);
+            self.process_dma(addr, m, pins);
         } else {
             tracing::error!(
                 "fw_cfg DMA: triggered at {:#x} but no memory available",
@@ -448,24 +604,25 @@ impl BxFwCfg {
     /// - control (4 bytes): SELECT/READ/SKIP/WRITE flags + key in upper 16 bits
     /// - length (4 bytes)
     /// - address (8 bytes): guest physical address for data transfer
-    fn process_dma(&mut self, dma_addr: u64, mem: &mut BxMemC<'_>) {
-        let (ram_ptr, ram_len) = mem.get_ram_base_ptr();
-
-        // Read 16-byte descriptor from guest memory
+    fn process_dma(&mut self, dma_addr: u64, mem: &mut BxMemC<'_>, pins: &[CpuTlbPin]) {
+        // A DMA descriptor is indivisible: do not interpret a short/hole
+        // prefix, because its control word may not belong to this request.
         let mut desc = [0u8; 16];
-        let da = dma_addr as usize;
-        if da + 16 > ram_len {
-            tracing::error!(
-                "fw_cfg DMA: descriptor address {:#x} out of range",
-                dma_addr
-            );
-            return;
-        }
-        unsafe {
-            core::ptr::copy_nonoverlapping(ram_ptr.add(da), desc.as_mut_ptr(), 16);
+        match mem.read_ram(pins, dma_addr, &mut desc) {
+            Ok(16) => {}
+            Ok(copied) => {
+                tracing::error!(
+                    "fw_cfg DMA: descriptor at {dma_addr:#x} is short ({copied}/16 bytes)"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::error!("fw_cfg DMA: descriptor read at {dma_addr:#x} failed: {error:?}");
+                return;
+            }
         }
 
-        // Parse big-endian descriptor
+        // Parse big-endian descriptor.
         let mut control = u32::from_be_bytes([desc[0], desc[1], desc[2], desc[3]]);
         let length = u32::from_be_bytes([desc[4], desc[5], desc[6], desc[7]]);
         let address = u64::from_be_bytes([
@@ -480,83 +637,63 @@ impl BxFwCfg {
             self.cur_entry
         );
 
-        // SELECT: choose entry from upper 16 bits of control
         if control & FW_CFG_DMA_CTL_SELECT != 0 {
-            let key = (control >> 16) as u16;
-            self.cur_entry = key;
+            self.cur_entry = (control >> 16) as u16;
             self.cur_offset = 0;
-            tracing::debug!("fw_cfg DMA: selected entry {:#06x}", key);
+            tracing::debug!("fw_cfg DMA: selected entry {:#06x}", self.cur_entry);
         }
 
-        // READ: copy entry data to guest memory in page-aligned chunks
         if control & FW_CFG_DMA_CTL_READ != 0 {
             let key = self.cur_entry & FW_CFG_ENTRY_MASK;
-
-            let success = if let Some(data) = self.get_entry_data(key) {
-                let mut to_read = length;
-                if self.cur_offset as usize + to_read as usize > data.len() {
-                    to_read = data.len().saturating_sub(self.cur_offset as usize) as u32;
-                }
-
-                // Page-chunked write to guest memory
-                let mut written = 0u32;
-                let src = &data[self.cur_offset as usize..];
-                let mut dst_addr = address as usize;
-
-                while written < to_read {
-                    let page_offset = dst_addr & 0xFFF;
-                    let to_page_end = 0x1000 - page_offset;
-                    let chunk = core::cmp::min(to_read - written, to_page_end as u32) as usize;
-
-                    if dst_addr + chunk > ram_len {
-                        tracing::error!("fw_cfg DMA READ: dest {:#x} out of range", dst_addr);
-                        break;
+            let entry_offset = self.cur_offset as usize;
+            let mut success = false;
+            if let Some(data) = self.get_entry_data(key) {
+                let available = data.len().saturating_sub(entry_offset);
+                let requested = available.min(length as usize);
+                let committed = match mem.write_ram(pins, address, &data[entry_offset..entry_offset + requested]) {
+                    Ok(copied) => copied,
+                    Err(error) => {
+                        tracing::error!("fw_cfg DMA READ: write to {address:#x} failed: {error:?}");
+                        0
                     }
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            src[written as usize..].as_ptr(),
-                            ram_ptr.add(dst_addr),
-                            chunk,
-                        );
-                    }
-                    written += chunk as u32;
-                    dst_addr += chunk;
+                };
+                self.cur_offset = self.cur_offset.saturating_add(committed as u32);
+                success = committed == requested;
+                if !success {
+                    tracing::error!(
+                        "fw_cfg DMA READ: destination {address:#x} accepted {committed}/{requested} bytes"
+                    );
                 }
-
-                self.cur_offset += to_read;
-                tracing::debug!(
-                    "fw_cfg DMA: read {} bytes from entry {:#06x} to {:#x}",
-                    to_read,
-                    key,
-                    address
-                );
-                true
-            } else {
-                false
-            };
-
+            }
             if !success {
                 control |= FW_CFG_DMA_CTL_ERROR;
-                tracing::error!("fw_cfg DMA: invalid entry {:#06x}", self.cur_entry);
+                tracing::error!("fw_cfg DMA: invalid or incomplete entry {:#06x}", self.cur_entry);
             }
             control &= !FW_CFG_DMA_CTL_READ;
         }
 
-        // SKIP: advance offset without transferring data
         if control & FW_CFG_DMA_CTL_SKIP != 0 {
-            self.cur_offset += length;
+            self.cur_offset = self.cur_offset.saturating_add(length);
             control &= !FW_CFG_DMA_CTL_SKIP;
             tracing::debug!("fw_cfg DMA: skipped {} bytes", length);
         }
 
-        // Clear SELECT bit
-        control &= !FW_CFG_DMA_CTL_SELECT;
+        // QEMU/Bochs does not implement host-directed writes for this device.
+        // Complete them with ERROR rather than leaving the DMA command busy.
+        if control & FW_CFG_DMA_CTL_WRITE != 0 {
+            control |= FW_CFG_DMA_CTL_ERROR;
+            control &= !FW_CFG_DMA_CTL_WRITE;
+        }
 
-        // Write back control word (0 on success, ERROR on failure)
+        control &= !FW_CFG_DMA_CTL_SELECT;
         let ctrl_be = control.to_be_bytes();
-        if da + 4 <= ram_len {
-            unsafe {
-                core::ptr::copy_nonoverlapping(ctrl_be.as_ptr(), ram_ptr.add(da), 4);
+        match mem.write_ram(pins, dma_addr, &ctrl_be) {
+            Ok(4) => {}
+            Ok(copied) => tracing::error!(
+                "fw_cfg DMA: completion at {dma_addr:#x} is short ({copied}/4 bytes)"
+            ),
+            Err(error) => {
+                tracing::error!("fw_cfg DMA: completion write at {dma_addr:#x} failed: {error:?}")
             }
         }
     }
@@ -647,7 +784,7 @@ impl BxFwCfg {
         let dir_len = self.file_dir_len;
         // Safety: we need to borrow file_dir immutably while calling add_bytes.
         // Copy the relevant slice to avoid aliasing issues.
-        let mut dir_copy = [0u8; 4096];
+        let mut dir_copy = [0u8; FW_CFG_FILE_DIRECTORY_SIZE];
         dir_copy[..dir_len].copy_from_slice(&self.file_dir[..dir_len]);
         self.add_bytes(FW_CFG_FILE_DIR, &dir_copy[..dir_len]);
 
@@ -673,11 +810,11 @@ impl BxFwCfg {
     /// Initialize the file directory buffer (count + FILE_SLOTS * 64 bytes).
     fn init_file_dir(&mut self) {
         let dir_size = 4 + FW_CFG_FILE_SLOTS * 64;
-        self.file_dir = [0u8; 4096];
+        self.file_dir = [0u8; FW_CFG_FILE_DIRECTORY_SIZE];
         self.file_dir_len = dir_size;
         self.file_count = 0;
         // Register empty directory — file_dir is all zeros, safe to copy out
-        let empty = [0u8; 4096];
+        let empty = [0u8; FW_CFG_FILE_DIRECTORY_SIZE];
         self.add_bytes(FW_CFG_FILE_DIR, &empty[..dir_size]);
     }
 
@@ -782,6 +919,191 @@ impl BxFwCfg {
         tracing::info!("fw_cfg: added HPET configuration");
     }
 }
+#[cfg(feature = "std")]
+fn invalid_fw_cfg_snapshot(message: &'static str) -> Error {
+    Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "std")]
+fn validate_fw_cfg_slots(
+    slots: &[FwCfgSlot],
+    data_used: usize,
+    cur_entry: u16,
+    cur_offset: u32,
+) -> io::Result<()> {
+    if data_used > FW_CFG_DATA_POOL_SIZE {
+        return Err(invalid_fw_cfg_snapshot("fw_cfg data pool exceeds capacity"));
+    }
+
+    for (index, slot) in slots.iter().enumerate() {
+        if slot.key == FW_CFG_INVALID || slot.key & FW_CFG_WRITE_CHANNEL != 0 {
+            return Err(invalid_fw_cfg_snapshot("fw_cfg slot key is invalid"));
+        }
+
+        let start = usize::from(slot.offset);
+        let end = start
+            .checked_add(usize::from(slot.len))
+            .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg slot range overflows"))?;
+        if end > data_used {
+            return Err(invalid_fw_cfg_snapshot("fw_cfg slot exceeds data pool"));
+        }
+
+        for prior in &slots[..index] {
+            if prior.key == slot.key {
+                return Err(invalid_fw_cfg_snapshot("fw_cfg slot key is duplicated"));
+            }
+            let prior_start = usize::from(prior.offset);
+            let prior_end = prior_start
+                .checked_add(usize::from(prior.len))
+                .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg slot range overflows"))?;
+            if start < prior_end && prior_start < end {
+                return Err(invalid_fw_cfg_snapshot("fw_cfg slot ranges overlap"));
+            }
+        }
+    }
+
+    if cur_entry == FW_CFG_INVALID {
+        if cur_offset != 0 {
+            return Err(invalid_fw_cfg_snapshot(
+                "fw_cfg invalid selector has a nonzero offset",
+            ));
+        }
+        return Ok(());
+    }
+
+    let selected_key = cur_entry & FW_CFG_ENTRY_MASK;
+    let selected_slot = slots
+        .iter()
+        .find(|slot| slot.key == cur_entry || slot.key == selected_key)
+        .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg current selector has no slot"))?;
+    if cur_offset > u32::from(selected_slot.len) {
+        return Err(invalid_fw_cfg_snapshot(
+            "fw_cfg current offset exceeds selected entry",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn validate_fw_cfg_file_directory(
+    slots: &[FwCfgSlot],
+    file_dir_len: usize,
+    file_count: usize,
+    data_pool: &[u8; FW_CFG_DATA_POOL_SIZE],
+    directory: &[u8; FW_CFG_FILE_DIRECTORY_SIZE],
+) -> io::Result<()> {
+    if file_dir_len > FW_CFG_FILE_DIRECTORY_SIZE || file_count > FW_CFG_FILE_SLOTS {
+        return Err(invalid_fw_cfg_snapshot("fw_cfg file directory exceeds capacity"));
+    }
+    let directory_slot = slots
+        .iter()
+        .find(|slot| slot.key == FW_CFG_FILE_DIR)
+        .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file directory slot is absent"))?;
+    if usize::from(directory_slot.len) != file_dir_len {
+        return Err(invalid_fw_cfg_snapshot(
+            "fw_cfg file directory slot length disagrees with metadata",
+        ));
+    }
+    let directory_start = usize::from(directory_slot.offset);
+    let directory_end = directory_start
+        .checked_add(usize::from(directory_slot.len))
+        .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file directory slot range overflows"))?;
+    let pool_directory = data_pool.get(directory_start..directory_end).ok_or_else(|| {
+        invalid_fw_cfg_snapshot("fw_cfg file directory slot exceeds data pool")
+    })?;
+    if pool_directory != &directory[..file_dir_len] {
+        return Err(invalid_fw_cfg_snapshot(
+            "fw_cfg file directory data disagrees with pool",
+        ));
+    }
+    if file_dir_len == 0 {
+        return if file_count == 0 {
+            Ok(())
+        } else {
+            Err(invalid_fw_cfg_snapshot(
+                "fw_cfg empty file directory has files",
+            ))
+        };
+    }
+
+    let required_len = 4usize
+        .checked_add(
+            file_count
+                .checked_mul(64)
+                .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file count overflows"))?,
+        )
+        .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file directory length overflows"))?;
+    if file_dir_len < required_len {
+        return Err(invalid_fw_cfg_snapshot(
+            "fw_cfg file directory is shorter than its entries",
+        ));
+    }
+
+    let header = directory
+        .get(0..4)
+        .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file directory header is missing"))?;
+    let mut encoded_count = [0u8; 4];
+    encoded_count.copy_from_slice(header);
+    if usize::try_from(u32::from_be_bytes(encoded_count))
+        .map_err(|_| invalid_fw_cfg_snapshot("fw_cfg file count does not fit usize"))?
+        != file_count
+    {
+        return Err(invalid_fw_cfg_snapshot(
+            "fw_cfg file directory count disagrees with metadata",
+        ));
+    }
+
+
+    for index in 0..file_count {
+        let entry_start = 4usize
+            .checked_add(
+                index
+                    .checked_mul(64)
+                    .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file index overflows"))?,
+            )
+            .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file entry offset overflows"))?;
+        let entry_end = entry_start
+            .checked_add(64)
+            .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file entry range overflows"))?;
+        let entry = directory
+            .get(entry_start..entry_end)
+            .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file entry exceeds directory"))?;
+
+        let mut size_bytes = [0u8; 4];
+        size_bytes.copy_from_slice(
+            entry
+                .get(0..4)
+                .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file size is missing"))?,
+        );
+        let mut select_bytes = [0u8; 2];
+        select_bytes.copy_from_slice(
+            entry
+                .get(4..6)
+                .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file selector is missing"))?,
+        );
+        let selected_key = u16::from_be_bytes(select_bytes);
+        let expected_key = u16::try_from(
+            usize::from(FW_CFG_FILE_FIRST)
+                .checked_add(index)
+                .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file selector overflows"))?,
+        )
+        .map_err(|_| invalid_fw_cfg_snapshot("fw_cfg file selector does not fit u16"))?;
+        if selected_key != expected_key {
+            return Err(invalid_fw_cfg_snapshot("fw_cfg file selector is out of order"));
+        }
+        let file_slot = slots
+            .iter()
+            .find(|slot| slot.key == selected_key)
+            .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file entry slot is absent"))?;
+        if u32::from(file_slot.len) != u32::from_be_bytes(size_bytes) {
+            return Err(invalid_fw_cfg_snapshot(
+                "fw_cfg file size disagrees with its slot",
+            ));
+        }
+    }
+    Ok(())
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -793,10 +1115,54 @@ mod tests {
     use super::*;
 
     fn read_u16_entry(fw_cfg: &mut BxFwCfg, key: u16) -> u16 {
-        fw_cfg.write_port(FW_CFG_IO_BASE, key as u32, SELECTOR_WRITE_BYTES, None);
+        fw_cfg.write_port(FW_CFG_IO_BASE, key as u32, SELECTOR_WRITE_BYTES, None, &[]);
         let lo = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES) as u16;
         let hi = fw_cfg.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES) as u16;
         lo | (hi << 8)
+    }
+
+    #[test]
+    fn fw_cfg_dma_descriptor_and_payload_in_swapped_blocks() {
+        use crate::memory::{BxMemC, BxMemoryStubC};
+
+        const MIB: usize = 1024 * 1024;
+        const DESCRIPTOR: u64 = 2 * MIB as u64;
+        const DESTINATION: u64 = 3 * MIB as u64;
+        const KEY: u16 = 0x1234;
+
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("swapped memory"),
+            false,
+        );
+        mem.set_a20_mask(u64::MAX);
+        let mut fw_cfg = BxFwCfg::new();
+        fw_cfg.add_bytes(KEY, &[0x61, 0x62, 0x63, 0x64, 0x65]);
+
+        let control = ((KEY as u32) << 16) | FW_CFG_DMA_CTL_SELECT | FW_CFG_DMA_CTL_READ;
+        let mut descriptor = [0u8; 16];
+        descriptor[..4].copy_from_slice(&control.to_be_bytes());
+        descriptor[4..8].copy_from_slice(&(5u32).to_be_bytes());
+        descriptor[8..].copy_from_slice(&DESTINATION.to_be_bytes());
+        assert_eq!(mem.write_ram(&[], DESCRIPTOR, &descriptor).unwrap(), 16);
+        mem.smc_mark_icache_mask(DESCRIPTOR, u32::MAX);
+        mem.smc_mark_icache_mask(DESTINATION, u32::MAX);
+        let before_smc = mem.smc_seq_next();
+
+        fw_cfg.process_dma(DESCRIPTOR, &mut mem, &[]);
+
+        let mut payload = [0; 5];
+        assert_eq!(mem.read_ram(&[], DESTINATION, &mut payload).unwrap(), payload.len());
+        assert_eq!(payload, [0x61, 0x62, 0x63, 0x64, 0x65]);
+        let mut completion = [0; 4];
+        assert_eq!(mem.read_ram(&[], DESCRIPTOR, &mut completion).unwrap(), 4);
+        assert_eq!(u32::from_be_bytes(completion), (KEY as u32) << 16);
+        assert!(mem.smc_seq_next() > before_smc);
+
+        descriptor[..4].copy_from_slice(&FW_CFG_DMA_CTL_WRITE.to_be_bytes());
+        assert_eq!(mem.write_ram(&[], DESCRIPTOR, &descriptor).unwrap(), 16);
+        fw_cfg.process_dma(DESCRIPTOR, &mut mem, &[]);
+        assert_eq!(mem.read_ram(&[], DESCRIPTOR, &mut completion).unwrap(), 4);
+        assert_eq!(u32::from_be_bytes(completion), FW_CFG_DMA_CTL_ERROR);
     }
 
     #[test]
@@ -812,5 +1178,88 @@ mod tests {
             read_u16_entry(&mut fw_cfg, FW_CFG_MAX_CPUS),
             TEST_CPU_COUNT as u16
         );
+    }
+
+    #[test]
+    fn platform_snapshot_resumes_fw_cfg_pio_and_partial_dma_address() {
+        use crate::memory::{BxMemC, BxMemoryStubC};
+        use crate::snapshot::SnapshotReader;
+        use std::io::{Cursor, ErrorKind};
+
+        const MIB: usize = 1024 * 1024;
+        const DESCRIPTOR: u64 = 2 * MIB as u64;
+        const DESTINATION: u64 = 3 * MIB as u64;
+        const PAYLOAD: &[u8] = b"resume";
+
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("snapshot memory"),
+            false,
+        );
+        mem.set_a20_mask(u64::MAX);
+
+        let mut source = BxFwCfg::new();
+        source.init(TEST_RAM_SIZE, TEST_CPU_COUNT);
+        let payload_key = FW_CFG_FILE_FIRST + source.file_count;
+        source.add_file("etc/snapshot-resume", PAYLOAD);
+        source.write_port(
+            FW_CFG_IO_BASE,
+            payload_key as u32,
+            SELECTOR_WRITE_BYTES,
+            None,
+            &[],
+        );
+        assert_eq!(
+            source.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES),
+            u32::from(PAYLOAD[0])
+        );
+
+        let control =
+            (u32::from(payload_key) << 16) | FW_CFG_DMA_CTL_SELECT | FW_CFG_DMA_CTL_READ;
+        let mut descriptor = [0u8; 16];
+        descriptor[..4].copy_from_slice(&control.to_be_bytes());
+        descriptor[4..8].copy_from_slice(&(PAYLOAD.len() as u32).to_be_bytes());
+        descriptor[8..].copy_from_slice(&DESTINATION.to_be_bytes());
+        assert_eq!(mem.write_ram(&[], DESCRIPTOR, &descriptor).unwrap(), descriptor.len());
+
+        // Write all but the triggering byte of a bytewise DMA address.  The
+        // final byte must resume the descriptor after restoration.
+        source.write_port(0x518, 0, 1, None, &[]);
+        source.write_port(0x519, 0x20, 1, None, &[]);
+        source.write_port(0x51A, 0, 1, None, &[]);
+        assert_eq!(source.dma_addr, DESCRIPTOR);
+
+        let mut saved = Vec::new();
+        source.save_snapshot_v3_body(&mut saved).unwrap();
+
+        let mut restored = BxFwCfg::new();
+        let mut reader = SnapshotReader::new(Cursor::new(saved.clone()), saved.len() as u64).unwrap();
+        restored.restore_snapshot_v3_body(&mut reader).unwrap();
+        reader.finish_exact().unwrap();
+
+        assert_eq!(
+            restored.read_port_mut(FW_CFG_DATA_PORT, DATA_READ_BYTES),
+            u32::from(PAYLOAD[1]),
+            "the restored selector and PIO offset must resume at the next byte"
+        );
+        assert_eq!(restored.dma_addr, DESCRIPTOR);
+        restored.write_port(0x51B, 0, 1, Some(&mut mem), &[]);
+
+        let mut payload = [0u8; PAYLOAD.len()];
+        assert_eq!(
+            mem.read_ram(&[], DESTINATION, &mut payload).unwrap(),
+            payload.len()
+        );
+        assert_eq!(payload, PAYLOAD);
+
+        // The first saved slot has nonempty data.  Moving it to the end of
+        // the used pool makes its range invalid before any restored buffers
+        // can be committed.
+        let data_used = u64::from_le_bytes(saved[4..12].try_into().unwrap());
+        let mut malformed = saved;
+        malformed[40..42].copy_from_slice(&(data_used as u16).to_le_bytes());
+        let malformed_len = malformed.len() as u64;
+        let mut reader = SnapshotReader::new(Cursor::new(malformed), malformed_len).unwrap();
+        let error = restored.restore_snapshot_v3_body(&mut reader).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
     }
 }

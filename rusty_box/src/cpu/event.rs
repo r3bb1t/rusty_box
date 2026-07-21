@@ -15,13 +15,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         &mut self,
         pic: Option<&mut crate::pic::BxPicC>,
         mut dma: Option<&mut crate::dma::BxDmaC>,
+        mut mem: Option<&mut crate::memory::BxMemC<'c>>,
+        pins: &[crate::memory::CpuTlbPin],
     ) -> bool {
         // Check if CPU is in non-active state (HLT, MWAIT, etc.)
         // Matches Bochs event.cc
         if !matches!(self.activity_state, CpuActivityState::Active) {
             // For one processor, pass the time as quickly as possible until
             // an interrupt wakes up the CPU.
-            if self.handle_wait_for_event(dma.as_deref_mut()) {
+            if self.handle_wait_for_event(dma.as_deref_mut(), mem.as_deref_mut(), pins) {
                 return true; // Return to caller of cpu_loop
             }
         }
@@ -323,7 +325,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // service_local_apic() which may re-signal if more IRQs pending.
                 self.clear_event(Self::BX_EVENT_PENDING_LAPIC_INTR);
                 let vector = self.lapic.acknowledge_int();
-                self.sync_lapic_intr_event();
+                self.sync_lapic_events();
                 if vector > 0 {
                     #[cfg(debug_assertions)]
                     {
@@ -470,7 +472,16 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Assert Hold Acknowledge (HLDA) and perform DMA transfer
         if self.get_hrq() {
             if let Some(dma) = dma {
-                dma.raise_hlda();
+                dma.raise_hlda(mem.as_deref_mut(), pins);
+                // Bochs dma.cc raise_HLDA calls bx_pc_system.set_HRQ(0)
+                // synchronously at terminal count; apply it here so the
+                // async_event clear below observes the dropped line instead
+                // of thrashing the trace until the next boundary.
+                if let Some(level) = dma.take_hrq_request() {
+                    if let Some(ps) = self.pc_system_mut() {
+                        ps.set_hrq(level);
+                    }
+                }
             }
         }
 
@@ -554,7 +565,12 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Handle wait for event - matches Bochs event.cc:handleWaitForEvent()
     /// Called when CPU is halted (HLT) or waiting (MWAIT)
     /// Returns true if should return from cpu_loop
-    fn handle_wait_for_event(&mut self, dma: Option<&mut crate::dma::BxDmaC>) -> bool {
+    fn handle_wait_for_event(
+        &mut self,
+        dma: Option<&mut crate::dma::BxDmaC>,
+        mem: Option<&mut crate::memory::BxMemC<'c>>,
+        pins: &[crate::memory::CpuTlbPin],
+    ) -> bool {
         // For WAIT_FOR_SIPI, just return (matches Bochs event.cc)
         if matches!(self.activity_state, CpuActivityState::WaitForSipi) {
             tracing::trace!("CPU in WAIT_FOR_SIPI state, returning from cpu_loop");
@@ -564,7 +580,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Handle DMA also when CPU is halted (Bochs event.cc)
         if self.get_hrq() {
             if let Some(dma) = dma {
-                dma.raise_hlda();
+                dma.raise_hlda(mem, pins);
+                // Bochs dma.cc raise_HLDA: synchronous set_HRQ(0) at
+                // terminal count (see handle_async_event above).
+                if let Some(level) = dma.take_hrq_request() {
+                    if let Some(ps) = self.pc_system_mut() {
+                        ps.set_hrq(level);
+                    }
+                }
             }
         }
 
@@ -785,7 +808,7 @@ mod tests {
             ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT,
             0
         );
-        let exited = ap.handle_async_event(None, None);
+        let exited = ap.handle_async_event(None, None, None, &[]);
 
         assert!(exited, "AP entering WAIT_FOR_SIPI must exit the cpu loop");
         assert_eq!(ap.rax(), 0);
@@ -804,7 +827,7 @@ mod tests {
         ap.svm_gif = false;
         ap.deliver_smi();
         ap.deliver_init();
-        let exited = ap.handle_async_event(None, None);
+        let exited = ap.handle_async_event(None, None, None, &[]);
 
         assert!(!exited);
         assert!(ap.is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI));
@@ -821,7 +844,7 @@ mod tests {
         // first so this test does not depend on SMM entry machinery.
         ap.clear_event(BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI);
         ap.svm_gif = true;
-        let exited = ap.handle_async_event(None, None);
+        let exited = ap.handle_async_event(None, None, None, &[]);
 
         assert!(exited, "AP entering WAIT_FOR_SIPI must exit the cpu loop");
         assert_eq!(ap.rax(), 0);
@@ -840,7 +863,7 @@ mod tests {
         ap.vmcb = Some(vmcb);
 
         ap.deliver_smi();
-        let exited = ap.handle_async_event(None, None);
+        let exited = ap.handle_async_event(None, None, None, &[]);
 
         // Bochs event.cc: Svm_Vmexit(SVM_VMEXIT_SMI) fires instead of SMM
         // entry, and the SMI stays pending (held by GIF=0 after the exit).
@@ -866,7 +889,7 @@ mod tests {
         ap.vmcb = Some(vmcb);
 
         ap.deliver_init();
-        let exited = ap.handle_async_event(None, None);
+        let exited = ap.handle_async_event(None, None, None, &[]);
 
         // Bochs event.cc: Svm_Vmexit(SVM_VMEXIT_INIT) fires with INIT still
         // pending; the CPU reset is skipped.
@@ -952,7 +975,7 @@ mod tests {
 
         // SMI delivery enters SMM at the next instruction boundary.
         ap.deliver_smi();
-        let exited = ap.handle_async_event(None, None);
+        let exited = ap.handle_async_event(None, None, None, &[]);
         assert!(!exited);
         assert!(ap.in_smm, "SMI must enter System Management Mode");
         // Bochs smm.cc enter_system_management_mode masks SMI/NMI/virtual-NMI.
@@ -965,7 +988,7 @@ mod tests {
         // An NMI arriving during SMM stays pending and is not dispatched.
         ap.deliver_nmi();
         let rip_in_smm = ap.rip();
-        let exited = ap.handle_async_event(None, None);
+        let exited = ap.handle_async_event(None, None, None, &[]);
         assert!(!exited);
         assert_ne!(
             ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI,
@@ -1008,7 +1031,7 @@ mod tests {
         ap.in_vmx_guest = true;
 
         ap.deliver_smi();
-        let exited = ap.handle_async_event(None, None);
+        let exited = ap.handle_async_event(None, None, None, &[]);
         assert!(!exited);
         assert!(ap.in_smm, "SMI must enter System Management Mode");
 

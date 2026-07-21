@@ -7,7 +7,7 @@
 //! This is the no-alloc equivalent of `Emulator::setup_direct_linux_boot`.
 
 use crate::cpu::{cpu::BxCpuC, cpuid::BxCpuIdTrait, instrumentation::Instrumentation};
-use crate::memory::BxMemC;
+use crate::memory::{BxMemC, CpuTlbPin};
 
 /// Error from boot setup (no alloc — uses static strings).
 #[derive(Debug)]
@@ -49,6 +49,25 @@ const MADT_MAX_LEN: usize = MADT_HEADER_LEN
 pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     memory: &mut BxMemC<'_>,
+    bzimage: &[u8],
+    initramfs: Option<&[u8]>,
+    cmdline: &[u8],
+    ram_size: u64,
+    cpu_count: u32,
+) -> Result<(), BootError> {
+    // The public no-alloc entry point cannot discover sibling CPUs, but it
+    // must still protect the supplied CPU if callers reuse it after a prior
+    // execution slice.  Emulator-owned boot uses its complete stable pin set.
+    let pins = [CpuTlbPin::new(&*cpu)];
+    setup_direct_linux_boot_with_pins(
+        cpu, memory, &pins, bzimage, initramfs, cmdline, ram_size, cpu_count,
+    )
+}
+
+pub(crate) fn setup_direct_linux_boot_with_pins<I: BxCpuIdTrait, T: Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
+    memory: &mut BxMemC<'_>,
+    pins: &[CpuTlbPin],
     bzimage: &[u8],
     initramfs: Option<&[u8]>,
     cmdline: &[u8],
@@ -109,7 +128,7 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
         gdt_bytes[i * 8..(i + 1) * 8].copy_from_slice(&entry.to_le_bytes());
     }
     memory
-        .load_RAM(&gdt_bytes, GDT_ADDR)
+        .load_RAM(pins, &gdt_bytes, GDT_ADDR)
         .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // Write boot_params (zero page)
@@ -154,7 +173,7 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
         let initrd_load_addr = (max_addr - initrd_data.len() as u64) & !0xFFF;
 
         memory
-            .load_RAM(initrd_data, initrd_load_addr)
+            .load_RAM(pins, initrd_data, initrd_load_addr)
             .map_err(|_| BootError::MemoryLoadFailed)?;
 
         boot_params[0x218..0x21C].copy_from_slice(&(initrd_load_addr as u32).to_le_bytes());
@@ -180,7 +199,7 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
     boot_params[0x1E8] = e820_idx as u8;
 
     memory
-        .load_RAM(&boot_params, boot_params_addr)
+        .load_RAM(pins, &boot_params, boot_params_addr)
         .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // Write command line (stack buffer, max 2048 bytes)
@@ -188,15 +207,15 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
     let cmdline_len = core::cmp::min(cmdline.len(), 2047);
     cmdline_buf[..cmdline_len].copy_from_slice(&cmdline[..cmdline_len]);
     memory
-        .load_RAM(&cmdline_buf[..cmdline_len + 1], cmdline_addr)
+        .load_RAM(pins, &cmdline_buf[..cmdline_len + 1], cmdline_addr)
         .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // ACPI tables (all stack-allocated)
-    write_acpi_tables(memory, cpu_count)?;
+    write_acpi_tables(memory, pins, cpu_count)?;
 
     // Load protected-mode kernel
     memory
-        .load_RAM(pm_kernel, code32_start as u64)
+        .load_RAM(pins, pm_kernel, code32_start as u64)
         .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // Configure CPU for protected mode
@@ -265,14 +284,18 @@ fn build_madt(cpu_count: u32) -> Result<([u8; MADT_MAX_LEN], usize), BootError> 
 
 /// Write minimal ACPI tables (RSDP → XSDT → MADT) to guest memory.
 /// All buffers are stack-allocated.
-fn write_acpi_tables(memory: &mut BxMemC<'_>, cpu_count: u32) -> Result<(), BootError> {
+fn write_acpi_tables(
+    memory: &mut BxMemC<'_>,
+    pins: &[CpuTlbPin],
+    cpu_count: u32,
+) -> Result<(), BootError> {
     const RSDP_ADDR: u64 = 0x40000;
     const XSDT_ADDR: u64 = 0x40100;
     const MADT_ADDR: u64 = 0x40200;
 
     let (madt, madt_len) = build_madt(cpu_count)?;
     memory
-        .load_RAM(&madt[..madt_len], MADT_ADDR)
+        .load_RAM(pins, &madt[..madt_len], MADT_ADDR)
         .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // XSDT: 36 header + 8 pointer = 44
@@ -289,7 +312,7 @@ fn write_acpi_tables(memory: &mut BxMemC<'_>, cpu_count: u32) -> Result<(), Boot
     let sum: u8 = xsdt.iter().fold(0u8, |a, &b| a.wrapping_add(b));
     xsdt[9] = 0u8.wrapping_sub(sum);
     memory
-        .load_RAM(&xsdt, XSDT_ADDR)
+        .load_RAM(pins, &xsdt, XSDT_ADDR)
         .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // RSDP v2.0 = 36 bytes
@@ -305,7 +328,7 @@ fn write_acpi_tables(memory: &mut BxMemC<'_>, cpu_count: u32) -> Result<(), Boot
     let v2_sum: u8 = rsdp.iter().fold(0u8, |a, &b| a.wrapping_add(b));
     rsdp[32] = 0u8.wrapping_sub(v2_sum);
     memory
-        .load_RAM(&rsdp, RSDP_ADDR)
+        .load_RAM(pins, &rsdp, RSDP_ADDR)
         .map_err(|_| BootError::MemoryLoadFailed)?;
 
     Ok(())

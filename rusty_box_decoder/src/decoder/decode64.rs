@@ -1030,6 +1030,11 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         instr.operands.src3 = ((instr.immediate >> 4) & 0xF) as u8;
     }
 
+    match validate_reserved_vex_vvvv(instr.opcode, vex_vvv) {
+        Ok(()) => {}
+        Err(error) => return Err(error),
+    }
+
     // Check if opcode lookup failed
     if matches!(instr.opcode, Opcode::IaError) {
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
@@ -1043,6 +1048,20 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     }
 
     Ok(instr)
+}
+
+/// VEXTRACTF128 and VEXTRACTI128 have no `vvvv` source operand; Intel reserves
+/// every encoding except VEX.vvvv = 1111b (decoded here as zero).
+const fn validate_reserved_vex_vvvv(opcode: Opcode, vex_vvv: u8) -> DecodeResult<()> {
+    if vex_vvv != 0
+        && matches!(
+            opcode,
+            Opcode::V256Vextractf128WdqVdqIb | Opcode::V256Vextracti128WdqVdqIb
+        )
+    {
+        return Err(DecodeError::Decoder(BxDecodeError::BxIllegalVexXopVvv));
+    }
+    Ok(())
 }
 
 /// Get opcode table and look up opcode for 64-bit mode
@@ -3377,6 +3396,23 @@ mod tests {
         let i = fetch_decode64(&[0x90]).unwrap();
         assert_eq!(i.ilen(), 1);
         assert_eq!(i.get_ia_opcode(), Opcode::Nop);
+    }
+
+    #[test]
+    fn vextractf128_rejects_reserved_vex_vvvv() {
+        for (opcode, expected) in [
+            (0x19, Opcode::V256Vextractf128WdqVdqIb),
+            (0x39, Opcode::V256Vextracti128WdqVdqIb),
+        ] {
+            let valid = fetch_decode64(&[0xC4, 0xE3, 0x7D, opcode, 0xD8, 0x01]).unwrap();
+            assert_eq!(valid.get_ia_opcode(), expected);
+
+            let invalid = fetch_decode64(&[0xC4, 0xE3, 0x75, opcode, 0xD8, 0x01]);
+            assert!(matches!(
+                invalid,
+                Err(DecodeError::Decoder(BxDecodeError::BxIllegalVexXopVvv))
+            ));
+        }
     }
 
     #[test]

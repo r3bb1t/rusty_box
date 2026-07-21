@@ -84,7 +84,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         R: RangeBounds<u64>,
         F: FnMut(u64, &Instruction) + Send + 'static,
     {
-        self.cpu.instrumentation.add_code(range, Box::new(cb))
+        self.cpu_mut().instrumentation.add_code(range, Box::new(cb))
     }
 
     /// Register a hook fired AFTER each instruction whose RIP is in `range`.
@@ -93,7 +93,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         R: RangeBounds<u64>,
         F: FnMut(u64, &Instruction) + Send + 'static,
     {
-        self.cpu.instrumentation.add_code_after(range, Box::new(cb))
+        self.cpu_mut().instrumentation.add_code_after(range, Box::new(cb))
     }
 
     /// Register a memory access hook.
@@ -102,9 +102,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         R: RangeBounds<u64>,
         F: FnMut(&MemHookEvent) + Send + 'static,
     {
-        self.cpu
-            .instrumentation
-            .add_mem(hook_type, range, Box::new(cb))
+        self.cpu_mut().instrumentation.add_mem(hook_type, range, Box::new(cb))
     }
 
     /// Register a software-interrupt hook (INT n / INT3 / INTO).
@@ -113,7 +111,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     where
         F: FnMut(u8) + Send + 'static,
     {
-        self.cpu.instrumentation.add_interrupt(Box::new(cb))
+        self.cpu_mut().instrumentation.add_interrupt(Box::new(cb))
     }
 
     /// Register a hardware-interrupt hook (external IRQ delivery).
@@ -121,7 +119,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     where
         F: FnMut(&HwInterruptEvent) + Send + 'static,
     {
-        self.cpu.instrumentation.add_hw_interrupt(Box::new(cb))
+        self.cpu_mut().instrumentation.add_hw_interrupt(Box::new(cb))
     }
 
     /// Register a CPU-exception hook.
@@ -130,7 +128,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     where
         F: FnMut(u8, u32) + Send + 'static,
     {
-        self.cpu.instrumentation.add_exception(Box::new(cb))
+        self.cpu_mut().instrumentation.add_exception(Box::new(cb))
     }
 
     /// Register an I/O port hook (IN/OUT instructions).
@@ -139,9 +137,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         R: RangeBounds<u16>,
         F: FnMut(&IoHookEvent) + Send + 'static,
     {
-        self.cpu
-            .instrumentation
-            .add_io(hook_type, range, Box::new(cb))
+        self.cpu_mut().instrumentation.add_io(hook_type, range, Box::new(cb))
     }
 
     /// Register a branch hook. Fires for conditional, unconditional, and
@@ -151,7 +147,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         R: RangeBounds<u64>,
         F: FnMut(&BranchEvent) + Send + 'static,
     {
-        self.cpu.instrumentation.add_branch(range, Box::new(cb))
+        self.cpu_mut().instrumentation.add_branch(range, Box::new(cb))
     }
 
     /// Register a block hook. Fires at the start of each basic block (trace)
@@ -161,7 +157,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         R: RangeBounds<u64>,
         F: FnMut(u64, u16) + Send + 'static,
     {
-        self.cpu.instrumentation.add_block(range, Box::new(cb))
+        self.cpu_mut().instrumentation.add_block(range, Box::new(cb))
     }
 
     /// Register an invalid-instruction hook. Fires before #UD for
@@ -171,7 +167,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     where
         F: FnMut(u64) -> bool + Send + 'static,
     {
-        self.cpu.instrumentation.add_invalid_insn(Box::new(cb))
+        self.cpu_mut().instrumentation.add_invalid_insn(Box::new(cb))
     }
 
     /// Register an unmapped-memory hook. Fires before page fault for
@@ -180,7 +176,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     where
         F: FnMut(u64, usize, crate::cpu::instrumentation::MemAccessRW) -> bool + Send + 'static,
     {
-        self.cpu.instrumentation.add_mem_unmapped(Box::new(cb))
+        self.cpu_mut().instrumentation.add_mem_unmapped(Box::new(cb))
     }
 
     /// Remove a previously registered hook.
@@ -190,14 +186,14 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         &mut self,
         handle: HookHandle,
     ) -> core::result::Result<(), InstrumentationError> {
-        self.cpu.instrumentation.remove(handle)
+        self.cpu_mut().instrumentation.remove(handle)
     }
 
     /// Direct typed reference to the installed tracer. Zero-cost field access.
     /// Panics only if called while a hook is mid-dispatch (the tracer is
     /// temporarily taken for borrow-splitting) — user code can't observe this.
     pub fn instrumentation(&self) -> &T {
-        self.cpu
+        self.cpu()
             .instrumentation
             .tracer
             .as_ref()
@@ -206,7 +202,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     /// Mutable reference to the installed tracer.
     pub fn instrumentation_mut(&mut self) -> &mut T {
-        self.cpu
+        self.cpu_mut()
             .instrumentation
             .tracer
             .as_mut()
@@ -216,7 +212,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Recompute the active hook mask from the tracer's `active_hooks()`.
     /// Call this after mutating tracer state that changes which categories are active.
     pub fn refresh_hook_mask(&mut self) {
-        self.cpu.instrumentation.refresh_active();
+        self.cpu_mut().instrumentation.refresh_active();
     }
 }
 
@@ -226,7 +222,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Read any register by enum tag. Narrower registers are zero-extended
     /// into the returned `u64`.
     pub fn reg_read(&self, reg: X86Reg) -> u64 {
-        self.cpu.api_reg_read(reg)
+        self.cpu().api_reg_read(reg)
     }
 
     /// Write any register by enum tag. Width semantics:
@@ -239,24 +235,24 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     ///   For correct protected-mode operation use
     ///   `setup_cpu_mode` instead.
     pub fn reg_write(&mut self, reg: X86Reg, val: u64) {
-        self.cpu.api_reg_write(reg, val);
+        self.cpu_mut().api_reg_write(reg, val);
     }
 
     /// Read an MSR by index. Returns Err if the MSR is not modeled.
     pub fn msr_read(&self, msr: u32) -> Result<u64> {
-        self.cpu.read_msr_for_api(msr).map_err(Error::Cpu)
+        self.cpu().read_msr_for_api(msr).map_err(Error::Cpu)
     }
 
     /// Write an MSR by index. Returns Err if the MSR is not writable.
     pub fn msr_write(&mut self, msr: u32, val: u64) -> Result<()> {
-        self.cpu.write_msr_for_api(msr, val).map_err(Error::Cpu)
+        self.cpu_mut().write_msr_for_api(msr, val).map_err(Error::Cpu)
     }
 
     /// Build a CPU snapshot on demand. Not invoked by instrumentation — see
     /// [`CpuSnapshot`] docs for the design rationale (callbacks use
     /// primitives, not snapshots).
     pub fn cpu_snapshot(&self) -> CpuSnapshot {
-        let cpu = &self.cpu;
+        let cpu = self.cpu();
         CpuSnapshot {
             rax: cpu.rax(),
             rbx: cpu.rbx(),
@@ -349,7 +345,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             X86Reg::Fpr7 => 7,
             _ => return [0u8; 10],
         };
-        self.cpu.fpu_read_st(index)
+        self.cpu().fpu_read_st(index)
     }
 
     pub fn reg_write_fp80(&mut self, reg: X86Reg, val: [u8; 10]) {
@@ -364,7 +360,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             X86Reg::Fpr7 => 7,
             _ => return,
         };
-        self.cpu.fpu_write_st(index, val);
+        self.cpu_mut().fpu_write_st(index, val);
     }
 
     pub fn reg_read_xmm(&self, reg: X86Reg) -> [u8; 16] {
@@ -387,7 +383,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             X86Reg::Xmm15 => 15,
             _ => return [0u8; 16],
         };
-        self.cpu.xmm_read_for_api(index)
+        self.cpu().xmm_read_for_api(index)
     }
 
     pub fn reg_write_xmm(&mut self, reg: X86Reg, val: [u8; 16]) {
@@ -410,7 +406,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             X86Reg::Xmm15 => 15,
             _ => return,
         };
-        self.cpu.xmm_write_for_api(index, val);
+        self.cpu_mut().xmm_write_for_api(index, val);
     }
 
     pub fn reg_read_ymm(&self, reg: X86Reg) -> [u8; 32] {
@@ -433,7 +429,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             X86Reg::Ymm15 => 15,
             _ => return [0u8; 32],
         };
-        self.cpu.ymm_read_for_api(index)
+        self.cpu().ymm_read_for_api(index)
     }
 
     pub fn reg_write_ymm(&mut self, reg: X86Reg, val: [u8; 32]) {
@@ -456,7 +452,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             X86Reg::Ymm15 => 15,
             _ => return,
         };
-        self.cpu.ymm_write_for_api(index, val);
+        self.cpu_mut().ymm_write_for_api(index, val);
     }
 
     pub fn reg_read_zmm(&self, reg: X86Reg) -> [u8; 64] {
@@ -495,7 +491,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             X86Reg::Zmm31 => 31,
             _ => return [0u8; 64],
         };
-        self.cpu.zmm_read_for_api(index)
+        self.cpu().zmm_read_for_api(index)
     }
 
     pub fn reg_write_zmm(&mut self, reg: X86Reg, val: [u8; 64]) {
@@ -534,7 +530,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             X86Reg::Zmm31 => 31,
             _ => return,
         };
-        self.cpu.zmm_write_for_api(index, val);
+        self.cpu_mut().zmm_write_for_api(index, val);
     }
 
     // ── Exit set API ─────────────────────────────────────────────────────
@@ -564,13 +560,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         read_cb: alloc::boxed::Box<dyn FnMut(u64, usize) -> u64 + Send>,
         write_cb: alloc::boxed::Box<dyn FnMut(u64, usize, u64) + Send>,
     ) {
-        self.cpu.mmio.map(addr, size, read_cb, write_cb);
+        self.cpu_mut().mmio.map(addr, size, read_cb, write_cb);
     }
 
     /// Remove MMIO regions overlapping [addr, addr+size).
     #[cfg(feature = "alloc")]
     pub fn mmio_unmap(&mut self, addr: u64, size: u64) {
-        self.cpu.mmio.unmap(addr, size);
+        self.cpu_mut().mmio.unmap(addr, size);
     }
 }
 
@@ -580,87 +576,69 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Read bytes from guest physical memory into the caller's buffer.
     /// Returns the number of bytes read (always `buf.len()` on success).
     /// Bypasses MMIO handlers — matches Unicorn `uc_mem_read` semantics.
-    pub fn mem_read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
-        let ram = self.memory.ram_slice();
-        let start = addr as usize;
-        let end = start.checked_add(buf.len()).ok_or_else(|| {
-            Error::Memory(crate::memory::MemoryError::ReadPhysicalPage {
-                addr: addr as u64,
+    pub fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> Result<()> {
+        let pins_ptr = self.tlb_pins().as_ptr();
+        let pins_len = self.tlb_pins().len();
+        let copied = self.memory.read_ram(
+            unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) },
+            addr,
+            buf,
+        )?;
+        if copied != buf.len() {
+            return Err(Error::Memory(crate::memory::MemoryError::ReadPhysicalPage {
+                addr,
                 len: buf.len(),
-            })
-        })?;
-        if end > ram.len() {
-            return Err(Error::Memory(
-                crate::memory::MemoryError::ReadPhysicalPage {
-                    addr: addr as u64,
-                    len: buf.len(),
-                },
-            ));
+            }));
         }
-        buf.copy_from_slice(&ram[start..end]);
         Ok(())
     }
 
-    /// Read `size` bytes into a freshly-allocated `Vec`.
     #[cfg(feature = "alloc")]
-    pub fn mem_read_vec(&self, addr: u64, size: usize) -> Result<Vec<u8>> {
+    pub fn mem_read_vec(&mut self, addr: u64, size: usize) -> Result<Vec<u8>> {
         let mut v = alloc::vec![0u8; size];
         self.mem_read(addr, &mut v)?;
         Ok(v)
     }
 
-    /// Write bytes to guest physical memory.
-    /// Bypasses MMIO handlers — matches Unicorn `uc_mem_write` semantics.
+    /// Write bytes to guest physical RAM, including swapped blocks.
     pub fn mem_write(&mut self, addr: u64, data: &[u8]) -> Result<()> {
-        let (ptr, cap) = self.memory.get_ram_base_ptr();
-        let start = addr as usize;
-        let end = start.checked_add(data.len()).ok_or_else(|| {
-            Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
-                addr: addr as u64,
+        let pins_ptr = self.tlb_pins().as_ptr();
+        let pins_len = self.tlb_pins().len();
+        let copied = self.memory.write_ram(
+            unsafe { core::slice::from_raw_parts(pins_ptr, pins_len) },
+            addr,
+            data,
+        )?;
+        if copied != data.len() {
+            return Err(Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
+                addr,
                 len: data.len(),
-            })
-        })?;
-        if end > cap {
-            return Err(Error::Memory(
-                crate::memory::MemoryError::WritePhysicalPage {
-                    addr: addr as u64,
-                    len: data.len(),
-                },
-            ));
-        }
-        // SAFETY: bounds-checked above; write to owned guest RAM.
-        unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(start), data.len());
+            }));
         }
         Ok(())
     }
 
-    /// Fill `size` bytes of guest memory with `byte`.
     pub fn mem_fill(&mut self, addr: u64, size: usize, byte: u8) -> Result<()> {
-        let (ptr, cap) = self.memory.get_ram_base_ptr();
-        let start = addr as usize;
-        let end = start.checked_add(size).ok_or_else(|| {
-            Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
-                addr: addr as u64,
-                len: size,
-            })
-        })?;
-        if end > cap {
-            return Err(Error::Memory(
-                crate::memory::MemoryError::WritePhysicalPage {
-                    addr: addr as u64,
-                    len: size,
-                },
-            ));
+        let chunk = [byte; 4096];
+        let mut offset = 0usize;
+        while offset < size {
+            let count = (size - offset).min(chunk.len());
+            self.mem_write(
+                addr.checked_add(u64::try_from(offset)?)
+                    .ok_or(Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
+                        addr,
+                        len: size,
+                    }))?,
+                &chunk[..count],
+            )?;
+            offset += count;
         }
-        // SAFETY: bounds-checked above; write to owned guest RAM.
-        unsafe { core::ptr::write_bytes(ptr.add(start), byte, size) };
         Ok(())
     }
 
     /// Guest memory size in bytes.
     pub fn mem_size(&self) -> usize {
-        self.memory.ram_slice().len()
+        self.memory.get_memory_len()
     }
 
     /// Set memory permissions for a physical address range.
@@ -673,7 +651,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         perms: crate::cpu::instrumentation::MemPerms,
     ) {
         let mem_len = self.memory.get_memory_len();
-        let pp = self.cpu.page_permissions.get_or_insert_with(|| {
+        let pp = self.cpu_mut().page_permissions.get_or_insert_with(|| {
             crate::memory::permissions::PagePermissions::new(mem_len as u64)
         });
         pp.set(addr, size, perms);
@@ -682,25 +660,25 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     // Typed helpers — reduce noise when loaders build page tables, GDT/IDT
     // entries, stack frames, or TEB/PEB scaffolding.
 
-    pub fn mem_read_u8(&self, addr: u64) -> Result<u8> {
+    pub fn mem_read_u8(&mut self, addr: u64) -> Result<u8> {
         let mut b = [0u8; 1];
         self.mem_read(addr, &mut b)?;
         Ok(b[0])
     }
 
-    pub fn mem_read_u16_le(&self, addr: u64) -> Result<u16> {
+    pub fn mem_read_u16_le(&mut self, addr: u64) -> Result<u16> {
         let mut b = [0u8; 2];
         self.mem_read(addr, &mut b)?;
         Ok(u16::from_le_bytes(b))
     }
 
-    pub fn mem_read_u32_le(&self, addr: u64) -> Result<u32> {
+    pub fn mem_read_u32_le(&mut self, addr: u64) -> Result<u32> {
         let mut b = [0u8; 4];
         self.mem_read(addr, &mut b)?;
         Ok(u32::from_le_bytes(b))
     }
 
-    pub fn mem_read_u64_le(&self, addr: u64) -> Result<u64> {
+    pub fn mem_read_u64_le(&mut self, addr: u64) -> Result<u64> {
         let mut b = [0u8; 8];
         self.mem_read(addr, &mut b)?;
         Ok(u64::from_le_bytes(b))
@@ -727,13 +705,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// Translate a guest virtual address to guest physical address using
     /// the current page tables (CR3). Returns Err on page fault.
     pub fn virt_to_phys(&self, vaddr: u64) -> Result<u64> {
-        self.cpu.translate_linear_for_api(vaddr).map_err(Error::Cpu)
+        self.cpu().translate_linear_for_api(vaddr).map_err(Error::Cpu)
     }
 
     /// Read bytes from guest VIRTUAL memory. Translates through current
     /// page tables, then reads from the resulting physical address.
     /// Handles page-crossing reads by translating each page separately.
-    pub fn virt_read(&self, vaddr: u64, buf: &mut [u8]) -> Result<()> {
+    pub fn virt_read(&mut self, vaddr: u64, buf: &mut [u8]) -> Result<()> {
         let mut offset = 0;
         while offset < buf.len() {
             let va = vaddr + offset as u64;
@@ -750,15 +728,13 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     /// translation instead of the current CR3. Useful for reading user-space
     /// strings after the kernel has swapped CR3 (KPTI).
     /// Long mode only. Returns `Err` on translation failure.
-    pub fn virt_read_with_cr3(&self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> Result<()> {
+    pub fn virt_read_with_cr3(&mut self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> Result<()> {
         let mut offset = 0;
         while offset < buf.len() {
             let va = vaddr + offset as u64;
             let page_offset = (va & 0xFFF) as usize;
             let chunk = (0x1000 - page_offset).min(buf.len() - offset);
-            let pa = self
-                .cpu
-                .translate_linear_with_cr3_for_api(va, cr3)
+            let pa = self.cpu().translate_linear_with_cr3_for_api(va, cr3)
                 .ok_or_else(|| Error::Memory(crate::memory::MemoryError::PageNotPresent))?;
             self.mem_read(pa, &mut buf[offset..offset + chunk])?;
             offset += chunk;
@@ -784,31 +760,31 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
     /// Read bytes from guest virtual memory into a Vec.
     #[cfg(feature = "alloc")]
-    pub fn virt_read_vec(&self, vaddr: u64, size: usize) -> Result<Vec<u8>> {
+    pub fn virt_read_vec(&mut self, vaddr: u64, size: usize) -> Result<Vec<u8>> {
         let mut v = alloc::vec![0u8; size];
         self.virt_read(vaddr, &mut v)?;
         Ok(v)
     }
 
-    pub fn virt_read_u8(&self, vaddr: u64) -> Result<u8> {
+    pub fn virt_read_u8(&mut self, vaddr: u64) -> Result<u8> {
         let mut b = [0u8; 1];
         self.virt_read(vaddr, &mut b)?;
         Ok(b[0])
     }
 
-    pub fn virt_read_u16_le(&self, vaddr: u64) -> Result<u16> {
+    pub fn virt_read_u16_le(&mut self, vaddr: u64) -> Result<u16> {
         let mut b = [0u8; 2];
         self.virt_read(vaddr, &mut b)?;
         Ok(u16::from_le_bytes(b))
     }
 
-    pub fn virt_read_u32_le(&self, vaddr: u64) -> Result<u32> {
+    pub fn virt_read_u32_le(&mut self, vaddr: u64) -> Result<u32> {
         let mut b = [0u8; 4];
         self.virt_read(vaddr, &mut b)?;
         Ok(u32::from_le_bytes(b))
     }
 
-    pub fn virt_read_u64_le(&self, vaddr: u64) -> Result<u64> {
+    pub fn virt_read_u64_le(&mut self, vaddr: u64) -> Result<u64> {
         let mut b = [0u8; 8];
         self.virt_read(vaddr, &mut b)?;
         Ok(u64::from_le_bytes(b))
@@ -884,7 +860,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     {
         // Reset any prior stop signal and jump to entry.
         self.stop_flag.store(false, Ordering::Relaxed);
-        self.cpu.set_rip(begin);
+        self.cpu_mut().api_reg_write(X86Reg::Rip, begin);
 
         #[cfg(feature = "std")]
         let start = std::time::Instant::now();
@@ -909,7 +885,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             if timeout.is_some_and(|t| start.elapsed() >= t) {
                 return Ok(EmuStopReason::TimedOut);
             }
-            if self.cpu.is_in_shutdown() {
+            if self.cpu().is_in_shutdown() {
                 return Ok(EmuStopReason::Shutdown);
             }
 
@@ -920,17 +896,17 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
             let (n, _shutdown) = self.step_batch(budget)?;
             executed = executed.saturating_add(n);
 
-            if until.is_some_and(|a| self.cpu.rip() == a) {
+            if until.is_some_and(|a| self.cpu().rip() == a) {
                 return Ok(EmuStopReason::ReachedUntil);
             }
             // Check exit addresses
             if !self.exit_set.is_empty() {
-                let rip = self.cpu.rip();
+                let rip = self.cpu().rip();
                 if self.exit_set.contains(rip) {
                     return Ok(EmuStopReason::ReachedExit(rip));
                 }
             }
-            if n == 0 && self.cpu.is_waiting_for_event() {
+            if n == 0 && self.cpu().is_waiting_for_event() {
                 return Ok(EmuStopReason::Halted);
             }
         }
@@ -962,14 +938,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
         let mut emu = Self::new(config)?;
         // Minimal init: memory + CPU registers + async event flags. We skip
         // load_bios + pc_system.start etc. since the user will not run a BIOS.
-        let cfg = emu.config_ref().clone();
-        emu.memory.init_memory(
-            cfg.guest_memory_size,
-            cfg.host_memory_size,
-            cfg.memory_block_size,
-        )?;
-        emu.memory.set_a20_mask(emu.pc_system.a20_mask());
-        emu.pc_system.initialize(cfg.ips);
+        emu.init_memory_and_pc_system()?;
         // Bring every configured CPU to reset state before applying the mode to the BSP.
         emu.reset(ResetReason::Hardware)?;
         emu.setup_cpu_mode(mode)?;
@@ -987,14 +956,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         tracer: T,
     ) -> Result<Box<Self>> {
         let mut emu = Self::new_with_instrumentation(config, tracer)?;
-        let cfg = emu.config_ref().clone();
-        emu.memory.init_memory(
-            cfg.guest_memory_size,
-            cfg.host_memory_size,
-            cfg.memory_block_size,
-        )?;
-        emu.memory.set_a20_mask(emu.pc_system.a20_mask());
-        emu.pc_system.initialize(cfg.ips);
+        emu.init_memory_and_pc_system()?;
         emu.reset(crate::cpu::ResetReason::Hardware)?;
         emu.setup_cpu_mode(mode)?;
         Ok(emu)
@@ -1017,7 +979,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     fn setup_real_mode(&mut self) -> Result<()> {
         // Reset already puts us in real mode; just enable A20 and IF.
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
-        self.cpu.set_rflags_for_api(0x0000_0202); // IF=1, bit1 reserved=1
+        self.cpu_mut().set_rflags_for_api(0x0000_0202); // IF=1, bit1 reserved=1
         Ok(())
     }
 
@@ -1026,21 +988,19 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     fn setup_protected16(&mut self) -> Result<()> {
         self.install_flat_gdt()?;
         // CS 16-bit, limit 64KB
-        self.cpu.set_seg_for_api(
-            crate::cpu::instrumentation::X86Reg::Cs,
-            0x08,
-            0,
-            0xFFFF,
-            /*code16*/ true,
-            /*long*/ false,
-        );
+        self.cpu_mut().set_seg_for_api(crate::cpu::instrumentation::X86Reg::Cs,
+        0x08,
+        0,
+        0xFFFF,
+        /*code16*/ true,
+        /*long*/ false,);
         // Data selectors, 16-bit
         for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
-            self.cpu.set_seg_for_api(reg, 0x10, 0, 0xFFFF, false, false);
+            self.cpu_mut().set_seg_for_api(reg, 0x10, 0, 0xFFFF, false, false);
         }
-        self.cpu.enter_protected_mode_for_api();
+        self.cpu_mut().enter_protected_mode_for_api();
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
-        self.cpu.set_rflags_for_api(0x0000_0202);
+        self.cpu_mut().set_rflags_for_api(0x0000_0202);
         Ok(())
     }
 
@@ -1049,21 +1009,18 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     fn setup_flat_protected32(&mut self) -> Result<()> {
         self.install_flat_gdt()?;
         // CS 32-bit, 4GB flat
-        self.cpu.set_seg_for_api(
-            X86Reg::Cs,
-            0x08,
-            0,
-            0xFFFFFFFF,
-            /*code16*/ false,
-            /*long*/ false,
-        );
+        self.cpu_mut().set_seg_for_api(X86Reg::Cs,
+        0x08,
+        0,
+        0xFFFFFFFF,
+        /*code16*/ false,
+        /*long*/ false,);
         for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
-            self.cpu
-                .set_seg_for_api(reg, 0x10, 0, 0xFFFFFFFF, false, false);
+            self.cpu_mut().set_seg_for_api(reg, 0x10, 0, 0xFFFFFFFF, false, false);
         }
-        self.cpu.enter_protected_mode_for_api();
+        self.cpu_mut().enter_protected_mode_for_api();
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
-        self.cpu.set_rflags_for_api(0x0000_0202);
+        self.cpu_mut().set_rflags_for_api(0x0000_0202);
         Ok(())
     }
 
@@ -1096,22 +1053,19 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
         self.install_flat_gdt()?;
         // CS in long mode: L=1, D=0
-        self.cpu.set_seg_for_api(
-            X86Reg::Cs,
-            0x08,
-            0,
-            0xFFFFFFFF,
-            /*code16*/ false,
-            /*long*/ true,
-        );
+        self.cpu_mut().set_seg_for_api(X86Reg::Cs,
+        0x08,
+        0,
+        0xFFFFFFFF,
+        /*code16*/ false,
+        /*long*/ true,);
         for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
-            self.cpu
-                .set_seg_for_api(reg, 0x10, 0, 0xFFFFFFFF, false, false);
+            self.cpu_mut().set_seg_for_api(reg, 0x10, 0, 0xFFFFFFFF, false, false);
         }
 
-        self.cpu.enter_long_mode_for_api(PML4);
+        self.cpu_mut().enter_long_mode_for_api(PML4);
         self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
-        self.cpu.set_rflags_for_api(0x0000_0202);
+        self.cpu_mut().set_rflags_for_api(0x0000_0202);
         Ok(())
     }
 
@@ -1137,8 +1091,8 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
         let data_desc: u64 = 0x00CF92000000FFFF;
         self.mem_write_u64_le(GDT_BASE + 0x10, data_desc)?;
 
-        self.cpu.set_gdtr_base_for_api(GDT_BASE);
-        self.cpu.set_gdtr_limit_for_api(0x1F);
+        self.cpu_mut().set_gdtr_base_for_api(GDT_BASE);
+        self.cpu_mut().set_gdtr_limit_for_api(0x1F);
         Ok(())
     }
 }
