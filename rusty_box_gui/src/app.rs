@@ -894,7 +894,7 @@ impl NativeShellApp {
                     .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
                     .inner_margin(egui::Margin::symmetric(12, 4)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let status = self.runtime_status();
                     let running = status.running;
@@ -995,7 +995,7 @@ impl NativeShellApp {
                     .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
                     .inner_margin(egui::Margin::symmetric(14, 6)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let status = self.runtime_status();
                     let running = status.running;
@@ -1059,7 +1059,7 @@ impl NativeShellApp {
                     .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
                     .inner_margin(egui::Margin::same(14)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.label(
                     RichText::new("Library")
                         .size(16.0)
@@ -1133,7 +1133,7 @@ impl NativeShellApp {
                     .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
                     .inner_margin(egui::Margin::symmetric(14, 4)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     if self.shared.is_poisoned() {
                         status_dot(ui, ACCENT_RED);
@@ -1195,7 +1195,7 @@ impl NativeShellApp {
         self.take_runtime_error_notice();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG_BASE))
-            .show_inside(ui, |ui| match self.chrome.selected_page {
+            .show(ui, |ui| match self.chrome.selected_page {
                 ShellPage::Home => self.draw_home_page(ui),
                 ShellPage::Console => self.draw_console_page(ui, frame),
                 ShellPage::Hardware => self.draw_hardware_page(ui),
@@ -2108,7 +2108,7 @@ impl NativeShellApp {
                     .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
                     .inner_margin(egui::Margin::symmetric(12, 4)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let status = self.runtime_status();
                     let running = status.running;
@@ -3109,7 +3109,7 @@ impl WebShellApp {
                     .fill(BG_PANEL)
                     .inner_margin(egui::Margin::symmetric(12, 4)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.menu_button("File", |ui| {
                         if ui.button(WEB_BOOT_MEDIA_ACTION_LABEL).clicked() {
@@ -3159,7 +3159,7 @@ impl WebShellApp {
                     .fill(Color32::from_rgb(0x0D, 0x13, 0x1A))
                     .inner_margin(egui::Margin::symmetric(14, 6)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let has_vm = self.web_has_vm();
                     if ui.button(web_primary_action_label(has_vm)).clicked() {
@@ -3196,7 +3196,7 @@ impl WebShellApp {
                     .fill(BG_PANEL)
                     .inner_margin(egui::Margin::same(14)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.label(
                     RichText::new("Library")
                         .size(16.0)
@@ -3243,7 +3243,7 @@ impl WebShellApp {
                     .fill(BG_PANEL)
                     .inner_margin(egui::Margin::symmetric(14, 4)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let state = web_runtime_state(
                         self.init_error.is_some(),
@@ -3281,7 +3281,7 @@ impl WebShellApp {
     fn draw_central(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG_BASE))
-            .show_inside(ui, |ui| match self.chrome.selected_page {
+            .show(ui, |ui| match self.chrome.selected_page {
                 ShellPage::Home => self.draw_web_home_page(ui),
                 ShellPage::Console => self.draw_web_console_page(ui),
                 ShellPage::Hardware => self.draw_web_hardware_page(ui),

@@ -456,7 +456,7 @@ impl WasmEmulatorApp {
                     .inner_margin(egui::Margin::symmetric(16, 0))
                     .stroke(egui::Stroke::new(0.5_f32, BORDER_SUBTLE)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.label(
                         egui::RichText::new("Rusty Box")
@@ -503,7 +503,7 @@ impl WasmEmulatorApp {
                     .inner_margin(egui::Margin::symmetric(16, 0))
                     .stroke(egui::Stroke::new(0.5_f32, BORDER_SUBTLE)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 24.0;
 
@@ -554,7 +554,7 @@ impl WasmEmulatorApp {
     fn render_display(&self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG_DARKEST))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 if let Some(ref err) = self.init_error {
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
