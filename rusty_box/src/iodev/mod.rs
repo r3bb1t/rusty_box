@@ -160,6 +160,14 @@ impl TimerRequestTable {
         self.slots[slot] = request;
         changed
     }
+
+    /// True when any owner slot holds a pending Activate/Deactivate request.
+    #[inline]
+    pub(crate) fn has_any_request(&self) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| !matches!(slot, TimerRequest::Unchanged))
+    }
 }
 
 /// Identifies which hardware device owns an I/O port registration.
@@ -354,6 +362,18 @@ impl BxDevicesC {
         };
         self.request_timer(owner, request);
     }
+    /// Non-consuming test of every I/O-latched boundary slot, used by the
+    /// scheduler's no-work fast path. Covers exactly the sources
+    /// `service_scheduler_boundary` drains from this layer: the final PIC and
+    /// HRQ levels, the explicit boundary request, and fixed timer requests.
+    #[inline]
+    pub(crate) fn has_pending_boundary_work(&self) -> bool {
+        self.pic_intr_level.is_some()
+            || self.hrq_level.is_some()
+            || self.scheduler_boundary_requested
+            || self.timer_requests.has_any_request()
+    }
+
     /// Drain the final PIC INT level observed during I/O dispatch.
     #[inline]
     pub(crate) fn take_pic_intr_level(&mut self) -> Option<bool> {

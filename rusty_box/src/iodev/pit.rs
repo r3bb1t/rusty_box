@@ -1083,21 +1083,22 @@ impl BxPitC {
             return;
         }
 
-        let elapsed_instr = icount.saturating_sub(self.icount_at_last_sync);
-        if elapsed_instr == 0 {
-            return;
-        }
+        // Bochs pit.cc keeps a SINGLE time cursor (`s.last_usec`): every sync —
+        // the timer callback and every port access — advances the counters to
+        // the absolute emulated microsecond, from the same baseline. `total_usec`
+        // is that one cursor here. Deriving elapsed from a *separate* icount
+        // baseline let the timer-callback path (`sync_to_system_ticks`, which
+        // advances `total_usec` absolutely) leave this baseline stale, so the
+        // next port access re-applied the whole span — doubling `total_usec` and
+        // freezing the PIT until wall time caught up. That freeze is what made
+        // Linux `check_timer()` see zero IRQ0 ticks and panic
+        // "IO-APIC + timer doesn't work!".
         self.icount_at_last_sync = icount;
-
-        // icount → whole emulated microseconds first (Bochs pc_system
-        // time_usec = ticks/m_ips feeding pit.cc periodic()), so counter
-        // movement is quantized to microseconds exactly like Bochs. The
-        // sub-microsecond remainder is carried, never dropped.
-        self.usec_remainder += elapsed_instr as u128 * USEC_PER_SECOND as u128;
-        let usec = (self.usec_remainder / self.ips as u128) as u64;
-        self.usec_remainder %= self.ips as u128;
-        if usec != 0 {
-            self.advance_by_usec(usec);
+        let scaled = u128::from(icount) * u128::from(USEC_PER_SECOND);
+        let target_usec = (scaled / u128::from(self.ips)) as u64;
+        self.usec_remainder = scaled % u128::from(self.ips);
+        if target_usec > self.total_usec {
+            self.advance_by_usec(target_usec - self.total_usec);
         }
     }
 
@@ -2060,6 +2061,46 @@ mod tests {
             "zero-elapsed realtime polling must not discard the sub-microsecond baseline"
         );
     }
+    #[test]
+    fn pit_port_access_after_timer_span_does_not_freeze_the_clock() {
+        // Bochs pit.cc keeps ONE time cursor (s.last_usec): the timer callback
+        // and every port access advance the counters from the same baseline.
+        // A port access after a timer-driven span must not re-apply that span
+        // and stall the counter — the exact regression behind Linux
+        // check_timer()'s "IO-APIC + timer doesn't work!" panic.
+        const IPS: u64 = 1_000_000; // 1 tick == 1 microsecond
+        let mut pit = BxPitC::new();
+        pit.counters[0].out_handler_attached = true;
+        pit.init_icount_sync(0, IPS);
+
+        // Counter 0, mode 2 (rate generator), divisor 100.
+        pit.write(PIT_CONTROL, 0x34, 1, 0);
+        pit.write(PIT_COUNTER0, 100, 1, 0);
+        pit.write(PIT_COUNTER0, 0, 1, 0);
+        let _ = pit.drain_irq0_events();
+
+        // Advance ~1000 us purely through the timer-callback (tick) path.
+        let early = pit.timer_callback(1_000, IPS).irq0_transitions
+            + pit.drain_irq0_events().0;
+        assert!(early > 0, "PIT must tick via the timer path");
+
+        // A guest reads a PIT port at the same emulated time. This must NOT
+        // re-apply the 1000 us already consumed by the timer path.
+        let _ = pit.read(PIT_COUNTER0, 1, 1_000);
+        let _ = pit.drain_irq0_events();
+
+        // Continue the tick path; the PIT must keep generating IRQ0 edges.
+        let mut later = 0u32;
+        for tick in 1_001..=2_000 {
+            later += pit.timer_callback(tick, IPS).irq0_transitions;
+            later += pit.drain_irq0_events().0;
+        }
+        assert!(
+            later > 0,
+            "PIT froze after a port access following a timer span (dual-cursor double-count)"
+        );
+    }
+
     #[test]
     fn pit_irq0_fires_at_submillisecond_owner_deadline() {
         let mut pit = BxPitC::new();

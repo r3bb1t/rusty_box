@@ -32,6 +32,42 @@ cargo check --no-default-features -p rusty_box  # no_std + no_alloc build
 cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi  # UEFI app
 ```
 
+## Observing the egui GUI (agents: use this, not desktop screenshots)
+
+To see what the egui GUI is rendering (the VMware-style shell **and** the guest's
+VGA console) and to drive it, use egui 0.35's built-in **inspection protocol** via
+the `egui_mcp` server — do NOT rely on OS-level desktop screenshots (they capture
+the wrong window, need the window foregrounded, and can't synthesize input into egui
+reliably). The inspection path attaches straight to the running app, reads its
+accessibility tree, and synthesizes real input events.
+
+One-time setup:
+```bash
+# rusty_box_gui already builds eframe with the `inspection` feature.
+cargo install --git https://github.com/rerun-io/kittest_inspector egui_mcp  # installs egui-mcp
+claude mcp add egui egui-mcp   # register the stdio MCP server (needs a session reload to expose mcp__egui__* tools)
+```
+
+Launch the GUI with inspection enabled (the app then listens on `127.0.0.1:5719`):
+```bash
+EGUI_INSPECTION=1 cargo run --release -p rusty_box_gui -- --no-config --display egui \
+  --bios cpp_orig/bochs/bochs/bios/BIOS-bochs-latest \
+  --vga-bios cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin \
+  --cdrom <image.iso> --boot cdrom --memory-mib 256 --host-memory-mib 256 --ips 300000000
+```
+
+Then work in an **observe → act → verify** loop with the `egui` MCP tools: `attach`
+first, then `screenshot` (renders the exact egui frame, VGA texture included) and
+`query_tree` (find widget `id`/`role`/text) to orient; `click`/`type_text`/`press_key`
+to drive (e.g. click the "Power On VM" button to boot); `wait_for` to poll async UI.
+Prefer text/`id` locators over raw `pos`. The GUI starts **Stopped** on the launcher —
+it must be powered on (click "Power On VM") before the guest console appears under the
+Console tab; the status bar shows `Running · <n> IPS` once booting.
+
+If the `mcp__egui__*` tools aren't loaded in the current session, drive `egui-mcp`
+directly over stdio (newline-delimited JSON-RPC: `initialize` → `notifications/initialized`
+→ `tools/call attach` → `tools/call screenshot {"save_path": "..."}`) and read the saved PNG.
+
 ## Architecture
 
 ```

@@ -219,6 +219,8 @@ impl BxMemoryStubC {
                 core::ptr::addr_of_mut!((*ptr).used_blocks).write(Cell::new(0));
             }
             core::ptr::addr_of_mut!((*ptr).next_swapout_idx).write(Cell::new(0));
+            // Full residency lays blocks out as an identity map above.
+            core::ptr::addr_of_mut!((*ptr).identity_map).write(Cell::new(allocated >= len));
             #[cfg(feature = "std")]
             core::ptr::addr_of_mut!((*ptr).overflow_file).write(UnsafeCell::new(overflow_file));
             // Machine-wide SMC write-stamp table (Bochs icache.h
@@ -347,6 +349,8 @@ impl BxMemoryStubC {
             smc_overflow_seq: 0,
             apic_scratch: [0u8; 4096],
             next_swapout_idx: Cell::new(0),
+            // Full residency lays blocks out as an identity map above.
+            identity_map: Cell::new(host >= guest),
             #[cfg(feature = "std")]
             overflow_file: UnsafeCell::new(overflow_file),
         })
@@ -813,6 +817,7 @@ impl BxMemoryStubC {
         }
         self.used_blocks.set(used_blocks);
         self.next_swapout_idx.set(next_swapout);
+        self.recompute_identity_map();
         self.smc_stamps.fill(0);
         self.smc_pending.fill(crate::cpu::icache::PendingSmc::default());
         self.smc_pending_len = 0;
@@ -958,6 +963,11 @@ impl BxMemoryStubC {
             if uses_new_slot {
                 self.used_blocks.set(used_blocks + 1);
             }
+            // Swapping regime: blocks land at arbitrary slots (and this path
+            // is only reachable when residency is partial), so the identity
+            // map is broken. Exact by construction — under full residency no
+            // block is ever SwappedOut and this function is never entered.
+            self.identity_map.set(false);
             Ok(())
         }
     }

@@ -102,11 +102,33 @@ fn run() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(500_000_000);
 
+    // PERFBENCH_CPUS=N (default 1): configure N logical CPUs. The workload
+    // still runs only on the BSP; the APs stay parked in wait-for-SIPI. With
+    // N>1 the batch loop takes the SMP round-robin path (quantum slices +
+    // per-slice scheduler boundary), so comparing N=1 vs N=2 isolates the
+    // SMP scheduling overhead on an identical, icache-warm instruction
+    // stream — no BIOS/boot-phase mix, no cold-trace compilation skew.
+    let cpus: u32 = std::env::var("PERFBENCH_CPUS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+
+    // PERFBENCH_QUANTUM=N (default 16, range 1-32): SMP scheduling quantum.
+    // Sweeping this attributes SMP overhead: per-slice costs scale ~1/N.
+    let quantum: u32 = std::env::var("PERFBENCH_QUANTUM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(16);
+
     let cfg = EmulatorConfig {
         guest_memory_size: GUEST_RAM,
         host_memory_size: GUEST_RAM,
         ips: 1_000_000_000,
         pci_enabled: false,
+        cpu_params: rusty_box::params::BxParams::default()
+            .with_topology(cpus, 1, 1)
+            .expect("valid PERFBENCH_CPUS topology"),
+        smp_quantum: quantum,
         ..EmulatorConfig::default()
     };
 
@@ -122,7 +144,9 @@ fn run() {
     // Counter high enough it never reaches zero within the budget.
     emu.reg_write(X86Reg::Rcx, 0x0000_FFFF_FFFF_FFFF);
 
-    println!("perfbench[{mode}]: running {insns} instructions (FlatLong64, paging on)...");
+    println!(
+        "perfbench[{mode}]: running {insns} instructions (FlatLong64, paging on, cpus={cpus})..."
+    );
     let start = Instant::now();
     let reason = emu
         .emu_start(CODE_BASE, None, None, Some(insns))
