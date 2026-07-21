@@ -213,6 +213,12 @@ impl BxDmaC {
         self.hrq_request.take()
     }
 
+    /// Non-consuming test used by the scheduler's no-work fast path.
+    #[inline]
+    pub(crate) fn has_hrq_request(&self) -> bool {
+        self.hrq_request.is_some()
+    }
+
     /// Initialize the DMA controllers (Bochs dma.cc)
     pub fn init(&mut self) {
         tracing::debug!("DMA: Initializing 8237 DMA Controllers");

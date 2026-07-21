@@ -1110,7 +1110,22 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 debug_assert!(self.cpu_runnable_for_batch(cpu_index));
 
                 if smp {
-                    self.cpu_mut_at(cpu_index).mark_icount_sync();
+                    // Stamp this CPU's LAPIC time epoch with the round clock.
+                    // Bochs main.cc SMP loop: `bx_pc_system.ticksTotal` grows
+                    // by BX_TICKN once per full round, so `time_ticks()` —
+                    // which apic.cc get_current_timer_count reads — is frozen
+                    // within a trace but ADVANCES between rounds. Without this
+                    // stamp, a CPU whose LAPIC has no queued scheduler work
+                    // keeps a stale epoch and its TMCCT appears dead until the
+                    // timer fires — guest APIC-timer calibration (TMICT armed
+                    // huge, TMCCT polled over a PIT window) then never sees
+                    // the count move and hangs the AP bring-up.
+                    let round_epoch = self.pc_system.time_ticks();
+                    let cpu = self.cpu_mut_at(cpu_index);
+                    cpu.mark_icount_sync();
+                    cpu.lapic.current_ticks = round_epoch;
+                    cpu.lapic.ticks_at_sync = round_epoch;
+                    cpu.lapic.icount_at_sync = cpu.icount;
                 }
 
                 let mem_static = self.mem_nonnull_static();
@@ -1186,7 +1201,15 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         // SMP must expose queued work before a sibling runs.
                         // UP services a distinct boundary immediately; elapsed
                         // virtual time is committed below.
-                        if smp || boundary_requested {
+                        //
+                        // A slice that queued nothing needs no boundary: the
+                        // exact predicate covers every source the boundary
+                        // drains, so skipping is a pure no-op elision. This
+                        // keeps the SMP round loop near Bochs main.cc cost,
+                        // where slices run no device servicing at all.
+                        if (smp || boundary_requested)
+                            && (boundary_requested || self.scheduler_boundary_work_pending())
+                        {
                             if self.service_scheduler_boundary(0)? {
                                 // Reset applied mid-round: discard all
                                 // pre-reset round time (including the SMP
@@ -3215,9 +3238,67 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// pc_system.cc bx_pc_system_c::Reset runs synchronously inside the
     /// triggering OUT, so nothing accrued before the reset is observable by
     /// the post-reset machine.
+    /// Exact no-work test for a zero-elapsed scheduler boundary.
+    ///
+    /// True iff `service_scheduler_boundary(0)` would perform any state
+    /// change. Every queue and latch the boundary drains is enumerated here —
+    /// a false negative would strand queued device work, so any new boundary
+    /// work source MUST be added to this predicate as well.
+    ///
+    /// Bochs main.cc's SMP round loop runs no per-slice device servicing at
+    /// all (devices act only when `tickn` fires a timer), so skipping our
+    /// no-op boundaries between slices is what keeps the SMP hot loop at
+    /// comparable cost; the servicing itself remains exactly Bochs-ordered
+    /// whenever any work exists.
+    #[inline]
+    fn scheduler_boundary_work_pending(&self) -> bool {
+        // LAPIC bus IPIs, local events, and timer requests
+        // (drain_lapic_bus / service_lapic_local_events /
+        // service_lapic_timer_requests) — the mask is refreshed by
+        // `refresh_cpu_masks` immediately after every CPU slice.
+        self.lapic_work_mask.next_set(0, self.cpu_count()).is_some()
+            // I/O-latched PIC/HRQ levels, boundary request, timer requests.
+            || self.devices.has_pending_boundary_work()
+            // Direct 8237 HRQ slot (producers outside I/O dispatch).
+            || self.device_manager.dma.has_hrq_request()
+            // Deferred ATAPI seek-complete (service_deferred_devices).
+            || self.device_manager.harddrv.seek_complete_pending[0]
+            || self.device_manager.harddrv.seek_complete_pending[1]
+            // A20, PAM/SMRAM/BAR re-registration, and reset requests.
+            || self.device_manager.has_pending_machine_boundary()
+            // IOAPIC deliveries deferred until the LAPIC bus is reachable
+            // (sync_final_event_levels): enqueued by mid-slice I/O without
+            // setting any request flag, so they must be checked directly.
+            || self.device_manager.ioapic.num_pending_deliveries != 0
+            // PIC edge bookkeeping awaiting collapse to a final level.
+            || self.device_manager.pic.irq_pending
+            || self.device_manager.pic.irq_cleared
+            // PIC→IOAPIC edge forwards (drained by dispatch_timer_fires).
+            || self.device_manager.pic.num_ioapic_forwards != 0
+            // Latched CPU events (sync_final_event_levels tail).
+            || self.pc_system.intr_raised
+            || self.pc_system.intr_cleared
+            || self.pc_system.async_event_pending
+            // Fired-timer dispatch loop.
+            || self.pc_system.has_fired_timers()
+            // Cross-CPU SMC invalidation (drain_pending_smc) — must reach
+            // every sibling icache before another CPU runs (Bochs icache.cc
+            // handleSMC).
+            || self.memory.smc_has_pending()
+    }
+
     pub fn service_scheduler_boundary(&mut self, elapsed_ticks: u64) -> CpuResult<bool> {
         self.clear_scheduler_raw_wiring();
 
+        // No-work fast path: when nothing is queued anywhere, every drain in
+        // the prologue below is a no-op by construction, so skip straight to
+        // the tick loop. Bochs main.cc's SMP round commit is exactly this: a
+        // bare BX_TICKN with no device servicing attached. The epilogue after
+        // the tick loop still runs unconditionally — its final-level
+        // publication and mask refresh are state normalizations, not queue
+        // drains, and callers rely on them independently of queued work.
+        let had_work = self.scheduler_boundary_work_pending();
+        if had_work {
         // Reset dominates every previously queued effect. Hardware requests
         // win over software requests from the same boundary.
         let reset_applied = match self.check_and_handle_resets() {
@@ -3331,6 +3412,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             self.invalidate_all_cpu_host_mappings();
         }
         self.drain_device_timer_requests();
+        } // had_work prologue
         // Step virtual time only to the earliest owner deadline, dispatch
         // every tied owner in registration order, then recompute. Callback
         // rearming cannot be skipped by a large tickn leap.
@@ -5829,6 +5911,138 @@ mod tests {
                     "one-tick deadline did not stop the active batch promptly: {executed}"
                 );
                 assert_eq!(emu.pc_system.time_ticks(), executed);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn pit_generates_periodic_irq0_across_multiple_periods() {
+        // Linux check_timer() needs the 8254 PIT to deliver *repeated* IRQ0
+        // ticks. Program counter 0 in mode 2 (rate generator) and confirm the
+        // owner keeps firing, producing many IRQ0 rising edges — not one.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.devices.init(&mut emu.memory).unwrap();
+                emu.device_manager
+                    .init(&mut emu.devices, &mut emu.memory)
+                    .unwrap();
+                emu.pc_system.initialize(1_000_000); // 1 tick = 1 microsecond
+                emu.devices.set_timer_ips(1_000_000);
+                emu.register_timer_owners().unwrap();
+
+                // Counter 0, LSB/MSB, mode 2 (rate generator), binary: 0x34.
+                // Divisor 100 → ~84 us period.
+                emu.device_manager
+                    .pit
+                    .write(crate::iodev::pit::PIT_CONTROL, 0x34, 1, 0);
+                emu.device_manager
+                    .pit
+                    .write(crate::iodev::pit::PIT_COUNTER0, 100, 1, 0);
+                emu.device_manager
+                    .pit
+                    .write(crate::iodev::pit::PIT_COUNTER0, 0, 1, 0);
+
+                let now = emu.pc_system.time_ticks();
+                let delay = emu.device_manager.pit.next_event_usec();
+                assert!(delay.is_some(), "programmed PIT must have a periodic deadline");
+                emu.devices
+                    .request_timer_after_usec(DeviceTimerOwner::Pit, now, delay);
+                emu.drain_device_timer_requests();
+
+                let before = emu.device_manager.diag_pit_fires;
+                // Advance 2 ms; a ~84 us period should fire ~23 times.
+                emu.service_scheduler_boundary(2_000).unwrap();
+                let fires = emu.device_manager.diag_pit_fires - before;
+                assert!(
+                    fires >= 5,
+                    "PIT mode 2 must generate repeated IRQ0 edges, got {fires}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn pit_irq0_delivers_through_ioapic_pin2_to_cpu0() {
+        // Linux check_timer()'s primary path: the 8259 masks IRQ0 and the
+        // timer is routed via IOAPIC pin 2 (GSI2, the IRQ0->GSI2 override) to
+        // CPU 0's LAPIC. A PIT tick must deliver the redirection vector.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.devices.init(&mut emu.memory).unwrap();
+                emu.device_manager
+                    .init(&mut emu.devices, &mut emu.memory)
+                    .unwrap();
+                emu.pc_system.initialize(1_000_000);
+                emu.devices.set_timer_ips(1_000_000);
+                emu.register_timer_owners().unwrap();
+
+                // PIT counter 0, mode 2, divisor 100 (~84 us period).
+                emu.device_manager
+                    .pit
+                    .write(crate::iodev::pit::PIT_CONTROL, 0x34, 1, 0);
+                emu.device_manager
+                    .pit
+                    .write(crate::iodev::pit::PIT_COUNTER0, 100, 1, 0);
+                emu.device_manager
+                    .pit
+                    .write(crate::iodev::pit::PIT_COUNTER0, 0, 1, 0);
+                let now = emu.pc_system.time_ticks();
+                let delay = emu.device_manager.pit.next_event_usec();
+                emu.devices
+                    .request_timer_after_usec(DeviceTimerOwner::Pit, now, delay);
+                emu.drain_device_timer_requests();
+
+                // Software-enable CPU 0's LAPIC (spurious vector 0xFF, bit 8).
+                emu.cpu_mut().lapic.write_aligned(0xF0, 0x1FF, now);
+
+                // Program IOAPIC pin 2: vector 0x30, fixed, physical dest CPU 0,
+                // edge, unmasked. Redirection low index = 0x10 + 2*2 = 0x14.
+                emu.device_manager
+                    .ioapic
+                    .write_aligned(0xFEC0_0000, 0x14, None, None);
+                emu.device_manager
+                    .ioapic
+                    .write_aligned(0xFEC0_0010, 0x30, None, None);
+                emu.device_manager
+                    .ioapic
+                    .write_aligned(0xFEC0_0000, 0x15, None, None);
+                emu.device_manager
+                    .ioapic
+                    .write_aligned(0xFEC0_0010, 0x00, None, None);
+
+                // Linux masks IRQ0 in the 8259 when routing via the IOAPIC.
+                emu.device_manager.pic.master.imr |= 0x01;
+
+                // Fire the PIT across several periods.
+                emu.service_scheduler_boundary(2_000).unwrap();
+
+                assert_ne!(
+                    emu.cpu.pending_event
+                        & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_LAPIC_INTR,
+                    0,
+                    "IOAPIC pin-2 timer interrupt never raised LAPIC INTR on CPU 0"
+                );
+                assert_eq!(
+                    emu.cpu.lapic.acknowledge_int(),
+                    0x30,
+                    "CPU 0 LAPIC did not receive the IOAPIC pin-2 timer vector"
+                );
             })
             .unwrap()
             .join()
@@ -8438,6 +8652,75 @@ mod tests {
                     emu.cpu_ref(AP_INDEX).lapic.intr,
                     "AP LAPIC timer did not interrupt during the SMP batch"
                 );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Bochs main.cc SMP loop: `ticksTotal` grows by BX_TICKN once per round,
+    /// so apic.cc get_current_timer_count — frozen within a trace — still
+    /// advances between rounds. A CPU whose LAPIC has no queued scheduler
+    /// work must therefore observe TMCCT moving across SMP rounds; a frozen
+    /// TMCCT hangs guest APIC-timer calibration during AP bring-up.
+    #[test]
+    fn smp_lapic_tmcct_advances_across_rounds_without_scheduler_work() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const HUGE_TMICT: u32 = 0x0FFF_FFFF;
+
+                let mut config = EmulatorConfig::default();
+                config.cpu_params = BxParams::default()
+                    .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
+                    .unwrap();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    config,
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.reset(ResetReason::Hardware).unwrap();
+                emu.load_ram(&[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN], AP_TRAMPOLINE_ADDR)
+                    .unwrap();
+
+                let handle = emu
+                    .pc_system
+                    .register_timer(TimerOwner::Lapic(AP_INDEX), 1, false, false, "ap_lapic")
+                    .unwrap();
+
+                {
+                    let ap = emu.cpu_mut_at(AP_INDEX);
+                    ap.lapic.timer_handle = Some(handle);
+                    ap.lapic.write_aligned(0xF0, 0x1FF, 0);
+                    ap.lapic.write_aligned(0x320, TEST_LAPIC_TIMER_VECTOR, 0);
+                    ap.lapic.set_initial_timer_count(HUGE_TMICT, 0);
+                    ap.deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                }
+                emu.rebuild_cpu_masks_from_scan();
+                // Apply the deferred timer activation; afterwards the AP LAPIC
+                // has no scheduler work left, exactly like a guest spinning in
+                // an APIC-timer calibration loop.
+                emu.service_scheduler_boundary(0).unwrap();
+
+                let read_tmcct = |emu: &mut Emulator<'_, Corei7SkylakeX>| {
+                    let ap = emu.cpu_mut_at(AP_INDEX);
+                    let icount = ap.icount;
+                    ap.lapic.read_aligned(0x390, icount)
+                };
+
+                let quantum = emu.smp_quantum_ticks();
+                let first = read_tmcct(&mut emu);
+                for _ in 0..8 {
+                    unsafe { emu.run_cpu_batch(quantum) }.unwrap();
+                }
+                let later = read_tmcct(&mut emu);
+
+                assert!(
+                    later < first,
+                    "TMCCT frozen across SMP rounds ({later:#x} vs {first:#x}): \
+                     round epoch was not stamped into the LAPIC time base"
+                );
+                assert!(later > 0, "huge TMICT must not have expired in this window");
             })
             .unwrap()
             .join()

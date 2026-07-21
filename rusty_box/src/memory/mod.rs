@@ -250,6 +250,13 @@ pub struct BxMemoryStubC {
     apic_scratch: [u8; 4096],
 
     next_swapout_idx: Cell<usize>,
+
+    /// Cached "host backing is a full identity map" verdict consumed by
+    /// `identity_guest_base` on every cpu-loop entry (per SMP slice — the
+    /// O(num_blocks) table walk this replaces dominated the SMP hot path).
+    /// Maintained at every block-table mutation: construction, block
+    /// allocation/eviction, and snapshot restore.
+    identity_map: Cell<bool>,
     #[cfg(feature = "std")]
     //overflow_file: Option<Arc<Mutex<std::fs::File>>>,
     overflow_file: UnsafeCell<File>,
@@ -551,6 +558,28 @@ impl BxMemoryStubC {
         &mut arr[..self.num_blocks]
     }
 
+    /// Full O(num_blocks) identity-map scan — the ground truth behind the
+    /// cached `identity_map` flag. Used to (re)compute the cache at block
+    /// table rewrites and as the debug oracle in `identity_guest_base`.
+    pub(super) fn scan_identity_map(&self) -> bool {
+        self.allocated >= self.len
+            && self
+                .blocks_offsets()
+                .iter()
+                .enumerate()
+                .all(|(guest_block, block)| {
+                    matches!(
+                        block,
+                        Block::Block { offset } if *offset == guest_block * self.block_size
+                    )
+                })
+    }
+
+    /// Re-derive the cached identity verdict after a bulk block-table rewrite.
+    pub(super) fn recompute_identity_map(&self) {
+        self.identity_map.set(self.scan_identity_map());
+    }
+
     pub(super) fn rom(&mut self) -> &mut [u8] {
         let ro = self.rom_offset;
         &mut self.actual_vector_mut()[ro..]
@@ -767,20 +796,18 @@ impl<'m> BxMemC<'m> {
     ///
     /// The null result deliberately prevents consumers from treating swapped
     /// guest RAM as a guest-wide host slice.
+    ///
+    /// Consumes the cached `identity_map` verdict: this runs on every
+    /// cpu-loop entry (per SMP slice), where the previous O(num_blocks)
+    /// table walk dominated the whole SMP scheduling path.
     pub(crate) fn identity_guest_base(&mut self) -> (*mut u8, usize) {
         let stub = &self.inherited_memory_stub;
-        if stub.allocated < stub.len
-            || stub
-                .blocks_offsets()
-                .iter()
-                .enumerate()
-                .any(|(guest_block, block)| {
-                    !matches!(
-                        block,
-                        Block::Block { offset } if *offset == guest_block * stub.block_size
-                    )
-                })
-        {
+        debug_assert_eq!(
+            stub.identity_map.get(),
+            stub.scan_identity_map(),
+            "cached identity-map verdict diverged from the block table"
+        );
+        if !stub.identity_map.get() {
             return (core::ptr::null_mut(), 0);
         }
         let ptr = unsafe { stub.actual_vector.add(stub.vector_offset) };
