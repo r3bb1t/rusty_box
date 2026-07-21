@@ -473,6 +473,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if self.get_hrq() {
             if let Some(dma) = dma {
                 dma.raise_hlda(mem.as_deref_mut(), pins);
+                // Bochs dma.cc raise_HLDA calls bx_pc_system.set_HRQ(0)
+                // synchronously at terminal count; apply it here so the
+                // async_event clear below observes the dropped line instead
+                // of thrashing the trace until the next boundary.
+                if let Some(level) = dma.take_hrq_request() {
+                    if let Some(ps) = self.pc_system_mut() {
+                        ps.set_hrq(level);
+                    }
+                }
             }
         }
 
@@ -572,6 +581,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if self.get_hrq() {
             if let Some(dma) = dma {
                 dma.raise_hlda(mem, pins);
+                // Bochs dma.cc raise_HLDA: synchronous set_HRQ(0) at
+                // terminal count (see handle_async_event above).
+                if let Some(level) = dma.take_hrq_request() {
+                    if let Some(ps) = self.pc_system_mut() {
+                        ps.set_hrq(level);
+                    }
+                }
             }
         }
 

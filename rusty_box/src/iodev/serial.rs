@@ -936,6 +936,39 @@ impl BxSerialC {
         self.num_ports
     }
 
+    /// Level of a restored port's IRQ output pin (Bochs serial.cc
+    /// raise_interrupt/lower_interrupt): high while any interrupt source flag
+    /// is set, gated onto the bus by MCR.OUT2.
+    #[cfg(feature = "std")]
+    pub(crate) fn restored_irq_line(&self, port_index: usize) -> Option<(u8, bool)> {
+        let s = self.ports.get(port_index)?;
+        if port_index >= self.num_ports {
+            return None;
+        }
+        let level = s.modem_cntl.out2
+            && (s.ls_interrupt
+                || s.ms_interrupt
+                || s.rx_interrupt
+                || s.tx_interrupt
+                || s.fifo_interrupt);
+        Some((s.irq, level))
+    }
+
+    /// Whether a restored raise/lower edge is still queued for this port's
+    /// first post-restore boundary.
+    #[cfg(feature = "std")]
+    pub(crate) fn has_pending_irq_transition(&self, port_index: usize) -> bool {
+        self.pending_irq_raise
+            .get(port_index)
+            .copied()
+            .unwrap_or(false)
+            || self
+                .pending_irq_lower
+                .get(port_index)
+                .copied()
+                .unwrap_or(false)
+    }
+
     /// Attach or clear this port's fixed `TimerOwner::SerialFifo` handle.
     ///
     /// The central scheduler owns registration. Keeping the handle here makes
@@ -1851,6 +1884,34 @@ impl BxSerialC {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn serial_snapshot_rejects_fifo_overflow() {
+        // A snapshot claiming more buffered RX bytes than the 16-byte 16550
+        // FIFO can hold is corrupt input and must be rejected before any
+        // live state changes.
+        let serial = BxSerialC::new(1);
+        let mut saved = Vec::new();
+        serial.save_snapshot_v3(&mut saved).unwrap();
+
+        // Layout: header = version u32 + num_ports u32 (8 bytes); the first
+        // port record starts with base u16 + irq u8 + 9 interrupt/pending
+        // bools (12 bytes), placing the RX FIFO count u32 at offset 20.
+        const RX_COUNT_OFFSET: usize = 8 + 12;
+        saved[RX_COUNT_OFFSET..RX_COUNT_OFFSET + 4]
+            .copy_from_slice(&17u32.to_le_bytes());
+
+        let mut target = BxSerialC::new(1);
+        let mut reader =
+            SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        let error = target.restore_snapshot_v3(&mut reader).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("count exceeds bound"),
+            "unexpected rejection: {error}"
+        );
+    }
 
     #[test]
     fn test_serial_creation() {

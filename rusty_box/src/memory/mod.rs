@@ -39,6 +39,12 @@ struct CpuTlbPinState {
     dtlb_hosts: [usize; CPU_TLB_PIN_DTLB_SLOTS],
     itlb_hosts: [usize; CPU_TLB_PIN_ITLB_SLOTS],
     vmcb_host: usize,
+    /// Bounded non-ITLB instruction-fetch window (`eip_fetch_ptr`) host
+    /// interval; `fetch_window_end == 0` means no window. Bochs cpu.cc
+    /// `prefetch`: `eipFetchPtr` stays valid until the next refill, so its
+    /// backing block must never be evicted while retained.
+    fetch_window_start: usize,
+    fetch_window_end: usize,
 }
 
 impl CpuTlbPinState {
@@ -47,6 +53,8 @@ impl CpuTlbPinState {
             dtlb_hosts: [0; CPU_TLB_PIN_DTLB_SLOTS],
             itlb_hosts: [0; CPU_TLB_PIN_ITLB_SLOTS],
             vmcb_host: 0,
+            fetch_window_start: 0,
+            fetch_window_end: 0,
         }
     }
 }
@@ -80,6 +88,8 @@ impl CpuTlbPin {
         state.dtlb_hosts.fill(0);
         state.itlb_hosts.fill(0);
         state.vmcb_host = 0;
+        state.fetch_window_start = 0;
+        state.fetch_window_end = 0;
     }
 
     #[inline]
@@ -102,6 +112,16 @@ impl CpuTlbPin {
         unsafe { (*self.state.get()).vmcb_host = host };
     }
 
+    /// Publish (or clear, with `len == 0`) the bounded instruction-fetch
+    /// window so eviction never steals the block backing `eip_fetch_ptr`.
+    #[inline]
+    pub(crate) fn set_fetch_window(&self, start: usize, len: usize) {
+        // SAFETY: see `clear_tlb_hosts`.
+        let state = unsafe { &mut *self.state.get() };
+        state.fetch_window_start = start;
+        state.fetch_window_end = start.wrapping_add(len);
+    }
+
     #[inline]
     pub(crate) fn is_range_pinned(&self, start: usize, end: usize) -> bool {
         // SAFETY: eviction checks only read this separately addressable state;
@@ -109,6 +129,7 @@ impl CpuTlbPin {
         let state = unsafe { &*self.state.get() };
         let contains = |host: usize| host != 0 && host >= start && host < end;
         contains(state.vmcb_host)
+            || (state.fetch_window_start < end && state.fetch_window_end > start)
             || state.dtlb_hosts.iter().copied().any(contains)
             || state.itlb_hosts.iter().copied().any(contains)
     }
@@ -1331,6 +1352,64 @@ mod phase1_tests {
                 let mut retained = [0];
                 assert_eq!(mem.read_ram(&pins, 0, &mut retained).unwrap(), 1);
                 assert_eq!(retained, [0x5a]);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn fetch_window_pin_blocks_data_evicting_code_block() {
+        // Bochs cpu.cc prefetch: `eipFetchPtr` stays valid until the next
+        // refill. A sub-block fetch window has no ITLB slot, so the pin's
+        // dedicated window interval is the only thing preventing a data
+        // access from evicting the code block under a full swap cap.
+        std::thread::Builder::new()
+            .stack_size(256 * MIB)
+            .spawn(|| {
+                let mut mem = BxMemC::new(
+                    BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).unwrap(),
+                    false,
+                );
+                mem.set_a20_mask(u64::MAX);
+                let cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+                let pins = [CpuTlbPin::new(&*cpu)];
+
+                // Make guest block 0 resident and locate its host span.
+                mem.write_ram(&[], 0, &[0x5a]).unwrap();
+                let host = mem
+                    .get_host_mem_addr_pinned(
+                        0,
+                        MemoryAccessType::Execute,
+                        &pins,
+                        CpuMemoryPolicy::default(),
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .as_ptr() as usize;
+
+                // Publish a bounded sub-block fetch window inside block 0,
+                // exactly as `sync_fetch_window_pin` would.
+                pins[0].set_fetch_window(host + 0x100, 0x80);
+                assert!(pins[0].is_range_pinned(host, host + MIB));
+
+                // A data access to a swapped block must NOT evict the pinned
+                // code block — the sole victim candidate is protected.
+                let mut buf = [0u8; 1];
+                assert!(matches!(
+                    mem.read_ram(&pins, 2 * MIB as u64, &mut buf),
+                    Err(Error::Memory(MemoryError::InsufficientRam))
+                ));
+                // The code block is untouched: the stale-pointer scenario is
+                // prevented at its root.
+                let mut retained = [0];
+                assert_eq!(mem.read_ram(&pins, 0, &mut retained).unwrap(), 1);
+                assert_eq!(retained, [0x5a]);
+
+                // Clearing the window releases the block for eviction.
+                pins[0].set_fetch_window(0, 0);
+                assert_eq!(mem.read_ram(&pins, 2 * MIB as u64, &mut buf).unwrap(), 1);
+                assert_eq!(buf, [0]);
             })
             .unwrap()
             .join()

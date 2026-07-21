@@ -849,6 +849,14 @@ impl BxPcSystemC {
 
         // Clear DMA pending flag
         self.hrq_pending = false;
+
+        // Discard fired-but-undispatched timer callbacks. Bochs pc_system.cc
+        // dispatches timer handlers synchronously inside tickn, so a queued
+        // pre-reset callback can never be carried across Reset into the
+        // fresh machine.
+        self.num_fired = 0;
+        self.fired_owner_counts = [0; BX_MAX_TIMERS];
+        self.fired_owners = [TimerOwner::NullTimer; BX_MAX_TIMERS];
     }
 
     /// Register state for save/restore functionality.
@@ -1443,6 +1451,21 @@ impl BxPcSystemC {
         self.fired_owner_counts = fired_owner_counts;
         self.num_fired = num_fired;
         Ok(())
+    }
+
+    /// Locate the registered slot owned by `owner`, if any.
+    #[cfg(feature = "std")]
+    pub(crate) fn find_timer_slot_by_owner(&self, owner: TimerOwner) -> Option<usize> {
+        (0..self.num_timers).find(|&index| {
+            self.timers[index].flags.contains(TimerFlags::IN_USE)
+                && self.timers[index].owner == owner
+        })
+    }
+
+    /// Whether a fired-but-undispatched callback for `owner` is queued.
+    #[cfg(feature = "std")]
+    pub(crate) fn has_fired_owner(&self, owner: TimerOwner) -> bool {
+        self.fired_owners[..self.num_fired].contains(&owner)
     }
 
     /// Validate that a decoded device timer handle still names the fixed

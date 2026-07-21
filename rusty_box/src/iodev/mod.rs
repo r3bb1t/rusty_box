@@ -267,6 +267,10 @@ pub struct BxDevicesC {
     /// the PIC. This overwrites edge history so a clear followed by a reassert
     /// is observed by the CPU as asserted.
     pic_intr_level: Option<bool>,
+    /// Final desired HRQ level after the latest I/O dispatch touched the 8237
+    /// (Bochs pc_system.cc set_HRQ). Last writer wins, exactly like
+    /// `pic_intr_level`.
+    hrq_level: Option<bool>,
     /// Set whenever I/O queues scheduler-owned work that must be committed
     /// after raw bus pointers are torn down.
     scheduler_boundary_requested: bool,
@@ -303,6 +307,7 @@ impl BxDevicesC {
             diag_io_writes: 0,
             device_manager: None,
             pic_intr_level: None,
+            hrq_level: None,
             scheduler_boundary_requested: false,
             timer_requests: TimerRequestTable::default(),
             timer_ips: 1,
@@ -355,6 +360,12 @@ impl BxDevicesC {
         self.pic_intr_level.take()
     }
 
+    /// Drain the final desired HRQ level observed during I/O dispatch.
+    #[inline]
+    pub(crate) fn take_hrq_level(&mut self) -> Option<bool> {
+        self.hrq_level.take()
+    }
+
     /// Drain the scheduler-boundary request raised by I/O dispatch.
     #[inline]
     pub(crate) fn take_scheduler_boundary_requested(&mut self) -> bool {
@@ -373,6 +384,7 @@ impl BxDevicesC {
     #[inline]
     pub(crate) fn discard_scheduler_boundary_work(&mut self) {
         self.pic_intr_level = None;
+        self.hrq_level = None;
         self.scheduler_boundary_requested = false;
         self.timer_requests = TimerRequestTable::default();
     }
@@ -492,6 +504,7 @@ impl BxDevicesC {
         let has_handler = device_id != DeviceId::None && (entry.mask & len_mask) != 0;
 
         let mut pic_intr_level = None;
+        let mut hrq_level = None;
         let mut timer_update = None;
         let value = if has_handler {
             if let Some(dm) = self.device_manager_mut() {
@@ -506,6 +519,7 @@ impl BxDevicesC {
                     }
                 }
                 let (fwds, count) = dm.pic.take_ioapic_forwards();
+                hrq_level = dm.dma.take_hrq_request();
                 let devices::DeviceManager {
                     ref mut pic,
                     ref mut ioapic,
@@ -529,6 +543,9 @@ impl BxDevicesC {
         if let Some(level) = pic_intr_level {
             self.pic_intr_level = Some(level);
         }
+        if let Some(level) = hrq_level {
+            self.hrq_level = Some(level);
+        }
         self.last_io_read_port = port;
         self.last_io_read_value = value;
         value
@@ -545,6 +562,7 @@ impl BxDevicesC {
 
         if has_handler {
             let mut pic_intr_level = None;
+            let mut hrq_level = None;
             let mut ide_timer_delays = [None; 2];
             let mut timer_update = None;
             let mut cmos_timer_sync = None;
@@ -565,6 +583,7 @@ impl BxDevicesC {
                     }
                 }
                 let (fwds, count) = dm.pic.take_ioapic_forwards();
+                hrq_level = dm.dma.take_hrq_request();
                 let devices::DeviceManager { pic, ioapic, .. } = dm;
                 for &(irq, level) in &fwds[..count] {
                     ioapic.set_irq_level(irq, level, Some(&mut *pic), None);
@@ -590,6 +609,9 @@ impl BxDevicesC {
             }
             if let Some(level) = pic_intr_level {
                 self.pic_intr_level = Some(level);
+            }
+            if let Some(level) = hrq_level {
+                self.hrq_level = Some(level);
             }
             for (channel, delay_ticks) in ide_timer_delays.into_iter().enumerate() {
                 if let Some(delay_ticks) = delay_ticks {
@@ -1002,6 +1024,10 @@ impl BxDevicesC {
             len,
             if self.pic_intr_level.is_some() { 2 } else { 1 },
         )?;
+        len = checked_snapshot_len_add(
+            len,
+            if self.hrq_level.is_some() { 2 } else { 1 },
+        )?;
         len = checked_snapshot_len_add(len, 1)?; // scheduler boundary latch
         for request in self.timer_requests.slots {
             len = checked_snapshot_len_add(len, timer_request_snapshot_len(request)?)?;
@@ -1030,6 +1056,10 @@ impl BxDevicesC {
         writer.write_u32(self.pci_conf_addr)?;
         writer.write_bool(self.pic_intr_level.is_some())?;
         if let Some(level) = self.pic_intr_level {
+            writer.write_bool(level)?;
+        }
+        writer.write_bool(self.hrq_level.is_some())?;
+        if let Some(level) = self.hrq_level {
             writer.write_bool(level)?;
         }
         writer.write_bool(self.scheduler_boundary_requested)?;
@@ -1071,6 +1101,11 @@ impl BxDevicesC {
         } else {
             None
         };
+        let hrq_level = if reader.read_bool()? {
+            Some(reader.read_bool()?)
+        } else {
+            None
+        };
         let scheduler_boundary_requested = reader.read_bool()?;
         let mut timer_requests =
             [TimerRequest::Unchanged; BX_FIXED_TIMER_OWNER_COUNT];
@@ -1103,6 +1138,7 @@ impl BxDevicesC {
         self.pci_enabled = pci_enabled;
         self.pci_conf_addr = pci_conf_addr;
         self.pic_intr_level = pic_intr_level;
+        self.hrq_level = hrq_level;
         self.scheduler_boundary_requested = scheduler_boundary_requested;
         self.timer_requests = TimerRequestTable {
             slots: timer_requests,

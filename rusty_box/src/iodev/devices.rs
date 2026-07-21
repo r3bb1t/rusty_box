@@ -1432,8 +1432,9 @@ pub struct SystemControlPort {
     /// Most recently requested A20 gate value from port 92h. The central
     /// boundary synchronizes this mirror to the machine gate after quiescing.
     pub a20_gate: bool,
-    /// Set by every port 92h write so stale controller mirrors cannot suppress
-    /// a requested machine-wide A20 transition.
+    /// Set only on an actual A20 gate transition. The central boundary keeps
+    /// this mirror in sync with the machine gate after every quiesce, so a
+    /// compare against the mirror is a compare against the machine state.
     pub(crate) a20_change_pending: bool,
     /// Reset request type from port 92h bit 0 (Bochs treats it as software reset).
     pub reset_request: Option<ResetReason>,
@@ -1451,21 +1452,25 @@ impl SystemControlPort {
     }
 
     /// Queue a port 92h A20/reset request for the central machine boundary.
-    /// Returns true because every write requires boundary service.
-    pub fn write(&mut self, value: u8) -> bool {
+    /// Callers observe latched work through `a20_change_pending` and
+    /// `reset_request` (also aggregated by `has_pending_machine_boundary`).
+    pub fn write(&mut self, value: u8) {
         self.value = value;
-        // Bochs devices.cc applies each write to the one machine-wide A20
-        // gate. Keep the desired value pending even when this controller's
-        // local mirror happens to match it.
-        self.a20_gate = (value & 0x02) != 0;
-        self.a20_change_pending = true;
+        // Bochs pc_system.cc bx_pc_system_c::set_enable_a20 fires
+        // MemoryMappingChanged() only "If there has been a transition"; a
+        // repeated same-value write is architecturally a no-op. The mirror is
+        // re-synced from the machine gate at every boundary quiesce, so the
+        // transition compare below is against real machine state.
+        let new_gate = (value & 0x02) != 0;
+        if new_gate != self.a20_gate {
+            self.a20_gate = new_gate;
+            self.a20_change_pending = true;
+        }
         self.reset_request = if (value & 0x01) != 0 {
             Some(ResetReason::Software)
         } else {
             None
         };
-
-        true
     }
 
     /// Read current port 92h value
@@ -1919,21 +1924,44 @@ mod tests {
         assert!(port.reset_request.is_none());
 
         // Disable A20 (bit 1 = 0)
-        let changed = port.write(0x00);
-        assert!(changed); // State changed
+        port.write(0x00);
+        assert!(port.a20_change_pending);
         assert!(!port.a20_gate);
 
         // Enable A20 again (bit 1 = 1)
-        let changed = port.write(0x02);
-        assert!(changed);
-        assert!(port.a20_gate);
-
-        // Repeating a desired value must still queue the machine-wide request.
-        assert!(port.write(0x02));
+        port.write(0x02);
         assert!(port.a20_change_pending);
+        assert!(port.a20_gate);
 
         // Trigger reset (bit 0 = 1)
         port.write(0x01);
+        assert_eq!(port.reset_request, Some(ResetReason::Software));
+    }
+
+    #[test]
+    fn port92_repeated_value_does_not_latch_boundary() {
+        // Bochs pc_system.cc set_enable_a20: only an actual gate transition
+        // produces machine work; a same-value write is a no-op.
+        let mut port = SystemControlPort::new();
+
+        // Gate starts enabled; rewriting the enabled value latches nothing.
+        port.write(0x02);
+        assert!(!port.a20_change_pending);
+
+        // A genuine transition latches boundary work.
+        port.write(0x00);
+        assert!(port.a20_change_pending);
+
+        // Simulate the central boundary draining the request.
+        port.a20_change_pending = false;
+
+        // Repeating the now-current value latches nothing again.
+        port.write(0x00);
+        assert!(!port.a20_change_pending);
+
+        // A reset-bearing write latches its reset without a spurious A20 latch.
+        port.write(0x01);
+        assert!(!port.a20_change_pending);
         assert_eq!(port.reset_request, Some(ResetReason::Software));
     }
 
@@ -2771,7 +2799,8 @@ mod tests {
             use std::io::Cursor;
 
             let mut source = DeviceManager::new();
-            assert!(source.port92.write(0x01));
+            source.port92.write(0x01);
+            assert!(source.port92.reset_request.is_some());
             source.pci_conf_addr = 0x8000_0900;
             source.pam_needs_update = true;
 

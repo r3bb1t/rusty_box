@@ -833,6 +833,23 @@ impl BxPicC {
         None
     }
 
+    /// Read the restored input line level of one IRQ (Bochs pic.h `IRQ_in`).
+    ///
+    /// Deliberately reads the line state, not IRR: edge-latch history such as
+    /// an IRR bit consumed by interrupt acknowledge while the line stays high
+    /// must not look like a device/PIC disagreement.
+    #[cfg(feature = "std")]
+    #[inline]
+    pub(crate) fn irq_line_level(&self, irq_no: u8) -> bool {
+        if irq_no < 8 {
+            self.master.irq_in[irq_no as usize] != 0
+        } else if irq_no < 16 {
+            self.slave.irq_in[(irq_no - 8) as usize] != 0
+        } else {
+            false
+        }
+    }
+
     /// Lower an IRQ line (Bochs `bx_pic_c::lower_irq`)
     ///
     /// Clears the IRQ assertion flag and the IRR bit.

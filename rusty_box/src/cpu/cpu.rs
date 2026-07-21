@@ -1094,6 +1094,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             0
         });
+        match self.eip_fetch_ptr {
+            Some(slice) => pin.set_fetch_window(slice.as_ptr() as usize, slice.len()),
+            None => pin.set_fetch_window(0, 0),
+        }
         self.tlb_pin_dirty.set(false);
     }
 
@@ -1162,6 +1166,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.eip_fetch_ptr = None;
         self.itlb.invalidate_slot(laddr, len);
         self.sync_itlb_pin_slot(laddr, len);
+        self.sync_fetch_window_pin();
+    }
+
+    /// Publish the current bounded instruction-fetch window to the eviction
+    /// sidecar. `eip_fetch_ptr` (Bochs cpu.cc `eipFetchPtr`) may reference a
+    /// sub-page resident block that no ITLB slot pins; without this interval
+    /// a data access could evict the backing block and leave the retained
+    /// fetch pointer dangling.
+    #[inline]
+    pub(crate) fn sync_fetch_window_pin(&self) {
+        if let Some(pin) = self.active_tlb_pin_sidecar() {
+            match self.eip_fetch_ptr {
+                Some(slice) => pin.set_fetch_window(slice.as_ptr() as usize, slice.len()),
+                None => pin.set_fetch_window(0, 0),
+            }
+        } else {
+            self.tlb_pin_dirty.set(true);
+        }
     }
 
 
@@ -1909,14 +1931,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// visible only after the raw I/O borrow ends.
     #[inline]
     pub(super) fn sync_io_events(&mut self) {
-        let (pic_intr_level, scheduler_boundary_requested) =
+        let (pic_intr_level, hrq_level, scheduler_boundary_requested) =
             if let Some(io) = self.io_bus_mut() {
                 (
                     io.take_pic_intr_level(),
+                    io.take_hrq_level(),
                     io.take_scheduler_boundary_requested(),
                 )
             } else {
-                (None, false)
+                (None, None, false)
             };
 
         if let Some(level) = pic_intr_level {
@@ -1924,6 +1947,18 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 self.signal_event(Self::BX_EVENT_PENDING_INTR);
             } else {
                 self.clear_event(Self::BX_EVENT_PENDING_INTR);
+            }
+        }
+        if let Some(level) = hrq_level {
+            // Bochs pc_system.cc set_HRQ: `HRQ = val; if (val)
+            // BX_CPU(0)->async_event = 1;` — the OUT that unmasked a pending
+            // DRQ makes HRQ visible at this CPU's very next instruction
+            // boundary, where handle_async_event services HLDA.
+            if let Some(ps) = self.pc_system_mut() {
+                ps.set_hrq(level);
+            }
+            if level {
+                self.async_event |= 1;
             }
         }
         if scheduler_boundary_requested {
@@ -3440,6 +3475,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             }
         }
 
+        // Publish the final fetch window from every arm above, including
+        // full-page windows installed without a matching ITLB slot.
+        self.sync_fetch_window_pin();
+
         Ok(())
     }
 
@@ -3928,6 +3967,41 @@ mod tests {
         params::BxParams,
         pc_system::{BxPcSystemC, TimerOwner},
     };
+
+    #[test]
+    fn fetch_window_pin_cleared_by_itlb_invalidation() {
+        // Bochs cpu.cc prefetch: `eipFetchPtr` remains valid until the next
+        // refill. The publisher must pin its exact host span and the ITLB
+        // invalidation path must clear both the pointer and the pin.
+        static CODE: [u8; 0x80] = [0x90; 0x80];
+
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
+            false,
+        );
+        let pin = CpuTlbPin::new(&cpu);
+        let pins = core::slice::from_ref(&pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
+
+        cpu.eip_fetch_ptr = Some(&CODE);
+        cpu.sync_fetch_window_pin();
+        let start = CODE.as_ptr() as usize;
+        assert!(pin.is_range_pinned(start, start + CODE.len()));
+        // Only the exact window is pinned, not neighbouring ranges.
+        assert!(!pin.is_range_pinned(start + CODE.len(), start + 2 * CODE.len()));
+
+        cpu.invalidate_itlb_pin_slot(0, 0);
+        assert!(cpu.eip_fetch_ptr.is_none());
+        assert!(!pin.is_range_pinned(start, start + CODE.len()));
+
+        // The full-rescan recovery path republishes a live window.
+        cpu.eip_fetch_ptr = Some(&CODE);
+        cpu.refresh_tlb_pin(&pin);
+        assert!(pin.is_range_pinned(start, start + CODE.len()));
+
+        cpu.clear_memory_access();
+    }
 
     #[test]
     fn page_walk_direct_ad_writes_invalidate_dword_and_qword_cached_code() {

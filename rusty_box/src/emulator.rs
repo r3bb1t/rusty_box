@@ -40,16 +40,25 @@ use core::sync::atomic::AtomicBool;
 #[cfg(feature = "alloc")]
 use core::sync::atomic::Ordering;
 
+// Direct Linux boot (`setup_direct_linux_boot`) is alloc-only.
+#[cfg(feature = "alloc")]
 const BZIMAGE_MIN_HEADER_LEN: usize = 0x264;
 #[cfg(not(feature = "alloc"))]
 const NO_ALLOC_MAX_AP_CPUS: usize = (crate::params::BX_MAX_SMP_THREADS_SUPPORTED as usize) - 1;
 const BOCHS_APIC_BUS_ID_MASK: u32 = 0xFF;
+#[cfg(feature = "alloc")]
 const BZIMAGE_BOOT_SIGNATURE_OFFSET: usize = 0x1FE;
+#[cfg(feature = "alloc")]
 const BZIMAGE_BOOT_SIGNATURE_LO: u8 = 0x55;
+#[cfg(feature = "alloc")]
 const BZIMAGE_BOOT_SIGNATURE_HI: u8 = 0xAA;
+#[cfg(feature = "alloc")]
 const BZIMAGE_HEADER_MAGIC_OFFSET: usize = 0x202;
+#[cfg(feature = "alloc")]
 const BZIMAGE_HEADER_MAGIC: u32 = u32::from_le_bytes(*b"HdrS");
+#[cfg(feature = "alloc")]
 const BZIMAGE_BOOT_VERSION_OFFSET: usize = 0x206;
+#[cfg(feature = "alloc")]
 const BZIMAGE_MIN_BOOT_PROTOCOL: u16 = 0x0204;
 
 /// Fixed-width CPU membership bitmap for the accepted 254-CPU topology.
@@ -713,7 +722,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         live_sm: u16,
         live_vga: crate::iodev::vga::VgaSnapshotRestoreTarget,
         platform: crate::iodev::devices::PlatformSnapshotRestore,
-        _keyboard: crate::iodev::keyboard::KeyboardSnapshotRestore,
+        keyboard: crate::iodev::keyboard::KeyboardSnapshotRestore,
+        cmos: crate::iodev::cmos::CmosSnapshotRestoreState,
         acpi: crate::iodev::acpi::AcpiSnapshotRestore,
         vga: crate::iodev::vga::VgaSnapshotRestoreTarget,
         pci: crate::iodev::pci_ide::PciIdeSnapshotTopology,
@@ -733,15 +743,139 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             )
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
 
-        self.device_manager
+        let sci_level = self
+            .device_manager
             .acpi
             .post_restore_snapshot_v3(self.pc_system.time_ticks());
         self.device_manager.serial.after_restore_snapshot_v3()?;
         self.device_manager.vga.rebuild_snapshot_v3_derived_state()?;
+        self.validate_restored_irq_levels(&keyboard, &cmos, sci_level)?;
         self.sync_restored_event_levels();
         self.rebuild_cpu_masks_from_scan();
         self.batch_advanced_pc_system = false;
         self.clear_scheduler_raw_wiring();
+        Ok(())
+    }
+
+    /// Re-anchor host pacing after a restore and validate the Slowdown owner
+    /// against the live configuration.
+    ///
+    /// Host anchors (wall-clock `Instant`, accrued lead/lag) are deliberately
+    /// never serialized — host time is not guest state — so a restore must
+    /// restart lead/lag accumulation at zero from the restored virtual clock
+    /// and the current wall clock (plan restore-hook step 8: host pause time
+    /// is not charged). Cross-configuration restores are rejected like the
+    /// section's IPS-mismatch precedent.
+    #[cfg(feature = "std")]
+    pub(crate) fn reanchor_slowdown_after_restore(&mut self) -> std::io::Result<()> {
+        use std::io::{Error, ErrorKind};
+        let restored_slot = self
+            .pc_system
+            .find_timer_slot_by_owner(TimerOwner::Slowdown);
+        match (
+            self.config.sync_slowdown,
+            self.slowdown_timer.timer_handle,
+            restored_slot,
+        ) {
+            (false, None, None) => Ok(()),
+            (true, Some(handle), Some(slot)) if slot == handle => {
+                self.pc_system
+                    .validate_timer_handle_owner(handle, TimerOwner::Slowdown)?;
+                let emulated_now = self.pc_system.time_usec();
+                self.slowdown_timer
+                    .initialize(handle, emulated_now, std::time::Instant::now());
+                // A genuine snapshot always carries the one-shot armed or its
+                // fire queued; rearm defensively if neither survived so
+                // pacing resumes.
+                if !self.pc_system.is_timer_active(handle)
+                    && !self.pc_system.has_fired_owner(TimerOwner::Slowdown)
+                {
+                    self.pc_system
+                        .activate_timer_usec(handle, SLOWDOWN_QUANTUM_USEC as u32, false)
+                        .map_err(|error| {
+                            Error::new(
+                                ErrorKind::InvalidData,
+                                format!("slowdown pacing rearm failed: {error:?}"),
+                            )
+                        })?;
+                }
+                Ok(())
+            }
+            _ => Err(Error::new(
+                ErrorKind::InvalidData,
+                "snapshot slowdown pacing owner does not match live configuration",
+            )),
+        }
+    }
+
+    /// Reject a snapshot whose device sections disagree with the restored PIC
+    /// input lines.
+    ///
+    /// Bochs pic.cc `bx_pic_c::register_state` restores `IRQ_in` from the
+    /// PIC's own saved state and no device re-raises its line on restore; a
+    /// correct quiesced save therefore always agrees. Re-driving a level here
+    /// would emit artificial IOAPIC edges, so a disagreement is corrupt input
+    /// and poisons the restore. Checks are skipped while a serialized
+    /// in-flight edge latch says a transition is still queued for the first
+    /// post-restore boundary.
+    #[cfg(feature = "std")]
+    fn validate_restored_irq_levels(
+        &self,
+        keyboard: &crate::iodev::keyboard::KeyboardSnapshotRestore,
+        cmos: &crate::iodev::cmos::CmosSnapshotRestoreState,
+        sci_level: bool,
+    ) -> std::io::Result<()> {
+        fn mismatch(what: &'static str) -> std::io::Error {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("restored {what} level disagrees with restored PIC line"),
+            )
+        }
+        let pic = &self.device_manager.pic;
+        let kbd = &self.device_manager.keyboard.kbd_controller;
+
+        if !kbd.irq1_requested && pic.irq_line_level(1) != keyboard.irq1_level {
+            return Err(mismatch("keyboard IRQ1"));
+        }
+        if !kbd.irq12_requested && pic.irq_line_level(12) != keyboard.irq12_level {
+            return Err(mismatch("mouse IRQ12"));
+        }
+
+        let cmos_live = &self.device_manager.cmos;
+        if !cmos_live.irq8_pending
+            && !cmos_live.irq8_lower_pending
+            && pic.irq_line_level(8) != cmos.irq8_level
+        {
+            return Err(mismatch("RTC IRQ8"));
+        }
+
+        // `pm_update_sci` recomputes deterministically from restored
+        // PMSTS/PMEN state, so a genuine snapshot always agrees.
+        if pic.irq_line_level(9) != sci_level {
+            return Err(mismatch("ACPI SCI IRQ9"));
+        }
+
+        for (channel, irq) in [(0usize, 14u8), (1, 15)] {
+            if self.device_manager.harddrv.seek_complete_pending[channel] {
+                continue;
+            }
+            if pic.irq_line_level(irq) != self.device_manager.harddrv.get_irq_level(channel)
+            {
+                return Err(mismatch("ATA IRQ"));
+            }
+        }
+
+        let serial = &self.device_manager.serial;
+        for port in 0..serial.configured_port_count() {
+            if serial.has_pending_irq_transition(port) {
+                continue;
+            }
+            if let Some((irq, level)) = serial.restored_irq_line(port) {
+                if pic.irq_line_level(irq) != level {
+                    return Err(mismatch("serial IRQ"));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -814,6 +948,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             self.lapic_work_mask, lapic_work,
             "LAPIC work CPU mask diverged"
         );
+        assert_eq!(
+            self.can_fast_forward_bsp_hlt(),
+            self.can_fast_forward_bsp_hlt_scan(),
+            "HLT fast-forward predicate diverged from the per-AP scan"
+        );
     }
 
     /// Clear all raw device-side wiring before touching machine-owned state.
@@ -826,6 +965,19 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.device_manager.mem_ptr = None;
         self.device_manager.active_tlb_pins = None;
         self.device_manager.active_tlb_pin_count = 0;
+    }
+
+    /// Per-AP HLT fast-forward eligibility from the maintained runnable mask.
+    ///
+    /// Equivalence with the authoritative per-AP scan
+    /// (`can_fast_forward_bsp_hlt_scan`): `cpu_runnable_for_batch` is false
+    /// exactly for WAIT_FOR_SIPI and for the SHUTDOWN/HLT/MWAIT family with
+    /// no pending wake event — precisely the scan's eligibility set — and
+    /// `Active` is always runnable. The test-mode oracle asserts this
+    /// equivalence at every batch/boundary.
+    #[inline]
+    fn ap_fast_forward_allowed(runnable_mask: CpuMask, cpu_count: usize) -> bool {
+        runnable_mask.next_set(1, cpu_count).is_none()
     }
 
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
@@ -844,6 +996,13 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // at their exact deadlines inside tickn either way, and a fully idle
         // machine has no other event source), so this host-side optimization
         // does not diverge from Bochs guest-visible behavior.
+        Self::ap_fast_forward_allowed(self.runnable_mask, self.cpu_count())
+    }
+
+    /// The authoritative per-AP scan the mask predicate must match; kept as
+    /// the test oracle only.
+    #[cfg(test)]
+    fn can_fast_forward_bsp_hlt_scan(&self) -> bool {
         (1..self.cpu_count()).all(|cpu_index| {
             matches!(
                 self.cpu_ref(cpu_index).activity_state,
@@ -880,6 +1039,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         }
         self.batch_advanced_pc_system = false;
         self.clear_scheduler_raw_wiring();
+        // A reset applied at batch entry needs no special handling: the batch
+        // below simply starts executing at the reset vector.
         self.service_scheduler_boundary(0)?;
         self.refresh_dirty_tlb_pins();
 
@@ -927,6 +1088,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             };
             let mut round_ticks = 0u64;
             let mut boundary_reached = false;
+            let mut reset_in_round = false;
             let idle_credit = self.smp_quantum_ticks();
             let mut cpu_cursor = 0usize;
 
@@ -1025,7 +1187,18 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         // UP services a distinct boundary immediately; elapsed
                         // virtual time is committed below.
                         if smp || boundary_requested {
-                            self.service_scheduler_boundary(0)?;
+                            if self.service_scheduler_boundary(0)? {
+                                // Reset applied mid-round: discard all
+                                // pre-reset round time (including the SMP
+                                // division remainder) so no pre-reset tick
+                                // reaches the fresh machine, and end the
+                                // batch at the reset vector.
+                                round_ticks = 0;
+                                self.smp_tick_remainder = 0;
+                                reset_in_round = true;
+                                boundary_reached = true;
+                                break;
+                            }
                         }
                         if boundary_requested {
                             boundary_reached = true;
@@ -1046,6 +1219,12 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 break;
             }
 
+            if reset_in_round {
+                // Pre-reset elapsed time was discarded; the next instruction
+                // executed is at the reset vector.
+                break;
+            }
+
             let elapsed_ticks = if smp {
                 let total_ticks = self.smp_tick_remainder.saturating_add(round_ticks);
                 let elapsed = total_ticks / cpu_count as u64;
@@ -1061,8 +1240,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 continue;
             }
 
+            if self.service_scheduler_boundary(elapsed_ticks)? {
+                // Reset at the commit boundary itself: elapsed_ticks was
+                // discarded by the boundary and must not be reported as
+                // committed batch time.
+                self.smp_tick_remainder = 0;
+                break;
+            }
             total_elapsed_ticks = total_elapsed_ticks.saturating_add(elapsed_ticks);
-            self.service_scheduler_boundary(elapsed_ticks)?;
             self.batch_advanced_pc_system = true;
             if boundary_reached {
                 break;
@@ -1671,6 +1856,17 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     ///
     /// Call this AFTER `init_memory_and_pc_system()` and `load_bios()`.
     pub fn init_cpu_and_devices(&mut self) -> Result<()> {
+        // The no-alloc construction path (`init_at`) has no separate
+        // `init_memory_and_pc_system` step, so make this initializer
+        // self-sufficient: without it a no-alloc machine ran every device
+        // timer conversion against the default `ips = 1`. Re-running it in
+        // the alloc flow is harmless — no timers are registered until
+        // `register_timer_owners` below and no virtual time has advanced.
+        self.pc_system.initialize(self.config.ips);
+        self.devices.set_timer_ips(u64::from(self.config.ips));
+        self.smp_tick_remainder = 0;
+        self.batch_advanced_pc_system = false;
+
         let cpu_params = self.config.cpu_params.clone();
         for cpu_index in 0..self.cpu_count() {
             self.cpu_mut_at(cpu_index).initialize(cpu_params.clone())?;
@@ -2214,7 +2410,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         bytes
     }
 
-    #[cfg(feature = "alloc")]
+    // Only the debug-assertions Alpine diagnostic dump consumes this.
+    #[cfg(all(feature = "std", debug_assertions))]
     #[inline]
     fn read_physical_u64_or_zero(&mut self, addr: u64) -> u64 {
         let bytes = self.peek_ram_at(addr as usize, 8);
@@ -2264,13 +2461,17 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     }
 
     /// Queue Port 92 A20/reset work through the central machine boundary.
-    /// Returns whether the write requested a reset.
+    /// Returns whether a reset was applied at this boundary.
     pub fn write_port_92h(&mut self, value: u8) -> bool {
-        let a20_changed = self.device_manager.port92.write(value);
+        self.device_manager.port92.write(value);
+        let a20_changed = self.device_manager.port92.a20_change_pending;
         let reset_requested = self.device_manager.port92.reset_request.is_some();
         if a20_changed || reset_requested {
-            if let Err(error) = self.service_scheduler_boundary(0) {
-                tracing::error!("Port 92 scheduler boundary failed: {error:?}");
+            match self.service_scheduler_boundary(0) {
+                Ok(reset_applied) => return reset_applied,
+                Err(error) => {
+                    tracing::error!("Port 92 scheduler boundary failed: {error:?}");
+                }
             }
         }
         reset_requested
@@ -2384,6 +2585,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// feel laggy and drop characters. Pumping inside the wait lets a keypress
     /// enqueue a scancode, which the very next device tick delivers as IRQ1,
     /// waking the guest within a device quantum.
+    /// Without alloc there is no GUI (`Emulator::gui` requires `Box<dyn
+    /// BxGui>`), so host-input pumping is a no-op; `step_batch` and the
+    /// HLT/MWAIT waits stay callable from no-alloc hosts like the UEFI
+    /// example.
+    #[cfg(not(feature = "alloc"))]
+    #[inline]
+    fn pump_gui_input(&mut self) {}
+
     #[cfg(feature = "alloc")]
     fn pump_gui_input(&mut self) {
         let mut scancodes_to_send = Vec::new();
@@ -2442,6 +2651,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 }
             }
         }
+        // A reset applied here needs no branch: host input reaches a machine
+        // that resumes at the reset vector either way.
         if let Err(error) = self.service_scheduler_boundary(0) {
             tracing::error!("host-input scheduler boundary failed: {error:?}");
         }
@@ -2449,6 +2660,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
 
     #[inline]
     fn advance_pc_system_after_cpu_ticks(&mut self, ticks: u64) {
+        // On reset the boundary discards `ticks` itself; execution resumes at
+        // the reset vector, so both outcomes continue identically here.
         if let Err(error) = self.service_scheduler_boundary(ticks) {
             tracing::error!("scheduler tick commit failed: {error:?}");
         }
@@ -2995,7 +3208,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     ///
     /// A CPU can queue work, but neither it nor a sibling observes the
     /// resulting machine state until this method has returned.
-    pub fn service_scheduler_boundary(&mut self, elapsed_ticks: u64) -> CpuResult<()> {
+    ///
+    /// Returns `true` when a reset was applied at this boundary. In that case
+    /// every previously queued boundary effect and the caller's
+    /// `elapsed_ticks` were discarded and virtual time did not advance: Bochs
+    /// pc_system.cc bx_pc_system_c::Reset runs synchronously inside the
+    /// triggering OUT, so nothing accrued before the reset is observable by
+    /// the post-reset machine.
+    pub fn service_scheduler_boundary(&mut self, elapsed_ticks: u64) -> CpuResult<bool> {
         self.clear_scheduler_raw_wiring();
 
         // Reset dominates every previously queued effect. Hardware requests
@@ -3008,14 +3228,35 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             }
         };
 
-        // Pre-reset LAPIC work was discarded by reset. Otherwise source bus
-        // work before local control/EOI and captured-epoch timer requests.
-        if !reset_applied {
-            self.drain_lapic_bus();
-            self.service_lapic_local_events();
-            self.service_lapic_timer_requests();
+        if reset_applied {
+            // Reset discarded all pre-reset LAPIC/device/timer work and
+            // rearmed reset-time owners; servicing anything further here
+            // (or ticking elapsed_ticks) would let pre-reset state leak into
+            // the fresh machine — e.g. a rearmed timer firing before the
+            // first instruction at the reset vector.
+            #[cfg(test)]
+            self.assert_cpu_masks_match_scan();
+            return Ok(true);
         }
+
+        // Source bus work before local control/EOI and captured-epoch timer
+        // requests.
+        self.drain_lapic_bus();
+        self.service_lapic_local_events();
+        self.service_lapic_timer_requests();
         self.service_deferred_devices();
+
+        // Apply the final 8237 HRQ level (Bochs pc_system.cc set_HRQ). The
+        // I/O-dispatch copy covers CPU-issued port traffic; the direct DMA
+        // slot covers producers outside I/O dispatch (tests driving set_drq,
+        // device timer callbacks).
+        let mut hrq_level = self.devices.take_hrq_level();
+        if let Some(level) = self.device_manager.dma.take_hrq_request() {
+            hrq_level = Some(level);
+        }
+        if let Some(level) = hrq_level {
+            self.pc_system.set_hrq(level);
+        }
 
         // Apply A20 and PCI/memory effects until no producer remains. Capture
         // both simultaneous A20 desires before changing either controller
@@ -3130,7 +3371,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.sync_final_event_levels();
         #[cfg(test)]
         self.assert_cpu_masks_match_scan();
-        Ok(())
+        Ok(false)
     }
 
     /// Apply fixed I/O owner requests after the raw device manager pointer has
@@ -3264,6 +3505,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     }
     /// Rebuild CPU interrupt-level bits after snapshot restore without
     /// consuming any restored PIC, IOAPIC, LAPIC, or timer work queues.
+    #[cfg(feature = "std")]
     fn sync_restored_event_levels(&mut self) {
         let pic_asserted = self.device_manager.pic.has_interrupt()
             || self.device_manager.pic.irq_pending
@@ -3346,7 +3588,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     }
 
     /// Legacy public entry point: host/UI callers now join the same central
-    /// zero-time commit used between CPU slices.
+    /// zero-time commit used between CPU slices. A reset applied here needs
+    /// no branch: the next batch starts at the reset vector.
     pub fn sync_event_flags(&mut self) {
         if let Err(error) = self.service_scheduler_boundary(0) {
             tracing::error!("scheduler boundary event synchronization failed: {error:?}");
@@ -4144,7 +4387,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 }
                                 // 2. Advance halted virtual time in a device-friendly quantum.
                                 let step = self.hlt_wait_step_ticks();
-                                self.service_scheduler_boundary(u64::from(step))?;
+                                if self.service_scheduler_boundary(u64::from(step))? {
+                                    // Reset: stop advancing time; the CPU is
+                                    // Active at the reset vector.
+                                    break;
+                                }
                                 hlt_budget += u64::from(step);
                                 if !self.can_fast_forward_bsp_hlt() {
                                     break;
@@ -4239,7 +4486,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                         break;
                                     }
                                     let step = self.hlt_wait_step_ticks();
-                                    self.service_scheduler_boundary(u64::from(step))?;
+                                    if self.service_scheduler_boundary(u64::from(step))? {
+                                        // Reset: stop advancing time; the CPU
+                                        // is Active at the reset vector.
+                                        break;
+                                    }
                                     hlt2 += u64::from(step);
                                     if !self.can_fast_forward_bsp_hlt() {
                                         break;
@@ -4467,11 +4718,10 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         Ok(instructions_executed)
     }
 
-    #[cfg(feature = "alloc")]
     /// Execute a batch of instructions cooperatively (no blocking loop).
     ///
-    /// Designed for single-threaded environments like WASM where the caller
-    /// must yield control back to the event loop regularly. Runs up to
+    /// Designed for single-threaded environments like WASM or UEFI where the
+    /// caller must yield control back to its event loop regularly. Runs up to
     /// `max_instructions`, ticks devices, syncs A20, then returns.
     ///
     /// Returns `(instructions_executed, is_shutdown)`.
@@ -4526,7 +4776,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         break;
                     }
                     let step = self.hlt_wait_step_ticks();
-                    self.service_scheduler_boundary(u64::from(step))?;
+                    if self.service_scheduler_boundary(u64::from(step))? {
+                        // Reset: stop advancing time; the CPU is Active at
+                        // the reset vector.
+                        break;
+                    }
                     hlt_budget += u64::from(step);
                     if !self.can_fast_forward_bsp_hlt() {
                         break;
@@ -4553,6 +4807,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             // --- Tight loop: if CPU was woken from MWAIT and wall budget remains,
             // run another cycle instead of returning to egui event loop.
             // This matches Bochs's dedicated CPU thread which never yields to GUI.
+            // Without std there is no wall clock: yield cooperatively on the
+            // instruction budget instead, so an Active CPU cannot spin here
+            // forever and starve the caller's event loop.
             if matches!(self.cpu.activity_state, CpuActivityState::Active) && {
                 #[cfg(feature = "std")]
                 {
@@ -4560,7 +4817,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 }
                 #[cfg(not(feature = "std"))]
                 {
-                    true
+                    total_executed < max_instructions
                 }
             } {
                 continue 'batch;
@@ -6678,6 +6935,106 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(feature = "std")]
+    #[test]
+    fn slowdown_state_reanchors_on_restore() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                use std::io::Cursor;
+                let build = || {
+                    let config = EmulatorConfig {
+                        guest_memory_size: 4 * 1024 * 1024,
+                        host_memory_size: 4 * 1024 * 1024,
+                        sync_slowdown: true,
+                        ..EmulatorConfig::default()
+                    };
+                    let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                    emu.initialize().unwrap();
+                    emu.reset(ResetReason::Hardware).unwrap();
+                    emu
+                };
+
+                let mut source = build();
+                // Dirty the host pacing history the way a long pre-snapshot
+                // run would.
+                source.slowdown_timer.last_time_usec = 777_000;
+                source.service_scheduler_boundary(0).unwrap();
+                let mut saved = Vec::new();
+                source.save_snapshot(&mut saved).unwrap();
+
+                let mut restored = build();
+                restored.slowdown_timer.last_time_usec = 55; // stale target state
+                restored
+                    .restore_snapshot(&mut Cursor::new(&saved))
+                    .unwrap();
+
+                let handle = restored.slowdown_timer.timer_handle.unwrap();
+                restored
+                    .pc_system
+                    .validate_timer_handle_owner(handle, TimerOwner::Slowdown)
+                    .unwrap();
+                // Host anchors restart: no pre-restore lead/lag survives and
+                // the emulated baseline is the restored virtual clock.
+                assert_eq!(restored.slowdown_timer.last_time_usec, 0);
+                assert_eq!(
+                    restored.slowdown_timer.start_emulated_time_usec,
+                    restored.pc_system.time_usec()
+                );
+                // Pacing continues: the one-shot is armed or already queued.
+                assert!(
+                    restored.pc_system.is_timer_active(handle)
+                        || restored.pc_system.has_fired_owner(TimerOwner::Slowdown)
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn slowdown_config_mismatch_rejects_restore() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                use std::io::Cursor;
+                let build = |sync_slowdown: bool| {
+                    let config = EmulatorConfig {
+                        guest_memory_size: 4 * 1024 * 1024,
+                        host_memory_size: 4 * 1024 * 1024,
+                        sync_slowdown,
+                        ..EmulatorConfig::default()
+                    };
+                    let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                    emu.initialize().unwrap();
+                    emu.reset(ResetReason::Hardware).unwrap();
+                    emu
+                };
+
+                for (save_slowdown, restore_slowdown) in [(true, false), (false, true)] {
+                    let mut source = build(save_slowdown);
+                    source.service_scheduler_boundary(0).unwrap();
+                    let mut saved = Vec::new();
+                    source.save_snapshot(&mut saved).unwrap();
+
+                    let mut target = build(restore_slowdown);
+                    let error = target
+                        .restore_snapshot(&mut Cursor::new(&saved))
+                        .unwrap_err();
+                    assert_eq!(
+                        error.kind(),
+                        std::io::ErrorKind::InvalidData,
+                        "slowdown cross-config restore (save={save_slowdown}, \
+                         restore={restore_slowdown}) must be rejected: {error}"
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn hardware_reset_rearms_exact_device_owners() {
         std::thread::Builder::new()
@@ -6877,11 +7234,13 @@ mod tests {
                 );
                 emu.service_scheduler_boundary(0).unwrap();
                 assert!(!emu.pc_system.get_enable_a20());
-                assert!(emu.device_manager.port92.write(0x02));
+                emu.device_manager.port92.write(0x02);
+                assert!(emu.device_manager.port92.a20_change_pending);
                 emu.service_scheduler_boundary(0).unwrap();
                 assert!(emu.pc_system.get_enable_a20());
 
-                assert!(emu.device_manager.port92.write(0x00));
+                emu.device_manager.port92.write(0x00);
+                assert!(emu.device_manager.port92.a20_change_pending);
                 emu.service_scheduler_boundary(0).unwrap();
                 assert!(!emu.pc_system.get_enable_a20());
                 emu.device_manager.keyboard.write(
@@ -6954,6 +7313,198 @@ mod tests {
                     0xE6, 0xE9, 0xF4,
                 ]);
                 assert!(emu.device_manager.pci2isa.reset_request.is_none());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn reset_boundary_discards_elapsed_ticks_and_pending_timers() {
+        // Bochs pc_system.cc bx_pc_system_c::Reset runs synchronously inside
+        // the triggering OUT: no pre-reset elapsed tick, deferred timer
+        // request, or queued callback may reach the post-reset machine.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                for hardware in [false, true] {
+                    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                        EmulatorConfig::default(),
+                        CpuSetupMode::FlatProtected32,
+                    )
+                    .unwrap();
+                    emu.devices.init(&mut emu.memory).unwrap();
+                    emu.device_manager
+                        .init(&mut emu.devices, &mut emu.memory)
+                        .unwrap();
+
+                    // A device files a pre-reset one-shot request, exactly as
+                    // a PIT port write would.
+                    let now = emu.pc_system.time_ticks();
+                    emu.devices
+                        .request_timer_after_usec(DeviceTimerOwner::Pit, now, Some(1));
+
+                    if hardware {
+                        emu.device_manager.pci2isa.reset_request =
+                            Some(ResetReason::Hardware);
+                    } else {
+                        emu.device_manager.port92.write(0x01);
+                    }
+
+                    let t0 = emu.pc_system.time_ticks();
+                    let reset_applied = emu.service_scheduler_boundary(10_000).unwrap();
+                    assert!(reset_applied, "reset must be reported by the boundary");
+
+                    // Virtual time did not advance: the elapsed ticks were
+                    // discarded, so no timer can fire before the first
+                    // instruction at the reset vector.
+                    assert_eq!(emu.pc_system.time_ticks(), t0);
+                    assert!(!emu.pc_system.has_fired_timers());
+
+                    // The pre-reset PIT request is gone (the post-reset rearm
+                    // drained its own requests inside reset()).
+                    let table = emu.devices.take_timer_requests();
+                    assert_eq!(
+                        table.get(DeviceTimerOwner::Pit),
+                        TimerRequest::Unchanged,
+                        "pre-reset timer request survived the reset boundary"
+                    );
+
+                    // CPU is at the reset vector.
+                    assert_eq!(emu.reg_read(X86Reg::Rip), 0xFFF0);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn legacy_dma_drq_to_hlda_terminal_count_end_to_end() {
+        // Bochs dma.cc: set_DRQ -> control_HRQ -> bx_pc_system.set_HRQ(1) ->
+        // CPU handleAsyncEvent -> raise_HLDA -> transfer -> terminal count ->
+        // set_HRQ(0). The full chain must work through the deferred-request
+        // transport: a DRQ must wake the CPU and the TC must drop HRQ.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                fn dma_write(data: &mut [u8], maxlen: u16) -> u16 {
+                    let payload = [0xd1, 0xa5, 0x5e, 0x33];
+                    let len = payload.len().min(maxlen as usize);
+                    data[..len].copy_from_slice(&payload[..len]);
+                    len as u16
+                }
+                fn dma_read(_data: &[u8], _maxlen: u16) -> u16 {
+                    0
+                }
+
+                const CODE: u64 = 0x1000;
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.devices.init(&mut emu.memory).unwrap();
+                emu.device_manager
+                    .init(&mut emu.devices, &mut emu.memory)
+                    .unwrap();
+
+                {
+                    let dma = &mut emu.device_manager.dma;
+                    assert!(dma.register_dma8_channel(
+                        2,
+                        dma_read,
+                        dma_write,
+                        "hrq end-to-end"
+                    ));
+                    dma.s[0].mask[2] = false;
+                    dma.s[1].mask[0] = false;
+                    dma.s[0].chan[2].mode.mode_type = 1; // single (Bochs dma.cc)
+                    dma.s[0].chan[2].mode.transfer_type = 1; // I/O -> memory
+                    dma.s[0].chan[2].page_reg = 0x20;
+                    dma.s[0].chan[2].base_count = 3;
+                    dma.s[0].chan[2].current_count = 3;
+                    dma.set_drq(2, true);
+                }
+
+                // The boundary transports the request to pc_system and nudges
+                // the CPU (Bochs pc_system.cc set_HRQ).
+                assert!(!emu.service_scheduler_boundary(0).unwrap());
+                assert!(emu.pc_system.get_hrq());
+                assert_ne!(emu.cpu.async_event, 0);
+
+                // nop; hlt — handle_async_event services HLDA before the
+                // first instruction completes the batch.
+                emu.virt_write(CODE, &[0x90, 0xF4]).unwrap();
+                emu.reg_write(X86Reg::Rip, CODE);
+                let executed = unsafe { emu.run_cpu_batch(8) }.unwrap();
+                assert!(executed > 0);
+
+                // Payload landed at page_reg 0x20 -> physical 0x20_0000.
+                let mut received = [0u8; 4];
+                assert_eq!(
+                    emu.memory
+                        .read_ram(&[], 0x20_0000, &mut received)
+                        .unwrap(),
+                    4
+                );
+                assert_eq!(received, [0xd1, 0xa5, 0x5e, 0x33]);
+
+                let dma = &emu.device_manager.dma;
+                // Terminal count reached: status bit set, non-autoinit
+                // channel re-masked (Bochs dma.cc raise_HLDA).
+                assert_ne!(dma.s[0].status_reg & (1 << 2), 0, "TC status not set");
+                assert!(dma.s[0].mask[2], "non-autoinit channel must re-mask at TC");
+                // The synchronous TC deassert reached pc_system.
+                assert!(!emu.pc_system.get_hrq(), "HRQ must drop at terminal count");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn mid_batch_reset_commits_no_pre_reset_ticks() {
+        // A guest-triggered reset mid-batch must not commit the instructions
+        // executed before the reset as post-reset virtual time.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                const CODE: u64 = 0x1000;
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.devices.init(&mut emu.memory).unwrap();
+                emu.device_manager
+                    .init(&mut emu.devices, &mut emu.memory)
+                    .unwrap();
+
+                // mov edx,0x92; mov al,0x01; out dx,al; out 0xe9,al; hlt
+                emu.virt_write(
+                    CODE,
+                    &[0xBA, 0x92, 0x00, 0x00, 0x00, 0xB0, 0x01, 0xEE, 0xE6, 0xE9, 0xF4],
+                )
+                .unwrap();
+                emu.reg_write(X86Reg::Rip, CODE);
+
+                let t0 = emu.pc_system.time_ticks();
+                let executed = unsafe { emu.run_cpu_batch(64) }.unwrap();
+                assert!(executed > 0);
+                assert!(
+                    emu.devices.take_port_e9_output().is_empty(),
+                    "the marker OUT after the reset request executed"
+                );
+                // The three pre-reset instructions were discarded, not
+                // committed: the post-reset clock still reads the pre-batch
+                // epoch.
+                assert_eq!(
+                    emu.pc_system.time_ticks(),
+                    t0,
+                    "pre-reset elapsed ticks were committed to the fresh machine"
+                );
+                assert_eq!(emu.reg_read(X86Reg::Rip), 0xFFF0);
             })
             .unwrap()
             .join()
@@ -7231,6 +7782,32 @@ mod tests {
         assert_eq!(runnable.next_set(0, MAX_SUPPORTED_TEST_CPUS as usize), Some(32));
         assert_eq!(runnable.next_set(33, MAX_SUPPORTED_TEST_CPUS as usize), Some(253));
         assert_eq!(runnable.next_set(254, MAX_SUPPORTED_TEST_CPUS as usize), None);
+
+        // The shipped HLT fast-forward predicate at maximum topology. A
+        // 254-CPU Emulator is not constructible in tests (each BxCpuC is tens
+        // of megabytes), so the production associated fn is exercised at the
+        // mask level across every word boundary the full machine would hit;
+        // the 2-CPU transition matrix covers the live plumbing.
+        type TestEmu<'a> = Emulator<'a, Corei7SkylakeX>;
+        const MAX: usize = 254;
+        assert!(!TestEmu::ap_fast_forward_allowed(runnable, MAX), "bit 32+253");
+        assert!(TestEmu::ap_fast_forward_allowed(CpuMask::default(), MAX));
+        for ap_bit in [1usize, 32, 63, 64, 191, 192, 253] {
+            let mut mask = CpuMask::default();
+            mask.assign(ap_bit, true);
+            assert!(
+                !TestEmu::ap_fast_forward_allowed(mask, MAX),
+                "runnable AP bit {ap_bit} must block fast-forward"
+            );
+        }
+        // A runnable BSP alone never blocks AP fast-forward.
+        let mut bsp_only = CpuMask::default();
+        bsp_only.assign(0, true);
+        assert!(TestEmu::ap_fast_forward_allowed(bsp_only, MAX));
+        // An AP bit at/beyond the CPU count is outside the topology.
+        let mut beyond = CpuMask::default();
+        beyond.assign(200, true);
+        assert!(TestEmu::ap_fast_forward_allowed(beyond, 100));
     }
 
     #[test]
@@ -7256,6 +7833,8 @@ mod tests {
                     CpuActivityState::WaitForSipi
                 );
                 emu.assert_cpu_masks_match_scan();
+                // WAIT_FOR_SIPI AP: BSP HLT may fast-forward.
+                assert!(emu.can_fast_forward_bsp_hlt());
 
                 // HLT and a local wake event update only the affected CPU bit.
                 {
@@ -7283,6 +7862,8 @@ mod tests {
                 emu.refresh_cpu_masks(AP_INDEX);
                 emu.assert_cpu_masks_match_scan();
                 assert!(emu.runnable_mask.contains(AP_INDEX));
+                // SIPI'd (Active) AP: fast-forward is forbidden.
+                assert!(!emu.can_fast_forward_bsp_hlt());
 
                 for cpu_index in 0..emu.cpu_count() {
                     let cpu = emu.cpu_mut_at(cpu_index);
@@ -7296,6 +7877,8 @@ mod tests {
                     emu.refresh_cpu_masks(cpu_index);
                 }
                 emu.assert_cpu_masks_match_scan();
+                // Both halted with no pending events: fast-forward allowed.
+                assert!(emu.can_fast_forward_bsp_hlt());
 
                 // A physical-destination IPI exercises one remote LAPIC.
                 emu.cpu_mut_at(BSP_INDEX)
@@ -7348,6 +7931,9 @@ mod tests {
                 emu.assert_cpu_masks_match_scan();
                 assert!(emu.runnable_mask.contains(BSP_INDEX));
                 assert!(emu.runnable_mask.contains(AP_INDEX));
+                // Halted AP holding a delivered IPI wake: fast-forward
+                // is forbidden.
+                assert!(!emu.can_fast_forward_bsp_hlt());
 
                 // EOI is deferred local LAPIC work until the central boundary.
                 {
@@ -7876,11 +8462,15 @@ mod tests {
                 );
 
                 emu.cpu_mut_at(AP_INDEX).deliver_sipi(AP_TRAMPOLINE_VECTOR);
+                // Direct state poke: production SIPI delivery refreshes the
+                // masks itself (refresh_cpu_masks contract); mirror it here.
+                emu.refresh_cpu_masks(AP_INDEX);
 
                 assert!(
                     !emu.can_fast_forward_bsp_hlt(),
                     "once an AP is active, the SMP scheduler must own HLT progress"
                 );
+                emu.assert_cpu_masks_match_scan();
             })
             .unwrap()
             .join()

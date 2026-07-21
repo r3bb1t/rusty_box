@@ -13,12 +13,16 @@ use crate::{
 
 #[cfg(feature = "std")]
 const SNAPSHOT_MAGIC: &[u8; 8] = b"RBXSNAP1";
+/// Global container version. Version 4 is the ratified v3-architecture
+/// contract: 16 canonical sections, every known section at
+/// `SNAPSHOT_SECTION_VERSION == 1`, plus the deferred HRQ latches in the
+/// PLATFORM/DMA payloads. Version 3 (whose PLATFORM section carried an ad-hoc
+/// version 2 after `period_ticks` was added) is rejected wholesale so no old
+/// layout can misdecode.
 #[cfg(feature = "std")]
-pub(crate) const SNAPSHOT_V3_VERSION: u32 = 3;
+pub(crate) const SNAPSHOT_V3_VERSION: u32 = 4;
 #[cfg(feature = "std")]
 pub(crate) const SNAPSHOT_SECTION_VERSION: u32 = 1;
-#[cfg(feature = "std")]
-const PLATFORM_SNAPSHOT_SECTION_VERSION: u32 = 2;
 
 #[cfg(feature = "std")]
 pub(crate) const MAX_SNAPSHOT_SECTION_LEN: u64 = 4 * 1024 * 1024 * 1024;
@@ -333,7 +337,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
         write_section_with_limit(writer, SEC_MEMORY, memory_len, memory_len, |s| save_memory(&self.memory, s))?;
         write_section(writer, SEC_PC_SYSTEM, self.pc_system.snapshot_v3_len()?, |s| self.pc_system.save_snapshot_v3(s))?;
         let platform_len = checked_snapshot_len_add(4, checked_snapshot_len_add(self.device_manager.fw_cfg.snapshot_v3_body_len()?, checked_snapshot_len_add(self.devices.snapshot_v3_body_len()?, self.device_manager.snapshot_v3_body_len()?)?)?)?;
-        write_section(writer, SEC_PLATFORM, platform_len, |s| { s.write_u32(PLATFORM_SNAPSHOT_SECTION_VERSION)?; self.device_manager.fw_cfg.save_snapshot_v3_body(s)?; self.devices.save_snapshot_v3_body(s)?; self.device_manager.save_snapshot_v3_body(s) })?;
+        write_section(writer, SEC_PLATFORM, platform_len, |s| { s.write_u32(SNAPSHOT_SECTION_VERSION)?; self.device_manager.fw_cfg.save_snapshot_v3_body(s)?; self.devices.save_snapshot_v3_body(s)?; self.device_manager.save_snapshot_v3_body(s) })?;
         write_section(writer, SEC_CPU, cpu_len(self)?, |s| save_cpus(self, s))?;
         write_section(writer, SEC_PIC, self.device_manager.pic.snapshot_v3_len()?, |s| self.device_manager.pic.save_snapshot_v3(s))?;
         write_section(writer, SEC_PIT, self.device_manager.pit.snapshot_v3_len()?, |s| self.device_manager.pit.save_snapshot_v3(s))?;
@@ -401,7 +405,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
                     SEC_MEMORY => restore_memory(&mut self.memory, &mut section)?,
                     SEC_PC_SYSTEM => self.pc_system.restore_snapshot_v3(&mut section)?,
                     SEC_PLATFORM => {
-                        if section.read_u32()? != PLATFORM_SNAPSHOT_SECTION_VERSION {
+                        if section.read_u32()? != SNAPSHOT_SECTION_VERSION {
                             return Err(invalid_snapshot(
                                 "unsupported platform snapshot section version",
                             ));
@@ -529,9 +533,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
         self.validate_post_restore_handles(pit, cmos, keyboard, acpi)?;
         self.device_manager.pci_ide.validate_snapshot_v3_timer_owners(&self.pc_system)?;
         self.device_manager.serial.validate_snapshot_v3_timer_handles(|port, handle| self.pc_system.validate_timer_handle_owner(handle, TimerOwner::SerialFifo(port)))?;
+        self.reanchor_slowdown_after_restore()?;
         if platform.desired_bmdma_base != pci.bmdma_base || platform.desired_pm_base != acpi.pm_base || platform.desired_sm_base != acpi.sm_base || platform.desired_vga_lfb_base != vga.lfb_base || platform.desired_vga_mmio_base != vga.mmio_base { return Err(invalid_snapshot("snapshot mapping targets disagree across sections")); }
         self.finish_snapshot_restore_v3(
-            live_bmdma, live_pm, live_sm, live_vga, platform, keyboard, acpi, vga, pci,
+            live_bmdma, live_pm, live_sm, live_vga, platform, keyboard, cmos, acpi, vga, pci,
         )
     }
 
@@ -817,6 +822,32 @@ mod tests {
             emu.mem_write(DATA, &[0x10, 0x20, 0x30, 0x40]).unwrap();
             emu.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0x5A;
             emu.device_manager.keyboard.kbd_controller.outb = true;
+            // A real OBF fill raises IRQ1 (Bochs keyboard.cc periodic timer);
+            // keep the machine self-consistent for the restore-time
+            // device/PIC level validation.
+            emu.device_manager.pic.raise_irq(1);
+            {
+                let dm = &mut emu.device_manager;
+                let (fwds, count) = dm.pic.take_ioapic_forwards();
+                for &(irq, level) in &fwds[..count] {
+                    dm.ioapic.set_irq_level(irq, level, Some(&mut dm.pic), None);
+                }
+            }
+            // Non-default state across the remaining device families so the
+            // round trip proves more than default images: a masked IOAPIC
+            // redirect entry, a LAPIC TPR, a DMA extra page register, a
+            // CMOS RAM byte, and the COM1 scratch register. (The PCI config
+            // latch cross-check has its own dedicated rejection regression.)
+            emu.device_manager
+                .ioapic
+                .write_aligned(0xFEC0_0000, 0x12, None, None);
+            emu.device_manager
+                .ioapic
+                .write_aligned(0xFEC0_0010, 0x0001_00E5, None, None);
+            emu.cpu_mut().lapic.write_aligned(0x80, 0x20, 0);
+            emu.device_manager.dma.ext_page_reg[3] = 0x42;
+            emu.device_manager.cmos.ram[0x30] = 0x99;
+            emu.device_manager.serial.write(0x3FF, 0x77, 1);
             emu.service_scheduler_boundary(0).unwrap();
 
 
@@ -828,6 +859,8 @@ mod tests {
             emu.mem_fill(DATA, 4, 0xCC).unwrap();
             emu.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0;
             emu.device_manager.keyboard.kbd_controller.outb = false;
+            emu.device_manager.dma.ext_page_reg[3] = 0;
+            emu.device_manager.cmos.ram[0x30] = 0;
 
             emu.restore_snapshot(&mut Cursor::new(&saved)).unwrap();
 
@@ -839,6 +872,21 @@ mod tests {
                 0x5A
             );
             assert!(emu.device_manager.keyboard.kbd_controller.outb);
+            // Non-default device families made it back.
+            assert_eq!(
+                emu.device_manager.ioapic.read_aligned(0xFEC0_0000),
+                0x12,
+                "IOAPIC IOREGSEL did not round-trip"
+            );
+            assert_eq!(
+                emu.device_manager.ioapic.read_aligned(0xFEC0_0010),
+                0x0001_00E5,
+                "IOAPIC redirect entry did not round-trip"
+            );
+            assert_eq!(emu.cpu().lapic.read_aligned(0x80, 0), 0x20);
+            assert_eq!(emu.device_manager.dma.ext_page_reg[3], 0x42);
+            assert_eq!(emu.device_manager.cmos.ram[0x30], 0x99);
+            assert_eq!(emu.device_manager.serial.read(0x3FF, 1), 0x77);
 
             let mut resaved = Vec::new();
             emu.save_snapshot(&mut resaved).unwrap();
@@ -853,6 +901,103 @@ mod tests {
                 saved.len(),
                 first_difference.map(|index| resaved[index]),
                 first_difference.map(|index| saved[index]),
+            );
+        });
+    }
+
+    #[test]
+    fn snapshot_rejects_wrong_ram_length_without_min_copy() {
+        // A MEMORY section whose guest length disagrees with the configured
+        // machine is rejected by the geometry validation before any block
+        // byte is applied — never min-copied onto the live RAM.
+        on_large_stack(|| {
+            let mut source = machine();
+            source.mem_write(0x1000, &[0xAB, 0xCD]).unwrap();
+            source.service_scheduler_boundary(0).unwrap();
+            let mut saved = Vec::new();
+            source.save_snapshot(&mut saved).unwrap();
+
+            let memory = snapshot_sections(&saved)
+                .into_iter()
+                .find(|section| section.id == SEC_MEMORY)
+                .unwrap();
+            // Payload: section_version u32, then guest_len u64.
+            write_u64_at(&mut saved, memory.payload + 4, (4 * 1024 * 1024) + 4096);
+
+            assert_restore_error(
+                &saved,
+                io::ErrorKind::InvalidData,
+                "snapshot memory geometry does not match machine",
+            );
+        });
+    }
+
+    #[test]
+    fn restore_rejects_device_irq_level_disagreeing_with_pic() {
+        // Bochs pic.cc register_state: PIC input levels restore from the
+        // PIC's own state and no device re-raises its line. A snapshot whose
+        // keyboard section implies IRQ1 high while the PIC section says the
+        // line is low cannot come from a correct quiesced save — reject and
+        // poison, never re-drive an artificial edge.
+        on_large_stack(|| {
+            let mut source = machine();
+            source.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0x5A;
+            source.device_manager.keyboard.kbd_controller.outb = true;
+            // Deliberately do NOT raise PIC IRQ1: device-high / PIC-low.
+            source.service_scheduler_boundary(0).unwrap();
+
+            let mut saved = Vec::new();
+            source.save_snapshot(&mut saved).unwrap();
+
+            assert_restore_error(
+                &saved,
+                io::ErrorKind::InvalidData,
+                "restored keyboard IRQ1 level disagrees with restored PIC line",
+            );
+        });
+    }
+
+    #[test]
+    fn restore_preserves_consistent_pending_irq_levels_without_edges() {
+        on_large_stack(|| {
+            let mut source = machine();
+            // Keyboard OBF with the line legitimately raised and unmasked so
+            // the INT pin (and therefore the CPU event bit) asserts.
+            source.device_manager.pic.master.imr = 0xFF & !0x02;
+            source.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0x5A;
+            source.device_manager.keyboard.kbd_controller.outb = true;
+            source.device_manager.pic.raise_irq(1);
+            {
+                let dm = &mut source.device_manager;
+                let (fwds, count) = dm.pic.take_ioapic_forwards();
+                for &(irq, level) in &fwds[..count] {
+                    dm.ioapic.set_irq_level(irq, level, Some(&mut dm.pic), None);
+                }
+            }
+            source.service_scheduler_boundary(0).unwrap();
+
+            let mut saved = Vec::new();
+            source.save_snapshot(&mut saved).unwrap();
+
+            let mut restored = machine();
+            restored.restore_snapshot(&mut Cursor::new(&saved)).unwrap();
+
+            // Final level preserved, no artificial edge generated: the
+            // restore path enqueued zero IOAPIC forwards.
+            assert!(restored.device_manager.pic.irq_line_level(1));
+            let (_, forward_count) =
+                restored.device_manager.pic.take_ioapic_forwards();
+            assert_eq!(
+                forward_count, 0,
+                "restore generated an artificial IRQ edge"
+            );
+            // The CPU observes the restored line through the republished
+            // event bits (Bochs cpu.h BX_EVENT_PENDING_INTR).
+            assert_ne!(
+                restored.cpu().pending_event
+                    & crate::cpu::BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_INTR,
+                0,
+                "restored PIC line did not republish the CPU event bit"
             );
         });
     }
@@ -986,7 +1131,9 @@ mod tests {
                 .into_iter()
                 .find(|section| section.id == SEC_PLATFORM)
                 .unwrap();
-            write_u32_at(&mut saved, platform.payload, 1);
+            // The pre-ratification PLATFORM payload carried section version 2;
+            // the v4 container requires every known section at version 1.
+            write_u32_at(&mut saved, platform.payload, 2);
 
             assert_restore_error(
                 &saved,

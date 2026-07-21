@@ -13,15 +13,18 @@
 //!
 //! The DMA transfer flow (Bochs dma.cc):
 //! 1. Device asserts DRQ via `set_drq(channel, true)`
-//! 2. `control_hrq()` checks for unmasked DRQ, asserts HRQ to CPU via `pc_system.set_hrq(true)`
-//! 3. CPU acknowledges with HLDA at next instruction boundary
+//! 2. `control_hrq()` checks for unmasked DRQ and files the desired HRQ level
+//!    in `hrq_request`; the I/O dispatch / scheduler boundary applies it to
+//!    `BxPcSystemC::set_hrq`, which raises `async_event` on the CPU
+//! 3. CPU observes HRQ at its next instruction boundary and calls
+//!    `raise_hlda()` with the block-aware memory bus and TLB pins
 //! 4. `raise_hlda()` performs the actual data transfer:
 //!    - Finds highest-priority channel with active DRQ
 //!    - Calls registered device handler (dmaRead8/dmaWrite8 or dmaRead16/dmaWrite16)
-//!    - Updates address/count, handles TC (terminal count)
-//!
-//! Currently no devices register DMA handlers (IDE uses PIO, floppy not implemented),
-//! so the machinery exists structurally but no actual data transfers occur.
+//!    - Moves bytes through checked `read_ram`/`write_ram` (SMC-stamped)
+//!    - Updates address/count; at terminal count sets TC status, re-masks
+//!      non-autoinit channels, and files the HRQ deassert (Bochs
+//!      dma.cc raise_HLDA: `bx_pc_system.set_HRQ(0)`)
 use crate::memory::{BxMemC, CpuTlbPin};
 #[cfg(feature = "std")]
 use std::io::{Error, ErrorKind, Read, Write};
@@ -170,6 +173,12 @@ pub struct BxDmaC {
     pub(crate) ext_page_reg: [u8; 16],
     /// Per-channel DMA handlers (Bochs dma.h, h[4])
     handlers: [DmaHandlers; 4],
+    /// Latest desired HRQ level toward the CPU; last writer wins. Bochs
+    /// dma.cc calls bx_pc_system.set_HRQ synchronously; here the level is
+    /// filed as a deferred request because DMA runs behind a raw I/O borrow
+    /// and cannot reach `BxPcSystemC` directly. Drained after I/O dispatch,
+    /// after `raise_hlda`, and at the scheduler boundary.
+    hrq_request: Option<bool>,
     // DMA physical transfers borrow the checked block-aware memory path at
     // the CPU event boundary. No guest-wide host pointer is retained.
 }
@@ -194,7 +203,14 @@ impl BxDmaC {
                 DmaHandlers::default(),
                 DmaHandlers::default(),
             ],
+            hrq_request: None,
         }
+    }
+
+    /// Drain the latest desired HRQ level toward `BxPcSystemC::set_hrq`.
+    #[inline]
+    pub(crate) fn take_hrq_request(&mut self) -> Option<bool> {
+        self.hrq_request.take()
     }
 
     /// Initialize the DMA controllers (Bochs dma.cc)
@@ -209,6 +225,7 @@ impl BxDmaC {
         }
         self.hlda = false;
         self.tc = false;
+        self.hrq_request = None;
 
         // Init all channel state (Bochs dma.cc)
         for i in 0..2 {
@@ -239,6 +256,7 @@ impl BxDmaC {
     pub fn reset(&mut self) {
         self.reset_controller(0);
         self.reset_controller(1);
+        self.hrq_request = None;
     }
 
     /// Reset a single controller (Bochs dma.cc)
@@ -385,11 +403,9 @@ impl BxDmaC {
         // Deassert HRQ if no DRQ is pending (Bochs dma.cc)
         if (self.s[ma_sl].status_reg & 0xF0) == 0 {
             if ma_sl != 0 {
-                // DMA2: deassert HRQ to CPU.
-                // NOTE: pc_system is not wired here yet. When DMA devices are
-                // connected, the I/O dispatch path must provide pc_system so
-                // control_hrq can signal HRQ to the CPU.
-                tracing::trace!("DMA: would deassert HRQ (pc_system not wired)");
+                // DMA2: deassert HRQ to CPU (Bochs dma.cc control_HRQ:
+                // bx_pc_system.set_HRQ(0)).
+                self.hrq_request = Some(false);
             } else {
                 // DMA1: clear cascade DRQ on DMA2 channel 0
                 self.set_drq(4, false);
@@ -401,8 +417,9 @@ impl BxDmaC {
         for ch in 0..4 {
             if (self.s[ma_sl].status_reg & (1 << (ch + 4))) != 0 && !self.s[ma_sl].mask[ch] {
                 if ma_sl != 0 {
-                    // DMA2: assert HRQ to CPU (see deassert note above).
-                    tracing::trace!("DMA: would assert HRQ (pc_system not wired)")
+                    // DMA2: assert HRQ to CPU (Bochs dma.cc control_HRQ:
+                    // bx_pc_system.set_HRQ(1)).
+                    self.hrq_request = Some(true);
                 } else {
                     // DMA1: send DRQ to cascade channel of the master
                     self.set_drq(4, true);
@@ -586,12 +603,11 @@ impl BxDmaC {
                 self.s[ma_sl].chan[channel].current_count = self.s[ma_sl].chan[channel].base_count;
             }
 
-            // Clear TC, HLDA, HRQ, DACK (Bochs dma.cc)
+            // Clear TC, HLDA, HRQ, DACK (Bochs dma.cc raise_HLDA:
+            // bx_pc_system.set_HRQ(0) at count expiry).
             self.tc = false;
             self.hlda = false;
-            // NOTE: pc_system not wired here; HRQ deassert is a no-op.
-            // When DMA devices are connected, raise_hlda must receive
-            // &mut BxPcSystemC to call set_hrq(false).
+            self.hrq_request = Some(false);
             self.s[ma_sl].dack[channel] = false;
             if ma_sl == 0 {
                 // Clear cascade (Bochs dma.cc)
@@ -889,7 +905,8 @@ impl BxDmaC {
         let controller = checked_snapshot_len_add(16, channels)?;
         let controllers = checked_snapshot_len_mul(2, controller)?;
         let prefix_and_controllers = checked_snapshot_len_add(4, controllers)?;
-        checked_snapshot_len_add(prefix_and_controllers, 18)
+        let tail = if self.hrq_request.is_some() { 20 } else { 19 };
+        checked_snapshot_len_add(prefix_and_controllers, tail)
     }
 
     pub(crate) fn save_snapshot_v3<W: Write + ?Sized>(
@@ -904,7 +921,12 @@ impl BxDmaC {
         }
         writer.write_bool(self.hlda)?;
         writer.write_bool(self.tc)?;
-        writer.write_bytes(&self.ext_page_reg)
+        writer.write_bytes(&self.ext_page_reg)?;
+        writer.write_bool(self.hrq_request.is_some())?;
+        if let Some(level) = self.hrq_request {
+            writer.write_bool(level)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn restore_snapshot_v3<R: Read>(
@@ -923,6 +945,11 @@ impl BxDmaC {
         let tc = reader.read_bool()?;
         let mut ext_page_reg = [0u8; 16];
         reader.read_bytes(&mut ext_page_reg)?;
+        let hrq_request = if reader.read_bool()? {
+            Some(reader.read_bool()?)
+        } else {
+            None
+        };
 
         for (controller_index, (saved, live)) in
             controllers.iter().zip(self.s.iter()).enumerate()
@@ -948,6 +975,7 @@ impl BxDmaC {
         self.hlda = hlda;
         self.tc = tc;
         self.ext_page_reg = ext_page_reg;
+        self.hrq_request = hrq_request;
         Ok(())
     }
 }
@@ -1242,6 +1270,39 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert!(error.to_string().contains("ownership"));
     }
+    #[test]
+    fn control_hrq_files_level_requests() {
+        // Bochs dma.cc control_HRQ: DMA2 raises set_HRQ(1) for a pending
+        // unmasked DRQ and set_HRQ(0) once no DRQ remains; DMA1 propagates
+        // through the channel-4 cascade.
+        fn dma_write(_data: &mut [u8], _maxlen: u16) -> u16 {
+            0
+        }
+        fn dma_read(_data: &[u8], _maxlen: u16) -> u16 {
+            0
+        }
+
+        let mut dma = BxDmaC::new();
+        dma.init();
+        assert!(dma.register_dma8_channel(2, dma_read, dma_write, "hrq test"));
+        dma.s[0].mask[2] = false;
+        dma.s[1].mask[0] = false;
+        dma.s[0].chan[2].mode.mode_type = DMA_MODE_SINGLE;
+
+        dma.set_drq(2, true);
+        assert_eq!(dma.take_hrq_request(), Some(true));
+        assert_eq!(dma.take_hrq_request(), None, "request must drain once");
+
+        dma.set_drq(2, false);
+        assert_eq!(dma.take_hrq_request(), Some(false));
+
+        // A disabled DMA2 files nothing (Bochs dma.cc control_HRQ early
+        // return on ctrl_disabled).
+        dma.s[1].ctrl_disabled = true;
+        dma.set_drq(2, true);
+        assert_eq!(dma.take_hrq_request(), None);
+    }
+
     #[test]
     fn legacy_dma_swapped_block_round_trip_and_smc() {
         use crate::memory::{BxMemC, BxMemoryStubC};
