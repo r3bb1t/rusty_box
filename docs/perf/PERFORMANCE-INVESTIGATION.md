@@ -255,3 +255,55 @@ The real GUI reached the Windows installer start screen at 88,198,927,292
 retired guest instructions. Treat instruction milestones as phase markers, not
 linear predictors: the early 1B and unattended 34.6B windows improved, while
 the earlier pre-handler 4B and 88B comparisons were nearly unchanged.
+
+---
+
+## SMP per-slice scheduler overhead (2026-07-21)
+
+Everything above measured the single-CPU path. The SMP round-robin path had
+never been isolated. `perfbench` grew `PERFBENCH_CPUS` / `PERFBENCH_QUANTUM`
+knobs so a steady-state A/B — workload on the BSP, APs parked in wait-for-SIPI,
+icache warm — attributes SMP scheduler cost cleanly (no BIOS/boot-phase mix, no
+cold-trace decode skew). It exposed a large tax:
+
+| mixed, 500M insns, quantum 16 | MIPS | ns/insn |
+|---|---:|---:|
+| 1 CPU | 192 | 5.2 |
+| 2 CPU — before | 18.3 | 54.5 |
+| 2 CPU — after | 88 | 11.4 |
+
+**SMP tax 10.5× → 1.85×** (interleaved medians, `eea5cfe`). Two root causes:
+
+1. **`BxMemC::identity_guest_base` walked the whole block table on every
+   cpu-loop entry** (`memory/mod.rs`) — O(num_blocks), 1024 blocks at 128 MiB —
+   which in SMP is once per ≤32-instruction quantum slice. samply put it at
+   **67% of 2-CPU runtime**. Fixed with a cached `identity_map: Cell<bool>`
+   verdict maintained at every block-table mutation (both constructors,
+   `allocate_block`, snapshot restore) behind a `debug_assert` scan oracle.
+   This is also why the earlier *"batch-scope prewiring of mem/io bus pointers"*
+   probe (see the SMP notes in memory) read flat — the wiring was never the
+   cost; the O(N) walk *inside* the loop entry was.
+2. **`service_scheduler_boundary` ran its full device / timer / A20 / LAPIC
+   servicing after every SMP slice** even when nothing was queued, whereas Bochs
+   `main.cc`'s round commit is a bare `BX_TICKN` with no per-slice servicing.
+   Now gated on an exact `scheduler_boundary_work_pending()` predicate that
+   enumerates every source the boundary drains; the tick loop and the epilogue
+   state-normalization still run unconditionally for every real call.
+
+The residual 1.85× (~83 ns/slice) is the genuine serialized-guest-work floor:
+Bochs SMP is single-host-threaded round-robin, so N runnable CPUs is ~N× the
+work on one host thread regardless — `main.cc`'s own comment notes the quantum
+trades interrupt-interleave granularity for exactly this. `quantum=32` (the
+Bochs-legal max) roughly halves the per-slice count again for latency-tolerant
+guests. Only a host-threaded vCPU rewrite (non-Bochs) removes the rest.
+
+A correctness fix rode along: LAPIC TMCCT was frozen in SMP for any CPU with no
+queued scheduler work (`live_ticks` returns the stale `current_ticks`). The
+slice setup now stamps each CPU's LAPIC epoch from the round-start
+`time_ticks()`, matching Bochs (`ticksTotal` grows once per round via
+`BX_TICKN`; `apic.cc get_current_timer_count` reads it) — the intra-round freeze
+itself is Bochs-faithful and deliberately kept. Guard:
+`smp_lapic_tmcct_advances_across_rounds_without_scheduler_work`. The whole change
+was parity-reviewed by two independent adversarial passes (PIT single-cursor,
+SMP epoch, boundary-predicate completeness, identity-cache coherence all upheld;
+two LAPIC time-domain bugs found and fixed in `81673ac`).
