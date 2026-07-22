@@ -2154,17 +2154,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 // Byte-level write to LAPIC: read-modify-write the aligned dword.
                 // In practice, LAPIC is always accessed as dword — this is a safety net.
                 let aligned = a20_addr & !0x3;
-                // `live_ticks(icount)` (apic.cc get_current_timer_count path)
-                // subtracts the LAPIC's `icount_at_sync`, so the argument must be
-                // in the raw icount domain — exactly what the sibling read paths
-                // pass. `system_ticks()` is the ticks domain and would mismatch,
-                // corrupting the timer current-count read during this RMW.
-                let icount = self.icount;
-                let old = self.lapic.read(aligned, 4, icount);
+                // The two halves of this RMW take DIFFERENT time domains:
+                // - LAPIC reads convert through `live_ticks(icount)` (apic.cc
+                //   get_current_timer_count path), which subtracts the LAPIC's
+                //   `icount_at_sync` — raw icount, like the sibling read paths.
+                // - LAPIC writes store the argument directly into tick-domain
+                //   state (apic.cc set_initial_timer_count: `ticksInitial =
+                //   bx_pc_system.time_ticks()`; activation deadlines feed
+                //   pc_system ticks) — `system_ticks()`, like the sibling
+                //   word/dword write paths.
+                let old = self.lapic.read(aligned, 4, self.icount);
                 let byte_offset = (a20_addr & 0x3) as u32;
                 let mask = !(0xFFu32 << (byte_offset * 8));
                 let new_val = (old & mask) | ((value as u32) << (byte_offset * 8));
-                self.lapic.write(aligned, new_val, 4, icount);
+                let current_ticks = self.system_ticks();
+                self.lapic.write(aligned, new_val, 4, current_ticks);
                 self.sync_lapic_events();
                 return;
             }

@@ -845,9 +845,11 @@ pub struct BxPitC {
     /// microseconds of this clock, exactly like Bochs pit.cc periodic();
     /// the port 0x61 refresh bit reads it directly.
     total_usec: u64,
-    /// Sub-microsecond remainder of the icount→usec conversion
-    /// (units: instruction_count * USEC_PER_SECOND, modulo ips). Carries
-    /// fractions across sync points so no emulated time is lost.
+    /// Sub-microsecond remainder of the ABSOLUTE icount→usec conversion at
+    /// the last port-path sync: `(icount * USEC_PER_SECOND) % ips`. Serialized
+    /// and phase-validated (`< ips`), but it no longer drives advancement —
+    /// since the single-cursor fix `total_usec` is the sole authoritative
+    /// position and the port path recomputes this remainder wholesale.
     usec_remainder: u128,
     /// Sub-tick remainder of the usec→tick conversion — the integer-exact
     /// equivalent of Bochs pit.cc periodic()'s
@@ -1067,9 +1069,11 @@ impl BxPitC {
     /// Synchronize PIT counters to match elapsed CPU time.
     /// Called before counter reads AND writes (Bochs pit.cc bx_pit_c::read
     /// runs handle_timer() and bx_pit_c::write runs periodic(time_passed32)
-    /// before touching the counters). Uses a fractional accumulator to
-    /// avoid losing ticks when only a few instructions have elapsed between
-    /// accesses (~13 instructions per PIT tick at 15M IPS).
+    /// before touching the counters). Advances the single `total_usec` cursor
+    /// to the absolute emulated microsecond for this icount; the sub-tick
+    /// precision that keeps small gaps (~13 instructions per PIT tick at 15M
+    /// IPS) from losing counter movement lives in total_usec + the exact
+    /// pit_usec_accumulator, not a per-sync fractional carry.
     pub fn sync_to_icount(&mut self, icount: u64) {
         #[cfg(feature = "std")]
         if self.realtime_last.is_some() {

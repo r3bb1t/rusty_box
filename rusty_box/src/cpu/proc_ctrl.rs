@@ -934,7 +934,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return Ok(0);
             }
             let index = (msr - 0x800) << 4;
-            if let Some(val) = self.lapic.read_x2apic(index, self.system_ticks()) {
+            // LAPIC reads convert through `live_ticks(icount)` (apic.cc
+            // get_current_timer_count), which subtracts `icount_at_sync` —
+            // raw icount domain, like the MMIO read paths. `system_ticks()`
+            // would double-add the ticks-icount divergence accumulated by
+            // HLT fast-forwards and understate TMCCT (MSR 0x839) to ~0.
+            if let Some(val) = self.lapic.read_x2apic(index, self.icount) {
                 return Ok(val);
             }
             self.exception(super::cpu::Exception::Gp, 0)?;
