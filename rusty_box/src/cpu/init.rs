@@ -492,9 +492,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn tlb_flush_non_global(&mut self) {
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
-        self.dtlb.flush_non_global();
-        self.itlb.flush_non_global();
-        self.sync_active_tlb_pin();
+        // Track B: fuse pin publication into the invalidation walk instead of
+        // the full 5120-slot refresh_tlb_pin rescan (sync_active_tlb_pin).
+        self.flush_non_global_and_publish_pin();
+        // Bochs paging.cc — iCache.breakLinks()
+        self.i_cache.break_links();
+    }
+
+    /// Invalidate a single page — Bochs paging.cc `TLB_invlpg`. Drops the
+    /// prefetch queue and stack cache, invalidates the DTLB+ITLB entry with
+    /// fused Track-B pin publication, and breaks icache trace links. Shared by
+    /// the INVLPG instruction, MOV to DR0-3, and INVLPGA — each a `TLB_invlpg`
+    /// in Bochs (crregs.cc `MOV_DdRd`, svm.cc `INVLPGA`).
+    ///
+    /// Bochs additionally calls `wakeup_monitor()` here so an MWAIT whose
+    /// monitored page was just remapped cannot wait forever. rusty models no
+    /// wakeup on any invlpg path — a shared, pre-existing MWAIT gap, not
+    /// introduced by this consolidation.
+    pub(super) fn tlb_invlpg(&mut self, laddr: u64) {
+        self.invalidate_prefetch_q();
+        self.invalidate_stack_cache();
+        self.invlpg_and_publish_pin(laddr);
         // Bochs paging.cc — iCache.breakLinks()
         self.i_cache.break_links();
     }

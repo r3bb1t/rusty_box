@@ -1838,10 +1838,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
-        // Invalidate TLB entry
-        self.dtlb.invlpg(laddr);
-        self.itlb.invlpg(laddr);
-        self.sync_active_tlb_pin();
+        // Bochs svm.cc INVLPGA — TLB_invlpg(laddr) (FIXME: flush all ASID
+        // entries). The prior code skipped the prefetch/stack invalidation and
+        // icache link break that Bochs paging.cc TLB_invlpg performs.
+        self.tlb_invlpg(laddr);
         Ok(())
     }
 }

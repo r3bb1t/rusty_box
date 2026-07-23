@@ -25,7 +25,10 @@ use core::cell::{Cell, UnsafeCell};
 ///
 /// They deliberately live with the descriptor rather than the CPU: eviction
 /// checks may run while a CPU is mutably borrowed for instruction execution.
-pub(crate) const CPU_TLB_PIN_DTLB_SLOTS: usize = 4096;
+/// These mirror `BX_DTLB_SIZE` / `BX_ITLB_SIZE` (cpu.rs, Bochs cpu.h) and must
+/// stay `>=` them — each pin array is indexed by TLB slot, so under-sizing
+/// would let a slot index run past the end.
+pub(crate) const CPU_TLB_PIN_DTLB_SLOTS: usize = 2048;
 pub(crate) const CPU_TLB_PIN_ITLB_SLOTS: usize = 1024;
 
 /// Pin-visible host pointers copied out of one CPU.
@@ -132,6 +135,21 @@ impl CpuTlbPin {
             || (state.fetch_window_start < end && state.fetch_window_end > start)
             || state.dtlb_hosts.iter().copied().any(contains)
             || state.itlb_hosts.iter().copied().any(contains)
+    }
+
+    /// Exact equality of every published host pin. Used by the Track B property
+    /// test to assert that incrementally maintained sidecars stay byte-identical
+    /// to a fresh `refresh_tlb_pin` rescan after each TLB operation.
+    #[cfg(test)]
+    pub(crate) fn state_matches(&self, other: &CpuTlbPin) -> bool {
+        // SAFETY: single-threaded test access; no concurrent sidecar mutation.
+        let a = unsafe { &*self.state.get() };
+        let b = unsafe { &*other.state.get() };
+        a.dtlb_hosts == b.dtlb_hosts
+            && a.itlb_hosts == b.itlb_hosts
+            && a.vmcb_host == b.vmcb_host
+            && a.fetch_window_start == b.fetch_window_start
+            && a.fetch_window_end == b.fetch_window_end
     }
 }
 /// The only CPU state consumed by handler-aware physical-memory operations.

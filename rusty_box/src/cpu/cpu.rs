@@ -43,11 +43,13 @@ pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 /// wiring has been torn down.
 pub(crate) const BX_ASYNC_EVENT_SCHEDULER_BOUNDARY: u32 = 1 << 30;
 
-// Bochs uses 2048 DTLB / 1024 ITLB (direct-mapped). Real CPUs have much
-// larger set-associative TLBs (Intel Skylake: 1536 4K + 32 2M/4M data entries).
-// 4096 entries reduce direct-mapped eviction pressure during Linux kernel
-// startup where boot page tables overlap with decompressed kernel data.
-const BX_DTLB_SIZE: usize = 4096;
+// Bochs cpu.h — BX_DTLB_SIZE 2048, BX_ITLB_SIZE 1024 (direct-mapped). Matching
+// the upstream sizes keeps rusty's host page-walk and direct-mapped eviction
+// profile on the same curve as Bochs, the perf-parity source of truth: a larger
+// DTLB changes only host miss rate (guest behaviour is identical), but that host
+// divergence is exactly what the wall-clock comparison must not carry.
+// CPU_TLB_PIN_DTLB_SLOTS (memory/mod.rs) mirrors BX_DTLB_SIZE and must move with it.
+const BX_DTLB_SIZE: usize = 2048;
 const BX_ITLB_SIZE: usize = 1024;
 
 #[cfg(feature = "alloc")]
@@ -1092,16 +1094,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         })
     }
 
-    /// Refresh every slot after a bulk invalidation.
-    #[inline]
-    pub(crate) fn sync_active_tlb_pin(&self) {
-        if let Some(pin) = self.active_tlb_pin_sidecar() {
-            self.refresh_tlb_pin(pin);
-        } else {
-            self.tlb_pin_dirty.set(true);
-        }
-    }
-
     /// Publish the pin sidecar after a FULL TLB flush (`dtlb.flush()` +
     /// `itlb.flush()`), where every entry is now invalid.
     ///
@@ -1124,6 +1116,87 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.tlb_pin_dirty.set(false);
         } else {
             self.tlb_pin_dirty.set(true);
+        }
+    }
+
+    /// Non-global TLB flush (Bochs paging.cc `TLB_flushNonGlobal`) with pin
+    /// publication fused into the invalidation walk (Track B). Clears only the
+    /// pin slots the walk actually invalidates, then republishes the O(1) VMCB
+    /// and fetch-window pins — producing exactly the sidecar state a full
+    /// `refresh_tlb_pin` rescan would, at O(entries invalidated) instead of
+    /// O(`BX_DTLB_SIZE` + `BX_ITLB_SIZE`).
+    ///
+    /// Correctness rests on the pin invariant: a kept (global) entry's slot
+    /// already equals its live host pointer because every install publishes via
+    /// `sync_dtlb_pin_slot` / `sync_itlb_pin_slot`, so leaving it untouched
+    /// matches the fresh rescan. This never under-pins: every slot cleared here
+    /// belongs to an entry the same call just invalidated. Over-pinning is safe.
+    #[inline]
+    pub(crate) fn flush_non_global_and_publish_pin(&mut self) {
+        match self.active_tlb_pin_sidecar {
+            Some(pin_ptr) => {
+                // SAFETY: the sidecar lives in the caller-owned pin slice, not
+                // inside the CPU, so it is separately addressable from
+                // self.dtlb/itlb. `as_ref` yields a reference decoupled from the
+                // `&mut self` borrow, which is what lets the mutable TLB walks
+                // below publish into it. The single-threaded CPU/memory scope
+                // serializes all sidecar mutation.
+                let pin: &crate::memory::CpuTlbPin = unsafe { pin_ptr.as_ref() };
+                self.dtlb
+                    .flush_non_global_publishing(|slot| pin.set_dtlb_host(slot, 0));
+                self.itlb
+                    .flush_non_global_publishing(|slot| pin.set_itlb_host(slot, 0));
+                self.republish_scalar_pins(pin);
+                self.tlb_pin_dirty.set(false);
+            }
+            None => {
+                self.dtlb.flush_non_global();
+                self.itlb.flush_non_global();
+                self.tlb_pin_dirty.set(true);
+            }
+        }
+    }
+
+    /// Single-page INVLPG (Bochs paging.cc `TLB_invlpg`) with pin publication
+    /// fused into the invalidation (Track B). The non-split path touches at most
+    /// one DTLB and one ITLB slot; the split-large path publishes every slot its
+    /// scan clears. See `flush_non_global_and_publish_pin` for the invariant.
+    #[inline]
+    pub(crate) fn invlpg_and_publish_pin(&mut self, laddr: BxAddress) {
+        match self.active_tlb_pin_sidecar {
+            Some(pin_ptr) => {
+                // SAFETY: see `flush_non_global_and_publish_pin`.
+                let pin: &crate::memory::CpuTlbPin = unsafe { pin_ptr.as_ref() };
+                self.dtlb
+                    .invlpg_publishing(laddr, |slot| pin.set_dtlb_host(slot, 0));
+                self.itlb
+                    .invlpg_publishing(laddr, |slot| pin.set_itlb_host(slot, 0));
+                self.republish_scalar_pins(pin);
+                self.tlb_pin_dirty.set(false);
+            }
+            None => {
+                self.dtlb.invlpg(laddr);
+                self.itlb.invlpg(laddr);
+                self.tlb_pin_dirty.set(true);
+            }
+        }
+    }
+
+    /// Republish the O(1) non-TLB host pins (VMCB backing + bounded fetch
+    /// window) exactly as `refresh_tlb_pin` does, so a fused flush leaves the
+    /// sidecar byte-identical to a full rescan for those fields. A TLB flush
+    /// does not change SVM state, but rewriting them is O(1) and removes any
+    /// dependence on a pre-existing VMCB/fetch-window invariant.
+    #[inline]
+    fn republish_scalar_pins(&self, pin: &crate::memory::CpuTlbPin) {
+        pin.set_vmcb_host(if self.in_svm_guest {
+            self.vmcbhostptr as usize
+        } else {
+            0
+        });
+        match self.eip_fetch_ptr {
+            Some(slice) => pin.set_fetch_window(slice.as_ptr() as usize, slice.len()),
+            None => pin.set_fetch_window(0, 0),
         }
     }
 
@@ -4577,6 +4650,104 @@ mod tests {
         );
 
         cpu.clear_memory_access();
+    }
+
+    #[test]
+    fn incremental_tlb_pins_match_a_fresh_rescan_after_every_op() {
+        // Track B property test. The pin sidecar is maintained incrementally:
+        // installs publish one slot, `flush_non_global_and_publish_pin` and
+        // `invlpg_and_publish_pin` fuse pin removal into the invalidation walk,
+        // and `tlb_flush` memsets. After every operation the sidecar must be
+        // byte-identical to a fresh `refresh_tlb_pin` full rescan — the oracle —
+        // for both an SVM-off and an SVM-on host, or the fused walks would
+        // under-pin (use-after-free) or over-pin (a stale eviction block).
+        const MIB: usize = 1024 * 1024;
+
+        for &svm in &[false, true] {
+            let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+            let mut mem = BxMemC::new(
+                BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).unwrap(),
+                false,
+            );
+            let host_base = mem.identity_guest_base().0 as usize;
+
+            if svm {
+                cpu.in_svm_guest = true;
+                cpu.vmcbhostptr = (host_base + 0x2_0000) as _;
+            }
+
+            let pin = CpuTlbPin::new(&cpu);
+            let oracle = CpuTlbPin::new(&cpu);
+            cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
+            if svm {
+                cpu.sync_vmcb_pin();
+            }
+
+            // Deterministic xorshift64 — Date/rand are unavailable in tests.
+            let mut state: u64 = 0x9E37_79B9_7F4A_7C15 ^ (svm as u64).wrapping_mul(0xD1B5_4A32_D192_ED03);
+            let mut next = || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            // Page-aligned linear address spanning 8192 pages, forcing slot
+            // collisions in both the 1024-entry ITLB and the larger DTLB.
+            let laddr_of = |n: u64| ((n & 0x1FFF) << 12) as u64;
+
+            for _ in 0..2000 {
+                match next() % 6 {
+                    0 | 1 => {
+                        let laddr = laddr_of(next());
+                        let host = host_base + laddr as usize;
+                        let global = (next() & 1) != 0;
+                        let large = (next() & 7) == 0;
+                        let slot = cpu.dtlb.get_index_of(laddr, 0);
+                        {
+                            let e = &mut cpu.dtlb.entries[slot];
+                            e.lpf = laddr;
+                            e.host_page_addr = host as _;
+                            // bit31 == TLB_GLOBAL_PAGE (tlb.rs); low bit is a
+                            // normal access-permission bit marking the entry live.
+                            e.access_bits = 1 | if global { 0x8000_0000 } else { 0 };
+                            e.lpf_mask = if large { 0x1F_FFFF } else { 0xFFF };
+                        }
+                        if large {
+                            cpu.dtlb.split_large = true;
+                        }
+                        cpu.sync_dtlb_pin_slot(laddr, 0);
+                    }
+                    2 => {
+                        let laddr = laddr_of(next());
+                        let host = host_base + laddr as usize;
+                        let global = (next() & 1) != 0;
+                        let slot = cpu.itlb.get_index_of(laddr, 0);
+                        {
+                            let e = &mut cpu.itlb.entries[slot];
+                            e.lpf = laddr;
+                            e.host_page_addr = host as _;
+                            e.access_bits = 1 | if global { 0x8000_0000 } else { 0 };
+                            e.lpf_mask = 0xFFF;
+                        }
+                        cpu.sync_itlb_pin_slot(laddr, 0);
+                    }
+                    3 => {
+                        let laddr = laddr_of(next());
+                        cpu.invlpg_and_publish_pin(laddr);
+                    }
+                    4 => cpu.flush_non_global_and_publish_pin(),
+                    _ => cpu.tlb_flush(),
+                }
+
+                cpu.refresh_tlb_pin(&oracle);
+                assert!(
+                    pin.state_matches(&oracle),
+                    "incremental pin diverged from a fresh rescan (svm={svm})"
+                );
+            }
+
+            cpu.clear_memory_access();
+        }
     }
 
     #[test]

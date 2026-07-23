@@ -314,14 +314,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.in_vmx_guest && self.vmexit_check_invlpg(laddr)? {
             return Ok(());
         }
-        // Bochs paging.cc TLB_invlpg: invalidate prefetch, stack cache, TLB entries, icache links
-        self.invalidate_prefetch_q();
-        self.invalidate_stack_cache();
-        self.dtlb.invlpg(laddr);
-        self.itlb.invlpg(laddr);
-        self.sync_active_tlb_pin();
-        // Bochs paging.cc — iCache.breakLinks()
-        self.i_cache.break_links();
+        // Bochs paging.cc TLB_invlpg — prefetch/stack/TLB invalidation + link
+        // break, with fused Track-B pin publication.
+        self.tlb_invlpg(laddr);
 
         // BOCHS BX_INSTR_TLB_CNTRL with INVLPG kind.
         #[cfg(feature = "instrumentation")]
@@ -1461,10 +1456,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         match dr_idx {
             0..=3 => {
                 self.dr[dr_idx] = val as u64;
-                // Bochs: TLB_invlpg at breakpoint address
-                self.dtlb.invlpg(val as u64);
-                self.itlb.invlpg(val as u64);
-                self.sync_active_tlb_pin();
+                // Bochs crregs.cc MOV_DdRd — TLB_invlpg at the breakpoint
+                // address (full paging.cc TLB_invlpg: prior code skipped the
+                // stack-cache invalidation and icache link break).
+                self.tlb_invlpg(val as u64);
             }
             4 | 6 => {
                 // DR6: preserve reserved bits, only allow bits 0-3 (B0-B3) and bits 13-15 (BD,BS,BT)
