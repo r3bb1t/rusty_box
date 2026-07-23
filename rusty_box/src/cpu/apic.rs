@@ -320,7 +320,7 @@ struct LocalApicSnapshotState {
     ticks_initial: u64,
     current_ticks: u64,
     ticks_at_sync: u64,
-    icount_at_sync: u64,
+    cpu_ticks_at_sync: u64,
     intr_pending: bool,
     timer_divconf: u32,
     timer_divide_factor: u32,
@@ -409,10 +409,10 @@ pub struct BxLocalApic {
     /// Used by read_aligned(&self) to compute current timer count without &mut self.
     pub(crate) current_ticks: u64,
     /// System ticks at last sync point (batch boundary).
-    /// Used with icount_at_sync to compute live ticks mid-batch.
+    /// Used with cpu_ticks_at_sync to compute live ticks mid-batch.
     pub(crate) ticks_at_sync: u64,
-    /// CPU instruction count at last sync point.
-    pub(crate) icount_at_sync: u64,
+    /// CPU tick clock (`cpu_ticks()`) at last sync point.
+    pub(crate) cpu_ticks_at_sync: u64,
     /// Rust-only bridge for Bochs service_local_apic() -> cpu->signal_event(BX_EVENT_PENDING_LAPIC_INTR). Set by service_local_apic(); consumed by CPU-owned APIC mutation sites or emulator sync points. Not architectural LAPIC state.
     pub(crate) intr_pending: bool,
 
@@ -549,7 +549,7 @@ impl Default for BxLocalApic {
             ticks_initial: 0,
             current_ticks: 0,
             ticks_at_sync: 0,
-            icount_at_sync: 0,
+            cpu_ticks_at_sync: 0,
             intr_pending: false,
             timer_divconf: 0,
             timer_divide_factor: 1,
@@ -588,12 +588,12 @@ impl BxLocalApic {
     /// Get the live system tick count. In Bochs SMP, CPU traces do not advance
     /// global time; the scheduler advances it only after a full CPU round.
     #[inline]
-    fn live_ticks(&self, icount: u64) -> u64 {
+    fn live_ticks(&self, cpu_ticks: u64) -> u64 {
         if self.bus_cpu_count > 1 {
             return self.current_ticks;
         }
-        if icount >= self.icount_at_sync {
-            self.ticks_at_sync + (icount - self.icount_at_sync)
+        if cpu_ticks >= self.cpu_ticks_at_sync {
+            self.ticks_at_sync + (cpu_ticks - self.cpu_ticks_at_sync)
         } else {
             self.current_ticks
         }
@@ -787,7 +787,7 @@ impl BxLocalApic {
 
     /// Read from a 16-byte-aligned APIC register.
     /// Bochs: read_aligned (apic.cc)
-    pub(crate) fn read_aligned(&self, addr: BxPhyAddress, icount: u64) -> u32 {
+    pub(crate) fn read_aligned(&self, addr: BxPhyAddress, cpu_ticks: u64) -> u32 {
         debug_assert!((addr & 0xF) == 0);
         let mut data: u32 = 0;
         let apic_reg = (addr & 0xFF0) as u32;
@@ -876,7 +876,7 @@ impl BxLocalApic {
             }
             // Timer current count (apic.cc)
             // Bochs calls get_current_timer_count(bx_pc_system.time_ticks()) here.
-            // We use live_ticks() with the passed icount for accuracy
+            // We use live_ticks() with the passed CPU tick clock for accuracy
             // within CPU batches (critical for kernel timer calibration loops).
             0x390 => {
                 let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
@@ -884,7 +884,7 @@ impl BxLocalApic {
                     // TSC-deadline mode: current count always reads 0
                     data = 0;
                 } else if self.timer_active && self.timer_divide_factor > 0 {
-                    let ticks = self.live_ticks(icount);
+                    let ticks = self.live_ticks(cpu_ticks);
                     let delta64 =
                         ticks.saturating_sub(self.ticks_initial) / self.timer_divide_factor as u64;
                     debug_assert!(
@@ -1041,12 +1041,12 @@ impl BxLocalApic {
 
     /// Handle a read from the LAPIC MMIO region.
     /// Bochs: read (apic.cc)
-    pub(crate) fn read(&self, addr: BxPhyAddress, len: u32, icount: u64) -> u32 {
+    pub(crate) fn read(&self, addr: BxPhyAddress, len: u32, cpu_ticks: u64) -> u32 {
         if (addr & !0x3) != ((addr + len as BxPhyAddress - 1) & !0x3) {
             error!("APIC read at address {:#x} spans 32-bit boundary!", addr);
             return 0;
         }
-        let value = self.read_aligned(addr & !0x3, icount);
+        let value = self.read_aligned(addr & !0x3, cpu_ticks);
         if len == 4 {
             return value;
         }
@@ -1083,7 +1083,7 @@ impl BxLocalApic {
 
     /// Handle a read from the x2APIC MSR register window.
     /// Bochs: read_x2apic (apic.cc)
-    pub(crate) fn read_x2apic(&self, index: u32, icount: u64) -> Option<u64> {
+    pub(crate) fn read_x2apic(&self, index: u32, cpu_ticks: u64) -> Option<u64> {
         match index {
             // Full-width x2APIC-only registers.
             0x020 => Some(self.apic_id as u64),
@@ -1096,7 +1096,7 @@ impl BxLocalApic {
             | 0x160 | 0x170 | 0x180 | 0x190 | 0x1A0 | 0x1B0 | 0x1C0 | 0x1D0 | 0x1E0 | 0x1F0
             | 0x200 | 0x210 | 0x220 | 0x230 | 0x240 | 0x250 | 0x260 | 0x270 | 0x280 | 0x2F0
             | 0x320 | 0x330 | 0x340 | 0x350 | 0x360 | 0x370 | 0x380 | 0x390 | 0x3E0 => {
-                Some(self.read_aligned(index as BxPhyAddress, icount) as u64)
+                Some(self.read_aligned(index as BxPhyAddress, cpu_ticks) as u64)
             }
             _ => {
                 error!("read_x2apic: register {:#x} not implemented", index);
@@ -1588,6 +1588,9 @@ impl BxLocalApic {
         self.intr = false;
         self.clear_pending_lapic_event();
         self.service_local_apic(); // may set intr=true again
+
+        // BENCHMARK-ONLY (temporary): delivered-vector histogram
+        crate::vec_diag::count(vec_u32 as usize);
 
         vector as u8
     }
@@ -2332,7 +2335,7 @@ impl BxLocalApic {
             self.ticks_initial,
             self.current_ticks,
             self.ticks_at_sync,
-            self.icount_at_sync,
+            self.cpu_ticks_at_sync,
         ] {
             writer.write_u64(value)?;
         }
@@ -2468,7 +2471,7 @@ impl BxLocalApic {
         let ticks_initial = reader.read_u64()?;
         let current_ticks = reader.read_u64()?;
         let ticks_at_sync = reader.read_u64()?;
-        let icount_at_sync = reader.read_u64()?;
+        let cpu_ticks_at_sync = reader.read_u64()?;
         let intr_pending = reader.read_bool()?;
         let timer_divconf = reader.read_u32()?;
         let timer_divide_factor = reader.read_u32()?;
@@ -2601,7 +2604,7 @@ impl BxLocalApic {
             base_addr, mode, xapic_ext, software_enabled, spurious_vector, focus_disable,
             task_priority, ldr, dest_format, isr, tmr, irr, ier, error_status,
             shadow_error_status, icr_hi, icr_lo, lvt, timer_initial, timer_current,
-            ticks_initial, current_ticks, ticks_at_sync, icount_at_sync, intr_pending,
+            ticks_initial, current_ticks, ticks_at_sync, cpu_ticks_at_sync, intr_pending,
             timer_divconf, timer_divide_factor, timer_active, timer_handle, vmx_timer_handle,
             vmx_preemption_timer_value, vmx_preemption_timer_initial, vmx_preemption_timer_fire,
             vmx_preemption_timer_rate, vmx_timer_active, mwaitx_timer_handle,
@@ -2637,7 +2640,7 @@ impl BxLocalApic {
         self.ticks_initial = state.ticks_initial;
         self.current_ticks = state.current_ticks;
         self.ticks_at_sync = state.ticks_at_sync;
-        self.icount_at_sync = state.icount_at_sync;
+        self.cpu_ticks_at_sync = state.cpu_ticks_at_sync;
         self.intr_pending = state.intr_pending;
         self.timer_divconf = state.timer_divconf;
         self.timer_divide_factor = state.timer_divide_factor;

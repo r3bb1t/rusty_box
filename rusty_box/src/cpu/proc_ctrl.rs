@@ -194,21 +194,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Get current system ticks from pc_system (Bochs: bx_pc_system.time_ticks()).
-    /// Falls back to icount when pc_system is not wired (unit tests).
+    /// Falls back to `cpu_ticks()` when pc_system is not wired (unit tests).
     ///
-    /// UP observes the live pc-system clock plus instructions retired in the
-    /// wired batch. SMP freezes every CPU's view at the round-start epoch and
-    /// advances global time only when the emulator completes that full round.
+    /// UP observes the live pc-system clock plus the ticks this CPU generated
+    /// in the wired batch — `cpu_ticks()`, so fast-REP bulk transfers advance
+    /// time exactly like Bochs BX_TICKN. SMP freezes every CPU's view at the
+    /// round-start epoch and advances global time only when the emulator
+    /// completes that full round.
     #[inline]
     pub(crate) fn system_ticks(&self) -> u64 {
         let Some(pc_system) = self.pc_system_ptr else {
-            return self.icount;
+            return self.cpu_ticks();
         };
         if self.pc_system_tick_denominator == 1 {
             // SAFETY: pc_system_ptr is wired only for the active execution
             // scope and cleared before the emulator regains this borrow.
             let live_ticks = unsafe { pc_system.as_ref().time_ticks() };
-            live_ticks.wrapping_add(self.icount.wrapping_sub(self.pc_system_icount_at_sync))
+            live_ticks
+                .wrapping_add(self.cpu_ticks().wrapping_sub(self.pc_system_cpu_ticks_at_sync))
         } else {
             self.pc_system_ticks_at_sync
         }
@@ -934,12 +937,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return Ok(0);
             }
             let index = (msr - 0x800) << 4;
-            // LAPIC reads convert through `live_ticks(icount)` (apic.cc
-            // get_current_timer_count), which subtracts `icount_at_sync` —
-            // raw icount domain, like the MMIO read paths. `system_ticks()`
-            // would double-add the ticks-icount divergence accumulated by
-            // HLT fast-forwards and understate TMCCT (MSR 0x839) to ~0.
-            if let Some(val) = self.lapic.read_x2apic(index, self.icount) {
+            // LAPIC reads convert through `live_ticks(cpu_ticks)` (apic.cc
+            // get_current_timer_count), which subtracts `cpu_ticks_at_sync` —
+            // the CPU tick clock, like the MMIO read paths. `system_ticks()`
+            // would double-add the ticks divergence accumulated by HLT
+            // fast-forwards and understate TMCCT (MSR 0x839) to ~0.
+            if let Some(val) = self.lapic.read_x2apic(index, self.cpu_ticks()) {
                 return Ok(val);
             }
             self.exception(super::cpu::Exception::Gp, 0)?;

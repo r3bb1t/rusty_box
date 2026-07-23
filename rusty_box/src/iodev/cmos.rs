@@ -335,7 +335,8 @@ pub struct BxCmosC {
     timeval_change: bool,
 
     // --- IRQ state ---
-    /// IRQ8 enabled (controls whether PIC is signaled)
+    /// IRQ8 enabled (controls whether PIC is signaled) — Bochs cmos.h
+    /// enable_irq; the HPET clears it in legacy-replacement mode.
     pub(crate) irq_enabled: bool,
     /// IRQ8 raise pending — set by periodic/alarm timer, consumed by tick_devices
     pub(crate) irq8_pending: bool,
@@ -438,6 +439,12 @@ impl BxCmosC {
         self.init_defaults();
     }
 
+    /// Gate the RTC off IRQ8 — Bochs cmos.h enable_irq, driven by the HPET's
+    /// legacy-replacement mode (hpet.cc).
+    pub(crate) fn enable_irq(&mut self, enabled: bool) {
+        self.irq_enabled = enabled;
+    }
+
     /// Return the initial owner state after timer handles have been registered.
     pub(crate) fn timer_sync(&self) -> CmosTimerSync {
         CmosTimerSync {
@@ -450,6 +457,9 @@ impl BxCmosC {
     /// Reset the CMOS/RTC and report the owner transitions to apply.
     pub fn reset(&mut self) -> CmosTimerSync {
         self.address = 0;
+        // Bochs cmos.cc reset(): s.irq_enabled = 1. A hardware reset
+        // re-enables the RTC IRQ even if HPET legacy mode had cleared the gate.
+        self.irq_enabled = true;
         self.nmi_mask = false;
         self.irq8_pending = false;
         self.irq8_lower_pending = false;
@@ -759,7 +769,18 @@ impl BxCmosC {
                 let addr = (self.address & 0x7F) as usize;
                 let value = match addr as u8 {
                     REG_STAT_A => {
+                        // BENCHMARK-ONLY (temporary): count REG_A polls and
+                        // how often the guest observes UIP set.
+                        crate::vec_diag::count(504);
+                        if self.ram[addr] & 0x80 != 0 {
+                            crate::vec_diag::count(505);
+                        }
                         // UIP bit is dynamically maintained by timers
+                        self.ram[addr]
+                    }
+                    0x00 => {
+                        // BENCHMARK-ONLY (temporary): count seconds-register polls
+                        crate::vec_diag::count(506);
                         self.ram[addr]
                     }
                     REG_STAT_C => {

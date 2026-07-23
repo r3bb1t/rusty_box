@@ -381,8 +381,19 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     pub(super) prev_ssp: BxAddress,
     pub(super) speculative_rsp: bool,
 
+    /// Instructions retired — Bochs cpu.h `icount` units: one per executed
+    /// instruction, one per `repeat()` iteration, one per fast-REP chunk.
+    /// REP elements beyond the chunk's first are time, not instructions —
+    /// they are charged to [`Self::tick_surplus`] (Bochs string.cc/io.cc
+    /// `BX_TICKN(count-1)`), never here.
     pub(crate) icount: u64,
-    pub(super) icount_last_sync: u64,
+    /// Virtual ticks charged beyond `icount` by fast-REP bulk transfers —
+    /// the deferred form of Bochs string.cc/io.cc `BX_TICKN(count-1)`.
+    /// `cpu_ticks()` (= icount + tick_surplus) is this CPU's tick-domain
+    /// clock; every elapsed-time computation must use it, never raw icount.
+    pub(crate) tick_surplus: u64,
+    /// `cpu_ticks()` baseline captured by `mark_tick_sync`.
+    pub(super) ticks_last_sync: u64,
 
     /// What events to inhibit at any given time.  Certain instructions
     /// inhibit interrupts, some debug exceptions and single-step traps.
@@ -808,8 +819,8 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// `pc_system.time_ticks()` captured when the emulator wired this CPU for
     /// the current batch/round.
     pub(super) pc_system_ticks_at_sync: u64,
-    /// CPU icount corresponding to `pc_system_ticks_at_sync`.
-    pub(super) pc_system_icount_at_sync: u64,
+    /// CPU tick clock (`cpu_ticks()`) corresponding to `pc_system_ticks_at_sync`.
+    pub(super) pc_system_cpu_ticks_at_sync: u64,
     /// A value of one selects live UP time. SMP retains the captured
     /// round-start epoch until the emulator completes the round.
     pub(super) pc_system_tick_denominator: u64,
@@ -927,14 +938,23 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.cpuid.set_cpuid_freq(freq, ips);
     }
 
+    /// This CPU's tick-domain clock: instructions retired plus the fast-REP
+    /// tick surplus. Matches the per-CPU contribution to Bochs
+    /// `bx_pc_system.time_ticks()` (BX_TICK1 per instruction plus BX_TICKN
+    /// for bulk REP), while `icount` alone matches Bochs `icount`.
     #[inline]
-    pub(crate) fn mark_icount_sync(&mut self) {
-        self.icount_last_sync = self.icount;
+    pub(crate) fn cpu_ticks(&self) -> u64 {
+        self.icount.wrapping_add(self.tick_surplus)
     }
 
     #[inline]
-    pub(crate) fn icount_delta_since_sync(&self) -> u64 {
-        self.icount.saturating_sub(self.icount_last_sync)
+    pub(crate) fn mark_tick_sync(&mut self) {
+        self.ticks_last_sync = self.cpu_ticks();
+    }
+
+    #[inline]
+    pub(crate) fn tick_delta_since_sync(&self) -> u64 {
+        self.cpu_ticks().saturating_sub(self.ticks_last_sync)
     }
 
     /// Synchronize CPU-visible LAPIC INTR state and request a machine
@@ -1867,7 +1887,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         self.pc_system_ptr = Some(ps);
         // SAFETY: PcSystem pointer is valid for the duration of the CPU batch.
         self.pc_system_ticks_at_sync = unsafe { ps.as_ref().time_ticks() };
-        self.pc_system_icount_at_sync = self.icount;
+        self.pc_system_cpu_ticks_at_sync = self.cpu_ticks();
         self.pc_system_tick_denominator = tick_denominator.max(1);
     }
 
@@ -1920,6 +1940,20 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         let a20_addr = unsafe { mem_bus.as_ref().a20_addr(addr) };
         let policy = self.memory_access_policy(a20_addr);
         let mem = unsafe { &mut *mem_bus.as_ptr() };
+        // HPET registers convert emulated time inside the memory handler
+        // (Bochs hpet.cc reads bx_pc_system.time_nsec() there); stamp this
+        // access with the CPU's live clock so mid-batch counter reads are
+        // exact. Range-gated so ordinary slow-path accesses pay one compare.
+        if (crate::iodev::hpet::HPET_BASE
+            ..crate::iodev::hpet::HPET_BASE + crate::iodev::hpet::HPET_LEN)
+            .contains(&a20_addr)
+        {
+            let ips = self
+                .pc_system_ref()
+                .map(|ps| ps.ips())
+                .unwrap_or(0);
+            mem.stamp_hpet_access_clock(self.system_ticks(), ips);
+        }
         Some((policy, mem))
     }
 
@@ -2430,10 +2464,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         self.mem_host_len = host_len;
 
         let mut iteration = 0u64;
-        // Track icount at start for Bochs-compatible IPS measurement.
-        // Bochs counts REP iterations as separate instructions via time_ticks(),
-        // which matches icount (incremented per REP iteration in string.rs).
-        // We return icount delta instead of iteration count to match.
+        // `iteration` is the batch budget counter (one per handler dispatch).
+        // The RETURN VALUE is the icount delta — Bochs cpu.h icount units:
+        // slow `repeat()` loops retire one icount per iteration inside the
+        // handler (Bochs cpu.cc repeat), which `iteration` cannot see.
+        // Fast-REP element surpluses are ticks, not instructions, and land
+        // in `tick_surplus` (Bochs string.cc BX_TICKN(count-1)), so they
+        // appear in neither counter.
         let icount_start = self.icount;
         #[cfg(feature = "profiling")]
         let mut prof_assign_ns = 0u64;
@@ -2723,6 +2760,56 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 // instruction in the trace is wrong. The outer loop will handle the event
                 // and fetch a new trace for the updated RIP.
                 if self.async_event != 0 {
+                    // Bochs ctrl_xfer*.cc BX_LINK_TRACE → cpu.cc linkTrace:
+                    // when the ONLY pending event is the taken branch's own
+                    // STOP_TRACE and the branch is a direct near transfer,
+                    // continue straight into the cached target trace without
+                    // returning to the outer loop or re-hashing the icache.
+                    // Guard composition mirrors linkTrace: real async events
+                    // never link (the equality test), SMP never links
+                    // (STOP_AFTER_ONE_TRACE), and `iteration < max` is the
+                    // ticks-left guard — UP batches are pre-capped at the
+                    // next pc_system deadline, so a linked chain cannot run
+                    // past a timer any more than the existing trace-end
+                    // chaining can. Cooperative stop keeps trace latency.
+                    // BENCHMARK-ONLY (temporary): link-rate diagnostics —
+                    // 498 = STOP_TRACE breaks, 499 = other async breaks,
+                    // 500 = guard passed, 501 = link followed.
+                    if self.async_event == BX_ASYNC_EVENT_STOP_TRACE {
+                        crate::vec_diag::count(498);
+                    } else {
+                        crate::vec_diag::count(499);
+                    }
+                    if !STOP_AFTER_ONE_TRACE
+                        && self.async_event == BX_ASYNC_EVENT_STOP_TRACE
+                        && iteration < max_instructions
+                        && matches!(self.activity_state, CpuActivityState::Active)
+                        && !self.instrumentation.stop_request
+                        && super::icache::is_linkable_opcode(opcode)
+                    {
+                        crate::vec_diag::count(500);
+                        if let Some((start, tlen)) = self.try_link_trace(instr_idx) {
+                            crate::vec_diag::count(501);
+                            self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+                            instr_idx = start;
+                            trace_end = start + tlen;
+                            if STRICT_INSTRUCTION_BUDGET {
+                                let trace_budget = usize::try_from(
+                                    max_instructions.saturating_sub(iteration),
+                                )
+                                .unwrap_or(usize::MAX);
+                                trace_end =
+                                    trace_end.min(instr_idx.saturating_add(trace_budget));
+                            }
+                            #[cfg(feature = "instrumentation")]
+                            if self.instrumentation.active.has_block() {
+                                let block_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
+                                let block_len = (trace_end - instr_idx) as u16;
+                                self.instrumentation.fire_block_start(block_rip, block_len);
+                            }
+                            continue 'trace;
+                        }
+                    }
                     break 'trace;
                 }
 
@@ -2791,7 +2878,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             }
         };
 
-        result
+        // Bochs icount units: report retired instructions, which includes
+        // slow-repeat iterations charged inside handlers that `iteration`
+        // (the dispatch counter carried by the Ok breaks) does not count.
+        result.map(|_| self.icount.wrapping_sub(icount_start))
     }
 
     /// Cold path: handle fatal errors from instruction execution.
@@ -2869,6 +2959,52 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.get_icache_entry(mem_reborrowed, cpus)?
         };
         Ok(self.i_cache.mpool[mpool_start_idx])
+    }
+
+    /// Bochs cpu.cc `linkTrace`, loop-continuation form: after a taken direct
+    /// near branch, try to continue at the branch target's cached trace
+    /// without returning to the outer loop or re-hashing per branch.
+    ///
+    /// Hit-only, exactly like Bochs (`entry != NULL`): on any doubt —
+    /// icache miss, target outside the current prefetch window (Bochs
+    /// prefetch()es here; refusing is a pure link-rate reduction), or a
+    /// stale/mismatched stored link — return `None` and let the outer loop's
+    /// full `get_icache_entry` path (prefetch, SMC watermark, miss service)
+    /// handle it. Every refusal is behavior-invisible.
+    ///
+    /// Links die on `break_links`/`flush_all` via the timestamp bump; CPU
+    /// stores invalidate synchronously (`handle_smc_scan` → `break_links`)
+    /// and device writes only land at scheduler boundaries where the batch
+    /// ends, so a mid-batch link can never bypass a pending invalidation
+    /// that `get_icache_entry`'s SMC watermark would have applied.
+    ///
+    /// `expected_rip` is stored/checked so a stale link can only be followed
+    /// when the branch target genuinely resolves to the same mapping —
+    /// stronger than Bochs, which follows the stored target unconditionally.
+    #[inline]
+    fn try_link_trace(&mut self, branch_idx: usize) -> Option<(usize, usize)> {
+        let rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
+        let stamp = self.i_cache.trace_link_time_stamp;
+        // Fast path — Bochs instr.h getNextTrace.
+        if let Some(target) = self.i_cache.trace_links[branch_idx].target(stamp, rip) {
+            return Some(target);
+        }
+        // Store path — Bochs linkTrace's find_entry hit case.
+        let eip_biased = (rip as i64).wrapping_add(self.eip_page_bias as i64) as u32;
+        if self.eip_page_window_size == 0 || eip_biased >= self.eip_page_window_size {
+            return None;
+        }
+        let p_addr: BxPhyAddress = self.p_addr_fetch_page.wrapping_add(u64::from(eip_biased));
+        let hash_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
+        let entry = &self.i_cache.entry[hash_idx];
+        if entry.p_addr != p_addr {
+            return None;
+        }
+        let start = entry.mpool_start_idx;
+        let tlen = entry.tlen as usize;
+        self.i_cache.trace_links[branch_idx] =
+            super::icache::TraceLink::store(stamp, start, tlen, rip);
+        Some((start, tlen))
     }
 
     /// Look up the instruction cache for the current RIP.

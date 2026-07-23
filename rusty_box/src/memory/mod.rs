@@ -287,6 +287,7 @@ type Unsigned = u32;
 pub(crate) enum MemoryDeviceId {
     Vga(*mut crate::iodev::vga::BxVgaC),
     IoApic(*mut crate::iodev::ioapic::BxIoApic),
+    Hpet(*mut crate::iodev::hpet::BxHpetC),
     None,
 }
 
@@ -295,6 +296,7 @@ impl core::fmt::Debug for MemoryDeviceId {
         match self {
             Self::Vga(p) => write!(f, "Vga({:p})", p),
             Self::IoApic(p) => write!(f, "IoApic({:p})", p),
+            Self::Hpet(p) => write!(f, "Hpet({:p})", p),
             Self::None => write!(f, "None"),
         }
     }
@@ -327,6 +329,19 @@ impl MemoryDeviceId {
         }
     }
 
+    /// Dereference the HPET device pointer.
+    ///
+    /// # Safety (internal)
+    /// The raw pointer was set once at init and remains valid for the emulator lifetime.
+    /// Aliasing is the caller's responsibility (same as the prior inline `unsafe` blocks).
+    #[inline(always)]
+    pub(crate) fn hpet_mut(&self) -> Option<&mut crate::iodev::hpet::BxHpetC> {
+        match self {
+            MemoryDeviceId::Hpet(ptr) => Some(unsafe { &mut **ptr }),
+            _ => None,
+        }
+    }
+
     /// Whether two ids refer to the same device instance (pointer identity).
     /// Used by `unregister_memory_handlers` to match the handler to remove.
     #[inline]
@@ -334,6 +349,7 @@ impl MemoryDeviceId {
         match (self, other) {
             (MemoryDeviceId::Vga(a), MemoryDeviceId::Vga(b)) => core::ptr::eq(*a, *b),
             (MemoryDeviceId::IoApic(a), MemoryDeviceId::IoApic(b)) => core::ptr::eq(*a, *b),
+            (MemoryDeviceId::Hpet(a), MemoryDeviceId::Hpet(b)) => core::ptr::eq(*a, *b),
             (MemoryDeviceId::None, MemoryDeviceId::None) => true,
             _ => false,
         }
@@ -385,6 +401,12 @@ pub struct BxMemC<'a> {
     /// This is synchronized from BxPcSystemC when A20 state changes
     a20_mask: BxPhyAddress,
 
+    /// `(system_ticks, ips)` of the in-flight HPET MMIO access, stamped by
+    /// the CPU slow path before dispatch. The HPET converts this to the
+    /// nanosecond clock Bochs reads via `bx_pc_system.time_nsec()` inside
+    /// its handlers; a plain field would need `&mut` on read paths.
+    hpet_access_clock: core::cell::Cell<(u64, u64)>,
+
     /// Keeps the lifetime parameter used by callers (CPU borrows, emulator context).
     _marker: core::marker::PhantomData<&'a ()>,
 }
@@ -405,6 +427,21 @@ impl BxMemC<'_> {
     /// Get the current A20 mask
     pub fn a20_mask(&self) -> BxPhyAddress {
         self.a20_mask
+    }
+
+    /// Stamp the emulated clock for an in-flight HPET MMIO access — the CPU
+    /// slow path records its `system_ticks()`/`ips` pair here so the HPET
+    /// handler observes the same clock Bochs reads via
+    /// `bx_pc_system.time_nsec()` inside `hpet_read`/`hpet_write`.
+    #[inline]
+    pub(crate) fn stamp_hpet_access_clock(&self, system_ticks: u64, ips: u64) {
+        self.hpet_access_clock.set((system_ticks, ips));
+    }
+
+    /// The `(system_ticks, ips)` pair stamped for the current HPET access.
+    #[inline]
+    pub(crate) fn hpet_access_clock(&self) -> (u64, u64) {
+        self.hpet_access_clock.get()
     }
 
 

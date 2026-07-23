@@ -992,6 +992,9 @@ impl BxPicC {
         // Re-service master after acknowledge (Bochs pic.cc)
         self.service_pic_dispatch(true);
 
+        // BENCHMARK-ONLY (temporary): delivered-vector histogram (PIC bank)
+        crate::vec_diag::count(256 + usize::from(vector));
+
         vector
     }
 }

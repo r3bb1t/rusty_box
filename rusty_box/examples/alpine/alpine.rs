@@ -669,7 +669,7 @@ fn run_alpine() -> Result<()> {
     let e9 = emu.devices.take_port_e9_output();
     if !e9.is_empty() {
         println!();
-        println!("===== BOCHS DEBUG PORT OUTPUT (0xE9/0x402/0x403/0x500) =====");
+        println!("===== BOCHS DEBUG PORT OUTPUT (0xE9) =====");
         print!("{}", String::from_utf8_lossy(&e9));
     }
 

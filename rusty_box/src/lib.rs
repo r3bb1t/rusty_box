@@ -77,6 +77,7 @@ pub mod params;
 pub mod pc_system;
 pub mod pic;
 pub mod ring_buffer;
+pub(crate) mod vec_diag;
 
 // Emulator modules — core types always available,
 // alloc-dependent methods gated internally per-method.

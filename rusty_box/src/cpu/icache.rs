@@ -106,6 +106,56 @@ pub struct BxICache {
     pub(crate) mpindex: usize,
     next_page_split_index: usize,
     page_split_index: [PageSplitEntry; BX_ICACHE_PAGE_SPLIT_ENTRIES],
+    /// Trace links, indexed by the mpool slot of the linking branch
+    /// instruction — the Rust stand-in for Bochs `bxInstruction_c`'s
+    /// `handlers.next`/`modRMForm.Id2` pair (instr.h setNextTrace): after a
+    /// taken direct near branch, cpu_loop continues straight into the cached
+    /// target trace without re-hashing the icache (Bochs cpu.cc linkTrace).
+    /// Never serialized — a link is a pure cache over `entry`.
+    pub(crate) trace_links: [TraceLink; BX_ICACHE_MEM_POOL],
+    /// Bochs icache.h `traceLinkTimeStamp`: a link is valid only while its
+    /// stored stamp equals this value; every `break_links`/`flush_all` bumps
+    /// it, invalidating all outstanding links in O(1).
+    pub(crate) trace_link_time_stamp: u32,
+}
+
+/// One stored trace link (16 bytes; see `BxICache::trace_links`).
+///
+/// `packed` holds the target trace's mpool start index in bits 0..20
+/// (`BX_ICACHE_MEM_POOL` = 576K < 2^20) and its tlen in bits 20..27
+/// (tlen ≤ `BX_MAX_TRACE_LENGTH` + 1 dummy = 33). `expected_rip` is a
+/// host-side-stronger guard than Bochs carries: Bochs trusts the stored
+/// target unconditionally, which tolerates a virtual-aliasing edge (two
+/// mappings of one physical code page); the RIP check can only *refuse* a
+/// link — never change guest-visible behavior — so it is a safe tightening.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct TraceLink {
+    timestamp: u32,
+    packed: u32,
+    expected_rip: u64,
+}
+
+impl TraceLink {
+    #[inline]
+    pub(crate) fn store(timestamp: u32, start: usize, tlen: usize, expected_rip: u64) -> Self {
+        debug_assert!(start < (1 << 20) && tlen < (1 << 7));
+        Self {
+            timestamp,
+            packed: (start as u32) | ((tlen as u32) << 20),
+            expected_rip,
+        }
+    }
+
+    /// The linked target as `(mpool_start, tlen)` when the link is still
+    /// current for this timestamp and branch target.
+    #[inline]
+    pub(crate) fn target(self, timestamp: u32, rip: u64) -> Option<(usize, usize)> {
+        if self.timestamp == timestamp && self.expected_rip == rip {
+            Some(((self.packed & 0xF_FFFF) as usize, (self.packed >> 20) as usize))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -145,6 +195,22 @@ impl BxICache {
             mpindex: 0,
             next_page_split_index: 0,
             page_split_index: core::array::from_fn(|_| PageSplitEntry::default()),
+            trace_links: [TraceLink::default(); BX_ICACHE_MEM_POOL],
+            // Start at 1 so zero-initialized link slots can never match.
+            trace_link_time_stamp: 1,
+        }
+    }
+
+    /// Invalidate every outstanding trace link in O(1) — Bochs icache.h
+    /// `breakLinks` does `traceLinkTimeStamp++`. On the (never in practice)
+    /// u32 wrap the whole array is cleared so pre-wrap stamps cannot alias.
+    fn bump_link_timestamp(&mut self) {
+        self.trace_link_time_stamp = self.trace_link_time_stamp.wrapping_add(1);
+        if self.trace_link_time_stamp == 0 {
+            for link in self.trace_links.iter_mut() {
+                *link = TraceLink::default();
+            }
+            self.trace_link_time_stamp = 1;
         }
     }
 
@@ -232,7 +298,9 @@ impl BxICache {
     /// Bochs icache.h — breakLinks()
     /// Called on every TLB flush (CR3 write, INVLPG, CR0/CR4 write).
     /// Invalidates page-split icache entries so page-boundary instructions
-    /// don't serve stale bytes from old physical pages after remapping.
+    /// don't serve stale bytes from old physical pages after remapping, and
+    /// bumps the link timestamp so every outstanding trace link dies
+    /// (Bochs icache.h breakLinks: `traceLinkTimeStamp++`).
     pub fn break_links(&mut self) {
         // Bochs: invalidatePageSplitICacheEntries()
         for i in 0..BX_ICACHE_PAGE_SPLIT_ENTRIES {
@@ -243,6 +311,7 @@ impl BxICache {
             }
         }
         self.next_page_split_index = 0;
+        self.bump_link_timestamp();
     }
 
     pub fn flush_all(&mut self) {
@@ -255,7 +324,10 @@ impl BxICache {
             }
         }
 
-        // Reset mpool write pointer so new traces can be allocated from the start
+        // Reset mpool write pointer so new traces can be allocated from the start.
+        // mpool slots recycle after this, so all outstanding links (keyed by
+        // mpool slot) must die with the traces they belonged to.
+        self.bump_link_timestamp();
         self.mpindex = 0;
         // NOTE: the machine-wide SMC write-stamp table (Bochs
         // pageWriteStampTable, owned by BxMemoryStubC) is deliberately NOT
@@ -410,70 +482,88 @@ fn gen_dummy_icache_entry(i: &mut Instruction) {
     // In Rust, we check for Opcode::InsertedOpcode in cpu_loop_n and set async_event
 }
 
-/// Check if an opcode is a trace-ending instruction (control flow change).
-/// Matching Bochs BxTraceEnd flag: branches, jumps, calls, returns, loops,
-/// interrupts, IRET, HLT, and system call instructions all end the trace.
+/// Check if an opcode ends trace construction — the exact `BX_TRACE_END`
+/// flag set from Bochs `ia_opcodes.def`.
+///
+/// Conditional jumps are deliberately NOT in this set: Bochs gives every Jcc
+/// form flag `0`, so a trace continues across a not-taken conditional
+/// ("trace can continue over non-taken branch", Bochs ctrl_xfer64.cc JZ_Jq).
+/// A *taken* Jcc stops the trace at run time instead — `branch_near16/32/64`
+/// raise `BX_ASYNC_EVENT_STOP_TRACE`.
+///
+/// URDMSR/UWRMSR carry `BX_TRACE_END` upstream but are not implemented by
+/// the rusty_box decoder yet, so they have no variants to list here.
+/// Opcodes whose taken-branch path links traces — the exact owners of
+/// `BX_LINK_TRACE` in Bochs ctrl_xfer16/32/64.cc: direct near JMP/CALL,
+/// every Jcc form, and JCXZ/JECXZ/JRCXZ. Indirect and far transfers, RET,
+/// and LOOP* use `BX_NEXT_TRACE` upstream and never link.
+pub(crate) fn is_linkable_opcode(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        // Direct near jumps and calls
+        Opcode::JmpJw | Opcode::JmpJbw | Opcode::JmpJd | Opcode::JmpJbd |
+        Opcode::JmpJq | Opcode::JmpJbq |
+        Opcode::CallJw | Opcode::CallJd | Opcode::CallJq |
+        // Conditional jumps — every form
+        Opcode::JoJw | Opcode::JnoJw | Opcode::JbJw | Opcode::JnbJw |
+        Opcode::JzJw | Opcode::JnzJw | Opcode::JbeJw | Opcode::JnbeJw |
+        Opcode::JsJw | Opcode::JnsJw | Opcode::JpJw | Opcode::JnpJw |
+        Opcode::JlJw | Opcode::JnlJw | Opcode::JleJw | Opcode::JnleJw |
+        Opcode::JoJbw | Opcode::JnoJbw | Opcode::JbJbw | Opcode::JnbJbw |
+        Opcode::JzJbw | Opcode::JnzJbw | Opcode::JbeJbw | Opcode::JnbeJbw |
+        Opcode::JsJbw | Opcode::JnsJbw | Opcode::JpJbw | Opcode::JnpJbw |
+        Opcode::JlJbw | Opcode::JnlJbw | Opcode::JleJbw | Opcode::JnleJbw |
+        Opcode::JoJd | Opcode::JnoJd | Opcode::JbJd | Opcode::JnbJd |
+        Opcode::JzJd | Opcode::JnzJd | Opcode::JbeJd | Opcode::JnbeJd |
+        Opcode::JsJd | Opcode::JnsJd | Opcode::JpJd | Opcode::JnpJd |
+        Opcode::JlJd | Opcode::JnlJd | Opcode::JleJd | Opcode::JnleJd |
+        Opcode::JoJbd | Opcode::JnoJbd | Opcode::JbJbd | Opcode::JnbJbd |
+        Opcode::JzJbd | Opcode::JnzJbd | Opcode::JbeJbd | Opcode::JnbeJbd |
+        Opcode::JsJbd | Opcode::JnsJbd | Opcode::JpJbd | Opcode::JnpJbd |
+        Opcode::JlJbd | Opcode::JnlJbd | Opcode::JleJbd | Opcode::JnleJbd |
+        Opcode::JoJq | Opcode::JnoJq | Opcode::JbJq | Opcode::JnbJq |
+        Opcode::JzJq | Opcode::JnzJq | Opcode::JbeJq | Opcode::JnbeJq |
+        Opcode::JsJq | Opcode::JnsJq | Opcode::JpJq | Opcode::JnpJq |
+        Opcode::JlJq | Opcode::JnlJq | Opcode::JleJq | Opcode::JnleJq |
+        Opcode::JoJbq | Opcode::JnoJbq | Opcode::JbJbq | Opcode::JnbJbq |
+        Opcode::JzJbq | Opcode::JnzJbq | Opcode::JbeJbq | Opcode::JnbeJbq |
+        Opcode::JsJbq | Opcode::JnsJbq | Opcode::JpJbq | Opcode::JnpJbq |
+        Opcode::JlJbq | Opcode::JnlJbq | Opcode::JleJbq | Opcode::JnleJbq |
+        // Counter-zero jumps
+        Opcode::JcxzJbw | Opcode::JecxzJbd | Opcode::JrcxzJbq
+    )
+}
+
 fn is_trace_end_opcode(opcode: Opcode) -> bool {
     matches!(
         opcode,
-        // Jumps (near)
-        Opcode::JmpEd | Opcode::JmpEw | Opcode::JmpJw | Opcode::JmpJbw |
-        Opcode::JmpJd | Opcode::JmpJbd |
+        // Jumps (near, direct + indirect)
+        Opcode::JmpEd | Opcode::JmpEw | Opcode::JmpEq |
+        Opcode::JmpJw | Opcode::JmpJbw | Opcode::JmpJd | Opcode::JmpJbd |
+        Opcode::JmpJq | Opcode::JmpJbq |
         // Jumps (far)
         Opcode::JmpfAp | Opcode::JmpfOp16Ep | Opcode::JmpfOp32Ep |
-        // Jumps (64-bit)
-        Opcode::JmpJq | Opcode::JmpJbq | Opcode::JmpEq | Opcode::JmpfOp64Ep |
-        // Calls (near)
-        Opcode::CallEd | Opcode::CallEw | Opcode::CallJd | Opcode::CallJw |
+        Opcode::JmpfOp64Ep |
+        // Calls (near, direct + indirect)
+        Opcode::CallEd | Opcode::CallEw | Opcode::CallEq |
+        Opcode::CallJd | Opcode::CallJw | Opcode::CallJq |
         // Calls (far)
         Opcode::CallfOp16Ap | Opcode::CallfOp32Ap |
-        Opcode::CallfOp16Ep | Opcode::CallfOp32Ep |
-        // Calls (64-bit)
-        Opcode::CallJq | Opcode::CallEq | Opcode::CallfOp64Ep |
+        Opcode::CallfOp16Ep | Opcode::CallfOp32Ep | Opcode::CallfOp64Ep |
         // Returns (near)
         Opcode::RetOp16 | Opcode::RetOp16Iw | Opcode::RetOp32 | Opcode::RetOp32Iw |
         Opcode::RetOp64 | Opcode::RetOp64Iw |
         // Returns (far)
         Opcode::RetfOp16 | Opcode::RetfOp16Iw | Opcode::RetfOp32 | Opcode::RetfOp32Iw |
         Opcode::RetfOp64 | Opcode::RetfOp64Iw |
-        // Conditional jumps (16-bit relative)
-        Opcode::JoJw | Opcode::JnoJw | Opcode::JbJw | Opcode::JnbJw |
-        Opcode::JzJw | Opcode::JnzJw | Opcode::JbeJw | Opcode::JnbeJw |
-        Opcode::JsJw | Opcode::JnsJw | Opcode::JpJw | Opcode::JnpJw |
-        Opcode::JlJw | Opcode::JnlJw | Opcode::JleJw | Opcode::JnleJw |
-        // Conditional jumps (8-bit, 16-bit mode)
-        Opcode::JoJbw | Opcode::JnoJbw | Opcode::JbJbw | Opcode::JnbJbw |
-        Opcode::JzJbw | Opcode::JnzJbw | Opcode::JbeJbw | Opcode::JnbeJbw |
-        Opcode::JsJbw | Opcode::JnsJbw | Opcode::JpJbw | Opcode::JnpJbw |
-        Opcode::JlJbw | Opcode::JnlJbw | Opcode::JleJbw | Opcode::JnleJbw |
-        // Conditional jumps (32-bit relative)
-        Opcode::JoJd | Opcode::JnoJd | Opcode::JbJd | Opcode::JnbJd |
-        Opcode::JzJd | Opcode::JnzJd | Opcode::JbeJd | Opcode::JnbeJd |
-        Opcode::JsJd | Opcode::JnsJd | Opcode::JpJd | Opcode::JnpJd |
-        Opcode::JlJd | Opcode::JnlJd | Opcode::JleJd | Opcode::JnleJd |
-        // Conditional jumps (8-bit, 32-bit mode)
-        Opcode::JoJbd | Opcode::JnoJbd | Opcode::JbJbd | Opcode::JnbJbd |
-        Opcode::JzJbd | Opcode::JnzJbd | Opcode::JbeJbd | Opcode::JnbeJbd |
-        Opcode::JsJbd | Opcode::JnsJbd | Opcode::JpJbd | Opcode::JnpJbd |
-        Opcode::JlJbd | Opcode::JnlJbd | Opcode::JleJbd | Opcode::JnleJbd |
-        // Conditional jumps (64-bit relative)
-        Opcode::JoJq | Opcode::JnoJq | Opcode::JbJq | Opcode::JnbJq |
-        Opcode::JzJq | Opcode::JnzJq | Opcode::JbeJq | Opcode::JnbeJq |
-        Opcode::JsJq | Opcode::JnsJq | Opcode::JpJq | Opcode::JnpJq |
-        Opcode::JlJq | Opcode::JnlJq | Opcode::JleJq | Opcode::JnleJq |
-        // Conditional jumps (8-bit, 64-bit mode)
-        Opcode::JoJbq | Opcode::JnoJbq | Opcode::JbJbq | Opcode::JnbJbq |
-        Opcode::JzJbq | Opcode::JnzJbq | Opcode::JbeJbq | Opcode::JnbeJbq |
-        Opcode::JsJbq | Opcode::JnsJbq | Opcode::JpJbq | Opcode::JnpJbq |
-        Opcode::JlJbq | Opcode::JnlJbq | Opcode::JleJbq | Opcode::JnleJbq |
         // Loops
         Opcode::LoopJbw | Opcode::LoopeJbw | Opcode::LoopneJbw |
         Opcode::LoopJbd | Opcode::LoopeJbd | Opcode::LoopneJbd |
         Opcode::LoopJbq | Opcode::LoopeJbq | Opcode::LoopneJbq |
         // JCXZ/JECXZ/JRCXZ
         Opcode::JcxzJbw | Opcode::JecxzJbd | Opcode::JrcxzJbq |
-        // Interrupts
-        Opcode::IntIb | Opcode::Int0 |
+        // Software interrupts
+        Opcode::IntIb | Opcode::INT1 | Opcode::INT3 | Opcode::Int0 |
         // Interrupt returns
         Opcode::IretOp16 | Opcode::IretOp32 | Opcode::IretOp64 |
         // Halt
@@ -481,7 +571,43 @@ fn is_trace_end_opcode(opcode: Opcode) -> bool {
         // System calls
         Opcode::Syscall | Opcode::Sysret |
         Opcode::SyscallLegacy | Opcode::SysretLegacy |
-        Opcode::Sysenter | Opcode::Sysexit
+        Opcode::Sysenter | Opcode::Sysexit |
+        Opcode::Erets | Opcode::Eretu |
+        // Port I/O (scalar + REP string forms)
+        Opcode::InAlDx | Opcode::InAlib | Opcode::InAxDx | Opcode::InAxib |
+        Opcode::InEaxDx | Opcode::InEaxib |
+        Opcode::OutDxAl | Opcode::OutDxAx | Opcode::OutDxEax |
+        Opcode::OutIbAl | Opcode::OutIbAx | Opcode::OutIbEax |
+        Opcode::RepInsbYbDx | Opcode::RepInswYwDx | Opcode::RepInsdYdDx |
+        Opcode::RepOutsbDxxb | Opcode::RepOutswDxxw | Opcode::RepOutsdDxxd |
+        // Control/debug register writes and mode-affecting system ops
+        Opcode::MovCr0rd | Opcode::MovCr0rq |
+        Opcode::MovCr3rd | Opcode::MovCr3rq |
+        Opcode::MovCr4rd | Opcode::MovCr4rq |
+        Opcode::MovDdRd | Opcode::MovDqRq |
+        Opcode::LmswEw | Opcode::Clts |
+        Opcode::PopfFw | Opcode::PopfFd | Opcode::PopfFq |
+        // TLB / cache invalidation
+        Opcode::Invlpg | Opcode::Invlpga | Opcode::Invpcid |
+        Opcode::Invept | Opcode::Invvpid |
+        Opcode::Invd | Opcode::Wbinvd |
+        // MSR / TSC / feature-control accesses
+        Opcode::Rdmsr | Opcode::Wrmsr | Opcode::Wrmsrns |
+        Opcode::Rdmsrlist | Opcode::Wrmsrlist |
+        Opcode::RdmsrEqId | Opcode::WrmsrnsIdEq |
+        Opcode::Rdtsc | Opcode::Rdtscp |
+        Opcode::Xsetbv | Opcode::Wrpkru |
+        // Waits and power states
+        Opcode::Mwait | Opcode::Mwaitx |
+        Opcode::TpauseEd | Opcode::UmwaitEd |
+        // SMM / virtualization / security transitions
+        Opcode::Rsm | Opcode::Getsec |
+        Opcode::Vmcall | Opcode::Vmfunc | Opcode::Vmlaunch | Opcode::Vmresume |
+        Opcode::Vmmcall | Opcode::Vmrun | Opcode::Skinit |
+        // User interrupts
+        Opcode::Stui | Opcode::Uiret | Opcode::SenduipiEq |
+        // Undefined / error placeholders
+        Opcode::Ud0 | Opcode::Ud1 | Opcode::Ud2 | Opcode::IaError
     )
 }
 
@@ -1125,6 +1251,114 @@ mod smc_mask_tests {
                     assert_eq!(instr.get_ia_opcode(), Opcode::IaError);
                     assert_eq!(instr.ilen(), 1);
                 }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn trace_construction_continues_across_a_conditional_jump() {
+        // Bochs ia_opcodes.def gives every Jcc form flag 0 (no BX_TRACE_END):
+        // a decoded trace runs across the conditional and ends only at a real
+        // trace ender (here RET). A taken Jcc breaks the trace at run time via
+        // BX_ASYNC_EVENT_STOP_TRACE instead (ctrl_xfer64.cc JZ_Jq).
+        const CODE: u64 = 0x20_1000;
+
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatLong64,
+                )
+                .unwrap();
+
+                // nop; jz +0 (not taken: reset RFLAGS has ZF=0); nop; nop; ret
+                let bytes = [0x90, 0x74, 0x00, 0x90, 0x90, 0xC3];
+                emu.mem_write(CODE, &bytes).unwrap();
+                // Execute up to the RET (4 instructions) — enough to decode
+                // and commit the trace without needing a guest stack.
+                emu.emu_start(CODE, None, None, Some(4)).unwrap();
+
+                let cpu = emu.cpu();
+                let entry = cpu
+                    .i_cache
+                    .entry
+                    .iter()
+                    .find(|entry| entry.p_addr == CODE)
+                    .expect("the executed code must have a committed trace");
+                let opcodes: Vec<_> = (0..entry.tlen as usize)
+                    .map(|k| cpu.i_cache.mpool[entry.mpool_start_idx + k].get_ia_opcode())
+                    .collect();
+                assert_eq!(
+                    opcodes,
+                    [
+                        Opcode::Nop,
+                        Opcode::JzJbq,
+                        Opcode::Nop,
+                        Opcode::Nop,
+                        Opcode::RetOp64,
+                        // rusty appends the InsertedOpcode trace terminator
+                        // (Bochs genDummyICacheEntry) inside tlen.
+                        Opcode::InsertedOpcode,
+                    ],
+                    "trace must span the not-taken JZ and end at RET"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn smc_store_invalidates_a_stored_trace_link() {
+        // Bochs icache.h handleSMC → breakLinks: a guest store into cached
+        // code bumps traceLinkTimeStamp, so a CALL site that already linked
+        // to the old target trace must refuse its stale link and re-decode
+        // the patched bytes. Without the bump, iteration 2 would execute the
+        // pre-patch trace and RDX would stay 1.
+        const CODE: u64 = 0x20_2000;
+        const SUB: u64 = CODE + 0x20;
+        const STACK: u64 = 0x30_0000;
+
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatLong64,
+                )
+                .unwrap();
+                emu.reg_write(X86Reg::Rsp, STACK);
+
+                let mut main = Vec::new();
+                main.extend_from_slice(&[0x48, 0xC7, 0xC1, 0x02, 0x00, 0x00, 0x00]); // mov rcx,2
+                // call SUB (rel32 from next insn at CODE+0x0C)
+                main.push(0xE8);
+                main.extend_from_slice(&((SUB - (CODE + 0x0C)) as u32).to_le_bytes());
+                // mov byte [rip+disp], 2 — patches SUB's immediate at SUB+3
+                main.extend_from_slice(&[0xC6, 0x05]);
+                main.extend_from_slice(&((SUB + 3 - (CODE + 0x13)) as u32).to_le_bytes());
+                main.push(0x02);
+                main.extend_from_slice(&[0x48, 0xFF, 0xC9]); // dec rcx
+                main.extend_from_slice(&[0x75, 0xEF]); // jnz back to the call
+                emu.mem_write(CODE, &main).unwrap();
+                // SUB: mov rdx, 1; ret
+                emu.mem_write(SUB, &[0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00, 0xC3])
+                    .unwrap();
+
+                // iter1: mov rcx, call, mov rdx, ret, patch, dec, jnz (7)
+                // iter2: call, mov rdx(patched), ret, patch, dec, jnz (6)
+                emu.emu_start(CODE, None, None, Some(13)).unwrap();
+
+                assert_eq!(
+                    emu.reg_read(X86Reg::Rdx),
+                    2,
+                    "second CALL must re-decode the patched subroutine, \
+                     not follow the stale trace link"
+                );
+                assert_eq!(emu.reg_read(X86Reg::Rcx), 0);
             })
             .unwrap()
             .join()

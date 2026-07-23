@@ -13,14 +13,17 @@ use crate::{
 
 #[cfg(feature = "std")]
 const SNAPSHOT_MAGIC: &[u8; 8] = b"RBXSNAP1";
-/// Global container version. Version 4 is the ratified v3-architecture
-/// contract: 16 canonical sections, every known section at
-/// `SNAPSHOT_SECTION_VERSION == 1`, plus the deferred HRQ latches in the
-/// PLATFORM/DMA payloads. Version 3 (whose PLATFORM section carried an ad-hoc
-/// version 2 after `period_ticks` was added) is rejected wholesale so no old
-/// layout can misdecode.
+/// Global container version. Version 6 adds the 17th canonical section,
+/// `SEC_HPET` (Bochs iodev/hpet.cc state), plus the PIT/CMOS `irq_enabled`
+/// legacy-replacement gate. Version 5 extended the v4 ratified contract with
+/// the ATA seek-timing state (per-drive `curr_lsector`/`next_lsector`, the
+/// per-drive seek-arm latches, and the `HdSeek` timer owner) — Bochs
+/// harddrv.cc start_seek parity. Version 4 was: 16 canonical sections, every
+/// known section at `SNAPSHOT_SECTION_VERSION == 1`, plus the deferred HRQ
+/// latches in the PLATFORM/DMA payloads. Older versions are rejected
+/// wholesale so no old layout can misdecode.
 #[cfg(feature = "std")]
-pub(crate) const SNAPSHOT_V3_VERSION: u32 = 4;
+pub(crate) const SNAPSHOT_V3_VERSION: u32 = 6;
 #[cfg(feature = "std")]
 pub(crate) const SNAPSHOT_SECTION_VERSION: u32 = 1;
 
@@ -70,11 +73,14 @@ pub(crate) const SEC_PCI: u32 = 31;
 pub(crate) const SEC_ACPI: u32 = 32;
 #[cfg(feature = "std")]
 pub(crate) const SEC_PLATFORM: u32 = 33;
+#[cfg(feature = "std")]
+pub(crate) const SEC_HPET: u32 = 34;
 
 #[cfg(feature = "std")]
-pub(crate) const SNAPSHOT_V3_SECTION_ORDER: [u32; 16] = [
+pub(crate) const SNAPSHOT_V3_SECTION_ORDER: [u32; 17] = [
     SEC_MEMORY, SEC_PC_SYSTEM, SEC_PLATFORM, SEC_CPU, SEC_PIC, SEC_PIT, SEC_CMOS, SEC_DMA,
     SEC_KEYBOARD, SEC_SERIAL, SEC_HARDDRV, SEC_PCI, SEC_ACPI, SEC_VGA, SEC_IOAPIC, SEC_LAPIC,
+    SEC_HPET,
 ];
 
 #[cfg(feature = "std")]
@@ -351,7 +357,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
         write_section(writer, SEC_ACPI, self.device_manager.acpi.snapshot_v3_len()?, |s| self.device_manager.acpi.save_snapshot_v3(s))?;
         write_section(writer, SEC_VGA, self.device_manager.vga.snapshot_v3_len()?, |s| self.device_manager.vga.save_snapshot_v3(s))?;
         write_section(writer, SEC_IOAPIC, self.device_manager.ioapic.snapshot_v3_len()?, |s| self.device_manager.ioapic.save_snapshot_v3(s))?;
-        write_section(writer, SEC_LAPIC, lapic_len(self)?, |s| save_lapics(self, s))
+        write_section(writer, SEC_LAPIC, lapic_len(self)?, |s| save_lapics(self, s))?;
+        write_section(writer, SEC_HPET, self.device_manager.hpet.snapshot_v3_len()?, |s| self.device_manager.hpet.save_snapshot_v3(s))
     }
 
     pub fn restore_snapshot<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
@@ -483,6 +490,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
                     }
                     SEC_IOAPIC => self.device_manager.ioapic.restore_snapshot_v3(&mut section)?,
                     SEC_LAPIC => self.restore_lapics(&mut section)?,
+                    SEC_HPET => self.device_manager.hpet.restore_snapshot_v3(&mut section)?,
                     _ => unreachable!(),
                 }
                 Ok(())
@@ -557,6 +565,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
     fn validate_post_restore_handles(&self, pit: crate::iodev::pit::PitSnapshotRestoreState, cmos: crate::iodev::cmos::CmosSnapshotRestoreState, keyboard: crate::iodev::keyboard::KeyboardSnapshotRestore, acpi: crate::iodev::acpi::AcpiSnapshotRestore) -> io::Result<()> {
         if let Some(handle) = pit.timer_handle { self.pc_system.validate_timer_handle_owner(handle, TimerOwner::Pit)?; }
         for (handle, owner) in [(cmos.periodic_timer_handle, TimerOwner::CmosPeriodic), (cmos.one_second_timer_handle, TimerOwner::CmosOneSecond), (cmos.uip_timer_handle, TimerOwner::CmosUip), (keyboard.timer_handle, TimerOwner::Keyboard), (acpi.overflow_timer_handle, TimerOwner::AcpiPmOverflow)] { if let Some(handle) = handle { self.pc_system.validate_timer_handle_owner(handle, owner)?; } }
+        for (index, handle) in self.device_manager.hpet.timer_handles.iter().enumerate() { if let Some(handle) = handle { self.pc_system.validate_timer_handle_owner(*handle, TimerOwner::Hpet(index))?; } }
         Ok(())
     }
 }
@@ -810,6 +819,75 @@ mod tests {
             section.read_u32().unwrap_err().kind(),
             ErrorKind::UnexpectedEof
         );
+    }
+
+    #[test]
+    fn snapshot_restores_an_in_flight_atapi_seek_and_completes_it() {
+        // Bochs harddrv.cc start_seek arms the per-drive "HD/CD seek" timer;
+        // a snapshot taken mid-seek must carry the armed timer (owner
+        // HdSeek) and the drive command state so the read completes after
+        // restore exactly as it would have without the save.
+        on_large_stack(|| {
+            let mut emu = machine();
+            // 4-sector disc, media init parks curr_lba at 3: READ(10) of
+            // LBA 0 arms |0 - 3 + 1| / 4 of the 80 ms stroke = 40000 us.
+            emu.device_manager
+                .harddrv
+                .attach_cdrom_data(0, 0, vec![0u8; 2048 * 4]);
+            {
+                let dm = &mut emu.device_manager;
+                let crate::iodev::devices::DeviceManager {
+                    harddrv,
+                    pic,
+                    pci_ide,
+                    ..
+                } = dm;
+                harddrv.write(0x1f7, 0xA0, 1, pic, pci_ide); // PACKET
+                let packet = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
+                for word in packet.chunks_exact(2) {
+                    let value = u16::from_le_bytes([word[0], word[1]]) as u32;
+                    harddrv.write(0x1f0, value, 2, pic, pci_ide);
+                }
+            }
+            // Apply the arm the way the I/O layer does after the OUT.
+            let now = emu.pc_system.time_ticks();
+            let arm_usec = emu
+                .device_manager
+                .harddrv
+                .take_pending_seek_arm(0, 0)
+                .expect("ATAPI READ must arm the seek timer");
+            assert_eq!(arm_usec, 40_000);
+            emu.devices.request_timer_after_usec(
+                crate::iodev::DeviceTimerOwner::HdSeek(0),
+                now,
+                Some(u64::from(arm_usec)),
+            );
+            emu.drain_device_timer_requests();
+            // `machine()` uses the default config, so convert with its rate.
+            let seek_ticks = (u128::from(arm_usec)
+                * u128::from(EmulatorConfig::default().ips))
+            .div_ceil(1_000_000) as u64;
+
+            // Advance to mid-seek and snapshot with the timer still armed.
+            emu.service_scheduler_boundary(seek_ticks / 2).unwrap();
+            let drive = &emu.device_manager.harddrv.channels[0].drives[0];
+            assert!(!drive.controller.interrupt_pending, "seek must still be in flight");
+
+            let mut saved = Vec::new();
+            emu.save_snapshot(&mut saved).unwrap();
+
+            emu.restore_snapshot(&mut Cursor::new(&saved)).unwrap();
+
+            // The restored machine completes the seek at the original
+            // deadline: nothing right after restore, DRQ + IRQ14 once the
+            // remaining seek time elapses.
+            let drive = &emu.device_manager.harddrv.channels[0].drives[0];
+            assert!(!drive.controller.interrupt_pending);
+            emu.service_scheduler_boundary(seek_ticks / 2 + 2).unwrap();
+            let drive = &emu.device_manager.harddrv.channels[0].drives[0];
+            assert!(drive.controller.interrupt_pending);
+            assert!(emu.device_manager.pic.irq_line_level(14));
+        });
     }
 
     #[test]

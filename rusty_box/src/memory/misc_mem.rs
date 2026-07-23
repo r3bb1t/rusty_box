@@ -91,6 +91,7 @@ impl BxMemC<'_> {
 
             // A20 starts DISABLED at boot (synced from PC system during init)
             a20_mask: 0xFFFF_FFFF_FFEF_FFFFu64,
+            hpet_access_clock: core::cell::Cell::new((0, 0)),
             _marker: core::marker::PhantomData,
         }
     }
@@ -472,6 +473,11 @@ impl BxMemC<'_> {
                         } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
                             ioapic.mem_write(a20_addr, len as u32, &data[..len]);
                             return Ok(());
+                        } else if let Some(hpet) = handler.device_id.hpet_mut() {
+                            let (ticks, ips) = self.hpet_access_clock.get();
+                            hpet.set_now(ticks, ips);
+                            hpet.mem_write(a20_addr, len as u32, &data[..len]);
+                            return Ok(());
                         }
                     }
                     current_handler = handler
@@ -636,6 +642,11 @@ impl BxMemC<'_> {
                         // Bochs: memory_handler->read_handler(a20addr, 1, buf, param)
                         if let Some(vga) = handler.device_id.vga_mut() {
                             vga.mem_read(a20_addr, len as u32, data);
+                            return Ok(());
+                        } else if let Some(hpet) = handler.device_id.hpet_mut() {
+                            let (ticks, ips) = self.hpet_access_clock.get();
+                            hpet.set_now(ticks, ips);
+                            hpet.mem_read(a20_addr, len as u32, data);
                             return Ok(());
                         } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
                             ioapic.mem_read(a20_addr, len as u32, data);
@@ -1243,6 +1254,7 @@ mod handler_tests {
             MemoryDeviceId::Vga(pointer) => (0, pointer as usize),
             MemoryDeviceId::IoApic(pointer) => (1, pointer as usize),
             MemoryDeviceId::None => (2, 0),
+            MemoryDeviceId::Hpet(pointer) => (3, pointer as usize),
         }
     }
 

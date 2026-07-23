@@ -621,7 +621,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_di(di.wrapping_add(transferred_u16.wrapping_mul(2)));
                 cx = cx.wrapping_sub(transferred_u16);
                 self.set_cx(cx);
-                self.icount += transferred.saturating_sub(1) as u64;
+                self.tick_surplus += transferred.saturating_sub(1) as u64;
                 fastrep_iterations += transferred;
                 event_words_remaining -= transferred;
                 self.tickn_fastrep(fastrep_iterations);
@@ -766,7 +766,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_rdi(edi.wrapping_add(transferred_u32.wrapping_mul(2)) as u64);
                 ecx = ecx.wrapping_sub(transferred_u32);
                 self.set_ecx(ecx);
-                self.icount += transferred.saturating_sub(1) as u64;
+                self.tick_surplus += transferred.saturating_sub(1) as u64;
                 fastrep_iterations += transferred;
                 event_words_remaining -= transferred;
                 self.tickn_fastrep(fastrep_iterations);
@@ -1202,7 +1202,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.set_rdi(rdi.wrapping_add(transferred_u64.wrapping_mul(2)));
                 rcx = rcx.wrapping_sub(transferred_u64);
                 self.set_rcx(rcx);
-                self.icount += transferred.saturating_sub(1) as u64;
+                self.tick_surplus += transferred.saturating_sub(1) as u64;
                 fastrep_iterations += transferred;
                 event_words_remaining -= transferred;
                 self.tickn_fastrep(fastrep_iterations);
@@ -1650,7 +1650,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Log BIOS diagnostic ports at debug level so RUST_LOG=debug catches them
         // even if something goes wrong before the device handler is reached.
         // Include RIP so we can trace which BIOS function is writing.
-        if matches!(port, 0x80 | 0x84 | 0xE9 | 0x402 | 0x403 | 0x500) {
+        if matches!(port, 0x80 | 0x84 | 0xE9 | 0x400..=0x403 | 0x500..=0x503) {
             tracing::trace!(
                 "port_out: port={:#06x} value={:#04x} len={} RIP={:#010x}",
                 port,

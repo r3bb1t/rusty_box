@@ -115,9 +115,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.oszapc.set_oszapc_logic_32(1);
         if source == ResetReason::Hardware {
             self.icount = 0;
+            // tick_surplus travels with icount: cpu_ticks() restarts from 0
+            // on a hardware reset and stays monotone across software resets.
+            self.tick_surplus = 0;
         }
 
-        self.icount_last_sync = self.icount;
+        self.ticks_last_sync = self.cpu_ticks();
 
         self.inhibit_mask = 0;
         self.inhibit_icount = 0;

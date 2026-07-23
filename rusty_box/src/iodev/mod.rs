@@ -35,6 +35,7 @@ pub mod devices;
 pub use crate::dma;
 pub mod fw_cfg;
 pub mod harddrv;
+pub mod hpet;
 pub mod ioapic;
 pub mod keyboard;
 pub mod pci;
@@ -76,8 +77,9 @@ pub(crate) const BX_FIXED_SERIAL_TIMER_OWNERS: usize = 4;
 ///
 /// LAPIC requests use their CPU-local transport. Every device request below
 /// has exactly one stable slot, so a producer can overwrite its own pending
-/// work without allocating or scanning a timer list.
-pub(crate) const BX_FIXED_TIMER_OWNER_COUNT: usize = 6 + BX_FIXED_SERIAL_TIMER_OWNERS + 2;
+/// work without allocating or scanning a timer list. The final four slots are
+/// the ATA/ATAPI seek timers (Bochs harddrv.cc "HD/CD seek", one per drive).
+pub(crate) const BX_FIXED_TIMER_OWNER_COUNT: usize = 6 + BX_FIXED_SERIAL_TIMER_OWNERS + 2 + 4;
 
 /// A device-owned timer slot in the fixed scheduler transport.
 #[allow(dead_code)] // Phase 3 device producers fill the reserved owner slots.
@@ -92,6 +94,9 @@ pub(crate) enum DeviceTimerOwner {
     SerialFifo(usize),
     PciIdeCh0,
     PciIdeCh1,
+    /// ATA/ATAPI seek timer — Bochs harddrv.cc "HD/CD seek". The argument is
+    /// Bochs's `setTimerParam` value `(channel << 1) | device`.
+    HdSeek(usize),
 }
 
 impl DeviceTimerOwner {
@@ -108,6 +113,8 @@ impl DeviceTimerOwner {
             Self::SerialFifo(_) => None,
             Self::PciIdeCh0 => Some(6 + BX_FIXED_SERIAL_TIMER_OWNERS),
             Self::PciIdeCh1 => Some(7 + BX_FIXED_SERIAL_TIMER_OWNERS),
+            Self::HdSeek(param) if param < 4 => Some(8 + BX_FIXED_SERIAL_TIMER_OWNERS + param),
+            Self::HdSeek(_) => None,
         }
     }
 }
@@ -230,6 +237,15 @@ impl Default for IoHandlerEntry {
     }
 }
 
+/// Bochs biosdev.h BX_BIOS_MESSAGE_SIZE — rombios/vgabios message-port line
+/// buffer capacity.
+const BX_BIOS_MESSAGE_SIZE: usize = 80;
+
+/// Best-effort text view of a BIOS message-port buffer for log emission.
+fn bios_message_text(bytes: &[u8]) -> &str {
+    core::str::from_utf8(bytes).unwrap_or("<non-utf8 BIOS message>")
+}
+
 /// Device controller - manages all I/O devices and port handlers
 ///
 /// This struct is fully instance-based with no global state, allowing multiple
@@ -244,22 +260,26 @@ pub struct BxDevicesC {
     /// PCI configuration address register (port 0xCF8)
     pci_conf_addr: u32,
 
-    /// Bochs BIOS/debug output ports (always-on).
-    ///
-    /// Bochs' rombios uses:
-    /// - `INFO_PORT`  0x402
-    /// - `DEBUG_PORT` 0x403
-    ///
-    /// VGABIOS also supports an info port (0x500).
-    ///
-    /// We funnel these into a single byte stream buffer. Host code (examples/GUI)
-    /// can drain and print it.
+    /// Bochs port-0xE9 debug console byte stream (unmapped.cc port_e9_hack;
+    /// optional in upstream, always-on here). Host code (examples/GUI) can
+    /// drain and print it. BIOS/VGABIOS message ports (0x400-0x403,
+    /// 0x500-0x503) do NOT land here — Bochs biosdev.cc routes those to the
+    /// log, never the guest-visible console (see `bios_message_byte`).
     port_e9_output: RingBuffer<u8, 65536>,
 
     /// Bochs BIOS POST codes (port 0x80, sometimes 0x84).
     ///
     /// These are not ASCII; they are diagnostic progress codes used by many BIOSes.
     port80_output: RingBuffer<u8, 4096>,
+
+    /// Bochs biosdev.cc rombios message accumulator ("biosdev" logger).
+    bios_message: [u8; BX_BIOS_MESSAGE_SIZE],
+    bios_message_i: usize,
+    bios_panic_flag: bool,
+    /// Bochs biosdev.cc vgabios message accumulator ("vgabios" logger).
+    vgabios_message: [u8; BX_BIOS_MESSAGE_SIZE],
+    vgabios_message_i: usize,
+    vgabios_panic_flag: bool,
 
     /// Last I/O read port and value (for stuck-loop diagnostics)
     pub(crate) last_io_read_port: u16,
@@ -309,6 +329,12 @@ impl BxDevicesC {
             pci_conf_addr: 0,
             port_e9_output: RingBuffer::new(),
             port80_output: RingBuffer::new(),
+            bios_message: [0; BX_BIOS_MESSAGE_SIZE],
+            bios_message_i: 0,
+            bios_panic_flag: false,
+            vgabios_message: [0; BX_BIOS_MESSAGE_SIZE],
+            vgabios_message_i: 0,
+            vgabios_panic_flag: false,
             last_io_read_port: 0,
             last_io_read_value: 0,
             diag_io_reads: 0,
@@ -584,17 +610,23 @@ impl BxDevicesC {
             let mut pic_intr_level = None;
             let mut hrq_level = None;
             let mut ide_timer_delays = [None; 2];
+            let mut seek_arms = [[None; 2]; 2];
             let mut timer_update = None;
             let mut cmos_timer_sync = None;
-            let mut deferred_device_work = false;
             let mut machine_boundary_pending = false;
             let dispatched = if let Some(dm) = self.device_manager_mut() {
                 cmos_timer_sync =
                     Self::dispatch_write(dm, device_id, port, value, io_len, current_ticks);
                 timer_update =
                     Self::timer_update_after_dispatch(dm, device_id, port, current_ticks);
-                deferred_device_work = device_id == DeviceId::HardDrive
-                    && dm.harddrv.seek_complete_pending.iter().any(|pending| *pending);
+                // Seek-timer arms latched by harddrv during this dispatch —
+                // drained here so the deadline is anchored to the issuing OUT
+                // (Bochs harddrv.cc start_seek calls activate_timer inline).
+                for (channel, channel_arms) in seek_arms.iter_mut().enumerate() {
+                    for (device, arm) in channel_arms.iter_mut().enumerate() {
+                        *arm = dm.harddrv.take_pending_seek_arm(channel, device);
+                    }
+                }
                 if device_id == DeviceId::Acpi {
                     if dm.acpi.irq9_level {
                         dm.pic.raise_irq(9);
@@ -618,7 +650,7 @@ impl BxDevicesC {
                 false
             };
 
-            if deferred_device_work || machine_boundary_pending {
+            if machine_boundary_pending {
                 self.scheduler_boundary_requested = true;
             }
             if let Some(sync) = cmos_timer_sync {
@@ -648,6 +680,19 @@ impl BxDevicesC {
                             continuous: false,
                         },
                     );
+                }
+            }
+            for (channel, channel_arms) in seek_arms.into_iter().enumerate() {
+                for (device, arm) in channel_arms.into_iter().enumerate() {
+                    if let Some(seek_usec) = arm {
+                        // Bochs harddrv.cc start_seek: activate_timer(seek_time)
+                        // — one-shot, microsecond units.
+                        self.request_timer_after_usec(
+                            DeviceTimerOwner::HdSeek((channel << 1) | device),
+                            current_ticks,
+                            Some(u64::from(seek_usec)),
+                        );
+                    }
                 }
             }
             if dispatched {
@@ -743,18 +788,119 @@ impl BxDevicesC {
             return;
         }
 
-        // Bochs-style debug output ports: capture bytes into a host-drainable buffer.
-        //
-        // - 0xE9: Bochs debug console (optional in upstream; always-on here)
-        // - 0x402/0x403: Bochs rombios INFO/DEBUG ports (cpp_orig/bochs/bios/rombios.h)
-        // - 0x500: VGABIOS info port (cpp_orig/bochs/bios/VGABIOS-lgpl-README)
-        if io_len == 1 && matches!(address, 0x00E9 | 0x0402 | 0x0403 | 0x0500) {
-            tracing::trace!(
-                "BIOS output port {:#06x}: {:?}",
-                address,
-                value as u8 as char
-            );
+        // Bochs port-0xE9 debug console (unmapped.cc port_e9_hack; optional
+        // in upstream, always-on here): bytes go to the host-drainable stream.
+        if io_len == 1 && address == 0x00E9 {
             self.port_e9_output.push_back(value as u8);
+            return;
+        }
+
+        // Bochs biosdev.cc — rombios/vgabios message and panic ports. Text
+        // accumulates into per-BIOS line buffers and flushes to the host log
+        // only (info/debug/error level), never to a guest-visible stream.
+        // Bochs registers the panic ports for 1- and 2-byte writes and the
+        // message ports byte-wide.
+        match address {
+            // Bochs biosdev.cc port 0x0401: zero latches the panic flag; a
+            // buffered message flushes as the panic text; otherwise fall
+            // through to the line-number panic exactly like the C switch.
+            0x0401 if io_len <= 2 => {
+                if value == 0 {
+                    self.bios_panic_flag = true;
+                } else if self.bios_message_i > 0 {
+                    let end = self.bios_message_i.min(BX_BIOS_MESSAGE_SIZE - 1);
+                    self.bios_message_i = 0;
+                    tracing::error!(
+                        "[BIOS] panic: {}",
+                        bios_message_text(&self.bios_message[..end])
+                    );
+                } else {
+                    tracing::error!("[BIOS] panic at rombios.c, line {}", value);
+                }
+            }
+            0x0400 if io_len <= 2 => {
+                if value > 0 {
+                    tracing::error!("[BIOS] panic at rombios.c, line {}", value);
+                }
+            }
+            0x0402 | 0x0403 if io_len == 1 => {
+                Self::bios_message_byte(
+                    &mut self.bios_message,
+                    &mut self.bios_message_i,
+                    &mut self.bios_panic_flag,
+                    "BIOS",
+                    address == 0x0403,
+                    value as u8,
+                );
+            }
+            // Bochs biosdev.cc port 0x0502: vgabios twin of 0x0401.
+            0x0502 if io_len <= 2 => {
+                if value == 0 {
+                    self.vgabios_panic_flag = true;
+                } else if self.vgabios_message_i > 0 {
+                    let end = self.vgabios_message_i.min(BX_BIOS_MESSAGE_SIZE - 1);
+                    self.vgabios_message_i = 0;
+                    tracing::error!(
+                        "[VBIOS] panic: {}",
+                        bios_message_text(&self.vgabios_message[..end])
+                    );
+                } else {
+                    tracing::error!("[VBIOS] panic at vgabios.c, line {}", value);
+                }
+            }
+            0x0501 if io_len <= 2 => {
+                if value > 0 {
+                    tracing::error!("[VBIOS] panic at vgabios.c, line {}", value);
+                }
+            }
+            0x0500 | 0x0503 if io_len == 1 => {
+                Self::bios_message_byte(
+                    &mut self.vgabios_message,
+                    &mut self.vgabios_message_i,
+                    &mut self.vgabios_panic_flag,
+                    "VBIOS",
+                    address == 0x0503,
+                    value as u8,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// Bochs biosdev.cc write() message-port body: accumulate a byte, flush
+    /// the line to the log on overflow or newline; a pending panic flag
+    /// promotes the newline flush to error level (and only that flush
+    /// clears the flag, exactly like Bochs).
+    fn bios_message_byte(
+        message: &mut [u8; BX_BIOS_MESSAGE_SIZE],
+        index: &mut usize,
+        panic_flag: &mut bool,
+        source: &str,
+        is_debug: bool,
+        value: u8,
+    ) {
+        message[*index] = value;
+        *index += 1;
+        if *index >= BX_BIOS_MESSAGE_SIZE {
+            *index = 0;
+            let text = bios_message_text(&message[..BX_BIOS_MESSAGE_SIZE - 1]);
+            if is_debug {
+                tracing::debug!("[{}] {}", source, text);
+            } else {
+                tracing::info!("[{}] {}", source, text);
+            }
+        } else if value == b'\n' {
+            let end = *index - 1;
+            *index = 0;
+            let text = bios_message_text(&message[..end]);
+            if *panic_flag {
+                tracing::error!("[{}] panic: {}", source, text);
+            } else if is_debug {
+                tracing::debug!("[{}] {}", source, text);
+            } else {
+                tracing::info!("[{}] {}", source, text);
+            }
+            *panic_flag = false;
         }
     }
 
@@ -820,10 +966,8 @@ impl BxDevicesC {
     ) -> Option<(DeviceTimerOwner, Option<u64>)> {
         match id {
             DeviceId::Pit => Some((DeviceTimerOwner::Pit, dm.pit.next_event_usec())),
-            DeviceId::Keyboard => dm
-                .keyboard
-                .take_keyboard_timer_update()
-                .map(|delay| (DeviceTimerOwner::Keyboard, delay)),
+            // Keyboard: no per-dispatch arming — the 8042 timer is continuous
+            // (Bochs keyboard.cc init) and collects latched work every fire.
             DeviceId::Acpi => Some((
                 DeviceTimerOwner::AcpiPmOverflow,
                 dm.acpi.overflow_delay_usec(current_ticks),
@@ -1238,6 +1382,36 @@ mod tests {
     }
 
     #[test]
+    fn bios_message_ports_stay_out_of_the_e9_console_stream() {
+        let mut devices = boxed_devices();
+
+        // Bochs biosdev.cc: rombios/vgabios message ports flush to the log on
+        // newline and must never reach the guest-visible 0xE9 console stream
+        // (this leaked BIOS text onto the COM1 stdout mirror).
+        for byte in b"PIIX3/PIIX4 init: elcr=60 70\n" {
+            devices.outp(0x0402, u32::from(*byte), 1, 0);
+        }
+        for byte in b"VBE present\n" {
+            devices.outp(0x0500, u32::from(*byte), 1, 0);
+        }
+        assert!(devices.port_e9_output.is_empty());
+        assert_eq!(devices.bios_message_i, 0, "newline must flush the rombios buffer");
+        assert_eq!(devices.vgabios_message_i, 0, "newline must flush the vgabios buffer");
+
+        // A line longer than the Bochs 80-byte buffer flushes on overflow and
+        // keeps accumulating the remainder.
+        for _ in 0..BX_BIOS_MESSAGE_SIZE + 5 {
+            devices.outp(0x0403, u32::from(b'x'), 1, 0);
+        }
+        assert_eq!(devices.bios_message_i, 5);
+        assert!(devices.port_e9_output.is_empty());
+
+        // The genuine port-0xE9 debug console still lands in the stream.
+        devices.outp(0x00E9, u32::from(b'X'), 1, 0);
+        assert_eq!(devices.port_e9_output.len(), 1);
+    }
+
+    #[test]
     fn test_multiple_instances() {
         let mut dev1 = boxed_devices();
         let mut dev2 = boxed_devices();
@@ -1343,13 +1517,18 @@ mod tests {
         });
     }
     #[test]
-    fn keyboard_port60_read_lowers_irq_before_replacement_timer() {
+    fn keyboard_port60_read_lowers_irq_and_arms_no_owner_request() {
         on_big_stack(|| {
             let mut io = boxed_devices();
             let mut dm = devices::DeviceManager::new();
             dm.keyboard.send_scancode(0x1E);
-            let callback = dm.keyboard.timer_callback(1);
-            assert_eq!(callback.irq_mask & 0x01, 0x01);
+            // Bochs keyboard.cc periodic(): the transfer fire makes the byte
+            // readable (OBF) and latches IRQ1, but the IRQ is collected on the
+            // NEXT continuous fire (one serial-delay period later).
+            assert_eq!(dm.keyboard.timer_callback() & 0x01, 0);
+            assert!(dm.keyboard.kbd_controller.outb);
+            let irq_mask = dm.keyboard.timer_callback();
+            assert_eq!(irq_mask & 0x01, 0x01);
             let delivered = u32::from(dm.keyboard.kbd_controller.kbd_output_buffer);
             dm.pic.raise_irq(1);
             assert_ne!(dm.pic.master.irq_in[1], 0);
@@ -1361,59 +1540,12 @@ mod tests {
             io.clear_device_manager();
 
             assert_eq!(dm.pic.master.irq_in[1], 0);
-            assert_eq!(
-                io.take_timer_requests().get(DeviceTimerOwner::Keyboard),
-                TimerRequest::Activate {
-                    deadline_ticks: 78,
-                    period_ticks: 1,
-                    continuous: false,
-                }
-            );
-        });
-    }
-
-    #[test]
-    fn keyboard_status_polling_preserves_existing_one_shot_deadline() {
-        on_big_stack(|| {
-            let mut io = boxed_devices();
-            let mut dm = devices::DeviceManager::new();
-
-            io.set_timer_ips(120_000_000);
-            io.register_io_write_handler(
-                DeviceId::Keyboard,
-                keyboard::KBD_DATA_PORT,
-                "Keyboard",
-                0x1,
-            );
-            io.register_io_read_handler(
-                DeviceId::Keyboard,
-                keyboard::KBD_STATUS_PORT,
-                "Keyboard",
-                0x1,
-            );
-            io.set_device_manager(core::ptr::NonNull::from(&mut dm));
-
-            io.outp(keyboard::KBD_DATA_PORT, 0xff, 1, 100);
-            assert_eq!(
-                io.take_timer_requests().get(DeviceTimerOwner::Keyboard),
-                TimerRequest::Activate {
-                    deadline_ticks: 220,
-                    period_ticks: 120,
-                    continuous: false,
-                }
-            );
-            assert!(io.take_scheduler_boundary_requested());
-
-            for now in 101..220 {
-                let _ = io.inp(keyboard::KBD_STATUS_PORT, 1, now);
-            }
-            io.clear_device_manager();
-
+            // The 8042 timer is continuous (Bochs keyboard.cc): keyboard port
+            // I/O must not produce one-shot owner timer requests.
             assert_eq!(
                 io.take_timer_requests().get(DeviceTimerOwner::Keyboard),
                 TimerRequest::Unchanged
             );
-            assert!(!io.take_scheduler_boundary_requested());
         });
     }
 

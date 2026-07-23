@@ -167,6 +167,8 @@ pub struct DeviceManager {
     pub(crate) dma: BxDmaC,
     /// 8042 Keyboard Controller
     pub(crate) keyboard: BxKeyboardC,
+    /// High Precision Event Timer (Bochs iodev/hpet.cc)
+    pub(crate) hpet: super::hpet::BxHpetC,
     /// ATA/IDE Hard Drive Controller
     pub(crate) harddrv: BxHardDriveC,
     /// VGA Display Controller
@@ -305,6 +307,7 @@ impl DeviceManager {
             cmos: BxCmosC::new(),
             dma: BxDmaC::new(),
             keyboard: BxKeyboardC::new(),
+            hpet: super::hpet::BxHpetC::new(),
             harddrv: BxHardDriveC::new(),
             vga: BxVgaC::new(),
             ioapic: BxIoApic::new(),
@@ -368,6 +371,14 @@ impl DeviceManager {
         self.harddrv.init();
         // 8. I/O APIC (Bochs: pluginIOAPIC->init() in devices.cc)
         self.ioapic.init(mem)?;
+        // 8b. HPET (Bochs: PLUGTYPE_STANDARD hpet plugin — hpet.cc init()
+        // registers the fixed MMIO window; the rombios32 ACPI builder then
+        // probes 0xFED00000 for the 0x8086 vendor id).
+        {
+            use super::hpet::{HPET_BASE, HPET_LEN};
+            let device_id = crate::memory::MemoryDeviceId::Hpet(&mut self.hpet as *mut _);
+            mem.register_memory_handlers(device_id, HPET_BASE, HPET_BASE + HPET_LEN - 1)?;
+        }
         // 9. ACPI Power Management (Bochs: pluginACPIController->init() in devices.cc)
         self.acpi.reset();
         // 10. PCI bus devices (Bochs: pluginPciBridge->init(), pluginPci2IsaBridge->init(), etc.)
@@ -412,6 +423,9 @@ impl DeviceManager {
         self.vga.reset();
         self.serial.reset();
         self.ioapic.reset();
+        // Bochs hpet.cc reset(): comparators stop, state clears, and the
+        // PIT/RTC pins re-enable (queued; the emulator drains after reset).
+        self.hpet.reset();
         self.acpi.reset();
         self.fw_cfg.reset();
         {
@@ -1076,6 +1090,11 @@ impl DeviceManager {
 
     pub(crate) fn service_pit_irq0(pit: &mut BxPitC, pic: &mut BxPicC) -> u32 {
         let (transitions, level) = pit.drain_irq0_events();
+        // Bochs pit.cc irq_handler: with irq_enabled clear (HPET legacy
+        // mode), OUT transitions are consumed but never reach the PIC.
+        if !pit.irq_enabled {
+            return 0;
+        }
         Self::replay_pit_irq0_events(transitions, level, pic)
     }
 
@@ -2250,9 +2269,25 @@ mod tests {
                 harddrv.write(0x1F6, 0xE0, 1, pic, pci_ide); // LBA mode, drive 0
                 harddrv.write(0x1F7, 0xC8, 1, pic, pci_ide); // READ DMA
             }
+            // Bochs harddrv.cc: READ DMA arms the seek timer; only its
+            // deadline (seek_timer) signals bmdma_start_transfer.
+            assert!(
+                !dm.pci_ide.bmdma[0].data_ready,
+                "READ DMA must not start BM-DMA before the seek deadline"
+            );
+            assert!(dm.harddrv.take_pending_seek_arm(0, 0).is_some());
+            {
+                let DeviceManager {
+                    ref mut harddrv,
+                    ref mut pic,
+                    ref mut pci_ide,
+                    ..
+                } = dm;
+                harddrv.seek_timer(0b00, pic, pci_ide);
+            }
             assert!(
                 dm.pci_ide.bmdma[0].data_ready,
-                "READ DMA must signal bmdma_start_transfer"
+                "seek_timer must signal bmdma_start_transfer"
             );
 
             dm.pci_ide.bmdma_write(0xC004, 0x0020_0000, 4);

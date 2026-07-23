@@ -555,7 +555,9 @@ pub struct Emulator<'a, I: BxCpuIdTrait, T: Instrumentation = ()> {
     /// GUI instance (optional, can be None for headless operation)
     #[cfg(feature = "alloc")]
     gui: Option<Box<dyn BxGui>>,
-    /// BIOS output file for port 0x402/0x403/0xE9 messages (std feature only)
+    /// Output file for the port-0xE9 debug console (std feature only). BIOS
+    /// message ports 0x400-0x403/0x500-0x503 go to the log instead, exactly
+    /// like Bochs biosdev.cc.
     #[cfg(feature = "std")]
     bios_output_file: Option<std::fs::File>,
     /// Exit addresses for emu_start.
@@ -856,7 +858,15 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         }
 
         for (channel, irq) in [(0usize, 14u8), (1, 15)] {
-            if self.device_manager.harddrv.seek_complete_pending[channel] {
+            // An in-flight seek (armed "HD/CD seek" timer or an undrained arm
+            // latch) will raise/complete the IRQ when its deadline fires —
+            // the line level is legitimately transitional then.
+            let seek_in_flight = (0..2).any(|device| {
+                self.device_manager.harddrv.pending_seek_arm_usec[channel][device].is_some()
+                    || self.device_manager.harddrv.seek_timer_handles[channel][device]
+                        .is_some_and(|handle| self.pc_system.is_timer_active(handle))
+            });
+            if seek_in_flight {
                 continue;
             }
             if pic.irq_line_level(irq) != self.device_manager.harddrv.get_irq_level(channel)
@@ -1122,10 +1132,10 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     // the count move and hangs the AP bring-up.
                     let round_epoch = self.pc_system.time_ticks();
                     let cpu = self.cpu_mut_at(cpu_index);
-                    cpu.mark_icount_sync();
+                    cpu.mark_tick_sync();
                     cpu.lapic.current_ticks = round_epoch;
                     cpu.lapic.ticks_at_sync = round_epoch;
-                    cpu.lapic.icount_at_sync = cpu.icount;
+                    cpu.lapic.cpu_ticks_at_sync = cpu.cpu_ticks();
                 }
 
                 let mem_static = self.mem_nonnull_static();
@@ -1139,7 +1149,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut *mem_ptr);
                 let pins = core::slice::from_raw_parts(pins_ptr, pins_len);
                 let current_pin = &*pins_ptr.add(cpu_index);
-                let icount_before = self.cpu_ref(cpu_index).icount;
+                let ticks_before = self.cpu_ref(cpu_index).cpu_ticks();
                 let slice_result = if smp {
                     self.cpu_mut_at(cpu_index).cpu_run_trace_with_io(
                         mem_extended,
@@ -1181,7 +1191,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                             total_up_executed = total_up_executed.saturating_add(executed);
                         }
                         let elapsed = if smp {
-                            let delta = self.cpu_ref(cpu_index).icount_delta_since_sync();
+                            let delta = self.cpu_ref(cpu_index).tick_delta_since_sync();
                             if delta == 0 {
                                 self.smp_quantum_ticks()
                             } else {
@@ -1189,8 +1199,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                             }
                         } else {
                             self.cpu_ref(cpu_index)
-                                .icount
-                                .saturating_sub(icount_before)
+                                .cpu_ticks()
+                                .saturating_sub(ticks_before)
                         };
                         round_ticks = if smp {
                             round_ticks.saturating_add(elapsed)
@@ -1610,6 +1620,15 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         )?;
         self.device_manager.keyboard.set_timer_handle(keyboard);
 
+        // Bochs hpet.cc init(): one one-shot timer per comparator with the
+        // comparator index as its param ("hpet").
+        for index in 0..crate::iodev::hpet::HPET_NUM_TIMERS {
+            let handle =
+                self.pc_system
+                    .register_timer(TimerOwner::Hpet(index), 0, false, false, "hpet")?;
+            self.device_manager.hpet.timer_handles[index] = Some(handle);
+        }
+
         self.device_manager.cmos.periodic_timer_handle = Some(self.pc_system.register_timer(
             TimerOwner::CmosPeriodic,
             0,
@@ -1661,6 +1680,24 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 .pc_system
                 .register_timer(owner, 0, false, false, "PIIX IDE")?;
             self.device_manager.pci_ide.bmdma[channel].timer_index = Some(handle);
+        }
+
+        // Bochs harddrv.cc init registers one "HD/CD seek" timer per
+        // configured drive (param = channel<<1 | device). Media may attach
+        // after device init here, so all four slots are registered up front;
+        // a slot whose drive stays absent simply never activates.
+        for channel in 0..2usize {
+            for device in 0..2usize {
+                let param = (channel << 1) | device;
+                let handle = self.pc_system.register_timer(
+                    TimerOwner::HdSeek(param),
+                    0,
+                    false,
+                    false,
+                    "HD/CD seek",
+                )?;
+                self.device_manager.harddrv.seek_timer_handles[channel][device] = Some(handle);
+            }
         }
 
         for cpu_index in 0..self.cpu_count() {
@@ -2180,7 +2217,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         let current_ticks = self.pc_system.time_ticks();
         for owner in [
             DeviceTimerOwner::Pit,
-            DeviceTimerOwner::Keyboard,
             DeviceTimerOwner::CmosPeriodic,
             DeviceTimerOwner::CmosOneSecond,
             DeviceTimerOwner::CmosUip,
@@ -2202,11 +2238,18 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             current_ticks,
             self.device_manager.pit.next_event_usec(),
         );
-        self.devices.request_timer_after_usec(
-            DeviceTimerOwner::Keyboard,
-            current_ticks,
-            self.device_manager.keyboard.arm_keyboard_timer(),
-        );
+        // Bochs keyboard.cc init(): the 8042 timer is CONTINUOUS at the
+        // serial_delay period and never stops; (re)start it here where the
+        // IPS-based tick conversion is valid.
+        if let Some(handle) = self.device_manager.keyboard.timer_handle() {
+            if let Err(error) = self.pc_system.activate_timer_usec(
+                handle,
+                crate::iodev::keyboard::KBD_SERIAL_DELAY_USEC,
+                true,
+            ) {
+                tracing::error!("failed to start the 8042 serial-delay timer: {error:?}");
+            }
+        }
         self.devices
             .apply_cmos_timer_sync(current_ticks, self.device_manager.cmos.timer_sync());
         self.devices.request_timer_after_usec(
@@ -2215,6 +2258,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             self.device_manager.acpi.overflow_delay_usec(current_ticks),
         );
         self.drain_device_timer_requests();
+        // Bochs hpet.cc reset() queued comparator deactivations and the
+        // PIT/RTC pin re-enables — apply them to the fresh machine.
+        self.drain_hpet_pending();
     }
 
     /// Perform a system reset
@@ -2354,12 +2400,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // This is critical for kernel PIT-polling calibration loops (e.g., Alpine Linux).
         let ips = self.config.ips as u64;
         if ips > 0 {
-            self.device_manager
-                .pit
-                .init_icount_sync(self.cpu.icount, ips);
-            self.device_manager
-                .acpi
-                .init_icount_sync(self.cpu.icount, ips);
+            // The PIT/ACPI absolute time cursor lives in the system-tick
+            // domain — the same clock the port-I/O read paths pass via
+            // `system_ticks()`. At cold boot this equals icount (both 0);
+            // after HLT fast-forwards or fast-REP surpluses only the tick
+            // clock is correct.
+            let now_ticks = self.pc_system.time_ticks();
+            self.device_manager.pit.init_icount_sync(now_ticks, ips);
+            self.device_manager.acpi.init_icount_sync(now_ticks, ips);
             // Bochs `clock: sync=realtime` only when configured (pit.cc reads
             // bx_virt_timer with is_realtime from the clock option); with the
             // default sync=none the timers stay on emulated (icount) time.
@@ -2517,9 +2565,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     }
 
 
-    /// Set BIOS output file for port 0x402/0x403/0xE9 messages (requires std feature)
+    /// Set the output file for the port-0xE9 debug console (requires std
+    /// feature). BIOS message ports (0x400-0x403/0x500-0x503) are routed to
+    /// the log per Bochs biosdev.cc and never appear in this stream.
     ///
-    /// When set, BIOS debug output will be written to this file instead of stdout.
+    /// When set, port-0xE9 output will be written to this file instead of stdout.
     #[cfg(feature = "std")]
     pub fn set_bios_output_file(&mut self, file: std::fs::File) {
         self.bios_output_file = Some(file);
@@ -2580,24 +2630,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.device_manager.iac()
     }
 
-    /// Complete device work explicitly deferred until the issuing I/O
-    /// instruction has retired.
-    fn service_deferred_devices(&mut self) {
-        let dm = &mut self.device_manager;
-        for channel in 0..2 {
-            if dm.harddrv.seek_complete_pending[channel] {
-                dm.harddrv.seek_complete_pending[channel] = false;
-                let crate::iodev::devices::DeviceManager {
-                    harddrv,
-                    pic,
-                    pci_ide,
-                    ..
-                } = dm;
-                harddrv.ready_to_send_atapi(channel, pic, pci_ide);
-            }
-        }
-    }
-
     /// Drain pending host input (keyboard scancodes, mouse, serial) from the GUI
     /// into the device layer.
     ///
@@ -2645,19 +2677,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         }
 
         let current_ticks = self.pc_system.time_ticks();
-        if keyboard_changed {
-            if let Some(delay) = self
-                .device_manager
-                .keyboard
-                .take_keyboard_timer_update()
-            {
-                self.devices.request_timer_after_usec(
-                    DeviceTimerOwner::Keyboard,
-                    current_ticks,
-                    delay,
-                );
-            }
-        }
+        // Keyboard input needs no timer arming: the continuous 8042
+        // serial-delay timer (Bochs keyboard.cc) picks queued bytes up on
+        // its next fire.
         if serial_changed {
             if let Some(delay) = self.device_manager.serial.take_fifo_timer_update(0) {
                 self.devices.request_timer_after_usec(
@@ -2724,17 +2746,36 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                             .pci_ide_timer(1, &mut self.pc_system, &mut self.memory, pins);
                     }
                 }
+                TimerOwner::HdSeek(param) => {
+                    // Bochs harddrv.cc seek_timer — one-shot; the seek deadline
+                    // completes the read command (DRQ/IRQ or BM-DMA start).
+                    for _ in 0..counts[entry] {
+                        let crate::iodev::devices::DeviceManager {
+                            harddrv,
+                            pic,
+                            pci_ide,
+                            ..
+                        } = &mut self.device_manager;
+                        harddrv.seek_timer(param as u8, pic, pci_ide);
+                    }
+                }
                 TimerOwner::Pit => {
                     for _ in 0..counts[entry] {
                         let callback = self
                             .device_manager
                             .pit
                             .timer_callback(current_ticks, ips);
-                        let rising = DeviceManager::replay_pit_irq0_events(
-                            callback.irq0_transitions,
-                            callback.irq0_level,
-                            &mut self.device_manager.pic,
-                        );
+                        // Bochs pit.cc irq_handler: the HPET legacy-mode gate
+                        // drops OUT transitions before they reach the PIC.
+                        let rising = if self.device_manager.pit.irq_enabled {
+                            DeviceManager::replay_pit_irq0_events(
+                                callback.irq0_transitions,
+                                callback.irq0_level,
+                                &mut self.device_manager.pic,
+                            )
+                        } else {
+                            0
+                        };
                         if rising != 0 {
                             self.device_manager.diag_pit_fires += u64::from(rising);
                         }
@@ -2745,28 +2786,30 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         );
                     }
                 }
-                TimerOwner::Keyboard => {
+                TimerOwner::Hpet(index) => {
+                    // Bochs hpet.cc timer_handler → hpet_timer(): runs in
+                    // emulator context, so the queued IRQ edges and the
+                    // comparator re-arm drain immediately.
                     for _ in 0..counts[entry] {
-                        let elapsed_usec = self
-                            .device_manager
-                            .keyboard
-                            .arm_keyboard_timer()
-                            .unwrap_or(1);
-                        let callback = self
-                            .device_manager
-                            .keyboard
-                            .timer_callback(elapsed_usec);
-                        if callback.irq_mask & 0x01 != 0 {
+                        let ips = self.pc_system.ips();
+                        self.device_manager.hpet.set_now(current_ticks, ips);
+                        self.device_manager.hpet.timer_fired(index);
+                        self.drain_hpet_pending();
+                    }
+                }
+                TimerOwner::Keyboard => {
+                    // Bochs keyboard.cc timer_handler: the continuous
+                    // serial-delay timer runs periodic(1) every fire and
+                    // raises whatever IRQs the controller latched since the
+                    // previous fire. No rearm — pc_system reloads the period.
+                    for _ in 0..counts[entry] {
+                        let irq_mask = self.device_manager.keyboard.timer_callback();
+                        if irq_mask & 0x01 != 0 {
                             self.device_manager.pic.raise_irq(1);
                         }
-                        if callback.irq_mask & 0x02 != 0 {
+                        if irq_mask & 0x02 != 0 {
                             self.device_manager.pic.raise_irq(12);
                         }
-                        self.devices.request_timer_after_usec(
-                            DeviceTimerOwner::Keyboard,
-                            current_ticks,
-                            callback.next_delay_usec,
-                        );
                     }
                 }
                 TimerOwner::CmosPeriodic => {
@@ -3152,7 +3195,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 let cpu = self.cpu_mut_at(cpu_index);
                 cpu.lapic.current_ticks = ticks_now;
                 cpu.lapic.ticks_at_sync = ticks_now;
-                cpu.lapic.icount_at_sync = cpu.icount;
+                cpu.lapic.cpu_ticks_at_sync = cpu.cpu_ticks();
                 let timer_handle = cpu.lapic.timer_handle;
                 let deactivate = cpu.lapic.timer_deactivate_request;
                 cpu.lapic.timer_deactivate_request = false;
@@ -3179,7 +3222,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     let cpu = self.cpu_mut_at(cpu_index);
                     cpu.lapic.current_ticks = ticks_now;
                     cpu.lapic.ticks_at_sync = ticks_now;
-                    cpu.lapic.icount_at_sync = cpu.icount;
+                    cpu.lapic.cpu_ticks_at_sync = cpu.cpu_ticks();
                     cpu.lapic.timer_fired = false;
                     cpu.lapic.diag_timer_fires += 1;
                     cpu.lapic.periodic(ticks_now);
@@ -3204,7 +3247,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 let cpu = self.cpu_mut_at(cpu_index);
                 cpu.lapic.current_ticks = ticks_now;
                 cpu.lapic.ticks_at_sync = ticks_now;
-                cpu.lapic.icount_at_sync = cpu.icount;
+                cpu.lapic.cpu_ticks_at_sync = cpu.cpu_ticks();
 
                 if cpu.lapic.intr {
                     cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
@@ -3261,9 +3304,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             || self.devices.has_pending_boundary_work()
             // Direct 8237 HRQ slot (producers outside I/O dispatch).
             || self.device_manager.dma.has_hrq_request()
-            // Deferred ATAPI seek-complete (service_deferred_devices).
-            || self.device_manager.harddrv.seek_complete_pending[0]
-            || self.device_manager.harddrv.seek_complete_pending[1]
             // A20, PAM/SMRAM/BAR re-registration, and reset requests.
             || self.device_manager.has_pending_machine_boundary()
             // IOAPIC deliveries deferred until the LAPIC bus is reachable
@@ -3285,6 +3325,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             // every sibling icache before another CPU runs (Bochs icache.cc
             // handleSMC).
             || self.memory.smc_has_pending()
+            // HPET side effects queued from MMIO context (drain_hpet_pending).
+            || self.device_manager.hpet.has_pending_work()
     }
 
     pub fn service_scheduler_boundary(&mut self, elapsed_ticks: u64) -> CpuResult<bool> {
@@ -3325,7 +3367,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.drain_lapic_bus();
         self.service_lapic_local_events();
         self.service_lapic_timer_requests();
-        self.service_deferred_devices();
+        self.drain_hpet_pending();
 
         // Apply the final 8237 HRQ level (Bochs pc_system.cc set_HRQ). The
         // I/O-dispatch copy covers CPU-issued port traffic; the direct DMA
@@ -3456,10 +3498,94 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         Ok(false)
     }
 
+    /// Apply the side effects the HPET queued from MMIO context — the calls
+    /// Bochs hpet.cc performs synchronously inside its handlers
+    /// (`update_irq`, `activate_timer_nsec`, `deactivate_timer`,
+    /// `DEV_pit_enable_irq`, `DEV_cmos_enable_irq`, `DEV_MEM_WRITE_PHYSICAL`).
+    /// Comparator deadlines were pre-anchored at the access instant, so the
+    /// drain point does not shift them.
+    fn drain_hpet_pending(&mut self) {
+        if !self.device_manager.hpet.has_pending_work() {
+            return;
+        }
+        let pending = self.device_manager.hpet.take_pending();
+        if let Some(enabled) = pending.pit_irq_gate {
+            self.device_manager.pit.enable_irq(enabled);
+        }
+        if let Some(enabled) = pending.cmos_irq_gate {
+            self.device_manager.cmos.enable_irq(enabled);
+        }
+        for &(route, level) in &pending.irq_ops[..pending.irq_op_count] {
+            if route < 16 {
+                // Bochs DEV_pic_raise_irq/DEV_pic_lower_irq: the legacy PIC
+                // call also forwards the edge to the IOAPIC pin.
+                if level {
+                    self.device_manager.pic.raise_irq(route);
+                } else {
+                    self.device_manager.pic.lower_irq(route);
+                }
+            } else if route < 24 {
+                // GSI 16..23 exist only as IOAPIC pins here. DELIBERATE Bochs
+                // deviation, flagged not silent: Bochs update_irq() routes
+                // EVERY HPET pin through bx_pic_c::raise_irq(route,
+                // BX_IRQ_TYPE_ISA), whose unbounded `(irq_no < 8) ? master :
+                // slave` indexing reads slave IRQ_in[route & 7] for route >= 16
+                // — an out-of-range access that spuriously asserts ISA IRQ
+                // 8..15 (e.g. route 20 -> IRQ12) AND can trip its
+                // `BX_PANIC("ISA IRQ %d lost")` host abort. rusty_box declines
+                // to reproduce that hardware bug (a phantom ISA edge + possible
+                // host crash) and delivers only the architecturally correct
+                // IOAPIC pin. Per CLAUDE.md, correctness trumps Bochs
+                // literalness for a buggy/non-safe construct.
+                let DeviceManager {
+                    ref mut pic,
+                    ref mut ioapic,
+                    ..
+                } = self.device_manager;
+                ioapic.set_irq_level(route, level, Some(&mut *pic), None);
+            } else {
+                tracing::error!("HPET: interrupt route {route} beyond IOAPIC pins");
+            }
+        }
+        for &(address, value) in &pending.fsb_writes[..pending.fsb_write_count] {
+            // Bochs update_irq FSB path: DEV_MEM_WRITE_PHYSICAL of the
+            // 32-bit message. Bochs never advertises the FSB capability bit,
+            // so guests do not normally reach this.
+            let mut bytes = value.to_le_bytes();
+            if let Err(error) = self.memory.write_physical_page(
+                &[],
+                crate::memory::CpuMemoryPolicy::default(),
+                address,
+                bytes.len(),
+                &mut bytes,
+            ) {
+                tracing::error!("HPET: FSB message write to {address:#x} failed: {error:?}");
+            }
+        }
+        for (index, op) in pending.timer_ops.iter().enumerate() {
+            let (Some(op), Some(handle)) =
+                (op.as_ref(), self.device_manager.hpet.timer_handles[index])
+            else {
+                continue;
+            };
+            let result = match op {
+                crate::iodev::hpet::HpetTimerOp::ArmAtTicks(deadline) => self
+                    .pc_system
+                    .activate_timer_at_ticks(handle, *deadline, false),
+                crate::iodev::hpet::HpetTimerOp::Deactivate => {
+                    self.pc_system.deactivate_timer(handle)
+                }
+            };
+            if let Err(error) = result {
+                tracing::error!("HPET: comparator {index} timer update failed: {error:?}");
+            }
+        }
+    }
+
     /// Apply fixed I/O owner requests after the raw device manager pointer has
     /// been cleared. Phase 2 owns the already registered IDE channels; later
     /// owners retain their table slots until Phase 3 registers their handles.
-    fn drain_device_timer_requests(&mut self) {
+    pub(crate) fn drain_device_timer_requests(&mut self) {
         let _boundary_requested = self.devices.take_scheduler_boundary_requested();
         let requests = self.devices.take_timer_requests();
         let owners = [
@@ -3522,6 +3648,26 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 DeviceTimerOwner::PciIdeCh1,
                 self.device_manager.pci_ide.bmdma[1].timer_index,
                 "BM-DMA ch1",
+            ),
+            (
+                DeviceTimerOwner::HdSeek(0),
+                self.device_manager.harddrv.seek_timer_handles[0][0],
+                "HD/CD seek 0-0",
+            ),
+            (
+                DeviceTimerOwner::HdSeek(1),
+                self.device_manager.harddrv.seek_timer_handles[0][1],
+                "HD/CD seek 0-1",
+            ),
+            (
+                DeviceTimerOwner::HdSeek(2),
+                self.device_manager.harddrv.seek_timer_handles[1][0],
+                "HD/CD seek 1-0",
+            ),
+            (
+                DeviceTimerOwner::HdSeek(3),
+                self.device_manager.harddrv.seek_timer_handles[1][1],
+                "HD/CD seek 1-1",
             ),
         ];
 
@@ -4192,6 +4338,36 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         #[cfg(feature = "std")]
         const MIPS_LOG_INTERVAL: u64 = 50_000_000;
 
+        // BENCHMARK-ONLY (temporary, mirrors the same patch in the Bochs bench
+        // worktree): emit (icount, host_usec) samples so a guest boot can be
+        // compared phase by phase against upstream instead of as one aggregate.
+        // Sampling on the instruction axis, not emulated ticks -- ticks advance
+        // during HLT and would credit idle time as throughput. Inert unless
+        // RUSTY_BOX_BENCH_FILE is set; costs one u64 compare per batch.
+        #[cfg(feature = "std")]
+        let mut bench_sink = std::env::var("RUSTY_BOX_BENCH_FILE")
+            .ok()
+            .and_then(|path| std::fs::File::create(path).ok());
+        #[cfg(feature = "std")]
+        let bench_interval: u64 = std::env::var("RUSTY_BOX_BENCH_INTERVAL")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(25_000_000);
+        #[cfg(feature = "std")]
+        let bench_start = std::time::Instant::now();
+        #[cfg(feature = "std")]
+        let mut bench_next: u64 = if bench_sink.is_some() {
+            bench_interval
+        } else {
+            u64::MAX
+        };
+        #[cfg(feature = "std")]
+        if let Some(sink) = bench_sink.as_mut() {
+            use std::io::Write;
+            writeln!(sink, "icount,host_usec,ticks").map_err(Error::Io)?;
+        }
+
         const INSTRUCTION_BATCH_SIZE: u64 = 100_000;
         const PROGRESS_LOG_INTERVAL: u64 = 10_000_000;
         let mut next_progress_log: i64 = PROGRESS_LOG_INTERVAL as i64;
@@ -4711,6 +4887,40 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 }
             }
 
+            // BENCHMARK-ONLY (temporary): see the bench_sink setup above.
+            #[cfg(feature = "std")]
+            {
+                let retired = self.total_cpu_icount();
+                if retired >= bench_next {
+                    if let Some(sink) = bench_sink.as_mut() {
+                        use std::io::Write;
+                        bench_next = retired + bench_interval;
+                        let ticks = self.pc_system.time_ticks();
+                        let rip = self.cpu.rip();
+                        writeln!(
+                            sink,
+                            "{retired},{},{ticks},{rip:x}",
+                            bench_start.elapsed().as_micros()
+                        )
+                        .map_err(Error::Io)?;
+                        let mut vec_error = None;
+                        crate::vec_diag::snapshot(|index, count| {
+                            if vec_error.is_none() {
+                                if let Err(error) =
+                                    writeln!(sink, "V,{retired},{index},{count}")
+                                {
+                                    vec_error = Some(error);
+                                }
+                            }
+                        });
+                        if let Some(error) = vec_error {
+                            return Err(Error::Io(error));
+                        }
+                        sink.flush().map_err(Error::Io)?;
+                    }
+                }
+            }
+
             // Update GUI after CPU execution
             #[cfg(feature = "std")]
             if _should_update_gui {
@@ -4791,8 +5001,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 } else {
                     0.0
                 };
-                // icount = instruction count (REP iterations count as separate ticks)
-                let bochs_ticks = self.cpu.icount;
+                // cpu_ticks = instruction count plus the fast-REP tick surplus
+                // (Bochs BX_TICK1-per-instruction + BX_TICKN time domain).
+                let bochs_ticks = self.cpu.cpu_ticks();
                 tracing::debug!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
             }
         }
@@ -5889,6 +6100,40 @@ mod tests {
     }
 
     #[test]
+    fn strict_budget_stops_a_linked_branch_chain_exactly() {
+        // A hot dec/jnz loop links its back edge (Bochs cpu.cc linkTrace);
+        // the strict instruction budget must stop the linked chain at exactly
+        // the requested count — the link guard's `iteration < max` is the
+        // batch-capped UP form of linkTrace's ticks-left guard.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                const CODE: u64 = 0x1000;
+                emu.reg_write(X86Reg::Rcx, 1_000_000);
+                // dec ecx; jnz -3
+                emu.virt_write(CODE, &[0x49, 0x75, 0xFD]).unwrap();
+                emu.reg_write(X86Reg::Rip, CODE);
+
+                let executed =
+                    unsafe { emu.run_cpu_batch_with_strict_limit(501, true) }.unwrap();
+
+                assert_eq!(executed, 501, "strict budget must be exact");
+                // 501 instructions = 251 decs + 250 taken jnz.
+                assert_eq!(emu.reg_read(X86Reg::Rcx), 1_000_000 - 251);
+                // The loop is hot enough that the back edge must have linked;
+                // the budget stop above therefore covers the linked path.
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn run_cpu_batch_stops_at_the_next_exact_timer_deadline() {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
@@ -5965,6 +6210,79 @@ mod tests {
                     fires >= 5,
                     "PIT mode 2 must generate repeated IRQ0 edges, got {fires}"
                 );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn atapi_seek_timer_completes_the_read_at_the_exact_deadline() {
+        // Bochs harddrv.cc start_seek/seek_timer: an ATAPI READ arms a
+        // distance-proportional seek timer; DRQ and the channel IRQ appear
+        // only when pc_system reaches that deadline — never before.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                use crate::iodev::harddrv::AtaStatus;
+
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.devices.init(&mut emu.memory).unwrap();
+                emu.device_manager
+                    .init(&mut emu.devices, &mut emu.memory)
+                    .unwrap();
+                emu.pc_system.initialize(1_000_000); // 1 tick = 1 microsecond
+                emu.devices.set_timer_ips(1_000_000);
+                emu.register_timer_owners().unwrap();
+
+                // 4-sector disc: media init parks curr_lba at 3; READ(10) of
+                // LBA 0 seeks |0 - 3 + 1| / 4 of the 80 ms stroke = 40000 us.
+                emu.device_manager
+                    .harddrv
+                    .attach_cdrom_data(0, 0, vec![0u8; 2048 * 4]);
+                {
+                    let crate::iodev::devices::DeviceManager {
+                        harddrv,
+                        pic,
+                        pci_ide,
+                        ..
+                    } = &mut emu.device_manager;
+                    harddrv.write(0x1f7, 0xA0, 1, pic, pci_ide); // PACKET
+                    let packet = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
+                    for word in packet.chunks_exact(2) {
+                        let value = u16::from_le_bytes([word[0], word[1]]) as u32;
+                        harddrv.write(0x1f0, value, 2, pic, pci_ide);
+                    }
+                }
+                // The I/O layer drains the arm right after the OUT dispatch
+                // (iodev/mod.rs) — mirror that contract here.
+                let now = emu.pc_system.time_ticks();
+                let arm = emu.device_manager.harddrv.take_pending_seek_arm(0, 0);
+                assert_eq!(arm, Some(40_000));
+                emu.devices.request_timer_after_usec(
+                    DeviceTimerOwner::HdSeek(0),
+                    now,
+                    arm.map(u64::from),
+                );
+                emu.drain_device_timer_requests();
+
+                // One tick before the deadline: still seeking, no DRQ, no IRQ.
+                emu.service_scheduler_boundary(39_999).unwrap();
+                let drive = &emu.device_manager.harddrv.channels[0].drives[0];
+                assert!(!drive.controller.status.contains(AtaStatus::DRQ));
+                assert!(!drive.controller.interrupt_pending);
+                assert!(!emu.device_manager.pic.irq_line_level(14));
+
+                // Crossing the deadline completes the command.
+                emu.service_scheduler_boundary(2).unwrap();
+                let drive = &emu.device_manager.harddrv.channels[0].drives[0];
+                assert!(drive.controller.status.contains(AtaStatus::DRQ));
+                assert!(drive.controller.interrupt_pending);
+                assert!(emu.device_manager.pic.irq_line_level(14));
             })
             .unwrap()
             .join()
@@ -6072,9 +6390,24 @@ mod tests {
                 );
                 emu.drain_device_timer_requests();
 
+                // The tick-1 fire ends the batch and transfers the byte to the
+                // output buffer, but Bochs keyboard.cc periodic() only LATCHES
+                // the IRQ on a transfer — it is not raised until the next fire.
                 let executed = unsafe { emu.run_cpu_batch(4_096) }.unwrap();
-
                 assert_eq!(executed, 1);
+                assert!(emu.device_manager.keyboard.kbd_controller.outb);
+                assert_eq!(emu.device_manager.pic.master.irq_in[1], 0);
+
+                // The following serial-delay fire's top-of-function collection
+                // raises IRQ1 (one period after the transfer, exactly as Bochs).
+                let now = emu.pc_system.time_ticks();
+                emu.devices.request_timer_after_usec(
+                    DeviceTimerOwner::Keyboard,
+                    now,
+                    Some(1),
+                );
+                emu.drain_device_timer_requests();
+                unsafe { emu.run_cpu_batch(4_096) }.unwrap();
                 assert_ne!(emu.device_manager.pic.master.irq_in[1], 0);
             })
             .unwrap()
@@ -6558,8 +6891,10 @@ mod tests {
                 let retired = emu.cpu_ref(BSP_INDEX).icount - before;
 
                 // The trace executes REP INSW plus the following parking jump.
-                // The REP contributes exactly COUNT retirements.
-                assert_eq!(executed, 2);
+                // The REP contributes exactly COUNT retirements, and the batch
+                // reports Bochs icount units (retired instructions, including
+                // repeat() iterations) — not handler dispatches.
+                assert_eq!(executed, retired);
                 assert_eq!(retired, COUNT + 1);
                 assert_eq!(emu.pc_system.time_ticks() - ticks_before, retired);
                 assert_eq!(
@@ -7273,7 +7608,10 @@ mod tests {
                     emu.device_manager.keyboard.timer_handle(),
                     Some(keyboard_handle)
                 );
-                assert!(!emu.pc_system.is_timer_active(keyboard_handle));
+                // Bochs keyboard.cc registers the 8042 serial-delay timer
+                // continuous and always active — reset restarts it at the
+                // serial_delay period instead of deactivating it.
+                assert!(emu.pc_system.is_timer_active(keyboard_handle));
                 assert!(emu.pc_system.is_timer_active(one_second_handle));
             })
             .unwrap()
@@ -10313,9 +10651,14 @@ mod tests {
         });
     }
 
+    /// Bochs unit contract (string.cc fast path vs cpu.cc repeat()):
+    /// the fast path charges elements to TICKS (`BX_TICKN(count-1)` →
+    /// `tick_surplus`) and retires one icount per chunk, while the scalar
+    /// repeat() loop retires one icount per element. Tick totals match
+    /// exactly; icount deliberately differs.
     #[cfg(feature = "instrumentation")]
     #[test]
-    fn fast_rep_icount_and_ticks_match_scalar_n_elements() {
+    fn fast_rep_charges_ticks_not_icount_and_matches_scalar_ticks() {
         phase6_large_stack(|| {
             const CODE: u64 = 0x1000;
             const SRC: u64 = 0x2FF8;
@@ -10334,8 +10677,10 @@ mod tests {
             fast.reg_write(X86Reg::Rdi, DST);
             fast.reg_write(X86Reg::Rcx, COUNT);
             let fast_before = fast.cpu_ref(BSP_INDEX).icount;
+            let fast_surplus_before = fast.cpu_ref(BSP_INDEX).tick_surplus;
             phase6_run(&mut fast);
             let fast_retired = fast.cpu_ref(BSP_INDEX).icount - fast_before;
+            let fast_surplus = fast.cpu_ref(BSP_INDEX).tick_surplus - fast_surplus_before;
             let fast_ticks = fast.ticks();
 
             let (trace, repeats) = phase6_repeat_trace();
@@ -10365,7 +10710,16 @@ mod tests {
             assert_eq!(fast.mem_read_vec(DST, (COUNT * 2) as usize).unwrap(), scalar.mem_read_vec(DST, (COUNT * 2) as usize).unwrap());
             assert_eq!(fast.reg_read(X86Reg::Rcx), 0);
             assert_eq!(scalar.reg_read(X86Reg::Rcx), 0);
-            assert_eq!(fast_retired, scalar_retired);
+            // Both batches execute the identical instruction tail (the REP
+            // plus one parking jump), so moving element charges into
+            // tick_surplus must conserve the tick total exactly while icount
+            // retires per chunk (fast) vs per element (scalar repeat()).
+            assert!(
+                fast_surplus > 0,
+                "fast path must charge elements to tick_surplus, not icount"
+            );
+            assert_eq!(fast_retired + fast_surplus, scalar_retired);
+            assert!(fast_retired < scalar_retired);
             assert_eq!(fast_ticks, scalar.ticks());
             assert_eq!(phase6_lock(&repeats).len(), COUNT as usize);
         });

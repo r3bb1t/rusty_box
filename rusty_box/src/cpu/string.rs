@@ -1330,7 +1330,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(edi.wrapping_add(bytes) as u64);
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
-            self.icount += u64::from(elements) - 1;
+            self.tick_surplus += u64::from(elements) - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
             if ecx == 0 {
                 return Ok(());
@@ -1393,7 +1393,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(edi.wrapping_add(bytes) as u64);
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
-            self.icount += u64::from(elements) - 1;
+            self.tick_surplus += u64::from(elements) - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
             if ecx == 0 {
                 return Ok(());
@@ -1456,7 +1456,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(edi.wrapping_add(bytes) as u64);
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
-            self.icount += u64::from(elements) - 1;
+            self.tick_surplus += u64::from(elements) - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
             if ecx == 0 {
                 return Ok(());
@@ -1513,7 +1513,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(edi.wrapping_add(bytes) as u64);
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
-            self.icount += u64::from(elements) - 1;
+            self.tick_surplus += u64::from(elements) - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
             if ecx == 0 {
                 return Ok(());
@@ -1578,7 +1578,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(edi.wrapping_add(bytes) as u64);
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
-            self.icount += u64::from(elements) - 1;
+            self.tick_surplus += u64::from(elements) - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
             if ecx == 0 {
                 return Ok(());
@@ -1643,7 +1643,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(edi.wrapping_add(bytes) as u64);
             ecx = ecx.wrapping_sub(elements);
             self.set_ecx(ecx);
-            self.icount += u64::from(elements) - 1;
+            self.tick_surplus += u64::from(elements) - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("u32 fits usize"));
             if ecx == 0 {
                 return Ok(());
@@ -2098,7 +2098,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if self.lapic.is_selected(a20_addr) {
                 // Read aligned dword, extract requested byte
                 let aligned = a20_addr & !0x3;
-                let dword = self.lapic.read(aligned, 4, self.icount);
+                let dword = self.lapic.read(aligned, 4, self.cpu_ticks());
                 let byte_offset = (a20_addr & 0x3) as u32;
                 return (dword >> (byte_offset * 8)) as u8;
             }
@@ -2155,15 +2155,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 // In practice, LAPIC is always accessed as dword — this is a safety net.
                 let aligned = a20_addr & !0x3;
                 // The two halves of this RMW take DIFFERENT time domains:
-                // - LAPIC reads convert through `live_ticks(icount)` (apic.cc
+                // - LAPIC reads convert through `live_ticks(cpu_ticks)` (apic.cc
                 //   get_current_timer_count path), which subtracts the LAPIC's
-                //   `icount_at_sync` — raw icount, like the sibling read paths.
+                //   `cpu_ticks_at_sync` — the CPU tick clock, like the sibling
+                //   read paths.
                 // - LAPIC writes store the argument directly into tick-domain
                 //   state (apic.cc set_initial_timer_count: `ticksInitial =
                 //   bx_pc_system.time_ticks()`; activation deadlines feed
                 //   pc_system ticks) — `system_ticks()`, like the sibling
                 //   word/dword write paths.
-                let old = self.lapic.read(aligned, 4, self.icount);
+                let old = self.lapic.read(aligned, 4, self.cpu_ticks());
                 let byte_offset = (a20_addr & 0x3) as u32;
                 let mask = !(0xFFu32 << (byte_offset * 8));
                 let new_val = (old & mask) | ((value as u32) << (byte_offset * 8));
@@ -2211,7 +2212,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return read_unaligned_u16(host_offset(self.mem_host_base, linear));
             }
             if self.lapic.is_selected(a20_addr as BxPhyAddress) {
-                return self.lapic.read(a20_addr as BxPhyAddress, 2, self.icount) as u16;
+                return self.lapic.read(a20_addr as BxPhyAddress, 2, self.cpu_ticks()) as u16;
             }
             let paddr = addr as BxPhyAddress;
             if let Some((policy, mem)) = unsafe { self.mem_bus_with_policy(paddr) } {
@@ -2279,7 +2280,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // LAPIC MMIO intercept: 32-bit aligned register access
         // Bochs apic.cc read() — LAPIC registers are always dword-accessed.
         if self.lapic.is_selected(a20_addr as BxPhyAddress) {
-            return self.lapic.read(a20_addr as BxPhyAddress, 4, self.icount);
+            return self.lapic.read(a20_addr as BxPhyAddress, 4, self.cpu_ticks());
         }
         // Slow path: route through read_physical_page to hit registered MMIO handlers
         // (IOAPIC, VGA, etc.) with proper dword access width.
@@ -2849,7 +2850,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
             rcx = rcx.wrapping_sub(elements);
             self.set_rcx(rcx);
-            self.icount += elements - 1;
+            self.tick_surplus += elements - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
             if rcx == 0 {
                 return Ok(());
@@ -2923,7 +2924,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
             rcx = rcx.wrapping_sub(elements);
             self.set_rcx(rcx);
-            self.icount += elements - 1;
+            self.tick_surplus += elements - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
             if rcx == 0 {
                 return Ok(());
@@ -2997,7 +2998,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
             rcx = rcx.wrapping_sub(elements);
             self.set_rcx(rcx);
-            self.icount += elements - 1;
+            self.tick_surplus += elements - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
             if rcx == 0 {
                 return Ok(());
@@ -3065,7 +3066,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
             rcx = rcx.wrapping_sub(elements);
             self.set_rcx(rcx);
-            self.icount += elements - 1;
+            self.tick_surplus += elements - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
             if rcx == 0 {
                 return Ok(());
@@ -3139,7 +3140,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
             rcx = rcx.wrapping_sub(elements);
             self.set_rcx(rcx);
-            self.icount += elements - 1;
+            self.tick_surplus += elements - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
             if rcx == 0 {
                 return Ok(());
@@ -3213,7 +3214,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
             rcx = rcx.wrapping_sub(elements);
             self.set_rcx(rcx);
-            self.icount += elements - 1;
+            self.tick_surplus += elements - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
             if rcx == 0 {
                 return Ok(());
@@ -3771,7 +3772,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
             rcx = rcx.wrapping_sub(elements);
             self.set_rcx(rcx);
-            self.icount += elements - 1;
+            self.tick_surplus += elements - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
             if rcx == 0 {
                 return Ok(());
@@ -3846,7 +3847,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.set_rdi(rdi.wrapping_add(u64::from(bytes)));
             rcx = rcx.wrapping_sub(elements);
             self.set_rcx(rcx);
-            self.icount += elements - 1;
+            self.tick_surplus += elements - 1;
             self.tickn_fastrep(usize::try_from(elements).expect("page-bounded element count"));
             if rcx == 0 {
                 return Ok(());

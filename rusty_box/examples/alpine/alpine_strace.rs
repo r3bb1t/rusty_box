@@ -90,7 +90,25 @@ impl Instrumentation for StraceTracer {
 
         let mut no_fallback = |addr: u64| format!("{addr:#x}");
         let decoded = syscalls::Syscall::decode_x86_64(nr, args, &strings, &mut no_fallback);
-        tracing::info!("[{icount:>12}] {decoded}", icount = self.icount);
+        // write(fd, buf, len): dump the payload — buf is not NUL-terminated,
+        // so the generic string reader above misses it.
+        if nr == 1 && args[1] != 0 && args[1] < 0x8000_0000_0000_0000 {
+            let len = (args[2] as usize).min(120);
+            let mut buf = vec![0u8; len];
+            if ctx.virt_read_with_cr3(args[1], user_cr3, &mut buf) {
+                let text = String::from_utf8_lossy(&buf).into_owned();
+                tracing::info!(
+                    "[{icount:>12}] {{{user_cr3:x}}} {decoded} <<{:?}>>",
+                    text,
+                    icount = self.icount
+                );
+                return InstrAction::Continue;
+            }
+        }
+        tracing::info!(
+            "[{icount:>12}] {{{user_cr3:x}}} {decoded}",
+            icount = self.icount
+        );
 
         // Let the kernel actually service the syscall.
         InstrAction::Continue
