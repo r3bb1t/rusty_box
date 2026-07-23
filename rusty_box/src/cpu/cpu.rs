@@ -746,16 +746,10 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// this structure should be aligned on a 32-byte boundary to be friendly
     /// with the host cache lines.
     pub(super) i_cache: BxICache,
-    /// Direct handlers for opcode/form pairs whose table entries exactly match
-    /// `execute_instruction`. Unmapped or mode-sensitive forms remain `None`
-    /// and use the canonical dispatcher.
-    pub(super) opcode_handlers:
-        [Option<InstructionHandler<I, T>>; super::decoder::Opcode::COUNT * 2],
-    /// Handler selected when each mpool instruction is decoded. This mirrors
-    /// Bochs' `bxInstruction_c::execute1` without changing the decoder crate's
-    /// generic-free instruction layout.
-    pub(super) i_cache_handlers:
-        [Option<InstructionHandler<I, T>>; super::icache::BX_ICACHE_MEM_POOL],
+    // A2 single dispatch: the former `opcode_handlers` table and per-mpool-slot
+    // `i_cache_handlers` fn-ptr pool are gone — the cpu loop dispatches through
+    // the canonical `execute_instruction` match, so no handler pointers are
+    // cached per decoded instruction.
     pub(super) fetch_mode_mask: super::opcodes_table::FetchModeMask,
 
     pub(super) address_xlation: AddressXlation,
@@ -858,47 +852,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Drop
 }
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
-    /// Build the compact opcode/form dispatch table once per CPU.
-    ///
-    /// The excluded entries are dormant-table implementations known to differ
-    /// from the canonical dispatcher. The two 32-bit MOV memory forms are also
-    /// mode-sensitive for SS and therefore keep the dispatcher fallback.
-    pub(super) fn initialize_opcode_handlers(&mut self) {
-        use super::decoder::Opcode;
-        use super::opcodes_table::get_opcode_entry;
-
-        self.opcode_handlers.fill(None);
-        for raw_opcode in 0..Opcode::COUNT {
-            let opcode = Opcode::from_u16_const(raw_opcode as u16);
-            let Some(entry) = get_opcode_entry::<I, T>(opcode) else {
-                continue;
-            };
-            let base = raw_opcode * 2;
-            match opcode {
-                Opcode::AddAlib
-                | Opcode::XorAlib
-                | Opcode::PushOp16Sw
-                | Opcode::PopOp16Sw
-                | Opcode::JmpfAp => {}
-                Opcode::MovOp32GdEd | Opcode::MovOp32EdGd => {
-                    self.opcode_handlers[base + 1] = entry.execute2;
-                }
-                _ => {
-                    self.opcode_handlers[base] = Some(entry.execute1);
-                    self.opcode_handlers[base + 1] = entry.execute2;
-                }
-            }
-        }
-    }
-    #[inline]
-    pub(super) fn handler_for_instruction(
-        &self,
-        instr: &Instruction,
-    ) -> Option<InstructionHandler<I, T>> {
-        let opcode = instr.get_ia_opcode() as usize;
-        self.opcode_handlers[opcode * 2 + usize::from(instr.mod_c0())]
-    }
-
     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
     /// Persistent sleep sentinel set by enter_sleep_state (HLT/MWAIT).
     /// Matches Bochs proc_ctrl.cc `async_event = 1` — survives the
@@ -1144,6 +1097,31 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(crate) fn sync_active_tlb_pin(&self) {
         if let Some(pin) = self.active_tlb_pin_sidecar() {
             self.refresh_tlb_pin(pin);
+        } else {
+            self.tlb_pin_dirty.set(true);
+        }
+    }
+
+    /// Publish the pin sidecar after a FULL TLB flush (`dtlb.flush()` +
+    /// `itlb.flush()`), where every entry is now invalid.
+    ///
+    /// After a full flush `refresh_tlb_pin`'s per-slot rescan would write zero
+    /// to all `BX_DTLB_SIZE + BX_ITLB_SIZE` slots (every `pinned_host_page`
+    /// returns 0 for an invalid entry), so a single `clear_tlb_hosts` memset
+    /// reproduces it far more cheaply. The caller must have already invalidated
+    /// the prefetch queue, so the (now-empty) fetch window is correctly zeroed
+    /// too. `clear_tlb_hosts` also zeros `vmcb_host`; the flush does not change
+    /// SVM state, so an active guest's VMCB backing must be re-pinned — omitting
+    /// this would UNDER-pin it (use-after-free). Over-pinning is always safe;
+    /// under-pinning is the bug this guards against.
+    #[inline]
+    pub(crate) fn clear_active_tlb_pin_hosts(&self) {
+        if let Some(pin) = self.active_tlb_pin_sidecar() {
+            pin.clear_tlb_hosts();
+            if self.in_svm_guest {
+                pin.set_vmcb_host(self.vmcbhostptr as usize);
+            }
+            self.tlb_pin_dirty.set(false);
         } else {
             self.tlb_pin_dirty.set(true);
         }
@@ -2486,11 +2464,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.rip()
         );
 
-        let _last_diag_iteration = 0u64;
         let mut outer_loop_count = 0u64;
         let result = 'cpu_loop: loop {
             outer_loop_count += 1;
-            // Detect spinning: log every 100K outer-loop iterations
+            // Spin diagnostics are debug-only: the periodic trace and its
+            // modulo are compiled out of release so the hot per-trace path
+            // stays minimal. The infinite-loop bailout stays in release — a
+            // single comparison per trace is negligible — as a safety net.
+            #[cfg(debug_assertions)]
             if outer_loop_count.is_multiple_of(100_000) {
                 tracing::trace!(
                     "[cpu_loop-spin] outer={} iter={}/{} RIP={:#010x} async={} activity={:?}",
@@ -2501,10 +2482,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     self.async_event,
                     self.activity_state,
                 );
-                if outer_loop_count > 50_000_000 {
-                    tracing::error!("[cpu_loop] BAILOUT after {} outer loops", outer_loop_count);
-                    break Ok(iteration);
-                }
+            }
+            if outer_loop_count > 50_000_000 {
+                tracing::error!("[cpu_loop] BAILOUT after {} outer loops", outer_loop_count);
+                break Ok(iteration);
             }
 
             // Cooperative stop request (Bochs kill_bochs_request analogue):
@@ -2694,11 +2675,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         .fire_before_execution(rip_before, instr_ref());
                 }
 
-                let execution_result = if let Some(handler) = self.i_cache_handlers[instr_idx] {
-                    handler(self, instr_ref())
-                } else {
-                    self.execute_instruction(instr_ref())
-                };
+                // A2 single dispatch (unmeasured): the canonical
+                // `execute_instruction` match is the sole path. The former
+                // parallel `i_cache_handlers` fn-ptr pool cached exactly the
+                // arm the opcode selects here (matching handlers == the arm;
+                // excluded opcodes already fell back to this match), so this is
+                // behaviorally identical while dropping the 4.6 MB pool and the
+                // per-instruction Option check. Dispatch mechanism is not
+                // guest-observable, so the match is parity-safe.
+                let execution_result = self.execute_instruction(instr_ref());
                 match execution_result {
                     Ok(()) => {}
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
@@ -4219,11 +4204,7 @@ mod tests {
             unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
         assert_ne!(legacy_reloaded, legacy_mpool);
         let legacy_instr = cpu.i_cache.mpool[legacy_reloaded];
-        if let Some(handler) = cpu.i_cache_handlers[legacy_reloaded] {
-            handler(&mut cpu, &legacy_instr).unwrap();
-        } else {
-            cpu.execute_instruction(&legacy_instr).unwrap();
-        }
+        cpu.execute_instruction(&legacy_instr).unwrap();
 
         // Repeat with the PAE direct qword walker.  Its PTE line is likewise
         // decoded into a live trace before the architectural A/D write.
@@ -4274,11 +4255,7 @@ mod tests {
             unsafe { cpu.get_icache_entry(&mut *mem_ptr, pins) }.unwrap();
         assert_ne!(pae_reloaded, pae_mpool);
         let pae_instr = cpu.i_cache.mpool[pae_reloaded];
-        if let Some(handler) = cpu.i_cache_handlers[pae_reloaded] {
-            handler(&mut cpu, &pae_instr).unwrap();
-        } else {
-            cpu.execute_instruction(&pae_instr).unwrap();
-        }
+        cpu.execute_instruction(&pae_instr).unwrap();
 
 
         cpu.clear_memory_access();
@@ -4348,11 +4325,7 @@ mod tests {
             "normal lookup must commit the primary page-split trace"
         );
         let old_instr = cpu.i_cache.mpool[old_mpool];
-        if let Some(handler) = cpu.i_cache_handlers[old_mpool] {
-            handler(&mut cpu, &old_instr).unwrap();
-        } else {
-            cpu.execute_instruction(&old_instr).unwrap();
-        }
+        cpu.execute_instruction(&old_instr).unwrap();
         assert_eq!(
             cpu.get_gpr32(0),
             0x1234_5678,
@@ -4385,11 +4358,7 @@ mod tests {
             "a primary cache hit after remapping would reuse stale split code"
         );
         let new_instr = cpu.i_cache.mpool[new_mpool];
-        if let Some(handler) = cpu.i_cache_handlers[new_mpool] {
-            handler(&mut cpu, &new_instr).unwrap();
-        } else {
-            cpu.execute_instruction(&new_instr).unwrap();
-        }
+        cpu.execute_instruction(&new_instr).unwrap();
         assert_eq!(
             cpu.get_gpr32(0),
             0x7788_9978,
@@ -4533,6 +4502,81 @@ mod tests {
         assert!(cpu.translate_data_read(TARGET).is_err());
         assert!(!pin.is_range_pinned(host_ptr, host_ptr + 0x1000));
         cpu.clear_execution_memory_wiring();
+    }
+
+    #[test]
+    fn full_tlb_flush_clears_pin_hosts_like_a_full_rescan() {
+        // Track B: `tlb_flush` publishes the pin sidecar via a memset
+        // (`clear_active_tlb_pin_hosts`) instead of the per-slot rescan. Every
+        // pinned DTLB and ITLB host pointer must be gone afterward — exactly
+        // what `refresh_tlb_pin` produces once every entry is invalid.
+        const DTLB_TARGET: u64 = 0x4000;
+        const ITLB_TARGET: u64 = 0x8000;
+
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
+            false,
+        );
+        let pin = CpuTlbPin::new(&cpu);
+        let host_base = mem.identity_guest_base().0 as usize;
+        let dtlb_host = host_base + DTLB_TARGET as usize;
+        let itlb_host = host_base + ITLB_TARGET as usize;
+
+        let dslot = cpu.dtlb.get_index_of(DTLB_TARGET, 0);
+        {
+            let e = &mut cpu.dtlb.entries[dslot];
+            e.lpf = DTLB_TARGET;
+            e.host_page_addr = dtlb_host as _;
+            e.access_bits = 1;
+        }
+        let islot = cpu.itlb.get_index_of(ITLB_TARGET, 0);
+        {
+            let e = &mut cpu.itlb.entries[islot];
+            e.lpf = ITLB_TARGET;
+            e.host_page_addr = itlb_host as _;
+            e.access_bits = 1;
+        }
+
+        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
+        cpu.sync_dtlb_pin_slot(DTLB_TARGET, 0);
+        cpu.sync_itlb_pin_slot(ITLB_TARGET, 0);
+        assert!(pin.is_range_pinned(dtlb_host, dtlb_host + 0x1000));
+        assert!(pin.is_range_pinned(itlb_host, itlb_host + 0x1000));
+
+        cpu.tlb_flush();
+        assert!(!pin.is_range_pinned(dtlb_host, dtlb_host + 0x1000));
+        assert!(!pin.is_range_pinned(itlb_host, itlb_host + 0x1000));
+
+        cpu.clear_memory_access();
+    }
+
+    #[test]
+    fn full_tlb_flush_keeps_the_vmcb_pin_in_an_svm_guest() {
+        // The full-flush memset zeros `vmcb_host`, but the flush does not change
+        // SVM state — under-pinning the VMCB backing would be a use-after-free.
+        // `clear_active_tlb_pin_hosts` re-publishes it while in an SVM guest.
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
+            false,
+        );
+        let pin = CpuTlbPin::new(&cpu);
+        let vmcb_host = mem.identity_guest_base().0 as usize + 0x1_0000;
+        cpu.in_svm_guest = true;
+        cpu.vmcbhostptr = vmcb_host as _;
+
+        cpu.wire_memory_access(NonNull::from(&mut mem), core::slice::from_ref(&pin), &pin);
+        cpu.sync_vmcb_pin();
+        assert!(pin.is_range_pinned(vmcb_host, vmcb_host + 0x1000));
+
+        cpu.tlb_flush();
+        assert!(
+            pin.is_range_pinned(vmcb_host, vmcb_host + 0x1000),
+            "a full flush must not drop the active SVM guest's VMCB pin"
+        );
+
+        cpu.clear_memory_access();
     }
 
     #[test]

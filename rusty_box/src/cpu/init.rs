@@ -466,7 +466,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.invalidate_stack_cache();
         self.dtlb.flush();
         self.itlb.flush();
-        self.sync_active_tlb_pin();
+        // Every entry is now invalid, so the pin sidecar's per-slot host
+        // pointers are all zero: memset instead of the full pinned_host_page
+        // rescan (Track B — full-flush pin publication).
+        self.clear_active_tlb_pin_hosts();
         // Bochs paging.cc — iCache.breakLinks()
         // Invalidates page-split icache entries and increments trace link timestamp.
         // Without this, page-boundary instructions survive TLB flush and serve

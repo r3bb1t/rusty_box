@@ -741,15 +741,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
             match decode_result {
                 Ok(()) => {
-                    let handler =
-                        self.handler_for_instruction(&self.i_cache.mpool[current_mpindex]);
-                    self.i_cache_handlers[current_mpindex] = handler;
                     // Instruction is already in mpool[current_mpindex] — get its length
                     let i_len = { self.i_cache.mpool[current_mpindex].ilen() as u32 };
 
-                    // Bochs stores the selected execute handler in each decoded
-                    // instruction. Rust keeps the generic function pointer in
-                    // the parallel i_cache_handlers pool populated above.
+                    // A2 single dispatch: no handler pointer is cached per
+                    // instruction — the cpu loop dispatches via execute_instruction.
                     // Check if this instruction ends the trace (matching Bochs assignHandler
                     // BxTraceEnd check). Control-flow instructions (branches, jumps, calls,
                     // returns, loops, interrupts) must end the trace so that the next
@@ -916,9 +912,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                         break;
                     }
                     self.i_cache.mpool[current_mpindex] = boundary_instr;
-                    let handler =
-                        self.handler_for_instruction(&self.i_cache.mpool[current_mpindex]);
-                    self.i_cache_handlers[current_mpindex] = handler;
                     current_mpindex += 1;
 
                     // Add the instruction to trace cache (matching C++ line 152-154)
@@ -942,9 +935,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                             let entry = &mut self.i_cache.entry[entry_idx];
                             entry.tlen += 1; /* Add the inserted end of trace opcode */
                             gen_dummy_icache_entry(&mut self.i_cache.mpool[current_mpindex]);
-                            let handler =
-                                self.handler_for_instruction(&self.i_cache.mpool[current_mpindex]);
-                            self.i_cache_handlers[current_mpindex] = handler;
                             current_mpindex += 1;
                         }
                     }
@@ -973,8 +963,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             if current_mpindex < BX_ICACHE_MEM_POOL {
                 // Note: tlen will be incremented here, then used below
                 gen_dummy_icache_entry(&mut self.i_cache.mpool[current_mpindex]);
-                let handler = self.handler_for_instruction(&self.i_cache.mpool[current_mpindex]);
-                self.i_cache_handlers[current_mpindex] = handler;
                 current_mpindex += 1;
                 tlen += 1; /* Add the inserted end of trace opcode */
             }
@@ -1156,8 +1144,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         debug_assert!(source_start_idx + max_length <= BX_ICACHE_MEM_POOL);
         for k in 0..max_length {
             self.i_cache.mpool[current_mpindex + k] = self.i_cache.mpool[source_start_idx + k];
-            self.i_cache_handlers[current_mpindex + k] =
-                self.i_cache_handlers[source_start_idx + k];
         }
 
         // Bochs mergeTraces: entry->tlen += max_length; entry->traceMask |= e->traceMask. Our
