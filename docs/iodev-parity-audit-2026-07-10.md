@@ -121,12 +121,14 @@ convention.
       `serial_rx_trigger_raises_only_at_exact_level`,
       `serial_non_fifo_overrun_overwrites_rbr_and_raises_rxdata`,
       `serial_lsr_read_keeps_parity_and_fifo_error`.
-    - **Still open (deferred, coupled):** RX byte *arrival* stays immediate (not
-      baud-paced — a deliberate, separate divergence, user-ratified); the
-      IER-write raise/lower **pulse** (#12 tail) and the batched-IRQ
-      raise-before-lower **chronology** (#13) share the deferred
-      `pending_irq_raise`/`pending_irq_lower` machinery and must be fixed together
-      (Bochs is fully synchronous via `DEV_pic_*`); see #13.
+    - **IER-pulse + chronology RESOLVED 2026-07-24** (with #13): the IER write no
+      longer pulses raise/lower unconditionally — it tracks a promotion (`gen_int`)
+      / demotion (`needs_lower`) per changed enable bit and, in Bochs order, lowers
+      inline then raises once only if a promotion occurred. Combined with the #13
+      fix below, the line now settles to the exact Bochs state. Tests:
+      `serial_ier_enable_without_pending_source_raises_nothing`.
+    - **Still open:** RX byte *arrival* stays immediate (not baud-paced — a
+      deliberate, separate divergence, user-ratified).
 
 13. **Serial: batched IRQ actions reordered raise-before-lower** —
     `take_pending_irqs` always yields raise then lower regardless of chronology;
@@ -134,6 +136,14 @@ convention.
     LOW with `rx_interrupt` still true — a purely interrupt-driven guest can
     stall on the last byte. CONFIRMED structural, loss timing-dependent.
     **small**.
+    - **RESOLVED 2026-07-24** — `raise_interrupt`/`lower_interrupt` now coalesce to
+      the LAST edge per drain window (a raise clears any pending lower and vice
+      versa), so a lower→raise sequence nets HIGH like Bochs's synchronous
+      `DEV_pic_*`. This is exact because the PIC's `raise_irq`/`lower_irq` are
+      already idempotent/edge-latched on IRR, so emitting only the final edge
+      matches. Snapshot format unchanged (the two bools are now mutually
+      exclusive). Test: `serial_lower_then_raise_in_one_window_nets_raise`
+      (+ `serial_snapshot_resumes_partial_fifo_and_irq_state` updated).
 
 14. **Keyboard: `periodic()` never calls `create_mouse_packet(0)`** — Bochs
     flushes residual `delayed_dx/dy` when the kbd buffer is idle; Rust omits it,

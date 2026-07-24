@@ -1252,8 +1252,15 @@ impl BxSerialC {
             }
         }
 
+        // Bochs raise_interrupt calls DEV_pic_raise_irq synchronously. The
+        // deferred model coalesces to the LAST edge per drain window: a raise
+        // supersedes a pending lower so a lower→raise sequence (e.g. an RBR read
+        // then a freshly received byte before the next drain) nets HIGH, as in
+        // Bochs — not the reverse. The PIC's raise/lower are already idempotent
+        // (edge-latched on IRR), so emitting only the final edge is exact.
         if gen_int && s.modem_cntl.out2 {
             self.pending_irq_raise[port_idx] = true;
+            self.pending_irq_lower[port_idx] = false;
         }
     }
 
@@ -1265,7 +1272,10 @@ impl BxSerialC {
             && !s.tx_interrupt
             && !s.fifo_interrupt
         {
+            // A pending lower supersedes a pending raise (last edge wins),
+            // matching Bochs's synchronous DEV_pic_lower_irq ordering.
             self.pending_irq_lower[port_idx] = true;
+            self.pending_irq_raise[port_idx] = false;
         }
     }
 
@@ -1650,24 +1660,36 @@ impl BxSerialC {
                     let new_rxlstat = (val & 0x04) != 0;
                     let new_modstat = (val & 0x08) != 0;
 
+                    // Bochs serial.cc IER write: each changed enable bit either
+                    // promotes a pending source (→ gen_int, a single trailing
+                    // raise) or demotes an active one (→ inline lower). Track both
+                    // so the final raise/lower is conditional, not an
+                    // unconditional pulse.
+                    let mut gen_int = false;
+                    let mut needs_lower = false;
+
                     // Modem status enable transition
                     if new_modstat && !s.int_enable.modstat_enable {
                         if s.ms_ipending {
                             s.ms_interrupt = true;
                             s.ms_ipending = false;
+                            gen_int = true;
                         }
                     } else if !new_modstat && s.int_enable.modstat_enable && s.ms_interrupt {
                         s.ms_ipending = true;
                         s.ms_interrupt = false;
+                        needs_lower = true;
                     }
 
                     // TX hold enable transition
                     if new_txhold && !s.int_enable.txhold_enable {
                         if s.line_status.thr_empty {
                             s.tx_interrupt = true;
+                            gen_int = true;
                         }
                     } else if !new_txhold && s.int_enable.txhold_enable {
                         s.tx_interrupt = false;
+                        needs_lower = true;
                     }
 
                     // RX data enable transition
@@ -1675,19 +1697,23 @@ impl BxSerialC {
                         if s.fifo_ipending {
                             s.fifo_interrupt = true;
                             s.fifo_ipending = false;
+                            gen_int = true;
                         }
                         if s.rx_ipending {
                             s.rx_interrupt = true;
                             s.rx_ipending = false;
+                            gen_int = true;
                         }
                     } else if !new_rxdata && s.int_enable.rxdata_enable {
                         if s.rx_interrupt {
                             s.rx_ipending = true;
                             s.rx_interrupt = false;
+                            needs_lower = true;
                         }
                         if s.fifo_interrupt {
                             s.fifo_ipending = true;
                             s.fifo_interrupt = false;
+                            needs_lower = true;
                         }
                     }
 
@@ -1696,10 +1722,12 @@ impl BxSerialC {
                         if s.ls_ipending {
                             s.ls_interrupt = true;
                             s.ls_ipending = false;
+                            gen_int = true;
                         }
                     } else if !new_rxlstat && s.int_enable.rxlstat_enable && s.ls_interrupt {
                         s.ls_ipending = true;
                         s.ls_interrupt = false;
+                        needs_lower = true;
                     }
 
                     s.int_enable.rxdata_enable = new_rxdata;
@@ -1707,8 +1735,15 @@ impl BxSerialC {
                     s.int_enable.rxlstat_enable = new_rxlstat;
                     s.int_enable.modstat_enable = new_modstat;
 
-                    self.raise_interrupt(port_idx, IntSource::Ier);
-                    self.lower_interrupt(port_idx);
+                    // Order matches Bochs: demotions lower inline first, then a
+                    // single raise if any promotion occurred, so a write that both
+                    // promotes and demotes nets HIGH (the trailing raise wins).
+                    if needs_lower {
+                        self.lower_interrupt(port_idx);
+                    }
+                    if gen_int {
+                        self.raise_interrupt(port_idx, IntSource::Ier);
+                    }
                 }
             }
 
@@ -2404,7 +2439,10 @@ mod tests {
         }
 
         assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3_123));
-        assert!(serial.pending_irq_raise[0]);
+        // The last TX-hold edge here was a lower (writing 'b' found the shift
+        // register busy and cleared tx_interrupt with no other source active);
+        // it supersedes the earlier raise, so only a lower stays pending.
+        assert!(!serial.pending_irq_raise[0]);
         assert!(serial.pending_irq_lower[0]);
 
         let mut saved = Vec::new();
@@ -2443,7 +2481,56 @@ mod tests {
         );
         assert_eq!(
             serial.take_pending_irqs().collect::<Vec<_>>(),
-            vec![(COM_IRQS[0], true), (COM_IRQS[0], false)]
+            vec![(COM_IRQS[0], false)]
+        );
+    }
+
+    #[test]
+    fn serial_lower_then_raise_in_one_window_nets_raise() {
+        // Regression for the batched-IRQ chronology bug: an RBR read (lower)
+        // followed by a freshly received byte (raise) before the next drain must
+        // net the line HIGH, matching Bochs's synchronous DEV_pic_* ordering.
+        // The old two-boolean drain emitted raise-before-lower and stalled the
+        // guest on the last byte.
+        let mut serial = BxSerialC::new(1);
+        let base = COM_BASES[0];
+        serial.write(base + REG_LCR, 0x03, 1); // 8-bit word
+        serial.write(base + REG_MCR, 0x08, 1); // OUT2 gates the IRQ line
+        serial.write(base + REG_IER_DLM, 0x01, 1); // enable RXDATA interrupt (non-FIFO)
+        let _ = serial.take_pending_irqs().count();
+
+        // A byte arrives and raises RXDATA.
+        serial.receive_byte(0, 0xaa);
+        assert_eq!(serial.take_pending_irqs().next(), Some((COM_IRQS[0], true)));
+
+        // Guest reads it (lowers), then a new byte arrives (raises) — both before
+        // the next drain. Net must be a single raise, not a raise+lower pulse.
+        assert_eq!(serial.read(base + REG_RBR_THR, 1), 0xaa);
+        serial.receive_byte(0, 0xbb);
+        assert_eq!(
+            serial.take_pending_irqs().collect::<Vec<_>>(),
+            vec![(COM_IRQS[0], true)]
+        );
+    }
+
+    #[test]
+    fn serial_ier_enable_without_pending_source_raises_nothing() {
+        // Bochs serial.cc IER write raises only on an actual promotion. Enabling
+        // RXDATA with nothing pending must not queue a spurious raise (the old
+        // code pulsed raise+lower unconditionally).
+        let mut serial = BxSerialC::new(1);
+        let base = COM_BASES[0];
+        serial.write(base + REG_LCR, 0x03, 1);
+        serial.write(base + REG_MCR, 0x08, 1); // OUT2
+        let _ = serial.take_pending_irqs().count();
+
+        // Enable RXDATA with no rx_ipending/fifo_ipending pending — no promotion,
+        // so no raise should be queued.
+        serial.write(base + REG_IER_DLM, 0x01, 1);
+        assert_eq!(
+            serial.take_pending_irqs().count(),
+            0,
+            "IER enable with no pending source raises nothing"
         );
     }
 }
