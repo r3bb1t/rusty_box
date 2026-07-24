@@ -2264,8 +2264,16 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 tracing::error!("failed to start the 8042 serial-delay timer: {error:?}");
             }
         }
+        // Apply the timer-owner delta the CMOS produced during its own reset
+        // (stashed by DeviceManager::reset because it can't reach the timers);
+        // fall back to a fresh derivation if reset didn't run this path.
+        let cmos_sync = self
+            .device_manager
+            .cmos_reset_timer_sync
+            .take()
+            .unwrap_or_else(|| self.device_manager.cmos.timer_sync());
         self.devices
-            .apply_cmos_timer_sync(current_ticks, self.device_manager.cmos.timer_sync());
+            .apply_cmos_timer_sync(current_ticks, cmos_sync);
         self.devices.request_timer_after_usec(
             DeviceTimerOwner::AcpiPmOverflow,
             current_ticks,

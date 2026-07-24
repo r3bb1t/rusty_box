@@ -217,6 +217,11 @@ pub struct DeviceManager {
     /// Deferred: a VGA PCI BAR (LFB or MMIO) changed, needs memory-handler
     /// (re)registration at the new base.
     pub(crate) vga_bar_needs_reregister: bool,
+    /// Deferred: the CMOS timer-owner delta produced by `cmos.reset()` on a
+    /// hardware reset. `BxCmosC::reset` can't reach the machine timers, so the
+    /// emulator drains this in `rearm_device_timers_after_hardware_reset`
+    /// (transient — set and consumed within a single reset, never snapshotted).
+    pub(crate) cmos_reset_timer_sync: Option<super::cmos::CmosTimerSync>,
     /// Diagnostic: PIT IRQ0 rising edges applied to the PIC
     pub diag_pit_fires: u64,
     /// Diagnostic: raise_irq(0) latched (irq_in was 0)
@@ -330,6 +335,7 @@ impl DeviceManager {
             smram_needs_update: false,
             bios_write_needs_update: false,
             vga_bar_needs_reregister: false,
+            cmos_reset_timer_sync: None,
             diag_pit_fires: 0,
             diag_irq0_latched: 0,
             diag_irq0_already_high: 0,
@@ -421,7 +427,10 @@ impl DeviceManager {
         // Deliberate no-op: Bochs pit82c54.cc reset(type) is empty — the
         // PIT counters keep their programming across a guest reset.
         self.pit.reset();
-        self.cmos.reset();
+        // Bochs cmos.cc reset returns the periodic/one-second/UIP timer-owner
+        // delta. This code path can't reach the machine timers, so stash it for
+        // rearm_device_timers_after_hardware_reset to apply once reset finishes.
+        self.cmos_reset_timer_sync = Some(self.cmos.reset());
         self.dma.reset();
         self.keyboard.reset();
         self.harddrv.reset();
