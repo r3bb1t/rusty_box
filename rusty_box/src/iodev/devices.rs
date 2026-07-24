@@ -279,6 +279,11 @@ impl DeviceManager {
             || self.port92.reset_request.is_some()
             || self.keyboard.reset_requested.is_some()
             || self.pci2isa.reset_request.is_some()
+            // Bochs acpi.cc apic_bus_deliver_smi is synchronous with the OUT
+            // to SMI_CMD; ending the slice here delivers the SMI to CPU 0
+            // before the guest's next instruction. Drained by the emulator's
+            // service_scheduler_boundary BEFORE the apply/quiesce loop.
+            || self.acpi.smi_request_pending
     }
 
     /// Drain all reset producers, with hardware reset taking precedence over
@@ -625,10 +630,14 @@ impl DeviceManager {
             io.register_io_handler(DeviceId::Pci, port, "PCI Config Data", 0x7);
         }
 
-        // PIIX3 I/O ports: APM (0xB2-0xB3), ELCR (0x4D0-0x4D1), CPU reset (0xCF9)
-        // Bochs pci2isa.cc init(): all five registered as 1-byte ports.
+        // PIIX3 I/O ports: APM (0xB2-0xB3), ELCR (0x4D0-0x4D1), CPU reset
+        // (0xCF9). Bochs pci2isa.cc init(): the APM command port (0xB2) WRITE
+        // handler is registered with mask 3 so the 16-bit `outw 0xB2, ax`
+        // idiom reaches the handler (apms loads from the high byte); all
+        // other ports and the 0xB2 read side are 1-byte.
+        io.register_io_read_handler(DeviceId::Pci, super::pci2isa::APM_CMD_PORT, "PIIX3", 0x1);
+        io.register_io_write_handler(DeviceId::Pci, super::pci2isa::APM_CMD_PORT, "PIIX3", 0x3);
         for port in [
-            super::pci2isa::APM_CMD_PORT,
             super::pci2isa::APM_STS_PORT,
             super::pci2isa::ELCR1_PORT,
             super::pci2isa::ELCR2_PORT,
@@ -1312,12 +1321,12 @@ impl DeviceManager {
             0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 | 0x0CF9 => {
                 self.pci2isa.write(address, value, io_len);
                 if address == 0x00B2 {
+                    // Bochs pci2isa.cc case 0x00b2: apmc/apms are stored by
+                    // pci2isa.write above; DEV_acpi_generate_smi delivers the
+                    // SMI (when APMC_EN is set) and the GUEST's SMM handler is
+                    // what acknowledges the command — e.g. the BIOS relocation
+                    // handler's `out 0xb3, 0`. apms is never cleared here.
                     self.acpi.generate_smi(value as u8);
-                    self.pci2isa.apms = 0;
-                    tracing::trace!(
-                        "APM command {:#04x}: forwarded to ACPI, apms cleared (no SMM)",
-                        value
-                    );
                 }
                 // Bochs pci2isa.cc write case 0x04d0/0x04d1:
                 // DEV_pic_set_mode(is_master, elcr) — forward the new

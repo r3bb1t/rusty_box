@@ -128,9 +128,11 @@ impl<'c> BxMemC<'c> {
         };
         let write = (rw as u32 & 1) != 0;
 
+        // Bochs memory.cc getHostMemAddr: same SMRAM condition as the
+        // physical-page paths — smram_enable || (smm_mode && !restricted).
         if (0x000a0000..0x000c0000).contains(&a20_addr)
             && self.smram_available
-            && (self.smram_enable || policy.smm_mode())
+            && (self.smram_enable || (policy.smm_mode() && !self.smram_restricted))
         {
             return Ok(Some(self.resident_ram_span(pins, a20_addr)?));
         }
@@ -444,10 +446,10 @@ impl BxMemC<'_> {
         };
 
         // Check SMRAM first (before memory handlers).
-        if (0x000a0000..0x000c0000).contains(&a20_addr)
+        let smram_hit = (0x000a0000..0x000c0000).contains(&a20_addr)
             && self.smram_available
-            && (self.smram_enable || (policy.smm_mode() && !self.smram_restricted))
-        {
+            && (self.smram_enable || (policy.smm_mode() && !self.smram_restricted));
+        if smram_hit {
             // Write to SMRAM - delegate to stub for regular memory write
             return self.inherited_memory_stub.write_physical_page(
                 pins,

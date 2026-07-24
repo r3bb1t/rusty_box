@@ -183,6 +183,14 @@ pub struct BxAcpiCtrl {
     /// IRQ 9 level (SCI) — the emulator loop syncs this to the PIC.
     pub irq9_level: bool,
 
+    /// A `generate_smi` fired with APMC_EN set (Bochs acpi.cc
+    /// `apic_bus_deliver_smi()`); the emulator drains this at the scheduler
+    /// boundary and delivers the SMI to CPU 0. Transient (set by an OUT to
+    /// SMI_CMD, consumed at the very next boundary before any further guest
+    /// instruction), so it is deliberately not snapshotted — snapshots are
+    /// taken at serviced boundaries where it is always clear.
+    pub(crate) smi_request_pending: bool,
+
     /// Whether PM I/O ports are registered (tracks pm_base changes)
     pub(crate) pm_ports_registered: bool,
     /// Whether SM I/O ports are registered (tracks sm_base changes)
@@ -564,6 +572,7 @@ impl BxAcpiCtrl {
             #[cfg(feature = "std")]
             realtime_start: None,
             irq9_level: false,
+            smi_request_pending: false,
             pm_ports_registered: false,
             sm_ports_registered: false,
             uefi_enabled: false,
@@ -682,6 +691,7 @@ impl BxAcpiCtrl {
         self.smbus = SmBusState::default();
 
         self.irq9_level = false;
+        self.smi_request_pending = false;
 
         // Map PM/SM I/O windows when the BAR is configured (e.g. UEFI defaults).
         let pmbar = u32::from_le_bytes([
@@ -824,14 +834,22 @@ impl BxAcpiCtrl {
 
     /// Handle SMI command (ACPI enable/disable).
     /// Bochs: generate_smi() (acpi.cc)
+    /// Bochs acpi.cc `generate_smi`: the ACPI enable/disable commands toggle
+    /// SCI_EN directly (ACPI specs 3.0, 4.7.2.5), and when APMC_EN
+    /// (`pci_conf[0x5b]` bit 1, set by the BIOS via the SMI-control dword at
+    /// config 0x58) is enabled, an SMI is delivered to CPU 0
+    /// (`apic_bus_deliver_smi`) — the emulator drains `smi_request_pending`
+    /// at the next scheduler boundary.
     pub fn generate_smi(&mut self, value: u8) {
         if value == ACPI_ENABLE {
             self.pmcntrl |= PmControl::SCI_EN.bits();
         } else if value == ACPI_DISABLE {
             self.pmcntrl &= !PmControl::SCI_EN.bits();
         }
-        // SMI delivery via APIC bus not implemented (requires APIC bus infrastructure)
-        // Bochs acpi.cc: if (pci_conf[0x5b] & 0x02) apic_bus_deliver_smi()
+
+        if (self.pci_conf[0x5b] & 0x02) != 0 {
+            self.smi_request_pending = true;
+        }
     }
 
     // ─── I/O Port Handlers ───────────────────────────────────────────────
@@ -1351,6 +1369,31 @@ mod tests {
         acpi.time_usec = 100; // ~358 PM ticks at 3.58 MHz
         let pmsts = acpi.get_pmsts(0);
         assert_ne!(pmsts & PmStatus::TMROF_STS.bits(), 0);
+    }
+
+    #[test]
+    fn generate_smi_delivers_only_with_apmc_en() {
+        // Bochs acpi.cc generate_smi: SCI_EN toggles regardless; the SMI is
+        // delivered to CPU 0 only when pci_conf[0x5b] bit 1 (APMC_EN, set by
+        // the BIOS via the SMI-control dword at config 0x58) is enabled.
+        let mut acpi = BxAcpiCtrl::new();
+
+        acpi.generate_smi(0x00);
+        assert!(!acpi.smi_request_pending, "no SMI without APMC_EN");
+
+        acpi.generate_smi(ACPI_ENABLE);
+        assert_ne!(acpi.pmcntrl & PmControl::SCI_EN.bits(), 0, "SCI_EN set");
+        assert!(!acpi.smi_request_pending);
+
+        // The BIOS smm_init: pci_config_writel(d, 0x58, value | (1 << 25)).
+        acpi.pci_write(0x58, 1 << 25, 4);
+        acpi.generate_smi(0x00);
+        assert!(acpi.smi_request_pending, "APMC_EN set: SMI delivered");
+
+        acpi.smi_request_pending = false;
+        acpi.generate_smi(ACPI_DISABLE);
+        assert_eq!(acpi.pmcntrl & PmControl::SCI_EN.bits(), 0, "SCI_EN cleared");
+        assert!(acpi.smi_request_pending, "delivery is independent of the command value");
     }
 
     #[test]

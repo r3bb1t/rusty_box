@@ -3399,6 +3399,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             return Ok(true);
         }
 
+        // Bochs apic.cc apic_bus_deliver_smi(): an SMI raised by the ACPI
+        // controller (OUT to SMI_CMD 0xB2 with APMC_EN set) goes to CPU 0.
+        // Drained before the apply/quiesce loop below so the pending flag
+        // never trips its has_pending_machine_boundary convergence check.
+        if core::mem::take(&mut self.device_manager.acpi.smi_request_pending) {
+            self.cpu_mut_at(0).deliver_smi();
+        }
+
         // Source bus work before local control/EOI and captured-epoch timer
         // requests.
         self.drain_lapic_bus();
@@ -6213,6 +6221,79 @@ mod tests {
                     "one-tick deadline did not stop the active batch promptly: {executed}"
                 );
                 assert_eq!(emu.pc_system.time_ticks(), executed);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn smi_apm_handshake_runs_the_guest_smm_handler() {
+        // The Bochs BIOS smm_init contract (rombios32.c): outb(0xb3, 1),
+        // outb(0xb2, 0) raises an SMI (APMC_EN set via ACPI config 0x58 bit
+        // 25); the CPU enters SMM at SMBASE+0x8000 = 0x38000 and the GUEST
+        // handler clears 0xb3 and RSMs. POST then polls 0xb3 until 0.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                emu.devices.init(&mut emu.memory).unwrap();
+                emu.device_manager
+                    .init(&mut emu.devices, &mut emu.memory)
+                    .unwrap();
+                emu.pc_system.initialize(1_000_000);
+                emu.devices.set_timer_ips(1_000_000);
+                emu.register_timer_owners().unwrap();
+
+                // BIOS smm_init: enable SMI generation on APMC writes.
+                emu.device_manager.acpi.pci_write(0x58, 1 << 25, 4);
+
+                // Guest code at 0x1000: apms := 1, then the SMI command.
+                //   mov al, 1 ; out 0xb3, al ; mov al, 0 ; out 0xb2, al ; nops
+                let mut code = [0x90u8; 64];
+                code[..8].copy_from_slice(&[0xB0, 0x01, 0xE6, 0xB3, 0xB0, 0x00, 0xE6, 0xB2]);
+                emu.virt_write(0x1000, &code).unwrap();
+                // SMM handler at 0x38000 (SMBASE 0x30000 + entry 0x8000):
+                //   mov al, 0 ; out 0xb3, al ; rsm
+                emu.virt_write(0x38000, &[0xB0, 0x00, 0xE6, 0xB3, 0x0F, 0xAA])
+                    .unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+
+                // Run: OUT 0xB2 ends the slice (machine boundary), the
+                // boundary delivers the SMI to CPU 0, the next batch enters
+                // SMM, runs the handler, and RSM resumes the interrupted code.
+                let mut entered_smm = false;
+                for _ in 0..8 {
+                    let _ = unsafe { emu.run_cpu_batch(64) }.unwrap();
+                    emu.service_scheduler_boundary(0).unwrap();
+                    entered_smm |= emu.cpu_mut_at(0).smm_mode();
+                    if emu.device_manager.pci2isa.apms == 0
+                        && !emu.cpu_mut_at(0).smm_mode()
+                        && emu.reg_read(X86Reg::Rip) > 0x1008
+                    {
+                        break;
+                    }
+                }
+
+                assert_eq!(
+                    emu.device_manager.pci2isa.apms, 0,
+                    "the guest SMM handler must clear apms (out 0xb3, 0)"
+                );
+                assert!(
+                    !emu.cpu_mut_at(0).smm_mode(),
+                    "RSM must have exited System Management Mode"
+                );
+                // Execution resumed past the OUT 0xB2 that raised the SMI (the
+                // interrupted instruction stream continues; where it stops among
+                // the trailing nops is irrelevant).
+                assert!(
+                    emu.reg_read(X86Reg::Rip) > 0x1008,
+                    "execution must resume after the OUT that raised the SMI"
+                );
             })
             .unwrap()
             .join()
