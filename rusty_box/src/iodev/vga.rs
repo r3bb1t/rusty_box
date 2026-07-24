@@ -1868,13 +1868,21 @@ impl BxVgaC {
     }
 
     /// Read from I/O port
-    pub(crate) fn read_port(&mut self, port: u16, _io_len: u8, icount: u64) -> u32 {
+    pub(crate) fn read_port(&mut self, port: u16, io_len: u8, icount: u64) -> u32 {
         // Bochs vgacore.cc: port gating based on color_emulation
         if (0x3B0..=0x3BF).contains(&port) && self.misc_color_emulation {
             return 0xFF; // mono ports disabled in color mode
         }
         if (0x3D0..=0x3DF).contains(&port) && !self.misc_color_emulation {
             return 0xFF; // color ports disabled in mono mode
+        }
+        // Bochs vgacore.cc read: a 16-bit access is two byte reads combined
+        // (low | high<<8) — e.g. inw(0x3D4) returns index | data<<8. The VBE
+        // dispi ports return their full 16-bit value and must not be split.
+        if io_len == 2 && port != VBE_DISPI_IOPORT_INDEX && port != VBE_DISPI_IOPORT_DATA {
+            let lo = self.read_port(port, 1, icount);
+            let hi = self.read_port(port.wrapping_add(1), 1, icount);
+            return lo | (hi << 8);
         }
         match port {
             VBE_DISPI_IOPORT_INDEX => self.vbe.curindex as u32,
@@ -1966,8 +1974,9 @@ impl BxVgaC {
             }
             VGA_MISC_OUTPUT => self.misc_output as u32,
 
-            // Misc Output Write port - write-only, return 0xFF on read
-            VGA_MISC_OUTPUT_WRITE => 0xFF,
+            // 0x3C2 is Input Status 0 on read (the Misc Output *write* port).
+            // Bochs vgacore.cc read: RETURN(0).
+            VGA_MISC_OUTPUT_WRITE => 0x00,
 
             // VGA Enable
             VGA_ENABLE => self.vga_enabled as u32,
@@ -2081,7 +2090,11 @@ impl BxVgaC {
                     // display shape changes. Bochs vgacore.cc write_handler marks
                     // needs_update for these CRTC writes and redraws the visible area.
                     match index {
-                        CRTC_END_HORIZ_BLANK
+                        // Bochs vgacore.cc recalcs on CR0 (htotal) and CR2 (hbstart)
+                        // too — get_crtc_params/calculate_retrace_timing read them.
+                        CRTC_HORIZ_TOTAL
+                        | CRTC_START_HORIZ_BLANK
+                        | CRTC_END_HORIZ_BLANK
                         | CRTC_END_HORIZ_RETRACE
                         | CRTC_VERT_TOTAL
                         | CRTC_OVERFLOW
@@ -2135,11 +2148,10 @@ impl BxVgaC {
                 }
                 self.attr_flip_flop = !self.attr_flip_flop;
             }
-            VGA_ATTRIB_DATA
-                // Writing to 0x3C1 is not standard, but some code may try
-                if self.attr_index < 21 => {
-                    self.attr_regs[self.attr_index as usize] = value;
-                }
+            // Bochs vgacore.cc write: 0x3C1 (Attribute Data READ port) is not a
+            // write target — writes fall through to the ignore path. Attribute
+            // registers are written only via the 0x3C0 flip-flop data phase above.
+            VGA_ATTRIB_DATA => {}
             VGA_SEQ_INDEX => {
                 // Bochs vgacore.cc write: sequencer index is stored unmasked
                 // (`s.sequencer.index = value;`). Out-of-range DATA writes are
@@ -2992,7 +3004,8 @@ impl BxVgaC {
         // Build palette (matching vgacore.cc)
         let mut actl_palette = [0u8; 16];
         for (i, palette) in actl_palette.iter_mut().enumerate() {
-            *palette = self.attr_regs[i] & 0x0f; // Simplified - no pel.mask for now
+            // Bochs vgacore.cc update(): actl_palette[i] = palette_reg[i] & pel.mask
+            *palette = self.attr_regs[i] & self.pel_mask;
         }
 
         // Calculate rows and cols (matching vgacore.cc)
@@ -5147,6 +5160,30 @@ mod tests {
         vga.write_port(VGA_GRAPHICS_DATA, 0xFF, 1);
 
         assert_eq!(vga.graphics_regs, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn word_read_of_crtc_returns_index_and_data() {
+        // Bochs vgacore.cc read: a 16-bit access combines two byte reads,
+        // low | high<<8 — inw(0x3D4) → index | data<<8.
+        let mut vga = BxVgaC::new();
+        vga.write_port(VGA_CRTC_INDEX, CRTC_OVERFLOW as u32, 1);
+        vga.crtc_regs[CRTC_OVERFLOW] = 0x5A;
+        let word = vga.read_port(VGA_CRTC_INDEX, 2, 0);
+        assert_eq!(word & 0xFF, CRTC_OVERFLOW as u32, "low byte = index reg");
+        assert_eq!((word >> 8) & 0xFF, 0x5A, "high byte = data reg");
+    }
+
+    #[test]
+    fn write_to_0x3c1_ignored_and_0x3c2_reads_zero() {
+        // Bochs vgacore.cc: 0x3C1 (Attribute Data READ port) ignores writes;
+        // 0x3C2 read (Input Status 0) returns 0, not 0xFF.
+        let mut vga = BxVgaC::new();
+        vga.attr_index = 5;
+        vga.attr_regs[5] = 0x11;
+        vga.write_port(VGA_ATTRIB_DATA, 0xFF, 1);
+        assert_eq!(vga.attr_regs[5], 0x11, "0x3C1 write must not modify attr regs");
+        assert_eq!(vga.read_port(VGA_MISC_OUTPUT_WRITE, 1, 0), 0x00, "0x3C2 read = 0");
     }
 
     // ---- Finding #7: CR11 bit 7 write-protects CRTC registers 0-7 ----
