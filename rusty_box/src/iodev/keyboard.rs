@@ -165,7 +165,10 @@ pub const KBD_STATUS_PORT: u16 = 0x0064;
 pub const KBD_COMMAND_PORT: u16 = 0x0064;
 
 // Buffer sizes (matching Bochs)
-const BX_KBD_ELEMENTS: usize = 256;
+// Bochs iodev/iodev.h: `#define BX_KBD_ELEMENTS 16`. The keyboard ring overflows
+// (drops the incoming scancode) at 16 queued bytes; a larger ring silently
+// accepts more before dropping, so it must match for overflow parity.
+const BX_KBD_ELEMENTS: usize = 16;
 const BX_MOUSE_BUFF_SIZE: usize = 48;
 const BX_KBD_CONTROLLER_QSIZE: usize = 5;
 
@@ -2844,6 +2847,23 @@ mod tests {
         assert_eq!(read.value, 0x1E);
         assert!(read.consumed);
         assert_eq!(read.irq_to_lower, Some(1));
+    }
+
+    #[test]
+    fn kbd_internal_ring_overflows_at_16_like_bochs() {
+        // Bochs iodev.h BX_KBD_ELEMENTS = 16: the internal keyboard ring accepts
+        // 16 queued scancodes, then drops further ones (num_elements caps at 16).
+        let mut kbd = BxKeyboardC::new();
+        for i in 0..16u8 {
+            kbd.kbd_enq(0x10 + i);
+        }
+        assert_eq!(kbd.kbd_internal_buffer.num_elements, 16, "ring holds 16 entries");
+        // The 17th scancode is dropped, not queued.
+        kbd.kbd_enq(0xFF);
+        assert_eq!(
+            kbd.kbd_internal_buffer.num_elements, 16,
+            "the 17th scancode is dropped at the Bochs 16-entry limit"
+        );
     }
 
     /// Poll status until OBF, then read the data port — Linux i8042_wait_read
