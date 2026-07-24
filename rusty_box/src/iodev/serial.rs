@@ -1284,8 +1284,17 @@ impl BxSerialC {
             let reached_trigger = {
                 let port = &mut self.ports[port_idx];
                 port.rx_fifo.push_back(data);
-                let trigger = RX_FIFO_TRIGGERS[port.fifo_cntl.rxtrigger as usize] as usize;
-                let reached_trigger = port.rx_fifo.len() >= trigger;
+                // Bochs serial.cc rx_fifo_enq: RXDATA fires only when the level
+                // reaches EXACTLY the trigger (== 4/8/14). Trigger level 1
+                // (rxtrigger 0, the switch default) fires on every byte. Using
+                // `>=` would re-raise above the trigger and skip arming the
+                // character-timeout one-shot.
+                let reached_trigger = match port.fifo_cntl.rxtrigger {
+                    1 => port.rx_fifo.len() == 4,
+                    2 => port.rx_fifo.len() == 8,
+                    3 => port.rx_fifo.len() == 14,
+                    _ => true,
+                };
 
                 if reached_trigger {
                     // A receive-data interrupt supersedes a pending timeout.
@@ -1307,10 +1316,12 @@ impl BxSerialC {
             return;
         }
 
+        // Bochs serial.cc rx_fifo_enq (non-FIFO): an overrun raises RXLSTAT but
+        // still falls through to overwrite RBR and raise RXDATA — the new byte
+        // is delivered, not dropped.
         if self.ports[port_idx].line_status.rxdata_ready {
             self.ports[port_idx].line_status.overrun_error = true;
             self.raise_interrupt(port_idx, IntSource::RxLstat);
-            return;
         }
         self.ports[port_idx].rxbuffer = data;
         self.ports[port_idx].line_status.rxdata_ready = true;
@@ -1486,12 +1497,12 @@ impl BxSerialC {
                     val |= 0x80;
                 }
 
+                // Bochs serial.cc read() LSR clears only overrun/framing/break_int
+                // (+ ls_interrupt/ls_ipending); parity_error and fifo_error persist.
                 let s = &mut self.ports[port_idx];
                 s.line_status.overrun_error = false;
-                s.line_status.parity_error = false;
                 s.line_status.framing_error = false;
                 s.line_status.break_int = false;
-                s.line_status.fifo_error = false;
                 s.ls_interrupt = false;
                 s.ls_ipending = false;
 
@@ -2265,6 +2276,88 @@ mod tests {
         assert_eq!(serial.fifo_timeout_delay_usec(0), None);
         assert!(!serial.fifo_timer_fired(0));
         assert_eq!(serial.read(COM_BASES[0] + REG_IIR_FCR, 1) & 0x01, 0x01);
+    }
+
+    #[test]
+    fn serial_rx_trigger_raises_only_at_exact_level() {
+        // Bochs serial.cc rx_fifo_enq raises RXDATA when the FIFO level reaches
+        // EXACTLY the trigger (4 here), then arms the character-timeout one-shot
+        // for every byte above it — it does not re-raise. The old `>=` compare
+        // re-raised on every byte at/above the trigger and never re-armed.
+        let mut serial = fifo_serial_with_four_byte_trigger();
+
+        // Three bytes: below the trigger — no RXDATA, timeout armed.
+        for b in 0..3u8 {
+            serial.receive_byte(0, b);
+        }
+        assert_eq!(serial.take_pending_irqs().count(), 0, "below trigger: no IRQ");
+        assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
+
+        // Fourth byte hits the trigger exactly — one RXDATA raise, timeout gone.
+        serial.receive_byte(0, 3);
+        let mut irqs = serial.take_pending_irqs();
+        assert_eq!(irqs.next(), Some((COM_IRQS[0], true)));
+        assert_eq!(irqs.next(), None);
+        drop(irqs);
+        assert_eq!(serial.fifo_timeout_delay_usec(0), None);
+
+        // Fifth byte is above the trigger — no re-raise, timeout re-armed.
+        serial.receive_byte(0, 4);
+        assert_eq!(
+            serial.take_pending_irqs().count(),
+            0,
+            "above trigger: no re-raise"
+        );
+        assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
+    }
+
+    #[test]
+    fn serial_non_fifo_overrun_overwrites_rbr_and_raises_rxdata() {
+        // Bochs serial.cc rx_fifo_enq (non-FIFO): a byte arriving while RBR is
+        // still full sets overrun_error AND falls through to overwrite RBR and
+        // raise RXDATA — the new byte is delivered, not dropped.
+        let mut serial = BxSerialC::new(1);
+        let base = COM_BASES[0];
+        serial.write(base + REG_LCR, 0x03, 1); // 8-bit word
+        serial.write(base + REG_MCR, 0x08, 1); // OUT2 gates the IRQ line
+        serial.write(base + REG_IER_DLM, 0x01, 1); // enable RXDATA interrupt
+        let _ = serial.take_pending_irqs().count();
+
+        serial.receive_byte(0, b'A');
+        let mut irqs = serial.take_pending_irqs();
+        assert_eq!(irqs.next(), Some((COM_IRQS[0], true)));
+        drop(irqs);
+
+        // Second byte without draining RBR: overrun.
+        serial.receive_byte(0, b'B');
+        // A fresh RXDATA raise fired for the overwriting byte.
+        assert_eq!(serial.take_pending_irqs().next(), Some((COM_IRQS[0], true)));
+        // overrun_error is reported (LSR bit 1) before the read clears it.
+        assert_ne!(serial.read(base + REG_LSR, 1) & 0x02, 0, "overrun_error set");
+        // RBR now holds the NEW byte, not the stale 'A'.
+        assert_eq!(serial.read(base + REG_RBR_THR, 1), u32::from(b'B'));
+    }
+
+    #[test]
+    fn serial_lsr_read_keeps_parity_and_fifo_error() {
+        // Bochs serial.cc read() LSR clears overrun/framing/break_int but leaves
+        // parity_error and fifo_error latched.
+        let mut serial = BxSerialC::new(1);
+        serial.ports[0].line_status.parity_error = true;
+        serial.ports[0].line_status.fifo_error = true;
+        serial.ports[0].line_status.overrun_error = true;
+
+        let lsr = serial.read(COM_BASES[0] + REG_LSR, 1);
+        assert_ne!(lsr & 0x02, 0, "OE reported");
+        assert_ne!(lsr & 0x04, 0, "PE reported");
+        assert_ne!(lsr & 0x80, 0, "FIFO error reported");
+
+        assert!(
+            !serial.ports[0].line_status.overrun_error,
+            "overrun cleared on read"
+        );
+        assert!(serial.ports[0].line_status.parity_error, "PE persists");
+        assert!(serial.ports[0].line_status.fifo_error, "fifo_error persists");
     }
 
     #[cfg(feature = "std")]

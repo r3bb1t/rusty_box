@@ -109,10 +109,24 @@ convention.
       per byte *actually transmitted* (fixing the 515-vs-242 THRE count). LSR now
       reflects `tsr_empty`/`thr_empty` mid-transmission. Wiring: `TimerOwner::
       SerialTx` + `DeviceTimerOwner::SerialTx`, snapshot v7. The RX FIFO-timeout
-      timer (`fifo_timer`) was wired in an earlier pass. **Still open:** RX byte
-      *arrival* stays immediate (not baud-paced — a deliberate, separate
-      divergence); the RX-trigger `>=`-vs-`==`, non-FIFO overrun RDA, and
-      IER-pulse sub-items are untouched by this change and need their own review.
+      timer (`fifo_timer`) was wired in an earlier pass.
+    - **RX-trigger + overrun + LSR RESOLVED 2026-07-24** — three more sub-items
+      brought to `serial.cc` parity: (a) `rx_fifo_enq` FIFO trigger now fires
+      RXDATA only when the level equals the trigger exactly (Bochs `== 4/8/14`;
+      level-1 = every byte) and re-arms the character-timeout above it, replacing
+      the `>=` compare that re-raised and never re-armed; (b) the non-FIFO overrun
+      path now falls through to overwrite RBR + raise RXDATA (delivers the byte)
+      instead of `return`-ing early; (c) LSR read no longer clears `parity_error`
+      / `fifo_error` (Bochs clears only OE/FE/BI). Tests:
+      `serial_rx_trigger_raises_only_at_exact_level`,
+      `serial_non_fifo_overrun_overwrites_rbr_and_raises_rxdata`,
+      `serial_lsr_read_keeps_parity_and_fifo_error`.
+    - **Still open (deferred, coupled):** RX byte *arrival* stays immediate (not
+      baud-paced — a deliberate, separate divergence, user-ratified); the
+      IER-write raise/lower **pulse** (#12 tail) and the batched-IRQ
+      raise-before-lower **chronology** (#13) share the deferred
+      `pending_irq_raise`/`pending_irq_lower` machinery and must be fixed together
+      (Bochs is fully synchronous via `DEV_pic_*`); see #13.
 
 13. **Serial: batched IRQ actions reordered raise-before-lower** —
     `take_pending_irqs` always yields raise then lower regardless of chronology;
