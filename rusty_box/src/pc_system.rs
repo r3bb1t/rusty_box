@@ -110,6 +110,9 @@ pub enum TimerOwner {
     AcpiPmOverflow,
     /// Receive FIFO timeout for the UART index.
     SerialFifo(usize),
+    /// TX shift-register pacing timer for the UART index — Bochs serial.cc
+    /// `tx_timer`, one byte emitted per `databyte_usec`.
+    SerialTx(usize),
     /// Local APIC timer for the CPU index.
     Lapic(usize),
     /// Bochs host/virtual-time slowdown pacing timer.
@@ -178,6 +181,8 @@ const TIMER_OWNER_SLOWDOWN: u8 = 11;
 const TIMER_OWNER_HD_SEEK: u8 = 12;
 #[cfg(feature = "std")]
 const TIMER_OWNER_HPET: u8 = 13;
+#[cfg(feature = "std")]
+const TIMER_OWNER_SERIAL_TX: u8 = 14;
 
 #[cfg(feature = "std")]
 const TIMER_OWNER_WIRE_LEN: u64 = 5;
@@ -226,6 +231,12 @@ fn timer_owner_wire_parts(owner: TimerOwner) -> io::Result<(u8, u32)> {
                 return Err(snapshot_invalid_data("serial timer owner is out of range"));
             }
             Ok((TIMER_OWNER_SERIAL_FIFO, snapshot_usize_to_u32(port)?))
+        }
+        TimerOwner::SerialTx(port) => {
+            if port >= crate::iodev::BX_FIXED_SERIAL_TIMER_OWNERS {
+                return Err(snapshot_invalid_data("serial timer owner is out of range"));
+            }
+            Ok((TIMER_OWNER_SERIAL_TX, snapshot_usize_to_u32(port)?))
         }
         TimerOwner::Lapic(cpu) => {
             if cpu >= max_lapic_timer_owners()? {
@@ -286,6 +297,14 @@ fn read_timer_owner<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Timer
                 return Err(snapshot_invalid_data("serial timer owner is out of range"));
             }
             Ok(TimerOwner::SerialFifo(port))
+        }
+        TIMER_OWNER_SERIAL_TX => {
+            let port = usize::try_from(argument)
+                .map_err(|_| snapshot_invalid_data("serial timer owner argument is too large"))?;
+            if port >= crate::iodev::BX_FIXED_SERIAL_TIMER_OWNERS {
+                return Err(snapshot_invalid_data("serial timer owner is out of range"));
+            }
+            Ok(TimerOwner::SerialTx(port))
         }
         TIMER_OWNER_LAPIC => {
             let cpu = usize::try_from(argument)

@@ -1670,6 +1670,16 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             self.device_manager
                 .serial
                 .set_fifo_timer_handle(port_index, Some(handle));
+            let tx_handle = self.pc_system.register_timer(
+                TimerOwner::SerialTx(port_index),
+                0,
+                false,
+                false,
+                "serial TX",
+            )?;
+            self.device_manager
+                .serial
+                .set_tx_timer_handle(port_index, Some(tx_handle));
         }
 
         for (owner, channel) in [
@@ -2229,6 +2239,10 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         for port_index in 0..self.device_manager.serial.configured_port_count() {
             self.devices.request_timer(
                 DeviceTimerOwner::SerialFifo(port_index),
+                TimerRequest::Deactivate,
+            );
+            self.devices.request_timer(
+                DeviceTimerOwner::SerialTx(port_index),
                 TimerRequest::Deactivate,
             );
         }
@@ -2857,6 +2871,29 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 TimerOwner::SerialFifo(port_index) => {
                     for _ in 0..counts[entry] {
                         self.device_manager.serial.fifo_timer_fired(port_index);
+                    }
+                    for (irq, raise) in self.device_manager.serial.take_pending_irqs() {
+                        if raise {
+                            self.device_manager.pic.raise_irq(irq);
+                        } else {
+                            self.device_manager.pic.lower_irq(irq);
+                        }
+                    }
+                }
+                TimerOwner::SerialTx(port_index) => {
+                    for _ in 0..counts[entry] {
+                        self.device_manager.serial.tx_timer_fired(port_index);
+                    }
+                    // Re-arm for the next byte if transmission continues
+                    // (Bochs serial.cc tx_timer re-activates the timer).
+                    if let Some(delay) =
+                        self.device_manager.serial.take_tx_timer_update(port_index)
+                    {
+                        self.devices.request_timer_after_usec(
+                            DeviceTimerOwner::SerialTx(port_index),
+                            current_ticks,
+                            delay,
+                        );
                     }
                     for (irq, raise) in self.device_manager.serial.take_pending_irqs() {
                         if raise {
@@ -3638,6 +3675,26 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 DeviceTimerOwner::SerialFifo(3),
                 self.device_manager.serial.fifo_timer_handle(3),
                 "serial FIFO 3",
+            ),
+            (
+                DeviceTimerOwner::SerialTx(0),
+                self.device_manager.serial.tx_timer_handle(0),
+                "serial TX 0",
+            ),
+            (
+                DeviceTimerOwner::SerialTx(1),
+                self.device_manager.serial.tx_timer_handle(1),
+                "serial TX 1",
+            ),
+            (
+                DeviceTimerOwner::SerialTx(2),
+                self.device_manager.serial.tx_timer_handle(2),
+                "serial TX 2",
+            ),
+            (
+                DeviceTimerOwner::SerialTx(3),
+                self.device_manager.serial.tx_timer_handle(3),
+                "serial TX 3",
             ),
             (
                 DeviceTimerOwner::PciIdeCh0,

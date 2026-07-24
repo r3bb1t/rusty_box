@@ -4751,6 +4751,50 @@ mod tests {
     }
 
     #[test]
+    fn tlb_flushes_disarm_the_monitor_like_bochs() {
+        // Bochs paging.cc calls wakeup_monitor() in TLB_flush / TLB_flushNonGlobal
+        // / TLB_invlpg: a flush can change the monitored page's translation, so
+        // the monitor is disarmed and any MWAIT sleep is woken to ACTIVE. The
+        // host-side rewire invalidate_host_memory_mappings is NOT a guest flush
+        // and must preserve the (possibly just-restored) monitor.
+        use super::{BX_MONITOR_ARMED_BY_MONITOR, CpuActivityState};
+
+        // Full flush also wakes an MWAIT sleep to ACTIVE.
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
+        cpu.activity_state = CpuActivityState::Mwait;
+        assert!(cpu.monitor.armed());
+        cpu.tlb_flush();
+        assert!(!cpu.monitor.armed(), "tlb_flush must disarm the monitor");
+        assert_eq!(
+            cpu.activity_state,
+            CpuActivityState::Active,
+            "tlb_flush must wake an MWAIT sleep"
+        );
+
+        // Non-global flush disarms too.
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
+        cpu.tlb_flush_non_global();
+        assert!(!cpu.monitor.armed(), "tlb_flush_non_global must disarm the monitor");
+
+        // Single-page invlpg disarms too.
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
+        cpu.tlb_invlpg(0x2000);
+        assert!(!cpu.monitor.armed(), "tlb_invlpg must disarm the monitor");
+
+        // Host-side rewire must PRESERVE the monitor across its internal flush.
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
+        cpu.invalidate_host_memory_mappings();
+        assert!(
+            cpu.monitor.armed(),
+            "invalidate_host_memory_mappings must not disarm the guest monitor"
+        );
+    }
+
+    #[test]
     fn itlb_miss_releases_colliding_pin_before_block_replacement() {
         const MIB: usize = 1024 * 1024;
         const TARGET: u64 = 4 * MIB as u64;

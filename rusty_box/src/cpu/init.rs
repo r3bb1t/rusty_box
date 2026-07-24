@@ -458,10 +458,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     // Minimal platform housekeeping helpers used during reset/context changes.
 
-    /// Flush all TLB entries (both DTLB and ITLB) and invalidate prefetch/stack caches.
-    /// Matching Bochs paging.cc TLB_flush(): flushes DTLB, ITLB, prefetch queue,
-    /// stack cache, and breaks icache trace links.
-    pub(crate) fn tlb_flush(&mut self) {
+    /// TLB entry + host-pointer invalidation shared by the guest `tlb_flush`
+    /// and the host-side rewire. Deliberately excludes the guest-visible
+    /// `wakeup_monitor` and the icache link break so each caller composes only
+    /// the pieces it needs: a guest flush wakes/disarms the monitor, a host
+    /// rewire must not (that would clobber a monitor being restored).
+    fn tlb_flush_hosts(&mut self) {
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
         self.dtlb.flush();
@@ -470,6 +472,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // pointers are all zero: memset instead of the full pinned_host_page
         // rescan (Track B — full-flush pin publication).
         self.clear_active_tlb_pin_hosts();
+    }
+
+    /// Flush all TLB entries (both DTLB and ITLB) and invalidate prefetch/stack caches.
+    /// Matching Bochs paging.cc TLB_flush(): flushes DTLB, ITLB, prefetch queue,
+    /// stack cache, wakes/disarms the monitor, and breaks icache trace links.
+    pub(crate) fn tlb_flush(&mut self) {
+        self.tlb_flush_hosts();
+        // Bochs paging.cc TLB_flush — a flush can change the monitored page's
+        // translation, so disarm the monitor / wake any MWAIT sleep.
+        self.wakeup_monitor();
         // Bochs paging.cc — iCache.breakLinks()
         // Invalidates page-split icache entries and increments trace link timestamp.
         // Without this, page-boundary instructions survive TLB flush and serve
@@ -478,10 +490,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Drop every CPU-held host-memory reference before machine backing is
-    /// replaced or restored.
+    /// replaced or restored. This is a host-side rewire, not a guest TLB flush,
+    /// so it uses the monitor-neutral `tlb_flush_hosts`: running the guest
+    /// `wakeup_monitor` here would disarm a monitor (and wake an MWAIT / cancel
+    /// the mwaitx timer) that a snapshot restore has just reinstated.
     pub(crate) fn invalidate_host_memory_mappings(&mut self) {
         self.vmcbhostptr = 0;
-        self.tlb_flush();
+        self.tlb_flush_hosts();
+        self.i_cache.break_links();
         self.i_cache.flush_all();
         self.sync_vmcb_pin();
     }
@@ -495,24 +511,25 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Track B: fuse pin publication into the invalidation walk instead of
         // the full 5120-slot refresh_tlb_pin rescan (sync_active_tlb_pin).
         self.flush_non_global_and_publish_pin();
+        // Bochs paging.cc TLB_flushNonGlobal — disarm the monitor / wake MWAIT.
+        self.wakeup_monitor();
         // Bochs paging.cc — iCache.breakLinks()
         self.i_cache.break_links();
     }
 
     /// Invalidate a single page — Bochs paging.cc `TLB_invlpg`. Drops the
     /// prefetch queue and stack cache, invalidates the DTLB+ITLB entry with
-    /// fused Track-B pin publication, and breaks icache trace links. Shared by
-    /// the INVLPG instruction, MOV to DR0-3, and INVLPGA — each a `TLB_invlpg`
-    /// in Bochs (crregs.cc `MOV_DdRd`, svm.cc `INVLPGA`).
-    ///
-    /// Bochs additionally calls `wakeup_monitor()` here so an MWAIT whose
-    /// monitored page was just remapped cannot wait forever. rusty models no
-    /// wakeup on any invlpg path — a shared, pre-existing MWAIT gap, not
-    /// introduced by this consolidation.
+    /// fused Track-B pin publication, wakes/disarms the monitor, and breaks
+    /// icache trace links. Shared by the INVLPG instruction, MOV to DR0-3, and
+    /// INVLPGA — each a `TLB_invlpg` in Bochs (crregs.cc `MOV_DdRd`, svm.cc
+    /// `INVLPGA`).
     pub(super) fn tlb_invlpg(&mut self, laddr: u64) {
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
         self.invlpg_and_publish_pin(laddr);
+        // Bochs paging.cc TLB_invlpg — a remapped monitored page must not leave
+        // a subsequent MWAIT waiting forever.
+        self.wakeup_monitor();
         // Bochs paging.cc — iCache.breakLinks()
         self.i_cache.break_links();
     }

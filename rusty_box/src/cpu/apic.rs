@@ -2105,12 +2105,19 @@ impl BxLocalApic {
         self.timer_fired = false;
     }
 
-    /// Deactivates the MWAITX timer if the main timer is not active.
+    /// Deactivate the MWAITX timeout timer. Bochs apic.cc `deactivate_mwaitx_timer`:
+    /// a no-op unless the timer is armed, otherwise cancel it and clear the flag.
+    /// (The prior code inverted both halves — it guarded on the *main* LAPIC timer
+    /// and *set* `mwaitx_timer_active = true`, a state snapshot validation always
+    /// rejects. Dormant until `wakeup_monitor` began running on every TLB flush.)
     pub(super) fn deactivate_mwaitx_timer(&mut self) {
-        if self.timer_active {
+        if !self.mwaitx_timer_active {
             return;
         }
-        self.mwaitx_timer_active = true;
+        // Bochs also cancels the registered pc_system timer here; rusty's MWAITX
+        // timer is not yet armed (set_mwaitx_timer is unwired), so there is no
+        // live pc_system timer to cancel — only the flag needs clearing.
+        self.mwaitx_timer_active = false;
     }
 
     // ─── Helper ──────────────────────────────────────────────────────────

@@ -77,9 +77,11 @@ pub(crate) const BX_FIXED_SERIAL_TIMER_OWNERS: usize = 4;
 ///
 /// LAPIC requests use their CPU-local transport. Every device request below
 /// has exactly one stable slot, so a producer can overwrite its own pending
-/// work without allocating or scanning a timer list. The final four slots are
-/// the ATA/ATAPI seek timers (Bochs harddrv.cc "HD/CD seek", one per drive).
-pub(crate) const BX_FIXED_TIMER_OWNER_COUNT: usize = 6 + BX_FIXED_SERIAL_TIMER_OWNERS + 2 + 4;
+/// work without allocating or scanning a timer list. Each UART reserves two
+/// slots (RX FIFO-timeout + TX shift). The final four slots are the ATA/ATAPI
+/// seek timers (Bochs harddrv.cc "HD/CD seek", one per drive).
+pub(crate) const BX_FIXED_TIMER_OWNER_COUNT: usize =
+    6 + 2 * BX_FIXED_SERIAL_TIMER_OWNERS + 2 + 4;
 
 /// A device-owned timer slot in the fixed scheduler transport.
 #[allow(dead_code)] // Phase 3 device producers fill the reserved owner slots.
@@ -92,6 +94,9 @@ pub(crate) enum DeviceTimerOwner {
     CmosUip,
     AcpiPmOverflow,
     SerialFifo(usize),
+    /// TX shift-register pacing timer for the UART index (Bochs serial.cc
+    /// tx_timer).
+    SerialTx(usize),
     PciIdeCh0,
     PciIdeCh1,
     /// ATA/ATAPI seek timer — Bochs harddrv.cc "HD/CD seek". The argument is
@@ -111,9 +116,13 @@ impl DeviceTimerOwner {
             Self::AcpiPmOverflow => Some(5),
             Self::SerialFifo(index) if index < BX_FIXED_SERIAL_TIMER_OWNERS => Some(6 + index),
             Self::SerialFifo(_) => None,
-            Self::PciIdeCh0 => Some(6 + BX_FIXED_SERIAL_TIMER_OWNERS),
-            Self::PciIdeCh1 => Some(7 + BX_FIXED_SERIAL_TIMER_OWNERS),
-            Self::HdSeek(param) if param < 4 => Some(8 + BX_FIXED_SERIAL_TIMER_OWNERS + param),
+            Self::SerialTx(index) if index < BX_FIXED_SERIAL_TIMER_OWNERS => {
+                Some(6 + BX_FIXED_SERIAL_TIMER_OWNERS + index)
+            }
+            Self::SerialTx(_) => None,
+            Self::PciIdeCh0 => Some(6 + 2 * BX_FIXED_SERIAL_TIMER_OWNERS),
+            Self::PciIdeCh1 => Some(7 + 2 * BX_FIXED_SERIAL_TIMER_OWNERS),
+            Self::HdSeek(param) if param < 4 => Some(8 + 2 * BX_FIXED_SERIAL_TIMER_OWNERS + param),
             Self::HdSeek(_) => None,
         }
     }
@@ -612,6 +621,7 @@ impl BxDevicesC {
             let mut ide_timer_delays = [None; 2];
             let mut seek_arms = [[None; 2]; 2];
             let mut timer_update = None;
+            let mut serial_tx_update: Option<(usize, Option<u64>)> = None;
             let mut cmos_timer_sync = None;
             let mut machine_boundary_pending = false;
             let dispatched = if let Some(dm) = self.device_manager_mut() {
@@ -619,6 +629,17 @@ impl BxDevicesC {
                     Self::dispatch_write(dm, device_id, port, value, io_len, current_ticks);
                 timer_update =
                     Self::timer_update_after_dispatch(dm, device_id, port, current_ticks);
+                // Serial TX shift timer — a THR write may have moved a byte into
+                // the shift register (Bochs serial.cc activate_timer(tx_timer_
+                // index)). Collected separately from the FIFO-timeout arming
+                // because both UART timers can be pending at once.
+                if device_id == DeviceId::Serial {
+                    if let Some(index) = dm.serial.port_index_for_address(port) {
+                        if let Some(delay) = dm.serial.take_tx_timer_update(index) {
+                            serial_tx_update = Some((index, delay));
+                        }
+                    }
+                }
                 // Seek-timer arms latched by harddrv during this dispatch —
                 // drained here so the deadline is anchored to the issuing OUT
                 // (Bochs harddrv.cc start_seek calls activate_timer inline).
@@ -658,6 +679,13 @@ impl BxDevicesC {
             }
             if let Some((owner, delay)) = timer_update {
                 self.request_timer_after_usec(owner, current_ticks, delay);
+            }
+            if let Some((index, delay)) = serial_tx_update {
+                self.request_timer_after_usec(
+                    DeviceTimerOwner::SerialTx(index),
+                    current_ticks,
+                    delay,
+                );
             }
             if let Some(level) = pic_intr_level {
                 self.pic_intr_level = Some(level);

@@ -28,8 +28,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// Wake up from MWAIT state
-    fn wakeup_monitor(&mut self) {
+    /// Wake up from MWAIT state and disarm the monitor. Bochs mwait.cc
+    /// `wakeup_monitor`; also called from the TLB flush/invlpg paths (paging.cc)
+    /// because invalidating a TLB entry can change the monitored page's
+    /// translation and otherwise leave a subsequent MWAIT waiting forever.
+    pub(super) fn wakeup_monitor(&mut self) {
         // wakeup from MWAIT state
         if matches!(
             self.activity_state,

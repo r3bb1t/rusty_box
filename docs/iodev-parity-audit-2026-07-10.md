@@ -102,6 +102,17 @@ convention.
     overrun drops the new byte and skips RDA (Bochs overwrites RBR + raises);
     IER write emits an unconditional raise/lower pulse. CONFIRMED. **subsystem**
     (timers), small for the rest.
+    - **TX timer RESOLVED 2026-07-24** — ported Bochs `serial.cc tx_timer`: a THR
+      write now moves the byte into the shift register and arms a per-UART
+      one-shot for `databyte_usec` instead of transmitting instantly; the timer
+      fire emits the byte, reloads the next FIFO/THR byte, and raises THRE once
+      per byte *actually transmitted* (fixing the 515-vs-242 THRE count). LSR now
+      reflects `tsr_empty`/`thr_empty` mid-transmission. Wiring: `TimerOwner::
+      SerialTx` + `DeviceTimerOwner::SerialTx`, snapshot v7. The RX FIFO-timeout
+      timer (`fifo_timer`) was wired in an earlier pass. **Still open:** RX byte
+      *arrival* stays immediate (not baud-paced — a deliberate, separate
+      divergence); the RX-trigger `>=`-vs-`==`, non-FIFO overrun RDA, and
+      IER-pulse sub-items are untouched by this change and need their own review.
 
 13. **Serial: batched IRQ actions reordered raise-before-lower** —
     `take_pending_irqs` always yields raise then lower regardless of chronology;

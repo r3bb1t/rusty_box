@@ -22,8 +22,12 @@ const SNAPSHOT_MAGIC: &[u8; 8] = b"RBXSNAP1";
 /// known section at `SNAPSHOT_SECTION_VERSION == 1`, plus the deferred HRQ
 /// latches in the PLATFORM/DMA payloads. Older versions are rejected
 /// wholesale so no old layout can misdecode.
+///
+/// Version 7 adds the per-UART serial TX shift timer (Bochs serial.cc tx_timer):
+/// the `SerialTx` timer owner plus each port's `tx_timer_handle` /
+/// `tx_timer_delay_usec` / `tx_timer_request_pending` in the SERIAL section.
 #[cfg(feature = "std")]
-pub(crate) const SNAPSHOT_V3_VERSION: u32 = 6;
+pub(crate) const SNAPSHOT_V3_VERSION: u32 = 7;
 #[cfg(feature = "std")]
 pub(crate) const SNAPSHOT_SECTION_VERSION: u32 = 1;
 
@@ -540,7 +544,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<
         self.invalidate_all_cpu_host_mappings();
         self.validate_post_restore_handles(pit, cmos, keyboard, acpi)?;
         self.device_manager.pci_ide.validate_snapshot_v3_timer_owners(&self.pc_system)?;
-        self.device_manager.serial.validate_snapshot_v3_timer_handles(|port, handle| self.pc_system.validate_timer_handle_owner(handle, TimerOwner::SerialFifo(port)))?;
+        self.device_manager.serial.validate_snapshot_v3_timer_handles(
+            |port, handle| self.pc_system.validate_timer_handle_owner(handle, TimerOwner::SerialFifo(port)),
+            |port, handle| self.pc_system.validate_timer_handle_owner(handle, TimerOwner::SerialTx(port)),
+        )?;
         self.reanchor_slowdown_after_restore()?;
         if platform.desired_bmdma_base != pci.bmdma_base || platform.desired_pm_base != acpi.pm_base || platform.desired_sm_base != acpi.sm_base || platform.desired_vga_lfb_base != vga.lfb_base || platform.desired_vga_mmio_base != vga.mmio_base { return Err(invalid_snapshot("snapshot mapping targets disagree across sections")); }
         self.finish_snapshot_restore_v3(
