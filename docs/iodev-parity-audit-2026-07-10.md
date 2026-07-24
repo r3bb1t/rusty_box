@@ -272,6 +272,16 @@ tags as of 2026-07-10 and re-check before fixing.
 28. **APM port 0xB2** — Rust force-clears `apms=0` after each command (Bochs
     never does — the APM handshake polls 0xB3) and registers 0xB2 with mask 1 vs
     Bochs mask 3 (word writes to SMI_CMD dropped). CONFIRMED. **one-liners**.
+    - **BLOCKED 2026-07-24** — removing the `apms=0` force-clear was verified to
+      DETERMINISTICALLY BREAK the Bochs-BIOS boot (hangs in POST before ISOLINUX;
+      isolated via boot bisect). The force-clear is **load-bearing**: `apms` is
+      set by 0xB3 writes and, in real Bochs, the SMM APM handler produces the
+      status result the BIOS then polls; rusty has NO SMM APM handler
+      (`acpi.rs generate_smi` only toggles SCI_EN), so the clear compensates for
+      its absence. Making 0xB2 mask-3 also routes word writes into that stub.
+      Neither half is safely fixable without implementing SMM APM emulation —
+      the audit's "one-liner" classification is wrong. Leave as-is until SMM APM
+      is ported; the boot regression is the gate.
 
 29. **ACPI sleep states** — S5 (`sus_typ=0`): Bochs terminates the simulation;
     Rust logs and keeps running. S3 (`sus_typ=1`): Bochs writes CMOS 0xF=0xFE +
