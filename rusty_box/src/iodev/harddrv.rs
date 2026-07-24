@@ -2957,11 +2957,14 @@ impl BxHardDriveC {
                                 // Raises for both "more sectors" and "done"
                                 self.raise_interrupt(channel_num, pic, pci_ide);
                             } else {
-                                // Write error
+                                // Bochs harddrv.cc: an ide_write_sector() failure
+                                // routes through command_aborted, which clears
+                                // current_command/buffer_index, sets DRDY|ERR (DSC
+                                // preserved), and RAISES the interrupt — so a guest
+                                // polling for the write-completion IRQ is not left
+                                // hung. (Was a manual register poke with no IRQ.)
                                 tracing::error!("ATA: ide_write_sector failed");
-                                drive.controller.error = AtaError::ABRT;
-                                drive.controller.status = AtaStatus::ERR | AtaStatus::DRDY;
-                                drive.controller.status.remove(AtaStatus::DRQ);
+                                self.command_aborted(channel_num, current_command, pic, pci_ide);
                             }
                         }
                         ATA_CMD_PACKET => {
@@ -4486,11 +4489,56 @@ impl BxHardDriveC {
                 drive.controller.status.insert(AtaStatus::DSC | AtaStatus::DRQ);
                 drive.controller.buffer_index = 0;
             }
-            // 0x40 = READ VERIFY with retries, 0x41 = without retries
-            ATA_CMD_READ_VERIFY | 0x41 => {
-                // Bochs harddrv.cc — verify sectors, no data transfer
-                drive.lba48_transform(false);
-                drive.controller.interrupt_pending = true;
+            // 0x40 = READ VERIFY, 0x41 = no retry, 0x42 = READ VERIFY EXT (LBA48)
+            ATA_CMD_READ_VERIFY | 0x41 | 0x42 => {
+                // Bochs harddrv.cc: verify aborts on a non-disk; otherwise clears
+                // BSY/DRQ, sets DRDY, and raises the completion IRQ (0x42 is the
+                // LBA48 form).
+                if drive.device_type != DeviceType::Disk {
+                    self.command_aborted(channel_num, command, pic, pci_ide);
+                    return;
+                }
+                drive.lba48_transform(command == 0x42);
+                drive
+                    .controller
+                    .status
+                    .remove(AtaStatus::BSY | AtaStatus::DRQ);
+                drive.controller.status.insert(AtaStatus::DRDY);
+                self.raise_interrupt(channel_num, pic, pci_ide);
+            }
+            // 0x27 = READ NATIVE MAX ADDRESS EXT, 0xF8 = READ NATIVE MAX ADDRESS
+            0x27 | 0xF8 => {
+                // Bochs harddrv.cc: HD + LBA mode only; reports the last sector's
+                // address in the taskfile registers, then raises the IRQ.
+                if drive.device_type != DeviceType::Disk {
+                    self.command_aborted(channel_num, command, pic, pci_ide);
+                    return;
+                }
+                drive.lba48_transform(command == 0x27);
+                if !drive.controller.lba_mode {
+                    self.command_aborted(channel_num, command, pic, pci_ide);
+                    return;
+                }
+                let max_sector = drive.geometry.total_sectors as i64 - 1;
+                if !drive.controller.lba48 {
+                    drive.controller.head_no = ((max_sector >> 24) & 0xf) as u8;
+                    drive.controller.cylinder_no = ((max_sector >> 8) & 0xffff) as u16;
+                    drive.controller.sector_no = (max_sector & 0xff) as u8;
+                } else {
+                    drive.controller.hob.hcyl = ((max_sector >> 40) & 0xff) as u8;
+                    drive.controller.hob.lcyl = ((max_sector >> 32) & 0xff) as u8;
+                    drive.controller.hob.sector = ((max_sector >> 24) & 0xff) as u8;
+                    drive.controller.cylinder_no = ((max_sector >> 8) & 0xffff) as u16;
+                    drive.controller.sector_no = (max_sector & 0xff) as u8;
+                }
+                drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DSC);
+                self.raise_interrupt(channel_num, pic, pci_ide);
+            }
+            // 0x37 = SET MAX ADDRESS EXT, 0xF9 = SET MAX ADDRESS
+            0x37 | 0xF9 => {
+                // Bochs harddrv.cc: HPA set-max is not truly supported; Bochs logs
+                // and returns success by raising the completion IRQ.
+                self.raise_interrupt(channel_num, pic, pci_ide);
             }
             ATA_CMD_SEEK => {
                 // Bochs harddrv.cc case 0x70 (SEEK): HD only — record the
