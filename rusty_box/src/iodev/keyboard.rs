@@ -1761,15 +1761,12 @@ impl BxKeyboardC {
                 tracing::trace!("Keyboard: mouse command 0xBB (OS/2 Warp 3 compat), ignoring");
             }
             MOUSE_CMD_READ_DATA => {
-                // Read data (remote mode)
+                // Bochs keyboard.cc case 0xeb: ACK, then the movement packet is
+                // sent via mouse_enq_packet (mouse internal buffer + aux-clock
+                // gating, IntelliMouse 4th byte handled there), not straight to
+                // the controller output buffer.
                 self.controller_enq(KBD_RESP_ACK, 1);
-                // Send empty packet (3 bytes standard, 4 bytes in IntelliMouse mode)
-                self.controller_enq(0x08 | (self.mouse.button_status & 0x0F), 1);
-                self.controller_enq(0x00, 1);
-                self.controller_enq(0x00, 1);
-                if self.mouse.im_mode {
-                    self.controller_enq(0x00, 1); // 4th byte: scroll wheel Z delta
-                }
+                self.mouse_enq_packet(0x08 | (self.mouse.button_status & 0x0F), 0x00, 0x00, 0x00);
             }
             _ => {
                 if is_ps2 {
