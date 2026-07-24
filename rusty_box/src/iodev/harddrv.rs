@@ -2314,17 +2314,46 @@ impl BxHardDriveC {
             port - base
         };
 
+        // Bochs harddrv.cc read_handler distinguishes "no drive on the whole
+        // channel" (`BX_ANY_IS_PRESENT`) from "the selected drive is absent"
+        // (`BX_SELECTED_IS_PRESENT`). An absent drive's controller still holds
+        // register values that OSes read to probe the channel, so we must not
+        // blanket-0xFF whenever the selected drive is absent.
+        let none_present = channel.drives[0].device_type == DeviceType::None
+            && channel.drives[1].device_type == DeviceType::None;
+
         let drive = channel.selected_drive_mut();
 
-        // Check if drive exists.
-        // Bochs harddrv.cc: "Just return zero for these registers" (status/alt-status).
-        // Other registers return 0xFF when selected drive absent.
         if drive.device_type == DeviceType::None {
-            return if offset == ATA_STATUS || offset == ATA_ALT_STATUS {
-                0x00 // Bochs: return zero when selected drive not present
-            } else {
-                0xFF
-            };
+            match offset {
+                // Data: Bochs returns 0 (drq==0) for an absent selection.
+                ATA_DATA => return 0,
+                // Error/count/sector/cyl-low/cyl-high: 0 only when NO drive is
+                // present on the channel; otherwise the selected controller's
+                // register (fall through to the main match, which reads the
+                // absent drive's stored register value — Bochs BX_ANY_IS_PRESENT).
+                ATA_ERROR | ATA_SECTOR_COUNT | ATA_SECTOR_NUM | ATA_CYL_LOW
+                | ATA_CYL_HIGH => {
+                    if none_present {
+                        return 0;
+                    }
+                }
+                // Drive/head (0x1F6) is composed unconditionally — fall through.
+                ATA_DRIVE_HEAD => {}
+                // Status/alt-status: Bochs returns 0 for an absent selection
+                // (overriding the controller), but 0x1F7 still lowers the
+                // channel IRQ. Do NOT fall through — an absent drive's default
+                // controller status is DRDY|DSC, not 0.
+                ATA_STATUS | ATA_ALT_STATUS => {
+                    if offset == ATA_STATUS {
+                        let irq = if channel_num == 0 { 14u8 } else { 15u8 };
+                        pic.lower_irq(irq);
+                    }
+                    return 0;
+                }
+                // Obsolete 0x3F7 address register: Bochs reports all ones.
+                _ => return 0xFF,
+            }
         }
 
         match offset {
@@ -4210,12 +4239,35 @@ impl BxHardDriveC {
             .push_back((channel_num as u8, command, lba));
 
         if drive.device_type == DeviceType::None {
-            tracing::trace!(
-                "[ATA-DIAG] cmd {:#04x} to ch{} (empty) — dropped",
-                command,
-                channel_num
-            );
-            return;
+            // Bochs harddrv.cc: a command to an absent selected drive is NOT
+            // silently dropped (the slave-absent case was already filtered by
+            // the command-register write). Per Bochs's command switch:
+            //  - CALIBRATE (0x10) reports "track 0 not found" (error 0x02) with
+            //    DRDY|ERR and raises the IRQ;
+            //  - EXECUTE DEVICE DIAGNOSTIC (0x90) runs regardless of presence
+            //    (its arm below composes the 0xFFFF "no device" signature) —
+            //    fall through;
+            //  - every other command aborts, which also raises the IRQ.
+            // Raising the completion IRQ is what keeps a drive-detection probe
+            // from hanging on an empty master.
+            match command {
+                ATA_CMD_RECALIBRATE => {
+                    drive.controller.current_command = command;
+                    drive.controller.error = AtaError::TK0NF; // 0x02 track 0 not found
+                    drive.controller.status = AtaStatus::DRDY | AtaStatus::ERR;
+                    drive.controller.interrupt_pending = true;
+                    self.raise_interrupt(channel_num, pic, pci_ide);
+                    return;
+                }
+                ATA_CMD_EXECUTE_DIAGNOSTICS => {
+                    // Bochs runs this even for an absent drive — fall through
+                    // to the command match below.
+                }
+                _ => {
+                    self.command_aborted(channel_num, command, pic, pci_ide);
+                    return;
+                }
+            }
         }
 
         drive.controller.current_command = command;
@@ -6052,6 +6104,46 @@ mod tests {
         let drive = &hd.channels[0].drives[0];
         assert!(drive.controller.status.contains(AtaStatus::ERR));
         assert!(drive.controller.error.contains(AtaError::ABRT));
+    }
+
+    #[test]
+    fn absent_selected_drive_reads_and_calibrate_match_bochs() {
+        let mut hd = BxHardDriveC::new();
+        let mut pic = crate::iodev::pic::BxPicC::new();
+        let mut pci_ide = crate::iodev::pci_ide::BxPciIde::new();
+
+        // Channel 0: master (device 0) absent, slave (device 1) present.
+        hd.attach_disk_data(0, 1, vec![0x5au8; SECTOR_SIZE * 2], 1, 1, 2);
+        assert_eq!(hd.channels[0].drives[0].device_type, DeviceType::None);
+        assert_eq!(hd.channels[0].drive_select, 0, "master selected by default");
+
+        // Bochs harddrv.cc BX_ANY_IS_PRESENT: with a drive present on the
+        // channel, the taskfile registers return the selected (absent)
+        // controller's value — not 0xFF (OSes probe the slave this way).
+        hd.channels[0].drives[0].controller.sector_count = 0x5a;
+        assert_eq!(
+            hd.read(0x1f2, 1, &mut pic, &mut pci_ide),
+            0x5a,
+            "absent master + present slave returns the register, not 0xFF"
+        );
+        // Status and alternate status still read 0 for an absent selection.
+        assert_eq!(hd.read(0x1f7, 1, &mut pic, &mut pci_ide), 0);
+        assert_eq!(hd.read(0x3f6, 1, &mut pic, &mut pci_ide), 0);
+
+        // CALIBRATE (0x10) to the absent selected master: Bochs reports track-0-
+        // not-found (error 0x02, DRDY|ERR) and raises the IRQ — not a silent drop.
+        hd.channels[0].drives[0].controller.interrupt_pending = false;
+        hd.write(0x1f7, 0x10, 1, &mut pic, &mut pci_ide);
+        let drive = &hd.channels[0].drives[0];
+        assert_eq!(drive.controller.error.bits(), 0x02, "track 0 not found");
+        assert!(drive
+            .controller
+            .status
+            .contains(AtaStatus::DRDY | AtaStatus::ERR));
+        assert!(
+            drive.controller.interrupt_pending,
+            "CALIBRATE to an absent drive raises the completion IRQ"
+        );
     }
 
     #[test]
