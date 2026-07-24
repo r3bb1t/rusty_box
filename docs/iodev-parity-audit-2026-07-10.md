@@ -11,6 +11,31 @@ convention.
 
 ---
 
+## 2026-07-24 status — this audit is substantially stale; re-verify before acting
+
+Many findings have been fixed in the ~2 weeks since 2026-07-10. Verified RESOLVED
+in current code this session (spot-check + the serial/keyboard cluster fixed
+outright):
+- **#1** CMOS malformed-date host-DoS — `cmos.rs timeutc` normalizes `mon %= 12`
+  and `mday - 1`, so out-of-range fields never index an array (comment documents
+  the fix).
+- **#2** Port 0xCF9 reset — now registered/routed (`devices.rs` read/write arms
+  for `0x0CF9`; `take_reset_request` drains `pci2isa.reset_request`).
+- **#3** ELCR → PIC `set_mode` — now drained (`devices.rs` forwards
+  `elcr1_changed`/`elcr2_changed` to `pic.set_mode`).
+- **#12** serial TX/RX/FIFO — TX timer, RX-trigger `==`, non-FIFO overrun, LSR
+  clears, and the IER pulse all fixed (commits db43214, 38ec370, 1142f43).
+- **#13** serial batched-IRQ chronology — fixed (1142f43).
+- **#14** keyboard `create_mouse_packet(0)` flush — fixed (3df933b).
+- **#15** keyboard IRQ latch timing — already at parity (`periodic()` snapshots
+  `retval` at entry and only latches the new IRQ; `KBD_IRQ_BIT_*` = Bochs
+  `irq1 | irq12<<1`).
+
+Everything else below is UNVERIFIED against current code — treat the CONFIRMED
+tags as of 2026-07-10 and re-check before fixing.
+
+---
+
 ## TIER 1 — Guest-breaking or host-DoS
 
 1. **CMOS: guest-triggerable host panic/hang on malformed date registers** —
