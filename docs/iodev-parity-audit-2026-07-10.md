@@ -149,6 +149,11 @@ convention.
     flushes residual `delayed_dx/dy` when the kbd buffer is idle; Rust omits it,
     so clamped/deferred mouse motion sticks until the next host event → pointer
     lag/jump, likely felt on the current GUI branch. CONFIRMED. **one-liner**.
+    - **RESOLVED 2026-07-24** — `periodic()` now calls `create_mouse_packet(false)`
+      as the first statement of the idle (else) branch, matching Bochs
+      keyboard.cc, so residual motion is packetized and delivered on the service
+      tick. No-op when there is no pending motion (headless boot unaffected).
+      Test: `periodic_flushes_residual_mouse_motion`.
 
 15. **Keyboard: IRQ for a just-transferred byte delivered in the same periodic
     call** — Bochs snapshots `retval` at entry; the new `irq1_requested` reaches

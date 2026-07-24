@@ -1909,6 +1909,11 @@ impl BxKeyboardC {
                 self.kbd_controller.irq1_requested = true;
             }
         } else {
+            // Bochs keyboard.cc periodic(): flush any residual delayed mouse
+            // motion into a packet before servicing the mouse buffer, so clamped
+            // or deferred motion doesn't stick until the next host event. A no-op
+            // when there is no pending motion.
+            self.create_mouse_packet(false);
             // Try mouse internal buffer
             if self.kbd_controller.aux_clock_enabled && self.mouse_internal_buffer.num_elements > 0
             {
@@ -2756,6 +2761,33 @@ mod tests {
         kbd.mouse_motion(10, 10, 0, 0x00);
 
         assert_eq!(kbd.mouse_internal_buffer.num_elements, 0);
+    }
+
+    #[test]
+    fn periodic_flushes_residual_mouse_motion() {
+        // Bochs keyboard.cc periodic() calls create_mouse_packet(0) when the kbd
+        // buffer is idle, flushing residual delayed motion into a packet so it
+        // does not stick until the next host event.
+        let mut kbd = stream_mouse();
+        kbd.kbd_controller.aux_clock_enabled = true;
+        kbd.kbd_controller.allow_irq12 = true;
+
+        // Residual motion accumulated (e.g. it arrived while the mouse buffer was
+        // busy); the kbd buffer is idle and the service timer is due.
+        kbd.mouse.delayed_dx = 5;
+        kbd.mouse.delayed_dy = -3;
+        kbd.kbd_controller.timer_pending = 1;
+
+        let _ = kbd.periodic(1);
+
+        // The residual delta was drained into a packet and its first byte
+        // delivered to the AUX output buffer with IRQ12 latched. Without the
+        // flush the buffer stays empty and delayed_dx sticks at 5.
+        assert_eq!(kbd.mouse.delayed_dx, 0);
+        assert_eq!(kbd.mouse.delayed_dy, 0);
+        assert!(kbd.kbd_controller.outb);
+        assert!(kbd.kbd_controller.auxb);
+        assert!(kbd.kbd_controller.irq12_requested);
     }
 
     #[test]
