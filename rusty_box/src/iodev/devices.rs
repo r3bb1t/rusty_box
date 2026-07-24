@@ -516,18 +516,18 @@ impl DeviceManager {
     fn register_dma_handlers(&mut self, io: &mut BxDevicesC) {
         // DMA1 ports 0x0000-0x000F (Bochs dma.cc)
         for port in 0x0000..=0x000F_u16 {
-            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
+            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x7);
         }
 
         // Page registers 0x0080-0x008F (Bochs dma.cc)
         for port in 0x0080..=0x008F_u16 {
-            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
+            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x7);
         }
 
         // DMA2 ports 0x00C0-0x00DE, step 2 (Bochs dma.cc)
         let mut port = 0x00C0_u16;
         while port <= 0x00DE {
-            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
+            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x7);
             port += 2;
         }
     }
