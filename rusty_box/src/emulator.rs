@@ -278,6 +278,11 @@ pub struct EmulatorConfig {
     /// Bochs default `hardware`, which makes modern Linux trust the dumped
     /// multi-GHz TSC frequency and run all TSC-derived time `freq/ips` slow.
     pub cpuid_freq: CpuidFreq,
+    /// How the RTC is seeded at power-up — Bochs `clock: time0` (config.cc
+    /// BXPN_CLOCK_TIME0). Default `Local`, matching Bochs, so the guest RTC
+    /// shows host local wall-clock time; `Utc` or a fixed timestamp are
+    /// available for UTC guests / deterministic boots.
+    pub rtc_time0: crate::iodev::cmos::RtcInitTime,
 }
 
 impl Default for EmulatorConfig {
@@ -294,6 +299,7 @@ impl Default for EmulatorConfig {
             sync_realtime: false,
             smp_quantum: 16,
             cpuid_freq: CpuidFreq::default(),
+            rtc_time0: crate::iodev::cmos::RtcInitTime::default(),
         }
     }
 }
@@ -1818,6 +1824,12 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // Step 9: Initialize devices (line 1353)
         self.devices.init(&mut self.memory)?;
 
+        // Bochs clock:time0 — apply the RTC power-up seed source (local / utc /
+        // fixed) from config. The CMOS was seeded at construction with the Utc
+        // default; re-seed it here so the guest's RTC matches the configuration
+        // before any device reset or the BIOS reads it.
+        self.device_manager.cmos.set_time0(self.config.rtc_time0);
+
         // Initialize device manager (actual hardware + I/O handler registration)
         self.device_manager
             .init(&mut self.devices, &mut self.memory)?;
@@ -1960,6 +1972,12 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
 
         // Step 9: Initialize devices (line 1353)
         self.devices.init(&mut self.memory)?;
+
+        // Bochs clock:time0 — apply the RTC power-up seed source (local / utc /
+        // fixed) from config. The CMOS was seeded at construction with the Utc
+        // default; re-seed it here so the guest's RTC matches the configuration
+        // before any device reset or the BIOS reads it.
+        self.device_manager.cmos.set_time0(self.config.rtc_time0);
 
         // Initialize device manager (actual hardware + I/O handler registration)
         self.device_manager

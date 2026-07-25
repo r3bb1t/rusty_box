@@ -346,6 +346,96 @@ pub struct BxCmosC {
     /// Bit 7 is forced on so addresses 0x80-0xFF are accessible.
     /// Matches Bochs cmos.cc `cmos_ext_mem_addr`.
     cmos_ext_mem_addr: u8,
+    /// How `timeval` is seeded at power-up — Bochs `clock: time0` (config.cc
+    /// BXPN_CLOCK_TIME0). Defaults to Utc here so direct construction is
+    /// deterministic; the emulator applies EmulatorConfig.rtc_time0 (default
+    /// Local, matching Bochs) via `set_time0` before the machine runs.
+    time0: RtcInitTime,
+}
+
+/// How the RTC clock is seeded at power-up — Bochs `clock: time0` (config.cc
+/// BXPN_CLOCK_TIME0). Bochs's default is `local`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtcInitTime {
+    /// Host local wall-clock time (Bochs `time0: local`, the Bochs default).
+    Local,
+    /// Host UTC (Bochs `time0: utc`).
+    Utc,
+    /// A fixed Unix timestamp — deterministic boots (Bochs `time0: <n>`).
+    Fixed(i64),
+}
+
+impl Default for RtcInitTime {
+    fn default() -> Self {
+        // Bochs config.cc default is BX_CLOCK_TIME0_LOCAL.
+        RtcInitTime::Local
+    }
+}
+
+/// Host UTC offset in seconds (local − UTC) for the current moment, so a
+/// `time0: local` seed displays host wall-clock time in the (UTC-encoded) RTC
+/// registers — matching Bochs `timeutc(localtime(time(NULL)))`. Any platform
+/// error falls back to 0 (UTC), so this can never break RTC init or a boot.
+#[cfg(all(feature = "std", windows))]
+fn local_utc_offset_seconds() -> i64 {
+    #[repr(C)]
+    struct WinSystemTime {
+        _fields: [u16; 8],
+    }
+    #[repr(C)]
+    struct TimeZoneInformation {
+        bias: i32,
+        _standard_name: [u16; 32],
+        _standard_date: WinSystemTime,
+        standard_bias: i32,
+        _daylight_name: [u16; 32],
+        _daylight_date: WinSystemTime,
+        daylight_bias: i32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetTimeZoneInformation(info: *mut TimeZoneInformation) -> u32;
+    }
+    const TIME_ZONE_ID_INVALID: u32 = 0xFFFF_FFFF;
+    const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
+    // SAFETY: GetTimeZoneInformation fills the caller-provided struct; kernel32
+    // is always linked on Windows.
+    let mut tzi: TimeZoneInformation = unsafe { core::mem::zeroed() };
+    let rc = unsafe { GetTimeZoneInformation(&mut tzi) };
+    if rc == TIME_ZONE_ID_INVALID {
+        return 0;
+    }
+    // Windows: UTC = local + (Bias + seasonal bias), in minutes.
+    // local − UTC = −(Bias + seasonal) minutes.
+    let seasonal = if rc == TIME_ZONE_ID_DAYLIGHT {
+        tzi.daylight_bias
+    } else {
+        tzi.standard_bias
+    };
+    -(i64::from(tzi.bias) + i64::from(seasonal)) * 60
+}
+
+#[cfg(all(feature = "std", unix))]
+fn local_utc_offset_seconds() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut tm: libc::tm = unsafe { core::mem::zeroed() };
+    // SAFETY: localtime_r fills `tm` from a valid time_t; the returned pointer
+    // is only checked for null (failure).
+    let res = unsafe { libc::localtime_r(&now, &mut tm) };
+    if res.is_null() {
+        return 0;
+    }
+    // glibc / BSD / macOS: tm_gmtoff is (local − UTC) in seconds.
+    tm.tm_gmtoff as i64
+}
+
+#[cfg(all(feature = "std", not(any(windows, unix))))]
+fn local_utc_offset_seconds() -> i64 {
+    0
 }
 
 impl Default for BxCmosC {
@@ -371,9 +461,50 @@ impl BxCmosC {
             irq8_pending: false,
             irq8_lower_pending: false,
             cmos_ext_mem_addr: 0x80,
+            time0: RtcInitTime::Utc,
         };
         cmos.init_defaults();
         cmos
+    }
+
+    /// Seed `timeval` from the configured `time0` source (Bochs cmos.cc init()).
+    fn seed_timeval(&mut self) {
+        // 2025-01-01 00:00:00 UTC fallback when the host clock is unavailable.
+        const FALLBACK: i64 = 1_735_732_800;
+        #[cfg(feature = "std")]
+        {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(FALLBACK);
+            self.timeval = match self.time0 {
+                // Bochs time0=utc: s.timeval = time(NULL).
+                RtcInitTime::Utc => now,
+                // Bochs time0=local (default): s.timeval = timeutc(localtime(now))
+                // = now + host UTC offset, so the RTC displays local wall-clock.
+                RtcInitTime::Local => now.saturating_add(local_utc_offset_seconds()),
+                // Bochs time0=<n>: a fixed timestamp (deterministic boots).
+                RtcInitTime::Fixed(ts) => ts,
+            };
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            // No host clock in no_std; only a fixed seed is meaningful.
+            self.timeval = match self.time0 {
+                RtcInitTime::Fixed(ts) => ts,
+                _ => FALLBACK,
+            };
+        }
+    }
+
+    /// Set the RTC power-up time source and re-seed the clock registers. Bochs
+    /// applies `clock: time0` once at init; the emulator applies it from
+    /// EmulatorConfig before the machine runs.
+    pub(crate) fn set_time0(&mut self, mode: RtcInitTime) {
+        self.time0 = mode;
+        self.seed_timeval();
+        self.update_clock();
     }
 
     /// Initialize default CMOS values
@@ -400,19 +531,8 @@ impl BxCmosC {
         // Final: 0x06 = FPU + mouse port, no floppy, EGA/VGA
         self.ram[REG_EQUIPMENT as usize] = 0x06;
 
-        // Use current system time when available, else fall back to 2025-01-01 12:00:00
-        #[cfg(feature = "std")]
-        {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            self.timeval = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(1_735_732_800);
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            self.timeval = 1_735_732_800;
-        }
+        // Seed the RTC clock from the configured time0 source.
+        self.seed_timeval();
         self.update_clock();
         // Century and weekday are computed by update_clock() from timeval
 
@@ -1832,6 +1952,35 @@ mod tests {
         cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
         let sync = cmos.write(CMOS_DATA, 0x42, 1);
         assert_eq!(sync.periodic, CmosTimerAction::Unchanged);
+    }
+
+    // Bochs clock:time0 — the RTC power-up seed source. Fixed is deterministic;
+    // Local and Utc both seed near "now" and differ by the host UTC offset.
+    #[test]
+    fn cmos_time0_seeds_from_configured_source() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let mut cmos = BxCmosC::new();
+
+        // Fixed timestamp: exact and deterministic.
+        cmos.set_time0(RtcInitTime::Fixed(1_000_000_000));
+        assert_eq!(cmos.timeval, 1_000_000_000);
+
+        // Utc seeds at host "now".
+        cmos.set_time0(RtcInitTime::Utc);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let utc = cmos.timeval;
+        assert!((utc - now).abs() <= 5, "Utc seed {utc} not near now {now}");
+
+        // Local differs from Utc by exactly the host UTC offset (bounded ±14h).
+        cmos.set_time0(RtcInitTime::Local);
+        let offset = cmos.timeval - utc;
+        assert!(
+            offset.abs() <= 14 * 3600,
+            "local−utc offset {offset}s out of range"
+        );
     }
 
     // =========================================================================

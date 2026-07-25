@@ -87,6 +87,11 @@ path = "examples/snapshot_resume/snapshot_resume.rs"
 required-features = ["std"]
 
 
+# Unix host localtime for the RTC `time0: local` seed (cmos.rs). Windows uses a
+# self-contained kernel32 GetTimeZoneInformation FFI, so no dep there.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", default-features = false }
+
 [dev-dependencies]
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
