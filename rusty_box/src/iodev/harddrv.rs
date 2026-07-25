@@ -3498,6 +3498,129 @@ impl BxHardDriveC {
                 }
                 self.raise_interrupt(channel_num, pic, pci_ide);
             }
+            0x42 => {
+                // READ SUB-CHANNEL — Bochs harddrv.cc case 0x42 delegates to
+                // cdrom_base_c::read_sub_channel (cdrom.cc), which synthesizes
+                // the response from constants (no audio support): a 4-byte
+                // header, and with SubQ set a per-format data block. A format
+                // outside 1..=3 makes it return 0, which Bochs reports as
+                // ILLEGAL_REQUEST / invalid field in the command packet.
+                let drive = self.channels[channel_num].selected_drive_mut();
+                let ready = drive.cdrom.ready;
+                let msf = (drive.controller.buffer[1] >> 1) & 1 != 0;
+                let sub_q = (drive.controller.buffer[2] >> 6) & 1 != 0;
+                let data_format = drive.controller.buffer[3];
+                let alloc_length = ((drive.controller.buffer[7] as i32) << 8)
+                    | drive.controller.buffer[8] as i32;
+
+                if !ready {
+                    self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
+                    return;
+                }
+
+                // Bochs cdrom.cc read_sub_channel: `ret_len = 4` header first.
+                let mut buf = [0u8; 24];
+                buf[3] = 4;
+                let mut ret_len: usize = 4;
+                if sub_q {
+                    // !sub_q == header only
+                    match data_format {
+                        1 => {
+                            buf[2] = 0; // length (MSB -> LSB)
+                            buf[3] = 12;
+                            buf[4] = 1; // format code = 1
+                            buf[5] = 0; // ADR | CONTROL
+                            buf[6] = 1; // track number
+                            buf[7] = 1; // index number
+                            if msf {
+                                // Bochs uses a hardcoded lba of 0 plus the
+                                // 2-second (150 frame) lead-in.
+                                let lba: u32 = 2 * 75;
+                                let mins = ((lba / 75) / 60) as u8;
+                                let secs = ((lba / 75) % 60) as u8;
+                                let frames = (lba % 75) as u8;
+                                buf[8] = 0; // Absolute CD address (H = 0)
+                                buf[9] = mins;
+                                buf[10] = secs;
+                                buf[11] = frames;
+                                buf[12] = 0; // Track-relative CD address (H = 0)
+                                buf[13] = mins;
+                                buf[14] = secs;
+                                buf[15] = frames;
+                            } else {
+                                // LBA format
+                                buf[8] = 0;
+                                buf[9] = 0;
+                                buf[10] = 0;
+                                buf[11] = 1;
+                                buf[12] = 0;
+                                buf[13] = 0;
+                                buf[14] = 0;
+                                buf[15] = 1;
+                            }
+                            ret_len = 16;
+                        }
+                        2 => {
+                            buf[3] = 20;
+                            buf[4] = 2;
+                            buf[8] = 0; // no MCN
+                            buf[22] = 0; // zero
+                            buf[23] = 0; // AFRAME
+                            ret_len = 24;
+                        }
+                        3 => {
+                            buf[3] = 20;
+                            buf[4] = 3;
+                            buf[5] = (1 << 4) | 4; // 0x14
+                            buf[6] = 1;
+                            buf[7] = 0; // reserved
+                            buf[8] = 0; // no ISRC
+                            buf[21] = 0; // zero
+                            buf[22] = 0; // AFRAME
+                            buf[23] = 0; // reserved
+                            ret_len = 24;
+                        }
+                        _ => ret_len = 0,
+                    }
+                }
+
+                if ret_len == 0 {
+                    // Bochs: "Read sub-channel with SubQ not implemented".
+                    self.atapi_cmd_error(
+                        channel_num,
+                        SenseKey::IllegalRequest,
+                        Asc::InvFieldInCmdPacket,
+                    );
+                    self.raise_interrupt(channel_num, pic, pci_ide);
+                    return;
+                }
+
+                self.init_send_atapi_command(
+                    channel_num,
+                    atapi_command,
+                    ret_len as i32,
+                    alloc_length,
+                    false,
+                );
+                let drive = self.channels[channel_num].selected_drive_mut();
+                drive.controller.buffer[..ret_len].copy_from_slice(&buf[..ret_len]);
+                self.ready_to_send_atapi(channel_num, pic, pci_ide);
+            }
+            // Audio playback commands. Bochs harddrv.cc delegates each to the
+            // cdrom backend (play_audio / play_audio_msf / stop_audio /
+            // pause_resume_audio); cdrom_base_c implements none of them and
+            // returns 0, so the disk-image backend always takes the failure
+            // branch: ILLEGAL_REQUEST with "invalid field in command packet"
+            // (NOT the illegal-opcode the default arm would produce).
+            0x45 | 0xA5 | 0x47 | 0x4B | 0x4E => {
+                self.atapi_cmd_error(
+                    channel_num,
+                    SenseKey::IllegalRequest,
+                    Asc::InvFieldInCmdPacket,
+                );
+                self.raise_interrupt(channel_num, pic, pci_ide);
+            }
             0x25 => {
                 // READ CAPACITY
                 let drive = self.channels[channel_num].selected_drive_mut();
@@ -6163,6 +6286,97 @@ mod tests {
     }
 
     #[test]
+    // Bochs harddrv.cc case 0x42 (READ SUB-CHANNEL) delegates to
+    // cdrom_base_c::read_sub_channel (cdrom.cc), which synthesizes a response
+    // from constants: a 4-byte header alone when SubQ is clear, a 16-byte
+    // format-1 / 24-byte format-2/3 block when set, and 0 (-> ILLEGAL_REQUEST)
+    // for any other format. Audio commands always fail with the same sense.
+    #[test]
+    fn atapi_read_sub_channel_matches_bochs_cdrom_base() {
+        let mut hd = BxHardDriveC::new();
+        let mut pic = crate::iodev::pic::BxPicC::new();
+        let mut pci_ide = crate::iodev::pci_ide::BxPciIde::new();
+
+        hd.channels[0].drives[0] = AtaDrive::create_cdrom();
+        hd.channels[0].drives[0].attach_cdrom_data(vec![0u8; CDROM_SECTOR_SIZE * 4]);
+        hd.channels[0].drive_select = 0;
+
+        // Helper: load a 12-byte CDB and dispatch it.
+        let run = |hd: &mut BxHardDriveC,
+                   pic: &mut crate::iodev::pic::BxPicC,
+                   pci_ide: &mut crate::iodev::pci_ide::BxPciIde,
+                   cdb: [u8; 12]| {
+            let drive = hd.channels[0].selected_drive_mut();
+            drive.controller.buffer[..12].copy_from_slice(&cdb);
+            hd.handle_atapi_command(0, pic, pci_ide);
+        };
+
+        // SubQ clear -> header only (4 bytes), buf[3] = 4.
+        let mut cdb = [0u8; 12];
+        cdb[0] = 0x42;
+        cdb[8] = 24; // allocation length
+        run(&mut hd, &mut pic, &mut pci_ide, cdb);
+        let drive = hd.channels[0].selected_drive();
+        assert_eq!(drive.controller.buffer[3], 4, "header length byte");
+
+        // SubQ set, format 1, LBA form -> 16 bytes, format code 1, track 1.
+        let mut cdb = [0u8; 12];
+        cdb[0] = 0x42;
+        cdb[2] = 0x40; // SubQ
+        cdb[3] = 0x01; // data format 1
+        cdb[8] = 24;
+        run(&mut hd, &mut pic, &mut pci_ide, cdb);
+        let drive = hd.channels[0].selected_drive();
+        assert_eq!(drive.controller.buffer[3], 12, "format 1 data length");
+        assert_eq!(drive.controller.buffer[4], 1, "format code");
+        assert_eq!(drive.controller.buffer[6], 1, "track number");
+        assert_eq!(drive.controller.buffer[11], 1, "LBA-form absolute address");
+
+        // SubQ set, format 1, MSF form -> the 2-second lead-in (150 frames).
+        let mut cdb = [0u8; 12];
+        cdb[0] = 0x42;
+        cdb[1] = 0x02; // MSF
+        cdb[2] = 0x40; // SubQ
+        cdb[3] = 0x01;
+        cdb[8] = 24;
+        run(&mut hd, &mut pic, &mut pci_ide, cdb);
+        let drive = hd.channels[0].selected_drive();
+        assert_eq!(drive.controller.buffer[9], 0, "M field");
+        assert_eq!(drive.controller.buffer[10], 2, "S field = 150/75 frames");
+        assert_eq!(drive.controller.buffer[11], 0, "F field");
+
+        // An unsupported format aborts (Bochs: ret_len == 0).
+        let mut cdb = [0u8; 12];
+        cdb[0] = 0x42;
+        cdb[2] = 0x40; // SubQ
+        cdb[3] = 0x07; // invalid data format
+        cdb[8] = 24;
+        run(&mut hd, &mut pic, &mut pci_ide, cdb);
+        let drive = hd.channels[0].selected_drive();
+        assert!(
+            drive.controller.status.contains(AtaStatus::ERR),
+            "invalid sub-channel format must abort"
+        );
+
+        // Audio playback: cdrom_base_c implements none, so Bochs reports
+        // ILLEGAL_REQUEST / invalid field — not illegal opcode.
+        for command in [0x45u8, 0xA5, 0x47, 0x4B, 0x4E] {
+            let mut cdb = [0u8; 12];
+            cdb[0] = command;
+            run(&mut hd, &mut pic, &mut pci_ide, cdb);
+            let drive = hd.channels[0].selected_drive();
+            assert!(
+                drive.controller.status.contains(AtaStatus::ERR),
+                "audio command {command:#04x} must fail"
+            );
+            assert_eq!(
+                drive.sense.asc,
+                Asc::InvFieldInCmdPacket as u8,
+                "audio command {command:#04x} sense must be invalid-field"
+            );
+        }
+    }
+
     fn absent_selected_drive_reads_and_calibrate_match_bochs() {
         let mut hd = BxHardDriveC::new();
         let mut pic = crate::iodev::pic::BxPicC::new();
