@@ -3407,6 +3407,17 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 .store(true, core::sync::atomic::Ordering::Relaxed);
         }
 
+        // Bochs acpi.cc PM1_CNT SLP_EN with SLP_TYP=0 (S5 soft power off) sets
+        // `bx_user_quit = 1` and BX_FATALs. Same treatment as port 0x8900: stop
+        // the run loop gracefully instead of aborting. Drained unconditionally,
+        // before the `had_work` gate, so it can never trip the apply/quiesce
+        // convergence check on has_pending_machine_boundary.
+        if core::mem::take(&mut self.device_manager.acpi.soft_off_pending) {
+            tracing::info!("ACPI S5 soft power off — stopping emulation");
+            self.stop_flag
+                .store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+
         // No-work fast path: when nothing is queued anywhere, every drain in
         // the prologue below is a no-op by construction, so skip straight to
         // the tick loop. Bochs main.cc's SMP round commit is exactly this: a

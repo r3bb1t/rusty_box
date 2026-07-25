@@ -298,6 +298,10 @@ impl DeviceManager {
             || self.port92.reset_request.is_some()
             || self.keyboard.reset_requested.is_some()
             || self.pci2isa.reset_request.is_some()
+            // Bochs acpi.cc PM1_CNT: S3 resets the machine, S5 terminates it.
+            // Both must end the CPU slice so the boundary can act on them.
+            || self.acpi.reset_request.is_some()
+            || self.acpi.soft_off_pending
             // Bochs acpi.cc apic_bus_deliver_smi is synchronous with the OUT
             // to SMI_CMD; ending the slice here delivers the SMI to CPU 0
             // before the guest's next instruction. Drained by the emulator's
@@ -311,12 +315,15 @@ impl DeviceManager {
         let port92 = self.port92.reset_request.take();
         let keyboard = self.keyboard.reset_requested.take();
         let pci = self.pci2isa.reset_request.take();
+        // Bochs acpi.cc S3 (suspend to ram) -> bx_pc_system.Reset(BX_RESET_HARDWARE).
+        let acpi = self.acpi.reset_request.take();
         if matches!(port92, Some(ResetReason::Hardware))
             || matches!(keyboard, Some(ResetReason::Hardware))
             || matches!(pci, Some(ResetReason::Hardware))
+            || matches!(acpi, Some(ResetReason::Hardware))
         {
             Some(ResetReason::Hardware)
-        } else if port92.is_some() || keyboard.is_some() || pci.is_some() {
+        } else if port92.is_some() || keyboard.is_some() || pci.is_some() || acpi.is_some() {
             Some(ResetReason::Software)
         } else {
             None
@@ -1426,6 +1433,13 @@ impl DeviceManager {
     /// `register_acpi_handlers` and last registration wins for a port.
     pub(crate) fn acpi_write(&mut self, address: u16, value: u32, io_len: u8, icount: u64) {
         self.acpi.write(address, value, io_len, icount);
+        // Bochs acpi.cc PM1_CNT suspend-to-ram (S3) calls DEV_cmos_set_reg(0xF,
+        // 0xFE) — a plain store of the shutdown-status byte the BIOS reads on
+        // the resume path — before requesting the hardware reset. Applied here
+        // because only the DeviceManager can reach the CMOS from the ACPI write.
+        if core::mem::take(&mut self.acpi.suspend_to_ram_pending) {
+            self.cmos.ram[0x0F] = 0xFE;
+        }
     }
 
     /// PCI IDE I/O read dispatch (BM-DMA ports)

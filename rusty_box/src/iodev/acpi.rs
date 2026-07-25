@@ -191,6 +191,26 @@ pub struct BxAcpiCtrl {
     /// taken at serviced boundaries where it is always clear.
     pub(crate) smi_request_pending: bool,
 
+    /// The guest entered S5 (PM1_CNT SLP_EN with SLP_TYP=0). Bochs acpi.cc sets
+    /// `bx_user_quit = 1` and BX_FATALs; the emulator drains this at the
+    /// scheduler boundary and stops the run loop gracefully instead. Transient
+    /// (consumed at the very next boundary), so not snapshotted — same argument
+    /// as `smi_request_pending`.
+    pub(crate) soft_off_pending: bool,
+
+    /// The guest entered S3 (PM1_CNT SLP_EN with SLP_TYP=1). Bochs acpi.cc does
+    /// `DEV_cmos_set_reg(0xF, 0xFE)` then `bx_pc_system.Reset(BX_RESET_HARDWARE)`.
+    /// The CMOS byte is applied in the same I/O dispatch (DeviceManager can reach
+    /// the CMOS there); this flag carries the reset request to the boundary.
+    /// Transient — drained by `take_reset_request` at the next boundary.
+    pub(crate) suspend_to_ram_pending: bool,
+
+    /// A machine reset requested by the ACPI controller (S3). Drained by
+    /// `DeviceManager::take_reset_request` alongside the port92/keyboard/PIIX3
+    /// producers. Transient — never snapshotted (a snapshot is only taken at a
+    /// serviced boundary, where the request has already been consumed).
+    pub(crate) reset_request: Option<crate::cpu::ResetReason>,
+
     /// Whether PM I/O ports are registered (tracks pm_base changes)
     pub(crate) pm_ports_registered: bool,
     /// Whether SM I/O ports are registered (tracks sm_base changes)
@@ -573,6 +593,9 @@ impl BxAcpiCtrl {
             realtime_start: None,
             irq9_level: false,
             smi_request_pending: false,
+            soft_off_pending: false,
+            suspend_to_ram_pending: false,
+            reset_request: None,
             pm_ports_registered: false,
             sm_ports_registered: false,
             uefi_enabled: false,
@@ -692,6 +715,12 @@ impl BxAcpiCtrl {
 
         self.irq9_level = false;
         self.smi_request_pending = false;
+        // A machine reset discards any in-flight sleep-state request: Bochs
+        // performs the S3 reset synchronously, so nothing survives into the
+        // fresh machine.
+        self.soft_off_pending = false;
+        self.suspend_to_ram_pending = false;
+        self.reset_request = None;
 
         // Map PM/SM I/O windows when the BAR is configured (e.g. UEFI defaults).
         let pmbar = u32::from_le_bytes([
@@ -990,14 +1019,27 @@ impl BxAcpiCtrl {
                         let sus_typ = (value >> 10) & 7;
                         match sus_typ {
                             0 => {
-                                // Soft power off (acpi.cc)
-                                tracing::debug!("ACPI: soft power off requested");
+                                // Soft power off — Bochs acpi.cc case 0:
+                                //   bx_user_quit = 1; BX_FATAL("ACPI control:
+                                //   soft power off");
+                                // Deferred to the scheduler boundary, which stops
+                                // the run loop gracefully instead of aborting.
+                                tracing::info!("ACPI control: soft power off");
+                                self.soft_off_pending = true;
                             }
                             1 => {
-                                // Suspend to RAM (acpi.cc)
-                                tracing::debug!("ACPI: suspend to RAM requested");
+                                // Suspend to RAM — Bochs acpi.cc case 1:
+                                //   pmsts |= (RSM_STS | PWRBTN_STS);
+                                //   DEV_cmos_set_reg(0xF, 0xFE);
+                                //   bx_pc_system.Reset(BX_RESET_HARDWARE);
+                                // The CMOS shutdown-status byte is written by the
+                                // I/O dispatch (which can reach the CMOS) and the
+                                // reset is drained at the boundary.
+                                tracing::info!("ACPI control: suspend to ram");
                                 self.pmsts |=
                                     PmStatus::RSM_STS.bits() | PmStatus::PWRBTN_STS.bits();
+                                self.suspend_to_ram_pending = true;
+                                self.reset_request = Some(crate::cpu::ResetReason::Hardware);
                             }
                             _ => {}
                         }
@@ -1132,16 +1174,28 @@ impl BxAcpiCtrl {
             }
         }
 
-        // Update base addresses if changed (acpi.cc)
+        // Update base addresses if changed (acpi.cc). Bochs routes both through
+        // devices.cc `pci_set_base_io`, which skips the remap entirely when
+        //     ((newbase & 0xfffc) != mask) && (newbase != oldbase)
+        // is false — i.e. a PCI *size probe* (the guest writes all-ones and the
+        // masked read-back equals `mask`) or an unchanged base. Without that
+        // guard a sizing write would strand the window at the mask address and
+        // take the PM timer, SCI and S-state control with it.
         if pm_base_change {
             let new_base = u32::from_le_bytes([
                 self.pci_conf[0x40],
                 self.pci_conf[0x41],
                 self.pci_conf[0x42],
                 self.pci_conf[0x43],
-            ]) & 0xFFC0; // Mask to 64-port alignment
-            self.pm_base = new_base;
-            tracing::debug!("ACPI: new PM base address: {:#06x}", self.pm_base);
+            ]) & 0xFFC0; // Mask to 64-port alignment (Bochs mask = ~(64-1))
+            if new_base == 0xFFC0 || new_base == self.pm_base {
+                // Size probe or no change: leave the live window alone. The
+                // probe pattern still reads back from pci_conf.
+                pm_base_change = false;
+            } else {
+                self.pm_base = new_base;
+                tracing::debug!("ACPI: new PM base address: {:#06x}", self.pm_base);
+            }
         }
 
         if sm_base_change {
@@ -1150,9 +1204,13 @@ impl BxAcpiCtrl {
                 self.pci_conf[0x91],
                 self.pci_conf[0x92],
                 self.pci_conf[0x93],
-            ]) & 0xFFF0; // Mask to 16-port alignment
-            self.sm_base = new_base;
-            tracing::debug!("ACPI: new SM base address: {:#06x}", self.sm_base);
+            ]) & 0xFFF0; // Mask to 16-port alignment (Bochs mask = ~(16-1))
+            if new_base == 0xFFF0 || new_base == self.sm_base {
+                sm_base_change = false;
+            } else {
+                self.sm_base = new_base;
+                tracing::debug!("ACPI: new SM base address: {:#06x}", self.sm_base);
+            }
         }
 
         (pm_base_change, sm_base_change)
@@ -1394,6 +1452,84 @@ mod tests {
         acpi.generate_smi(ACPI_DISABLE);
         assert_eq!(acpi.pmcntrl & PmControl::SCI_EN.bits(), 0, "SCI_EN cleared");
         assert!(acpi.smi_request_pending, "delivery is independent of the command value");
+    }
+
+    // Bochs acpi.cc PM1_CNT (reg 0x04) with SUS_EN set:
+    //   sus_typ 0 -> bx_user_quit = 1 (soft power off)
+    //   sus_typ 1 -> pmsts |= RSM_STS|PWRBTN_STS; DEV_cmos_set_reg(0xF, 0xFE);
+    //                bx_pc_system.Reset(BX_RESET_HARDWARE)
+    #[test]
+    fn acpi_s5_requests_soft_power_off() {
+        let mut acpi = BxAcpiCtrl::new();
+        acpi.pm_base = 0xB000;
+        acpi.pci_conf[0x80] = 0x01; // PM I/O space enable
+        acpi.init_icount_sync(0, 1_000_000);
+        assert!(!acpi.soft_off_pending);
+
+        // SUS_EN with SLP_TYP = 0.
+        let value = PmControl::SUS_EN.bits() as u32;
+        acpi.write(acpi.pm_base as u16 + 0x04, value, 2, 0);
+
+        assert!(acpi.soft_off_pending, "S5 must request emulator shutdown");
+        assert!(acpi.reset_request.is_none(), "S5 stops, it does not reset");
+        // Bochs stores pmcntrl with SUS_EN masked off.
+        assert_eq!(acpi.pmcntrl & PmControl::SUS_EN.bits(), 0);
+    }
+
+    #[test]
+    fn acpi_s3_requests_hardware_reset() {
+        let mut acpi = BxAcpiCtrl::new();
+        acpi.pm_base = 0xB000;
+        acpi.pci_conf[0x80] = 0x01; // PM I/O space enable
+        acpi.init_icount_sync(0, 1_000_000);
+
+        // SUS_EN with SLP_TYP = 1 (bits 10-12).
+        let value = PmControl::SUS_EN.bits() as u32 | (1 << 10);
+        acpi.write(acpi.pm_base as u16 + 0x04, value, 2, 0);
+
+        assert!(!acpi.soft_off_pending, "S3 suspends, it does not power off");
+        assert_eq!(
+            acpi.reset_request,
+            Some(crate::cpu::ResetReason::Hardware),
+            "S3 must request a hardware reset"
+        );
+        assert!(
+            acpi.suspend_to_ram_pending,
+            "the CMOS 0xF=0xFE store is pending for the dispatcher"
+        );
+        assert_ne!(
+            acpi.pmsts & (PmStatus::RSM_STS.bits() | PmStatus::PWRBTN_STS.bits()),
+            0
+        );
+    }
+
+    // Bochs devices.cc pci_set_base_io skips the remap when the masked write-back
+    // equals `mask` (an all-ones size probe) or the base is unchanged.
+    #[test]
+    fn acpi_bar_size_probe_does_not_move_the_window() {
+        let mut acpi = BxAcpiCtrl::new();
+
+        // Establish a real PM base first.
+        acpi.pci_write(0x40, 0x0000_B000, 4);
+        assert_eq!(acpi.pm_base, 0xB000);
+
+        // All-ones size probe must NOT relocate the window.
+        let (pm_changed, _) = acpi.pci_write(0x40, 0xFFFF_FFFF, 4);
+        assert!(!pm_changed, "a size probe must not signal a base change");
+        assert_eq!(acpi.pm_base, 0xB000, "PM window must stay put");
+
+        // Re-writing the same base is also not a change.
+        let (pm_changed, _) = acpi.pci_write(0x40, 0x0000_B000, 4);
+        assert!(!pm_changed);
+        assert_eq!(acpi.pm_base, 0xB000);
+
+        // The SM BAR behaves identically (16-port alignment -> 0xFFF0 probe).
+        acpi.pci_write(0x90, 0x0000_B100, 4);
+        let sm_base = acpi.sm_base;
+        assert_eq!(sm_base, 0xB100);
+        let (_, sm_changed) = acpi.pci_write(0x90, 0xFFFF_FFFF, 4);
+        assert!(!sm_changed, "a size probe must not signal a base change");
+        assert_eq!(acpi.sm_base, 0xB100, "SM window must stay put");
     }
 
     #[test]
