@@ -2183,8 +2183,36 @@ impl BxVgaC {
                 } else {
                     // Data mode (flip_flop=true): Bochs flip_flop==1
                     // Write to the attribute register selected by attr_index
-                    if self.attr_index < 21 {
-                        self.attr_regs[self.attr_index as usize] = value;
+                    // Bochs vgacore.cc write case 0x03c0 data-write mode: each
+                    // register keeps only its defined bits, and a change to the
+                    // palette / plane-enable / pel-panning / color-select
+                    // registers sets needs_update, which ends in a full
+                    // vga_redraw_area(0, 0, last_xres, last_yres).
+                    let index = self.attr_index as usize;
+                    if index < 21 {
+                        let old_value = self.attr_regs[index];
+                        let (stored, redraw) = match index {
+                            // Internal palette registers 0x00-0x0F.
+                            0x00..=0x0F => (value, value != old_value),
+                            // 0x10 mode control: bit 7 (internal palette size)
+                            // change forces a redraw; bit 2 (line graphics) marks
+                            // the charmap dirty, which rusty folds into the same
+                            // redraw since it has no separate charmap channel.
+                            0x10 => (value, (value ^ old_value) & 0x84 != 0),
+                            // 0x11 overscan color: 6 bits, no redraw in Bochs.
+                            0x11 => (value & 0x3F, false),
+                            // 0x12 color plane enable, 0x13 horizontal pel
+                            // panning, 0x14 color select: 4 bits, always redraw.
+                            0x12 | 0x13 | 0x14 => (value & 0x0F, true),
+                            _ => (value, false),
+                        };
+                        self.attr_regs[index] = stored;
+                        if redraw {
+                            self.vga_mem_updated = 1;
+                            self.text_buffer_update = true;
+                            #[cfg(feature = "alloc")]
+                            self.redraw_current_legacy_area();
+                        }
                     }
                 }
                 self.attr_flip_flop = !self.attr_flip_flop;
@@ -2201,20 +2229,48 @@ impl BxVgaC {
             }
             VGA_SEQ_DATA
                 if self.seq_index < 5 => {
-                    self.seq_regs[self.seq_index as usize] = value;
+                    // Bochs vgacore.cc write case 0x03c5 keeps each sequencer
+                    // register as decomposed fields, so a read-back only exposes
+                    // the bits it retained. Reproduce that by masking on store.
+                    let old_value = self.seq_regs[self.seq_index as usize];
                     match self.seq_index {
-                        1 => {
-                            // Clocking mode: recalculate retrace if dot clock or char width changed
-                            // Bochs vgacore.cc
-                            self.calculate_retrace_timing();
+                        0 => {
+                            // Reset register. Bochs: on the reset1 falling edge
+                            // (bit 0 going 1 -> 0) the character-map selection is
+                            // reset and the charmap is marked dirty.
+                            if (old_value & 0x01) != 0 && (value & 0x01) == 0 {
+                                self.seq_regs[SEQ_REG_CHAR_MAP_SELECT] = 0;
+                            }
+                            // Read-back is reset1 | reset2<<1.
+                            self.seq_regs[0] = value & 0x03;
                         }
+                        1 => {
+                            // Clocking mode. Bochs recalculates the retrace timing
+                            // and forces a redraw only when one of the bits in
+                            // 0x29 changes (dot-clock/2, screen-off, 8/9 dot).
+                            if (value ^ old_value) & 0x29 != 0 {
+                                self.seq_regs[1] = value & 0x3D;
+                                self.calculate_retrace_timing();
+                                self.vga_mem_updated = 1;
+                                #[cfg(feature = "alloc")]
+                                self.redraw_current_legacy_area();
+                            } else {
+                                self.seq_regs[1] = value & 0x3D;
+                            }
+                        }
+                        // Map mask: only the 4 plane-enable bits are kept.
+                        2 => self.seq_regs[2] = value & 0x0F,
+                        // Character map select.
+                        3 => self.seq_regs[3] = value & 0x3F,
                         4 => {
-                            // Track chain_four and odd_even_dis from memory mode register
-                            // (Bochs vgacore.cc seq register 4 write handler)
+                            // Memory mode. Bochs keeps only extended_mem (bit 1),
+                            // odd_even_dis (bit 2) and chain_four (bit 3), and its
+                            // read-back recomposes exactly those.
+                            self.seq_regs[4] = value & 0x0E;
                             self.seq_chain_four = (value & 0x08) != 0;
                             self.seq_odd_even_dis = (value & 0x04) != 0;
                         }
-                        _ => {}
+                        _ => self.seq_regs[self.seq_index as usize] = value,
                     }
                 }
             VGA_GRAPHICS_INDEX => {
@@ -5264,6 +5320,69 @@ mod tests {
 
         // 0x3DB is the high byte of a 16-bit read from 0x3DA: Bochs returns 0.
         assert_eq!(vga.read_port(0x3DB, 1, 0), 0x00);
+    }
+
+    // Bochs vgacore.cc keeps sequencer registers as decomposed fields, so a
+    // read-back only exposes the retained bits (write case 0x03c5 / read case
+    // 0x03c5). Reset register 0's falling edge also clears char-map select.
+    #[test]
+    fn sequencer_registers_mask_on_store_like_bochs() {
+        let mut vga = BxVgaC::new();
+        let write_seq = |vga: &mut BxVgaC, index: u32, value: u32| {
+            vga.write_port(VGA_SEQ_INDEX, index, 1);
+            vga.write_port(VGA_SEQ_DATA, value, 1);
+        };
+
+        // Reg 0 (reset): only reset1|reset2 survive.
+        write_seq(&mut vga, 0, 0xFF);
+        assert_eq!(vga.seq_regs[SEQ_REG_RESET], 0x03);
+        // Reg 1 (clocking mode): value & 0x3D.
+        write_seq(&mut vga, 1, 0xFF);
+        assert_eq!(vga.seq_regs[SEQ_REG_CLOCKING_MODE], 0x3D);
+        // Reg 2 (map mask): 4 plane bits.
+        write_seq(&mut vga, 2, 0xFF);
+        assert_eq!(vga.seq_regs[SEQ_REG_MAP_MASK], 0x0F);
+        // Reg 3 (char map select): 6 bits.
+        write_seq(&mut vga, 3, 0xFF);
+        assert_eq!(vga.seq_regs[SEQ_REG_CHAR_MAP_SELECT], 0x3F);
+        // Reg 4 (memory mode): only extended_mem/odd_even_dis/chain_four.
+        write_seq(&mut vga, 4, 0xFF);
+        assert_eq!(vga.seq_regs[SEQ_REG_MEMORY_MODE], 0x0E);
+        assert!(vga.seq_chain_four);
+
+        // Reset1 falling edge (bit 0: 1 -> 0) clears char-map select.
+        assert_ne!(vga.seq_regs[SEQ_REG_CHAR_MAP_SELECT], 0);
+        write_seq(&mut vga, 0, 0x00);
+        assert_eq!(
+            vga.seq_regs[SEQ_REG_CHAR_MAP_SELECT], 0,
+            "reset1 falling edge resets the character map selection"
+        );
+    }
+
+    // Bochs vgacore.cc write case 0x03c0 data-write mode: per-register bit masks.
+    #[test]
+    fn attribute_registers_mask_on_store_like_bochs() {
+        let mut vga = BxVgaC::new();
+        let write_attr = |vga: &mut BxVgaC, index: u32, value: u32| {
+            // Address phase (flip-flop clear), then data phase.
+            vga.attr_flip_flop = false;
+            vga.write_port(VGA_ATTRIB_ADDR, index, 1);
+            vga.write_port(VGA_ATTRIB_ADDR, value, 1);
+        };
+
+        // 0x11 overscan color: 6 bits.
+        write_attr(&mut vga, 0x11, 0xFF);
+        assert_eq!(vga.attr_regs[0x11], 0x3F);
+        // 0x12 color plane enable / 0x13 pel panning / 0x14 color select: 4 bits.
+        write_attr(&mut vga, 0x12, 0xFF);
+        assert_eq!(vga.attr_regs[0x12], 0x0F);
+        write_attr(&mut vga, 0x13, 0xFF);
+        assert_eq!(vga.attr_regs[0x13], 0x0F);
+        write_attr(&mut vga, 0x14, 0xFF);
+        assert_eq!(vga.attr_regs[0x14], 0x0F);
+        // Palette registers keep all 8 bits (Bochs stores value unmasked).
+        write_attr(&mut vga, 0x05, 0xFF);
+        assert_eq!(vga.attr_regs[0x05], 0xFF);
     }
 
     // Bochs vgacore.cc CRTC write case 0x09: y_doublescan = ((value & 0x9f) > 0).
