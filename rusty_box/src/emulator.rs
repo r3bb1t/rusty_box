@@ -6304,11 +6304,15 @@ mod tests {
                 // Run: OUT 0xB2 ends the slice (machine boundary), the
                 // boundary delivers the SMI to CPU 0, the next batch enters
                 // SMM, runs the handler, and RSM resumes the interrupted code.
-                let mut entered_smm = false;
+                // NOTE: sampling `smm_mode()` at batch boundaries cannot observe
+                // the SMM visit — entry, handler and RSM all complete inside a
+                // single batch, so the flag is already false at every sample.
+                // The deterministic proof that SMM ran is `apms == 0` below:
+                // only the handler at 0x38000 issues `out 0xb3, 0`, and that
+                // address is reachable only via SMI entry at SMBASE+0x8000.
                 for _ in 0..8 {
                     let _ = unsafe { emu.run_cpu_batch(64) }.unwrap();
                     emu.service_scheduler_boundary(0).unwrap();
-                    entered_smm |= emu.cpu_mut_at(0).smm_mode();
                     if emu.device_manager.pci2isa.apms == 0
                         && !emu.cpu_mut_at(0).smm_mode()
                         && emu.reg_read(X86Reg::Rip) > 0x1008
@@ -6319,7 +6323,9 @@ mod tests {
 
                 assert_eq!(
                     emu.device_manager.pci2isa.apms, 0,
-                    "the guest SMM handler must clear apms (out 0xb3, 0)"
+                    "the guest SMM handler must clear apms (out 0xb3, 0) — this is \
+                     the proof that the SMI was delivered and SMM was entered, since \
+                     the handler at 0x38000 is only reachable via SMBASE+0x8000"
                 );
                 assert!(
                     !emu.cpu_mut_at(0).smm_mode(),

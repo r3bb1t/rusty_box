@@ -606,14 +606,17 @@ impl DeviceManager {
     }
 
     /// Register ACPI I/O handlers.
-    /// Static ports: SMI command (0xB2), ACPI debug (0xB044).
+    /// Static port: ACPI debug (0xB044).
     /// Dynamic ports (PM/SM base) are re-registered when PCI config changes.
     fn register_acpi_handlers(&mut self, io: &mut BxDevicesC) {
-        // SMI command port (0xB2) — Bochs acpi.cc
-        io.register_io_write_handler(DeviceId::Acpi, 0x00B2, "ACPI SMI Command", 0x1);
-
-        // ACPI debug port (0xB044) — Bochs acpi.cc
-        io.register_io_handler(DeviceId::Acpi, 0xB044, "ACPI Debug", 0x7);
+        // ACPI debug port (0xB044) — Bochs acpi.cc init():
+        //   DEV_register_iowrite_handler(..., ACPI_DBG_IO_ADDR, "ACPI", 4)
+        // WRITE only, and only 4-byte accesses. Reads and 1/2-byte writes are
+        // unmapped in Bochs (default handler: 0xFFFFFFFF / ignored).
+        io.register_io_write_handler(DeviceId::Acpi, 0xB044, "ACPI Debug", 0x4);
+        // NOTE: the SMI command port (0xB2) is NOT registered by Bochs acpi.cc —
+        // it belongs to the PIIX3 bridge (pci2isa.cc), which forwards writes to
+        // DEV_acpi_generate_smi. rusty registers it in register_pci_handlers.
     }
 
     /// Register ACPI PM I/O port range (called when PM base changes via PCI config).
@@ -1414,13 +1417,15 @@ impl DeviceManager {
         self.acpi.read(address, io_len, icount)
     }
 
-    /// ACPI I/O write dispatch
+    /// ACPI I/O write dispatch.
+    ///
+    /// Port 0xB2 is deliberately absent: Bochs routes the SMI command port
+    /// through the PIIX3 bridge (pci2isa.cc write case 0x00b2 ->
+    /// DEV_acpi_generate_smi), which the PCI dispatch already does. An arm here
+    /// was dead code — `register_pci_handlers` runs after
+    /// `register_acpi_handlers` and last registration wins for a port.
     pub(crate) fn acpi_write(&mut self, address: u16, value: u32, io_len: u8, icount: u64) {
-        if address == 0x00B2 {
-            self.acpi.generate_smi(value as u8);
-        } else {
-            self.acpi.write(address, value, io_len, icount);
-        }
+        self.acpi.write(address, value, io_len, icount);
     }
 
     /// PCI IDE I/O read dispatch (BM-DMA ports)
