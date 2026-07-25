@@ -248,7 +248,15 @@ impl DriveGeometry {
         let spt = self.sectors_per_track as u32;
         let heads = self.heads as u32;
 
-        (cylinder as u32 * heads * spt) + (head as u32 * spt) + (sector as u32).wrapping_sub(1)
+        // Bochs harddrv.cc computes the logical sector in Bit32u with silent
+        // wraparound: `sector_no == 0` wraps `sector - 1` to ~0xFFFFFFFF (which
+        // the caller's bounds check rejects), so every operator must wrap
+        // rather than panic in debug builds.
+        (cylinder as u32)
+            .wrapping_mul(heads)
+            .wrapping_mul(spt)
+            .wrapping_add((head as u32).wrapping_mul(spt))
+            .wrapping_add((sector as u32).wrapping_sub(1))
     }
 }
 
@@ -1613,12 +1621,16 @@ impl AtaDrive {
                     | (self.controller.sector_no as i64);
             }
         } else {
-            // CHS mode
-            logical_sector = (self.controller.cylinder_no as i64
-                * self.geometry.heads as i64
-                * self.geometry.sectors_per_track as i64)
-                + (self.controller.head_no as i64 * self.geometry.sectors_per_track as i64)
-                + (self.controller.sector_no as i64 - 1);
+            // CHS mode — Bochs harddrv.cc calculate_logical_address computes the
+            // sector in Bit32u, so `sector_no == 0` wraps to a huge value the
+            // bounds check below rejects (command aborted at issue). Computing
+            // in i64 instead yielded -1 for CHS 0/0/0, which slipped through the
+            // `>= sector_count` check. Route through the Bochs-exact helper.
+            logical_sector = self.geometry.chs_to_lba(
+                self.controller.cylinder_no,
+                self.controller.head_no,
+                self.controller.sector_no,
+            ) as i64;
         }
 
         let sector_count = self.geometry.total_sectors as i64;
@@ -2916,9 +2928,12 @@ impl BxHardDriveC {
             port - base
         };
 
-        // Bochs harddrv.cc: clear HOB (bit 7 of control) on command block writes
-        // (ports 0x01-0x07, i.e., all except ATA_DATA and ATA_ALT_STATUS)
-        if (1..=7).contains(&offset) {
+        // Bochs harddrv.cc write(): "A write to any Command Block register
+        // clears the HOB bit" — cleared unconditionally at the top of write()
+        // for EVERY command-block port including the data register (0x00-0x07),
+        // i.e. all except ATA_ALT_STATUS (0x206, the device-control port, whose
+        // own write then re-derives read_hob from value bit 7).
+        if (0..=7).contains(&offset) {
             for drive in &mut channel.drives {
                 drive.controller.control &= !0x80u8;
             }
@@ -3168,6 +3183,9 @@ impl BxHardDriveC {
                         match channel.drives[d].device_type {
                             DeviceType::Disk => {
                                 channel.drives[d].controller.cylinder_no = 0;
+                                // Bochs set_signature(): signing an HD also resets
+                                // the channel's drive_select to 0 (master).
+                                channel.drive_select = 0;
                             }
                             DeviceType::Cdrom => {
                                 channel.drives[d].controller.cylinder_no = 0xEB14;
@@ -5800,6 +5818,27 @@ mod tests {
         // LBA to CHS
         let (c, h, s) = geom.lba_to_chs(0);
         assert_eq!((c, h, s), (0, 0, 1));
+    }
+
+    // Bochs harddrv.cc computes CHS→LBA in Bit32u with silent wraparound:
+    // sector_no == 0 wraps `sector - 1` to ~0xFFFFFFFF, a value the caller's
+    // bounds check rejects (command aborted). rusty must reproduce that wrap
+    // rather than panic in debug or yield a value that passes the bounds check.
+    #[test]
+    fn chs_to_lba_wraps_on_zero_sector_like_bochs() {
+        let geom = DriveGeometry::from_chs(1024, 16, 63);
+
+        // Normal addressing is unaffected.
+        assert_eq!(geom.chs_to_lba(0, 0, 1), 0);
+        assert_eq!(geom.chs_to_lba(1, 0, 1), 16 * 63);
+
+        // CHS 0/0/0: 0 + 0 + (0 - 1) wraps to 0xFFFFFFFF (Bit32u), which as i64
+        // exceeds any total_sectors -> calculate_logical_address returns None.
+        assert_eq!(geom.chs_to_lba(0, 0, 0), u32::MAX);
+
+        // Non-zero cylinder with sector 0: base + 0xFFFFFFFF wraps to base - 1
+        // (would overflow-panic in a debug build without wrapping arithmetic).
+        assert_eq!(geom.chs_to_lba(1, 0, 0), 16u32 * 63 - 1);
     }
 
     #[test]
