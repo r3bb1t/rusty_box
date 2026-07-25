@@ -4842,12 +4842,12 @@ impl BxHardDriveC {
                     drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC | AtaStatus::DRQ;
                     // Set interrupt_reason: i_o=1, c_d=0 (data to host)
                     drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x02;
-                    // Restore ATAPI signature in cylinder registers (byte_count).
-                    // The Linux ata_piix driver zeroes CYL_LOW/CYL_HIGH before sending
-                    // IDENTIFY PACKET, then re-reads them after completion to classify
-                    // the device via ata_dev_classify(). ATAPI devices must report
-                    // their signature (0xEB14) here so the driver sees ATAPI, not ATA.
-                    drive.controller.cylinder_no = 0xEB14;
+                    // Bochs harddrv.cc case 0xa1 (IDENTIFY PACKET DEVICE) does NOT
+                    // touch the cylinder registers — the ATAPI signature (0xEB14)
+                    // is established by set_signature() on SRST / EXECUTE DIAGNOSTIC
+                    // / DEVICE RESET, which is what libata's ata_dev_classify()
+                    // reads. (rusty previously wrote 0xEB14 here as an ata_piix
+                    // compat shim; removed for strict parity.)
                     drive.controller.buffer_index = 0;
 
                     if !drive.identify_set {
