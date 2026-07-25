@@ -2128,6 +2128,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// Uses VGA update() function to process text mode and get update data
     pub fn update_gui(&mut self) {
         if let Some(ref mut gui) = self.gui {
+            // Bochs vgacore.cc skip_update() calls bx_gui->clear_screen() for a
+            // pending sequencer clear-screen request even on frames it skips.
+            if self.device_manager.vga.take_pending_clear_screen() {
+                gui.clear_screen();
+            }
             if let Some(update_result) = self.device_manager.vga.update() {
                 match update_result {
                     VgaDisplayUpdate::Text(update_result) => {
@@ -2157,6 +2162,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 update_result.fwidth,
                                 8,
                             );
+                        }
+
+                        // Bochs vgacore.cc update_charmap() pushes both guest
+                        // character generators to the GUI (set_text_charmap)
+                        // before the text is drawn with them.
+                        if update_result.charmap_updated {
+                            gui.set_text_charmap(0, self.device_manager.vga.charmap(0));
+                            gui.set_text_charmap(1, self.device_manager.vga.charmap(1));
                         }
 
                         gui.text_update(

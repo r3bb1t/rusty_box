@@ -34,6 +34,16 @@ pub trait BxGui: Send + Sync {
         tm_info: &VgaTextModeInfo,
     );
 
+    /// Install one of the two guest character generators.
+    ///
+    /// Bochs `bx_gui_c::set_text_charmap(int map, Bit8u *fmap)` (gui.cc), called
+    /// from `bx_vgacore_c::update_charmap()`. `data` is 256 glyphs x 32 bytes of
+    /// raw VGA bitmap, each byte MSB-first (bit 7 = leftmost pixel). Default
+    /// no-op so text-only and headless GUIs need not implement it.
+    fn set_text_charmap(&mut self, map: usize, data: &[u8]) {
+        let _ = (map, data);
+    }
+
     /// Update a graphics tile
     fn graphics_tile_update(&mut self, tile: &[u8], x: u32, y: u32);
 

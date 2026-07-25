@@ -60,7 +60,21 @@ pub struct SharedDisplay {
     pub serial_log: String,
     /// ASCII bytes from GUI to inject into serial port RX (for console input)
     pub pending_serial_input: Vec<u8>,
+    /// The two guest character generators, 256 glyphs x 32 bytes each, as raw
+    /// VGA bitmaps (MSB-first: bit 7 is the leftmost pixel).
+    /// Bochs: `bx_gui_c::vga_charmap[2][0x2000]` (gui.h), filled by
+    /// `set_text_charmap` from `bx_vgacore_c::update_charmap()`.
+    pub vga_charmap: [Vec<u8>; 2],
+    /// True once the guest has programmed a character generator. Until then the
+    /// built-in font is used, so guests that never load one still render.
+    pub charmap_loaded: bool,
 }
+
+/// Bytes per guest character generator: 256 glyphs x 32 bytes.
+/// Bochs: the 0x2000-byte buffers in `bx_gui_c::vga_charmap` (gui.h).
+const GUEST_CHARMAP_LEN: usize = 0x2000;
+/// Bytes per glyph in a guest character generator (Bochs `(ch << 5)` stride).
+const GUEST_CHARMAP_GLYPH_BYTES: usize = 32;
 
 impl SharedDisplay {
     /// Create a new SharedDisplay with default 80x25 text mode (720x400 px).
@@ -93,6 +107,8 @@ impl SharedDisplay {
             stop_flag: Arc::new(AtomicBool::new(false)),
             serial_log: String::new(),
             pending_serial_input: Vec::new(),
+            vga_charmap: [Vec::new(), Vec::new()],
+            charmap_loaded: false,
         }
     }
 
@@ -174,6 +190,20 @@ impl SharedDisplay {
     /// - `start_address`: CRTC start address (byte offset into text buffer)
     /// - `line_offset`: CRTC line offset (bytes per row in VGA memory)
     #[allow(clippy::too_many_arguments)]
+    /// Install one of the guest character generators.
+    ///
+    /// Bochs `bx_gui_c::set_text_charmap` (gui.cc): copies 0x2000 bytes into
+    /// `vga_charmap[map]` and flags a full text redraw. `data` is raw VGA glyph
+    /// bitmap (32 bytes per glyph, MSB-first).
+    pub fn set_text_charmap(&mut self, map: usize, data: &[u8]) {
+        let slot = &mut self.vga_charmap[map & 1];
+        slot.clear();
+        slot.extend_from_slice(data);
+        if data.iter().any(|&b| b != 0) {
+            self.charmap_loaded = true;
+        }
+    }
+
     pub fn render_text_to_framebuffer(
         &mut self,
         text: &[u8],
@@ -192,6 +222,18 @@ impl SharedDisplay {
         let fh = self.font_height;
         let stride = self.fb_width * 4;
         let palette = self.palette; // Copy for parallel access
+        // Guest character generators, when the guest has programmed one.
+        // Bochs gui.cc draw_char_common indexes vga_charmap[font2][(ch<<5)+fy],
+        // where font2 comes from attribute bit 3 (harmless when both maps hold
+        // the same glyphs, which is what update_charmap guarantees).
+        let guest_charmap: Option<[&[u8]; 2]> = if self.charmap_loaded
+            && self.vga_charmap[0].len() >= GUEST_CHARMAP_LEN
+            && self.vga_charmap[1].len() >= GUEST_CHARMAP_LEN
+        {
+            Some([&self.vga_charmap[0], &self.vga_charmap[1]])
+        } else {
+            None
+        };
 
         // Helper closure: render a single character cell into framebuffer slice
         let render_cell =
@@ -214,10 +256,18 @@ impl SharedDisplay {
                 let py = row * fh;
 
                 for scanline in 0..fh {
-                    let font_byte = if (scanline as usize) < 16 {
-                        VGA_FONT_8X16[ch][scanline as usize]
-                    } else {
-                        0
+                    // A guest-programmed generator supplies raw VGA glyph rows
+                    // (32 bytes per glyph). Those are MSB-first, so they are
+                    // bit-reversed here into the LSB-first convention the loop
+                    // below (and the built-in font) uses.
+                    let font_byte = match guest_charmap {
+                        Some(maps) if (scanline as usize) < GUEST_CHARMAP_GLYPH_BYTES => {
+                            let map = usize::from(attr & 0x08 != 0);
+                            maps[map][(ch << 5) + scanline as usize].reverse_bits()
+                        }
+                        Some(_) => 0,
+                        None if (scanline as usize) < 16 => VGA_FONT_8X16[ch][scanline as usize],
+                        None => 0,
                     };
                     let cursor_invert = is_cursor
                         && cs_start <= cs_end
@@ -341,7 +391,7 @@ impl Default for SharedDisplay {
 
 #[cfg(test)]
 mod tests {
-    use super::SharedDisplay;
+    use super::{SharedDisplay, GUEST_CHARMAP_LEN};
     use core::sync::atomic::Ordering;
 
     #[test]
@@ -363,6 +413,58 @@ mod tests {
 
         assert_eq!(shared.drain_serial_input(), b"boot\n");
         assert!(shared.drain_serial_input().is_empty());
+    }
+
+    // A guest character generator holds raw VGA glyph bitmaps, which are
+    // MSB-first (bit 7 = leftmost pixel) — Bochs gui.cc draw_char_common shifts
+    // left and tests bit 8. rusty's built-in VGA_FONT_8X16 is stored LSB-first
+    // instead, so guest glyphs must be bit-reversed on the way in. Getting this
+    // backwards mirrors every character, which is easy to miss because most
+    // glyphs still "look like text". Pin it with an asymmetric pattern.
+    #[test]
+    fn guest_charmap_glyphs_render_msb_first() {
+        let mut shared = SharedDisplay::new();
+        shared.resize(2, 1, 8, 1);
+
+        // Glyph 'A' (0x41): a single lit pixel at the LEFTMOST column.
+        // MSB-first, that is 0x80.
+        let mut map = vec![0u8; GUEST_CHARMAP_LEN];
+        map[(0x41usize << 5)] = 0x80;
+        shared.set_text_charmap(0, &map);
+        shared.set_text_charmap(1, &map);
+        assert!(shared.charmap_loaded);
+
+        // One cell: character 0x41, attribute 0x0F (white on black).
+        let text = [0x41u8, 0x0F, 0x20, 0x0F];
+        let palette_identity: [u8; 16] = core::array::from_fn(|i| i as u8);
+        shared.render_text_to_framebuffer(&text, 0xffff, 0xffff, 0, 0, false, 0, 4, &palette_identity);
+
+        let stride = shared.fb_width as usize * 4;
+        let pixel = |x: usize| {
+            let o = x * 4;
+            [
+                shared.framebuffer[o],
+                shared.framebuffer[o + 1],
+                shared.framebuffer[o + 2],
+            ]
+        };
+        assert!(stride >= 8 * 4, "framebuffer must span the whole cell");
+        let lit = pixel(0);
+        let unlit = pixel(7);
+        assert_ne!(
+            lit, unlit,
+            "the glyph must not be uniform — one edge is lit, the other is not"
+        );
+        assert_eq!(
+            lit,
+            [0xFF, 0xFF, 0xFF],
+            "0x80 in a guest glyph lights the LEFTMOST pixel (MSB-first)"
+        );
+        assert_eq!(
+            unlit,
+            [0x00, 0x00, 0x00],
+            "the rightmost pixel stays background — a mirrored glyph would light it"
+        );
     }
 
     #[test]

@@ -69,6 +69,12 @@ mod bridge_impl {
             }
         }
 
+        fn set_text_charmap(&mut self, map: usize, data: &[u8]) {
+            if let Ok(mut display) = self.shared.lock() {
+                display.set_text_charmap(map, data);
+            }
+        }
+
         fn graphics_tile_update(&mut self, tile: &[u8], x: u32, y: u32) {
             self.graphics_tile_update_rgba(tile, x, y, 16, 24);
         }
