@@ -872,10 +872,25 @@ impl BxCmosC {
                             self.update_clock();
                         }
 
-                        // Bochs restarts/deactivates only on a PIE transition.
+                        // Bochs cmos.cc write REG_STAT_B: on a PIE transition,
+                        // 0->1 arms the periodic owner iff the STAT_A rate nibble
+                        // is non-zero — checking ONLY the nibble, not the divider
+                        // chain. So a running rate with the oscillator disabled
+                        // (dcc in {0,1}) still arms the timer with the stored
+                        // interval (u32::MAX usec ~= 71.6 min), reproducing Bochs's
+                        // phantom-periodic quirk; 1->0 deactivates. For a live
+                        // divider the interval is a real value and this is
+                        // byte-identical to periodic_timer_action().
                         if (old_val ^ new_val) & 0x40 != 0 {
                             sync.periodic = if new_val & 0x40 != 0 {
-                                self.periodic_timer_action()
+                                if self.ram[REG_STAT_A as usize] & 0x0F != 0 {
+                                    CmosTimerAction::Restart(self.periodic_interval_usec as u64)
+                                } else {
+                                    // nibble == 0: Bochs makes no activate_timer
+                                    // call; the periodic owner is already inactive
+                                    // (PIE was 0), so leave it unchanged.
+                                    CmosTimerAction::Unchanged
+                                }
                             } else {
                                 CmosTimerAction::Deactivate
                             };
@@ -1780,6 +1795,43 @@ mod tests {
         let sync = cmos.write(CMOS_DATA, stat_a as u32, 1);
 
         assert_eq!(sync.periodic, CmosTimerAction::Restart(interval));
+    }
+
+    // Bochs cmos.cc write REG_STAT_B: a PIE 0->1 transition arms the periodic
+    // owner based on the STAT_A rate nibble ALONE (not the divider chain), so a
+    // non-zero rate with the oscillator disabled arms a u32::MAX-usec (~71.6 min)
+    // phantom timer rather than staying idle. Reproduced for strict parity.
+    #[test]
+    fn cmos_pie_arms_phantom_timer_with_oscillator_disabled() {
+        let mut cmos = BxCmosC::new();
+
+        // STAT_A: rate nibble = 6 (non-zero), divider control = 0 (oscillator
+        // disabled) => periodic_interval_usec = u32::MAX.
+        cmos.write(CMOS_ADDR, REG_STAT_A as u32, 1);
+        cmos.write(CMOS_DATA, 0x06, 1);
+        assert_eq!(cmos.periodic_interval_usec, u32::MAX);
+
+        // Enable PIE (STAT_B bit 6) with 24-hour mode. Bochs checks only the
+        // nibble, so it arms the timer with the stored MAX interval.
+        cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+        let sync = cmos.write(CMOS_DATA, 0x42, 1);
+        assert_eq!(sync.periodic, CmosTimerAction::Restart(u32::MAX as u64));
+    }
+
+    // A PIE 0->1 transition with the STAT_A rate nibble == 0 must NOT arm the
+    // periodic owner: Bochs makes no activate_timer call (the owner is already
+    // inactive because PIE was 0).
+    #[test]
+    fn cmos_pie_with_zero_rate_nibble_does_not_arm() {
+        let mut cmos = BxCmosC::new();
+        // STAT_A: divider control = 2 (valid), nibble = 0 => interval = u32::MAX.
+        cmos.write(CMOS_ADDR, REG_STAT_A as u32, 1);
+        cmos.write(CMOS_DATA, 0x20, 1);
+        assert_eq!(cmos.periodic_interval_usec, u32::MAX);
+
+        cmos.write(CMOS_ADDR, REG_STAT_B as u32, 1);
+        let sync = cmos.write(CMOS_DATA, 0x42, 1);
+        assert_eq!(sync.periodic, CmosTimerAction::Unchanged);
     }
 
     // =========================================================================

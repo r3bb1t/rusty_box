@@ -531,9 +531,14 @@ impl DeviceManager {
     fn register_cmos_handlers(&mut self, io: &mut BxDevicesC) {
         io.register_io_handler(DeviceId::Cmos, CMOS_ADDR, "CMOS Address", 0x1);
         io.register_io_handler(DeviceId::Cmos, CMOS_DATA, "CMOS Data", 0x1);
-        // Bochs cmos.cc — extended CMOS RAM ports (addresses 0x80-0xFF)
-        io.register_io_handler(DeviceId::Cmos, 0x0072, "Ext CMOS RAM", 0x1);
-        io.register_io_handler(DeviceId::Cmos, 0x0073, "Ext CMOS RAM", 0x1);
+        // Bochs cmos.cc init() registers the extended-bank ports 0x72/0x73
+        // ONLY when a 256-byte `cmosimage` is configured (s.max_reg == 255).
+        // With the default 128-byte CMOS (no image) those ports are left
+        // unmapped and fall to the default handler (0xFF byte reads / ignored
+        // writes). rusty_box has no `cmosimage` config, so — matching Bochs's
+        // default — 0x72/0x73 stay unregistered. The cmos.rs read()/write()
+        // arms for them remain: they are the correct behavior once cmosimage
+        // support is added, and they anchor the snapshot's cmos_ext_mem_addr.
     }
 
     /// Register DMA I/O handlers (Bochs dma.cc)
