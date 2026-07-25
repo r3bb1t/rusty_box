@@ -217,6 +217,18 @@ pub struct DeviceManager {
     /// Deferred: a VGA PCI BAR (LFB or MMIO) changed, needs memory-handler
     /// (re)registration at the new base.
     pub(crate) vga_bar_needs_reregister: bool,
+    /// Deferred: the PIIX3 0x4F (APIC enable) or 0x80 (APIC base) config
+    /// register was written; the I/O APIC enable state + MMIO base must be
+    /// re-synced (Bochs pci2isa.cc pci_write_handler cases 0x4f/0x80's
+    /// DEV_ioapic_set_enabled() calls). Live-only transient: Bochs applies this
+    /// synchronously and its ioapic.cc reset() does not re-sync the IOAPIC, so
+    /// it is cleared (not re-derived) on reset and never snapshotted.
+    pub(crate) ioapic_enable_needs_update: bool,
+    /// Deferred: the PIIX3 0x4F "1-meg extended BIOS enable" bit changed;
+    /// carries the new BIOS_ROM_1MEG access value (Bochs pci2isa.cc case 0x4f's
+    /// DEV_mem_set_bios_rom_access(BIOS_ROM_1MEG, ...)). Not derivable from
+    /// pci_conf (only bit 0 is stored, matching Bochs), so carried as a transient.
+    pub(crate) bios_1meg_access_pending: Option<bool>,
     /// Deferred: the CMOS timer-owner delta produced by `cmos.reset()` on a
     /// hardware reset. `BxCmosC::reset` can't reach the machine timers, so the
     /// emulator drains this in `rearm_device_timers_after_hardware_reset`
@@ -279,6 +291,8 @@ impl DeviceManager {
             || self.smram_needs_update
             || self.bios_write_needs_update
             || self.vga_bar_needs_reregister
+            || self.ioapic_enable_needs_update
+            || self.bios_1meg_access_pending.is_some()
             || self.port92.a20_change_pending
             || self.keyboard.a20_change_pending
             || self.port92.reset_request.is_some()
@@ -335,6 +349,8 @@ impl DeviceManager {
             smram_needs_update: false,
             bios_write_needs_update: false,
             vga_bar_needs_reregister: false,
+            ioapic_enable_needs_update: false,
+            bios_1meg_access_pending: None,
             cmos_reset_timer_sync: None,
             diag_pit_fires: 0,
             diag_irq0_latched: 0,
@@ -455,6 +471,14 @@ impl DeviceManager {
                 self.sm_ports_base != self.acpi.sm_base as u16;
             self.vga_bar_needs_reregister = self.vga.peek_pending_lfb_relocate().is_some()
                 || self.vga.peek_pending_mmio_relocate().is_some();
+            // Bochs ioapic.cc reset() does NOT re-sync the IOAPIC enable state
+            // (unlike PAM/SMRAM/XBCS, which pci.cc/pci2isa.cc re-apply below):
+            // the IOAPIC keeps its last-applied enable/base across a guest
+            // reset. Drop any pending 0x4f/0x80 enable write rather than
+            // re-deriving from the reset pci_conf[0x4f]=0 (which would
+            // spuriously disable the IOAPIC).
+            self.ioapic_enable_needs_update = false;
+            self.bios_1meg_access_pending = None;
             // Re-apply the reset SMRAM/XBCS state synchronously before the
             // guest resumes. Hardware reset may already have disabled SMRAM;
             // the operation is idempotent.
@@ -839,6 +863,22 @@ impl DeviceManager {
             self.pci2isa.apply_bios_write_to_memory(mem);
             self.bios_write_needs_update = false;
             effects.memory_mapping_changed = true;
+        }
+        if self.ioapic_enable_needs_update {
+            // Bochs pci2isa.cc pci_write_handler cases 0x4f/0x80:
+            // DEV_ioapic_set_enabled(pci_conf[0x4f] & 0x01,
+            //   (pci_conf[0x80] & 0x3f) << 10). Only flag a memory-map change
+            // when the IOAPIC MMIO window was actually (un)registered/moved.
+            if self.pci2isa.apply_ioapic_enable(&mut self.ioapic, mem)? {
+                effects.memory_mapping_changed = true;
+            }
+            self.ioapic_enable_needs_update = false;
+        }
+        if let Some(enabled) = self.bios_1meg_access_pending.take() {
+            // Bochs pci2isa.cc case 0x4f:
+            // DEV_mem_set_bios_rom_access(BIOS_ROM_1MEG, ...). Tracked-but-inert
+            // bitmask (Bochs logs "not supported"), so no memory_mapping_changed.
+            mem.set_bios_rom_access(crate::memory::BIOS_ROM_1MEG, enabled);
         }
         if self.vga_bar_needs_reregister {
             effects.memory_mapping_changed |= self.reregister_vga_bars(mem)?;
@@ -1289,6 +1329,12 @@ impl DeviceManager {
                             let effects = self.pci2isa.pci_write(addr, val, len);
                             if effects.bios_write_changed {
                                 self.bios_write_needs_update = true;
+                            }
+                            if effects.ioapic_enable_changed {
+                                self.ioapic_enable_needs_update = true;
+                            }
+                            if let Some(v) = effects.bios_1meg_access {
+                                self.bios_1meg_access_pending = Some(v);
                             }
                         }
                     }
