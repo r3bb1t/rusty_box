@@ -25,6 +25,7 @@ mod bridge_impl {
     pub struct BridgeGui {
         shared: Arc<Mutex<SharedDisplay>>,
         local_scancodes: VecDeque<u8>,
+        local_keys: VecDeque<(crate::iodev::scancodes::BxKey, bool)>,
         local_mouse: VecDeque<crate::gui::host_input::HostMouseEvent>,
         display_mode: DisplayMode,
     }
@@ -35,6 +36,7 @@ mod bridge_impl {
             Self {
                 shared,
                 local_scancodes: VecDeque::new(),
+                local_keys: VecDeque::new(),
                 local_mouse: VecDeque::new(),
                 display_mode: DisplayMode::Sim,
             }
@@ -97,6 +99,9 @@ mod bridge_impl {
             if let Ok(mut display) = self.shared.lock() {
                 for scancode in display.pending_scancodes.drain(..) {
                     self.local_scancodes.push_back(scancode);
+                }
+                for key in display.pending_keys.drain(..) {
+                    self.local_keys.push_back(key);
                 }
                 for mouse in display.pending_mouse.drain(..) {
                     self.local_mouse.push_back(mouse);
@@ -178,6 +183,10 @@ mod bridge_impl {
             if let Ok(mut display) = self.shared.lock() {
                 display.ips = ips_count;
             }
+        }
+
+        fn get_pending_keys(&mut self) -> Vec<(crate::iodev::scancodes::BxKey, bool)> {
+            self.local_keys.drain(..).collect()
         }
 
         fn get_pending_scancodes(&mut self) -> Vec<u8> {

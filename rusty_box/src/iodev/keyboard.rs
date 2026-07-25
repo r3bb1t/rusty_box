@@ -1948,6 +1948,45 @@ impl BxKeyboardC {
     /// 0x80 onto the next translated byte.
     ///
     /// Matches Bochs gen_scancode() translation logic (keyboard.cc).
+    /// Emit the scancode sequence for a guest key press or release.
+    ///
+    /// Word-for-word port of Bochs `bx_keyb_c::gen_scancode` (keyboard.cc): the
+    /// bytes come from `scancodes[key][current_scancodes_set]`, so selecting set
+    /// 1 or 3 with the 0xF0 command actually changes what the guest sees. When
+    /// the 8042 is translating (CCB bit 6) each byte goes through
+    /// `translation8042`, with a 0xF0 break prefix folded into bit 7 of the
+    /// following byte instead of being emitted.
+    pub fn gen_scancode(&mut self, key: super::scancodes::BxKey, pressed: bool) {
+        // Ignore scancode if the keyboard clock is driven low.
+        if !self.kbd_controller.kbd_clock_enabled {
+            return;
+        }
+        // Ignore scancode if scanning is disabled.
+        if !self.kbd_internal_buffer.scanning_enabled {
+            return;
+        }
+
+        let set = (self.kbd_controller.current_scancodes_set as usize).min(2);
+        let entry = &super::scancodes::SCANCODES[key.index()][set];
+        let bytes: &'static [u8] = if pressed { entry.make } else { entry.brek };
+
+        if self.kbd_controller.scancodes_translate {
+            let mut escaped = 0x00u8;
+            for &byte in bytes {
+                if byte == 0xF0 {
+                    escaped = 0x80;
+                } else {
+                    self.kbd_enq(TRANSLATION_8042[byte as usize] | escaped);
+                    escaped = 0x00;
+                }
+            }
+        } else {
+            for &byte in bytes {
+                self.kbd_enq(byte);
+            }
+        }
+    }
+
     pub fn send_scancode(&mut self, scancode: u8) {
         if !self.kbd_controller.kbd_clock_enabled || !self.kbd_internal_buffer.scanning_enabled {
             return;
@@ -2847,6 +2886,63 @@ mod tests {
         assert_eq!(read.value, 0x1E);
         assert!(read.consumed);
         assert_eq!(read.irq_to_lower, Some(1));
+    }
+
+    // Bochs keyboard.cc gen_scancode() renders a key through
+    // scancodes[key][current_scancodes_set], so the 0xF0 "select scancode set"
+    // command actually changes the bytes the guest receives. Previously the
+    // selected set was tracked but never consulted.
+    #[test]
+    fn gen_scancode_honors_the_selected_scancode_set() {
+        use super::super::scancodes::BxKey;
+
+        // gen_scancode enqueues into the internal keyboard ring; the controller
+        // output buffer is only filled later by the serial-delay timer, so read
+        // the ring directly and reset it between cases.
+        let drain = |kbd: &mut BxKeyboardC| -> alloc::vec::Vec<u8> {
+            let n = kbd.kbd_internal_buffer.num_elements;
+            let head = kbd.kbd_internal_buffer.head;
+            let mut out = alloc::vec::Vec::new();
+            for i in 0..n {
+                out.push(kbd.kbd_internal_buffer.buffer[(head + i) % BX_KBD_ELEMENTS]);
+            }
+            kbd.kbd_internal_buffer.num_elements = 0;
+            kbd.kbd_internal_buffer.head = 0;
+            out
+        };
+
+        let mut kbd = BxKeyboardC::new();
+        // Raw mode so the bytes are the table's, not 8042-translated.
+        kbd.kbd_controller.scancodes_translate = false;
+
+        // Set 2 (the power-on default): 'A' makes 0x1C, breaks 0xF0 0x1C.
+        kbd.kbd_controller.current_scancodes_set = 1;
+        kbd.gen_scancode(BxKey::A, true);
+        assert_eq!(drain(&mut kbd), alloc::vec![0x1C]);
+        kbd.gen_scancode(BxKey::A, false);
+        assert_eq!(drain(&mut kbd), alloc::vec![0xF0, 0x1C]);
+
+        // Set 1: 'A' makes 0x1E and breaks with the high bit set.
+        kbd.kbd_controller.current_scancodes_set = 0;
+        kbd.gen_scancode(BxKey::A, true);
+        assert_eq!(drain(&mut kbd), alloc::vec![0x1E]);
+        kbd.gen_scancode(BxKey::A, false);
+        assert_eq!(drain(&mut kbd), alloc::vec![0x9E]);
+
+        // Set 3 differs again from set 2 for keys like Enter.
+        kbd.kbd_controller.current_scancodes_set = 2;
+        kbd.gen_scancode(BxKey::A, true);
+        let set3 = drain(&mut kbd);
+        assert_eq!(set3, alloc::vec![0x1C]);
+
+        // With 8042 translation on, set-2 bytes come out as set 1 and the 0xF0
+        // break prefix folds into bit 7 rather than being emitted.
+        kbd.kbd_controller.scancodes_translate = true;
+        kbd.kbd_controller.current_scancodes_set = 1;
+        kbd.gen_scancode(BxKey::A, true);
+        assert_eq!(drain(&mut kbd), alloc::vec![0x1E]);
+        kbd.gen_scancode(BxKey::A, false);
+        assert_eq!(drain(&mut kbd), alloc::vec![0x9E]);
     }
 
     #[test]

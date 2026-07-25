@@ -2727,14 +2727,21 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         let mut scancodes_to_send = Vec::new();
         let mut mouse_to_send = Vec::new();
         let mut serial_input = Vec::new();
+        let mut keys_to_send: Vec<(crate::iodev::scancodes::BxKey, bool)> = Vec::new();
         if let Some(gui) = &mut self.gui {
             gui.handle_events();
             scancodes_to_send = gui.get_pending_scancodes();
+            keys_to_send = gui.get_pending_keys();
             mouse_to_send = gui.get_pending_mouse();
             serial_input = gui.get_pending_serial_input();
         }
-        let keyboard_changed = !scancodes_to_send.is_empty() || !mouse_to_send.is_empty();
+        let keyboard_changed = !scancodes_to_send.is_empty()
+            || !keys_to_send.is_empty()
+            || !mouse_to_send.is_empty();
         let serial_changed = !serial_input.is_empty();
+        for (key, pressed) in keys_to_send {
+            self.device_manager.keyboard.gen_scancode(key, pressed);
+        }
         for scancode in scancodes_to_send {
             self.device_manager.keyboard.send_scancode(scancode);
         }
@@ -5455,6 +5462,13 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     ///
     /// For environments that handle keyboard input outside of `BxGui`
     /// (e.g. the WASM app processes egui events directly).
+    /// Deliver a guest key press/release, rendered through the guest's active
+    /// scancode set (Bochs keyboard.cc `gen_scancode`). Prefer this over
+    /// [`Emulator::send_scancode`], which bypasses the set selection.
+    pub fn send_key(&mut self, key: crate::iodev::scancodes::BxKey, pressed: bool) {
+        self.device_manager.keyboard.gen_scancode(key, pressed);
+    }
+
     pub fn send_scancode(&mut self, scancode: u8) {
         self.device_manager.keyboard.send_scancode(scancode);
     }

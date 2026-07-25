@@ -38,6 +38,7 @@ pub mod harddrv;
 pub mod hpet;
 pub mod ioapic;
 pub mod keyboard;
+pub mod scancodes;
 pub mod pci;
 pub mod pci2isa;
 pub mod pci_ide;

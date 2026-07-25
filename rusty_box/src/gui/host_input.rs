@@ -28,7 +28,17 @@ pub struct HostMouseEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostInputEvent {
     /// A PS/2 set-1 scancode byte (make/break; `0xE0`/`0xF0` prefixes inline).
+    ///
+    /// Prefer [`HostInputEvent::Key`]: raw bytes bypass the guest's selected
+    /// scancode set. This variant remains for callers that genuinely have bytes
+    /// (host bridges, the WASM console, tests).
     Scancode(u8),
+    /// A guest key press (`true`) or release (`false`).
+    ///
+    /// This is the Bochs-shaped path: the front end reports *which key* and the
+    /// keyboard controller renders it through `scancodes[key][set]`, so a guest
+    /// that selects scancode set 1 or 3 gets the right bytes.
+    Key(crate::iodev::scancodes::BxKey, bool),
     /// A relative mouse movement / button / wheel update.
     Mouse(HostMouseEvent),
 }
@@ -98,6 +108,7 @@ impl HostInputSink for super::shared_display::SharedDisplay {
     fn push(&mut self, event: HostInputEvent) {
         match event {
             HostInputEvent::Scancode(sc) => self.pending_scancodes.push(sc),
+            HostInputEvent::Key(key, pressed) => self.pending_keys.push((key, pressed)),
             HostInputEvent::Mouse(mouse) => self.pending_mouse.push(mouse),
         }
     }
@@ -109,6 +120,7 @@ impl<'a, I: crate::cpu::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrument
     fn push(&mut self, event: HostInputEvent) {
         match event {
             HostInputEvent::Scancode(sc) => self.send_scancode(sc),
+            HostInputEvent::Key(key, pressed) => self.send_key(key, pressed),
             HostInputEvent::Mouse(mouse) => {
                 self.send_mouse_event(mouse.dx, mouse.dy, mouse.dz, mouse.buttons);
             }

@@ -3015,16 +3015,14 @@ impl WebShellApp {
                 match event {
                     egui::Event::Text(text) => {
                         for ch in text.chars() {
-                            let seq = rusty_box::gui::char_to_scancode_sequence(ch);
-                            for scancode in seq {
-                                emu.send_scancode(scancode);
+                            for (key, pressed) in rusty_box::gui::char_to_bx_key_sequence(ch) {
+                                emu.send_key(key, pressed);
                             }
                         }
                     }
                     egui::Event::Key { key, pressed, .. } => {
-                        let seq = egui_key_to_scancodes(*key, *pressed);
-                        for scancode in seq {
-                            emu.send_scancode(scancode);
+                        if let Some(bx_key) = egui_key_to_bx_key(*key) {
+                            emu.send_key(bx_key, *pressed);
                         }
                     }
                     _ => {}
@@ -3972,48 +3970,44 @@ fn js_error(error: wasm_bindgen::JsValue) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn egui_key_to_scancodes(key: egui::Key, pressed: bool) -> Vec<u8> {
-    let (extended, make_code) = match key {
-        egui::Key::Escape => (false, 0x76u8),
-        egui::Key::F1 => (false, 0x05),
-        egui::Key::F2 => (false, 0x06),
-        egui::Key::F3 => (false, 0x04),
-        egui::Key::F4 => (false, 0x0C),
-        egui::Key::F5 => (false, 0x03),
-        egui::Key::F6 => (false, 0x0B),
-        egui::Key::F7 => (false, 0x83),
-        egui::Key::F8 => (false, 0x0A),
-        egui::Key::F9 => (false, 0x01),
-        egui::Key::F10 => (false, 0x09),
-        egui::Key::F11 => (false, 0x78),
-        egui::Key::F12 => (false, 0x07),
-        egui::Key::Enter => (false, 0x5A),
-        egui::Key::Tab => (false, 0x0D),
-        egui::Key::Backspace => (false, 0x66),
-        egui::Key::ArrowUp => (true, 0x75),
-        egui::Key::ArrowDown => (true, 0x72),
-        egui::Key::ArrowLeft => (true, 0x6B),
-        egui::Key::ArrowRight => (true, 0x74),
-        egui::Key::Home => (true, 0x6C),
-        egui::Key::End => (true, 0x69),
-        egui::Key::PageUp => (true, 0x7D),
-        egui::Key::PageDown => (true, 0x7A),
-        egui::Key::Delete => (true, 0x71),
-        egui::Key::Insert => (true, 0x70),
-        egui::Key::Space => (false, 0x29),
-        _ => return Vec::new(),
-    };
-    if extended {
-        if pressed {
-            vec![0xE0, make_code]
-        } else {
-            vec![0xE0, 0xF0, make_code]
-        }
-    } else if pressed {
-        vec![make_code]
-    } else {
-        vec![0xF0, make_code]
-    }
+/// Map an egui key to the guest key it represents.
+///
+/// The guest key (not a raw scancode) is what gets delivered, so the keyboard
+/// controller can render it through the guest's active scancode set — Bochs
+/// keyboard.cc `gen_scancode`. Returns `None` for keys the guest has no
+/// equivalent for; printable characters arrive separately as `egui::Event::Text`.
+fn egui_key_to_bx_key(key: egui::Key) -> Option<rusty_box::iodev::scancodes::BxKey> {
+    use rusty_box::iodev::scancodes::BxKey;
+    Some(match key {
+        egui::Key::Escape => BxKey::Esc,
+        egui::Key::F1 => BxKey::F1,
+        egui::Key::F2 => BxKey::F2,
+        egui::Key::F3 => BxKey::F3,
+        egui::Key::F4 => BxKey::F4,
+        egui::Key::F5 => BxKey::F5,
+        egui::Key::F6 => BxKey::F6,
+        egui::Key::F7 => BxKey::F7,
+        egui::Key::F8 => BxKey::F8,
+        egui::Key::F9 => BxKey::F9,
+        egui::Key::F10 => BxKey::F10,
+        egui::Key::F11 => BxKey::F11,
+        egui::Key::F12 => BxKey::F12,
+        egui::Key::Enter => BxKey::Enter,
+        egui::Key::Tab => BxKey::Tab,
+        egui::Key::Backspace => BxKey::Backspace,
+        egui::Key::ArrowUp => BxKey::Up,
+        egui::Key::ArrowDown => BxKey::Down,
+        egui::Key::ArrowLeft => BxKey::Left,
+        egui::Key::ArrowRight => BxKey::Right,
+        egui::Key::Home => BxKey::Home,
+        egui::Key::End => BxKey::End,
+        egui::Key::PageUp => BxKey::PageUp,
+        egui::Key::PageDown => BxKey::PageDown,
+        egui::Key::Delete => BxKey::Delete,
+        egui::Key::Insert => BxKey::Insert,
+        egui::Key::Space => BxKey::Space,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

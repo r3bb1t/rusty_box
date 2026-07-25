@@ -60,6 +60,10 @@ pub struct SharedDisplay {
     pub serial_log: String,
     /// ASCII bytes from GUI to inject into serial port RX (for console input)
     pub pending_serial_input: Vec<u8>,
+    /// Guest key press/release events queued for the emulator thread. Rendered
+    /// to bytes by the keyboard controller through the guest's active scancode
+    /// set (Bochs keyboard.cc `gen_scancode`).
+    pub pending_keys: Vec<(crate::iodev::scancodes::BxKey, bool)>,
     /// The two guest character generators, 256 glyphs x 32 bytes each, as raw
     /// VGA bitmaps (MSB-first: bit 7 is the leftmost pixel).
     /// Bochs: `bx_gui_c::vga_charmap[2][0x2000]` (gui.h), filled by
@@ -107,6 +111,7 @@ impl SharedDisplay {
             stop_flag: Arc::new(AtomicBool::new(false)),
             serial_log: String::new(),
             pending_serial_input: Vec::new(),
+            pending_keys: Vec::new(),
             vga_charmap: [Vec::new(), Vec::new()],
             charmap_loaded: false,
         }

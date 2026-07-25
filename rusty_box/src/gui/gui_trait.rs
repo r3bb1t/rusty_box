@@ -154,6 +154,15 @@ pub trait BxGui: Send + Sync {
         Vec::new()
     }
 
+    /// Get pending guest key press/release events.
+    ///
+    /// Preferred over [`BxGui::get_pending_scancodes`]: the keyboard controller
+    /// renders these through the guest's active scancode set, so selecting set 1
+    /// or 3 works (Bochs keyboard.cc `gen_scancode`).
+    fn get_pending_keys(&mut self) -> Vec<(crate::iodev::scancodes::BxKey, bool)> {
+        Vec::new()
+    }
+
     /// Get pending relative mouse events to forward to the PS/2 aux device.
     fn get_pending_mouse(&mut self) -> Vec<crate::gui::host_input::HostMouseEvent> {
         // Default: empty (GUIs without mouse forwarding)

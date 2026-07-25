@@ -8,7 +8,10 @@ pub mod vga_font;
 
 pub use gui_trait::{BxGui, DisplayMode, VgaTextModeInfo};
 pub use host_input::{HostInputEvent, HostInputSink, HostMouseEvent};
-pub use keymap::{ascii_to_scancode, char_to_scancode_sequence, needs_shift};
+pub use keymap::{
+    ascii_to_bx_key, ascii_to_scancode, char_to_bx_key_sequence, char_to_scancode_sequence,
+    needs_shift,
+};
 pub use nogui::NoGui;
 
 #[cfg(all(feature = "gui-egui", feature = "std"))]
