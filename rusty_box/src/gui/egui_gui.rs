@@ -122,9 +122,8 @@ mod bridge_impl {
 
         fn palette_change(&mut self, index: u8, red: u8, green: u8, blue: u8) -> bool {
             if let Ok(mut display) = self.shared.lock() {
-                if (index as usize) < 16 {
-                    display.palette[index as usize] = [red, green, blue];
-                }
+                // The palette is DAC-sized, so every index is valid.
+                display.palette[index as usize] = [red, green, blue];
             }
             true
         }

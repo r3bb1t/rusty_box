@@ -2154,6 +2154,16 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             if self.device_manager.vga.take_pending_clear_screen() {
                 gui.clear_screen();
             }
+            // Bochs vgacore.cc publishes each completed DAC write to the GUI via
+            // palette_change_common(). Drained here because the VGA cannot reach
+            // the GUI directly.
+            {
+                let changes: alloc::vec::Vec<(u8, u8, u8, u8)> =
+                    self.device_manager.vga.take_dac_palette_changes().collect();
+                for (index, red, green, blue) in changes {
+                    let _accepted = gui.palette_change(index, red, green, blue);
+                }
+            }
             if let Some(update_result) = self.device_manager.vga.update() {
                 match update_result {
                     VgaDisplayUpdate::Text(update_result) => {

@@ -63,6 +63,13 @@ const VGA_TEXT_MEM_BASE_MONO: BxPhyAddress = 0xB0000;
 /// Layout: memory[offset * 4 + plane], where plane = 0..3
 const VGA_MEM_SIZE: usize = 0x40000;
 
+/// Number of DAC (PEL) colour registers.
+const PEL_COLOR_COUNT: usize = 256;
+
+/// Shift applied to 6-bit DAC components to reach 8-bit host colour.
+/// Bochs: `s.dac_shift = 2` (vgacore.cc init_standard_vga).
+const DAC_SHIFT: u8 = 2;
+
 /// Size of one character generator: 256 glyphs x 32 bytes.
 /// Bochs: the `Bit8u charmap[0x2000]` in `update_charmap` (vgacore.cc).
 const CHARMAP_SIZE: usize = 0x2000;
@@ -626,6 +633,14 @@ pub(crate) struct BxVgaC {
     /// Bochs: `s.display_start_usec`, re-anchored in `vertical_timer()`.
     display_start_usec: u64,
 
+    /// DAC entries whose colour changed and have not yet been published to the
+    /// GUI. Bochs calls `bx_gui->palette_change_common(index, r << dac_shift,
+    /// ...)` synchronously from the PEL data write (vgacore.cc); the GUI is not
+    /// reachable from here, so the indices are queued and drained at the frame
+    /// boundary. A full-table republish is requested with `dac_all_dirty`.
+    dac_dirty: [bool; PEL_COLOR_COUNT],
+    dac_any_dirty: bool,
+
     /// Sequencer "screen off / clear screen" request (register 1 bit 5).
     /// Bochs: `s.sequencer.clear_screen` (vgacore.h), raised in the register-1
     /// write and consumed by `skip_update()`.
@@ -861,6 +876,8 @@ impl BxVgaC {
             feature_control: 0,
             crtc_start_addr: 0,
             display_start_usec: 0,
+            dac_dirty: [false; PEL_COLOR_COUNT],
+            dac_any_dirty: false,
             seq_clear_screen: false,
             pending_clear_screen: false,
             charmap_address1: 0,
@@ -2484,6 +2501,11 @@ impl BxVgaC {
                 self.pel_write_cycle += 1;
                 if self.pel_write_cycle >= PEL_CYCLES_PER_COLOR {
                     self.pel_write_cycle = 0;
+                    // Bochs vgacore.cc publishes the completed DAC entry to the
+                    // GUI here: palette_change_common(write_data_register,
+                    // red << dac_shift, green << dac_shift, blue << dac_shift).
+                    self.dac_dirty[color_index as usize] = true;
+                    self.dac_any_dirty = true;
                     self.pel_write_addr = self.pel_write_addr.wrapping_add(1);
                     #[cfg(feature = "alloc")]
                     self.redraw_area(0, 0, self.last_xres, self.last_yres);
@@ -3182,6 +3204,25 @@ impl BxVgaC {
             || !reset2
             || !reset1
             || screen_off
+    }
+
+    /// Drain the DAC entries whose colour changed, as `(index, r, g, b)` with
+    /// the values already shifted from the 6-bit DAC to 8-bit like Bochs's
+    /// `dac_shift` of 2.
+    pub(crate) fn take_dac_palette_changes(&mut self) -> impl Iterator<Item = (u8, u8, u8, u8)> + '_ {
+        let any = core::mem::take(&mut self.dac_any_dirty);
+        (0..PEL_COLOR_COUNT).filter_map(move |i| {
+            if !any || !core::mem::take(&mut self.dac_dirty[i]) {
+                return None;
+            }
+            let entry = self.pel_data[i];
+            Some((
+                i as u8,
+                entry[0] << DAC_SHIFT,
+                entry[1] << DAC_SHIFT,
+                entry[2] << DAC_SHIFT,
+            ))
+        })
     }
 
     /// Take a pending `clear_screen()` owed to the GUI (Bochs calls

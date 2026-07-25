@@ -45,8 +45,12 @@ pub struct SharedDisplay {
     pub start_pending: bool,
     /// Current instructions per second for status display
     pub ips: u32,
-    /// Custom palette (index → [R, G, B]), initially standard VGA 16-color
-    pub palette: [[u8; 3]; 16],
+    /// Host colour for each DAC (PEL) register, published by the VGA through
+    /// `palette_change`. This is DAC-sized, not 16 entries: VGA text mode maps
+    /// the bright attributes to DAC indices 0x38-0x3F through the attribute
+    /// palette, so a 16-entry table silently loses every bright colour.
+    /// Bochs keeps the same full-size table (`bx_gui_c::palette_change_common`).
+    pub palette: [[u8; 3]; 256],
     /// Set by GUI to request emulator restart; cleared by emulator thread when restart begins
     pub reset_requested: bool,
     /// Last emulator startup/runtime error reported by the worker thread
@@ -72,6 +76,20 @@ pub struct SharedDisplay {
     /// True once the guest has programmed a character generator. Until then the
     /// built-in font is used, so guests that never load one still render.
     pub charmap_loaded: bool,
+}
+
+/// Power-on DAC contents: the standard 16 VGA colours occupy both the low
+/// entries and the 0x38-0x3F block the attribute palette points at in text
+/// mode, matching how the VGA BIOS programs the DAC.
+fn default_dac_palette() -> [[u8; 3]; 256] {
+    let mut palette = [[0u8; 3]; 256];
+    for (i, colour) in VGA_DEFAULT_PALETTE_16.iter().enumerate() {
+        palette[i] = *colour;
+    }
+    for (i, colour) in VGA_DEFAULT_PALETTE_16.iter().enumerate().skip(8) {
+        palette[0x38 + (i - 8)] = *colour;
+    }
+    palette
 }
 
 /// Bytes per guest character generator: 256 glyphs x 32 bytes.
@@ -104,7 +122,7 @@ impl SharedDisplay {
             emu_running: false,
             start_pending: false,
             ips: 0,
-            palette: VGA_DEFAULT_PALETTE_16,
+            palette: default_dac_palette(),
             reset_requested: false,
             runtime_error: None,
             startup_status: None,
@@ -246,16 +264,11 @@ impl SharedDisplay {
                 // ACTL palette indirection (Bochs gui.cc)
                 let fg_idx = actl_palette[(attr & 0x0F) as usize] as usize;
                 let bg_idx = actl_palette[((attr >> 4) & 0x07) as usize] as usize;
-                let fg = if fg_idx < 16 {
-                    palette[fg_idx]
-                } else {
-                    [0xFF, 0xFF, 0xFF]
-                };
-                let bg = if bg_idx < 16 {
-                    palette[bg_idx]
-                } else {
-                    [0x00, 0x00, 0x00]
-                };
+                // Both indices are DAC registers (u8), so the table always
+                // covers them — no fallback, which used to turn every bright
+                // colour (DAC 0x38-0x3F) white.
+                let fg = palette[fg_idx];
+                let bg = palette[bg_idx];
 
                 let px = col * fw;
                 let py = row * fh;
@@ -396,7 +409,7 @@ impl Default for SharedDisplay {
 
 #[cfg(test)]
 mod tests {
-    use super::{SharedDisplay, GUEST_CHARMAP_LEN};
+    use super::{SharedDisplay, GUEST_CHARMAP_GLYPH_BYTES, GUEST_CHARMAP_LEN};
     use core::sync::atomic::Ordering;
 
     #[test]
@@ -469,6 +482,56 @@ mod tests {
             unlit,
             [0x00, 0x00, 0x00],
             "the rightmost pixel stays background — a mirrored glyph would light it"
+        );
+    }
+
+    // VGA text mode routes attributes through the attribute palette into the
+    // DAC, and the standard mapping sends the bright attributes (8-15) to DAC
+    // registers 0x38-0x3F. A 16-entry host palette cannot represent those, and
+    // the old code substituted white for any index >= 16 — which silently turned
+    // every bright colour white. Bochs keeps a full DAC-sized table
+    // (bx_gui_c::palette_change_common).
+    #[test]
+    fn bright_text_attributes_use_the_high_dac_entries_not_white() {
+        let mut shared = SharedDisplay::new();
+        shared.resize(1, 1, 8, 1);
+
+        // Give DAC 0x3C (where attribute 12 = bright red lands) a distinct colour.
+        shared.palette[0x3C] = [0xFE, 0x02, 0x03];
+
+        // Standard VGA text attribute palette: 0-7 direct, 8-15 -> 0x38-0x3F.
+        let mut actl = [0u8; 16];
+        for i in 0..8 {
+            actl[i] = i as u8;
+        }
+        for i in 8..16 {
+            actl[i] = 0x38 + (i as u8 - 8);
+        }
+
+        // One cell: a space on a bright-red foreground (attribute 0x0C).
+        let text = [b' ', 0x0C];
+        shared.render_text_to_framebuffer(&text, 0xffff, 0xffff, 0, 0, false, 0, 2, &actl);
+
+        // A blank glyph paints the background everywhere, so check the fg path
+        // by drawing a full-block glyph instead.
+        let mut map = vec![0u8; GUEST_CHARMAP_LEN];
+        for row in 0..GUEST_CHARMAP_GLYPH_BYTES {
+            map[(0xDBusize << 5) + row] = 0xFF;
+        }
+        shared.set_text_charmap(0, &map);
+        shared.set_text_charmap(1, &map);
+        let text = [0xDBu8, 0x0C];
+        shared.render_text_to_framebuffer(&text, 0xffff, 0xffff, 0, 0, false, 0, 2, &actl);
+
+        let pixel = [
+            shared.framebuffer[0],
+            shared.framebuffer[1],
+            shared.framebuffer[2],
+        ];
+        assert_eq!(
+            pixel,
+            [0xFE, 0x02, 0x03],
+            "bright attribute must resolve through DAC 0x3C, not fall back to white"
         );
     }
 
