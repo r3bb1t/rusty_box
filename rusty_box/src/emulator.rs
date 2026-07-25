@@ -3377,6 +3377,18 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     pub fn service_scheduler_boundary(&mut self, elapsed_ticks: u64) -> CpuResult<bool> {
         self.clear_scheduler_raw_wiring();
 
+        // Bochs unmapped.cc port 0x8900: a completed "Shutdown" protocol sets
+        // `bx_user_quit = 1` and BX_FATALs. Translate that guest request into
+        // our run-loop stop flag (checked at the top of every batch) — a
+        // graceful stop at the next boundary in place of Bochs's immediate
+        // abort. Drained unconditionally (the flag lives on `devices`, outside
+        // `scheduler_boundary_work_pending`'s DeviceManager view).
+        if self.devices.take_shutdown_request() {
+            tracing::info!("port 0x8900 shutdown protocol complete — stopping emulation");
+            self.stop_flag
+                .store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+
         // No-work fast path: when nothing is queued anywhere, every drain in
         // the prologue below is a no-op by construction, so skip straight to
         // the tick loop. Bochs main.cc's SMP round commit is exactly this: a

@@ -316,6 +316,16 @@ pub struct BxDevicesC {
     /// PC-system timer frequency used to convert device microseconds into
     /// absolute scheduler ticks without borrowing `BxPcSystemC` during I/O.
     timer_ips: u64,
+    /// Bochs unmapped.cc port-0x8900 "Shutdown" protocol progress (0..=8).
+    /// Writing the bytes of "Shutdown" in order advances this; completing it
+    /// requests emulator termination. Bochs's unmapped device has no
+    /// register_state(), so this is deliberately not snapshotted (defaults to
+    /// 0 on restore, matching upstream).
+    shutdown_state: u8,
+    /// Set when the port-0x8900 protocol completes (Bochs `bx_user_quit = 1`).
+    /// Drained by the emulator at the next scheduler boundary into its stop
+    /// flag. Transient — never snapshotted.
+    shutdown_requested: bool,
 }
 
 impl Default for BxDevicesC {
@@ -354,7 +364,17 @@ impl BxDevicesC {
             scheduler_boundary_requested: false,
             timer_requests: TimerRequestTable::default(),
             timer_ips: 1,
+            shutdown_state: 0,
+            shutdown_requested: false,
         }
+    }
+
+    /// Take (and clear) a pending port-0x8900 shutdown request. Bochs sets
+    /// `bx_user_quit = 1` and BX_FATALs; the emulator instead translates this
+    /// into its stop flag at the next scheduler boundary (a graceful stop in
+    /// place of Bochs's immediate abort). Transient — never snapshotted.
+    pub(crate) fn take_shutdown_request(&mut self) -> bool {
+        core::mem::take(&mut self.shutdown_requested)
     }
     /// Configure the scheduler tick frequency before device registration.
     #[inline]
@@ -891,6 +911,35 @@ impl BxDevicesC {
                     value as u8,
                 );
             }
+            // Bochs unmapped.cc port 0x8900: the "Shutdown" host<->guest
+            // shutdown protocol. Writing the ASCII bytes of "Shutdown" in
+            // sequence advances a state machine; the 8th ('n') requests
+            // emulator termination (Bochs `bx_user_quit = 1` + BX_FATAL).
+            // As in Bochs, an out-of-sequence *"Shutdown" letter* leaves the
+            // state unchanged, while any other byte resets it. The write path
+            // sees the full value (Bochs switches on `value`, not `value & 0xff`).
+            0x8900 => {
+                match value {
+                    0x53 if self.shutdown_state == 0 => self.shutdown_state = 1, // 'S'
+                    0x68 if self.shutdown_state == 1 => self.shutdown_state = 2, // 'h'
+                    0x75 if self.shutdown_state == 2 => self.shutdown_state = 3, // 'u'
+                    0x74 if self.shutdown_state == 3 => self.shutdown_state = 4, // 't'
+                    0x64 if self.shutdown_state == 4 => self.shutdown_state = 5, // 'd'
+                    0x6F if self.shutdown_state == 5 => self.shutdown_state = 6, // 'o'
+                    0x77 if self.shutdown_state == 6 => self.shutdown_state = 7, // 'w'
+                    0x6E if self.shutdown_state == 7 => self.shutdown_state = 8, // 'n'
+                    // A "Shutdown" letter that does not match the current step:
+                    // Bochs's `if (s.shutdown == N)` simply fails, leaving the
+                    // state unchanged (it is NOT reset).
+                    0x53 | 0x68 | 0x75 | 0x74 | 0x64 | 0x6F | 0x77 | 0x6E => {}
+                    // Bochs `default: s.shutdown = 0`.
+                    _ => self.shutdown_state = 0,
+                }
+                if self.shutdown_state == 8 {
+                    tracing::info!("Shutdown port (0x8900): shutdown requested");
+                    self.shutdown_requested = true;
+                }
+            }
             _ => {}
         }
     }
@@ -1407,6 +1456,38 @@ mod tests {
         assert_eq!(devices.inp(0x1234, 1, 0), 0xFF);
         assert_eq!(devices.inp(0x1234, 2, 0), 0xFFFF);
         assert_eq!(devices.inp(0x1234, 4, 0), 0xFFFFFFFF);
+    }
+
+    // Bochs unmapped.cc port 0x8900 "Shutdown" protocol: the ASCII bytes of
+    // "Shutdown" in order request emulator termination; an out-of-sequence
+    // "Shutdown" letter leaves the state unchanged, any other byte resets it.
+    #[test]
+    fn port_8900_shutdown_protocol_matches_bochs() {
+        let mut dev = boxed_devices();
+
+        // Partial progress, then a non-"Shutdown" byte resets (Bochs default:).
+        dev.default_write_handler(0x8900, u32::from(b'S'), 1);
+        dev.default_write_handler(0x8900, u32::from(b'h'), 1);
+        assert_eq!(dev.shutdown_state, 2);
+        assert!(!dev.shutdown_requested);
+        dev.default_write_handler(0x8900, u32::from(b'X'), 1);
+        assert_eq!(dev.shutdown_state, 0);
+
+        // An out-of-sequence *"Shutdown" letter* leaves the state unchanged
+        // (Bochs: the `if (s.shutdown == N)` guard fails without resetting).
+        dev.default_write_handler(0x8900, u32::from(b'S'), 1); // -> 1
+        dev.default_write_handler(0x8900, u32::from(b'S'), 1); // 'S' at state 1: unchanged
+        assert_eq!(dev.shutdown_state, 1);
+
+        // Completing the full "Shutdown" sequence requests termination.
+        let mut dev = boxed_devices();
+        for byte in b"Shutdown" {
+            dev.default_write_handler(0x8900, u32::from(*byte), 1);
+        }
+        assert_eq!(dev.shutdown_state, 8);
+        assert!(dev.shutdown_requested);
+        assert!(dev.take_shutdown_request());
+        assert!(!dev.take_shutdown_request(), "cleared after taking");
     }
 
     #[test]
