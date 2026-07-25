@@ -4289,8 +4289,11 @@ impl BxHardDriveC {
         }
 
         drive.controller.current_command = command;
-        // Bochs harddrv.cc: only clears ERR bit, preserves all other status bits
-        drive.controller.error = AtaError::empty();
+        // Bochs harddrv.cc command-write prologue clears ONLY the status ERR bit
+        // (`controller->status.err = 0`); the error register is cleared per-command
+        // (RECALIBRATE / READ* / WRITE* / SEEK / READ DMA / IDENTIFY / IDENTIFY
+        // PACKET) so a prior error code persists across commands that Bochs does
+        // not clear (SET FEATURES/MULTIPLE, READ VERIFY, WRITE DMA, power, ...).
         drive.controller.status.remove(AtaStatus::ERR);
 
         tracing::trace!(
@@ -4633,8 +4636,9 @@ impl BxHardDriveC {
                 self.start_seek(channel_num);
             }
             ATA_CMD_EXECUTE_DIAGNOSTICS => {
-                // Bochs harddrv.cc: set_signature + error=0x01 + raise_interrupt
-                // Must set signature for BOTH drives on the channel
+                // Bochs harddrv.cc case 0x90 (EXECUTE DEVICE DIAGNOSTIC):
+                // set_signature() on the selected drive, error=0x01, then
+                // raise_interrupt(channel). Bochs signs only the selected drive.
                 drive.controller.head_no = 0;
                 drive.controller.sector_count = 1;
                 drive.controller.sector_no = 1;
@@ -4645,7 +4649,17 @@ impl BxHardDriveC {
                 }
                 drive.controller.status.remove(AtaStatus::DRQ); // Clear DRQ
                 drive.controller.error = AtaError::from_bits_retain(0x01); // No error
-                drive.controller.interrupt_pending = true;
+                let is_disk = drive.device_type == DeviceType::Disk;
+                if is_disk {
+                    // Bochs set_signature(): signing an HD resets drive_select to 0.
+                    self.channels[channel_num].drive_select = 0;
+                }
+                // Bochs raises the completion IRQ AFTER the (possible) selection
+                // flip, so it is gated on and delivered to the now-selected drive
+                // rather than the pre-flip drive the fall-through epilogue would
+                // consult. Raise directly and skip the epilogue.
+                self.raise_interrupt(channel_num, pic, pci_ide);
+                return;
             }
             ATA_CMD_INITIALIZE_PARAMS => {
                 // Bochs harddrv.cc — INITIALIZE DRIVE PARAMETERS
@@ -4690,6 +4704,9 @@ impl BxHardDriveC {
                     return;
                 }
                 tracing::trace!("ATA: IDENTIFY command");
+                // Bochs harddrv.cc case 0xec clears the error register (the
+                // command-write prologue only clears status.ERR).
+                drive.controller.error = AtaError::empty();
                 drive.fill_identify_buffer(pci_ide.bmdma_present());
                 drive.controller.status.insert(AtaStatus::DRQ);
                 drive.controller.interrupt_pending = true;
