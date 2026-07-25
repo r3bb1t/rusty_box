@@ -75,3 +75,43 @@ Re-run Windows setup to get GROUND TRUTH on the next actual crash rather than
 implementing the AVX2 handler backlog speculatively — most of it (gather,
 permute, var-shift, mask-move) is not on the setup hot path. Prioritize by real
 DECODE-FAIL captures.
+
+---
+
+## RE-VERIFICATION 2026-07-25 — this backlog is ~half stale
+
+Checked every entry above against the current tree (`feb28c5`). Method: count
+references in `rusty_box_decoder/src/decoder/decode64.rs` (remap arms / decode
+wiring) and in `rusty_box/src/cpu/` (handlers).
+
+### Already DONE since the audit — do NOT re-implement
+
+The entire "AVX1 PARTIAL mis-decodes" section is resolved: `VROUNDSS/SD`,
+`VROUNDPS/PD`, `VBLENDPS/PD`, `VBLENDVPS`, `VDPPS/PD`, `VINSERTPS` and
+`VMPSADBW` all have `remap_sse_to_vex` arms today.
+
+From the "NEED NEW VEX HANDLERS" list, these are also wired with handlers:
+`VPERMILPS/PD`, `VPERMPS`, `VPERMPD`, `VPSRLVD/Q`, `VPSRAVD`, `VPSLLVD/Q`.
+
+### GENUINELY STILL OPEN — zero decode wiring AND zero handler
+
+| enc | insn | note |
+|---|---|---|
+| 0F38 0E/0F | `VTESTPS` / `VTESTPD` | small: sets ZF/CF from sign bits, no dst write. Bochs `avx/avx_pfp.cc VTESTPS_VpsWpsR` — ~15 lines each. Best next candidate. |
+| 0F38 13 | `VCVTPH2PS` | F16C |
+| 0F3A 1D | `VCVTPS2PH` | F16C |
+| 0F38 2C-2F | `VMASKMOVPS/PD` | masked load/store, faulting semantics |
+| 0F38 8C/8E | `VMASKMOVD/Q` | as above |
+| 0F38 90-93 | `VGATHER*` | large: fault-suppression + mask update per element |
+
+Also still absent from `decode64.rs`: `VPCLMULQDQ`, `VPCMPISTRI/M`,
+`VPEXTRB/W/D`. These were listed under "PARTIAL mis-decodes", so they may be
+decoding through a legacy SSE entry and losing VEX semantics — **verify before
+assuming they are merely missing**, since that failure mode is silent data
+corruption (the same class as the VPINSR bug this audit originally found).
+
+### Caveat
+
+This re-verification is reference-count based, not behavioural. A non-zero
+count proves wiring exists, not that it is Bochs-correct. Treat "DONE" as
+"stop looking here first", not as "verified equivalent".
