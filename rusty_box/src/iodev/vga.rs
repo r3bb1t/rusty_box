@@ -591,6 +591,18 @@ pub(crate) struct BxVgaC {
     /// VGA enable (port 0x3C3) - bit 0 enables VGA display
     vga_enabled: bool,
 
+    /// Feature Control register: written via port 0x3BA/0x3DA (mono/color
+    /// emulation), read back at 0x3CA. Only bit 3 is retained.
+    /// Bochs: `s.feature_control` (vgacore.h); write `feature_control = value & 0x08`
+    /// and read `RETURN(s.feature_control)` (vgacore.cc).
+    feature_control: u8,
+
+    /// Doubled scanlines in classic graphics modes, derived from CRTC register
+    /// 0x09 (Maximum Scan Line). Bochs: `s.y_doublescan = ((value & 0x9f) > 0)`
+    /// (vgacore.cc CRTC write case 0x09); consumed when rendering rows and when
+    /// halving the line-compare (split screen).
+    y_doublescan: bool,
+
     /// PEL mask register (port 0x3C6)
     pel_mask: u8,
 
@@ -789,7 +801,10 @@ impl BxVgaC {
 
             // VGA Enable and PEL/DAC registers
             vga_enabled: true, // VGA enabled by default
-            pel_mask: 0xFF,    // All palette entries visible
+            // Bochs init_standard_vga(): s.feature_control = 0
+            feature_control: 0,
+            y_doublescan: false,
+            pel_mask: 0xFF, // All palette entries visible
             dac_state: 0x01,   // Initial state
             pel_write_addr: 0,
             pel_read_addr: 0,
@@ -1068,7 +1083,8 @@ impl BxVgaC {
         let vbe_len = snapshot_v3_usize_len(self.vbe_memory.len())?;
 
         // Section version plus the scalar state written before every array.
-        let mut len = checked_snapshot_len_add(4, 84)?;
+        // 86 = 84 + feature_control (u8) + y_doublescan (bool).
+        let mut len = checked_snapshot_len_add(4, 86)?;
         for array_len in [
             pci_len,
             snapshot_v3_usize_len(self.crtc_regs.len())?,
@@ -1148,6 +1164,10 @@ impl BxVgaC {
 
         writer.write_u32(self.ext_start_addr)?;
         let mapping_target = self.snapshot_v3_mapping_target();
+        // Bochs registers both in its VGA state list (vgacore.cc register_state:
+        // "feature_control" and BXRS_PARAM_BOOL y_doublescan).
+        writer.write_u8(self.feature_control as u8)?;
+        writer.write_bool(self.y_doublescan)?;
         writer.write_bool(self.ext_y_dblsize)?;
         writer.write_bool(self.pci_enabled)?;
         writer.write_u32(mapping_target.lfb_base)?;
@@ -1250,6 +1270,8 @@ impl BxVgaC {
             ddc_enabled: reader.read_bool()?,
         };
         let ext_start_addr = reader.read_u32()?;
+        let feature_control = reader.read_u8()?;
+        let y_doublescan = reader.read_bool()?;
         let ext_y_dblsize = reader.read_bool()?;
         let pci_enabled = reader.read_bool()?;
         let target = VgaSnapshotRestoreTarget {
@@ -1348,6 +1370,8 @@ impl BxVgaC {
         self.vbe.dac_8bit = saved_vbe.dac_8bit;
         self.vbe.ddc_enabled = saved_vbe.ddc_enabled;
         self.ext_start_addr = ext_start_addr;
+        self.feature_control = feature_control;
+        self.y_doublescan = y_doublescan;
         self.ext_y_dblsize = ext_y_dblsize;
         self.pending_lfb_relocate = None;
         self.pending_mmio_base = None;
@@ -2006,8 +2030,16 @@ impl BxVgaC {
                 }
             }
 
+            // Feature Control read-back. Bochs vgacore.cc read case 0x03ca:
+            // RETURN(s.feature_control).
+            0x3CA => self.feature_control as u32,
+
             // EGA compatibility ports - return 0
-            0x3CA | 0x3CB | 0x3CD => 0x00,
+            0x3CB | 0x3CD => 0x00,
+
+            // Bochs vgacore.cc read case 0x03db: RETURN(0) — the high byte of a
+            // 16-bit read from 0x03DA lands here and must read 0, not 0xFF.
+            0x3DB => 0x00,
 
             _ => 0xFF,
         }
@@ -2104,6 +2136,15 @@ impl BxVgaC {
                             self.calculate_retrace_timing();
                         }
                         _ => {}
+                    }
+
+                    // Bochs vgacore.cc CRTC write case 0x09:
+                    //   s.y_doublescan = ((value & 0x9f) > 0);
+                    // (bit 7 = line-compare bit 9 and bit 5 = start-address bit
+                    // are excluded; any of the max-scan-line bits or bit 7's
+                    // 0x80 companion doubles the rows).
+                    if index == CRTC_MAX_SCAN_LINE {
+                        self.y_doublescan = (value & 0x9F) > 0;
                     }
 
                     match index {
@@ -2283,6 +2324,13 @@ impl BxVgaC {
                     #[cfg(feature = "alloc")]
                     self.redraw_area(0, 0, self.last_xres, self.last_yres);
                 }
+            }
+
+            // Feature Control (mono/color emulation). Bochs vgacore.cc write
+            // cases 0x03ba/0x03da: `s.feature_control = value & 0x08` — the
+            // register is otherwise inert ("ignoring: feature ctrl & vert sync").
+            VGA_STATUS | VGA_STATUS_MONO => {
+                self.feature_control = value & 0x08;
             }
 
             // EGA compatibility ports - ignore writes
@@ -2638,7 +2686,9 @@ impl BxVgaC {
                 } else {
                     0
                 };
-            if self.ext_y_dblsize {
+            // Bochs vgacore.cc update(): `if (s.y_doublescan) line_compare >>= 1;`
+            // — the split-screen line compare is in doubled rows.
+            if self.y_doublescan {
                 lc >> 1
             } else {
                 lc
@@ -2666,7 +2716,9 @@ impl BxVgaC {
                 let mut rgba = vec![0u8; (tile_width * tile_height * 4) as usize];
                 for r in 0..tile_height {
                     let mut y = yc + r;
-                    if self.ext_y_dblsize {
+                    // Bochs vgacore.cc update(): `if (s.y_doublescan) y >>= 1;`
+                    // — two consecutive screen rows share one memory row.
+                    if self.y_doublescan {
                         y >>= 1;
                     }
                     for c in 0..tile_width {
@@ -3203,8 +3255,13 @@ impl BxVgaC {
                     if current_addr >= self.vbe.base_address as BxPhyAddress {
                         let offset = current_addr - self.vbe.base_address as BxPhyAddress;
                         if self.seq_chain_four && offset < 0x40000 {
-                            let wrapped = VGA_WINDOW_GRAPHICS_BASE + (offset & 0x1ffff);
-                            *byte = vga_mem_read_byte(self, wrapped);
+                            // Bochs vga.cc mem_read: chain-4 LFB accesses go
+                            // straight to bx_vgacore_c::mem_read(offset) with the
+                            // raw offset — the full 256KB is addressable. Wrapping
+                            // to 128KB and re-entering at the legacy window base
+                            // re-applied window gating (mapping 1 returns 0xFF past
+                            // 64KB and 128-256KB aliased downward).
+                            *byte = vga_mem_read_byte(self, offset);
                         } else {
                             *byte = 0xff;
                         }
@@ -3236,8 +3293,11 @@ impl BxVgaC {
                     if current_addr >= self.vbe.base_address as BxPhyAddress {
                         let offset = current_addr - self.vbe.base_address as BxPhyAddress;
                         if self.seq_chain_four && offset < 0x40000 {
-                            let wrapped = VGA_WINDOW_GRAPHICS_BASE + (offset & 0x1ffff);
-                            vga_mem_write_byte(self, wrapped, value);
+                            // Bochs vga.cc mem_write: chain-4 LFB writes go
+                            // straight to bx_vgacore_c::mem_write(offset, value)
+                            // with the raw offset (full 256KB), not wrapped to
+                            // 128KB through the legacy window.
+                            vga_mem_write_byte(self, offset, value);
                         }
                         continue;
                     }
@@ -5172,6 +5232,61 @@ mod tests {
         let word = vga.read_port(VGA_CRTC_INDEX, 2, 0);
         assert_eq!(word & 0xFF, CRTC_OVERFLOW as u32, "low byte = index reg");
         assert_eq!((word >> 8) & 0xFF, 0x5A, "high byte = data reg");
+    }
+
+    // Bochs vgacore.cc write cases 0x03ba/0x03da: `feature_control = value & 0x08`;
+    // read case 0x03ca returns it; read case 0x03db returns 0.
+    #[test]
+    fn feature_control_round_trips_via_3da_and_3ca() {
+        let mut vga = BxVgaC::new();
+        assert_eq!(vga.read_port(0x3CA, 1, 0), 0x00, "reset value is 0");
+
+        vga.write_port(VGA_STATUS, 0xFF, 1);
+        assert_eq!(
+            vga.read_port(0x3CA, 1, 0),
+            0x08,
+            "only bit 3 of a 0x3DA write is retained"
+        );
+
+        // The 0x3BA alias is gated off while in color emulation — Bochs
+        // vgacore.cc write_handler returns early for 0x3b0-0x3bf when
+        // misc_output.color_emulation is set — so it must NOT clear the value.
+        vga.write_port(VGA_STATUS_MONO, 0x00, 1);
+        assert_eq!(
+            vga.read_port(0x3CA, 1, 0),
+            0x08,
+            "mono-port write must be ignored in color emulation mode"
+        );
+
+        // Writing 0 through the active (color) port does clear it.
+        vga.write_port(VGA_STATUS, 0x00, 1);
+        assert_eq!(vga.read_port(0x3CA, 1, 0), 0x00);
+
+        // 0x3DB is the high byte of a 16-bit read from 0x3DA: Bochs returns 0.
+        assert_eq!(vga.read_port(0x3DB, 1, 0), 0x00);
+    }
+
+    // Bochs vgacore.cc CRTC write case 0x09: y_doublescan = ((value & 0x9f) > 0).
+    #[test]
+    fn crtc_max_scan_line_derives_y_doublescan() {
+        let mut vga = BxVgaC::new();
+        vga.write_port(VGA_CRTC_INDEX, CRTC_MAX_SCAN_LINE as u32, 1);
+
+        // 0x00 -> no doubling.
+        vga.write_port(VGA_CRTC_DATA, 0x00, 1);
+        assert!(!vga.y_doublescan);
+
+        // Mode 13h programs 0x41 (max scan line 1 + line-compare bit 9): doubled.
+        vga.write_port(VGA_CRTC_DATA, 0x41, 1);
+        assert!(vga.y_doublescan);
+
+        // Only bits in 0x9F count — 0x40 alone (line compare bit 9) does not.
+        vga.write_port(VGA_CRTC_DATA, 0x40, 1);
+        assert!(!vga.y_doublescan);
+
+        // Bit 7 (0x80) is inside the mask.
+        vga.write_port(VGA_CRTC_DATA, 0x80, 1);
+        assert!(vga.y_doublescan);
     }
 
     #[test]
