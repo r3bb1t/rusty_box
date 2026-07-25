@@ -615,6 +615,17 @@ pub(crate) struct BxVgaC {
     /// and read `RETURN(s.feature_control)` (vgacore.cc).
     feature_control: u8,
 
+    /// CRTC start address latched for the current frame.
+    /// Bochs: `s.CRTC.start_addr`, refreshed in `vertical_timer()` from CRTC
+    /// registers 0x0C/0x0D — the write handlers deliberately do nothing, so a
+    /// mid-frame change cannot tear the picture.
+    crtc_start_addr: u16,
+
+    /// Host microsecond stamp of the last vertical retrace, used as the phase
+    /// anchor for the 0x3DA status register.
+    /// Bochs: `s.display_start_usec`, re-anchored in `vertical_timer()`.
+    display_start_usec: u64,
+
     /// Sequencer "screen off / clear screen" request (register 1 bit 5).
     /// Bochs: `s.sequencer.clear_screen` (vgacore.h), raised in the register-1
     /// write and consumed by `skip_update()`.
@@ -848,6 +859,8 @@ impl BxVgaC {
             vga_enabled: true, // VGA enabled by default
             // Bochs init_standard_vga(): s.feature_control = 0
             feature_control: 0,
+            crtc_start_addr: 0,
+            display_start_usec: 0,
             seq_clear_screen: false,
             pending_clear_screen: false,
             charmap_address1: 0,
@@ -1994,9 +2007,14 @@ impl BxVgaC {
                 // bit 0: Display Enable (1 = in blanking period)
                 // bit 3: Vertical Retrace (1 = in vertical retrace)
                 let retval = if self.has_icount_sync && self.vtotal_usec > 0 {
-                    // Timing-based retrace matching Bochs vgacore.cc
+                    // Timing-based retrace matching Bochs vgacore.cc:
+                    //   display_usec = time_usec() - s.display_start_usec;
+                    //   display_usec %= s.vtotal_usec;
+                    // The anchor is re-set at each vertical retrace by
+                    // vertical_timer(), phase-locking the waveform to the frame.
                     let time_usec = self.current_usec(icount);
-                    let display_usec = time_usec % self.vtotal_usec as u64;
+                    let display_usec = time_usec.wrapping_sub(self.display_start_usec)
+                        % self.vtotal_usec as u64;
                     let mut r = 0u8;
                     // Vertical retrace (bit 3)
                     if display_usec >= self.vrstart_usec as u64
@@ -2178,9 +2196,10 @@ impl BxVgaC {
                             (cursor_addr as usize % BYTES_PER_ROW) / BYTES_PER_CHAR,
                         );
                         self.vga_mem_updated |= 1;
-                    } else if index == CRTC_START_ADDR_HIGH || index == CRTC_START_ADDR_LOW {
-                        self.text_buffer_update = true;
                     }
+                    // CRTC 0x0C/0x0D deliberately have no immediate effect:
+                    // Bochs vgacore.cc notes "Start address change handled in
+                    // vertical_timer()", which latches it once per frame.
 
                     // Recalculate retrace timing and force redraws for register-only
                     // display shape changes. Bochs vgacore.cc write_handler marks
@@ -2522,8 +2541,9 @@ impl BxVgaC {
         // Our text_memory is flat: [char0, attr0, char1, attr1, ...] at offsets
         // (physical_addr & 0x7FFF). For 80x25 mode, each row is 160 bytes.
         // CRTC start address is in character cells (words).
-        let start_addr_words = ((self.crtc_regs[CRTC_START_ADDR_HIGH] as u16) << 8)
-            | (self.crtc_regs[CRTC_START_ADDR_LOW] as u16);
+        // Bochs renderers read the per-frame latch (s.CRTC.start_addr), not the
+        // live registers, so a mid-frame write cannot tear the picture.
+        let start_addr_words = self.crtc_start_addr;
         let start_address = (start_addr_words as usize) * BYTES_PER_CHAR;
 
         let mem_mask = VGA_TEXT_MEM_SIZE - 1; // 0x7fff
@@ -2776,9 +2796,8 @@ impl BxVgaC {
         if !graphics_alpha {
             return;
         }
-        let start_addr = (((self.crtc_regs[CRTC_START_ADDR_HIGH] as u32) << 8)
-            | self.crtc_regs[CRTC_START_ADDR_LOW] as u32)
-            .wrapping_add(self.ext_start_addr);
+        // Bochs uses the per-frame latch here too (s.CRTC.start_addr).
+        let start_addr = (self.crtc_start_addr as u32).wrapping_add(self.ext_start_addr);
         let shift = (self.graphics_regs[GFX_REG_GRAPHICS_MODE] >> 5) & 0x03;
         let mut line_offset = self.legacy_line_offset();
         if shift >= 2 && (self.crtc_regs[0x17] & 0x40) != 0 {
@@ -2820,9 +2839,8 @@ impl BxVgaC {
             self.redraw_area(0, 0, width, height);
         }
 
-        let start_addr = (((self.crtc_regs[CRTC_START_ADDR_HIGH] as u32) << 8)
-            | self.crtc_regs[CRTC_START_ADDR_LOW] as u32)
-            .wrapping_add(self.ext_start_addr);
+        // Bochs uses the per-frame latch here too (s.CRTC.start_addr).
+        let start_addr = (self.crtc_start_addr as u32).wrapping_add(self.ext_start_addr);
         let line_offset = self.legacy_line_offset().max(1);
         let line_compare = {
             let lc = self.crtc_regs[CRTC_LINE_COMPARE] as u16
@@ -3099,6 +3117,36 @@ impl BxVgaC {
         })
     }
 
+    /// Vertical retrace: latch the frame's start address and re-anchor the
+    /// 0x3DA phase.
+    ///
+    /// Bochs `bx_vgacore_c::vertical_timer()` (vgacore.cc):
+    ///   prev = s.CRTC.start_addr;
+    ///   s.CRTC.start_addr = (CRTC.reg[0x0c] << 8) | CRTC.reg[0x0d];
+    ///   if changed -> redraw (graphics: vga_redraw_area, text: vga_mem_updated |= 1)
+    ///   s.display_start_usec = current time
+    ///
+    /// Returns whether the start address moved, so the caller can force the
+    /// redraw Bochs performs for the graphics path.
+    pub(crate) fn vertical_timer(&mut self, now_usec: u64) -> bool {
+        let previous = self.crtc_start_addr;
+        self.crtc_start_addr = ((self.crtc_regs[CRTC_START_ADDR_HIGH] as u16) << 8)
+            | self.crtc_regs[CRTC_START_ADDR_LOW] as u16;
+        let changed = self.crtc_start_addr != previous;
+        if changed {
+            self.vga_mem_updated |= 1;
+            self.text_buffer_update = true;
+        }
+        self.display_start_usec = now_usec;
+        changed
+    }
+
+    /// Period of the vertical retrace in microseconds, for arming the vertical
+    /// timer (Bochs `s.vtotal_usec`). Zero before the retrace timing is known.
+    pub(crate) fn vertical_period_usec(&self) -> u32 {
+        self.vtotal_usec
+    }
+
     /// Whether this frame's screen update must be skipped.
     ///
     /// Bochs `bx_vgacore_c::skip_update()` (vgacore.cc): services a pending
@@ -3245,9 +3293,10 @@ impl BxVgaC {
         // We'll update `self.text_snapshot` to the new state at the end of this call.
         let old_snapshot = self.text_snapshot.clone();
 
-        // Calculate text mode parameters (matching vgacore.cc)
-        let start_addr = ((self.crtc_regs[CRTC_START_ADDR_HIGH] as u16) << 8)
-            | (self.crtc_regs[CRTC_START_ADDR_LOW] as u16);
+        // Calculate text mode parameters (matching vgacore.cc). The start
+        // address comes from the per-frame latch, as in Bochs's renderers
+        // (`tm_info.start_address = (s.CRTC.start_addr << 1)`).
+        let start_addr = self.crtc_start_addr;
         let start_address = start_addr << 1;
 
         let cs_start = self.crtc_regs[CRTC_CURSOR_START] & CRTC_CURSOR_START_MASK;

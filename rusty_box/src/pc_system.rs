@@ -124,6 +124,9 @@ pub enum TimerOwner {
     /// HPET comparator one-shot — Bochs hpet.cc "hpet". The argument is the
     /// comparator index (Bochs `setTimerParam(timer_id, i)`).
     Hpet(usize),
+    /// VGA vertical retrace — Bochs vgacore.cc "vga vertical timer". Latches the
+    /// CRTC start address for the frame and re-anchors the 0x3DA retrace phase.
+    VgaVertical,
 }
 
 /// Individual timer structure
@@ -183,6 +186,8 @@ const TIMER_OWNER_HD_SEEK: u8 = 12;
 const TIMER_OWNER_HPET: u8 = 13;
 #[cfg(feature = "std")]
 const TIMER_OWNER_SERIAL_TX: u8 = 14;
+/// VGA vertical retrace timer (Bochs vgacore.cc `vga_vtimer_id`).
+const TIMER_OWNER_VGA_VERTICAL: u8 = 15;
 
 #[cfg(feature = "std")]
 const TIMER_OWNER_WIRE_LEN: u64 = 5;
@@ -226,6 +231,7 @@ fn timer_owner_wire_parts(owner: TimerOwner) -> io::Result<(u8, u32)> {
         TimerOwner::CmosOneSecond => fixed(TIMER_OWNER_CMOS_ONE_SECOND),
         TimerOwner::CmosUip => fixed(TIMER_OWNER_CMOS_UIP),
         TimerOwner::AcpiPmOverflow => fixed(TIMER_OWNER_ACPI_PM_OVERFLOW),
+        TimerOwner::VgaVertical => fixed(TIMER_OWNER_VGA_VERTICAL),
         TimerOwner::SerialFifo(port) => {
             if port >= crate::iodev::BX_FIXED_SERIAL_TIMER_OWNERS {
                 return Err(snapshot_invalid_data("serial timer owner is out of range"));
@@ -290,6 +296,7 @@ fn read_timer_owner<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Timer
         TIMER_OWNER_CMOS_ONE_SECOND => fixed(TimerOwner::CmosOneSecond),
         TIMER_OWNER_CMOS_UIP => fixed(TimerOwner::CmosUip),
         TIMER_OWNER_ACPI_PM_OVERFLOW => fixed(TimerOwner::AcpiPmOverflow),
+        TIMER_OWNER_VGA_VERTICAL => fixed(TimerOwner::VgaVertical),
         TIMER_OWNER_SERIAL_FIFO => {
             let port = usize::try_from(argument)
                 .map_err(|_| snapshot_invalid_data("serial timer owner argument is too large"))?;

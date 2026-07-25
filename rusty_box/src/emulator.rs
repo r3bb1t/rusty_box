@@ -568,6 +568,12 @@ pub struct Emulator<'a, I: BxCpuIdTrait, T: Instrumentation = ()> {
     bios_output_file: Option<std::fs::File>,
     /// Exit addresses for emu_start.
     pub(crate) exit_set: ExitSet,
+    /// Handle of the VGA vertical-retrace timer (Bochs vgacore.cc
+    /// `vga_vtimer_id`). Re-armed whenever the retrace period changes.
+    pub(crate) vga_vertical_timer_handle: Option<usize>,
+    /// Vertical period currently programmed into that timer, so it is only
+    /// re-armed when the guest actually changes the display timing.
+    pub(crate) vga_vertical_period_usec: u32,
     /// Shared stop flag: when set to true by the GUI thread, run_interactive exits the loop
     #[cfg(feature = "alloc")]
     pub stop_flag: Arc<AtomicBool>,
@@ -1481,6 +1487,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             #[cfg(feature = "std")]
             core::ptr::addr_of_mut!((*ptr).bios_output_file).write(None);
             core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
+            core::ptr::addr_of_mut!((*ptr).vga_vertical_timer_handle).write(None);
+            core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
             core::ptr::addr_of_mut!((*ptr).stop_flag).write(Arc::new(AtomicBool::new(false)));
             Ok(alloc::boxed::Box::from_raw(ptr))
         }
@@ -1584,6 +1592,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         core::ptr::addr_of_mut!((*ptr).initialized).write(false);
         core::ptr::addr_of_mut!((*ptr).snapshot_restore_failed).write(false);
         core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
+            core::ptr::addr_of_mut!((*ptr).vga_vertical_timer_handle).write(None);
+            core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
         core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
         Ok(&mut *ptr)
     }
@@ -1634,6 +1644,17 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     .register_timer(TimerOwner::Hpet(index), 0, false, false, "hpet")?;
             self.device_manager.hpet.timer_handles[index] = Some(handle);
         }
+
+        // Bochs vgacore.cc registers a continuous "vga vertical timer" at the
+        // vertical-retrace period; it latches the frame's CRTC start address and
+        // re-anchors the 0x3DA phase. Armed once the retrace timing is known.
+        self.vga_vertical_timer_handle = Some(self.pc_system.register_timer(
+            TimerOwner::VgaVertical,
+            0,
+            false,
+            false,
+            "vga vertical timer",
+        )?);
 
         self.device_manager.cmos.periodic_timer_handle = Some(self.pc_system.register_timer(
             TimerOwner::CmosPeriodic,
@@ -2781,6 +2802,17 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         for entry in 0..count {
             match owners[entry] {
                 TimerOwner::NullTimer => {}
+                TimerOwner::VgaVertical => {
+                    // Bochs vgacore.cc vertical_timer(): latch the start address
+                    // for the frame and re-anchor the retrace phase. Coalesced —
+                    // only the newest retrace matters.
+                    let now_usec = if ips > 0 {
+                        (current_ticks as u128 * 1_000_000 / ips as u128) as u64
+                    } else {
+                        0
+                    };
+                    self.device_manager.vga.vertical_timer(now_usec);
+                }
                 TimerOwner::PciIdeCh0 => {
                     for _ in 0..counts[entry] {
                         let pins_ptr = self.tlb_pins().as_ptr();
@@ -3405,8 +3437,31 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             || self.device_manager.hpet.has_pending_work()
     }
 
+    /// Keep the VGA vertical-retrace timer armed at the current display period.
+    ///
+    /// Bochs vgacore.cc re-activates `vga_vtimer_id` from
+    /// `start_vertical_timer()` whenever `calculate_retrace_timing()` produces a
+    /// new `vtotal_usec`. Here the period is polled at the scheduler boundary,
+    /// which covers every path that can change the CRTC timing registers.
+    fn sync_vga_vertical_timer(&mut self) {
+        let Some(handle) = self.vga_vertical_timer_handle else {
+            return;
+        };
+        let period = self.device_manager.vga.vertical_period_usec();
+        if period == 0 || period == self.vga_vertical_period_usec {
+            return;
+        }
+        match self.pc_system.activate_timer_usec(handle, period, true) {
+            Ok(()) => self.vga_vertical_period_usec = period,
+            Err(error) => {
+                tracing::warn!("failed to arm the VGA vertical timer: {error:?}");
+            }
+        }
+    }
+
     pub fn service_scheduler_boundary(&mut self, elapsed_ticks: u64) -> CpuResult<bool> {
         self.clear_scheduler_raw_wiring();
+        self.sync_vga_vertical_timer();
 
         // Bochs unmapped.cc port 0x8900: a completed "Shutdown" protocol sets
         // `bx_user_quit = 1` and BX_FATALs. Translate that guest request into
