@@ -115,3 +115,51 @@ corruption (the same class as the VPINSR bug this audit originally found).
 This re-verification is reference-count based, not behavioural. A non-zero
 count proves wiring exists, not that it is Bochs-correct. Treat "DONE" as
 "stop looking here first", not as "verified equivalent".
+
+## CONFIRMED LIVE DECODE BUG 2026-07-25 — VPCLMULQDQ
+
+Verified in the tree, not inferred. `BxOpcodeTable0F3A44` (opmap_0f3a.rs) holds
+exactly one entry:
+
+```rust
+pub(super) const BxOpcodeTable0F3A44: [u64; 1] = [form_opcode(
+    attrs!(SSE_PREFIX_66),
+    Opcode::PclmulqdqVdqWdqIb,
+)];
+```
+
+No `VEX`-flagged entry precedes it. Per this audit's own architecture note,
+`find_opcode_in_table` returns the FIRST match and VEX-ness does not mask a
+legacy `SSE_PREFIX_66` entry — so `VEX.66.0F3A.WIG 44 /r ib` (VPCLMULQDQ)
+decodes to the **legacy 3-operand** `PclmulqdqVdqWdqIb` instead of the
+4-operand VEX form. Consequences, identical to the VPINSR bug this audit was
+opened for:
+
+- `vvvv` (src1) is dropped;
+- the destination is reused as src1, so `VPCLMULQDQ xmm1, xmm2, xmm3, imm8`
+  computes from xmm1 rather than xmm2;
+- the upper YMM lane is not cleared.
+
+Silent wrong results, no fault.
+
+### Fix shape (NOT a one-liner)
+
+The opcode variants already exist — `V128VpclmulqdqVdqHdqWdqIb`,
+`V256VpclmulqdqVdqHdqWdqIb` (opcode.rs) and the typed form
+`V128VpclmulqdqVdqHdqWdqIbR` (typed.rs) — **but there is no CPU handler for
+them** under `rusty_box/src/cpu/`. So the full fix is:
+
+1. `remap_sse_to_vex` arm in decode64.rs, VL-split, next to the existing
+   `MpsadbwVdqWdqIb` arm;
+2. new VEX handler(s) reading `src2()` as `vvvv` and clearing the upper lane,
+   ported from Bochs `cpu/avx/avx_pclmul.cc`;
+3. dispatcher wiring for the new opcodes;
+4. decode + execution regression tests, in the style of
+   `test_vex_pinsr_family_decode` / `vex_vpinsrw_sources_vvvv_and_clears_upper`.
+
+### Check these the same way before assuming they are merely missing
+
+`VPCMPISTRI/M` (0F3A 60-63) and `VPEXTRB/W/D` (0F3A 14-16) are likewise absent
+from decode64.rs while their tables carry legacy `SSE_PREFIX_66` entries. Read
+the corresponding `BxOpcodeTable0F3A*` constants: a lone legacy entry means the
+same silent fall-through, a preceding `VEX`-flagged entry means they are safe.
