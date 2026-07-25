@@ -11,6 +11,47 @@ convention.
 
 ---
 
+## 2026-07-25 status — the I/O parity backlog is CLOSED
+
+Everything actionable in this audit has now been resolved, and a large fraction
+of it turned out to be **already fixed or simply wrong** when re-verified against
+current code. Treat the per-finding text below as a 2026-07-10 snapshot, not as
+a to-do list; the entries that are still accurate are called out here.
+
+**Resolved in the 2026-07-25 pass** (21 commits on
+`feature/8-multi-processor-support`):
+
+| Finding | Outcome |
+|---|---|
+| #19 CMOS reset timer-sync | Applied instead of discarded (`dd976c2`) |
+| #22 DMA word I/O + maxlen | Registration mask 7, LSB fall-through, u16 truncation (`5f04741`) |
+| #23 PIC ICW1 / reset | Master ICW1 clears INTR; reset restores all fields (`20d5aba`) |
+| #25 harddrv absent drive | Bochs BX_ANY_IS_PRESENT taskfile reads + command handling (`4915cdb`) |
+| #27 ATAPI 0x42 | Ported — the "needs a CD backend" claim was **wrong**, `cdrom_base_c::read_sub_channel` is self-contained (`03efc63`) |
+| #28 APM 0xB2 | Resolved by the SMM implementation (`f2be059`); the load-bearing `apms=0` clear is gone |
+| #29 ACPI S3/S5 | S5 stops the machine, S3 writes CMOS 0xF=0xFE + hardware reset (`916b374`) |
+| #30 VGA cluster | All of it: registers, y_doublescan, chain-4 LFB, guest charmap, skip_update, vertical timer (`934864d`, `4b353b5`, `5041828`, `19c7b08`) |
+| #31 keyboard | Ring size 16 (`1a6c2ec`); scancode sets 1/2/3 (`f7b4fd5`); the rest already matched |
+| #33 CMOS details | 0x72/0x73 gated on a cmosimage, PIE quirk reproduced (`0dd65a9`), `clock:time0` implemented (`9f1327e`) |
+| #34 harddrv details | HOB scope, CHS wrap, SRST/0x90 drive_select, per-command error register, 0xA1 signature removed (`147d06e`, `44b0d98`, `0c2fdf5`) |
+| #35 PCI/ACPI details | BAR size-probe skip, 0xB044 mask, dead 0xB2 handler (`916b374`, `5be37f6`); i440FX regs and port relocation were already correct |
+| #36 port 0x8900 | Bochs `unmapped.cc` shutdown protocol ported (`99d4c97`) |
+| #37 housekeeping | The orphan `iodev/pic.rs` no longer exists |
+
+**Two deliberate divergences remain, both ratified:**
+
+- CMOS STAT_A divider-TEST values: Bochs `BX_PANIC`s, which is a
+  guest-triggerable host DoS. rusty accepts them, and its handling is
+  bit-identical to Bochs's own post-panic continuation.
+- The DMA HRQ engine is fully implemented (the older note calling it a stub is
+  wrong) — see `legacy_dma_drq_to_hlda_terminal_count_end_to_end`.
+
+**Lesson for future audits:** several entries here were confidently wrong.
+Re-verify any finding against current source before acting on it, and prefer
+reading the Bochs function over trusting a summary of it.
+
+---
+
 ## 2026-07-24 status — this audit is substantially stale; re-verify before acting
 
 Many findings have been fixed in the ~2 weeks since 2026-07-10. Verified RESOLVED
