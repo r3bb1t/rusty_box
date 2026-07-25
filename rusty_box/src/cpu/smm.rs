@@ -8,7 +8,7 @@
 
 use super::{
     cpuid::BxCpuIdTrait,
-    decoder::{BxSegregs, Instruction},
+    decoder::{BxSegregs, Instruction, BX_GENERAL_REGISTERS},
     descriptor::{
         SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
     },
@@ -264,7 +264,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        tracing::trace!("RSM: resuming from SMM (smbase={:#010x})", self.smbase);
+        // Bochs smm.cc RSM: BX_INFO(("RSM: Resuming from System Management Mode")).
+        tracing::info!("RSM: Resuming from System Management Mode");
 
         // Bochs smm.cc RSM: release the events held while in SMM.
         self.unmask_event(
@@ -292,8 +293,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return Err(super::error::CpuError::CpuLoopRestart);
         }
 
-        // Invalidate TLB and context
-        self.handle_cpu_context_change();
 
         // Bochs smm.cc RSM ends with BX_NEXT_TRACE(i): RSM is a serializing
         // trace-terminating instruction. The cpu_loop 'trace loop only breaks
@@ -316,6 +315,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     pub(super) fn enter_system_management_mode(&mut self) {
+        // Bochs smm.cc enter_system_management_mode:
+        // BX_INFO(("Enter to System Management Mode")).
+        tracing::info!("Enter to System Management Mode");
+
         // Bochs smm.cc enter_system_management_mode: SMI delivery leaves VMX
         // operation — CR4.VMXE is cleared and the root/non-root indication is
         // parked in in_smm_vmx / in_smm_vmx_guest until RSM restores it.
@@ -432,14 +435,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.sregs[idx].cache.u.set_segment_l(false);
         }
 
-        // Update CPU mode (we cleared PE → real mode)
-        self.handle_cpu_mode_change();
-
-        // Invalidate TLB
+        // Bochs smm.cc enter_system_management_mode: handleCpuContextChange()
+        // (TLB flush + prefetch/stack-cache invalidation + the mode recompute
+        // for the PE clear) then the MONITOR reset (BX_SUPPORT_MONITOR_MWAIT).
         self.handle_cpu_context_change();
-
-        // Bochs smm.cc enter_system_management_mode: reset the MONITOR range
-        // (BX_SUPPORT_MONITOR_MWAIT).
         self.monitor.reset_monitor();
     }
 
@@ -462,7 +461,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // as a HI32/LO32 dword pair, RAX..R15 in Bochs register order (the
         // SMRAM_FIELD enum is laid out RAX_HI32, EAX, RCX_HI32, ECX, ... so
         // field index = RAX_HI32 + 2n / EAX + 2n).
-        for n in 0..self.gen_reg.len() {
+        //
+        // The bound is BX_GENERAL_REGISTERS (Bochs `for n=0; n<BX_GENERAL_REGISTERS`),
+        // NOT gen_reg.len(): the array carries four extra slots after R15
+        // (RIP, SSP, BX_TMP_REGISTER, BX_NIL_REGISTER) that are not part of the
+        // SMRAM GPR block. Walking into them runs the field index off the end
+        // of the GPR pairs and into RIP_HI32/EIP/RFLAGS_HI32/EFLAGS/DR6/DR7.
+        for n in 0..BX_GENERAL_REGISTERS {
             let val = self.gen_reg[n].rrx();
             saved_state[map[SMRAM_FIELD_RAX_HI32 as usize + 2 * n] as usize] =
                 (val >> 32) as u32;
@@ -686,8 +691,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         self.set_eflags_internal(saved_eflags);
 
-        // Restore GPRs 64-bit wide (Bochs BX_WRITE_64BIT_REG loop).
-        for n in 0..self.gen_reg.len() {
+        // Restore GPRs 64-bit wide (Bochs BX_WRITE_64BIT_REG loop over
+        // BX_GENERAL_REGISTERS). The bound matters: gen_reg has four trailing
+        // slots (RIP, SSP, BX_TMP_REGISTER, BX_NIL_REGISTER) that are NOT
+        // GPRs. Restoring `gen_reg.len()` entries walked the field index past
+        // R15 into RIP/EFLAGS/DR6/DR7 and wrote those values into the trailing
+        // slots — clobbering BX_NIL_REGISTER, which the decoder relies on
+        // being permanently zero as the base of no-base addressing forms
+        // (init.rs sets it once at reset), so every later `[disp32]`-style
+        // access was displaced by DR7's value.
+        for n in 0..BX_GENERAL_REGISTERS {
             let hi = saved_state[map[SMRAM_FIELD_RAX_HI32 as usize + 2 * n] as usize];
             let lo = saved_state[map[SMRAM_FIELD_EAX as usize + 2 * n] as usize];
             self.gen_reg[n].set_rrx(((hi as u64) << 32) | lo as u64);
@@ -717,15 +730,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let selar = smram_get!(selar_field);
             let sel = (selar & 0xFFFF) as u16;
             let ar = ((selar >> 16) & 0xFFFF) as u16;
-            super::segment_ctrl_pro::parse_selector(sel, &mut self.sregs[idx].selector);
-            unpack_seg_ar(&mut self.sregs[idx].cache, ar);
             let base = ((smram_get!(base_hi_field) as u64) << 32) | smram_get!(base_field) as u64;
-            self.sregs[idx].cache.u.set_segment_base(base);
-            self.sregs[idx]
-                .cache
-                .u
-                .set_segment_limit_scaled(smram_get!(limit_field));
-            if self.sregs[idx].cache.valid != 0 && !self.sregs[idx].cache.segment {
+            if super::segment_ctrl_pro::set_segment_ar_data(
+                &mut self.sregs[idx],
+                ((ar >> 8) & 1) != 0,
+                sel,
+                base,
+                smram_get!(limit_field),
+                ar,
+            ) && !self.sregs[idx].cache.segment
+            {
                 tracing::error!("SMM restore: restored valid non segment {} !", idx);
                 return false;
             }
@@ -735,20 +749,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // BX_SYS_SEGMENT_LDT).
         let ldtr_selar = smram_get!(SMRAM_FIELD_LDTR_SELECTOR_AR);
         let ldtr_ar = ((ldtr_selar >> 16) & 0xFFFF) as u16;
-        super::segment_ctrl_pro::parse_selector((ldtr_selar & 0xFFFF) as u16, &mut self.ldtr.selector);
-        unpack_seg_ar(&mut self.ldtr.cache, ldtr_ar);
-        self.ldtr.cache.u.set_segment_base(smram_get64!(
-            SMRAM_FIELD_LDTR_BASE_HI32,
-            SMRAM_FIELD_LDTR_BASE
-        ));
-        self.ldtr
-            .cache
-            .u
-            .set_segment_limit_scaled(smram_get!(SMRAM_FIELD_LDTR_LIMIT));
+        let ldtr_base = smram_get64!(SMRAM_FIELD_LDTR_BASE_HI32, SMRAM_FIELD_LDTR_BASE);
         // Bochs uses segment=false system descriptors here; the type check is
         // on the raw descriptor type value.
         const BX_SYS_SEGMENT_LDT: u8 = 2;
-        if self.ldtr.cache.valid != 0 && self.ldtr.cache.r#type != BX_SYS_SEGMENT_LDT {
+        if super::segment_ctrl_pro::set_segment_ar_data(
+            &mut self.ldtr,
+            ((ldtr_ar >> 8) & 1) != 0,
+            (ldtr_selar & 0xFFFF) as u16,
+            ldtr_base,
+            smram_get!(SMRAM_FIELD_LDTR_LIMIT),
+            ldtr_ar,
+        ) && self.ldtr.cache.r#type != BX_SYS_SEGMENT_LDT
+        {
             tracing::error!("SMM restore: LDTR is not LDT descriptor type !");
             return false;
         }
@@ -756,18 +769,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Restore TR — a valid TR must be a TSS descriptor type.
         let tr_selar = smram_get!(SMRAM_FIELD_TR_SELECTOR_AR);
         let tr_ar = ((tr_selar >> 16) & 0xFFFF) as u16;
-        super::segment_ctrl_pro::parse_selector((tr_selar & 0xFFFF) as u16, &mut self.tr.selector);
-        unpack_seg_ar(&mut self.tr.cache, tr_ar);
-        self.tr.cache.u.set_segment_base(smram_get64!(
-            SMRAM_FIELD_TR_BASE_HI32,
-            SMRAM_FIELD_TR_BASE
-        ));
-        self.tr
-            .cache
-            .u
-            .set_segment_limit_scaled(smram_get!(SMRAM_FIELD_TR_LIMIT));
+        let tr_base = smram_get64!(SMRAM_FIELD_TR_BASE_HI32, SMRAM_FIELD_TR_BASE);
         // Bochs: AVAIL/BUSY 286/386 TSS types.
-        if self.tr.cache.valid != 0 && !matches!(self.tr.cache.r#type, 1 | 3 | 9 | 11) {
+        if super::segment_ctrl_pro::set_segment_ar_data(
+            &mut self.tr,
+            ((tr_ar >> 8) & 1) != 0,
+            (tr_selar & 0xFFFF) as u16,
+            tr_base,
+            smram_get!(SMRAM_FIELD_TR_LIMIT),
+            tr_ar,
+        ) && !matches!(self.tr.cache.r#type, 1 | 3 | 9 | 11)
+        {
             tracing::error!("SMM restore: TR is not TSS descriptor type !");
             return false;
         }
@@ -780,12 +792,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.smbase = smram_get!(SMRAM_FIELD_SMBASE_OFFSET);
         }
 
-        // Update CPU mode based on restored CR0/EFLAGS
-        self.handle_cpu_mode_change();
-        self.handle_alignment_check();
-        self.update_fetch_mode_mask();
-
-        // Bochs resume_from_system_management_mode: reset the MONITOR range.
+        // Bochs resume_from_system_management_mode ends with
+        // handleCpuContextChange() (TLB flush + prefetch/stack-cache
+        // invalidation + every mode/mask recompute) followed by the MONITOR
+        // reset. Both run only on the success path — an inconsistent image
+        // returns above and the caller shuts the CPU down.
+        self.handle_cpu_context_change();
         self.monitor.reset_monitor();
 
         true
@@ -1030,29 +1042,181 @@ mod tests {
             "Bochs RSM: incorrect restore state shuts the CPU down"
         );
     }
-}
 
-/// Unpack 16-bit AR format into descriptor cache (standalone to avoid borrow conflicts)
-fn unpack_seg_ar(cache: &mut super::descriptor::BxDescriptor, ar: u16) {
-    cache.r#type = (ar & 0x0F) as u8;
-    cache.segment = (ar & 0x10) != 0;
-    cache.dpl = ((ar >> 5) & 0x03) as u8;
-    cache.p = (ar & 0x80) != 0;
+    /// The relocated-SMBASE case, which is the one every real OS actually
+    /// exercises: after the Bochs BIOS `smm_init` handshake, SMBASE is 0xa0000
+    /// and the SMRAM control register is 0x0a (SMRAME=1, DOPEN=0, DCLS=0), so
+    /// the handler at 0xa8000 *and* the 512-byte save area at 0xafe00..0xb0000
+    /// live underneath the VGA legacy window. Every SMM access there must be
+    /// routed to DRAM (Bochs memory.cc read/writePhysicalPage and misc_mem.cc
+    /// getHostMemAddr SMRAM checks) while non-SMM accesses keep going to VGA.
+    ///
+    /// The POST relocation SMI cannot catch a regression here: it runs at
+    /// SMBASE 0x30000, which is plain DRAM with no routing involved.
+    #[test]
+    fn relocated_smbase_save_area_is_routed_under_the_vga_window() {
+        use crate::iodev::vga::BxVgaC;
+        use crate::memory::{CpuMemoryPolicy, CpuTlbPin, MemoryDeviceId};
 
-    // Bit 8: valid
-    if (ar & 0x100) != 0 {
-        cache.valid = SEG_VALID_CACHE
-            | SEG_ACCESS_ROK
-            | SEG_ACCESS_WOK
-            | SEG_ACCESS_ROK4_G
-            | SEG_ACCESS_WOK4_G;
-    } else {
-        cache.valid = 0;
+        let (mut cpu, mut mem) = cpu_with_memory();
+
+        // VGA owns 0xa0000-0xbffff, exactly as the machine registers it.
+        let mut vga = alloc::boxed::Box::new(BxVgaC::new());
+        let vga_id = MemoryDeviceId::Vga(&mut *vga as *mut BxVgaC);
+        mem.register_memory_handlers(vga_id, 0xA0000, 0xBFFFF)
+            .expect("VGA handler registration");
+        // SMRAM control 0x0a: available, not open, not restricted.
+        mem.enable_smram(false, false);
+        cpu.set_mem_bus_ptr(NonNull::from(mem.as_mut()));
+
+        // Post-relocation SMBASE, and a GPR value that must survive the trip.
+        cpu.smbase = 0xa0000;
+        cpu.gen_reg[3].set_rrx(0x0bad_c0de_dead_1234); // RBX
+
+        cpu.enter_system_management_mode();
+        assert!(cpu.in_smm);
+        assert_eq!(cpu.rip(), 0x8000, "SMM entry point");
+        let cs = super::super::decoder::BxSegregs::Cs as usize;
+        assert_eq!(
+            cpu.sregs[cs].cache.u.segment_base(),
+            0xa0000,
+            "CS base is the relocated SMBASE, so CS:IP resolves to 0xa8000"
+        );
+
+        // The save state must be in DRAM, not in the VGA planes: read the
+        // backing RAM directly, bypassing every routing decision.
+        let pins = [CpuTlbPin::new(&*cpu)];
+        let mut raw = [0u8; 4];
+        assert_eq!(mem.read_ram(&pins, 0xafefc, &mut raw).unwrap(), 4);
+        assert_eq!(
+            u32::from_le_bytes(raw),
+            SMM_REVISION_ID,
+            "SMM entry must write the save state to DRAM under the VGA window"
+        );
+        assert_eq!(mem.read_ram(&pins, 0xaffe0, &mut raw).unwrap(), 4);
+        assert_eq!(
+            u32::from_le_bytes(raw),
+            0xdead_1234,
+            "EBX slot (SMBASE+0xffe0) lands in DRAM"
+        );
+
+        // A non-SMM read of the same address must NOT see SMRAM: it belongs to
+        // the VGA handler while DOPEN is clear.
+        let mut via_vga = [0xffu8; 4];
+        mem.read_physical_page(
+            &pins,
+            CpuMemoryPolicy::default(),
+            0xafefc,
+            4,
+            &mut via_vga,
+        )
+        .expect("non-SMM read is served by the VGA handler");
+        assert_ne!(
+            u32::from_le_bytes(via_vga),
+            SMM_REVISION_ID,
+            "outside SMM the save area must stay hidden behind the VGA window"
+        );
+
+        // ...and the CPU's own SMM-mode read of it does see SMRAM.
+        assert_eq!(
+            cpu.smram_read_physical_dword(0xafefc),
+            SMM_REVISION_ID,
+            "in SMM the save area reads back from DRAM"
+        );
+
+        // Instruction fetch inside SMM must get a direct DRAM span for the
+        // handler page (Bochs getHostMemAddr: SMRAM direct access is granted
+        // for code only), while a data access to the same page is vetoed so it
+        // takes the slow, fully-checked physical path.
+        let policy = CpuMemoryPolicy::new(true, false);
+        assert!(
+            mem.get_host_mem_addr_pinned(
+                0xa8000,
+                crate::cpu::rusty_box::MemoryAccessType::Execute,
+                &pins,
+                policy,
+            )
+            .unwrap()
+            .is_some(),
+            "SMM code fetch at SMBASE+0x8000 must map straight to DRAM"
+        );
+        assert!(
+            mem.get_host_mem_addr_pinned(
+                0xa8000,
+                crate::cpu::rusty_box::MemoryAccessType::RW,
+                &pins,
+                policy,
+            )
+            .unwrap()
+            .is_none(),
+            "SMM data access must be vetoed here and fall back to the physical path"
+        );
+
+        // RSM restores through the same routing.
+        cpu.rsm(&Instruction::default())
+            .expect("RSM restores a self-saved image from relocated SMRAM");
+        assert!(!cpu.in_smm);
+        assert_eq!(cpu.smbase, 0xa0000, "SMBASE unchanged by this handler");
+        assert_eq!(cpu.gen_reg[3].rrx(), 0x0bad_c0de_dead_1234);
     }
 
-    // High nibble
-    cache.u.set_segment_avl((ar & 0x1000) != 0);
-    cache.u.set_segment_l((ar & 0x2000) != 0);
-    cache.u.set_segment_d_b((ar & 0x4000) != 0);
-    cache.u.set_segment_g((ar & 0x8000) != 0);
+    /// `gen_reg` is `BX_GENERAL_REGISTERS + 4` entries: RAX..R15 followed by
+    /// RIP, SSP, `BX_TMP_REGISTER` and `BX_NIL_REGISTER`. Only the first 16 are
+    /// GPRs, and the SMRAM save/restore loops must stop there (Bochs smm.cc
+    /// iterates `BX_GENERAL_REGISTERS`). Running to `gen_reg.len()` walks the
+    /// field index off the end of the GPR pairs into RIP_HI32/EIP,
+    /// RFLAGS_HI32/EFLAGS, DR6 and DR7 — and on the restore side writes those
+    /// into the trailing slots.
+    ///
+    /// `BX_NIL_REGISTER` is the damaging one: the decoder emits it as the base
+    /// of no-base addressing forms and `init.rs` sets it to zero once at reset,
+    /// so a non-zero value silently displaces every later `[disp32]`-style
+    /// memory access by that amount. That was invisible in the CPU trace and
+    /// only surfaced hundreds of millions of instructions later.
+    #[test]
+    fn smm_roundtrip_leaves_the_non_gpr_register_slots_alone() {
+        use crate::cpu::decoder::{
+            BX_GENERAL_REGISTERS, BX_NIL_REGISTER, BX_TMP_REGISTER, BX_64BIT_REG_RIP,
+        };
+
+        let (mut cpu, _mem) = cpu_with_memory();
+
+        // Distinctive sentinels that neither DR6 (0xffff0ff0) nor DR7 (0x400)
+        // could produce, so a clobber is unambiguous.
+        cpu.gen_reg[BX_TMP_REGISTER].set_rrx(0x7777_7777_7777_7777);
+        cpu.gen_reg[BX_NIL_REGISTER].set_rrx(0);
+        cpu.set_ssp(0x5555_5555_5555_5555);
+        for n in 0..BX_GENERAL_REGISTERS {
+            cpu.gen_reg[n].set_rrx(0x1000 + n as u64);
+        }
+        let rip_before = cpu.gen_reg[BX_64BIT_REG_RIP].rrx();
+
+        cpu.enter_system_management_mode();
+        cpu.rsm(&Instruction::default()).expect("clean RSM");
+
+        for n in 0..BX_GENERAL_REGISTERS {
+            assert_eq!(cpu.gen_reg[n].rrx(), 0x1000 + n as u64, "GPR {n} restored");
+        }
+        assert_eq!(
+            cpu.gen_reg[BX_64BIT_REG_RIP].rrx(),
+            rip_before,
+            "RIP restored to the interrupted instruction"
+        );
+        assert_eq!(
+            cpu.ssp(),
+            0x5555_5555_5555_5555,
+            "SSP round-trips through its own SMRAM slot"
+        );
+        assert_eq!(
+            cpu.gen_reg[BX_TMP_REGISTER].rrx(),
+            0x7777_7777_7777_7777,
+            "BX_TMP_REGISTER is not a GPR and must not be touched by RSM"
+        );
+        assert_eq!(
+            cpu.gen_reg[BX_NIL_REGISTER].rrx(),
+            0,
+            "BX_NIL_REGISTER must stay zero — it is the base of no-base \
+             addressing forms, so any other value displaces every [disp32] access"
+        );
+    }
 }

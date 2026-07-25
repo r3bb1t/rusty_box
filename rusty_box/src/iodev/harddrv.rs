@@ -6285,7 +6285,6 @@ mod tests {
         assert!(drive.controller.error.contains(AtaError::ABRT));
     }
 
-    #[test]
     // Bochs harddrv.cc case 0x42 (READ SUB-CHANNEL) delegates to
     // cdrom_base_c::read_sub_channel (cdrom.cc), which synthesizes a response
     // from constants: a 4-byte header alone when SubQ is clear, a 16-byte

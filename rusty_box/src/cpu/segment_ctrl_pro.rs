@@ -2,8 +2,8 @@ use super::{
     cpu::Exception,
     decoder::BxSegregs,
     descriptor::{
-        BxDescriptor, BxSelector, DescriptorGate, DescriptorSegment, DescriptorTaskGate,
-        SystemAndGateDescriptorEnum, SEG_VALID_CACHE,
+        BxDescriptor, BxSegmentReg, BxSelector, DescriptorGate, DescriptorSegment,
+        DescriptorTaskGate, SystemAndGateDescriptorEnum, SEG_VALID_CACHE,
     },
     Result,
 };
@@ -15,6 +15,74 @@ pub fn parse_selector(raw_selector: u16, selector: &mut BxSelector) {
     selector.ti = (raw_selector >> 2) & 0x01;
     // Note: bochs uses implicit cast
     selector.rpl = raw_selector as u8 & 0x03;
+}
+
+/// Bochs segment_ctrl_pro.cc `set_segment_ar_data`: rebuild a segment register
+/// from the flat (selector, base, limit, AR-word) tuple that the SMM save-state
+/// map stores segments in. Returns whether the descriptor came back VALID —
+/// callers use that to decide whether their descriptor-type checks apply.
+///
+/// Note the `valid` handling: Bochs assigns the plain 0/1 flag, i.e. only
+/// `SegValidCache`. The `SegAccess*` fast-path bits are deliberately NOT set
+/// here — the first access re-derives them through the read/write/execute
+/// checks (access.cc), which is what keeps limit and permission checks alive on
+/// a restored segment.
+pub(super) fn set_segment_ar_data(
+    seg: &mut BxSegmentReg,
+    valid: bool,
+    raw_selector: u16,
+    base: BxAddress,
+    limit_scaled: u32,
+    ar_data: u16,
+) -> bool {
+    parse_selector(raw_selector, &mut seg.selector);
+
+    let d = &mut seg.cache;
+
+    // Bochs descriptor.h `set_ar_byte`: P(7) | DPL(6:5) | S(4) | TYPE(3:0).
+    d.p = (ar_data >> 7) & 0x1 != 0;
+    d.dpl = ((ar_data >> 5) & 0x3) as u8;
+    d.segment = (ar_data >> 4) & 0x1 != 0;
+    d.r#type = (ar_data & 0x0f) as u8;
+
+    d.valid = if valid { SEG_VALID_CACHE } else { 0 };
+
+    if d.segment || !valid {
+        /* data/code segment descriptors */
+        d.u.set_segment_g((ar_data >> 15) & 0x1 != 0);
+        d.u.set_segment_d_b((ar_data >> 14) & 0x1 != 0);
+        d.u.set_segment_l((ar_data >> 13) & 0x1 != 0);
+        d.u.set_segment_avl((ar_data >> 12) & 0x1 != 0);
+
+        d.u.set_segment_base(base);
+        d.u.set_segment_limit_scaled(limit_scaled);
+    } else {
+        match d.r#type {
+            t if t == SystemAndGateDescriptorEnum::BxSysSegmentLdt as u8
+                || t == SystemAndGateDescriptorEnum::BxSysSegmentAvail286Tss as u8
+                || t == SystemAndGateDescriptorEnum::BxSysSegmentBusy286Tss as u8
+                || t == SystemAndGateDescriptorEnum::BxSysSegmentAvail386Tss as u8
+                || t == SystemAndGateDescriptorEnum::BxSysSegmentBusy386Tss as u8 =>
+            {
+                // Bochs sets no `l` bit on the system-descriptor path.
+                d.u.set_segment_avl((ar_data >> 12) & 0x1 != 0);
+                d.u.set_segment_d_b((ar_data >> 14) & 0x1 != 0);
+                d.u.set_segment_g((ar_data >> 15) & 0x1 != 0);
+                d.u.set_segment_base(base);
+                d.u.set_segment_limit_scaled(limit_scaled);
+            }
+            other => {
+                // Bochs leaves base/limit untouched in this case.
+                tracing::error!(
+                    "set_segment_ar_data(): case {} unsupported, valid={}",
+                    other,
+                    d.valid
+                );
+            }
+        }
+    }
+
+    d.valid != 0
 }
 
 impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>

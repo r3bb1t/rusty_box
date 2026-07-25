@@ -128,11 +128,19 @@ impl<'c> BxMemC<'c> {
         };
         let write = (rw as u32 & 1) != 0;
 
-        // Bochs memory.cc getHostMemAddr: same SMRAM condition as the
-        // physical-page paths — smram_enable || (smm_mode && !restricted).
-        if (0x000a0000..0x000c0000).contains(&a20_addr)
+        // Bochs misc_mem.cc getHostMemAddr: "allow direct access to SMRAM
+        // memory space for code and veto data". The direct span is handed out
+        // for INSTRUCTION FETCH only — data reads/writes deliberately fall
+        // through to the VGA memory handler's veto below so they take the slow
+        // read/writePhysicalPage path, which applies the stricter
+        // `smram_enable || (smm_mode && !smram_restricted)` routing. Note the
+        // condition here is the LOOSER one (no `!smram_restricted`), matching
+        // Bochs. The `cpu != NULL` guard is structural here: every caller of
+        // this function is a CPU path (the DMA paths never take it).
+        if rw as u32 == MemoryAccessType::Execute as u32
+            && (0x000a0000..0x000c0000).contains(&a20_addr)
             && self.smram_available
-            && (self.smram_enable || (policy.smm_mode() && !self.smram_restricted))
+            && (self.smram_enable || policy.smm_mode())
         {
             return Ok(Some(self.resident_ram_span(pins, a20_addr)?));
         }
