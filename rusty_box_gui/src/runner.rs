@@ -374,17 +374,35 @@ fn signal_egui_stop(shared: &Arc<Mutex<SharedDisplay>>) {
     }
 }
 
+/// Install the log subscriber.
+///
+/// `--log-level` sets the global level, and `RUST_LOG` (when set) overrides it
+/// with the usual per-module syntax so a noisy subsystem can be silenced
+/// without dropping the level everywhere. Several messages are deliberately
+/// `info!` because Bochs emits the same text at `BX_INFO` — SMI entry/exit
+/// (`cpu/smm.cc`), `cpu N hardware reset` (`cpu/init.cc`) and
+/// `allocate APIC id=` (`iodev/apic.cc`) — and release builds compile out
+/// `debug!` via `release_max_level_info`, so demoting them would make them
+/// unavailable exactly where boot problems get diagnosed. To quiet just those:
+///
+/// ```text
+/// RUST_LOG=info,rusty_box::cpu::smm=warn
+/// ```
 fn init_tracing(log_level: LogLevel) {
+    let level = match log_level {
+        LogLevel::Trace => tracing::Level::TRACE,
+        LogLevel::Debug => tracing::Level::DEBUG,
+        LogLevel::Info => tracing::Level::INFO,
+        LogLevel::Warn => tracing::Level::WARN,
+        LogLevel::Error => tracing::Level::ERROR,
+    };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level.to_string()));
+
     match tracing_subscriber::fmt()
         .without_time()
         .with_target(false)
-        .with_max_level(match log_level {
-            LogLevel::Trace => tracing::Level::TRACE,
-            LogLevel::Debug => tracing::Level::DEBUG,
-            LogLevel::Info => tracing::Level::INFO,
-            LogLevel::Warn => tracing::Level::WARN,
-            LogLevel::Error => tracing::Level::ERROR,
-        })
+        .with_env_filter(filter)
         .try_init()
     {
         Ok(()) => {}

@@ -788,7 +788,7 @@ impl BxFwCfg {
         dir_copy[..dir_len].copy_from_slice(&self.file_dir[..dir_len]);
         self.add_bytes(FW_CFG_FILE_DIR, &dir_copy[..dir_len]);
 
-        tracing::info!(
+        tracing::debug!(
             "fw_cfg: added file '{}' at index {:#06x} ({} bytes)",
             name,
             file_index,
@@ -802,7 +802,7 @@ impl BxFwCfg {
         self.add_file("etc/acpi/tables", tables);
         self.add_file("etc/acpi/rsdp", rsdp);
         self.add_file("etc/table-loader", loader);
-        tracing::info!("fw_cfg: added ACPI tables");
+        tracing::debug!("fw_cfg: added ACPI tables");
     }
 
     // ─── Internal Generators ────────────────────────────────────────────
@@ -858,10 +858,10 @@ impl BxFwCfg {
             count += 1;
         }
 
-        tracing::info!("fw_cfg: generated {} e820 entries:", count);
+        tracing::debug!("fw_cfg: generated {} e820 entries:", count);
         for i in 0..count {
             let e = &entries[i];
-            tracing::info!(
+            tracing::debug!(
                 "  Entry {}: addr={:#x} len={:#x} type={}",
                 i,
                 { e.address },
@@ -916,7 +916,7 @@ impl BxFwCfg {
         }
 
         self.add_bytes(FW_CFG_HPET, &data[..hpet_size]);
-        tracing::info!("fw_cfg: added HPET configuration");
+        tracing::debug!("fw_cfg: added HPET configuration");
     }
 }
 #[cfg(feature = "std")]
