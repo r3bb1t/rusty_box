@@ -739,6 +739,19 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             let decode_result =
                 normalize_decode_result(&mut self.i_cache.mpool[current_mpindex], decode_result);
 
+            // Bochs init_FetchDecodeTables (fetchdecode32.cc) makes an opcode
+            // whose CPUID feature this model lacks execute as BxError. Applied
+            // here, once per trace fill, so the dispatch loop is untouched. The
+            // decoded length is preserved: Bochs's decode also succeeds, only
+            // the handler changes.
+            if decode_result.is_ok() {
+                let decoded = self.i_cache.mpool[current_mpindex].get_ia_opcode();
+                let resolved = self.isa_resolve_opcode(decoded);
+                if resolved != decoded {
+                    self.i_cache.mpool[current_mpindex].set_ia_opcode(resolved);
+                }
+            }
+
             match decode_result {
                 Ok(()) => {
                     // Instruction is already in mpool[current_mpindex] — get its length
@@ -754,7 +767,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     let stop_trace_indication =
                         is_trace_end_opcode(self.i_cache.mpool[current_mpindex].get_ia_opcode());
 
-                    // BX_INSTR_OPCODE (matching C++ icache.cc:178-179)
+                    // BX_INSTR_OPCODE (matching C++ icache.cc)
                     #[cfg(feature = "instrumentation")]
                     if self.instrumentation.active.has_exec() {
                         let rip =
@@ -819,7 +832,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                             // the source trace's mask. Add the decoded portion's mask, stamp the
                             // page-write table with the full mask, advance mpindex PAST the spliced
                             // instructions (else the next trace overwrites them), and commit.
-                            // (Bochs serveICacheMiss, icache.cc:197-200.)
+                            // (Bochs serveICacheMiss, icache.cc.)
                             let full_mask = {
                                 let entry = &mut self.i_cache.entry[entry_idx];
                                 entry.trace_mask |= trace_mask;
@@ -1088,7 +1101,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // (matching C++ line 306: RIP = BX_CPU_THIS_PTR prev_rip)
         self.set_rip(self.prev_rip);
 
-        // BX_INSTR_OPCODE (matching C++ icache.cc:318-319)
+        // BX_INSTR_OPCODE (matching C++ icache.cc)
         #[cfg(feature = "instrumentation")]
         if self.instrumentation.active.has_exec() {
             let rip = self.prev_rip;
@@ -1151,7 +1164,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // instruction), so set the total here.
         let entry = &mut self.i_cache.entry[current_entry_idx];
         entry.tlen = (current_tlen + max_length) as u32;
-        debug_assert!(entry.tlen as usize <= BX_MAX_TRACE_LENGTH); // Bochs BX_ASSERT (icache.cc:244)
+        debug_assert!(entry.tlen as usize <= BX_MAX_TRACE_LENGTH); // Bochs BX_ASSERT (icache.cc)
         entry.trace_mask |= source_trace_mask;
         Some(max_length)
     }
@@ -1159,6 +1172,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
 #[cfg(test)]
 mod smc_mask_tests {
+
+/// Emulator construction needs a bigger stack than the default 2 MiB test
+/// thread: `Emulator` is ~4 MiB and the debug build materialises a few
+/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
+/// enough concurrent reservations to intermittently exhaust the process
+/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::{smc_cache_line_mask, BxICache, BxICacheEntry, Opcode, BX_ICACHE_INVALID_PHY_ADDRESS};
     use crate::{
         cpu::{core_i7_skylake::Corei7SkylakeX, cpu::Exception, CpuSetupMode, X86Reg},
@@ -1183,7 +1203,7 @@ mod smc_mask_tests {
         const STACK_TOP: u64 = 0x30_0000;
 
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 for opcode in [0x19, 0x39] {
                     let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
@@ -1252,7 +1272,7 @@ mod smc_mask_tests {
         const CODE: u64 = 0x20_1000;
 
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -1309,7 +1329,7 @@ mod smc_mask_tests {
         const STACK: u64 = 0x30_0000;
 
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),

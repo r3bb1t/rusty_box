@@ -485,7 +485,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_eflags_oszapc(flags);
 
         // Store result to XMM0
-        self.write_xmm_reg_lo128(0, result);
+        self.write_xmm_regz(instr, 0, result);
 
         Ok(())
     }
@@ -632,7 +632,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.set_eflags_oszapc(flags);
 
         // Store result to XMM0
-        self.write_xmm_reg_lo128(0, result);
+        self.write_xmm_regz(instr, 0, result);
 
         Ok(())
     }

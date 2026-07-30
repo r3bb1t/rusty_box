@@ -232,10 +232,34 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         true
     }
 
+    /// Raise #AC(0) when this access is misaligned and alignment checking is
+    /// armed. Bochs `access_read_linear` / `access_write_linear` (access.cc)
+    /// perform exactly this test — `alignment_check() && user`, then
+    /// `pageOffset & ac_mask` — *before* the TLB lookup, so #AC takes
+    /// precedence over #PF.
+    ///
+    /// `alignment_check_mask` is 0xF only while CS.RPL==3 && CR0.AM &&
+    /// EFLAGS.AC (see `handle_alignment_check`), and `user_pl` is forced false
+    /// around descriptor and other CPL-0 accesses, so both conditions must
+    /// hold. Byte accesses are never checked; vector accesses use the separate
+    /// `_aligned` #GP path, matching Bochs access2.cc.
+    #[inline(always)]
+    pub(super) fn check_alignment(&mut self, laddr: u64, ac_mask: u32) -> Result<()> {
+        // Near-always-false: the mask is zero unless a CPL-3 guest has armed
+        // both CR0.AM and EFLAGS.AC.
+        if self.alignment_check_mask != 0
+            && self.user_pl
+            && (laddr as u32 & (ac_mask & self.alignment_check_mask)) != 0
+        {
+            return self.exception(Exception::Ac, 0);
+        }
+        Ok(())
+    }
+
     // ===== Exception selector: #SS for SS, #GP for others (Bochs int_number) =====
 
     #[inline]
-    fn seg_exception(seg: BxSegregs) -> Exception {
+    pub(super) fn seg_exception(seg: BxSegregs) -> Exception {
         if matches!(seg, BxSegregs::Ss) {
             Exception::Ss
         } else {
@@ -1411,6 +1435,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Read a word given a pre-computed linear address with cross-page handling.
     /// Bochs: read_linear_word (access2.cc)
     pub(crate) fn read_linear_word(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u16> {
+        self.check_alignment(laddr, 1)?;
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 1);
@@ -1467,6 +1492,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Read a dword given a pre-computed linear address with cross-page handling.
     /// Bochs: read_linear_dword (access2.cc)
     pub(crate) fn read_linear_dword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u32> {
+        self.check_alignment(laddr, 3)?;
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 3);
@@ -1524,6 +1550,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Read a qword given a pre-computed linear address with cross-page handling.
     /// Bochs: read_linear_qword (access2.cc)
     pub(crate) fn read_linear_qword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u64> {
+        self.check_alignment(laddr, 7)?;
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 7);
@@ -1632,6 +1659,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         val: u16,
     ) -> Result<()> {
+        self.check_alignment(laddr, 1)?;
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 1);
@@ -1724,6 +1752,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         val: u32,
     ) -> Result<()> {
+        self.check_alignment(laddr, 3)?;
         self.check_gdt_watchpoint(laddr, val as u64, 4);
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
@@ -1788,6 +1817,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         val: u64,
     ) -> Result<()> {
+        self.check_alignment(laddr, 7)?;
         self.check_gdt_watchpoint(laddr, val, 8);
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);

@@ -7,7 +7,8 @@
 //! BX_CPU_C::cpu_loop() switch statement.
 
 use super::{
-    avx::{VexFmaForm, VexPackedFmaOp, VexScalarFmaOp},
+    avx::{VexFmaForm, VexPackedFmaOp, VexScalarFmaOp, VexVarShiftOp},
+    avx512_gather::VexGatherForm,
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, Opcode},
@@ -1181,7 +1182,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::INT3 => self.int3(instr),
             Opcode::INT1 => self.int1(instr),
             // INTO: Bochs ia_opcodes.def BX_IA_INTO → BX_CPU_C::INTO.
-            // Decoder emits Opcode::Int0 for 0xCE (fetchdecode_opmap.h:1138).
+            // Decoder emits Opcode::Int0 for 0xCE (fetchdecode_opmap.h).
             Opcode::Int0 => self.into(instr),
             Opcode::IretOp16 => {
                 self.iret16(instr)?;
@@ -4298,6 +4299,94 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             // VEX-encoded logical compare (Bochs avx.cc VPTEST_VdqWdqR)
             Opcode::VptestVdqWdq => self.vptest(instr),
+
+            // VEX-encoded packed sign-bit compare (Bochs avx_pfp.cc
+            // VTESTPS_VpsWpsR / VTESTPD_VpdWpdR)
+            Opcode::VtestpsVpsWps => self.vtest(instr, false),
+            Opcode::VtestpdVpdWpd => self.vtest(instr, true),
+
+            // AVX in-lane FP permutes (Bochs HANDLE_AVX_3OP<xmm_permilps> and
+            // avx.cc VPERMILPS_VpsWpsIbR / VPERMILPD_VpdWpdIbR)
+            Opcode::VpermilpsVpsHpsWps => self.vpermilps(instr),
+            Opcode::VpermilpdVpdHpdWpd => self.vpermilpd(instr),
+            Opcode::VpermilpsVpsWpsIb => self.vpermilps_imm(instr),
+            Opcode::VpermilpdVpdWpdIb => self.vpermilpd_imm(instr),
+
+            // AVX2 cross-lane FP permutes. Bochs maps these onto the integer
+            // handlers (ia_opcodes.def: VPERMPS → VPERMD_VdqHdqWdqR,
+            // VPERMPD → VPERMQ_VdqWdqIbR) — the lane shuffle is identical.
+            Opcode::V256VpermpsVpsHpsWps => self.vpermd(instr),
+            Opcode::V256VpermpdVpdWpdIb => self.vpermq(instr),
+
+            // VPCLMULQDQ under VEX — 3-operand, vvvv is the first source
+            // (Bochs avx_pclmul.cc VPCLMULQDQ_VdqHdqWdqIbR).
+            Opcode::V128VpclmulqdqVdqHdqWdqIb | Opcode::V256VpclmulqdqVdqHdqWdqIb => {
+                self.vpclmulqdq(instr)
+            }
+
+            // VEX VL128-only forms that reuse the legacy SSE handlers. The
+            // operands are identical (none of these take vvvv); the VEX-only
+            // difference — clearing bits above 128 — is handled inside the
+            // handler via write_xmm_regz.
+            Opcode::V128VpextrbEdVdqIbR => self.pextrb_ed_vdq_ib_r(instr),
+            Opcode::V128VpextrbMbVdqIbM => self.pextrb_mb_vdq_ib_m(instr),
+            Opcode::V128VpextrwEdVdqIbR => self.pextrw_ed_vdq_ib_r(instr),
+            Opcode::V128VpextrwMwVdqIbM => self.pextrw_mw_vdq_ib_m(instr),
+            Opcode::V128VpextrdEdVdqIb => self.pextrd_ed_vdq_ib(instr),
+            Opcode::V128VpextrqEqVdqIb => self.pextrq_eq_vdq_ib(instr),
+            Opcode::V128VpcmpestrmVdqWdqIb => self.pcmpestrm_vdq_wdq_ib(instr),
+            Opcode::V128VpcmpestriVdqWdqIb => self.pcmpestri_vdq_wdq_ib(instr),
+            Opcode::V128VpcmpistrmVdqWdqIb => self.pcmpistrm_vdq_wdq_ib(instr),
+            Opcode::V128VpcmpistriVdqWdqIb => self.pcmpistri_vdq_wdq_ib(instr),
+
+            // These legacy SSE4.1 forms had no dispatcher arm at all, so they
+            // raised #UD where Bochs implements them. MOVNTDQA maps to
+            // MOVAPS_VpsWpsM in Bochs; PEXTRW r/m16 is the 0F3A 15 encoding
+            // (distinct from the 0F C5 GPR-only form already wired below).
+            Opcode::MovntdqaVdqMdq => self.movdqa_load_sse(instr),
+            Opcode::PextrwEdVdqIbR => self.pextrw_ed_vdq_ib_r(instr),
+            Opcode::PextrwMwVdqIbM => self.pextrw_mw_vdq_ib_m(instr),
+
+            // AVX2 VSIB gathers (Bochs gather.cc VGATHERDPS_VpsHps and
+            // siblings). The integer and FP names of each shape load the
+            // same bits, so they share a handler.
+            Opcode::VgatherddVdqHdq | Opcode::VgatherdpsVpsHps => {
+                self.vex_vgather(instr, VexGatherForm::DIndexDword)
+            }
+            Opcode::VgatherqdVdqHdq | Opcode::VgatherqpsVpsHps => {
+                self.vex_vgather(instr, VexGatherForm::QIndexDword)
+            }
+            Opcode::VgatherdqVdqHdq | Opcode::VgatherdpdVpdHpd => {
+                self.vex_vgather(instr, VexGatherForm::DIndexQword)
+            }
+            Opcode::VgatherqqVdqHdq | Opcode::VgatherqpdVpdHpd => {
+                self.vex_vgather(instr, VexGatherForm::QIndexQword)
+            }
+
+            // AVX/AVX2 masked moves (Bochs avx.cc VMASKMOVPS_VpsHpsMps and
+            // avx512_helpers.cc avx_masked_load32 / avx_masked_store32). The
+            // element width follows the opcode, not VEX.W's usual meaning:
+            // PS/D are dword, PD/Q are qword.
+            Opcode::VmaskmovpsVpsHpsMps => self.vmaskmov_load(instr, false),
+            Opcode::VmaskmovdVdqHdqMdq => self.vmaskmov_load(instr, false),
+            Opcode::VmaskmovpdVpdHpdMpd => self.vmaskmov_load(instr, true),
+            Opcode::VmaskmovqVdqHdqMdq => self.vmaskmov_load(instr, true),
+            Opcode::VmaskmovpsMpsHpsVps => self.vmaskmov_store(instr, false),
+            Opcode::VmaskmovdMdqHdqVdq => self.vmaskmov_store(instr, false),
+            Opcode::VmaskmovpdMpdHpdVpd => self.vmaskmov_store(instr, true),
+            Opcode::VmaskmovqMdqHdqVdq => self.vmaskmov_store(instr, true),
+
+            // F16C half-precision conversions (Bochs avx_cvt.cc
+            // VCVTPH2PS_VpsWpsR / VCVTPS2PH_WpsVpsIb)
+            Opcode::Vcvtph2psVpsWps => self.vcvtph2ps(instr),
+            Opcode::Vcvtps2phWpsVpsIb => self.vcvtps2ph(instr),
+
+            // AVX2 per-element variable shifts (Bochs HANDLE_AVX_2OP<xmm_psrlvd>)
+            Opcode::VpsrlvdVdqHdqWdq => self.vex_var_shift(instr, VexVarShiftOp::SrlD),
+            Opcode::VpsrlvqVdqHdqWdq => self.vex_var_shift(instr, VexVarShiftOp::SrlQ),
+            Opcode::VpsravdVdqHdqWdq => self.vex_var_shift(instr, VexVarShiftOp::SraD),
+            Opcode::VpsllvdVdqHdqWdq => self.vex_var_shift(instr, VexVarShiftOp::SllD),
+            Opcode::VpsllvqVdqHdqWdq => self.vex_var_shift(instr, VexVarShiftOp::SllQ),
 
             // VEX-encoded zero/sign extend (Bochs avx2.cc VPMOVSX*/VPMOVZX*)
             Opcode::V128VpmovsxbwVdqWq | Opcode::V256VpmovsxbwVdqWdq => self.vpmovsxbw(instr),

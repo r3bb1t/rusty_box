@@ -331,7 +331,7 @@ fn xmm_xorps(dst: &mut BxPackedXmmRegister, src: &BxPackedXmmRegister) {
 /// Carry-less multiplication of two 64-bit values (Bochs xmm_pclmulqdq)
 ///
 /// Returns a 128-bit result in an XMM register.
-fn xmm_pclmulqdq(a: u64, b: u64) -> BxPackedXmmRegister {
+pub(super) fn xmm_pclmulqdq(a: u64, b: u64) -> BxPackedXmmRegister {
     let mut result = BxPackedXmmRegister::default();
     let mut tmp_lo: u64 = a;
     let mut tmp_hi: u64 = 0;

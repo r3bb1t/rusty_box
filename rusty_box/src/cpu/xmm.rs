@@ -5,7 +5,7 @@
 //! Safe structs backed by byte arrays with inline accessor methods.
 //! On x86 targets LLVM optimises from_le_bytes/to_le_bytes to identical code as union access.
 
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
+use crate::cpu::{decoder::Instruction, BxCpuC, BxCpuIdTrait};
 
 pub(super) const MXCSR_RESET: u32 = Mxcsr::RESET.bits();
 pub(super) const MXCSR_MASK: u32 = 0x0000_FFBF; // Valid bits mask (no bit 6 DAZ on older CPUs)
@@ -433,6 +433,26 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.vmm[index as usize].set_zmm128(0, val);
     }
 
+    /// Write an XMM result the way Bochs `BX_WRITE_XMM_REGZ` does: a legacy
+    /// SSE encoding preserves the bits above 128, a VEX encoding clears them.
+    ///
+    /// Handlers shared between the legacy and VEX forms of an instruction
+    /// (MOVD/MOVQ, PCMPxSTRM, …) MUST use this rather than
+    /// `write_xmm_reg_lo128`, or the VEX form leaks stale YMM data.
+    #[inline]
+    pub(super) fn write_xmm_regz(
+        &mut self,
+        instr: &Instruction,
+        index: u8,
+        val: BxPackedXmmRegister,
+    ) {
+        if instr.is_vex() {
+            self.write_xmm_reg(index, val);
+        } else {
+            self.write_xmm_reg_lo128(index, val);
+        }
+    }
+
     /// Read low qword of XMM register
     #[inline]
     pub(super) fn xmm_lo_qword(&self, index: u8) -> u64 {
@@ -517,6 +537,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
 #[cfg(test)]
 mod tests {
+
+/// Emulator construction needs a bigger stack than the default 2 MiB test
+/// thread: `Emulator` is ~4 MiB and the debug build materialises a few
+/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
+/// enough concurrent reservations to intermittently exhaust the process
+/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use crate::{
         cpu::{
             core_i7_skylake::Corei7SkylakeX,
@@ -613,7 +640,7 @@ mod tests {
     #[test]
     fn vpinsr_and_vextract_require_avx_state() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
         let forms: [(&str, &[u8]); 6] = [
             ("VPINSRB", &[0xC4, 0xE3, 0x71, 0x20, 0xC0, 0x05]),
@@ -661,7 +688,7 @@ mod tests {
     #[test]
     fn vextractf128_enabled_extracts_selected_lane() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
         let mut emu = avx_emulator();
         enable_guest_avx(&mut emu);
@@ -691,6 +718,412 @@ mod tests {
             assert_eq!(&result[..16], &source[16..], "{name} selected the wrong lane");
             assert_eq!(&result[16..], &[0; 16], "{name} must clear YMM upper bits");
         }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Per-opcode CPUID/ISA gate — Bochs init_FetchDecodeTables parity.
+    //
+    // These reach into the CPU's own `ia_extensions_bitmask`, which is what
+    // makes the gate per-CPU rather than the process-global handler table
+    // Bochs patches. Nothing here mutates shared state.
+    // ════════════════════════════════════════════════════════════════════
+
+    use crate::cpu::decoder::{Opcode, X86Feature};
+
+    fn set_feature(emu: &mut Emulator<'static, Corei7SkylakeX>, f: X86Feature, on: bool) {
+        let index = f as usize;
+        let (word, bit) = (index / 32, 1u32 << (index % 32));
+        let cpu = emu.cpu_mut();
+        if on {
+            cpu.ia_extensions_bitmask[word] |= bit;
+        } else {
+            cpu.ia_extensions_bitmask[word] &= !bit;
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // #AC on misaligned data access — Bochs access.cc access_read_linear /
+    // access_write_linear. `alignment_check_mask` was previously stored and
+    // snapshotted but never consulted, so #AC was never raised.
+    // ════════════════════════════════════════════════════════════════════
+
+
+
+    /// Proves the #AC check is *wired into* each of the six scalar linear
+    /// accessors with the correct `ac_mask`, not merely that the predicate
+    /// works in isolation.
+    ///
+    /// Leverage: Bochs `access_read_linear` / `access_write_linear` test
+    /// alignment *before* the TLB walk, so on a misaligned access #AC must
+    /// fire even though translation in this bare harness would fail with #PF.
+    /// "Which vector incremented" is therefore a direct probe of the call
+    /// site: a missing call or a too-narrow mask shows up as #PF, a too-wide
+    /// mask fires #AC on a naturally aligned access.
+    #[test]
+    fn ac_check_is_wired_into_every_scalar_linear_accessor() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                use crate::cpu::decoder::BxSegregs;
+                const BASE: u64 = 0x0060_0000;
+                let mut emu = avx_emulator();
+                let ac = Exception::Ac as usize;
+
+                // (width, offset, expect #AC). The "false" rows sit exactly on
+                // the mask boundary: aligned for that width, so a too-wide
+                // mask is caught there and a too-narrow one on the "true" rows.
+                let cases: &[(&str, u64, bool)] = &[
+                    ("word", 1, true),
+                    ("word", 2, false),
+                    ("dword", 1, true),
+                    ("dword", 2, true),
+                    ("dword", 3, true),
+                    ("dword", 4, false),
+                    ("qword", 1, true),
+                    ("qword", 4, true),
+                    ("qword", 7, true),
+                    ("qword", 8, false),
+                ];
+
+                for &(width, off, want_ac) in cases {
+                    for is_write in [false, true] {
+                        // Re-arm every iteration: delivering the previous
+                        // exception runs CPL-0 machinery that may clear
+                        // user_pl, and the check requires both conditions.
+                        emu.cpu_mut().alignment_check_mask = 0xf;
+                        emu.cpu_mut().user_pl = true;
+
+                        let before = emu.cpu().get_exception_diag()[ac];
+                        let addr = BASE + off;
+                        let _ = match (width, is_write) {
+                            ("word", false) => emu
+                                .cpu_mut()
+                                .read_linear_word(BxSegregs::Ds, addr)
+                                .map(|_| ()),
+                            ("word", true) => {
+                                emu.cpu_mut().write_linear_word(BxSegregs::Ds, addr, 0)
+                            }
+                            ("dword", false) => emu
+                                .cpu_mut()
+                                .read_linear_dword(BxSegregs::Ds, addr)
+                                .map(|_| ()),
+                            ("dword", true) => {
+                                emu.cpu_mut().write_linear_dword(BxSegregs::Ds, addr, 0)
+                            }
+                            (_, false) => emu
+                                .cpu_mut()
+                                .read_linear_qword(BxSegregs::Ds, addr)
+                                .map(|_| ()),
+                            (_, true) => {
+                                emu.cpu_mut().write_linear_qword(BxSegregs::Ds, addr, 0)
+                            }
+                        };
+                        let raised_ac = emu.cpu().get_exception_diag()[ac] > before;
+                        let dir = if is_write { "write" } else { "read" };
+                        if want_ac {
+                            assert!(
+                                raised_ac,
+                                "{dir}_linear_{width} at +{off} must raise #AC before the \
+                                 TLB walk — missing check_alignment call or too-narrow mask"
+                            );
+                        } else {
+                            assert!(
+                                !raised_ac,
+                                "{dir}_linear_{width} at +{off} is aligned for this width \
+                                 — the accessor's ac_mask is too wide"
+                            );
+                        }
+                    }
+                }
+
+                // Byte accessors take no ac_mask in Bochs and must never #AC.
+                emu.cpu_mut().alignment_check_mask = 0xf;
+                emu.cpu_mut().user_pl = true;
+                let before = emu.cpu().get_exception_diag()[ac];
+                let _ = emu.cpu_mut().read_linear_byte(BxSegregs::Ds, BASE + 1);
+                emu.cpu_mut().alignment_check_mask = 0xf;
+                emu.cpu_mut().user_pl = true;
+                let _ = emu.cpu_mut().write_linear_byte(BxSegregs::Ds, BASE + 1, 0);
+                assert_eq!(
+                    emu.cpu().get_exception_diag()[ac],
+                    before,
+                    "byte accesses are never alignment-checked"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn misaligned_user_access_raises_ac_when_armed() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = avx_emulator();
+                // Bochs ac_mask values, straight from access2.cc: word=1,
+                // dword=3, qword=7. Byte accesses are never checked and vector
+                // accesses take the separate #GP `_aligned` path.
+                const WORD: u32 = 1;
+                const DWORD: u32 = 3;
+                const QWORD: u32 = 7;
+
+                // Disarmed: alignment_check_mask is 0 unless CS.RPL==3 with
+                // CR0.AM and EFLAGS.AC, so nothing faults.
+                assert_eq!(emu.cpu().alignment_check_mask, 0);
+                for (addr, mask) in [(0x1001u64, WORD), (0x1003, DWORD), (0x1007, QWORD)] {
+                    assert!(
+                        emu.cpu_mut().check_alignment(addr, mask).is_ok(),
+                        "no #AC while the mask is disarmed"
+                    );
+                }
+
+                // Arm exactly what handle_alignment_check() would set.
+                emu.cpu_mut().alignment_check_mask = 0xf;
+                emu.cpu_mut().user_pl = true;
+
+                // Naturally aligned accesses still pass at every width.
+                for (addr, mask) in [(0x1000u64, WORD), (0x1000, DWORD), (0x1000, QWORD),
+                                     (0x1002, WORD), (0x1004, DWORD), (0x1008, QWORD)] {
+                    assert!(
+                        emu.cpu_mut().check_alignment(addr, mask).is_ok(),
+                        "aligned access at {addr:#x} mask {mask} must not fault"
+                    );
+                }
+
+                // Misaligned accesses raise #AC, one width at a time.
+                for (addr, mask, name) in [
+                    (0x1001u64, WORD, "word at +1"),
+                    (0x1001, DWORD, "dword at +1"),
+                    (0x1002, DWORD, "dword at +2"),
+                    (0x1004, QWORD, "qword at +4"),
+                    (0x1001, QWORD, "qword at +1"),
+                ] {
+                    let before = emu.cpu().get_exception_diag()[Exception::Ac as usize];
+                    assert!(
+                        emu.cpu_mut().check_alignment(addr, mask).is_err(),
+                        "{name} must fault"
+                    );
+                    assert_eq!(
+                        emu.cpu().get_exception_diag()[Exception::Ac as usize],
+                        before + 1,
+                        "{name} must raise #AC specifically"
+                    );
+                }
+
+                // Bochs gates the check on `user`: a supervisor access never
+                // faults, even with the mask armed. `user_pl` is forced false
+                // around descriptor loads and other CPL-0 accesses.
+                emu.cpu_mut().user_pl = false;
+                for (addr, mask) in [(0x1001u64, WORD), (0x1003, DWORD), (0x1005, QWORD)] {
+                    assert!(
+                        emu.cpu_mut().check_alignment(addr, mask).is_ok(),
+                        "#AC applies to user-privilege accesses only"
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn isa_gate_disables_opcodes_whose_feature_is_absent() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+            let mut emu = avx_emulator();
+
+            // Ungated base instructions are never touched.
+            assert_eq!(
+                emu.cpu().isa_resolve_opcode(Opcode::Nop),
+                Opcode::Nop,
+                "an opcode with no ISA feature must always be allowed"
+            );
+
+            // Skylake-X advertises AVX2, so VPERMD stays enabled...
+            assert_eq!(
+                emu.cpu().isa_resolve_opcode(Opcode::V256VpermdVdqHdqWdq),
+                Opcode::V256VpermdVdqHdqWdq
+            );
+            // ...and #UDs the moment the feature bit goes away.
+            set_feature(&mut emu, X86Feature::IsaAvx2, false);
+            assert_eq!(
+                emu.cpu().isa_resolve_opcode(Opcode::V256VpermdVdqHdqWdq),
+                Opcode::IaError,
+                "clearing AVX2 must disable AVX2-only opcodes"
+            );
+            set_feature(&mut emu, X86Feature::IsaAvx2, true);
+
+            // Features Skylake-X genuinely lacks are gated out of the box. GFNI
+            // matters in particular: its VEX form is 3-operand, so executing the
+            // legacy 2-operand handler under a VEX prefix would silently compute
+            // the wrong thing rather than fault.
+            for op in [
+                Opcode::Gf2p8affineqbVdqWdqIb,
+                Opcode::Sha256rnds2VdqWdq,
+                Opcode::Getsec,
+                Opcode::V256VaesencVdqHdqWdq,
+            ] {
+                assert_eq!(
+                    emu.cpu().isa_resolve_opcode(op),
+                    Opcode::IaError,
+                    "{op:?} is not in the Skylake-X feature set and must #UD"
+                );
+            }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn isa_gate_turns_unimplemented_avx512_into_a_guest_ud() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let emu = avx_emulator();
+
+                // Corei7SkylakeX deliberately advertises no AVX-512 (see the
+                // FIXME in core_i7_skylake.rs: the EVEX executor does not cover
+                // the guest-visible surface, and advertising AVX512F made glibc
+                // IFUNCs pick paths that hit unimplemented lanes).
+                for f in [
+                    X86Feature::IsaAvx512,
+                    X86Feature::IsaAvx512Bw,
+                    X86Feature::IsaAvx512Dq,
+                    X86Feature::IsaAvx512Cd,
+                ] {
+                    assert!(
+                        !emu.cpu().bx_cpuid_support_isa_extension(f),
+                        "{f:?} must stay disabled while the EVEX executor is incomplete"
+                    );
+                }
+
+                // Before the ISA gate existed these reached the dispatcher
+                // catch-all and produced CpuError::UnimplementedOpcode — an
+                // emulator-level error, i.e. the host stops rather than the
+                // guest faulting. Bochs points them at BxError, so the guest
+                // must simply see #UD.
+                for op in [
+                    Opcode::EvexVpaddbVdqHdqWdq,
+                    Opcode::EvexVmovdqu16VdqWdq,
+                    Opcode::EvexValigndVdqHdqWdqIbKmask,
+                ] {
+                    assert_eq!(
+                        emu.cpu().isa_resolve_opcode(op),
+                        Opcode::IaError,
+                        "{op:?} belongs to an unadvertised AVX-512 feature and must #UD"
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn isa_gate_applies_the_bochs_special_cases() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+            let mut emu = avx_emulator();
+
+            // Without LZCNT, F3 0F BD is architecturally BSR — Bochs copies the
+            // BSR table entry over LZCNT's rather than raising #UD.
+            set_feature(&mut emu, X86Feature::IsaLzcnt, false);
+            assert_eq!(
+                emu.cpu().isa_resolve_opcode(Opcode::LzcntGdEd),
+                Opcode::BsrGdEd
+            );
+            assert_eq!(
+                emu.cpu().isa_resolve_opcode(Opcode::LzcntGqEq),
+                Opcode::BsrGqEq
+            );
+            set_feature(&mut emu, X86Feature::IsaLzcnt, true);
+            assert_eq!(
+                emu.cpu().isa_resolve_opcode(Opcode::LzcntGdEd),
+                Opcode::LzcntGdEd
+            );
+
+            // Same shape for TZCNT/BSF under BMI1.
+            set_feature(&mut emu, X86Feature::IsaBmi1, false);
+            assert_eq!(
+                emu.cpu().isa_resolve_opcode(Opcode::TzcntGdEd),
+                Opcode::BsfGdEd
+            );
+            set_feature(&mut emu, X86Feature::IsaBmi1, true);
+
+            // 3DNow! Extensions re-enable a fixed list of MMX-era opcodes even
+            // when their declared feature (SSE) is absent.
+            set_feature(&mut emu, X86Feature::IsaSse, false);
+            assert_eq!(
+                emu.cpu().isa_resolve_opcode(Opcode::PavgbPqQq),
+                Opcode::IaError,
+                "without SSE or 3DNow!-Ext the MMX-era form is unavailable"
+            );
+            set_feature(&mut emu, X86Feature::Isa3dnowExt, true);
+            assert_eq!(
+                emu.cpu().isa_resolve_opcode(Opcode::PavgbPqQq),
+                Opcode::PavgbPqQq,
+                "3DNow!-Ext must re-enable the aliased MMX opcodes"
+            );
+            set_feature(&mut emu, X86Feature::Isa3dnowExt, false);
+            set_feature(&mut emu, X86Feature::IsaSse, true);
+
+            // AVX10.1 subsumes the AVX-512 sub-extensions.
+            set_feature(&mut emu, X86Feature::IsaAvx512Bw, false);
+            let evex_bw = Opcode::EvexVpaddbVdqHdqWdq;
+            assert_eq!(emu.cpu().isa_resolve_opcode(evex_bw), Opcode::IaError);
+            set_feature(&mut emu, X86Feature::IsaAvx10_1, true);
+            assert_eq!(
+                emu.cpu().isa_resolve_opcode(evex_bw),
+                evex_bw,
+                "AVX10.1 must stand in for the individual AVX-512 sub-features"
+            );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn isa_gate_lets_vpclmulqdq_vl256_run_once_its_feature_is_present() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut emu = avx_emulator();
+                enable_guest_avx(&mut emu);
+                // Corei7SkylakeX lacks VPCLMULQDQ, so the 256-bit form #UDs by
+                // default (asserted in the integration suite). Turn the feature
+                // on and the per-lane handler must run.
+                set_feature(&mut emu, X86Feature::IsaVaesVpclmulqdq, true);
+
+                let mut ymm1 = [0u8; 32];
+                let mut ymm2 = [0u8; 32];
+                ymm1[0] = 2;
+                ymm1[16] = 5;
+                ymm2[0] = 3;
+                ymm2[16] = 7;
+                emu.reg_write_ymm(X86Reg::Ymm1, ymm1);
+                emu.reg_write_ymm(X86Reg::Ymm2, ymm2);
+                emu.reg_write_ymm(X86Reg::Ymm0, [0xAA; 32]);
+
+                // VPCLMULQDQ ymm0, ymm1, ymm2, 0
+                run_one(&mut emu, CODE_BASE, &[0xC4, 0xE3, 0x75, 0x44, 0xC2, 0x00]).unwrap();
+
+                let got = emu.reg_read_ymm(X86Reg::Ymm0);
+                let mut want = [0u8; 32];
+                want[0] = 6; // carry-less 2 x 3
+                want[16] = 27; // carry-less 5 x 7
+                assert_eq!(
+                    got, want,
+                    "VEX.256 VPCLMULQDQ multiplies each 128-bit lane independently"
+                );
             })
             .unwrap()
             .join()

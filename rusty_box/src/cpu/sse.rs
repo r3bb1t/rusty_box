@@ -1445,6 +1445,29 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// PEXTRW EdVdqIbR — extract word from XMM at imm8 & 7 to a GPR
+    /// (66 0F 3A 15 /r ib, register destination). Bochs `PEXTRW_EdVdqIbR`
+    /// zero-extends the word into the full 32-bit register.
+    pub(super) fn pextrw_ed_vdq_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
+        let result = u32::from(op.xmm16u((instr.ib() & 0x7) as usize));
+        self.set_gpr32(instr.src1().into(), result); // rm = GPR destination
+        Ok(())
+    }
+
+    /// PEXTRW MwVdqIbM — extract word from XMM at imm8 & 7 to memory
+    /// (66 0F 3A 15 /r ib, memory destination). Bochs `PEXTRW_MwVdqIbM`.
+    pub(super) fn pextrw_mw_vdq_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
+        let result = op.xmm16u((instr.ib() & 0x7) as usize);
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
+        self.v_write_word(seg, eaddr, result)?;
+        Ok(())
+    }
+
     /// PEXTRD EdVdqIb — extract dword from XMM at imm8 & 3 position (combined R/M form)
     /// Decoder: 0F 3A map → dst=nnn (XMM source), src1=rm (GPR/mem destination)
     pub(super) fn pextrd_ed_vdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {

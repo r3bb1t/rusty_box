@@ -237,7 +237,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut op = BxPackedXmmRegister::default();
         op.set_xmm64u(0, val32 as u64);
         op.set_xmm64u(1, 0);
-        self.write_xmm_reg_lo128(instr.dst(), op);
+        // Bochs MOVD_VdqEdR writes through BX_WRITE_XMM_REGZ: the VEX form
+        // (V128_VMOVD_VdqEd shares this handler) must clear bits [255:128].
+        self.write_xmm_regz(instr, instr.dst(), op);
         Ok(())
     }
 
@@ -467,7 +469,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut op = BxPackedXmmRegister::default();
         op.set_xmm64u(0, val32 as u64);
         op.set_xmm64u(1, 0);
-        self.write_xmm_reg_lo128(instr.dst(), op);
+        // Bochs MOVD_VdqEdR writes through BX_WRITE_XMM_REGZ: the VEX form
+        // (V128_VMOVD_VdqEd shares this handler) must clear bits [255:128].
+        self.write_xmm_regz(instr, instr.dst(), op);
         Ok(())
     }
 
@@ -480,7 +484,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut op = BxPackedXmmRegister::default();
         op.set_xmm64u(0, val32 as u64);
         op.set_xmm64u(1, 0);
-        self.write_xmm_reg_lo128(instr.dst(), op);
+        // Bochs MOVD_VdqEdR writes through BX_WRITE_XMM_REGZ: the VEX form
+        // (V128_VMOVD_VdqEd shares this handler) must clear bits [255:128].
+        self.write_xmm_regz(instr, instr.dst(), op);
         Ok(())
     }
 
@@ -616,7 +622,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut op = BxPackedXmmRegister::default();
         op.set_xmm64u(0, val);
         op.set_xmm64u(1, 0);
-        self.write_xmm_reg_lo128(instr.dst(), op);
+        // Bochs MOVQ_VdqEqR writes through BX_WRITE_XMM_REGZ; the shared VEX
+        // form V128_VMOVQ_VdqEq must clear bits [255:128].
+        self.write_xmm_regz(instr, instr.dst(), op);
         Ok(())
     }
 
