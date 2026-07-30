@@ -1278,7 +1278,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     tracing::trace!("WRMSR EFER: attempt to change LME when CR0.PG=1, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
-                // Bochs SetEFER (cpu/crregs.cc:1490-1494): if SVME is being set
+                // Bochs SetEFER (cpu/crregs.cc): if SVME is being set
                 // and VM_CR.SVMDIS is locked, the write must #GP(0). The
                 // architecturally-required protection is what BX_VM_CR_MSR_LOCK
                 // exists for: once SVMDIS is locked, EFER.SVME cannot be enabled
@@ -4105,7 +4105,7 @@ mod tests {
     use crate::pc_system::BxPcSystemC;
     use core::ptr::NonNull;
 
-    /// Bochs `SetEFER` (cpu/crregs.cc:1490-1494): a write that tries to set
+    /// Bochs `SetEFER` (cpu/crregs.cc): a write that tries to set
     /// `EFER.SVME` while `VM_CR.SVMDIS` is locked must #GP(0) and leave the
     /// EFER MSR unchanged. The Err return is sufficient evidence \u2014 we don't
     /// inspect the IDT delivery side-effects, only that the gate fired.

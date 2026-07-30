@@ -1219,6 +1219,13 @@ impl BxMemC<'_> {
 
 #[cfg(test)]
 mod handler_tests {
+
+/// Emulator construction needs a bigger stack than the default 2 MiB test
+/// thread: `Emulator` is ~4 MiB and the debug build materialises a few
+/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
+/// enough concurrent reservations to intermittently exhaust the process
+/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::*;
     use crate::memory::MemoryDeviceId;
 
@@ -1495,7 +1502,7 @@ mod handler_tests {
         // stack (2MB on win32), so this must run on a big-stack thread —
         // same pattern as cpu/tests_jumps.rs.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
                 let mut mem = test_mem();
 
@@ -1565,7 +1572,7 @@ mod handler_tests {
         use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
 
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
                 let mut mem = test_mem();
                 mem.set_a20_mask(0xFFFF_FFFF_FFFF_FFFF); // A20 enabled: no address wraparound

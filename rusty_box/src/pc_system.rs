@@ -187,6 +187,7 @@ const TIMER_OWNER_HPET: u8 = 13;
 #[cfg(feature = "std")]
 const TIMER_OWNER_SERIAL_TX: u8 = 14;
 /// VGA vertical retrace timer (Bochs vgacore.cc `vga_vtimer_id`).
+#[cfg(feature = "std")]
 const TIMER_OWNER_VGA_VERTICAL: u8 = 15;
 
 #[cfg(feature = "std")]

@@ -259,7 +259,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.load_seg_reg_real_mode(BxSegregs::Cs, temp_cs);
                 self.set_eip(temp_ip as u32);
 
-                // Bochs vm8086.cc:248-249 — clear_TF(); clear_RF();
+                // Bochs vm8086.cc — clear_TF(); clear_RF();
                 self.eflags.remove(EFlags::TF);
                 self.clear_rf();
 

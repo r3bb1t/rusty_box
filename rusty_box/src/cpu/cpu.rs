@@ -944,7 +944,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.cpu_topology
     }
 
-    // Event bit layout — matches Bochs `cpu.h:1193-1208` exactly.
+    // Event bit layout — matches Bochs cpu.h `BX_EVENT_*` exactly.
     // Each bit identifies a single asynchronous event in the
     // `pending_event` / `event_mask` bitmaps the cpu maintains.
 

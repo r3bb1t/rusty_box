@@ -547,7 +547,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_insb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if cx != 0 {
@@ -661,7 +661,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_insd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if cx != 0 {
@@ -691,7 +691,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if ecx == 0 {
             return Ok(());
         }
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if ecx != 0 {
@@ -836,7 +836,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_outsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if cx != 0 {
@@ -861,7 +861,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_outsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if cx != 0 {
@@ -886,7 +886,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_outsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if cx != 0 {
@@ -916,7 +916,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if ecx == 0 {
             return Ok(());
         }
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if ecx != 0 {
@@ -946,7 +946,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if ecx == 0 {
             return Ok(());
         }
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if ecx != 0 {
@@ -976,7 +976,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if ecx == 0 {
             return Ok(());
         }
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if ecx != 0 {
@@ -1122,7 +1122,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_insb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if rcx != 0 {
@@ -1268,7 +1268,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_outsb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if rcx != 0 {
@@ -1293,7 +1293,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_outsw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if rcx != 0 {
@@ -1318,7 +1318,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     fn rep_outsd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        // Bochs cpu.cc:395-467 repeat(): natural exit returns; async break
+        // Bochs cpu.cc repeat(): natural exit returns; async break
         // falls through to assert_RF + RIP=prev_rip + STOP_TRACE tail.
         loop {
             if rcx != 0 {

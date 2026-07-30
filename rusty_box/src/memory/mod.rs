@@ -971,6 +971,12 @@ impl<'m> BxMemC<'m> {
 
 #[cfg(all(test, feature = "std"))]
 mod phase1_tests {
+
+/// Emulator construction needs more than the default 2 MiB test stack, but
+/// far less than the 256 MiB previously reserved here: `Emulator` is ~4 MiB.
+/// Oversized reservations across many parallel tests intermittently exhausted
+/// the process and failed unrelated tests with STATUS_STACK_OVERFLOW.
+const TEST_STACK_SIZE: usize = 64 * MIB;
     use super::{
         memory_rusty_box::*, BxMemC, BxMemoryStubC, CpuMemoryPolicy, CpuTlbPin, MemoryError,
         MemorySnapshotGeometry, MemorySnapshotResidency,
@@ -1328,7 +1334,7 @@ mod phase1_tests {
     #[test]
     fn typed_physical_access_crosses_subpage_guest_blocks() {
         std::thread::Builder::new()
-            .stack_size(256 * MIB)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut mem = BxMemC::new(
                     BxMemoryStubC::create_and_init(MIB, MIB, 1024).unwrap(),
@@ -1366,7 +1372,7 @@ mod phase1_tests {
     #[test]
     fn cpu_tlb_pin_sidecar_refreshes_and_clears_without_cpu_probe() {
         std::thread::Builder::new()
-            .stack_size(256 * MIB)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
                 let mut mem = BxMemC::new(
@@ -1402,7 +1408,7 @@ mod phase1_tests {
     #[test]
     fn sibling_tlb_pin_blocks_loader_eviction() {
         std::thread::Builder::new()
-            .stack_size(256 * MIB)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut mem = BxMemC::new(
                     BxMemoryStubC::create_and_init(2 * MIB, MIB, MIB).unwrap(),
@@ -1447,7 +1453,7 @@ mod phase1_tests {
         // dedicated window interval is the only thing preventing a data
         // access from evicting the code block under a full swap cap.
         std::thread::Builder::new()
-            .stack_size(256 * MIB)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut mem = BxMemC::new(
                     BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).unwrap(),
@@ -1501,7 +1507,7 @@ mod phase1_tests {
     #[test]
     fn pinned_cross_block_failure_returns_committed_copy_prefix() {
         std::thread::Builder::new()
-            .stack_size(256 * MIB)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut mem = BxMemC::new(
                     BxMemoryStubC::create_and_init(2 * MIB, MIB, MIB).unwrap(),

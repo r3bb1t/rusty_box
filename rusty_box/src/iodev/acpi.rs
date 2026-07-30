@@ -823,7 +823,7 @@ impl BxAcpiCtrl {
         }
 
         // Bochs schedules the first whole microsecond whose PM tick value has
-        // reached the current overflow boundary (acpi.cc:329-332).
+        // reached the current overflow boundary (acpi.cc).
         let expire_usec = muldiv64(self.tmr_overflow_time, 1_000_000, PM_FREQ as u32) + 1;
         (expire_usec > current_usec).then_some(expire_usec - current_usec)
     }

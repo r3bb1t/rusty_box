@@ -347,7 +347,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             self.speculative_rsp = false;
 
-            // Bochs exception.cc:976 — if (vector != BX_DB_EXCEPTION) assert_RF();
+            // Bochs exception.cc — if (vector != BX_DB_EXCEPTION) assert_RF();
             if vector != Exception::Db {
                 self.assert_rf();
             }

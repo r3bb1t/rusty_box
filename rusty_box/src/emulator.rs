@@ -3704,8 +3704,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     self.device_manager.pic.lower_irq(route);
                 }
             } else if route < 24 {
-                // GSI 16..23 exist only as IOAPIC pins here. DELIBERATE Bochs
-                // deviation, flagged not silent: Bochs update_irq() routes
+                // GSI 16..23 exist only as IOAPIC pins here. PERMANENTLY
+                // RATIFIED Bochs deviation (user decision 2026-07-25) — this
+                // is a closed item, not an open one. Bochs update_irq() routes
                 // EVERY HPET pin through bx_pic_c::raise_irq(route,
                 // BX_IRQ_TYPE_ISA), whose unbounded `(irq_no < 8) ? master :
                 // slave` indexing reads slave IRQ_in[route & 7] for route >= 16
@@ -5976,6 +5977,13 @@ unsafe impl<I: BxCpuIdTrait + Send, T: Instrumentation + Send> Send for Emulator
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
+
+/// Emulator construction needs a bigger stack than the default 2 MiB test
+/// thread: `Emulator` is ~4 MiB and the debug build materialises a few
+/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
+/// enough concurrent reservations to intermittently exhaust the process
+/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::*;
     use crate::cpu::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::decoder::Instruction;
@@ -6127,7 +6135,7 @@ mod tests {
     fn test_emulator_creation() {
         // BxICache contains ~19MB fixed arrays; debug-mode struct literal needs large stack
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -6146,7 +6154,7 @@ mod tests {
         impl crate::cpu::instrumentation::Instrumentation for NoopTracer {}
 
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE_ADDR: u64 = 0x1000;
                 let mut config = EmulatorConfig::default();
@@ -6179,7 +6187,7 @@ mod tests {
     #[test]
     fn test_emulator_initialization() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -6197,7 +6205,7 @@ mod tests {
     #[test]
     fn test_multiple_instances_independent() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
 
@@ -6224,7 +6232,7 @@ mod tests {
     #[test]
     fn strict_smp_deadline_keeps_bochs_idle_cpu_quantum_credit() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -6259,7 +6267,7 @@ mod tests {
     #[test]
     fn equal_smp_deadline_truncates_a_short_final_round() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -6312,7 +6320,7 @@ mod tests {
         // the requested count — the link guard's `iteration < max` is the
         // batch-capped UP form of linkTrace's ticks-left guard.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -6342,7 +6350,7 @@ mod tests {
     #[test]
     fn run_cpu_batch_stops_at_the_next_exact_timer_deadline() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -6375,7 +6383,7 @@ mod tests {
         // 25); the CPU enters SMM at SMBASE+0x8000 = 0x38000 and the GUEST
         // handler clears 0xb3 and RSMs. POST then polls 0xb3 until 0.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -6453,7 +6461,7 @@ mod tests {
         // ticks. Program counter 0 in mode 2 (rate generator) and confirm the
         // owner keeps firing, producing many IRQ0 rising edges — not one.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -6507,7 +6515,7 @@ mod tests {
         // distance-proportional seek timer; DRQ and the channel IRQ appear
         // only when pc_system reaches that deadline — never before.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 use crate::iodev::harddrv::AtaStatus;
 
@@ -6580,7 +6588,7 @@ mod tests {
         // timer is routed via IOAPIC pin 2 (GSI2, the IRQ0->GSI2 override) to
         // CPU 0's LAPIC. A PIT tick must deliver the redirection vector.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -6655,7 +6663,7 @@ mod tests {
     #[test]
     fn keyboard_one_usec_deadline_ends_up_batch_and_raises_irq1() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -6703,7 +6711,7 @@ mod tests {
     #[test]
     fn deferred_continuous_timer_keeps_its_programmed_period() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const PROGRAMMING_TICKS: u64 = 100;
                 const PERIOD_TICKS: u64 = 10;
@@ -6751,7 +6759,7 @@ mod tests {
     #[test]
     fn deadline_scheduler_preserves_windows_timer_order() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu =
                     Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
@@ -6794,7 +6802,7 @@ mod tests {
     #[test]
     fn no_fixed_device_polling_state_remains() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
@@ -6872,7 +6880,7 @@ mod tests {
     #[test]
     fn phase1_tests_subpage_guest_blocks_fetch_sequential_instructions() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const BLOCK_SIZE: usize = 1024;
                 const START: u64 = (BLOCK_SIZE - 2) as u64;
@@ -6906,7 +6914,7 @@ mod tests {
     #[test]
     fn strict_cpu_batch_limit_does_not_execute_trace_tail() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const START: u64 = 0x1000;
                 let mut emu =
@@ -6934,7 +6942,7 @@ mod tests {
     #[test]
     fn memory_reinitialization_invalidates_every_cpu_host_pin() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
@@ -6970,7 +6978,7 @@ mod tests {
     #[test]
     fn run_interactive_stops_at_exact_instruction_limit_across_batches() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const START: u64 = 0x1000;
                 const LIMIT: u64 = 100_000 + 2;
@@ -6995,7 +7003,7 @@ mod tests {
     #[test]
     fn phase1_tests_emulator_loader_respects_sibling_tlb_pins() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
@@ -7035,7 +7043,7 @@ mod tests {
     #[test]
     fn run_cpu_batch_passes_all_cpu_tlb_pins_to_eviction() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
@@ -7101,7 +7109,7 @@ mod tests {
     #[test]
     fn phase1_tests_unsafe_cpu_mutation_keeps_cached_pin_valid() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
@@ -7140,7 +7148,7 @@ mod tests {
     #[test]
     fn rep_insw32_fast_path_retires_exact_iteration_count() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE_ADDR: u64 = 0x1000;
                 const DEST_ADDR: u64 = 0x2000;
@@ -7198,7 +7206,7 @@ mod tests {
     #[test]
     fn rep_insw32_stops_at_event_budget_across_page_boundary() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE_ADDR: u64 = 0x1000;
                 const DEST_ADDR: u64 = 0x2ff0;
@@ -7266,7 +7274,7 @@ mod tests {
     #[test]
     fn smp_batch_with_parked_application_processors_reaches_timer_quantum() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -7302,7 +7310,7 @@ mod tests {
     #[test]
     fn halted_application_processors_do_not_force_trace_sized_batches() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -7343,7 +7351,7 @@ mod tests {
     #[test]
     fn parked_application_processor_ipi_breaks_bsp_batch_for_delivery() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -7389,7 +7397,7 @@ mod tests {
     #[test]
     fn smc_store_within_current_trace_stops_trace() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -7431,7 +7439,7 @@ mod tests {
     #[test]
     fn fw_cfg_dma_out_stops_cached_trace_before_following_instruction() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 const DESCRIPTOR: u64 = 0x3000;
@@ -7493,7 +7501,7 @@ mod tests {
     #[test]
     fn smp_cross_cpu_code_patch_invalidates_sibling_icache() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -7544,7 +7552,7 @@ mod tests {
     #[test]
     fn dma_write_to_cached_code_page_invalidates_icache() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 fn dma_read(_data: &[u8], _maxlen: u16) -> u16 {
                     0
@@ -7604,7 +7612,7 @@ mod tests {
     #[test]
     fn active_cpu_batch_has_no_fixed_millisecond_polling_cap() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -7645,7 +7653,7 @@ mod tests {
     #[test]
     fn keyboard_reset_ack_reaches_bios_poll_before_timeout_at_high_configured_ips() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.ips = 300_000_000;
@@ -7697,7 +7705,7 @@ mod tests {
     #[test]
     fn hlt_wait_step_uses_exact_next_timer_deadline() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -7712,7 +7720,7 @@ mod tests {
     #[test]
     fn hlt_wait_step_respects_near_pc_system_timer() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -7749,7 +7757,7 @@ mod tests {
     #[test]
     fn slowdown_owner_bounds_hlt_wait() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.sync_slowdown = true;
@@ -7773,7 +7781,7 @@ mod tests {
     #[test]
     fn slowdown_state_reanchors_on_restore() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 use std::io::Cursor;
                 let build = || {
@@ -7830,7 +7838,7 @@ mod tests {
     #[test]
     fn slowdown_config_mismatch_rejects_restore() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 use std::io::Cursor;
                 let build = |sync_slowdown: bool| {
@@ -7872,7 +7880,7 @@ mod tests {
     #[test]
     fn hardware_reset_rearms_exact_device_owners() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu =
                     Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
@@ -7907,7 +7915,7 @@ mod tests {
     #[test]
     fn software_reset_requests_preserve_device_state() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -7951,7 +7959,7 @@ mod tests {
     #[test]
     fn pci_cf9_hardware_reset_resets_device_state() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -7974,7 +7982,7 @@ mod tests {
     #[test]
     fn pam_boundary_flushes_all_cpu_mappings() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
@@ -8016,7 +8024,7 @@ mod tests {
     #[test]
     fn a20_port92_and_keyboard_transitions_flush_all_cpu_mappings() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
@@ -8103,7 +8111,7 @@ mod tests {
     #[test]
     fn all_reset_ports_stop_before_the_next_instruction() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 let reset_guest = |code: &[u8]| {
@@ -8162,7 +8170,7 @@ mod tests {
         // the triggering OUT: no pre-reset elapsed tick, deferred timer
         // request, or queued callback may reach the post-reset machine.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 for hardware in [false, true] {
                     let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
@@ -8223,7 +8231,7 @@ mod tests {
         // set_HRQ(0). The full chain must work through the deferred-request
         // transport: a DRQ must wake the CPU and the TC must drop HRQ.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 fn dma_write(data: &mut [u8], maxlen: u16) -> u16 {
                     let payload = [0xd1, 0xa5, 0x5e, 0x33];
@@ -8305,7 +8313,7 @@ mod tests {
         // A guest-triggered reset mid-batch must not commit the instructions
         // executed before the reset as post-reset virtual time.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
@@ -8351,7 +8359,7 @@ mod tests {
     #[test]
     fn initialize_enables_configured_pci_vga() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 for (pci_enabled, pci_vga) in
                     [(false, false), (false, true), (true, false), (true, true)]
@@ -8378,7 +8386,7 @@ mod tests {
     #[test]
     fn emulator_new_builds_and_resets_all_configured_cpus() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -8409,7 +8417,7 @@ mod tests {
     #[test]
     fn nonflat_topology_reports_bochs_compatible_guest_tables() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default().with_topology(2, 2, 2).unwrap();
@@ -8501,7 +8509,7 @@ mod tests {
     #[test]
     fn cpuid_freq_config_reaches_every_cpu_through_cpuid_instruction() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 // `ips` mode: leaf 0x15 must report a crystal of `ips` Hz with
                 // a 1/1 ratio and leaf 0x16 the rate in MHz — on the BSP and
@@ -8650,7 +8658,7 @@ mod tests {
     #[test]
     fn cpu_masks_match_scan_oracle_for_scheduler_transition_matrix() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const FIXED_VECTOR: u32 = 0x42;
                 const LEVEL_VECTOR: u8 = 0xE0;
@@ -8834,7 +8842,7 @@ mod tests {
     #[test]
     fn run_cpu_batch_executes_application_processor_after_sipi() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -8866,7 +8874,7 @@ mod tests {
     #[test]
     fn bsp_icr_init_sipi_wakes_and_runs_application_processor() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const ICR_LOW: u64 = 0x300;
                 const ICR_HIGH: u64 = 0x310;
@@ -8925,7 +8933,7 @@ mod tests {
     #[test]
     fn bsp_icr_init_sipi_restarts_active_application_processor() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const SECOND_TRAMPOLINE_VECTOR: u8 = AP_TRAMPOLINE_VECTOR + 1;
                 const SECOND_TRAMPOLINE_ADDR: u64 = (SECOND_TRAMPOLINE_VECTOR as u64) << 12;
@@ -8990,7 +8998,7 @@ mod tests {
     #[test]
     fn init_does_not_recall_ipis_already_sent_by_active_ap() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const IN_FLIGHT_VECTOR: u32 = 0x44;
 
@@ -9049,7 +9057,7 @@ mod tests {
     #[test]
     fn init_ipi_to_active_ap_stays_pending_until_instruction_boundary() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -9091,7 +9099,7 @@ mod tests {
     #[test]
     fn smi_then_init_ipis_are_both_signaled_not_collapsed() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -9135,7 +9143,7 @@ mod tests {
     #[test]
     fn run_cpu_batch_uses_smp_time_when_peer_is_started_but_halted() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -9187,7 +9195,7 @@ mod tests {
     #[test]
     fn smp_batch_keeps_guest_time_at_the_frozen_round_epoch() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -9226,7 +9234,7 @@ mod tests {
     #[test]
     fn smp_batch_services_lapic_timer_at_round_boundary() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -9289,7 +9297,7 @@ mod tests {
     #[test]
     fn smp_lapic_tmcct_advances_across_rounds_without_scheduler_work() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const HUGE_TMICT: u32 = 0x0FFF_FFFF;
 
@@ -9353,7 +9361,7 @@ mod tests {
     #[test]
     fn bsp_hlt_fast_forward_stays_available_until_application_processors_start() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -9386,7 +9394,7 @@ mod tests {
     #[test]
     fn all_but_self_fixed_ipi_wakes_halted_application_processors() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const FIXED_IPI_VECTOR: u32 = 0xF1;
                 const ICR_ALL_BUT_SELF: u32 = 3 << 18;
@@ -9438,7 +9446,7 @@ mod tests {
     #[test]
     fn nmi_ipi_wakes_shutdown_application_processor() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const ICR_DELIVERY_NMI: u32 = 4 << 8;
                 const NMI_HANDLER_SEG: u16 = 0x0500;
@@ -9537,7 +9545,7 @@ mod tests {
     #[test]
     fn lapic_timer_request_is_activated_before_round_ticks_advance() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -9585,7 +9593,7 @@ mod tests {
     #[test]
     fn self_ipi_control_event_ends_up_batch() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 const SELF_NMI_IPI: u32 =
@@ -9643,7 +9651,7 @@ mod tests {
     #[test]
     fn up_lapic_timer_uses_programming_instruction_epoch() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 const INITIAL_COUNT: u32 = 4;
@@ -9717,7 +9725,7 @@ mod tests {
     #[test]
     fn halted_application_processor_lapic_timer_disables_bsp_hlt_fast_forward() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -9757,7 +9765,7 @@ mod tests {
     #[test]
     fn service_lapic_local_events_catches_up_overdue_periodic_ap_timers() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -9809,7 +9817,7 @@ mod tests {
     #[test]
     fn service_lapic_local_events_catches_up_overdue_periodic_ap_timers_beyond_previous_cap() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const ELAPSED_TICKS: u32 = 10_050;
                 const EXPECTED_FIRES: u64 = 1005;
@@ -9868,7 +9876,7 @@ mod tests {
     #[test]
     fn reset_deactivates_lapic_pc_timer_before_next_tick() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -9914,7 +9922,7 @@ mod tests {
     #[test]
     fn service_lapic_local_events_drains_level_triggered_eoi() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const VECTOR: u8 = 0x40;
                 const VECTOR_BIT: u32 = 1;
@@ -9957,7 +9965,7 @@ mod tests {
     #[test]
     fn wait_for_sipi_application_processors_credit_quantum_ticks() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -10031,7 +10039,7 @@ mod tests {
     #[test]
     fn pic_deferred_clear_cannot_erase_reasserted_int_pin() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -10061,7 +10069,7 @@ mod tests {
     #[test]
     fn scheduler_boundary_republishes_asserted_pic_without_edge_history() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -10090,7 +10098,7 @@ mod tests {
     #[test]
     fn rep_insw_respects_configured_page_write_permissions() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE_ADDR: u64 = 0x1000;
                 const DEST_ADDR: u64 = 0x2000;
@@ -10126,7 +10134,7 @@ mod tests {
     #[test]
     fn split_page_rmw_faults_before_first_mmio_read() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 use std::sync::{
                     atomic::{AtomicUsize, Ordering},
@@ -10180,7 +10188,7 @@ mod tests {
     #[test]
     fn insw_permission_fault_precedes_destructive_mmio_read() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 use std::sync::{
                     atomic::{AtomicUsize, Ordering},
@@ -10234,7 +10242,7 @@ mod tests {
     #[test]
     fn rep_insw_mmio_fallback_reads_once_per_input_word() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 use std::sync::{
                     atomic::{AtomicUsize, Ordering},
@@ -10287,7 +10295,7 @@ mod tests {
 
     fn phase6_large_stack(f: impl FnOnce() + Send + 'static) {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(f)
             .unwrap()
             .join()
@@ -11145,7 +11153,7 @@ mod tests {
     #[test]
     fn empty_memory_write_is_a_no_op() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -11166,7 +11174,7 @@ mod tests {
     #[test]
     fn snapshot_rebuilds_runnable_and_lapic_work_masks_before_resume() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig {
                     guest_memory_size: 4 * 1024 * 1024,

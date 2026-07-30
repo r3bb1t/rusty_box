@@ -19,7 +19,9 @@ pub(crate) fn count(index: usize) {
     VEC_COUNTS[index & 0x1ff].fetch_add(1, Ordering::Relaxed);
 }
 
-/// Snapshot every non-zero slot as `(index, count)`.
+/// Snapshot every non-zero slot as `(index, count)`. Only the
+/// `RUSTY_BOX_BENCH_FILE` sampler calls this, and that is std-only.
+#[cfg(feature = "std")]
 pub(crate) fn snapshot(mut visit: impl FnMut(usize, u64)) {
     for (index, slot) in VEC_COUNTS.iter().enumerate() {
         let value = slot.load(Ordering::Relaxed);
