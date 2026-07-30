@@ -695,6 +695,490 @@ fn test_vex_pinsr_family_decode() {
 }
 
 #[test]
+fn test_vex_vtestps_vtestpd_decode() {
+    // VTESTPS ymm1, ymm2 — VEX.256.66.0F38.W0 0E /r.
+    // C4 E2: 3-byte VEX, mmmmm=02 (0F38). 7D: W=0 vvvv=1111 L=1 pp=01(66).
+    let ps = fetch_decode64(&[0xC4, 0xE2, 0x7D, 0x0E, 0xCA]).unwrap();
+    assert_eq!(ps.ilen(), 5);
+    assert_eq!(ps.get_ia_opcode(), Opcode::VtestpsVpsWps);
+    assert_eq!(ps.dst(), 1); // nnn
+    assert_eq!(ps.src1(), 2); // rm
+    assert_eq!(ps.get_vl(), 1);
+
+    // VTESTPD xmm0, xmm1 — VEX.128.66.0F38.W0 0F /r.
+    let pd = fetch_decode64(&[0xC4, 0xE2, 0x79, 0x0F, 0xC1]).unwrap();
+    assert_eq!(pd.get_ia_opcode(), Opcode::VtestpdVpdWpd);
+    assert_eq!(pd.dst(), 0);
+    assert_eq!(pd.src1(), 1);
+    assert_eq!(pd.get_vl(), 0);
+
+    // Memory source form must decode too (Bochs LOAD_Vector path).
+    let mem = fetch_decode64(&[0xC4, 0xE2, 0x7D, 0x0E, 0x08]).unwrap();
+    assert_eq!(mem.get_ia_opcode(), Opcode::VtestpsVpsWps);
+    assert!(!mem.mod_c0());
+
+    // VEX.vvvv is reserved (must be 1111b) — Bochs "VEX.VVV #UD".
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0x75, 0x0E, 0xCA]).is_err());
+    // VEX.W1 is reserved.
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0xFD, 0x0E, 0xCA]).is_err());
+    // No legacy (non-VEX) encoding exists at 66 0F 38 0E/0F.
+    assert!(fetch_decode64(&[0x66, 0x0F, 0x38, 0x0E, 0xCA]).is_err());
+}
+
+#[test]
+fn test_vex_vpermil_decode() {
+    // VPERMILPS ymm1, ymm2, ymm3 — VEX.256.66.0F38.W0 0C /r.
+    // vvvv is the DATA operand, ModRM.rm is the per-element CONTROL.
+    let ps = fetch_decode64(&[0xC4, 0xE2, 0x6D, 0x0C, 0xCB]).unwrap();
+    assert_eq!(ps.get_ia_opcode(), Opcode::VpermilpsVpsHpsWps);
+    assert_eq!(ps.dst(), 1);
+    assert_eq!(ps.src2(), 2); // vvvv = data
+    assert_eq!(ps.src1(), 3); // rm = control
+    assert_eq!(ps.get_vl(), 1);
+
+    // VPERMILPD xmm0, xmm1, xmm2 — VEX.128.66.0F38.W0 0D /r.
+    let pd = fetch_decode64(&[0xC4, 0xE2, 0x71, 0x0D, 0xC2]).unwrap();
+    assert_eq!(pd.get_ia_opcode(), Opcode::VpermilpdVpdHpdWpd);
+    assert_eq!(pd.dst(), 0);
+    assert_eq!(pd.src2(), 1);
+    assert_eq!(pd.src1(), 2);
+    assert_eq!(pd.get_vl(), 0);
+
+    // VPERMILPS ymm1, ymm2, 0x1B — VEX.256.66.0F3A.W0 04 /r ib (no vvvv).
+    let ps_ib = fetch_decode64(&[0xC4, 0xE3, 0x7D, 0x04, 0xCA, 0x1B]).unwrap();
+    assert_eq!(ps_ib.get_ia_opcode(), Opcode::VpermilpsVpsWpsIb);
+    assert_eq!(ps_ib.dst(), 1);
+    assert_eq!(ps_ib.src1(), 2);
+    assert_eq!(ps_ib.ib(), 0x1B);
+
+    // VPERMILPD ymm1, ymm2, 0x05 — VEX.256.66.0F3A.W0 05 /r ib.
+    let pd_ib = fetch_decode64(&[0xC4, 0xE3, 0x7D, 0x05, 0xCA, 0x05]).unwrap();
+    assert_eq!(pd_ib.get_ia_opcode(), Opcode::VpermilpdVpdWpdIb);
+    assert_eq!(pd_ib.ib(), 0x05);
+
+    // VEX.W1 is reserved for all four.
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0xED, 0x0C, 0xCB]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0xFD, 0x04, 0xCA, 0x1B]).is_err());
+    // The imm8 forms take no vvvv source.
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0x75, 0x04, 0xCA, 0x1B]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0x75, 0x05, 0xCA, 0x05]).is_err());
+    // No legacy encoding exists at 66 0F 38 0C.
+    assert!(fetch_decode64(&[0x66, 0x0F, 0x38, 0x0C, 0xCB]).is_err());
+}
+
+#[test]
+fn test_vex_vpermps_vpermpd_decode() {
+    // VPERMPS ymm1, ymm2, ymm3 — VEX.256.66.0F38.W0 16 /r (256-bit only).
+    let ps = fetch_decode64(&[0xC4, 0xE2, 0x6D, 0x16, 0xCB]).unwrap();
+    assert_eq!(ps.get_ia_opcode(), Opcode::V256VpermpsVpsHpsWps);
+    assert_eq!(ps.dst(), 1);
+    assert_eq!(ps.src2(), 2); // vvvv = index vector
+    assert_eq!(ps.src1(), 3); // rm = source vector
+    assert_eq!(ps.get_vl(), 1);
+
+    // VPERMPD ymm1, ymm2, 0x1B — VEX.256.66.0F3A.W1 01 /r ib (256-bit only).
+    let pd = fetch_decode64(&[0xC4, 0xE3, 0xFD, 0x01, 0xCA, 0x1B]).unwrap();
+    assert_eq!(pd.get_ia_opcode(), Opcode::V256VpermpdVpdWpdIb);
+    assert_eq!(pd.dst(), 1);
+    assert_eq!(pd.src1(), 2);
+    assert_eq!(pd.ib(), 0x1B);
+
+    // VEX.128 forms are reserved.
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0x69, 0x16, 0xCB]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0xF9, 0x01, 0xCA, 0x1B]).is_err());
+    // VPERMPS is W0-only, VPERMPD is W1-only.
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0xED, 0x16, 0xCB]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0x7D, 0x01, 0xCA, 0x1B]).is_err());
+    // VPERMPD takes no vvvv source.
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0xF5, 0x01, 0xCA, 0x1B]).is_err());
+}
+
+#[test]
+fn test_vex_variable_shift_decode() {
+    // VPSRLVD/Q, VPSRAVD, VPSLLVD/Q — VEX.66.0F38 45/46/47, W-split.
+    // vvvv holds the values to shift; ModRM.rm holds the per-element counts.
+    let cases: &[(&[u8], Opcode)] = &[
+        (&[0xC4, 0xE2, 0x6D, 0x45, 0xCB], Opcode::VpsrlvdVdqHdqWdq),
+        (&[0xC4, 0xE2, 0xED, 0x45, 0xCB], Opcode::VpsrlvqVdqHdqWdq),
+        (&[0xC4, 0xE2, 0x6D, 0x46, 0xCB], Opcode::VpsravdVdqHdqWdq),
+        (&[0xC4, 0xE2, 0x6D, 0x47, 0xCB], Opcode::VpsllvdVdqHdqWdq),
+        (&[0xC4, 0xE2, 0xED, 0x47, 0xCB], Opcode::VpsllvqVdqHdqWdq),
+    ];
+    for (bytes, want) in cases {
+        let i = fetch_decode64(bytes).unwrap();
+        assert_eq!(i.get_ia_opcode(), *want, "bytes {bytes:02X?}");
+        assert_eq!(i.dst(), 1);
+        assert_eq!(i.src2(), 2); // vvvv = values
+        assert_eq!(i.src1(), 3); // rm = counts
+        assert_eq!(i.get_vl(), 1);
+    }
+
+    // VPSRAVD has no VEX.W1 form (VPSRAVQ is AVX-512 only).
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0xED, 0x46, 0xCB]).is_err());
+    // 128-bit forms decode too.
+    let vl128 = fetch_decode64(&[0xC4, 0xE2, 0x69, 0x45, 0xCB]).unwrap();
+    assert_eq!(vl128.get_ia_opcode(), Opcode::VpsrlvdVdqHdqWdq);
+    assert_eq!(vl128.get_vl(), 0);
+    // No legacy encoding exists at 66 0F 38 45.
+    assert!(fetch_decode64(&[0x66, 0x0F, 0x38, 0x45, 0xCB]).is_err());
+}
+
+#[test]
+fn test_vex_f16c_decode() {
+    // VCVTPH2PS ymm1, xmm2 — VEX.256.66.0F38.W0 13 /r.
+    let up = fetch_decode64(&[0xC4, 0xE2, 0x7D, 0x13, 0xCA]).unwrap();
+    assert_eq!(up.get_ia_opcode(), Opcode::Vcvtph2psVpsWps);
+    assert_eq!(up.dst(), 1);
+    assert_eq!(up.src1(), 2);
+    assert_eq!(up.get_vl(), 1);
+
+    let up128 = fetch_decode64(&[0xC4, 0xE2, 0x79, 0x13, 0xCA]).unwrap();
+    assert_eq!(up128.get_ia_opcode(), Opcode::Vcvtph2psVpsWps);
+    assert_eq!(up128.get_vl(), 0);
+
+    // VCVTPS2PH xmm1, ymm2, 0 — VEX.256.66.0F3A.W0 1D /r ib. The destination
+    // is ModRM.rm, so nnn is the *source*: modrm D1 → nnn=2, rm=1.
+    let down = fetch_decode64(&[0xC4, 0xE3, 0x7D, 0x1D, 0xD1, 0x00]).unwrap();
+    assert_eq!(down.get_ia_opcode(), Opcode::Vcvtps2phWpsVpsIb);
+    assert_eq!(down.dst(), 2); // nnn = source ymm2
+    assert_eq!(down.src1(), 1); // rm = destination xmm1
+    assert_eq!(down.ib(), 0x00);
+
+    // Memory-destination form.
+    let down_mem = fetch_decode64(&[0xC4, 0xE3, 0x7D, 0x1D, 0x10, 0x04]).unwrap();
+    assert_eq!(down_mem.get_ia_opcode(), Opcode::Vcvtps2phWpsVpsIb);
+    assert!(!down_mem.mod_c0());
+    assert_eq!(down_mem.ib(), 0x04);
+
+    // Both are VEX.W0-only and take no vvvv source.
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0xFD, 0x13, 0xCA]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0xFD, 0x1D, 0xD1, 0x00]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0x75, 0x13, 0xCA]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0x75, 0x1D, 0xD1, 0x00]).is_err());
+    // No legacy encodings exist.
+    assert!(fetch_decode64(&[0x66, 0x0F, 0x38, 0x13, 0xCA]).is_err());
+    assert!(fetch_decode64(&[0x66, 0x0F, 0x3A, 0x1D, 0xD1, 0x00]).is_err());
+}
+
+#[test]
+fn test_vex_maskmov_decode() {
+    // VMASKMOVPS ymm1, ymm2, [rax] — VEX.256.66.0F38.W0 2C /r.
+    // 6D: W=0 vvvv=~2 L=1 pp=66. modrm 08 = mod00 reg=1 rm=0(rax).
+    let load = fetch_decode64(&[0xC4, 0xE2, 0x6D, 0x2C, 0x08]).unwrap();
+    assert_eq!(load.get_ia_opcode(), Opcode::VmaskmovpsVpsHpsMps);
+    assert_eq!(load.dst(), 1);
+    assert_eq!(load.src2(), 2); // vvvv = mask
+    assert!(!load.mod_c0());
+
+    // VMASKMOVPS [rax], ymm2, ymm1 — VEX.256.66.0F38.W0 2E /r.
+    let store = fetch_decode64(&[0xC4, 0xE2, 0x6D, 0x2E, 0x08]).unwrap();
+    assert_eq!(store.get_ia_opcode(), Opcode::VmaskmovpsMpsHpsVps);
+    assert_eq!(store.dst(), 1); // nnn = data source
+    assert_eq!(store.src2(), 2); // vvvv = mask
+
+    // The W-split AVX2 integer forms.
+    let cases: &[(&[u8], Opcode)] = &[
+        (&[0xC4, 0xE2, 0x6D, 0x2D, 0x08], Opcode::VmaskmovpdVpdHpdMpd),
+        (&[0xC4, 0xE2, 0x6D, 0x2F, 0x08], Opcode::VmaskmovpdMpdHpdVpd),
+        (&[0xC4, 0xE2, 0x6D, 0x8C, 0x08], Opcode::VmaskmovdVdqHdqMdq),
+        (&[0xC4, 0xE2, 0xED, 0x8C, 0x08], Opcode::VmaskmovqVdqHdqMdq),
+        (&[0xC4, 0xE2, 0x6D, 0x8E, 0x08], Opcode::VmaskmovdMdqHdqVdq),
+        (&[0xC4, 0xE2, 0xED, 0x8E, 0x08], Opcode::VmaskmovqMdqHdqVdq),
+    ];
+    for (bytes, want) in cases {
+        let i = fetch_decode64(bytes).unwrap();
+        assert_eq!(i.get_ia_opcode(), *want, "bytes {bytes:02X?}");
+        assert_eq!(i.src2(), 2);
+    }
+
+    // Every group is memory-only — the register form (mod=11) is #UD.
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0x6D, 0x2C, 0xCB]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0x6D, 0x2E, 0xCB]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0x6D, 0x8C, 0xCB]).is_err());
+    // VMASKMOVPS/PD are VEX.W0-only.
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0xED, 0x2C, 0x08]).is_err());
+    // No legacy encodings exist.
+    assert!(fetch_decode64(&[0x66, 0x0F, 0x38, 0x2C, 0x08]).is_err());
+}
+
+#[test]
+fn test_vex_gather_decode() {
+    // VPGATHERDD xmm1, [rax+xmm2*4], xmm3 — VEX.128.66.0F38.W0 90 /r.
+    // 61: W=0 vvvv=~3 L=0 pp=66. modrm 0C = mod00 reg=1 rm=4(SIB).
+    // sib 90 = scale=2(*4) index=2 base=0(rax).
+    let g = fetch_decode64(&[0xC4, 0xE2, 0x61, 0x90, 0x0C, 0x90]).unwrap();
+    assert_eq!(g.get_ia_opcode(), Opcode::VgatherddVdqHdq);
+    assert_eq!(g.dst(), 1);
+    assert_eq!(g.src2(), 3); // vvvv = mask vector
+    assert_eq!(g.sib_index(), 2); // VSIB index is a vector register
+    assert_eq!(g.sib_scale(), 2);
+    assert_eq!(g.sib_base(), 0);
+    assert!(!g.mod_c0());
+
+    // xmm4 is a legal VSIB index even though GPR index 4 means "no index"
+    // in an ordinary SIB byte — sib A0 = scale=2 index=4 base=0.
+    let idx4 = fetch_decode64(&[0xC4, 0xE2, 0x61, 0x90, 0x0C, 0xA0]).unwrap();
+    assert_eq!(idx4.sib_index(), 4);
+
+    let cases: &[(&[u8], Opcode)] = &[
+        (&[0xC4, 0xE2, 0xE1, 0x90, 0x0C, 0x90], Opcode::VgatherdqVdqHdq),
+        (&[0xC4, 0xE2, 0x61, 0x91, 0x0C, 0x90], Opcode::VgatherqdVdqHdq),
+        (&[0xC4, 0xE2, 0xE1, 0x91, 0x0C, 0x90], Opcode::VgatherqqVdqHdq),
+        (&[0xC4, 0xE2, 0x61, 0x92, 0x0C, 0x90], Opcode::VgatherdpsVpsHps),
+        (&[0xC4, 0xE2, 0xE1, 0x92, 0x0C, 0x90], Opcode::VgatherdpdVpdHpd),
+        (&[0xC4, 0xE2, 0x61, 0x93, 0x0C, 0x90], Opcode::VgatherqpsVpsHps),
+        (&[0xC4, 0xE2, 0xE1, 0x93, 0x0C, 0x90], Opcode::VgatherqpdVpdHpd),
+    ];
+    for (bytes, want) in cases {
+        let i = fetch_decode64(bytes).unwrap();
+        assert_eq!(i.get_ia_opcode(), *want, "bytes {bytes:02X?}");
+        assert_eq!(i.src2(), 3);
+        assert_eq!(i.sib_index(), 2);
+    }
+
+    // Register form is #UD — every gather group is memory-only.
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0x61, 0x90, 0xCB]).is_err());
+    // No legacy encoding exists.
+    assert!(fetch_decode64(&[0x66, 0x0F, 0x38, 0x90, 0x0C, 0x90]).is_err());
+}
+
+#[test]
+fn test_vex_vl128_only_legacy_shared_forms_decode() {
+    // These VEX forms share the legacy SSE opcode's table entry. Bochs marks
+    // every one of their VEX groups ATTR_VL128 and none of them takes a vvvv
+    // source, so VEX.256 and VEX.vvvv != 1111b are both reserved.
+
+    // VPEXTRB eax, xmm1, 3 — C4 E3 79 14 C8 03.
+    let b = fetch_decode64(&[0xC4, 0xE3, 0x79, 0x14, 0xC8, 0x03]).unwrap();
+    assert_eq!(b.get_ia_opcode(), Opcode::V128VpextrbEdVdqIbR);
+    assert_eq!(b.dst(), 1); // nnn = xmm source
+    assert_eq!(b.src1(), 0); // rm = GPR destination
+
+    // VPEXTRW [rax], xmm1, 2 — C4 E3 79 15 08 02 (memory destination).
+    let w = fetch_decode64(&[0xC4, 0xE3, 0x79, 0x15, 0x08, 0x02]).unwrap();
+    assert_eq!(w.get_ia_opcode(), Opcode::V128VpextrwMwVdqIbM);
+    assert!(!w.mod_c0());
+
+    // 0F3A 16 keeps the W split: W0 -> VPEXTRD, W1 -> VPEXTRQ.
+    let d = fetch_decode64(&[0xC4, 0xE3, 0x79, 0x16, 0xC8, 0x01]).unwrap();
+    assert_eq!(d.get_ia_opcode(), Opcode::V128VpextrdEdVdqIb);
+    let q = fetch_decode64(&[0xC4, 0xE3, 0xF9, 0x16, 0xC8, 0x01]).unwrap();
+    assert_eq!(q.get_ia_opcode(), Opcode::V128VpextrqEqVdqIb);
+
+    // The four VPCMPxSTRx forms.
+    let cases: &[(&[u8], Opcode)] = &[
+        (
+            &[0xC4, 0xE3, 0x79, 0x60, 0xCA, 0x00],
+            Opcode::V128VpcmpestrmVdqWdqIb,
+        ),
+        (
+            &[0xC4, 0xE3, 0x79, 0x61, 0xCA, 0x00],
+            Opcode::V128VpcmpestriVdqWdqIb,
+        ),
+        (
+            &[0xC4, 0xE3, 0x79, 0x62, 0xCA, 0x00],
+            Opcode::V128VpcmpistrmVdqWdqIb,
+        ),
+        (
+            &[0xC4, 0xE3, 0x79, 0x63, 0xCA, 0x00],
+            Opcode::V128VpcmpistriVdqWdqIb,
+        ),
+    ];
+    for (bytes, want) in cases {
+        assert_eq!(
+            fetch_decode64(bytes).unwrap().get_ia_opcode(),
+            *want,
+            "bytes {bytes:02X?}"
+        );
+    }
+
+    // VEX.256 is reserved for all of them.
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0x7D, 0x14, 0xC8, 0x03]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0x7D, 0x15, 0xC8, 0x03]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0x7D, 0x16, 0xC8, 0x01]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0x7D, 0x63, 0xCA, 0x00]).is_err());
+    // So is a non-1111b VEX.vvvv.
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0x71, 0x14, 0xC8, 0x03]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0x71, 0x63, 0xCA, 0x00]).is_err());
+
+    // Legacy (non-VEX) encodings must still resolve to the SSE opcodes.
+    assert_eq!(
+        fetch_decode64(&[0x66, 0x0F, 0x3A, 0x14, 0xC8, 0x03])
+            .unwrap()
+            .get_ia_opcode(),
+        Opcode::PextrbEdVdqIbR
+    );
+    assert_eq!(
+        fetch_decode64(&[0x66, 0x0F, 0x3A, 0x63, 0xCA, 0x00])
+            .unwrap()
+            .get_ia_opcode(),
+        Opcode::PcmpistriVdqWdqIb
+    );
+}
+
+#[test]
+fn test_vex_vmovntdqa_and_vpclmulqdq_decode() {
+    // VMOVNTDQA — VL-split, memory-only. C4 E2 79 2A 00 / C4 E2 7D 2A 00.
+    let v128 = fetch_decode64(&[0xC4, 0xE2, 0x79, 0x2A, 0x00]).unwrap();
+    assert_eq!(v128.get_ia_opcode(), Opcode::V128VmovntdqaVdqMdq);
+    let v256 = fetch_decode64(&[0xC4, 0xE2, 0x7D, 0x2A, 0x00]).unwrap();
+    assert_eq!(v256.get_ia_opcode(), Opcode::V256VmovntdqaVdqMdq);
+    // No vvvv source.
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0x71, 0x2A, 0x00]).is_err());
+    // Legacy form still decodes to the SSE4.1 opcode.
+    assert_eq!(
+        fetch_decode64(&[0x66, 0x0F, 0x38, 0x2A, 0x00])
+            .unwrap()
+            .get_ia_opcode(),
+        Opcode::MovntdqaVdqMdq
+    );
+
+    // VPCLMULQDQ — 3-operand under VEX, VL-split.
+    let c128 = fetch_decode64(&[0xC4, 0xE3, 0x71, 0x44, 0xC2, 0x11]).unwrap();
+    assert_eq!(c128.get_ia_opcode(), Opcode::V128VpclmulqdqVdqHdqWdqIb);
+    assert_eq!(c128.dst(), 0);
+    assert_eq!(c128.src2(), 1, "vvvv is the first source");
+    assert_eq!(c128.src1(), 2, "ModRM.rm is the second source");
+    assert_eq!(c128.ib(), 0x11);
+    let c256 = fetch_decode64(&[0xC4, 0xE3, 0x75, 0x44, 0xC2, 0x11]).unwrap();
+    assert_eq!(c256.get_ia_opcode(), Opcode::V256VpclmulqdqVdqHdqWdqIb);
+    // Legacy PCLMULQDQ is unchanged.
+    assert_eq!(
+        fetch_decode64(&[0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x11])
+            .unwrap()
+            .get_ia_opcode(),
+        Opcode::PclmulqdqVdqWdqIb
+    );
+}
+
+#[test]
+fn opcode_isa_table_is_in_sync_with_the_opcode_enum() {
+    use crate::features::X86Feature;
+    use crate::opcode_isa::{
+        opcode_isa_feature, GATED_OPCODE_COUNT, ISA_ALWAYS, OPCODE_ISA, OPCODE_VARIANT_COUNT,
+    };
+
+    // The table is indexed by `Opcode as usize`, so a variant added without
+    // rerunning `scripts/gen_opcode_isa.py` would index out of bounds or, worse,
+    // read a neighbour's feature. `from_u16_const` returns IaError past the end
+    // of the enum, which pins the variant count exactly.
+    assert_eq!(OPCODE_ISA.len(), OPCODE_VARIANT_COUNT);
+    assert_ne!(
+        Opcode::from_u16_const((OPCODE_VARIANT_COUNT - 1) as u16),
+        Opcode::IaError,
+        "last table slot must correspond to a real Opcode variant — regenerate \
+         with scripts/gen_opcode_isa.py"
+    );
+    assert_eq!(
+        Opcode::from_u16_const(OPCODE_VARIANT_COUNT as u16),
+        Opcode::IaError,
+        "Opcode gained variants past the table — regenerate with \
+         scripts/gen_opcode_isa.py"
+    );
+
+    assert_eq!(
+        OPCODE_ISA.iter().filter(|f| **f != ISA_ALWAYS).count(),
+        GATED_OPCODE_COUNT
+    );
+
+    // Spot-check the mapping against Bochs ia_opcodes.def. IaError itself must
+    // never be gated, or a #UD would recurse into another #UD.
+    assert_eq!(opcode_isa_feature(Opcode::IaError), ISA_ALWAYS);
+    assert_eq!(opcode_isa_feature(Opcode::Nop), ISA_ALWAYS);
+    assert_eq!(
+        opcode_isa_feature(Opcode::V256VpermdVdqHdqWdq),
+        X86Feature::IsaAvx2 as u16
+    );
+    assert_eq!(
+        opcode_isa_feature(Opcode::Vcvtph2psVpsWps),
+        X86Feature::IsaAvxF16c as u16
+    );
+    assert_eq!(
+        opcode_isa_feature(Opcode::V256VpclmulqdqVdqHdqWdqIb),
+        X86Feature::IsaVaesVpclmulqdq as u16
+    );
+    assert_eq!(
+        opcode_isa_feature(Opcode::V128VpclmulqdqVdqHdqWdqIb),
+        X86Feature::IsaAvx as u16,
+        "the 128-bit form is plain AVX; only the 256-bit form needs VPCLMULQDQ"
+    );
+}
+
+#[test]
+fn test_vex_legacy_shared_forms_enforce_bochs_encoding_limits() {
+    // These VEX forms share a legacy SSE table entry, so nothing in the table
+    // itself constrains them. Bochs constrains them in its separate VEX groups
+    // (fetchdecode_opmap_avx.cc), and the results are already correct — what
+    // was missing is the reserved-encoding #UD.
+
+    // --- VL128-only (Bochs marks each group ATTR_VL128) ---
+    // VMOVLPS [rax], xmm1 — C5 F8 13 08 decodes; the VEX.256 form must not.
+    assert_eq!(
+        fetch_decode64(&[0xC5, 0xF8, 0x13, 0x08])
+            .unwrap()
+            .get_ia_opcode(),
+        Opcode::MovlpsMqVps
+    );
+    assert!(fetch_decode64(&[0xC5, 0xFC, 0x13, 0x08]).is_err());
+    // VMOVHPD [rax], xmm1 — 66-prefixed sibling at 0F 17.
+    assert!(fetch_decode64(&[0xC5, 0xF9, 0x17, 0x08]).is_ok());
+    assert!(fetch_decode64(&[0xC5, 0xFD, 0x17, 0x08]).is_err());
+    // VMOVD/VMOVQ both directions.
+    assert!(fetch_decode64(&[0xC5, 0xF9, 0x6E, 0xC0]).is_ok());
+    assert!(fetch_decode64(&[0xC5, 0xFD, 0x6E, 0xC0]).is_err());
+    assert!(fetch_decode64(&[0xC5, 0xF9, 0x7E, 0xC0]).is_ok());
+    assert!(fetch_decode64(&[0xC5, 0xFD, 0x7E, 0xC0]).is_err());
+    // VPEXTRW eax, xmm0, 1 — 0F C5, register source only.
+    assert!(fetch_decode64(&[0xC5, 0xF9, 0xC5, 0xC0, 0x01]).is_ok());
+    assert!(fetch_decode64(&[0xC5, 0xFD, 0xC5, 0xC0, 0x01]).is_err());
+    // VMASKMOVDQU xmm0, xmm1 — 0F F7, register source only.
+    assert!(fetch_decode64(&[0xC5, 0xF9, 0xF7, 0xC1]).is_ok());
+    assert!(fetch_decode64(&[0xC5, 0xFD, 0xF7, 0xC1]).is_err());
+
+    // --- ModRM form constraints ---
+    // VPEXTRW and VMASKMOVDQU are ATTR_MODC0: no memory operand.
+    assert!(fetch_decode64(&[0xC5, 0xF9, 0xC5, 0x08, 0x01]).is_err());
+    assert!(fetch_decode64(&[0xC5, 0xF9, 0xF7, 0x08]).is_err());
+    // VLDMXCSR/VSTMXCSR are ATTR_MOD_MEM: no register operand.
+    assert!(fetch_decode64(&[0xC5, 0xF8, 0xAE, 0x10]).is_ok()); // /2 mem
+    assert!(fetch_decode64(&[0xC5, 0xF8, 0xAE, 0x18]).is_ok()); // /3 mem
+    assert!(fetch_decode64(&[0xC5, 0xF8, 0xAE, 0xD0]).is_err()); // /2 reg
+    assert!(fetch_decode64(&[0xC5, 0xFC, 0xAE, 0x10]).is_err()); // VEX.256
+
+    // --- 0F AE has no VEX form other than V(LD|ST)MXCSR ---
+    // A VEX-prefixed FXSAVE / XSAVE / CLFLUSH / fences must all #UD.
+    for modrm in [0x00u8 /* fxsave /0 */, 0x08 /* fxrstor /1 */, 0x20 /* xsave /4 */,
+                  0x28 /* xrstor /5 */, 0x38 /* clflush /7 */] {
+        assert!(
+            fetch_decode64(&[0xC5, 0xF8, 0xAE, modrm]).is_err(),
+            "VEX 0F AE /{} must #UD", modrm >> 3
+        );
+    }
+    assert!(fetch_decode64(&[0xC5, 0xF8, 0xAE, 0xE8]).is_err(), "VEX LFENCE");
+    assert!(fetch_decode64(&[0xC5, 0xF8, 0xAE, 0xF0]).is_err(), "VEX MFENCE");
+    assert!(fetch_decode64(&[0xC5, 0xF8, 0xAE, 0xF8]).is_err(), "VEX SFENCE");
+
+    // --- reserved VEX.vvvv (none of these take a vvvv source) ---
+    assert!(fetch_decode64(&[0xC5, 0xF1, 0x13, 0x08]).is_err()); // VMOVLPS
+    assert!(fetch_decode64(&[0xC5, 0xF1, 0x6E, 0xC0]).is_err()); // VMOVD
+    assert!(fetch_decode64(&[0xC5, 0xF1, 0xC5, 0xC0, 0x01]).is_err()); // VPEXTRW
+    assert!(fetch_decode64(&[0xC5, 0xF0, 0xAE, 0x10]).is_err()); // VLDMXCSR
+    // VUCOMISS / VCOMISS / VCVTTSS2SI take no vvvv either — but Bochs puts NO
+    // VL attribute on those groups, so VEX.256 stays legal for them.
+    assert!(fetch_decode64(&[0xC5, 0xF0, 0x2E, 0xC1]).is_err()); // vvvv reserved
+    assert!(fetch_decode64(&[0xC5, 0xFC, 0x2E, 0xC1]).is_ok(), "VUCOMISS has no VL limit");
+
+    // --- the legacy (non-VEX) encodings are untouched ---
+    assert_eq!(
+        fetch_decode64(&[0x0F, 0xAE, 0x10]).unwrap().get_ia_opcode(),
+        Opcode::Ldmxcsr
+    );
+    assert!(fetch_decode64(&[0x0F, 0xAE, 0xF8]).is_ok(), "legacy SFENCE");
+    assert!(fetch_decode64(&[0x0F, 0xAE, 0x00]).is_ok(), "legacy FXSAVE");
+    assert!(fetch_decode64(&[0x66, 0x0F, 0xF7, 0xC1]).is_ok(), "legacy MASKMOVDQU");
+}
+
+#[test]
 fn test_vex_fma3_decode_runtime_sequences() {
     // Captured from Ubuntu userspace boot: VEX.128.66.0F38.W1 A9 /r m64.
     let a9 = fetch_decode64(&[0xC4, 0xE2, 0xF9, 0xA9, 0x51, 0x18]).unwrap();

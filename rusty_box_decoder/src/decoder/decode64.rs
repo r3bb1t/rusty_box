@@ -1015,6 +1015,13 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     // is dispatched. EVEX has its own tables and doesn't need this.
     if is_vex && !is_evex {
         instr.opcode = remap_sse_to_vex(instr.opcode, vex_l);
+        // Legacy table entries carry no VEX attributes, so the vector-length
+        // and ModRM-form limits Bochs states in its VEX groups are applied
+        // here rather than by the table match.
+        match validate_vex_legacy_form(instr.opcode, vex_l, mod_c0) {
+            Ok(()) => {}
+            Err(error) => return Err(error),
+        }
     }
 
     // VEX is4 operand: VBLENDVPS/VBLENDVPD/VPBLENDVB encode a fourth (mask)
@@ -1050,13 +1057,148 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     Ok(instr)
 }
 
-/// VEXTRACTF128 and VEXTRACTI128 have no `vvvv` source operand; Intel reserves
-/// every encoding except VEX.vvvv = 1111b (decoded here as zero).
+/// Encoding limits Bochs places on VEX forms that rusty_box reaches through a
+/// shared legacy SSE table entry.
+///
+/// Those entries carry no VEX-specific attributes, so nothing in the table
+/// constrains vector length or ModRM form; Bochs states the limits in its
+/// separate VEX groups (`fetchdecode_opmap_avx.cc`). The decoded *results* are
+/// already correct — this supplies the reserved-encoding `#UD` that was
+/// missing. Only called on the VEX path, so legacy encodings are unaffected.
+const fn validate_vex_legacy_form(
+    opcode: Opcode,
+    vex_l: u8,
+    mod_c0: bool,
+) -> DecodeResult<()> {
+    use Opcode::*;
+
+    // 0F AE under VEX is only VLDMXCSR (/2) and VSTMXCSR (/3), both memory
+    // forms — Bochs BxOpcodeGroup_VEX_0FAE. Every other nnn at this opcode
+    // (FXSAVE/FXRSTOR/XSAVE/XRSTOR/CLFLUSH/fences/FSGSBASE/CET/WAITPKG) has no
+    // VEX encoding at all.
+    if matches!(
+        opcode,
+        Fxsave
+            | Fxrstor
+            | Xsave
+            | Xrstor
+            | Xsaveopt
+            | Xsaves
+            | Xrstors
+            | Clflush
+            | Clflushopt
+            | Clwb
+            | Lfence
+            | Mfence
+            | Sfence
+            | Incsspd
+            | Incsspq
+            | Clrssbsy
+            | TpauseEd
+            | UmwaitEd
+            | UmonitorEd
+            | UmonitorEq
+            | RdfsbaseEd
+            | RdfsbaseEq
+            | WrfsbaseEd
+            | WrfsbaseEq
+            | RdgsbaseEd
+            | RdgsbaseEq
+            | WrgsbaseEd
+            | WrgsbaseEq
+    ) {
+        return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+    }
+
+    // ATTR_VL128: a VEX.256 encoding of these is reserved.
+    if vex_l != 0
+        && matches!(
+            opcode,
+            MovlpsMqVps
+                | MovlpdMqVsd
+                | MovhpsMqVps
+                | MovhpdMqVsd
+                | MovdVdqEd
+                | MovqVdqEq
+                | MovdEdVd
+                | MovqEqVq
+                | PextrwGdUdqIb
+                | MaskmovdquVdqUdq
+                | Ldmxcsr
+                | Stmxcsr
+        )
+    {
+        return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+    }
+
+    // ATTR_MODC0: register operand only.
+    if !mod_c0 && matches!(opcode, PextrwGdUdqIb | MaskmovdquVdqUdq) {
+        return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+    }
+
+    // ATTR_MOD_MEM: memory operand only.
+    if mod_c0 && matches!(opcode, Ldmxcsr | Stmxcsr) {
+        return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+    }
+
+    Ok(())
+}
+
+/// VEX forms that take no `vvvv` source operand; Intel reserves every encoding
+/// except VEX.vvvv = 1111b (decoded here as zero). Bochs marks these
+/// "VEX.VVV #UD" in the opcode comments of `cpu/avx/*.cc`.
 const fn validate_reserved_vex_vvvv(opcode: Opcode, vex_vvv: u8) -> DecodeResult<()> {
     if vex_vvv != 0
         && matches!(
             opcode,
-            Opcode::V256Vextractf128WdqVdqIb | Opcode::V256Vextracti128WdqVdqIb
+            Opcode::V256Vextractf128WdqVdqIb
+                | Opcode::V256Vextracti128WdqVdqIb
+                | Opcode::VtestpsVpsWps
+                | Opcode::VtestpdVpdWpd
+                | Opcode::VpermilpsVpsWpsIb
+                | Opcode::VpermilpdVpdWpdIb
+                | Opcode::V256VpermpdVpdWpdIb
+                | Opcode::Vcvtph2psVpsWps
+                | Opcode::Vcvtps2phWpsVpsIb
+                | Opcode::V128VmovntdqaVdqMdq
+                | Opcode::V256VmovntdqaVdqMdq
+                | Opcode::V128VpextrbEdVdqIbR
+                | Opcode::V128VpextrbMbVdqIbM
+                | Opcode::V128VpextrwEdVdqIbR
+                | Opcode::V128VpextrwMwVdqIbM
+                | Opcode::V128VpextrdEdVdqIb
+                | Opcode::V128VpextrqEqVdqIb
+                | Opcode::V128VpcmpestrmVdqWdqIb
+                | Opcode::V128VpcmpestriVdqWdqIb
+                | Opcode::V128VpcmpistrmVdqWdqIb
+                | Opcode::V128VpcmpistriVdqWdqIb
+                // VEX forms reached through a shared legacy SSE table entry.
+                // None of them has an `H` operand in Bochs ia_opcodes.def, so
+                // VEX.vvvv is reserved for all of them.
+                | Opcode::MovlpsMqVps
+                | Opcode::MovlpdMqVsd
+                | Opcode::MovhpsMqVps
+                | Opcode::MovhpdMqVsd
+                | Opcode::MovdVdqEd
+                | Opcode::MovqVdqEq
+                | Opcode::MovdEdVd
+                | Opcode::MovqEqVq
+                | Opcode::PextrwGdUdqIb
+                | Opcode::MaskmovdquVdqUdq
+                | Opcode::Ldmxcsr
+                | Opcode::Stmxcsr
+                | Opcode::UcomissVssWss
+                | Opcode::UcomisdVsdWsd
+                | Opcode::ComissVssWss
+                | Opcode::ComisdVsdWsd
+                | Opcode::Cvttss2siGdWss
+                | Opcode::Cvttss2siGqWss
+                | Opcode::Cvttsd2siGdWsd
+                | Opcode::Cvttsd2siGqWsd
+                | Opcode::Cvtss2siGdWss
+                | Opcode::Cvtss2siGqWss
+                | Opcode::Cvtsd2siGdWsd
+                | Opcode::Cvtsd2siGqWsd
         )
     {
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalVexXopVvv));
@@ -2740,6 +2882,104 @@ const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
         PinsrqVdqEqIb => {
             if vl == 0 {
                 V128VpinsrqVdqEqIb
+            } else {
+                IaError
+            }
+        }
+
+        // ===== VMOVNTDQA — VL-sized non-temporal load. Bochs routes both
+        // widths to VMOVAPS_VpsWpsM (fetchdecode_opmap_avx.cc
+        // BxOpcodeGroup_VEX_0F382A), so the VEX form must load VL bytes and
+        // zero above them rather than reuse the 16-byte legacy path. =====
+        MovntdqaVdqMdq => {
+            if vl == 0 {
+                V128VmovntdqaVdqMdq
+            } else {
+                V256VmovntdqaVdqMdq
+            }
+        }
+
+        // ===== VPCLMULQDQ (vvvv is the first source; the VL256 form is the
+        // separate VPCLMULQDQ extension — Bochs fetchdecode_opmap_avx.cc
+        // BxOpcodeGroup_VEX_0F3A44) =====
+        PclmulqdqVdqWdqIb => {
+            if vl == 0 {
+                V128VpclmulqdqVdqHdqWdqIb
+            } else {
+                V256VpclmulqdqVdqHdqWdqIb
+            }
+        }
+
+        // ===== VPEXTRB/W/D/Q and VPCMPESTRM/ESTRI/ISTRM/ISTRI: VL128-only
+        // under VEX (Bochs marks every one of these groups ATTR_VL128), so a
+        // VEX.256 encoding is reserved. They take no vvvv source; that is
+        // enforced in validate_reserved_vex_vvvv. =====
+        PextrbEdVdqIbR => {
+            if vl == 0 {
+                V128VpextrbEdVdqIbR
+            } else {
+                IaError
+            }
+        }
+        PextrbMbVdqIbM => {
+            if vl == 0 {
+                V128VpextrbMbVdqIbM
+            } else {
+                IaError
+            }
+        }
+        PextrwEdVdqIbR => {
+            if vl == 0 {
+                V128VpextrwEdVdqIbR
+            } else {
+                IaError
+            }
+        }
+        PextrwMwVdqIbM => {
+            if vl == 0 {
+                V128VpextrwMwVdqIbM
+            } else {
+                IaError
+            }
+        }
+        PextrdEdVdqIb => {
+            if vl == 0 {
+                V128VpextrdEdVdqIb
+            } else {
+                IaError
+            }
+        }
+        PextrqEqVdqIb => {
+            if vl == 0 {
+                V128VpextrqEqVdqIb
+            } else {
+                IaError
+            }
+        }
+        PcmpestrmVdqWdqIb => {
+            if vl == 0 {
+                V128VpcmpestrmVdqWdqIb
+            } else {
+                IaError
+            }
+        }
+        PcmpestriVdqWdqIb => {
+            if vl == 0 {
+                V128VpcmpestriVdqWdqIb
+            } else {
+                IaError
+            }
+        }
+        PcmpistrmVdqWdqIb => {
+            if vl == 0 {
+                V128VpcmpistrmVdqWdqIb
+            } else {
+                IaError
+            }
+        }
+        PcmpistriVdqWdqIb => {
+            if vl == 0 {
+                V128VpcmpistriVdqWdqIb
             } else {
                 IaError
             }
