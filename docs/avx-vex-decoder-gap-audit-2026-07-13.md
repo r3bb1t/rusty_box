@@ -116,50 +116,106 @@ This re-verification is reference-count based, not behavioural. A non-zero
 count proves wiring exists, not that it is Bochs-correct. Treat "DONE" as
 "stop looking here first", not as "verified equivalent".
 
-## CONFIRMED LIVE DECODE BUG 2026-07-25 — VPCLMULQDQ
+## HEADLINE FINDING 2026-07-25 (FIXED) — CPUID advertised AVX/AVX2/F16C while 15 opcode-map slots raised #UD
 
-Verified in the tree, not inferred. `BxOpcodeTable0F3A44` (opmap_0f3a.rs) holds
-exactly one entry:
+This supersedes everything below it in priority. `Corei7SkylakeX` advertises
+**AVX2** (`CpuIdStd7Ebx::AVX2`, cpu/cpudb/intel/core_i7_skylake.rs) and **F16C**
+(`CpuIdStd1Ecx::AVX_F16C`), yet these slots in `opmap_0f38.rs` / `opmap_0f3a.rs`
+were `&BX_OPCODE_GROUP_ERR` — a guest that dispatched on CPUID took a `#UD` on a
+CPU that had told it the feature was present:
 
-```rust
-pub(super) const BxOpcodeTable0F3A44: [u64; 1] = [form_opcode(
-    attrs!(SSE_PREFIX_66),
-    Opcode::PclmulqdqVdqWdqIb,
-)];
-```
+| Encoding | Instruction | ISA |
+|---|---|---|
+| `VEX.66.0F38 0C/0D`, `0F3A 04/05` | VPERMILPS / VPERMILPD (variable + imm8) | AVX |
+| `VEX.66.0F38 0E/0F` | VTESTPS / VTESTPD | AVX |
+| `VEX.66.0F38 2C-2F` | VMASKMOVPS / VMASKMOVPD | AVX |
+| `VEX.66.0F38 13`, `0F3A 1D` | VCVTPH2PS / VCVTPS2PH | F16C |
+| `VEX.66.0F38 16`, `0F3A 01` | V256 VPERMPS / VPERMPD | AVX2 |
+| `VEX.66.0F38 45/46/47` | VPSRLVD/Q, VPSRAVD, VPSLLVD/Q | AVX2 |
+| `VEX.66.0F38 8C/8E` | VPMASKMOVD / VPMASKMOVQ | AVX2 |
+| `VEX.66.0F38 90-93` | VGATHER / VPGATHER (8 opcodes) | AVX2 |
 
-No `VEX`-flagged entry precedes it. Per this audit's own architecture note,
-`find_opcode_in_table` returns the FIRST match and VEX-ness does not mask a
-legacy `SSE_PREFIX_66` entry — so `VEX.66.0F3A.WIG 44 /r ib` (VPCLMULQDQ)
-decodes to the **legacy 3-operand** `PclmulqdqVdqWdqIb` instead of the
-4-operand VEX form. Consequences, identical to the VPINSR bug this audit was
-opened for:
+31 opcodes across 15 slots, all now implemented with decode and execution
+tests, including the two parity-critical fault behaviours: masked moves must
+not fault on masked-off elements, and a gather must leave a restartable mask
+after a mid-instruction `#PF`.
 
-- `vvvv` (src1) is dropped;
-- the destination is reused as src1, so `VPCLMULQDQ xmm1, xmm2, xmm3, imm8`
-  computes from xmm1 rather than xmm2;
-- the upper YMM lane is not cleared.
+**Scoping rule for the rest of the map.** A full sweep found 48 further slots
+still `&BX_OPCODE_GROUP_ERR`: FMA4 (40 opcodes), CMPCCXADD (30), AMX, AVX-VNNI
+and VNNI-INT8/INT16, AVX-IFMA, AVX-NE-CONVERT, XOP, SM3, SM4. `Corei7SkylakeX`
+advertises none of those, so Bochs decodes them and then raises `#UD` on the
+absent ISA bit while rusty_box raises `#UD` at decode — **identical observable
+behaviour**. They become real divergences only if a cpudb model that advertises
+them is added.
 
-Silent wrong results, no fault.
+## CORRECTION 2026-07-25 — the earlier "VPCLMULQDQ silently corrupts" claim was WRONG
 
-### Fix shape (NOT a one-liner)
+An earlier revision of this document asserted that `VEX.66.0F3A.44` decodes to
+the legacy `PclmulqdqVdqWdqIb` and therefore drops `vvvv`, reuses the
+destination as src1, and leaves the upper YMM lane dirty. **The decode half is
+right; the consequence is not.** The legacy handler `pclmulqdq_vdq_wdq_ib`
+(`rusty_box/src/cpu/aes.rs`) already branches on `instr.is_vex()` and reads
+`instr.src2()` (vvvv) as op1, and `write_xmm_result` in the same file already
+zeroes the upper lane for VEX encodings. The 128-bit VEX form produces correct
+results today.
 
-The opcode variants already exist — `V128VpclmulqdqVdqHdqWdqIb`,
-`V256VpclmulqdqVdqHdqWdqIb` (opcode.rs) and the typed form
-`V128VpclmulqdqVdqHdqWdqIbR` (typed.rs) — **but there is no CPU handler for
-them** under `rusty_box/src/cpu/`. So the full fix is:
+The real 0F3A44 divergence is narrower: Bochs `BxOpcodeGroup_VEX_0F3A44` splits
+on VL into `V128_VPCLMULQDQ_VdqHdqWdqIb` and `V256_VPCLMULQDQ_VdqHdqWdqIb`,
+while rusty_box has only the one legacy entry — so `VEX.256` runs the 128-bit
+operation instead of the per-lane 256-bit one. That form needs the VPCLMULQDQ
+CPUID feature, which `Corei7SkylakeX` does not have (Icelake+), so no guest on
+this model can reach it; the correct behaviour there is `#UD`. **Still open.**
 
-1. `remap_sse_to_vex` arm in decode64.rs, VL-split, next to the existing
-   `MpsadbwVdqWdqIb` arm;
-2. new VEX handler(s) reading `src2()` as `vvvv` and clearing the upper lane,
-   ported from Bochs `cpu/avx/avx_pclmul.cc`;
-3. dispatcher wiring for the new opcodes;
-4. decode + execution regression tests, in the style of
-   `test_vex_pinsr_family_decode` / `vex_vpinsrw_sources_vvvv_and_clears_upper`.
+## Also open — VEX encodings that should `#UD` but do not
 
-### Check these the same way before assuming they are merely missing
+`VPEXTRB/W/D/Q` (0F3A 14-16) and `VPCMPESTRM/ESTRI/ISTRM/ISTRI` (0F3A 60-63)
+carry only legacy `SSE_PREFIX_66` table entries, so a VEX prefix falls through
+to the legacy opcode. Unlike VPINSR, these forms have **no `vvvv` source**, and
+the legacy handlers read the same operands the VEX forms specify — so the
+computed results are correct. What is missing is fault behaviour: Bochs marks
+all of these `ATTR_VL128`, so `VEX.256` must `#UD`, and Intel reserves every
+encoding with `VEX.vvvv != 1111b`. rusty_box currently accepts both.
 
-`VPCMPISTRI/M` (0F3A 60-63) and `VPEXTRB/W/D` (0F3A 14-16) are likewise absent
-from decode64.rs while their tables carry legacy `SSE_PREFIX_66` entries. Read
-the corresponding `BxOpcodeTable0F3A*` constants: a lone legacy entry means the
-same silent fall-through, a preceding `VEX`-flagged entry means they are safe.
+Fix shape: `remap_sse_to_vex` arms returning `IaError` for `vl != 0` (the
+`PinsrwVdqEwIb` arm in decode64.rs is the model), plus entries in
+`validate_reserved_vex_vvvv`. The `V128Vpextr*` / `V128Vpcmp*` opcode variants
+and their typed.rs arms already exist.
+
+## 2026-07-25 (later) — remaining VEX fall-throughs closed, ISA gate landed
+
+The audit's remaining items are done. What the systematic sweep turned up beyond
+the original backlog:
+
+**Silent data corruption (the VPINSR class, wrong results with no fault):**
+`VMOVD` / `VMOVQ` to xmm and `VPCMPISTRM` / `VPCMPESTRM` wrote through
+`write_xmm_reg_lo128`, which *preserves* bits [255:128]. Bochs uses
+`BX_WRITE_XMM_REGZ`, which preserves for legacy SSE but clears for VEX. Every
+`VMOVD xmm, eax` leaked stale YMM data — and VMOVD/VMOVQ are far more common
+than VPINSR. Fixed with a shared `write_xmm_regz` helper (`cpu/xmm.rs`).
+
+**Instructions that did not exist at all:** `MOVNTDQA` (legacy SSE4.1 *and*
+VEX) and `PEXTRW r/m16, xmm, imm8` (66 0F3A 15) had no dispatcher arm, so both
+raised #UD where Bochs implements them.
+
+**Encoding limits:** `VPEXTRB/W/D/Q`, `VPCMPxSTRx`, `VMOVLPS/VMOVHPS` stores,
+`VMOVD/VMOVQ`, `VPEXTRW` (0F C5), `VMASKMOVDQU`, `VLDMXCSR`/`VSTMXCSR` now
+enforce Bochs's `ATTR_VL128` / `ATTR_MODC0` / `ATTR_MOD_MEM` and reserved
+`VEX.vvvv`. 0F AE additionally rejects every non-MXCSR nnn under a VEX prefix.
+Note 0F 2C/2D/2E/2F carry **no** VL attribute in Bochs, so `VEX.256`
+`VUCOMISS`/`VCVTTSS2SI` stay legal — only `vvvv` is reserved.
+
+**`VPCLMULQDQ`** now decodes to its 3-operand VEX form with a real per-lane
+handler; the 256-bit form is gated on the VPCLMULQDQ CPUID feature, which
+Corei7SkylakeX lacks, so it correctly #UDs on this model.
+
+**Per-instruction ISA gate** (`rusty_box_decoder/src/opcode_isa.rs`, generated
+by `scripts/gen_opcode_isa.py`): 2900 of 3677 opcodes now carry Bochs's CPUID
+feature requirement, applied at icache fill. On Corei7SkylakeX this turns 1052
+opcodes into #UD — every one a feature the model does not advertise. Notably
+that includes the ~400 EVEX AVX-512 opcodes rusty_box has no handler for: they
+previously reached the dispatcher catch-all and produced an *emulator-level*
+`UnimplementedOpcode` error (the host stops) instead of a guest #UD.
+
+**`#AC`** is now raised on misaligned user-privilege word/dword/qword accesses
+(`cpu/access.rs check_alignment`); `alignment_check_mask` was previously stored
+and snapshotted but never consulted.

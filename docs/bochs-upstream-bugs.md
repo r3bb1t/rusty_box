@@ -88,7 +88,13 @@ if (route < 16) {
 Alternatively bound-check `irq_no` inside `bx_pic_c::raise_irq`/`lower_irq`.
 
 **Rusty Box behavior**: delivers only the correct IOAPIC pin for routes
-16–23; documented in `rusty_box/src/emulator.rs` `drain_hpet_pending`.
+16–23; documented in `rusty_box/src/emulator.rs` `drain_hpet_pending`. The
+deviation was **permanently ratified** on 2026-07-25 — it is a closed decision,
+not an open item.
+
+**Filing status**: NOT FILED. The text above is issue-ready for
+`bochs-emu/Bochs` (same shape as the already-filed #791). Hand it to the
+maintainer/user to file — do not open the issue autonomously.
 
 ---
 
