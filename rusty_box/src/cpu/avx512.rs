@@ -6,6 +6,7 @@
 //! Mirrors Bochs `cpu/avx/avx512.cc`, `avx512_move.cc`, `avx512_pfp.cc`.
 
 use super::avx512_load::cut_opmask_to;
+use super::avx512_bw::write_zmm_masked_w;
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -18,6 +19,18 @@ use super::{
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use crate::cpu::float::FloatExt;
+
+/// Width pairing of a VPMOV widening conversion, named after the mnemonic
+/// suffix: `Bw` is byte-to-word, `Dq` dword-to-qword, and so on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PmovWiden {
+    Bw,
+    Bd,
+    Bq,
+    Wd,
+    Wq,
+    Dq,
+}
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
@@ -1923,44 +1936,94 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // ========================================================================
-    // VPMOVZXDQ/VPMOVSXDQ — Zero/Sign extend dwords to qwords
+    // VPMOVSX / VPMOVZX — sign- or zero-extend to a wider element
+    //
+    // Bochs avx512_move.cc VPMOV{S,Z}X{BW,BD,BQ,WD,WQ,DQ}_MASK_VdqWdqR. All
+    // twelve are the same loop differing only in the two widths and whether
+    // the source element is sign- or zero-extended, so they share one
+    // implementation. The source occupies a fraction of the destination width,
+    // which is why each pair names a Half / Quarter / Eighth loader.
     // ========================================================================
 
-    /// VPMOVZXDQ Vdq{k}, Wdq — EVEX.66.0F38.W0 35
-    pub fn evex_vpmovzxdq(&mut self, instr: &Instruction) -> super::Result<()> {
+    /// Source-to-destination width pairing of a VPMOV widening conversion,
+    /// named after the mnemonic suffix.
+    pub(super) fn evex_vpmov_widen(
+        &mut self,
+        instr: &Instruction,
+        widen: PmovWiden,
+        signed: bool,
+    ) -> super::Result<()> {
         let vl = instr.get_vl();
-        let ne = qword_elements(vl); // output qword count
         let src = if instr.mod_c0() {
             read_zmm(self, instr.src())
         } else {
-            self.evex_load_half_vec_mask_d_pair(instr)?
+            // Loader per the def entry for this width pairing.
+            match widen {
+                PmovWiden::Bw => self.evex_load_half_vec_mask_b_pair(instr)?,
+                PmovWiden::Bd => self.evex_load_quarter_vec_mask_b_pair(instr)?,
+                PmovWiden::Bq => self.evex_load_eighth_vec_mask_b_pair(instr)?,
+                PmovWiden::Wd => self.evex_load_half_vec_mask_w_pair(instr)?,
+                PmovWiden::Wq => self.evex_load_quarter_vec_mask_w_pair(instr)?,
+                PmovWiden::Dq => self.evex_load_half_vec_mask_d_pair(instr)?,
+            }
         };
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm64u(i, src.zmm32u(i) as u64);
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
-        Ok(())
-    }
 
-    /// VPMOVSXDQ Vdq{k}, Wdq — EVEX.66.0F38.W0 25
-    pub fn evex_vpmovsxdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = qword_elements(vl);
-        let src = if instr.mod_c0() {
-            read_zmm(self, instr.src())
-        } else {
-            self.evex_load_half_vec_mask_d_pair(instr)?
-        };
         let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm64u(i, (src.zmm32u(i) as i32) as i64 as u64);
-        }
         let m = read_opmask_for_write(self, instr);
         let z = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
+
+        // Read the narrow element, widen it, and write at the destination
+        // width. The element count follows the destination.
+        match widen {
+            PmovWiden::Bw => {
+                let ne = vl_bytes(vl) / 2; // word elements
+                for i in 0..ne {
+                    let v = src.zmmubyte(i);
+                    r.set_zmm16u(i, if signed { v as i8 as i16 as u16 } else { v as u16 });
+                }
+                write_zmm_masked_w(self, instr.dst(), &r, m, z, vl);
+            }
+            PmovWiden::Bd => {
+                let ne = dword_elements(vl);
+                for i in 0..ne {
+                    let v = src.zmmubyte(i);
+                    r.set_zmm32u(i, if signed { v as i8 as i32 as u32 } else { v as u32 });
+                }
+                write_zmm_masked(self, instr.dst(), &r, m, z, vl);
+            }
+            PmovWiden::Bq => {
+                let ne = qword_elements(vl);
+                for i in 0..ne {
+                    let v = src.zmmubyte(i);
+                    r.set_zmm64u(i, if signed { v as i8 as i64 as u64 } else { v as u64 });
+                }
+                write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
+            }
+            PmovWiden::Wd => {
+                let ne = dword_elements(vl);
+                for i in 0..ne {
+                    let v = src.zmm16u(i);
+                    r.set_zmm32u(i, if signed { v as i16 as i32 as u32 } else { v as u32 });
+                }
+                write_zmm_masked(self, instr.dst(), &r, m, z, vl);
+            }
+            PmovWiden::Wq => {
+                let ne = qword_elements(vl);
+                for i in 0..ne {
+                    let v = src.zmm16u(i);
+                    r.set_zmm64u(i, if signed { v as i16 as i64 as u64 } else { v as u64 });
+                }
+                write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
+            }
+            PmovWiden::Dq => {
+                let ne = qword_elements(vl);
+                for i in 0..ne {
+                    let v = src.zmm32u(i);
+                    r.set_zmm64u(i, if signed { v as i32 as i64 as u64 } else { v as u64 });
+                }
+                write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
+            }
+        }
         Ok(())
     }
 

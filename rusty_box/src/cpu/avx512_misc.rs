@@ -33,6 +33,76 @@ fn qword_elements(vl: u8) -> usize {
     }
 }
 
+/// Number of 16-bit elements per vector length: VL0=8, VL1=16, VL2=32
+#[inline]
+fn word_elements(vl: u8) -> usize {
+    match vl {
+        0 => 8,
+        1 => 16,
+        _ => 32,
+    }
+}
+
+/// Source element width of a VPMOV narrowing conversion. The element *count*
+/// follows this, since each source element produces one destination element.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PmovSrc {
+    Word,
+    Dword,
+    Qword,
+}
+
+/// Destination element width of a VPMOV narrowing conversion.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PmovDst {
+    Byte,
+    Word,
+    Dword,
+}
+
+/// How a source element too wide for the destination is reduced.
+/// Bochs xmm.h Saturate<Src><S|U>To<Dst><S|U>.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PmovSat {
+    /// VPMOV{QB,QW,QD,DB,DW,WB} — discard the high bits.
+    Truncate,
+    /// VPMOVS* — read the source signed, clamp to the destination's signed range.
+    Signed,
+    /// VPMOVUS* — read the source unsigned, clamp to the destination's max.
+    Unsigned,
+}
+
+/// Reduce one element to `dst` width under `sat`. Returns the raw destination
+/// bits, so a signed clamp lands as the two's-complement pattern of that width.
+#[inline]
+fn pmov_convert(raw: u64, src: PmovSrc, dst: PmovDst, sat: PmovSat) -> u64 {
+    match sat {
+        PmovSat::Truncate => raw,
+        PmovSat::Unsigned => {
+            let max = match dst {
+                PmovDst::Byte => u8::MAX as u64,
+                PmovDst::Word => u16::MAX as u64,
+                PmovDst::Dword => u32::MAX as u64,
+            };
+            raw.min(max)
+        }
+        PmovSat::Signed => {
+            // Sign-extend from the source width before comparing.
+            let signed = match src {
+                PmovSrc::Word => raw as u16 as i16 as i64,
+                PmovSrc::Dword => raw as u32 as i32 as i64,
+                PmovSrc::Qword => raw as i64,
+            };
+            let (lo, hi) = match dst {
+                PmovDst::Byte => (i8::MIN as i64, i8::MAX as i64),
+                PmovDst::Word => (i16::MIN as i64, i16::MAX as i64),
+                PmovDst::Dword => (i32::MIN as i64, i32::MAX as i64),
+            };
+            signed.clamp(lo, hi) as u64
+        }
+    }
+}
+
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
 fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
@@ -257,106 +327,65 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // ========================================================================
-    // VPMOVDB — Truncate packed dwords to bytes (register form)
-    // EVEX.F3.0F38.W0 31
+    // VPMOV narrowing conversions (register forms)
+    //
+    // Bochs avx512_move.cc VPMOV{,S,US}{QB,QW,QD,DB,DW,WB}_MASK_WdqVdqR. Every
+    // one of the eighteen is the same loop over source elements differing only
+    // in the two widths and how an out-of-range value is reduced, so they share
+    // an implementation rather than being written out one by one.
+    //
+    // The destination is at most 128 bits wide (one element per source element,
+    // each narrower), so building the result from zero reproduces Bochs's
+    // explicit `dst.xmm32u(1) = 0` / `xmm64u(1) = 0` tail clears plus the
+    // BX_WRITE_XMM_REG_CLEAR_HIGH above 128 bits.
     // ========================================================================
 
-    /// VPMOVDB Wdq{k}, Vdq — register form
-    /// Truncate each dword source element to a byte and pack into the lower
-    /// portion of the destination register.
-    pub fn evex_vpmovdb_r(&mut self, instr: &Instruction) -> super::Result<()> {
+    /// One VPMOV narrowing conversion, selected by source width, destination
+    /// width and saturation mode.
+    pub(super) fn evex_vpmov_narrow(
+        &mut self,
+        instr: &Instruction,
+        src_w: PmovSrc,
+        dst_w: PmovDst,
+        sat: PmovSat,
+    ) -> super::Result<()> {
         let vl = instr.get_vl();
-        let nelements = dword_elements(vl); // number of dword src elements
-        let src = read_zmm(self, instr.src());
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-
-        // Destination is byte-granularity in the low `nelements` bytes
-        let mut result = BxPackedZmmRegister::default();
-        let dst_orig = &self.vmm[instr.dst() as usize];
-        for i in 0..nelements {
-            if (mask >> i) & 1 != 0 {
-                result.set_zmmubyte(i, src.zmm32u(i) as u8);
-            } else if zmask {
-                result.set_zmmubyte(i, 0);
-            } else {
-                // merge: keep original destination byte
-                result.set_zmmubyte(i, dst_orig.zmmubyte(i));
-            }
-        }
-        // Bytes beyond nelements up to 16 are zeroed for VL < 512,
-        // and all upper bytes beyond 16 are always zeroed.
-        // For VL0 (4 elements): bytes 0-3 active, 4-63 zero
-        // For VL1 (8 elements): bytes 0-7 active, 8-63 zero
-        // For VL2 (16 elements): bytes 0-15 active, 16-63 zero
-
-        self.vmm[instr.dst() as usize] = result;
-        Ok(())
-    }
-
-    // ========================================================================
-    // VPMOVDW — Truncate packed dwords to words (register form)
-    // EVEX.F3.0F38.W0 33
-    // ========================================================================
-
-    /// VPMOVDW Wdq{k}, Vdq — register form
-    /// Truncate each dword source element to a word and pack into the lower
-    /// portion of the destination register.
-    pub fn evex_vpmovdw_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
+        let nelements = match src_w {
+            PmovSrc::Word => word_elements(vl),
+            PmovSrc::Dword => dword_elements(vl),
+            PmovSrc::Qword => qword_elements(vl),
+        };
         let src = read_zmm(self, instr.src());
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
 
         let mut result = BxPackedZmmRegister::default();
-        let dst_orig = &self.vmm[instr.dst() as usize];
+        let dst_orig = self.vmm[instr.dst() as usize];
         for i in 0..nelements {
-            if (mask >> i) & 1 != 0 {
-                result.set_zmm16u(i, src.zmm32u(i) as u16);
+            let active = (mask >> i) & 1 != 0;
+            let value = if active {
+                let raw = match src_w {
+                    PmovSrc::Word => src.zmm16u(i) as u64,
+                    PmovSrc::Dword => src.zmm32u(i) as u64,
+                    PmovSrc::Qword => src.zmm64u(i),
+                };
+                pmov_convert(raw, src_w, dst_w, sat)
             } else if zmask {
-                result.set_zmm16u(i, 0);
+                0
             } else {
-                result.set_zmm16u(i, dst_orig.zmm16u(i));
+                // Merge: keep the destination element that is already there.
+                match dst_w {
+                    PmovDst::Byte => dst_orig.zmmubyte(i) as u64,
+                    PmovDst::Word => dst_orig.zmm16u(i) as u64,
+                    PmovDst::Dword => dst_orig.zmm32u(i) as u64,
+                }
+            };
+            match dst_w {
+                PmovDst::Byte => result.set_zmmubyte(i, value as u8),
+                PmovDst::Word => result.set_zmm16u(i, value as u16),
+                PmovDst::Dword => result.set_zmm32u(i, value as u32),
             }
         }
-        // For VL0: words 0-3 active, rest zero
-        // For VL1: words 0-7 active, rest zero
-        // For VL2: words 0-15 active, rest zero
-
-        self.vmm[instr.dst() as usize] = result;
-        Ok(())
-    }
-
-    // ========================================================================
-    // VPMOVQD — Truncate packed qwords to dwords (register form)
-    // EVEX.F3.0F38.W0 35
-    // ========================================================================
-
-    /// VPMOVQD Wdq{k}, Vdq — register form
-    /// Truncate each qword source element to a dword and pack into the lower
-    /// portion of the destination register.
-    pub fn evex_vpmovqd_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src());
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-
-        let mut result = BxPackedZmmRegister::default();
-        let dst_orig = &self.vmm[instr.dst() as usize];
-        for i in 0..nelements {
-            if (mask >> i) & 1 != 0 {
-                result.set_zmm32u(i, src.zmm64u(i) as u32);
-            } else if zmask {
-                result.set_zmm32u(i, 0);
-            } else {
-                result.set_zmm32u(i, dst_orig.zmm32u(i));
-            }
-        }
-        // For VL0: dwords 0-1 active, rest zero
-        // For VL1: dwords 0-3 active, rest zero
-        // For VL2: dwords 0-7 active, rest zero
 
         self.vmm[instr.dst() as usize] = result;
         Ok(())

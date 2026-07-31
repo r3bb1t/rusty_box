@@ -1005,6 +1005,32 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         {
             instr.opcode = evex_op;
         }
+        // The VSIB gather/scatter groups are the only EVEX entries carrying
+        // ATTR_MOD_MEM | ATTR_MASK_REQUIRED (Bochs fetchdecode_opmap_evex.cc
+        // BxOpcodeGroup_EVEX_0F3890..93 and 0F38A0..A3): they have no register
+        // form, and the merging opmask is what selects the elements, so k0 has
+        // no meaning. Those attributes live in the opmap tables rather than in
+        // ia_opcodes_evex.def, so they are not covered by the generated flag
+        // table and are listed here instead.
+        if matches!(
+            instr.opcode,
+            Opcode::EvexVgatherddVdqVsib
+                | Opcode::EvexVgatherdqVdqVsib
+                | Opcode::EvexVgatherqdVdqVsib
+                | Opcode::EvexVgatherqqVdqVsib
+                | Opcode::EvexVscatterddVsibVdq
+                | Opcode::EvexVscatterdqVsibVdq
+                | Opcode::EvexVscatterqdVsibVdq
+                | Opcode::EvexVscatterqqVsibVdq
+                | Opcode::EvexVscatterdpsVsibVps
+                | Opcode::EvexVscatterdpdVsibVpd
+                | Opcode::EvexVscatterqpsVsibVps
+                | Opcode::EvexVscatterqpdVsibVpd
+        ) && (mod_c0 || evex_aaa == 0)
+        {
+            return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+        }
+
         // EVEX.b overloads one bit: embedded broadcast on a memory operand,
         // SAE / embedded rounding on a register one. An opcode that supports
         // neither must raise #UD instead of ignoring the bit. Bochs
@@ -1730,6 +1756,21 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0x91, 1, 0) => Some(Opcode::EvexVgatherqdVdqVsib),
                 // VPGATHERQQ — EVEX.66.0F38.W1 91
                 (0x91, 1, 1) => Some(Opcode::EvexVgatherqqVdqVsib),
+
+                // --- Scatter (avx512_gather.rs) ---
+                // Bochs fetchdecode_opmap_evex.cc BxOpcodeGroup_EVEX_0F38A0..A3.
+                // VPSCATTERDD / VPSCATTERDQ — EVEX.66.0F38.W0/W1 A0
+                (0xA0, 1, 0) => Some(Opcode::EvexVscatterddVsibVdq),
+                (0xA0, 1, 1) => Some(Opcode::EvexVscatterdqVsibVdq),
+                // VPSCATTERQD / VPSCATTERQQ — EVEX.66.0F38.W0/W1 A1
+                (0xA1, 1, 0) => Some(Opcode::EvexVscatterqdVsibVdq),
+                (0xA1, 1, 1) => Some(Opcode::EvexVscatterqqVsibVdq),
+                // VSCATTERDPS / VSCATTERDPD — EVEX.66.0F38.W0/W1 A2
+                (0xA2, 1, 0) => Some(Opcode::EvexVscatterdpsVsibVps),
+                (0xA2, 1, 1) => Some(Opcode::EvexVscatterdpdVsibVpd),
+                // VSCATTERQPS / VSCATTERQPD — EVEX.66.0F38.W0/W1 A3
+                (0xA3, 1, 0) => Some(Opcode::EvexVscatterqpsVsibVps),
+                (0xA3, 1, 1) => Some(Opcode::EvexVscatterqpdVsibVpd),
 
                 _ => None,
             }

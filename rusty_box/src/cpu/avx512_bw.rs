@@ -82,7 +82,7 @@ fn write_zmm_masked_b<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 }
 
 /// Write ZMM register with per-word masking, zeroing upper words beyond VL
-fn write_zmm_masked_w<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+pub(super) fn write_zmm_masked_w<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     reg: u8,
     result: &BxPackedZmmRegister,

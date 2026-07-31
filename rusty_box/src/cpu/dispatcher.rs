@@ -8,7 +8,9 @@
 
 use super::{
     avx::{VexFmaForm, VexPackedFmaOp, VexScalarFmaOp, VexVarShiftOp},
+    avx512::PmovWiden,
     avx512_gather::VexGatherForm,
+    avx512_misc::{PmovDst, PmovSat, PmovSrc},
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, Opcode},
@@ -3245,12 +3247,42 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVpcmpgtdKgwHdqWdq => self.evex_vpcmpgtd(instr),
             Opcode::EvexVpcmpeqqKgbHdqWdq => self.evex_vpcmpeqq(instr),
             Opcode::EvexVpcmpgtqKgbHdqWdq => self.evex_vpcmpgtq(instr),
-            // Sign/zero extend
+            // --- VPMOVSX / VPMOVZX widening conversions ---
+            Opcode::EvexVpmovsxbwVdqWdq | Opcode::EvexVpmovsxbwVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Bw, true)
+            }
+            Opcode::EvexVpmovsxbdVdqWdq | Opcode::EvexVpmovsxbdVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Bd, true)
+            }
+            Opcode::EvexVpmovsxbqVdqWdq | Opcode::EvexVpmovsxbqVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Bq, true)
+            }
+            Opcode::EvexVpmovsxwdVdqWdq | Opcode::EvexVpmovsxwdVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Wd, true)
+            }
+            Opcode::EvexVpmovsxwqVdqWdq | Opcode::EvexVpmovsxwqVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Wq, true)
+            }
             Opcode::EvexVpmovsxdqVdqWdq | Opcode::EvexVpmovsxdqVdqWdqKmask => {
-                self.evex_vpmovsxdq(instr)
+                self.evex_vpmov_widen(instr, PmovWiden::Dq, true)
+            }
+            Opcode::EvexVpmovzxbwVdqWdq | Opcode::EvexVpmovzxbwVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Bw, false)
+            }
+            Opcode::EvexVpmovzxbdVdqWdq | Opcode::EvexVpmovzxbdVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Bd, false)
+            }
+            Opcode::EvexVpmovzxbqVdqWdq | Opcode::EvexVpmovzxbqVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Bq, false)
+            }
+            Opcode::EvexVpmovzxwdVdqWdq | Opcode::EvexVpmovzxwdVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Wd, false)
+            }
+            Opcode::EvexVpmovzxwqVdqWdq | Opcode::EvexVpmovzxwqVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Wq, false)
             }
             Opcode::EvexVpmovzxdqVdqWdq | Opcode::EvexVpmovzxdqVdqWdqKmask => {
-                self.evex_vpmovzxdq(instr)
+                self.evex_vpmov_widen(instr, PmovWiden::Dq, false)
             }
             // VPALIGNR EVEX
             Opcode::EvexVpalignrVdqHdqWdqIb | Opcode::EvexVpalignrVdqHdqWdqIbKmask => {
@@ -3973,14 +4005,62 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVpexpandqVdqWdq | Opcode::EvexVpexpandqVdqWdqKmask => {
                 self.evex_vpexpandq(instr)
             }
-            Opcode::EvexVpmovdbWdqVdq | Opcode::EvexVpmovdbWdqVdqKmask => {
-                self.evex_vpmovdb_r(instr)
+            // --- VPMOV narrowing conversions (register forms) ---
+            // Source width, destination width, and how an out-of-range value
+            // is reduced: truncate, signed-saturate (S), unsigned-saturate (US).
+            Opcode::EvexVpmovqbWdqVdq | Opcode::EvexVpmovqbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Byte, PmovSat::Truncate)
             }
-            Opcode::EvexVpmovdwWdqVdq | Opcode::EvexVpmovdwWdqVdqKmask => {
-                self.evex_vpmovdw_r(instr)
+            Opcode::EvexVpmovqwWdqVdq | Opcode::EvexVpmovqwWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Word, PmovSat::Truncate)
             }
             Opcode::EvexVpmovqdWdqVdq | Opcode::EvexVpmovqdWdqVdqKmask => {
-                self.evex_vpmovqd_r(instr)
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Dword, PmovSat::Truncate)
+            }
+            Opcode::EvexVpmovdbWdqVdq | Opcode::EvexVpmovdbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Dword, PmovDst::Byte, PmovSat::Truncate)
+            }
+            Opcode::EvexVpmovdwWdqVdq | Opcode::EvexVpmovdwWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Dword, PmovDst::Word, PmovSat::Truncate)
+            }
+            Opcode::EvexVpmovwbWdqVdq | Opcode::EvexVpmovwbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Word, PmovDst::Byte, PmovSat::Truncate)
+            }
+            Opcode::EvexVpmovsqbWdqVdq | Opcode::EvexVpmovsqbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Byte, PmovSat::Signed)
+            }
+            Opcode::EvexVpmovsqwWdqVdq | Opcode::EvexVpmovsqwWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Word, PmovSat::Signed)
+            }
+            Opcode::EvexVpmovsqdWdqVdq | Opcode::EvexVpmovsqdWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Dword, PmovSat::Signed)
+            }
+            Opcode::EvexVpmovsdbWdqVdq | Opcode::EvexVpmovsdbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Dword, PmovDst::Byte, PmovSat::Signed)
+            }
+            Opcode::EvexVpmovsdwWdqVdq | Opcode::EvexVpmovsdwWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Dword, PmovDst::Word, PmovSat::Signed)
+            }
+            Opcode::EvexVpmovswbWdqVdq | Opcode::EvexVpmovswbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Word, PmovDst::Byte, PmovSat::Signed)
+            }
+            Opcode::EvexVpmovusqbWdqVdq | Opcode::EvexVpmovusqbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Byte, PmovSat::Unsigned)
+            }
+            Opcode::EvexVpmovusqwWdqVdq | Opcode::EvexVpmovusqwWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Word, PmovSat::Unsigned)
+            }
+            Opcode::EvexVpmovusqdWdqVdq | Opcode::EvexVpmovusqdWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Dword, PmovSat::Unsigned)
+            }
+            Opcode::EvexVpmovusdbWdqVdq | Opcode::EvexVpmovusdbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Dword, PmovDst::Byte, PmovSat::Unsigned)
+            }
+            Opcode::EvexVpmovusdwWdqVdq | Opcode::EvexVpmovusdwWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Dword, PmovDst::Word, PmovSat::Unsigned)
+            }
+            Opcode::EvexVpmovuswbWdqVdq | Opcode::EvexVpmovuswbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Word, PmovDst::Byte, PmovSat::Unsigned)
             }
             Opcode::EvexVpconflictdVdqWdqKmask => self.evex_vpconflictd(instr),
             Opcode::EvexVplzcntdVdqWdqKmask => self.evex_vplzcntd(instr),
@@ -3991,6 +4071,23 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVgatherdqVdqVsib => self.evex_vpgatherdq(instr),
             Opcode::EvexVgatherqdVdqVsib => self.evex_vpgatherqd(instr),
             Opcode::EvexVgatherqqVdqVsib => self.evex_vpgatherqq(instr),
+
+            // --- EVEX scatter (0F38 A0-A3) ---
+            // The integer and FP forms differ only in how the source register
+            // is named; the store is the same width either way, so each pair
+            // shares a handler.
+            Opcode::EvexVscatterddVsibVdq | Opcode::EvexVscatterdpsVsibVps => {
+                self.evex_vscatter_d_dword(instr)
+            }
+            Opcode::EvexVscatterdqVsibVdq | Opcode::EvexVscatterdpdVsibVpd => {
+                self.evex_vscatter_d_qword(instr)
+            }
+            Opcode::EvexVscatterqdVsibVdq | Opcode::EvexVscatterqpsVsibVps => {
+                self.evex_vscatter_q_dword(instr)
+            }
+            Opcode::EvexVscatterqqVsibVdq | Opcode::EvexVscatterqpdVsibVpd => {
+                self.evex_vscatter_q_qword(instr)
+            }
 
             // --- EVEX FP logical (reuse the integer bitwise handlers) ---
             // The single-precision forms are dword-granular and the

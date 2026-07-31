@@ -486,6 +486,119 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Bochs load.cc `LOAD_MASK_Half_VectorD`.
+    /// Bochs load.cc `LOAD_Quarter_Vector` — 32/64/128-bit operand.
+    pub(super) fn evex_load_quarter_vector(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedZmmRegister> {
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let mut tmp = BxPackedZmmRegister::default();
+        match instr.get_vl() {
+            0 => tmp.set_zmm32u(0, self.v_read_dword(seg, eaddr)?),
+            1 => tmp.set_zmm64u(0, self.v_read_qword(seg, eaddr)?),
+            _ => tmp.set_zmm128(0, self.v_read_xmmword(seg, eaddr)?),
+        }
+        Ok(tmp)
+    }
+
+    /// Bochs load.cc `LOAD_Eighth_Vector` — 16/32/64-bit operand.
+    pub(super) fn evex_load_eighth_vector(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedZmmRegister> {
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let mut tmp = BxPackedZmmRegister::default();
+        match instr.get_vl() {
+            0 => tmp.set_zmm16u(0, self.v_read_word(seg, eaddr)?),
+            1 => tmp.set_zmm32u(0, self.v_read_dword(seg, eaddr)?),
+            _ => tmp.set_zmm64u(0, self.v_read_qword(seg, eaddr)?),
+        }
+        Ok(tmp)
+    }
+
+    /// Bochs load.cc `LOAD_MASK_Half_VectorB` — half-width byte operand, so the
+    /// mask is cut to the *word* element count.
+    pub(super) fn evex_load_mask_half_vector_b(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedZmmRegister> {
+        let vl = instr.get_vl();
+        let opmask = self.load_opmask32(instr) & cut_opmask_to(word_elements(vl));
+        let mut tmp = BxPackedZmmRegister::default();
+        if opmask == 0 {
+            return Ok(tmp);
+        }
+        let eaddr = self.resolve_addr(instr);
+        self.avx_masked_load8(instr, eaddr, &mut tmp, opmask)?;
+        Ok(tmp)
+    }
+
+    /// Bochs load.cc `LOAD_MASK_Half_VectorW`.
+    pub(super) fn evex_load_mask_half_vector_w(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedZmmRegister> {
+        let vl = instr.get_vl();
+        let opmask = self.load_opmask16(instr) & cut_opmask_to(dword_elements(vl));
+        let mut tmp = BxPackedZmmRegister::default();
+        if opmask == 0 {
+            return Ok(tmp);
+        }
+        let eaddr = self.resolve_addr(instr);
+        self.avx_masked_load16(instr, eaddr, &mut tmp, opmask)?;
+        Ok(tmp)
+    }
+
+    /// Bochs load.cc `LOAD_MASK_Quarter_VectorB`.
+    pub(super) fn evex_load_mask_quarter_vector_b(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedZmmRegister> {
+        let vl = instr.get_vl();
+        let opmask = self.load_opmask16(instr) & cut_opmask_to(dword_elements(vl));
+        let mut tmp = BxPackedZmmRegister::default();
+        if opmask == 0 {
+            return Ok(tmp);
+        }
+        let eaddr = self.resolve_addr(instr);
+        self.avx_masked_load8(instr, eaddr, &mut tmp, opmask)?;
+        Ok(tmp)
+    }
+
+    /// Bochs load.cc `LOAD_MASK_Quarter_VectorW`.
+    pub(super) fn evex_load_mask_quarter_vector_w(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedZmmRegister> {
+        let vl = instr.get_vl();
+        let opmask = self.load_opmask8(instr) & cut_opmask_to(qword_elements(vl));
+        let mut tmp = BxPackedZmmRegister::default();
+        if opmask == 0 {
+            return Ok(tmp);
+        }
+        let eaddr = self.resolve_addr(instr);
+        self.avx_masked_load16(instr, eaddr, &mut tmp, opmask)?;
+        Ok(tmp)
+    }
+
+    /// Bochs load.cc `LOAD_MASK_Eighth_VectorB`.
+    pub(super) fn evex_load_mask_eighth_vector_b(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedZmmRegister> {
+        let vl = instr.get_vl();
+        let opmask = self.load_opmask8(instr) & cut_opmask_to(qword_elements(vl));
+        let mut tmp = BxPackedZmmRegister::default();
+        if opmask == 0 {
+            return Ok(tmp);
+        }
+        let eaddr = self.resolve_addr(instr);
+        self.avx_masked_load8(instr, eaddr, &mut tmp, opmask)?;
+        Ok(tmp)
+    }
+
     pub(super) fn evex_load_mask_half_vector_d(
         &mut self,
         instr: &Instruction,
@@ -771,6 +884,66 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.evex_load_broadcast_half_vector_d(instr)
         } else {
             self.evex_load_broadcast_mask_half_vector_d(instr)
+        }
+    }
+
+    /// Pair (`LOAD_Half_Vector`, `LOAD_MASK_Half_VectorB`) — VPMOVSXBW/ZXBW.
+    pub(super) fn evex_load_half_vec_mask_b_pair(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedZmmRegister> {
+        if instr.opmask() == 0 {
+            self.evex_load_half_vector(instr)
+        } else {
+            self.evex_load_mask_half_vector_b(instr)
+        }
+    }
+
+    /// Pair (`LOAD_Half_Vector`, `LOAD_MASK_Half_VectorW`) — VPMOVSXWD/ZXWD.
+    pub(super) fn evex_load_half_vec_mask_w_pair(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedZmmRegister> {
+        if instr.opmask() == 0 {
+            self.evex_load_half_vector(instr)
+        } else {
+            self.evex_load_mask_half_vector_w(instr)
+        }
+    }
+
+    /// Pair (`LOAD_Quarter_Vector`, `LOAD_MASK_Quarter_VectorB`) — VPMOVSXBD/ZXBD.
+    pub(super) fn evex_load_quarter_vec_mask_b_pair(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedZmmRegister> {
+        if instr.opmask() == 0 {
+            self.evex_load_quarter_vector(instr)
+        } else {
+            self.evex_load_mask_quarter_vector_b(instr)
+        }
+    }
+
+    /// Pair (`LOAD_Quarter_Vector`, `LOAD_MASK_Quarter_VectorW`) — VPMOVSXWQ/ZXWQ.
+    pub(super) fn evex_load_quarter_vec_mask_w_pair(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedZmmRegister> {
+        if instr.opmask() == 0 {
+            self.evex_load_quarter_vector(instr)
+        } else {
+            self.evex_load_mask_quarter_vector_w(instr)
+        }
+    }
+
+    /// Pair (`LOAD_Eighth_Vector`, `LOAD_MASK_Eighth_VectorB`) — VPMOVSXBQ/ZXBQ.
+    pub(super) fn evex_load_eighth_vec_mask_b_pair(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedZmmRegister> {
+        if instr.opmask() == 0 {
+            self.evex_load_eighth_vector(instr)
+        } else {
+            self.evex_load_mask_eighth_vector_b(instr)
         }
     }
 
