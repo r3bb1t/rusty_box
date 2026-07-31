@@ -33,20 +33,15 @@ ALWAYS = 0xFFFF
 # quo, a wrong gate would #UD a working guest. Listed explicitly so that new
 # drift shows up as a diff rather than silently widening this set.
 KNOWN_UNMATCHED = {
+    # rusty-internal pseudo-opcodes with no Bochs BX_IA_* counterpart.
     "IaError",
     "InsertedOpcode",
     "Int0",
-    "FstpSpecialSti",
-    "Pfrcpit2PqQq",
-    "PrefetchwMb",
     "Tmmultf32psTnnnTrmTreg",
+    # Bochs defines only the masked form BX_IA_EVEX_VPMULTISHIFTQB_..._Kmask;
+    # this unmasked variant is a rusty-side invention.
     "EvexVpmultishiftqbVdqHdqWdq",
-    "EvexVcvtudq2pdVpdWdq",
-    "EvexVcvtudq2pdVpdWdqKmask",
-    "EvexVcvtdq2pdVpdWdq",
-    "EvexVcvtdq2pdVpdWdqKmask",
-    "EvexVcvtsi2sdVsdEd",
-    "EvexVcvtusi2sdVsdEd",
+    # No BX_IA_EVEX_VMINPBF16/VMAXPBF16 exist upstream under any suffix.
     "EvexVminpbf16VphHphWph",
     "EvexVminpbf16VphHphWphKmask",
     "EvexVmaxpbf16VphHphWph",
@@ -82,13 +77,34 @@ def read(path):
 def main():
     # Bochs opcode name -> BX_ISA_* (or "0" for base-ISA instructions)
     bochs = {}
+    # Bochs opcode name -> the BX_PREPARE_EVEX* encoding-restriction bits
+    evex_flags = {}
     for name in ("ia_opcodes.def", "ia_opcodes_evex.def"):
         text = read("cpp_orig/bochs/bochs/cpu/decoder/" + name)
+        # Drop trailing line comments first. The entry regex anchors on the
+        # closing paren at end of line, and several defs carry a trailing
+        # `// ignore the SAE` that would otherwise make the whole entry
+        # invisible and silently leave that opcode ungated. No def field
+        # contains a literal '//' (the mnemonics are plain strings), so this
+        # is safe to strip wholesale.
+        text = re.sub(r"//[^\n]*", "", text)
         for m in re.finditer(r"bx_define_opcode\((.*?)\)\s*$", text, re.M):
             fields = split_top(m.group(1))
             if len(fields) < 6:
                 continue
             bochs[norm(fields[0].replace("BX_IA_", ""))] = fields[5].split("/*")[0].strip()
+            # Field 10 carries the BX_PREPARE_* attributes. Only the EVEX
+            # encoding-restriction bits matter here; the rest are decode hints
+            # rusty_box does not model.
+            attrs = fields[10] if len(fields) > 10 else ""
+            flags = 0
+            if "BX_PREPARE_EVEX_NO_BROADCAST" in attrs:
+                flags |= 0x280
+            if "BX_PREPARE_EVEX_NO_SAE" in attrs:
+                flags |= 0x180
+            if "BX_PREPARE_EVEX" in attrs:
+                flags |= 0x080
+            evex_flags[norm(fields[0].replace("BX_IA_", ""))] = flags
 
     # rusty X86Feature variants, declaration order == discriminant
     feat_src = read("rusty_box_decoder/src/features.rs")
@@ -177,6 +193,41 @@ def main():
         "/// Number of `Opcode` variants the table was generated against. A",
         "/// mismatch with the enum means the table needs regenerating.",
         f"pub const OPCODE_VARIANT_COUNT: usize = {len(opcodes)};",
+        "",
+        "// EVEX encoding restrictions — Bochs cpu/decoder/fetchdecode.h.",
+        "// `EVEX.b` means embedded broadcast on a memory operand and SAE /",
+        "// embedded rounding on a register operand; an opcode that supports",
+        "// neither must #UD rather than silently ignore the bit.",
+        "/// Opcode participates in the EVEX prepare checks at all.",
+        "pub const PREPARE_EVEX: u16 = 0x080;",
+        "/// `EVEX.b` with a register operand (SAE) is illegal for this opcode.",
+        "pub const PREPARE_EVEX_NO_SAE: u16 = 0x180;",
+        "/// `EVEX.b` with a memory operand (broadcast) is illegal for this opcode.",
+        "pub const PREPARE_EVEX_NO_BROADCAST: u16 = 0x280;",
+        "",
+        "/// BX_PREPARE_EVEX* attribute bits per opcode, from field 10 of",
+        "/// `bx_define_opcode`.",
+        "// A `const` rather than a `static`: the EVEX decode path is a",
+        "// `const fn`, and const evaluation may read consts but not statics.",
+        f"pub const OPCODE_EVEX_FLAGS: [u16; {len(opcodes)}] = [",
+    ]
+    evex_gated = 0
+    for op in opcodes:
+        flags = evex_flags.get(norm(op), 0)
+        if flags:
+            evex_gated += 1
+        lines.append(f"    {flags:#05x}, // {op}")
+    lines += [
+        "];",
+        "",
+        "/// EVEX prepare attributes for `opcode` (0 when it has none).",
+        "#[inline]",
+        "pub const fn opcode_evex_flags(opcode: Opcode) -> u16 {",
+        "    OPCODE_EVEX_FLAGS[opcode as usize]",
+        "}",
+        "",
+        "/// Number of opcodes carrying EVEX prepare attributes, pinned by tests.",
+        f"pub const EVEX_FLAGGED_OPCODE_COUNT: usize = {evex_gated};",
         "",
         "#[allow(dead_code)]",
         "fn _feature_type_is_used(f: X86Feature) -> u16 {",

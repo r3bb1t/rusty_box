@@ -1712,3 +1712,45 @@ fn test_not_rip_relative_in_32bit() {
     );
     assert_eq!(i.displacement, 0x12345678);
 }
+
+/// `EVEX.b` means embedded broadcast on a memory operand and SAE / embedded
+/// rounding on a register one. An opcode that supports neither must raise #UD
+/// rather than quietly ignore the bit — Bochs applies these two tests in
+/// `fetchdecode32.cc` right after resolving the EVEX opcode, redirecting
+/// `execute1` to `BxError`.
+///
+/// EVEX layout used below: `62 P0 P1 P2 opcode modrm`, with
+/// `P0 = 0xF0 | mm` (no REX extensions), `P1 = W<<7 | ~vvvv<<3 | 4 | pp`,
+/// `P2 = z<<7 | L'L<<5 | b<<4 | ~V'<<3 | aaa`.
+#[test]
+fn evex_b_is_rejected_where_the_opcode_allows_neither_sae_nor_broadcast() {
+    // VUNPCKLPS zmm1, zmm0, zmm2 — 0F map, no prefix, W0. Flagged NO_SAE, so
+    // EVEX.b on the register form is illegal.
+    assert!(
+        fetch_decode64(&[0x62, 0xF1, 0x7C, 0x58, 0x14, 0xCA]).is_err(),
+        "EVEX.b (SAE) on a register-form VUNPCKLPS must #UD"
+    );
+    // Same encoding with b=0 stays legal.
+    assert!(
+        fetch_decode64(&[0x62, 0xF1, 0x7C, 0x48, 0x14, 0xCA]).is_ok(),
+        "VUNPCKLPS without EVEX.b must still decode"
+    );
+
+    // VADDSS xmm1, xmm0, [rax] — F3 prefix, 0F map, W0. Flagged NO_BROADCAST,
+    // so EVEX.b on the memory form is illegal.
+    assert!(
+        fetch_decode64(&[0x62, 0xF1, 0x7E, 0x18, 0x58, 0x08]).is_err(),
+        "EVEX.b (broadcast) on a memory-form VADDSS must #UD"
+    );
+    assert!(
+        fetch_decode64(&[0x62, 0xF1, 0x7E, 0x08, 0x58, 0x08]).is_ok(),
+        "VADDSS without EVEX.b must still decode"
+    );
+
+    // VADDPS carries plain BX_PREPARE_EVEX: SAE on the register form is
+    // exactly what EVEX.b is for there, so it must be accepted.
+    assert!(
+        fetch_decode64(&[0x62, 0xF1, 0x7C, 0x58, 0x58, 0xCA]).is_ok(),
+        "EVEX.b (SAE) on a register-form VADDPS is legal and must decode"
+    );
+}

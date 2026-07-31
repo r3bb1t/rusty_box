@@ -1005,6 +1005,30 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         {
             instr.opcode = evex_op;
         }
+        // EVEX.b overloads one bit: embedded broadcast on a memory operand,
+        // SAE / embedded rounding on a register one. An opcode that supports
+        // neither must raise #UD instead of ignoring the bit. Bochs
+        // fetchdecode32.cc applies exactly this pair of tests after resolving
+        // the opcode, pointing execute1 at BxError.
+        if evex_b_flag != 0 {
+            let flags = crate::opcode_isa::opcode_evex_flags(instr.opcode);
+            if (flags & crate::opcode_isa::PREPARE_EVEX) != 0 {
+                let (forbidden, err) = if mod_c0 {
+                    (
+                        crate::opcode_isa::PREPARE_EVEX_NO_SAE,
+                        BxDecodeError::BxEvexIllegalEvexBSaeNotAllowed,
+                    )
+                } else {
+                    (
+                        crate::opcode_isa::PREPARE_EVEX_NO_BROADCAST,
+                        BxDecodeError::BxEvexIllegalEvexBBroadcastNotAllowed,
+                    )
+                };
+                if (flags & forbidden) == forbidden {
+                    return Err(DecodeError::Decoder(err));
+                }
+            }
+        }
     }
 
     // VEX SSE→VEX opcode remapping: When VEX prefix is present, the opcode table
