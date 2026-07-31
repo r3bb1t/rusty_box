@@ -4072,6 +4072,83 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVgatherqdVdqVsib => self.evex_vpgatherqd(instr),
             Opcode::EvexVgatherqqVdqVsib => self.evex_vpgatherqq(instr),
 
+            // --- EVEX scalar FMA (48 opcodes) ---
+            // Bochs avx512_fma.cc EVEX_FMA_SCALAR_{SINGLE,DOUBLE}. The
+            // 132/213/231 suffix selects the operand permutation, shared with
+            // the VEX forms; ss/sd selects the element width.
+            Opcode::EvexVfmadd132ssVpsHssWss | Opcode::EvexVfmadd132ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::EvexVfmadd132sdVpdHsdWsd | Opcode::EvexVfmadd132sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::EvexVfmadd213ssVpsHssWss | Opcode::EvexVfmadd213ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F213, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::EvexVfmadd213sdVpdHsdWsd | Opcode::EvexVfmadd213sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F213, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::EvexVfmadd231ssVpsHssWss | Opcode::EvexVfmadd231ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F231, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::EvexVfmadd231sdVpdHsdWsd | Opcode::EvexVfmadd231sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F231, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::EvexVfmsub132ssVpsHssWss | Opcode::EvexVfmsub132ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::EvexVfmsub132sdVpdHsdWsd | Opcode::EvexVfmsub132sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::EvexVfmsub213ssVpsHssWss | Opcode::EvexVfmsub213ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F213, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::EvexVfmsub213sdVpdHsdWsd | Opcode::EvexVfmsub213sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F213, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::EvexVfmsub231ssVpsHssWss | Opcode::EvexVfmsub231ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F231, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::EvexVfmsub231sdVpdHsdWsd | Opcode::EvexVfmsub231sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F231, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::EvexVfnmadd132ssVpsHssWss | Opcode::EvexVfnmadd132ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::EvexVfnmadd132sdVpdHsdWsd | Opcode::EvexVfnmadd132sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::EvexVfnmadd213ssVpsHssWss | Opcode::EvexVfnmadd213ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F213, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::EvexVfnmadd213sdVpdHsdWsd | Opcode::EvexVfnmadd213sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F213, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::EvexVfnmadd231ssVpsHssWss | Opcode::EvexVfnmadd231ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F231, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::EvexVfnmadd231sdVpdHsdWsd | Opcode::EvexVfnmadd231sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F231, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::EvexVfnmsub132ssVpsHssWss | Opcode::EvexVfnmsub132ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::EvexVfnmsub132sdVpdHsdWsd | Opcode::EvexVfnmsub132sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::EvexVfnmsub213ssVpsHssWss | Opcode::EvexVfnmsub213ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F213, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::EvexVfnmsub213sdVpdHsdWsd | Opcode::EvexVfnmsub213sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F213, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::EvexVfnmsub231ssVpsHssWss | Opcode::EvexVfnmsub231ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F231, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::EvexVfnmsub231sdVpdHsdWsd | Opcode::EvexVfnmsub231sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F231, VexScalarFmaOp::Fnmsub)
+            }
+
             // --- EVEX scatter (0F38 A0-A3) ---
             // The integer and FP forms differ only in how the source register
             // is named; the store is the same width either way, so each pair

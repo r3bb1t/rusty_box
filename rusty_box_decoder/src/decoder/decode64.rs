@@ -836,9 +836,15 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         instr.set_evex_b(evex_b_flag);
         instr.set_evex_v_prime(evex_v_prime);
         instr.set_zero_masking(evex_z);
-        // EVEX.b in register form implies 512-bit vector length
+        // L'L is overloaded: normally the vector length, but on a register
+        // operand with EVEX.b it is the embedded rounding mode instead. Bochs
+        // fetchdecode64.cc keeps both — `setRC(evex_vl_rc)` unconditionally,
+        // then `setVL` — so the rounding mode survives for
+        // `softfloat_status_word_rc_override` to apply. Capturing it here as
+        // well means the bits are not lost before a handler can consult them.
+        instr.set_rc(vex_l);
         if evex_b_flag != 0 && (metainfo1_bits & InstructionFlags::ModC0.bits()) != 0 {
-            instr.set_vl(2); // VL512
+            instr.set_vl(2); // VL512: embedded rounding always operates full width
         }
     }
 

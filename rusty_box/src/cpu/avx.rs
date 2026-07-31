@@ -2737,6 +2737,108 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
     }
 
+    /// EVEX FMA scalar single-precision — Bochs avx512_fma.cc
+    /// `EVEX_FMA_SCALAR_SINGLE`.
+    ///
+    /// Differs from the VEX form in three ways: the whole computation is gated
+    /// on the scalar opmask bit; an inactive element is zeroed under
+    /// zero-masking and left alone under merge-masking; and the destination's
+    /// bits above 128 are cleared either way. The operand permutation for
+    /// 132/213/231 is the same one the VEX form uses — the def-file operand
+    /// tuples for the EVEX entries reorder identically.
+    pub(super) fn evex_fma_scalar_ss(
+        &mut self,
+        instr: &Instruction,
+        form: VexFmaForm,
+        op: VexScalarFmaOp,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let mut result = self.read_xmm_reg(dst_idx);
+
+        if self.scalar_element_mask(instr) {
+            let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
+            self.softfloat_rc_override(&mut status, instr);
+            let v = result.xmm32u(0);
+            let h = self.read_xmm_reg(instr.src2()).xmm32u(0);
+            let w = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1()).xmm32u(0)
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_dword(seg, eaddr)?
+            };
+            let (a, b, c) = vex_fma_operands_u32(form, v, h, w);
+            result.set_xmm32u(0, f32_mul_add(a, b, c, scalar_fma_flags(op), &mut status));
+            self.write_xmm_reg(dst_idx, result);
+            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+        } else {
+            if instr.is_zero_masking() != 0 {
+                result.set_xmm32u(0, 0);
+            }
+            // Merge-masking leaves element 0 as it was; either way the write
+            // clears above 128 bits (Bochs BX_CLEAR_AVX_HIGH128).
+            self.write_xmm_reg(dst_idx, result);
+            Ok(())
+        }
+    }
+
+    /// EVEX FMA scalar double-precision — Bochs avx512_fma.cc
+    /// `EVEX_FMA_SCALAR_DOUBLE`.
+    pub(super) fn evex_fma_scalar_sd(
+        &mut self,
+        instr: &Instruction,
+        form: VexFmaForm,
+        op: VexScalarFmaOp,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let mut result = self.read_xmm_reg(dst_idx);
+
+        if self.scalar_element_mask(instr) {
+            let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
+            self.softfloat_rc_override(&mut status, instr);
+            let v = result.xmm64u(0);
+            let h = self.read_xmm_reg(instr.src2()).xmm64u(0);
+            let w = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1()).xmm64u(0)
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_qword(seg, eaddr)?
+            };
+            let (a, b, c) = vex_fma_operands_u64(form, v, h, w);
+            result.set_xmm64u(0, f64_mul_add(a, b, c, scalar_fma_flags(op), &mut status));
+            self.write_xmm_reg(dst_idx, result);
+            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+        } else {
+            if instr.is_zero_masking() != 0 {
+                result.set_xmm64u(0, 0);
+            }
+            self.write_xmm_reg(dst_idx, result);
+            Ok(())
+        }
+    }
+
+    /// Bochs sse_pfp.cc `softfloat_status_word_rc_override` — on a register
+    /// operand with EVEX.b, L'L is the embedded rounding mode rather than the
+    /// vector length, and every exception is both suppressed and masked (the
+    /// SAE half of "static rounding, suppress all exceptions").
+    #[inline]
+    pub(super) fn softfloat_rc_override(
+        &self,
+        status: &mut crate::cpu::softfloat3e::softfloat::SoftFloatStatus,
+        instr: &Instruction,
+    ) {
+        if instr.mod_c0() && instr.get_evex_b() != 0 && instr.get_vl() == 2 {
+            status.softfloat_roundingMode = instr.get_rc();
+            status.softfloat_suppressException =
+                crate::cpu::softfloat3e::softfloat::ALL_EXCEPTIONS_MASK;
+            status.softfloat_exceptionMasks =
+                crate::cpu::softfloat3e::softfloat::ALL_EXCEPTIONS_MASK;
+        }
+    }
+
     /// #UD when the CPU model does not advertise FMA (Bochs `BX_ISA_AVX_FMA`).
     #[inline]
     fn require_fma(&mut self) -> super::Result<()> {
