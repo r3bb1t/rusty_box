@@ -22,15 +22,15 @@ jobs:
       - name: Download Bochs BIOS ROMs
         shell: bash
         run: |
-          mkdir -p cpp_orig/bochs/bios/VGABIOS-lgpl
+          mkdir -p cpp_orig/bochs/bochs/bios/VGABIOS-lgpl
           python - <<'PY'
           from pathlib import Path
           from urllib.request import urlretrieve
 
           downloads = {
-              "cpp_orig/bochs/bios/BIOS-bochs-latest":
+              "cpp_orig/bochs/bochs/bios/BIOS-bochs-latest":
                   "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/BIOS-bochs-latest?format=raw",
-              "cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
+              "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
                   "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/VGABIOS-lgpl-latest?format=raw",
           }
 
@@ -51,8 +51,8 @@ jobs:
         run: |
           mkdir -p artifact/roms
           cp target/release/rusty_box_gui.exe artifact/rusty_box_gui.exe
-          cp cpp_orig/bochs/bios/BIOS-bochs-latest artifact/roms/BIOS-bochs-latest
-          cp cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin artifact/roms/VGABIOS-lgpl-latest.bin
+          cp cpp_orig/bochs/bochs/bios/BIOS-bochs-latest artifact/roms/BIOS-bochs-latest
+          cp cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin artifact/roms/VGABIOS-lgpl-latest.bin
           cat > artifact/rusty_box.toml <<'EOF'
           [rom]
           bios = "roms/BIOS-bochs-latest"
@@ -74,15 +74,15 @@ jobs:
         uses: actions/checkout@v4
       - name: Download Bochs BIOS ROMs
         run: |
-          mkdir -p cpp_orig/bochs/bios/VGABIOS-lgpl
+          mkdir -p cpp_orig/bochs/bochs/bios/VGABIOS-lgpl
           python3 - <<'PY'
           from pathlib import Path
           from urllib.request import urlretrieve
 
           downloads = {
-              "cpp_orig/bochs/bios/BIOS-bochs-latest":
+              "cpp_orig/bochs/bochs/bios/BIOS-bochs-latest":
                   "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/BIOS-bochs-latest?format=raw",
-              "cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
+              "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
                   "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/VGABIOS-lgpl-latest?format=raw",
           }
 
@@ -117,8 +117,8 @@ jobs:
           mkdir -p artifact/roms
           cp target/release/rusty_box_gui artifact/rusty_box_gui
           chmod +x artifact/rusty_box_gui
-          cp cpp_orig/bochs/bios/BIOS-bochs-latest artifact/roms/BIOS-bochs-latest
-          cp cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin artifact/roms/VGABIOS-lgpl-latest.bin
+          cp cpp_orig/bochs/bochs/bios/BIOS-bochs-latest artifact/roms/BIOS-bochs-latest
+          cp cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin artifact/roms/VGABIOS-lgpl-latest.bin
           cat > artifact/rusty_box.toml <<'EOF'
           [rom]
           bios = "roms/BIOS-bochs-latest"
@@ -140,15 +140,15 @@ jobs:
         uses: actions/checkout@v4
       - name: Download Bochs BIOS ROMs
         run: |
-          mkdir -p cpp_orig/bochs/bios/VGABIOS-lgpl
+          mkdir -p cpp_orig/bochs/bochs/bios/VGABIOS-lgpl
           python3 - <<'PY'
           from pathlib import Path
           from urllib.request import urlretrieve
 
           downloads = {
-              "cpp_orig/bochs/bios/BIOS-bochs-latest":
+              "cpp_orig/bochs/bochs/bios/BIOS-bochs-latest":
                   "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/BIOS-bochs-latest?format=raw",
-              "cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
+              "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
                   "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/VGABIOS-lgpl-latest?format=raw",
           }
 
@@ -169,8 +169,8 @@ jobs:
           mkdir -p artifact/roms
           cp target/release/rusty_box_gui artifact/rusty_box_gui
           chmod +x artifact/rusty_box_gui
-          cp cpp_orig/bochs/bios/BIOS-bochs-latest artifact/roms/BIOS-bochs-latest
-          cp cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin artifact/roms/VGABIOS-lgpl-latest.bin
+          cp cpp_orig/bochs/bochs/bios/BIOS-bochs-latest artifact/roms/BIOS-bochs-latest
+          cp cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin artifact/roms/VGABIOS-lgpl-latest.bin
           cat > artifact/rusty_box.toml <<'EOF'
           [rom]
           bios = "roms/BIOS-bochs-latest"
@@ -199,15 +199,15 @@ jobs:
 
       - name: Download Bochs BIOS ROMs
         run: |
-          mkdir -p cpp_orig/bochs/bios/VGABIOS-lgpl
+          mkdir -p cpp_orig/bochs/bochs/bios/VGABIOS-lgpl
           python3 - <<'PY'
           from pathlib import Path
           from urllib.request import urlretrieve
 
           downloads = {
-              "cpp_orig/bochs/bios/BIOS-bochs-latest":
+              "cpp_orig/bochs/bochs/bios/BIOS-bochs-latest":
                   "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/BIOS-bochs-latest?format=raw",
-              "cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
+              "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
                   "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/VGABIOS-lgpl-latest?format=raw",
           }
 
