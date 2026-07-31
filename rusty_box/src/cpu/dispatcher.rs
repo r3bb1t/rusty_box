@@ -2662,6 +2662,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::HsubpsVpsWps => self.hsubps_vps_wps(instr),
             Opcode::HsubpdVpdWpd => self.hsubpd_vpd_wpd(instr),
 
+            // SSE3 Add/Subtract (sse_pfp.rs)
+            Opcode::AddsubpsVpsWps => self.addsubps_vps_wps(instr),
+            Opcode::AddsubpdVpdWpd => self.addsubpd_vpd_wpd(instr),
+
             // SSE4.1 Dot Products (sse_pfp.rs)
             Opcode::DppsVpsWpsIb => self.dpps_vps_wps_ib(instr),
             Opcode::DppdVpdWpdIb => self.dppd_vpd_wpd_ib(instr),
@@ -4837,6 +4841,13 @@ mod tests {
         cpu: &mut BxCpuC<'_, I, T>,
     ) {
         cpu.cr4.insert(BxCr4::OSFXSR);
+        // `BxCpuBuilder::build()` only runs `initialize()`, not a hardware
+        // reset, so MXCSR is left at the zeroed-allocation value — a state
+        // no real CPU can be in, and one in which every exception is
+        // *unmasked*. Now that the FP handlers actually consult MXCSR, an
+        // inexact result there would raise #XM (or #UD, since these tests
+        // leave CR4.OSXMMEXCPT clear). Apply the architectural reset value.
+        cpu.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET;
     }
 
     fn make_legacy_round_instr(opcode: Opcode, dst: u8, src: u8, imm: u8) -> Instruction {
@@ -5874,6 +5885,137 @@ mod tests {
             expect_daz,
             "FMA must honor MXCSR.DAZ (flush subnormal input)"
         );
+    }
+
+    /// A legacy two-operand SSE instruction, register form.
+    fn make_legacy_sse_instr(opcode: Opcode, dst: u8, src: u8) -> Instruction {
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(opcode);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, dst);
+        instr.set_src_reg(1, src);
+        instr.set_seg(BxSegregs::Ds);
+        instr
+    }
+
+    // ── The SSE floating-point surface goes through SoftFloat, so MXCSR is
+    // live. None of the four properties below could hold on the native-float
+    // path this replaced. ──────────────────────────────────────────────────
+
+    #[test]
+    fn sse_scalar_fp_honors_mxcsr_rounding_mode() {
+        // 1.0 / 5.0 is inexact and rounds *up* under round-to-nearest, so
+        // round-toward-zero lands one ulp lower. (1/3 would not
+        // discriminate — its residue rounds down under both modes.)
+        let one = 1.0f64.to_bits();
+        let five = 5.0f64.to_bits();
+
+        let mut nearest = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut nearest);
+        nearest.vmm[1].set_zmm64u(0, one);
+        nearest.vmm[3].set_zmm64u(0, five);
+        nearest
+            .execute_instruction(&make_legacy_sse_instr(Opcode::DivsdVsdWsd, 1, 3))
+            .unwrap();
+
+        let mut toward_zero = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut toward_zero);
+        toward_zero.mxcsr.mxcsr = 0x1F80 | 0x6000; // RC = toward zero
+        toward_zero.vmm[1].set_zmm64u(0, one);
+        toward_zero.vmm[3].set_zmm64u(0, five);
+        toward_zero
+            .execute_instruction(&make_legacy_sse_instr(Opcode::DivsdVsdWsd, 1, 3))
+            .unwrap();
+
+        assert_eq!(nearest.vmm[1].zmm64u(0), 0x3FC9_9999_9999_999A);
+        assert_eq!(
+            toward_zero.vmm[1].zmm64u(0),
+            0x3FC9_9999_9999_9999,
+            "DIVSD must round per MXCSR.RC"
+        );
+    }
+
+    #[test]
+    fn sse_packed_fp_sets_mxcsr_sticky_exception_flags() {
+        use crate::cpu::xmm::Mxcsr;
+
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        assert!(!cpu.mxcsr.flags().contains(Mxcsr::PE));
+
+        // ADDPS lane 0: 2^24 + 1 is inexact in f32. Other lanes are exact.
+        cpu.vmm[1].set_zmm32u(0, 16_777_216.0f32.to_bits());
+        cpu.vmm[3].set_zmm32u(0, 1.0f32.to_bits());
+        cpu.execute_instruction(&make_legacy_sse_instr(Opcode::AddpsVpsWps, 1, 3))
+            .unwrap(); // masked → no fault
+
+        assert!(
+            cpu.mxcsr.flags().contains(Mxcsr::PE),
+            "inexact packed add must set MXCSR.PE"
+        );
+        assert_eq!(cpu.vmm[1].zmm32u(0), 16_777_216.0f32.to_bits());
+    }
+
+    #[test]
+    fn sse_unmasked_divide_by_zero_raises_and_leaves_destination_alone() {
+        use crate::cpu::xmm::Mxcsr;
+
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        cpu.cr4.insert(BxCr4::OSXMMEXCPT);
+        // All masked except #Z (bit 9 = ZM).
+        cpu.mxcsr.mxcsr = 0x1F80 & !Mxcsr::ZM.bits();
+
+        let poison = 0xDEAD_BEEF_CAFE_BABEu64;
+        cpu.vmm[1].set_zmm64u(0, 1.0f64.to_bits());
+        cpu.vmm[1].set_zmm64u(1, poison);
+        cpu.vmm[3].set_zmm64u(0, 0.0f64.to_bits());
+
+        let err = cpu
+            .execute_instruction(&make_legacy_sse_instr(Opcode::DivsdVsdWsd, 1, 3))
+            .unwrap_err();
+        assert!(matches!(err, crate::cpu::CpuError::CpuLoopRestart));
+
+        assert!(cpu.mxcsr.flags().contains(Mxcsr::ZE), "ZE must be recorded");
+        assert_eq!(
+            cpu.vmm[1].zmm64u(0),
+            1.0f64.to_bits(),
+            "an unmasked exception must abort before the destination is written"
+        );
+        assert_eq!(cpu.vmm[1].zmm64u(1), poison);
+    }
+
+    #[test]
+    fn sse_minmax_take_the_second_operand_on_nan() {
+        // MINSD/MAXSD return the source operand whenever the comparison is
+        // not strictly less/greater — including any NaN and ±0.0 ties.
+        for (opcode, expect_snan_passthrough) in
+            [(Opcode::MinsdVsdWsd, true), (Opcode::MaxsdVsdWsd, true)]
+        {
+            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            enable_sse(&mut cpu);
+            let src = 2.0f64.to_bits();
+            cpu.vmm[1].set_zmm64u(0, f64::NAN.to_bits());
+            cpu.vmm[3].set_zmm64u(0, src);
+            cpu.execute_instruction(&make_legacy_sse_instr(opcode, 1, 3))
+                .unwrap();
+            assert!(expect_snan_passthrough);
+            assert_eq!(
+                cpu.vmm[1].zmm64u(0),
+                src,
+                "{opcode:?} with a NaN first operand must return the second"
+            );
+        }
+
+        // -0.0 vs +0.0 compare equal, so the second operand wins.
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        cpu.vmm[1].set_zmm64u(0, (-0.0f64).to_bits());
+        cpu.vmm[3].set_zmm64u(0, 0.0f64.to_bits());
+        cpu.execute_instruction(&make_legacy_sse_instr(Opcode::MinsdVsdWsd, 1, 3))
+            .unwrap();
+        assert_eq!(cpu.vmm[1].zmm64u(0), 0.0f64.to_bits());
     }
 
     fn all_vpminmax_cases() -> [VpminmaxCase; 24] {

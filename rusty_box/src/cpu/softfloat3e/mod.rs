@@ -1,6 +1,7 @@
 pub(crate) mod internals;
 pub(crate) mod primitives;
 pub(crate) mod softfloat;
+pub(crate) mod softfloat_compare;
 pub(crate) mod softfloat_types;
 pub(crate) mod specialize;
 

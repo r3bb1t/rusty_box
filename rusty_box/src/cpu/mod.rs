@@ -119,12 +119,14 @@ pub(super) mod smm;
 #[cfg(feature = "std")]
 pub mod snapshot;
 pub(super) mod soft_int;
+pub(super) mod simd_pfp;
 pub(super) mod softfloat3e;
 pub(super) mod sse;
 pub(super) mod sse_fp;
 pub(super) mod sse_move;
 pub(super) mod sse_pfp;
 pub(super) mod sse_rcp;
+pub(super) mod sse_rcp_tables;
 pub(super) mod sse_string;
 pub(super) mod stack;
 pub(super) mod stack16;
