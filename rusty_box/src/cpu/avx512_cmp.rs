@@ -9,6 +9,8 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_cmp.cc`, `avx512_pfp.cc`.
 
+use super::softfloat3e::softfloat::softfloat_getExceptionFlags;
+use super::softfloat3e::softfloat_compare::{f32_compare_predicate, f64_compare_predicate};
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -147,147 +149,76 @@ fn read_src2_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 // Floating-point comparison predicates (32 predicates, imm8[4:0])
 // ============================================================================
 
-/// Compare two f32 values per the VCMPPS/VCMPSS predicate encoding.
-///
-/// The 32 predicates (imm8 & 0x1F) group into 8 base operations that repeat
-/// with signaling/quiet variants (same logic for emulation purposes):
-///   0=EQ, 1=LT, 2=LE, 3=UNORD, 4=NEQ, 5=NLT, 6=NLE, 7=ORD
-#[inline]
-/// Intel VCMPPS/VCMPSD predicate encoding (32 predicates, two groups).
-/// Group A (0-7, 16-23): ordered base comparisons.
-/// Group B (8-15, 24-31): swapped ordered/unordered sense.
-/// Signaling vs quiet (0-7 vs 16-23, 8-15 vs 24-31) only affects exception
-/// flags which we don't implement — same logical result within each pair.
-fn fp_compare_f32(a: f32, b: f32, imm: u8) -> bool {
-    let unordered = a.is_nan() || b.is_nan();
-    match imm & 0x1F {
-        // Group A: ordered (0-7, 16-23)
-        0 | 16 => !unordered && a == b, // EQ_OQ / EQ_OS
-        1 | 17 => !unordered && a < b,  // LT_OS / LT_OQ
-        2 | 18 => !unordered && a <= b, // LE_OS / LE_OQ
-        3 | 19 => unordered,            // UNORD_Q / UNORD_S
-        4 | 20 => unordered || a != b,  // NEQ_UQ / NEQ_US
-        5 | 21 => unordered || a >= b,  // NLT_US / NLT_UQ
-        6 | 22 => unordered || a > b,   // NLE_US / NLE_UQ
-        7 | 23 => !unordered,           // ORD_Q / ORD_S
-        // Group B: swapped (8-15, 24-31)
-        8 | 24 => unordered || a == b,   // EQ_UQ / EQ_US
-        9 | 25 => unordered || a < b,    // NGE_US / NGE_UQ
-        10 | 26 => unordered || a <= b,  // NGT_US / NGT_UQ
-        11 | 27 => false,                // FALSE_OQ / FALSE_OS
-        12 | 28 => !unordered && a != b, // NEQ_OQ / NEQ_OS
-        13 | 29 => !unordered && a >= b, // GE_OS / GE_OQ
-        14 | 30 => !unordered && a > b,  // GT_OS / GT_OQ
-        15 | 31 => true,                 // TRUE_UQ / TRUE_US
-        _ => unreachable!("AVX compare predicate imm & 0x1F cannot exceed 31"),
-    }
-}
-
-#[inline]
-fn fp_compare_f64(a: f64, b: f64, imm: u8) -> bool {
-    let unordered = a.is_nan() || b.is_nan();
-    match imm & 0x1F {
-        0 | 16 => !unordered && a == b,
-        1 | 17 => !unordered && a < b,
-        2 | 18 => !unordered && a <= b,
-        3 | 19 => unordered,
-        4 | 20 => unordered || a != b,
-        5 | 21 => unordered || a >= b,
-        6 | 22 => unordered || a > b,
-        7 | 23 => !unordered,
-        8 | 24 => unordered || a == b,
-        9 | 25 => unordered || a < b,
-        10 | 26 => unordered || a <= b,
-        11 | 27 => false,
-        12 | 28 => !unordered && a != b,
-        13 | 29 => !unordered && a >= b,
-        14 | 30 => !unordered && a > b,
-        15 | 31 => true,
-        _ => unreachable!("AVX compare predicate imm & 0x1F cannot exceed 31"),
-    }
-}
-
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
-    // VCMPPS — Compare packed single-precision FP, producing opmask
-    // EVEX.NDS.W0.0F C2 /r ib
+    // VCMPPS / VCMPPD — Compare packed FP, producing an opmask
+    // EVEX.NDS.W0.0F C2 /r ib and EVEX.NDS.W1.0F C2 /r ib
+    //
+    // Bochs avx512_pfp.cc VCMPPS_MASK_KGwHpsWpsIbR: an element masked off by
+    // the writemask is not compared at all, so it raises no exception and
+    // its result bit stays clear. The accumulated flags then go through
+    // check_exceptionsSSE before the opmask is written.
     // ========================================================================
 
-    /// VCMPPS Kk{k}, Hps, Wps, Ib — register form
-    pub fn evex_vcmpps_r(&mut self, instr: &Instruction) -> super::Result<()> {
+    /// The shared body of the four VCMPPS/VCMPPD forms.
+    fn evex_cmp_pfp(
+        &mut self,
+        instr: &Instruction,
+        src2: BxPackedZmmRegister,
+        qword: bool,
+    ) -> super::Result<()> {
         let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
+        let nelements = if qword {
+            qword_elements(vl)
+        } else {
+            dword_elements(vl)
+        };
         let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
-        let imm = instr.ib();
+        let predicate = instr.ib() & 0x1F;
         let write_mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if fp_compare_f32(src1.zmm32f(i), src2.zmm32f(i), imm) && ((write_mask >> i) & 1 != 0) {
+            if (write_mask >> i) & 1 == 0 {
+                continue;
+            }
+            let hit = if qword {
+                f64_compare_predicate(predicate, src1.zmm64u(i), src2.zmm64u(i), &mut status)
+            } else {
+                f32_compare_predicate(predicate, src1.zmm32u(i), src2.zmm32u(i), &mut status)
+            };
+            if hit {
                 result |= 1 << i;
             }
         }
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         self.bx_write_opmask(instr.dst() as usize, result);
         Ok(())
+    }
+
+    /// VCMPPS Kk{k}, Hps, Wps, Ib — register form
+    pub fn evex_vcmpps_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        let src2 = read_zmm(self, instr.src2());
+        self.evex_cmp_pfp(instr, src2, false)
     }
 
     /// VCMPPS Kk{k}, Hps, Mps, Ib — memory form
     pub fn evex_vcmpps_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
         let src2 = self.evex_load_broadcast_mask_vector_d(instr)?;
-        let imm = instr.ib();
-        let write_mask = read_opmask_for_write(self, instr);
-        let mut result: u64 = 0;
-        for i in 0..nelements {
-            if fp_compare_f32(src1.zmm32f(i), src2.zmm32f(i), imm) && ((write_mask >> i) & 1 != 0) {
-                result |= 1 << i;
-            }
-        }
-        self.bx_write_opmask(instr.dst() as usize, result);
-        Ok(())
+        self.evex_cmp_pfp(instr, src2, false)
     }
-
-    // ========================================================================
-    // VCMPPD — Compare packed double-precision FP, producing opmask
-    // EVEX.NDS.W1.0F C2 /r ib
-    // ========================================================================
 
     /// VCMPPD Kk{k}, Hpd, Wpd, Ib — register form
     pub fn evex_vcmppd_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
         let src2 = read_zmm(self, instr.src2());
-        let imm = instr.ib();
-        let write_mask = read_opmask_for_write(self, instr);
-        let mut result: u64 = 0;
-        for i in 0..nelements {
-            if fp_compare_f64(src1.zmm64f(i), src2.zmm64f(i), imm) && ((write_mask >> i) & 1 != 0) {
-                result |= 1 << i;
-            }
-        }
-        self.bx_write_opmask(instr.dst() as usize, result);
-        Ok(())
+        self.evex_cmp_pfp(instr, src2, true)
     }
 
     /// VCMPPD Kk{k}, Hpd, Mpd, Ib — memory form
     pub fn evex_vcmppd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
         let src2 = self.evex_load_broadcast_mask_vector_q(instr)?;
-        let imm = instr.ib();
-        let write_mask = read_opmask_for_write(self, instr);
-        let mut result: u64 = 0;
-        for i in 0..nelements {
-            if fp_compare_f64(src1.zmm64f(i), src2.zmm64f(i), imm) && ((write_mask >> i) & 1 != 0) {
-                result |= 1 << i;
-            }
-        }
-        self.bx_write_opmask(instr.dst() as usize, result);
-        Ok(())
+        self.evex_cmp_pfp(instr, src2, true)
     }
 
     // ========================================================================

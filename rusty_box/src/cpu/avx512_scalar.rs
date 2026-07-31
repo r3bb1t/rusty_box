@@ -9,18 +9,24 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_pfp.cc`.
 
+use super::softfloat3e::f32_addsub::{f32_add, f32_sub};
+use super::softfloat3e::f32_compare::{f32_max, f32_min};
+use super::softfloat3e::f32_div::f32_div;
+use super::softfloat3e::f32_mul::f32_mul;
+use super::softfloat3e::f32_sqrt::f32_sqrt;
+use super::softfloat3e::f64_addsub::{f64_add, f64_sub};
+use super::softfloat3e::f64_compare::{f64_max, f64_min};
+use super::softfloat3e::f64_div::f64_div;
+use super::softfloat3e::f64_mul::f64_mul;
+use super::softfloat3e::f64_sqrt::f64_sqrt;
+use super::softfloat3e::softfloat::{softfloat_getExceptionFlags, SoftFloatStatus};
+use super::softfloat3e::softfloat_types::{float32, float64};
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedZmmRegister,
 };
-// Load-bearing in pure no-std builds (core f32/f64 lack these inherent
-// methods there); redundant in unit graphs where std is linked, so the
-// unused-import lint is allowed rather than losing the no-std resolution.
-#[cfg(not(feature = "std"))]
-#[allow(unused_imports)]
-use crate::cpu::float::FloatExt;
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
@@ -55,14 +61,14 @@ fn write_scalar_ss<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     cpu: &mut BxCpuC<'_, I, T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
-    result_elem0: f32,
+    result_elem0: float32,
     mask: u64,
     zero_masking: bool,
 ) {
     let dst = &mut cpu.vmm[dst_reg as usize];
     // Element [0]: apply opmask bit 0
     if (mask & 1) != 0 {
-        dst.set_zmm32f(0, result_elem0);
+        dst.set_zmm32u(0, result_elem0);
     } else if zero_masking {
         dst.set_zmm32u(0, 0);
     }
@@ -87,14 +93,14 @@ fn write_scalar_sd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     cpu: &mut BxCpuC<'_, I, T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
-    result_elem0: f64,
+    result_elem0: float64,
     mask: u64,
     zero_masking: bool,
 ) {
     let dst = &mut cpu.vmm[dst_reg as usize];
     // Element [0]: apply opmask bit 0
     if (mask & 1) != 0 {
-        dst.set_zmm64f(0, result_elem0);
+        dst.set_zmm64u(0, result_elem0);
     } else if zero_masking {
         dst.set_zmm64u(0, 0);
     }
@@ -121,13 +127,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Read scalar f32 from rm operand (src1 in our convention).
     /// Register form: XMM element [0] of src1 (rm).
     /// Memory form: reads 4 bytes from memory.
-    fn evex_read_rm_ss(&mut self, instr: &Instruction) -> super::Result<f32> {
+    fn evex_read_rm_ss(&mut self, instr: &Instruction) -> super::Result<float32> {
         if instr.mod_c0() {
-            Ok(self.vmm[instr.src1() as usize].zmm32f(0))
+            Ok(self.vmm[instr.src1() as usize].zmm32u(0))
         } else {
             // Callers pair LOAD_Wss with LOAD_MASK_Wss, so a masked-off scalar
             // element must read as zero without touching memory.
-            Ok(f32::from_bits(self.evex_load_wss_pair(instr)?.zmm32u(0)))
+            Ok(self.evex_load_wss_pair(instr)?.zmm32u(0))
         }
     }
 
@@ -136,228 +142,137 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Memory form: reads 8 bytes from memory.
     #[inline]
     /// Read scalar f64 from rm operand (src1 in our convention).
-    fn evex_read_rm_sd(&mut self, instr: &Instruction) -> super::Result<f64> {
+    fn evex_read_rm_sd(&mut self, instr: &Instruction) -> super::Result<float64> {
         if instr.mod_c0() {
-            Ok(self.vmm[instr.src1() as usize].zmm64f(0))
+            Ok(self.vmm[instr.src1() as usize].zmm64u(0))
         } else {
             // Callers pair LOAD_Wsd with LOAD_MASK_Wsd.
-            Ok(f64::from_bits(self.evex_load_wsd_pair(instr)?.zmm64u(0)))
+            Ok(self.evex_load_wsd_pair(instr)?.zmm64u(0))
         }
     }
 
     // ========================================================================
-    // VADDSS / VADDSD — Add Scalar Single/Double-Precision
-    // EVEX.LIG.F3.0F.W0 58 / EVEX.LIG.F2.0F.W1 58
+    // Scalar EVEX FP arithmetic — Bochs avx512_pfp.cc
+    // `AVX512_SCALAR_SINGLE_FP_MASK` / `AVX512_SCALAR_DOUBLE_FP_MASK`.
+    //
+    // When opmask bit 0 is clear the operation is not performed at all, so
+    // it raises no exception; the destination element is then either zeroed
+    // or merged. Otherwise the result goes through SoftFloat with embedded
+    // rounding control applied, and check_exceptionsSSE runs before the
+    // write.
     // ========================================================================
+
+    /// The shared body of the single-precision scalar arithmetic handlers.
+    fn evex_scalar_ss(
+        &mut self,
+        instr: &Instruction,
+        func: fn(float32, float32, &mut SoftFloatStatus) -> float32,
+    ) -> super::Result<()> {
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_ss(instr)?;
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        let mut result = 0;
+        if (mask & 1) != 0 {
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            result = func(src1.zmm32u(0), src2_val, &mut status);
+            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        }
+        write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
+        Ok(())
+    }
+
+    /// The shared body of the double-precision scalar arithmetic handlers.
+    fn evex_scalar_sd(
+        &mut self,
+        instr: &Instruction,
+        func: fn(float64, float64, &mut SoftFloatStatus) -> float64,
+    ) -> super::Result<()> {
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_sd(instr)?;
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        let mut result = 0;
+        if (mask & 1) != 0 {
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            result = func(src1.zmm64u(0), src2_val, &mut status);
+            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        }
+        write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
+        Ok(())
+    }
 
     /// VADDSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vaddss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_ss(instr)?;
-        let result = src1.zmm32f(0) + src2_val;
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_ss(instr, f32_add)
     }
 
     /// VADDSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vaddsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_sd(instr)?;
-        let result = src1.zmm64f(0) + src2_val;
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_sd(instr, f64_add)
     }
-
-    // ========================================================================
-    // VSUBSS / VSUBSD — Subtract Scalar Single/Double-Precision
-    // EVEX.LIG.F3.0F.W0 5C / EVEX.LIG.F2.0F.W1 5C
-    // ========================================================================
 
     /// VSUBSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vsubss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_ss(instr)?;
-        let result = src1.zmm32f(0) - src2_val;
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_ss(instr, f32_sub)
     }
 
     /// VSUBSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vsubsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_sd(instr)?;
-        let result = src1.zmm64f(0) - src2_val;
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_sd(instr, f64_sub)
     }
-
-    // ========================================================================
-    // VMULSS / VMULSD — Multiply Scalar Single/Double-Precision
-    // EVEX.LIG.F3.0F.W0 59 / EVEX.LIG.F2.0F.W1 59
-    // ========================================================================
 
     /// VMULSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vmulss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_ss(instr)?;
-        let result = src1.zmm32f(0) * src2_val;
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_ss(instr, f32_mul)
     }
 
     /// VMULSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vmulsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_sd(instr)?;
-        let result = src1.zmm64f(0) * src2_val;
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_sd(instr, f64_mul)
     }
-
-    // ========================================================================
-    // VDIVSS / VDIVSD — Divide Scalar Single/Double-Precision
-    // EVEX.LIG.F3.0F.W0 5E / EVEX.LIG.F2.0F.W1 5E
-    // ========================================================================
 
     /// VDIVSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vdivss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_ss(instr)?;
-        let result = src1.zmm32f(0) / src2_val;
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_ss(instr, f32_div)
     }
 
     /// VDIVSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vdivsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_sd(instr)?;
-        let result = src1.zmm64f(0) / src2_val;
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_sd(instr, f64_div)
     }
 
-    // ========================================================================
-    // VSQRTSS / VSQRTSD — Square Root of Scalar Single/Double-Precision
-    // EVEX.LIG.F3.0F.W0 51 / EVEX.LIG.F2.0F.W1 51
-    // ========================================================================
-
-    /// VSQRTSS xmm1{k1}{z}, xmm2, xmm3/m32
+    /// VSQRTSS xmm1{k1}{z}, xmm2, xmm3/m32 — the vvvv operand supplies only
+    /// the upper elements, so the first argument is discarded.
     pub fn evex_vsqrtss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_ss(instr)?;
-        let result = src2_val.sqrt();
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_ss(instr, |_, b, status| f32_sqrt(b, status))
     }
 
     /// VSQRTSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vsqrtsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_sd(instr)?;
-        let result = src2_val.sqrt();
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_sd(instr, |_, b, status| f64_sqrt(b, status))
     }
-
-    // ========================================================================
-    // VMAXSS / VMAXSD — Maximum of Scalar Single/Double-Precision
-    // EVEX.LIG.F3.0F.W0 5F / EVEX.LIG.F2.0F.W1 5F
-    //
-    // SSE MAX semantics: if either operand is NaN, return src2 (source).
-    // If src2 > src1, return src2; else return src1.
-    // ========================================================================
 
     /// VMAXSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vmaxss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_ss(instr)?;
-        let src1_val = src1.zmm32f(0);
-        let result = if src1_val.is_nan() || src2_val.is_nan() || src2_val > src1_val {
-            src2_val
-        } else {
-            src1_val
-        };
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_ss(instr, f32_max)
     }
 
     /// VMAXSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vmaxsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_sd(instr)?;
-        let src1_val = src1.zmm64f(0);
-        let result = if src1_val.is_nan() || src2_val.is_nan() || src2_val > src1_val {
-            src2_val
-        } else {
-            src1_val
-        };
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_sd(instr, f64_max)
     }
-
-    // ========================================================================
-    // VMINSS / VMINSD — Minimum of Scalar Single/Double-Precision
-    // EVEX.LIG.F3.0F.W0 5D / EVEX.LIG.F2.0F.W1 5D
-    //
-    // SSE MIN semantics: if either operand is NaN, return src2 (source).
-    // If src2 < src1, return src2; else return src1.
-    // ========================================================================
 
     /// VMINSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vminss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_ss(instr)?;
-        let src1_val = src1.zmm32f(0);
-        let result = if src1_val.is_nan() || src2_val.is_nan() || src2_val < src1_val {
-            src2_val
-        } else {
-            src1_val
-        };
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_ss(instr, f32_min)
     }
 
     /// VMINSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vminsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
-        let src2_val = self.evex_read_rm_sd(instr)?;
-        let src1_val = src1.zmm64f(0);
-        let result = if src1_val.is_nan() || src2_val.is_nan() || src2_val < src1_val {
-            src2_val
-        } else {
-            src1_val
-        };
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
-        Ok(())
+        self.evex_scalar_sd(instr, f64_min)
     }
 
     // ========================================================================
@@ -382,7 +297,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // reads `src1()` for the base and `src2()` only for element 0.
             let src1 = read_zmm(self, instr.src1());
             let src2 = read_zmm(self, instr.src2());
-            let val = src2.zmm32f(0);
+            let val = src2.zmm32u(0);
             write_scalar_ss(self, instr.dst(), &src1, val, mask, zmask);
         } else {
             // Memory form: dst[0] = mem32, rest zeroed. Bochs
@@ -391,15 +306,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let val = if (mask & 1) != 0 {
                 let laddr = self.resolve_addr(instr);
                 let seg = BxSegregs::from(instr.seg());
-                f32::from_bits(self.v_read_dword(seg, laddr)?)
+                self.v_read_dword(seg, laddr)?
             } else {
-                0.0
+                0
             };
 
             let dst = &mut self.vmm[instr.dst() as usize];
             // Element [0]: apply opmask bit 0
             if (mask & 1) != 0 {
-                dst.set_zmm32f(0, val);
+                dst.set_zmm32u(0, val);
             } else if zmask {
                 dst.set_zmm32u(0, 0);
             }
@@ -422,7 +337,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // (VEX.vvvv). Bochs avx512_move.cc VMOVSD_MASK_VsdHpdWsdR.
             let src1 = read_zmm(self, instr.src1());
             let src2 = read_zmm(self, instr.src2());
-            let val = src2.zmm64f(0);
+            let val = src2.zmm64u(0);
             write_scalar_sd(self, instr.dst(), &src1, val, mask, zmask);
         } else {
             // Memory form: dst[0] = mem64, rest zeroed; no access when the
@@ -430,15 +345,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let val = if (mask & 1) != 0 {
                 let laddr = self.resolve_addr(instr);
                 let seg = BxSegregs::from(instr.seg());
-                f64::from_bits(self.v_read_qword(seg, laddr)?)
+                self.v_read_qword(seg, laddr)?
             } else {
-                0.0
+                0
             };
 
             let dst = &mut self.vmm[instr.dst() as usize];
             // Element [0]: apply opmask bit 0
             if (mask & 1) != 0 {
-                dst.set_zmm64f(0, val);
+                dst.set_zmm64u(0, val);
             } else if zmask {
                 dst.set_zmm64u(0, 0);
             }
@@ -460,7 +375,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src = read_zmm(self, instr.src());
             let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
             let zmask = instr.is_zero_masking() != 0;
-            let val = src.zmm32f(0);
+            let val = src.zmm32u(0);
             write_scalar_ss(self, instr.dst(), &src1, val, mask, zmask);
         } else {
             // Memory form store: write element [0] to memory
@@ -485,7 +400,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src = read_zmm(self, instr.src());
             let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
             let zmask = instr.is_zero_masking() != 0;
-            let val = src.zmm64f(0);
+            let val = src.zmm64u(0);
             write_scalar_sd(self, instr.dst(), &src1, val, mask, zmask);
         } else {
             // Memory form store: write element [0] to memory
