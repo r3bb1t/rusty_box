@@ -3171,6 +3171,28 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- EVEX scalar getexp/scalef/getmant + pd->udq (avx512_scalar.rs, avx512_cvt.rs) ---
+            Opcode::EvexVgetexpssVssHpsWss | Opcode::EvexVgetexpssVssHpsWssKmask => {
+                self.evex_vgetexpss(instr)
+            }
+            Opcode::EvexVgetexpsdVsdHpdWsd | Opcode::EvexVgetexpsdVsdHpdWsdKmask => {
+                self.evex_vgetexpsd(instr)
+            }
+            Opcode::EvexVscalefssVssHpsWss | Opcode::EvexVscalefssVssHpsWssKmask => {
+                self.evex_vscalefss(instr)
+            }
+            Opcode::EvexVscalefsdVsdHpdWsd | Opcode::EvexVscalefsdVsdHpdWsdKmask => {
+                self.evex_vscalefsd(instr)
+            }
+            Opcode::EvexVcvtpd2udqVdqWpd | Opcode::EvexVcvtpd2udqVdqWpdKmask => {
+                self.evex_vcvtpd2udq(instr)
+            }
+            Opcode::EvexVcvttpd2udqVdqWpd | Opcode::EvexVcvttpd2udqVdqWpdKmask => {
+                self.evex_vcvttpd2udq(instr)
+            }
+            Opcode::EvexVgetmantssVssHpsWssIbKmask => self.evex_vgetmantss(instr),
+            Opcode::EvexVgetmantsdVsdHpdWsdIbKmask => self.evex_vgetmantsd(instr),
+
             // --- byte/word opmask<->vector, blends, GPR broadcasts ---
             Opcode::EvexVpmovm2bVdqKeq => self.evex_vpmovm2b(instr),
             Opcode::EvexVpmovm2wVdqKed => self.evex_vpmovm2w(instr),

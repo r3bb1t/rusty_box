@@ -13,7 +13,9 @@ use super::softfloat3e::f64_to_f32::f64_to_f32;
 use super::softfloat3e::f64_to_int::{f64_to_i32, f64_to_i32_r_min_mag};
 use super::softfloat3e::int_to_float::{i32_to_f32, i32_to_f64};
 use super::softfloat3e::softfloat::{softfloat_getExceptionFlags, softfloat_getRoundingMode};
-use super::softfloat3e::uint_convert::{f32_to_ui32, f32_to_ui32_r_min_mag, ui32_to_f32};
+use super::softfloat3e::uint_convert::{
+    f32_to_ui32, f32_to_ui32_r_min_mag, f64_to_ui32, f64_to_ui32_r_min_mag, ui32_to_f32,
+};
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -492,6 +494,53 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
+
+    // ========================================================================
+    // VCVTPD2UDQ / VCVTTPD2UDQ — packed double to unsigned dword.
+    // Same half-width output shape as VCVTPD2DQ: n qword inputs produce n
+    // dwords in the low half, and everything above is zeroed.
+    // ========================================================================
+
+    /// The shared body; `truncate` selects round-toward-zero over MXCSR.RC.
+    fn evex_cvt_pd2udq(&mut self, instr: &Instruction, truncate: bool) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src = read_src_qword(self, instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let rc = softfloat_getRoundingMode(&status);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 != 0 {
+                let v = if truncate {
+                    f64_to_ui32_r_min_mag(src.zmm64u(i), true, false, &mut status)
+                } else {
+                    f64_to_ui32(src.zmm64u(i), rc, true, &mut status)
+                };
+                result.set_zmm32u(i, v);
+            }
+        }
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        let zmask = instr.is_zero_masking() != 0;
+        let out_vl = match vl {
+            0 | 1 => 0,
+            _ => 1,
+        };
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, out_vl);
+        Ok(())
+    }
+
+    /// VCVTPD2UDQ Vdq{k}, Wpd — EVEX.0F.W1 79 (MXCSR rounding)
+    pub fn evex_vcvtpd2udq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cvt_pd2udq(instr, false)
+    }
+
+    /// VCVTTPD2UDQ Vdq{k}, Wpd — EVEX.0F.W1 78 (truncate)
+    pub fn evex_vcvttpd2udq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cvt_pd2udq(instr, true)
+    }
+
 }
 
 #[cfg(test)]

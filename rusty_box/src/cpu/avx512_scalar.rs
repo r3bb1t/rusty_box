@@ -11,11 +11,13 @@
 
 use super::softfloat3e::f32_addsub::{f32_add, f32_sub};
 use super::softfloat3e::f32_compare::{f32_max, f32_min};
+use super::softfloat3e::f32_range::{f32_get_exp, f32_get_mant, f32_scalef};
 use super::softfloat3e::f32_div::f32_div;
 use super::softfloat3e::f32_mul::f32_mul;
 use super::softfloat3e::f32_sqrt::f32_sqrt;
 use super::softfloat3e::f64_addsub::{f64_add, f64_sub};
 use super::softfloat3e::f64_compare::{f64_max, f64_min};
+use super::softfloat3e::f64_range::{f64_get_exp, f64_get_mant, f64_scalef};
 use super::softfloat3e::f64_div::f64_div;
 use super::softfloat3e::f64_mul::f64_mul;
 use super::softfloat3e::f64_sqrt::f64_sqrt;
@@ -166,7 +168,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn evex_scalar_ss(
         &mut self,
         instr: &Instruction,
-        func: fn(float32, float32, &mut SoftFloatStatus) -> float32,
+        func: impl Fn(float32, float32, &mut SoftFloatStatus) -> float32,
     ) -> super::Result<()> {
         let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
         let src2_val = self.evex_read_rm_ss(instr)?;
@@ -187,7 +189,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn evex_scalar_sd(
         &mut self,
         instr: &Instruction,
-        func: fn(float64, float64, &mut SoftFloatStatus) -> float64,
+        func: impl Fn(float64, float64, &mut SoftFloatStatus) -> float64,
     ) -> super::Result<()> {
         let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
         let src2_val = self.evex_read_rm_sd(instr)?;
@@ -284,6 +286,55 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Memory form store: mem32 = src[0]
     // Register form store: dst[0] = src[0], dst[1..3] = src1[1..3], dst[4..15] = 0
     // ========================================================================
+
+    // ========================================================================
+    // Scalar exponent / mantissa / scale — VGETEXPSS/SD, VSCALEFSS/SD,
+    // VGETMANTSS/SD. Same masked scalar shape as the arithmetic above, so
+    // they reuse its body; only the element function differs.
+    //
+    // VGETEXP and VGETMANT take their value from the rm operand alone — the
+    // vvvv operand supplies only the upper elements — so their closures
+    // discard the first argument the way VSQRTSS does.
+    // ========================================================================
+
+    /// VGETEXPSS xmm1{k1}{z}, xmm2, xmm3/m32 — EVEX.66.0F38.W0 43
+    pub fn evex_vgetexpss(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_scalar_ss(instr, |_, b, status| f32_get_exp(b, status))
+    }
+
+    /// VGETEXPSD xmm1{k1}{z}, xmm2, xmm3/m64 — EVEX.66.0F38.W1 43
+    pub fn evex_vgetexpsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_scalar_sd(instr, |_, b, status| f64_get_exp(b, status))
+    }
+
+    /// VSCALEFSS xmm1{k1}{z}, xmm2, xmm3/m32 — EVEX.66.0F38.W0 2D
+    pub fn evex_vscalefss(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_scalar_ss(instr, f32_scalef)
+    }
+
+    /// VSCALEFSD xmm1{k1}{z}, xmm2, xmm3/m64 — EVEX.66.0F38.W1 2D
+    pub fn evex_vscalefsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_scalar_sd(instr, f64_scalef)
+    }
+
+    /// VGETMANTSS xmm1{k1}{z}, xmm2, xmm3/m32, Ib — EVEX.66.0F3A.W0 27
+    /// imm8[1:0] selects the mantissa interval, imm8[3:2] the sign control.
+    pub fn evex_vgetmantss(&mut self, instr: &Instruction) -> super::Result<()> {
+        let imm8 = instr.ib();
+        let (sign_ctrl, interv) = (((imm8 >> 2) & 0x3) as i32, (imm8 & 0x3) as i32);
+        self.evex_scalar_ss(instr, move |_, b, status| {
+            f32_get_mant(b, status, sign_ctrl, interv)
+        })
+    }
+
+    /// VGETMANTSD xmm1{k1}{z}, xmm2, xmm3/m64, Ib — EVEX.66.0F3A.W1 27
+    pub fn evex_vgetmantsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let imm8 = instr.ib();
+        let (sign_ctrl, interv) = (((imm8 >> 2) & 0x3) as i32, (imm8 & 0x3) as i32);
+        self.evex_scalar_sd(instr, move |_, b, status| {
+            f64_get_mant(b, status, sign_ctrl, interv)
+        })
+    }
 
     /// VMOVSS xmm1{k1}{z}, xmm2, xmm3 (register form load)
     /// VMOVSS xmm1{k1}{z}, m32 (memory form load)
@@ -416,5 +467,109 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    //! VGETEXP, VSCALEF and VGETMANT decompose and reassemble a float, so
+    //! each is checked against the identity it is supposed to satisfy rather
+    //! than against a hand-computed constant: getexp gives the unbiased
+    //! exponent, scalef multiplies by a power of two, and getmant returns
+    //! the significand normalised into the interval imm8[1:0] selects.
+
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::decoder::{BxSegregs, Instruction};
+    use crate::cpu::xmm::MXCSR_RESET;
+    use rusty_box_decoder::opcode::Opcode;
+
+    /// Register-form EVEX scalar: dst=0, rm=1 (the value), vvvv=2 (upper
+    /// elements). k0, so element 0 is always active.
+    fn evex_scalar(opcode: Opcode) -> Instruction {
+        let mut i = Instruction::default();
+        i.set_ia_opcode(opcode);
+        i.set_src_reg(0, 0);
+        i.set_src_reg(1, 1);
+        i.set_src_reg(2, 2);
+        i.set_opmask(0);
+        i.set_vex(true);
+        i.set_vl(0);
+        i.set_seg(BxSegregs::Ds);
+        i.init(0, 0, 1, 1);
+        i.assert_mod_c0();
+        i
+    }
+
+    #[test]
+    fn vgetexp_returns_the_unbiased_exponent() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.mxcsr.mxcsr = MXCSR_RESET;
+        for (v, want) in [(8.0f32, 3.0f32), (1.0, 0.0), (0.5, -1.0), (12.0, 3.0)] {
+            cpu.vmm[1].set_zmm32u(0, v.to_bits());
+            cpu.execute_instruction(&evex_scalar(Opcode::EvexVgetexpssVssHpsWss))
+                .unwrap();
+            assert_eq!(
+                cpu.vmm[0].zmm32u(0),
+                want.to_bits(),
+                "getexp({v}) should be {want}"
+            );
+        }
+        // Zero has no exponent: the architecture returns -inf.
+        cpu.vmm[1].set_zmm32u(0, 0.0f32.to_bits());
+        cpu.execute_instruction(&evex_scalar(Opcode::EvexVgetexpssVssHpsWss))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), f32::NEG_INFINITY.to_bits());
+    }
+
+    #[test]
+    fn vscalef_multiplies_by_two_to_the_truncated_exponent() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.mxcsr.mxcsr = MXCSR_RESET;
+        // vvvv holds the value, rm the exponent: 3.0 * 2^2 = 12.0.
+        cpu.vmm[2].set_zmm32u(0, 3.0f32.to_bits());
+        cpu.vmm[1].set_zmm32u(0, 2.0f32.to_bits());
+        cpu.execute_instruction(&evex_scalar(Opcode::EvexVscalefssVssHpsWss))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), 12.0f32.to_bits());
+
+        // A negative exponent scales down, and the exponent is truncated
+        // toward zero, so 2.7 behaves as 2.
+        cpu.vmm[2].set_zmm32u(0, 8.0f32.to_bits());
+        cpu.vmm[1].set_zmm32u(0, (-1.0f32).to_bits());
+        cpu.execute_instruction(&evex_scalar(Opcode::EvexVscalefssVssHpsWss))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), 4.0f32.to_bits());
+
+        cpu.vmm[2].set_zmm32u(0, 3.0f32.to_bits());
+        cpu.vmm[1].set_zmm32u(0, 2.7f32.to_bits());
+        cpu.execute_instruction(&evex_scalar(Opcode::EvexVscalefssVssHpsWss))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), 12.0f32.to_bits());
+    }
+
+    #[test]
+    fn vgetmant_normalises_into_the_interval_the_immediate_selects() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.mxcsr.mxcsr = MXCSR_RESET;
+        // 12.0 = 1.5 * 2^3, so the significand is 1.5.
+        cpu.vmm[1].set_zmm32u(0, 12.0f32.to_bits());
+
+        let mut i = evex_scalar(Opcode::EvexVgetmantssVssHpsWssIbKmask);
+        i.set_iq(0); // interval [1,2)
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), 1.5f32.to_bits());
+
+        let mut i = evex_scalar(Opcode::EvexVgetmantssVssHpsWssIbKmask);
+        i.set_iq(2); // interval [1/2,1) — halves the same significand
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), 0.75f32.to_bits());
+
+        // sign_ctrl imm8[3] set makes a negative input invalid -> QNaN.
+        cpu.vmm[1].set_zmm32u(0, (-12.0f32).to_bits());
+        let mut i = evex_scalar(Opcode::EvexVgetmantssVssHpsWssIbKmask);
+        i.set_iq(0b1000); // sign_ctrl = 0b10
+        cpu.execute_instruction(&i).unwrap();
+        assert!(f32::from_bits(cpu.vmm[0].zmm32u(0)).is_nan());
     }
 }
