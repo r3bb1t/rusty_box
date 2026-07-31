@@ -1201,6 +1201,11 @@ fn texture_update_size(tex: &mut GfTexture, cls: u32) {
         lw = (lw / 2).max(1);
         lh = (lh / 2).max(1);
     }
+    // Each cubemap face starts on a 128-byte boundary, so the per-face stride
+    // is the mip-chain size rounded up — without this the second and later
+    // faces are sampled from the wrong offset. Bochs geforce.cc
+    // texture_update_size.
+    tex.face_bytes = align_up(tex.face_bytes, 128);
 }
 
 // ---------------------------------------------------------------------------
@@ -3667,6 +3672,13 @@ impl BxGeForceC {
                 let i = (m & 0xF) as usize;
                 let mat = ((m >> 4) & 1) as usize;
                 ch.d3d_model_view_matrix[mat][i] = param_float;
+                // On NV35 the fixed-function matrices are also visible to the
+                // vertex program as transform constants, and the guest driver
+                // relies on writing only the matrix. Bochs geforce.cc
+                // execute_d3d.
+                if self.card_type == 0x35 {
+                    ch.d3d_transform_constant[0x44 + (i >> 2)][i & 3] = param_float;
+                }
             }
 
             // Composite matrix
@@ -3675,6 +3687,10 @@ impl BxGeForceC {
             {
                 let i = (m & 0xF) as usize;
                 ch.d3d_composite_matrix[i] = param_float;
+                // Bochs geforce.cc execute_d3d — NV35 transform-constant alias.
+                if self.card_type == 0x35 {
+                    ch.d3d_transform_constant[0x3C + (i >> 2)][i & 3] = param_float;
+                }
             }
 
             // Viewport offset

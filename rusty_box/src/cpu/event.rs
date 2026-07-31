@@ -258,7 +258,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 }
             }
             self.mask_event(Self::BX_EVENT_NMI); // Block further NMIs until IRET
-            self.activity_state = CpuActivityState::Active;
             let result = self.interrupt(2, super::exception::InterruptType::Nmi, false, false, 0); // NMI vector = 2
             self.ext = false;
             match result {
@@ -500,6 +499,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.async_event = 0;
         }
 
+        // Leaving a HLT/MWAIT sleep becomes visible only here, not in the
+        // wake branches of handle_wait_for_event: a VM exit or SMM entry
+        // taken on the way out has to report the activity state the CPU was
+        // still sleeping in. Paths that leave this function early instead of
+        // falling through set it themselves — see `interrupt`, `vmexit` and
+        // `svm_vmexit`. Bochs event.cc handleAsyncEvent.
+        self.activity_state = CpuActivityState::Active;
+
         false // Continue execution
     }
 
@@ -608,7 +615,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             if in_mwait {
                 self.monitor.reset_monitor();
             }
-            self.activity_state = CpuActivityState::Active;
             self.inhibit_mask = 0;
             return false; // Continue to SMI/INIT delivery
         }
@@ -619,7 +625,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             if in_mwait {
                 self.monitor.reset_monitor();
             }
-            self.activity_state = CpuActivityState::Active;
             self.inhibit_mask = 0;
             return false; // Continue to NMI delivery
         }
@@ -632,7 +637,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             if in_mwait {
                 self.monitor.reset_monitor();
             }
-            self.activity_state = CpuActivityState::Active;
             self.inhibit_mask = 0;
             return false; // Continue to interrupt delivery
         }
@@ -645,7 +649,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             if in_mwait {
                 self.monitor.reset_monitor();
             }
-            self.activity_state = CpuActivityState::Active;
             self.inhibit_mask = 0;
             return false; // Continue to LAPIC interrupt delivery
         }

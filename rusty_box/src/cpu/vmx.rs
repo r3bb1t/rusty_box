@@ -2655,6 +2655,12 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if reason == VmxVmexitReason::ExceptionNmi && vector == 2 {
             self.mask_event(Self::BX_EVENT_NMI);
         }
+        // The host always resumes running; `vmexit_load_host_state` above has
+        // already done this, but Bochs vmx.cc VMexit re-states it here so the
+        // guarantee does not depend on that helper. Both come after the
+        // guest-state save, which must record the sleeping state the guest
+        // exited from.
+        self.activity_state = super::cpu::CpuActivityState::Active;
         self.ext = false;
         self.last_exception_type = -1; // BX_ET_NONE
 

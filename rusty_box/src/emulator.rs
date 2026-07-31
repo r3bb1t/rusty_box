@@ -240,7 +240,10 @@ pub struct EmulatorConfig {
     pub host_memory_size: usize,
     /// Memory block size for allocation
     pub memory_block_size: usize,
-    /// Instructions per second for timing
+    /// Emulated instructions per second, used to calibrate emulated time
+    /// against wall-clock time. Bochs config.cc raised its default from 4M to
+    /// 50M — 4M badly under-reports modern hosts, which makes every guest
+    /// timeout fire early.
     pub ips: u32,
     /// Enable PCI support
     pub pci_enabled: bool,
@@ -291,7 +294,7 @@ impl Default for EmulatorConfig {
             guest_memory_size: 32 * 1024 * 1024,
             host_memory_size: 32 * 1024 * 1024,
             memory_block_size: 128 * 1024,
-            ips: 4_000_000,
+            ips: 50_000_000,
             pci_enabled: true,
             pci_vga: false,
             cpu_params: BxParams::default(),
@@ -6463,16 +6466,22 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
-                    EmulatorConfig::default(),
-                    CpuSetupMode::FlatProtected32,
-                )
-                .unwrap();
+                // 1 tick = 1 microsecond. The rate has to go in the config too,
+                // not just into pc_system: `service_scheduler_boundary` converts
+                // its budget through `config.ips`, so a config still holding the
+                // default would disagree with the clock programmed below.
+                let cfg = EmulatorConfig {
+                    ips: 1_000_000,
+                    ..EmulatorConfig::default()
+                };
+                let mut emu =
+                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
+                        .unwrap();
                 emu.devices.init(&mut emu.memory).unwrap();
                 emu.device_manager
                     .init(&mut emu.devices, &mut emu.memory)
                     .unwrap();
-                emu.pc_system.initialize(1_000_000); // 1 tick = 1 microsecond
+                emu.pc_system.initialize(1_000_000);
                 emu.devices.set_timer_ips(1_000_000);
                 emu.register_timer_owners().unwrap();
 
@@ -6590,11 +6599,16 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
-                    EmulatorConfig::default(),
-                    CpuSetupMode::FlatProtected32,
-                )
-                .unwrap();
+                // 1 tick = 1 microsecond, in the config as well as in pc_system —
+                // `service_scheduler_boundary` converts its budget through
+                // `config.ips`.
+                let cfg = EmulatorConfig {
+                    ips: 1_000_000,
+                    ..EmulatorConfig::default()
+                };
+                let mut emu =
+                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
+                        .unwrap();
                 emu.devices.init(&mut emu.memory).unwrap();
                 emu.device_manager
                     .init(&mut emu.devices, &mut emu.memory)

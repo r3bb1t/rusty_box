@@ -36,7 +36,13 @@ pub fn extf80_round_to_int(
     // Less than 1.0
     if exp <= 0x3FFE {
         if exp == 0 {
-            if (sig_a << 1) == 0 {
+            // Test the whole significand, not `sig_a << 1`: with a zero
+            // exponent an explicit-integer-bit-only significand
+            // (0x8000000000000000) is a pseudo-denormal, not a zero, and must
+            // fall through to the denormal path. Shifting left by one drops
+            // that bit and would return it unchanged. Bochs
+            // softfloat3e/extF80_roundToInt.cc extF80_roundToInt.
+            if sig_a == 0 {
                 return a; // ±0
             }
             softfloat_raiseFlags(status, FLAG_DENORMAL);

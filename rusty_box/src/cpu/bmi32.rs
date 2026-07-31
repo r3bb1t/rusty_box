@@ -99,8 +99,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let len = (control >> 8) as u32;
         let val = self.read_ed32(instr, instr.src1())?;
         let result = bextrd(val, start, len);
-        self.set_flags_oszapc_logic_32(result);
         self.set_gpr32(instr.dst() as usize, result);
+        // Bochs bmi32.cc BEXTR_GdEdBdR: for BEXTR every flag except ZF is
+        // architecturally undefined, but most modern hardware clears them all,
+        // so Bochs clears OSZAPC and asserts ZF on a zero result rather than
+        // deriving SF/PF from it.
+        self.oszapc.set_oszapc_logic_32(1);
+        if result == 0 {
+            self.oszapc.set_zf(true);
+        }
         Ok(())
     }
 

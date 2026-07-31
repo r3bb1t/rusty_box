@@ -3223,28 +3223,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
-    /// PKRU state — Bochs xsave.cc xsave_pkru_state. Single qword: low 32
-    /// bits hold the PKRU register; upper 32 are reserved.
+    /// PKRU state — Bochs xsave.cc xsave_pkru_state. The PKRU component is 8
+    /// bytes wide but only the low dword is architecturally defined, and Bochs
+    /// writes just those 4 bytes, leaving the upper 4 untouched.
     fn xsave_pkru_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
-        self.v_write_qword(seg, base, self.pkru as u64)?;
+        self.v_write_dword(seg, base, self.pkru)?;
         Ok(())
     }
 
-    /// PKRU restore — Bochs xsave.cc xrstor_pkru_state. Bochs reads into TMP32
-    /// and defers the set_PKeys side-effect to the end of XRSTOR; we have no
-    /// equivalent staging register, so apply via set_pkeys immediately.
+    /// PKRU restore — Bochs xsave.cc xrstor_pkru_state. Bochs stages the value
+    /// in TMP32 instead of calling set_PKeys here, because taking effect
+    /// immediately would apply the new access rights to the loads of every
+    /// XRSTOR component that follows. `pkru_tmp` is our equivalent staging
+    /// slot; `xrstor_unified` applies it once all components are restored.
     fn xrstor_pkru_state(
         &mut self,
         seg: super::decoder::BxSegregs,
         base: u64,
+        pkru_tmp: &mut u32,
     ) -> super::Result<()> {
-        let val = self.v_read_qword(seg, base)?;
-        self.set_pkeys(val as u32, self.pkrs);
+        *pkru_tmp = self.v_read_dword(seg, base)?;
         Ok(())
     }
 
-    fn xrstor_init_pkru_state(&mut self) {
-        self.set_pkeys(0, self.pkrs);
+    /// Bochs xsave.cc xrstor_init_pkru_state — also staged, not applied.
+    fn xrstor_init_pkru_state(pkru_tmp: &mut u32) {
+        *pkru_tmp = 0;
     }
 
     // =========================================================================
@@ -3500,6 +3504,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         seg: super::decoder::BxSegregs,
         base: u64,
         feature: u32,
+        pkru_tmp: &mut u32,
     ) -> super::Result<()> {
         use super::crregs::Xcr0Component;
         match Xcr0Component::from_bit(feature) {
@@ -3507,7 +3512,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Some(Xcr0Component::Opmask) => self.xrstor_opmask_state(seg, base),
             Some(Xcr0Component::ZmmHi256) => self.xrstor_zmm_hi256_state(seg, base),
             Some(Xcr0Component::HiZmm) => self.xrstor_hi_zmm_state(seg, base),
-            Some(Xcr0Component::Pkru) => self.xrstor_pkru_state(seg, base),
+            Some(Xcr0Component::Pkru) => self.xrstor_pkru_state(seg, base, pkru_tmp),
             Some(Xcr0Component::CetU) => self.xrstor_cet_u_state(seg, base),
             Some(Xcr0Component::CetS) => self.xrstor_cet_s_state(seg, base),
             Some(Xcr0Component::Uintr) => self.xrstor_uintr_state(seg, base),
@@ -3518,14 +3523,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Init an extended component to reset values
-    fn xrstor_init_extended_component(&mut self, feature: u32) {
+    fn xrstor_init_extended_component(&mut self, feature: u32, pkru_tmp: &mut u32) {
         use super::crregs::Xcr0Component;
         match Xcr0Component::from_bit(feature) {
             Some(Xcr0Component::Ymm) => self.xrstor_init_ymm_state(),
             Some(Xcr0Component::Opmask) => self.xrstor_init_opmask_state(),
             Some(Xcr0Component::ZmmHi256) => self.xrstor_init_zmm_hi256_state(),
             Some(Xcr0Component::HiZmm) => self.xrstor_init_hi_zmm_state(),
-            Some(Xcr0Component::Pkru) => self.xrstor_init_pkru_state(),
+            Some(Xcr0Component::Pkru) => Self::xrstor_init_pkru_state(pkru_tmp),
             Some(Xcr0Component::CetU) => self.xrstor_init_cet_u_state(),
             Some(Xcr0Component::CetS) => self.xrstor_init_cet_s_state(),
             Some(Xcr0Component::Uintr) => self.xrstor_init_uintr_state(),
@@ -4044,6 +4049,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
+        // Staging slot for the PKRU component — Bochs xsave.cc keeps it in
+        // TMP32 so a restored PKRU cannot change the access rights applied to
+        // the remaining component loads.
+        let mut pkru_tmp: u32 = 0;
+
         // --- Extended features (YMM and beyond) ---
         if compaction {
             // Compacted format: offset starts at 576, advances per component in xcomp_bv.
@@ -4053,9 +4063,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 let mask = 1u64 << feature;
                 if (requested & mask) != 0 {
                     if (restore_mask & mask) != 0 {
-                        self.xrstor_extended_component(seg, eaddr.wrapping_add(offset), feature)?;
+                        self.xrstor_extended_component(
+                            seg,
+                            eaddr.wrapping_add(offset),
+                            feature,
+                            &mut pkru_tmp,
+                        )?;
                     } else {
-                        self.xrstor_init_extended_component(feature);
+                        self.xrstor_init_extended_component(feature, &mut pkru_tmp);
                     }
                 }
                 // Offset advances for ALL components in format (xcomp_bv),
@@ -4075,12 +4090,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                             seg,
                             eaddr.wrapping_add(comp_offset),
                             feature,
+                            &mut pkru_tmp,
                         )?;
                     } else {
-                        self.xrstor_init_extended_component(feature);
+                        self.xrstor_init_extended_component(feature, &mut pkru_tmp);
                     }
                 }
             }
+        }
+
+        // Take effect of changing the PKRU state — Bochs xsave.cc xrstor(),
+        // keyed on the requested bitmap rather than on which branch above ran.
+        if (requested & (1u64 << super::crregs::Xcr0Component::Pkru as u32)) != 0 {
+            self.set_pkeys(pkru_tmp, self.pkrs);
         }
 
         Ok(())

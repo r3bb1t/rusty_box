@@ -72,6 +72,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.instrumentation.fire_interrupt(vector);
         }
 
+        // Taking an interrupt always resumes execution, so a CPU that was
+        // halted or in MWAIT is running again from here on. Bochs exception.cc
+        // interrupt() sets this before delivery because delivery can leave via
+        // a fault or VM exit and never fall back to handleAsyncEvent's tail.
+        self.activity_state = super::cpu::CpuActivityState::Active;
+
         // Discard any traps and inhibits for new context (matches Bochs line 800-801)
         self.debug_trap = 0;
         self.inhibit_mask = 0;
