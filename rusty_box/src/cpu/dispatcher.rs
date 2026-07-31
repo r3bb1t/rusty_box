@@ -3826,6 +3826,35 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.evex_vpsubw(instr)
             }
 
+            // --- AVX512_BW word shifts (avx512_bw.rs) ---
+            Opcode::EvexVpsrlwVdqHdqWdq | Opcode::EvexVpsrlwVdqHdqWdqKmask => {
+                self.evex_vpsrlw_reg(instr)
+            }
+            Opcode::EvexVpsrlwUdqIb | Opcode::EvexVpsrlwUdqIbKmask => {
+                self.evex_vpsrlw_imm(instr)
+            }
+            Opcode::EvexVpsrawVdqHdqWdq | Opcode::EvexVpsrawVdqHdqWdqKmask => {
+                self.evex_vpsraw_reg(instr)
+            }
+            Opcode::EvexVpsrawUdqIb | Opcode::EvexVpsrawUdqIbKmask => {
+                self.evex_vpsraw_imm(instr)
+            }
+            Opcode::EvexVpsllwVdqHdqWdq | Opcode::EvexVpsllwVdqHdqWdqKmask => {
+                self.evex_vpsllw_reg(instr)
+            }
+            Opcode::EvexVpsllwUdqIb | Opcode::EvexVpsllwUdqIbKmask => {
+                self.evex_vpsllw_imm(instr)
+            }
+            Opcode::EvexVpsrlvwVdqHdqWdq | Opcode::EvexVpsrlvwVdqHdqWdqKmask => {
+                self.evex_vpsrlvw(instr)
+            }
+            Opcode::EvexVpsravwVdqHdqWdq | Opcode::EvexVpsravwVdqHdqWdqKmask => {
+                self.evex_vpsravw(instr)
+            }
+            Opcode::EvexVpsllvwVdqHdqWdq | Opcode::EvexVpsllvwVdqHdqWdqKmask => {
+                self.evex_vpsllvw(instr)
+            }
+
             // --- AVX512_BW saturating / min-max / pack / abs (avx512_bw.rs) ---
             Opcode::EvexVpaddsbVdqHdqWdq | Opcode::EvexVpaddsbVdqHdqWdqKmask => {
                 self.evex_vpaddsb(instr)

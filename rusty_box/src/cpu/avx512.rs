@@ -663,7 +663,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpslld_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_d_pair(instr)?
+        };
         let count = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -686,7 +690,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsrld_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_d_pair(instr)?
+        };
         let count = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -709,7 +717,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsrad_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_d_pair(instr)?
+        };
         let count = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -732,7 +744,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsllq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
         let count = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -755,7 +771,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsrlq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
         let count = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -778,7 +798,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsraq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
         let count = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -945,7 +969,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src = read_zmm(self, instr.src1());
-        let count_reg = read_zmm(self, instr.src2());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src2())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
         let count64 = count_reg.zmm64u(0);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -969,7 +997,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src = read_zmm(self, instr.src1());
-        let count_reg = read_zmm(self, instr.src2());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src2())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
         let count64 = count_reg.zmm64u(0);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -993,7 +1025,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src = read_zmm(self, instr.src1());
-        let count_reg = read_zmm(self, instr.src2());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src2())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
         let count64 = count_reg.zmm64u(0);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1017,7 +1053,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
         let src = read_zmm(self, instr.src1());
-        let count_reg = read_zmm(self, instr.src2());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src2())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
         let count64 = count_reg.zmm64u(0);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1041,7 +1081,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
         let src = read_zmm(self, instr.src1());
-        let count_reg = read_zmm(self, instr.src2());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src2())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
         let count64 = count_reg.zmm64u(0);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1065,7 +1109,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
         let src = read_zmm(self, instr.src1());
-        let count_reg = read_zmm(self, instr.src2());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src2())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
         let count64 = count_reg.zmm64u(0);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1239,7 +1287,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vprold_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_d_pair(instr)?
+        };
         let count = (instr.ib() & 0x1F) as u32; // modulo 32
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1255,7 +1307,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vprord_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_d_pair(instr)?
+        };
         let count = (instr.ib() & 0x1F) as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1271,7 +1327,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vprolq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
         let count = (instr.ib() & 0x3F) as u32; // modulo 64
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1287,7 +1347,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vprorq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
         let count = (instr.ib() & 0x3F) as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {

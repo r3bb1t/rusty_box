@@ -784,8 +784,142 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpackuswb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_packwb(instr, saturate_word_s_to_byte_u)
     }
-}
 
+    // ════════════════════════════════════════════════════════════════════
+    // Word shifts. Three encodings, three different loaders — taken per
+    // opcode from field 4 of ia_opcodes_evex.def, not assumed:
+    //
+    //   VPSxxW Vdq, Hdq, Wdq   count is the low qword of a 128-bit operand;
+    //                          `LOADU_Wdq` for BOTH the base and _Kmask
+    //                          entries, so the count is read unaligned and
+    //                          unmasked even when a writemask is in play.
+    //   VPSxxW Udq, Ib         count is the imm8; `LOAD_Vector` /
+    //                          `LOAD_MASK_VectorW`.
+    //   VPSxxVW Vdq, Hdq, Wdq  per-element counts; `LOAD_Vector` /
+    //                          `LOAD_MASK_VectorW`.
+    //
+    // A count >= 16 produces 0 for the logical shifts; the arithmetic right
+    // shift saturates to the sign bit instead, which is why it clamps the
+    // count rather than zeroing (Bochs simd_int.h xmm_psraw).
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Shift every word by one shared count taken from the low qword of the
+    /// 128-bit rm operand.
+    fn evex_wshift_by_xmm(
+        &mut self,
+        instr: &Instruction,
+        shift: fn(u16, u32) -> u16,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = word_elements(vl);
+        let src = read_zmm(self, instr.src1());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src2())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
+        let count = count_reg.zmm64u(0).min(u32::MAX as u64) as u32;
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16u(i, shift(src.zmm16u(i), count));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// Shift every word by the imm8 count.
+    fn evex_wshift_by_imm(
+        &mut self,
+        instr: &Instruction,
+        shift: fn(u16, u32) -> u16,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = word_elements(vl);
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_vec_mask_w_pair(instr)?
+        };
+        let count = instr.ib() as u32;
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16u(i, shift(src.zmm16u(i), count));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// Shift every word by its own count from the corresponding element of
+    /// the rm operand.
+    fn evex_wshift_variable(
+        &mut self,
+        instr: &Instruction,
+        shift: fn(u16, u32) -> u16,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = word_elements(vl);
+        let src1 = read_zmm(self, instr.src1());
+        let src2 = read_src2_words(self, instr, vl)?;
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16u(i, shift(src1.zmm16u(i), src2.zmm16u(i) as u32));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPSRLW Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG D1
+    pub fn evex_vpsrlw_reg(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_wshift_by_xmm(instr, word_srl)
+    }
+
+    /// VPSRAW Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG E1
+    pub fn evex_vpsraw_reg(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_wshift_by_xmm(instr, word_sra)
+    }
+
+    /// VPSLLW Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG F1
+    pub fn evex_vpsllw_reg(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_wshift_by_xmm(instr, word_sll)
+    }
+
+    /// VPSRLW Vdq{k}, Udq, Ib — EVEX.66.0F.WIG 71 /2
+    pub fn evex_vpsrlw_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_wshift_by_imm(instr, word_srl)
+    }
+
+    /// VPSRAW Vdq{k}, Udq, Ib — EVEX.66.0F.WIG 71 /4
+    pub fn evex_vpsraw_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_wshift_by_imm(instr, word_sra)
+    }
+
+    /// VPSLLW Vdq{k}, Udq, Ib — EVEX.66.0F.WIG 71 /6
+    pub fn evex_vpsllw_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_wshift_by_imm(instr, word_sll)
+    }
+
+    /// VPSRLVW Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 10
+    pub fn evex_vpsrlvw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_wshift_variable(instr, word_srl)
+    }
+
+    /// VPSRAVW Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 11
+    pub fn evex_vpsravw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_wshift_variable(instr, word_sra)
+    }
+
+    /// VPSLLVW Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 12
+    pub fn evex_vpsllvw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_wshift_variable(instr, word_sll)
+    }
+
+}
 
 // ============================================================================
 // Saturation helpers
@@ -815,6 +949,35 @@ fn saturate_i32_to_u16(val: i32) -> u16 {
     }
 }
 
+
+/// Logical right shift of a word; a count of 16 or more yields zero.
+#[inline]
+fn word_srl(v: u16, count: u32) -> u16 {
+    if count >= 16 {
+        0
+    } else {
+        v >> count
+    }
+}
+
+/// Logical left shift of a word; a count of 16 or more yields zero.
+#[inline]
+fn word_sll(v: u16, count: u32) -> u16 {
+    if count >= 16 {
+        0
+    } else {
+        v << count
+    }
+}
+
+/// Arithmetic right shift of a word. Unlike the logical shifts an
+/// out-of-range count does not yield zero — every bit becomes the sign bit,
+/// so the count is clamped to 15 (Bochs simd_int.h `xmm_psraw`).
+#[inline]
+fn word_sra(v: u16, count: u32) -> u16 {
+    let n = if count >= 16 { 15 } else { count };
+    ((v as i16) >> n) as u16
+}
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
@@ -938,6 +1101,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn word_shifts_treat_an_out_of_range_count_by_kind() {
+        // A count of 16 or more zeroes the logical shifts, but the
+        // arithmetic right shift fills with the sign bit instead — the one
+        // case where "shift everything out" is not the same as "produce 0".
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.vmm[1].set_zmm16u(0, 0x8000); // negative
+        cpu.vmm[1].set_zmm16u(1, 0x4000); // positive
+        cpu.vmm[2].set_zmm64u(0, 20); // count, low qword of the 128-bit operand
+
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpsrawVdqHdqWdq, 0))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm16u(0), 0xFFFF, "negative saturates to all ones");
+        assert_eq!(cpu.vmm[0].zmm16u(1), 0x0000, "positive saturates to zero");
+
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpsrlwVdqHdqWdq, 0))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm16u(0), 0, "logical right shift zeroes");
+
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpsllwVdqHdqWdq, 0))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm16u(0), 0, "left shift zeroes");
+    }
+
+    #[test]
+    fn word_shift_by_imm_and_by_element_use_their_own_counts() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+
+        // imm8 form: the count is the immediate, the source is the rm operand.
+        cpu.vmm[2].set_zmm16u(0, 0x00F0);
+        let mut i = evex_reg(Opcode::EvexVpsrlwUdqIb, 0);
+        i.set_src_reg(1, 2); // single-source form reads src()
+        i.set_iq(4);
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.vmm[0].zmm16u(0), 0x000F);
+
+        // Variable form: every element takes its own count.
+        cpu.vmm[1].set_zmm16u(0, 0x0100);
+        cpu.vmm[1].set_zmm16u(1, 0x0100);
+        cpu.vmm[1].set_zmm16u(2, 0x0100);
+        cpu.vmm[2].set_zmm16u(0, 0);
+        cpu.vmm[2].set_zmm16u(1, 4);
+        cpu.vmm[2].set_zmm16u(2, 99); // out of range for this element only
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpsrlvwVdqHdqWdq, 0))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm16u(0), 0x0100);
+        assert_eq!(cpu.vmm[0].zmm16u(1), 0x0010);
+        assert_eq!(cpu.vmm[0].zmm16u(2), 0);
     }
 
     #[test]
