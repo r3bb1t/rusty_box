@@ -2572,6 +2572,62 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    // ===== 64-bit zmmword read/write functions =====
+
+    /// Read a 512-bit ZMM word from virtual memory in 64-bit mode.
+    ///
+    /// Bochs `read_virtual_zmmword` (access.h) issues one 64-byte access; like
+    /// the ymmword path above we compose it from qword accesses, which differ
+    /// only in how a segment-limit violation part-way through the operand is
+    /// reported.
+    pub(super) fn read_virtual_zmmword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: u64,
+    ) -> Result<super::xmm::BxPackedZmmRegister> {
+        let mut r = super::xmm::BxPackedZmmRegister::default();
+        for n in 0..8u64 {
+            let q = self.read_virtual_qword_64(seg, offset.wrapping_add(n * 8))?;
+            r.set_zmm64u(n as usize, q);
+        }
+        Ok(r)
+    }
+
+    /// Write a 512-bit ZMM word to virtual memory in 64-bit mode.
+    pub(super) fn write_virtual_zmmword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: u64,
+        val: &super::xmm::BxPackedZmmRegister,
+    ) -> Result<()> {
+        for n in 0..8u64 {
+            self.write_virtual_qword_64(seg, offset.wrapping_add(n * 8), val.zmm64u(n as usize))?;
+        }
+        Ok(())
+    }
+
+    // ===== Mode-dispatching wrappers for zmmword =====
+
+    pub fn v_read_zmmword(
+        &mut self,
+        seg: BxSegregs,
+        offset: impl Into<u64>,
+    ) -> Result<super::xmm::BxPackedZmmRegister> {
+        let offset = offset.into();
+        // ZMM operands only exist under EVEX, which rusty_box decodes in long mode.
+        self.read_virtual_zmmword_64(seg, offset)
+    }
+
+    pub fn v_write_zmmword(
+        &mut self,
+        seg: BxSegregs,
+        offset: impl Into<u64>,
+        val: &super::xmm::BxPackedZmmRegister,
+    ) -> Result<()> {
+        let offset = offset.into();
+        self.write_virtual_zmmword_64(seg, offset, val)
+    }
+
     // ===== Mode-dispatching wrappers for ymmword =====
 
     pub fn v_read_ymmword(

@@ -43,6 +43,7 @@ pub(super) mod avx512_fma;
 pub(super) mod avx512_gather;
 pub(super) mod avx512_insert;
 pub(super) mod avx512_int;
+pub(super) mod avx512_load;
 pub(super) mod avx512_mask;
 pub(super) mod avx512_misc;
 pub(super) mod avx512_perm;

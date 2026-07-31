@@ -20,7 +20,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxSegregs, Instruction},
+    decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
 // Load-bearing in pure no-std builds (core f32/f64 lack these inherent
@@ -129,20 +129,12 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 fn read_rm_ps<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    vl: u8,
+    _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src1()))
     } else {
-        let nelements = dword_elements(vl);
-        let mut tmp = BxPackedZmmRegister::default();
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        for i in 0..nelements {
-            let val = cpu.v_read_dword(seg, laddr + (i * 4) as u64)?;
-            tmp.set_zmm32u(i, val);
-        }
-        Ok(tmp)
+        cpu.evex_load_bcst_d_pair(instr)
     }
 }
 
@@ -152,21 +144,12 @@ fn read_rm_ps<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
 fn read_rm_pd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    vl: u8,
+    _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src1()))
     } else {
-        let nelements = qword_elements(vl);
-        let mut tmp = BxPackedZmmRegister::default();
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        for i in 0..nelements {
-            let lo = cpu.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-            let hi = cpu.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-            tmp.set_zmm64u(i, lo | (hi << 32));
-        }
-        Ok(tmp)
+        cpu.evex_load_bcst_q_pair(instr)
     }
 }
 

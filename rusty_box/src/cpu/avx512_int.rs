@@ -8,7 +8,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxSegregs, Instruction},
+    decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
 
@@ -46,15 +46,6 @@ fn qword_elements(vl: u8) -> usize {
     }
 }
 
-/// Byte size for vector length: VL0=16, VL1=32, VL2=64
-#[inline]
-fn vl_bytes(vl: u8) -> usize {
-    match vl {
-        0 => 16,
-        1 => 32,
-        _ => 64,
-    }
-}
 
 // ============================================================================
 // Opmask / register helpers (duplicated per-file to match crate pattern)
@@ -157,88 +148,66 @@ fn write_zmm_masked_w<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 // Memory read helpers
 // ============================================================================
 
-/// Read src2 from register or memory as dwords
+// Each helper routes the memory form through the loader that
+// `ia_opcodes_evex.def` names for its callers, so embedded broadcast and masked
+// fault suppression behave as Bochs does. The pairing is a property of the
+// opcode, not of the element width, so a caller whose def entries disagree with
+// its neighbours calls a loader directly instead of going through these.
+
+/// Read src2 as dwords — callers (VPMINUD, VPMAXUD) pair
+/// `LOAD_BROADCAST_VectorD` with `LOAD_BROADCAST_MASK_VectorD`.
 fn read_src2_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    vl: u8,
+    _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src2()))
     } else {
-        let ndwords = dword_elements(vl);
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let mut tmp = BxPackedZmmRegister::default();
-        for i in 0..ndwords {
-            let val = cpu.v_read_dword(seg, laddr + (i * 4) as u64)?;
-            tmp.set_zmm32u(i, val);
-        }
-        Ok(tmp)
+        cpu.evex_load_bcst_d_pair(instr)
     }
 }
 
-/// Read src2 from register or memory as qwords
+/// Read src2 as qwords — callers (VPMULDQ, VPMIN/MAXUQ, VPMIN/MAXSQ) pair
+/// `LOAD_BROADCAST_VectorQ` with `LOAD_BROADCAST_MASK_VectorQ`.
 fn read_src2_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    vl: u8,
+    _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src2()))
     } else {
-        let nelements = qword_elements(vl);
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let mut tmp = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let lo = cpu.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-            let hi = cpu.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-            tmp.set_zmm64u(i, lo | (hi << 32));
-        }
-        Ok(tmp)
+        cpu.evex_load_bcst_q_pair(instr)
     }
 }
 
-/// Read src2 from register or memory as words
+/// Read src2 as words — VPMULHUW / VPMULHW pair `LOAD_Vector` with
+/// `LOAD_MASK_VectorW`. VPMADDWD uses `LOAD_Vector` for both entries and so
+/// calls `evex_load_vector` directly rather than using this.
 fn read_src2_words<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    vl: u8,
+    _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src2()))
     } else {
-        let nwords = word_elements(vl);
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let mut tmp = BxPackedZmmRegister::default();
-        for i in 0..nwords {
-            let val = cpu.v_read_word(seg, laddr + (i * 2) as u64)?;
-            tmp.set_zmm16u(i, val);
-        }
-        Ok(tmp)
+        cpu.evex_load_vec_mask_w_pair(instr)
     }
 }
 
-/// Read src2 from register or memory as raw bytes
+/// Read src2 as raw bytes — callers (VPMADDUBSW, VPSADBW) use `LOAD_Vector`
+/// for every entry, so there is no masked variant to select.
 fn read_src2_bytes<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    vl: u8,
+    _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src2()))
     } else {
-        let nbytes = vl_bytes(vl);
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let mut tmp = BxPackedZmmRegister::default();
-        for i in 0..nbytes {
-            let val = cpu.v_read_byte(seg, laddr + i as u64)?;
-            tmp.set_zmmubyte(i, val);
-        }
-        Ok(tmp)
+        cpu.evex_load_vector(instr)
     }
 }
 
@@ -351,7 +320,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let ndwords = dword_elements(vl);
         let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_words(self, instr, vl)?;
+        // Both def entries use LOAD_Vector — the masked form is not
+        // fault-suppressing here, so this does not use read_src2_words.
+        let src2 = if instr.mod_c0() {
+            read_zmm(self, instr.src2())
+        } else {
+            self.evex_load_vector(instr)?
+        };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..ndwords {
             let lo = (src1.zmm16s(i * 2) as i32) * (src2.zmm16s(i * 2) as i32);

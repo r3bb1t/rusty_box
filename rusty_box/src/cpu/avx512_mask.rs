@@ -102,11 +102,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn kmovq_kgq_keq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let laddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let val = if self.long64_mode() {
-            self.read_virtual_qword_64(seg, laddr)?
-        } else {
-            self.v_read_dword(seg, laddr)? as u64
-        };
+        // KMOVQ moves all 64 bits regardless of mode — Bochs avx512_mask64.cc
+        // KMOVQ_KGqKEqM uses read_virtual_qword unconditionally. Reading a
+        // dword outside long mode would silently zero the upper half of the
+        // opmask.
+        let val = self.v_read_qword(seg, laddr)?;
         self.bx_write_opmask(instr.dst() as usize, val);
         Ok(())
     }

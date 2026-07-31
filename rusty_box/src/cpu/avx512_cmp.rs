@@ -12,7 +12,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxSegregs, Instruction},
+    decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
 
@@ -121,18 +121,12 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 fn read_src2_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    nelements: usize,
+    _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src2()))
     } else {
-        let mut tmp = BxPackedZmmRegister::default();
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        for i in 0..nelements {
-            tmp.set_zmm32u(i, cpu.v_read_dword(seg, laddr + (i * 4) as u64)?);
-        }
-        Ok(tmp)
+        cpu.evex_load_broadcast_mask_vector_d(instr)
     }
 }
 
@@ -140,20 +134,12 @@ fn read_src2_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 fn read_src2_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    nelements: usize,
+    _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src2()))
     } else {
-        let mut tmp = BxPackedZmmRegister::default();
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        for i in 0..nelements {
-            let lo = cpu.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-            let hi = cpu.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-            tmp.set_zmm64u(i, lo | (hi << 32));
-        }
-        Ok(tmp)
+        cpu.evex_load_broadcast_mask_vector_q(instr)
     }
 }
 
@@ -250,12 +236,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src1 = read_zmm(self, instr.src1());
-        let mut src2 = BxPackedZmmRegister::default();
-        let laddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        for i in 0..nelements {
-            src2.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-        }
+        let src2 = self.evex_load_broadcast_mask_vector_d(instr)?;
         let imm = instr.ib();
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
@@ -296,14 +277,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
         let src1 = read_zmm(self, instr.src1());
-        let mut src2 = BxPackedZmmRegister::default();
-        let laddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        for i in 0..nelements {
-            let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-            let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-            src2.set_zmm64u(i, lo | (hi << 32));
-        }
+        let src2 = self.evex_load_broadcast_mask_vector_q(instr)?;
         let imm = instr.ib();
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;

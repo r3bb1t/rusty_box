@@ -10,7 +10,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxSegregs, Instruction},
+    decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
 // Load-bearing in pure no-std builds (core f32/f64 lack these inherent
@@ -131,40 +131,42 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 fn read_src_dword<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    nelements: usize,
+    _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src()))
     } else {
-        let mut tmp = BxPackedZmmRegister::default();
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        for i in 0..nelements {
-            let val = cpu.v_read_dword(seg, laddr + (i * 4) as u64)?;
-            tmp.set_zmm32u(i, val);
-        }
-        Ok(tmp)
+        cpu.evex_load_bcst_d_pair(instr)
     }
 }
 
-/// Read source as qword vector from register or memory
-fn read_src_qword<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+/// Read source as a *half*-width dword vector — for the widening converts
+/// (VCVTDQ2PD, VCVTPS2PD), whose def entries pair
+/// `LOAD_BROADCAST_Half_VectorD` with `LOAD_BROADCAST_MASK_Half_VectorD`
+/// because the source holds half as many elements as the destination.
+fn read_src_half_dword<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src()))
     } else {
-        let mut tmp = BxPackedZmmRegister::default();
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        for i in 0..nelements {
-            let lo = cpu.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-            let hi = cpu.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-            tmp.set_zmm64u(i, lo | (hi << 32));
-        }
-        Ok(tmp)
+        cpu.evex_load_bcst_half_d_pair(instr)
+    }
+}
+
+/// Read source as qword vector from register or memory. Callers (VCVTPD2DQ,
+/// VCVTTPD2DQ, VCVTPD2PS) pair `LOAD_BROADCAST_VectorQ` with
+/// `LOAD_BROADCAST_MASK_VectorQ`.
+fn read_src_qword<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
+    instr: &Instruction,
+    _nelements: usize,
+) -> super::Result<BxPackedZmmRegister> {
+    if instr.mod_c0() {
+        Ok(read_zmm(cpu, instr.src()))
+    } else {
+        cpu.evex_load_bcst_q_pair(instr)
     }
 }
 
@@ -317,7 +319,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = qword_elements(vl); // number of output qword elements
                                             // Source is half the width: nelements dwords
-        let src = read_src_dword(self, instr, nelements)?;
+        let src = read_src_half_dword(self, instr)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm64f(i, src.zmm32s(i) as f64);
@@ -403,7 +405,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = qword_elements(vl); // output qword count
                                             // Source is half width: nelements dwords (float32)
-        let src = read_src_dword(self, instr, nelements)?;
+        let src = read_src_half_dword(self, instr)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm64f(i, src.zmm32f(i) as f64);

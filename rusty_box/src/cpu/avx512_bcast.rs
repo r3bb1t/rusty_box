@@ -8,6 +8,7 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512.cc` broadcast handlers.
 
+use super::avx512_load::cut_opmask_to;
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -219,17 +220,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vbroadcastss(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
+        let mask = read_opmask_for_write(self, instr);
         let scalar = if instr.mod_c0() {
             read_zmm(self, instr.src()).zmm32u(0)
-        } else {
+        } else if (mask & cut_opmask_to(nelements)) != 0 {
             let laddr = self.resolve_addr(instr);
             self.v_read_dword(BxSegregs::from(instr.seg()), laddr)?
+        } else {
+            // Bochs avx512_broadcast.cc VPBROADCASTD_MASK_VdqWdM.
+            0
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm32u(i, scalar);
         }
-        let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -246,24 +250,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vbroadcastsd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
+        let mask = read_opmask_for_write(self, instr);
         let scalar = if instr.mod_c0() {
             read_zmm(self, instr.src()).zmm64u(0)
-        } else {
+        } else if (mask & cut_opmask_to(nelements)) != 0 {
             let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            if self.long64_mode() {
-                self.read_virtual_qword_64(seg, laddr)?
-            } else {
-                let lo = self.v_read_dword(seg, laddr)? as u64;
-                let hi = self.v_read_dword(seg, laddr + 4)? as u64;
-                lo | (hi << 32)
-            }
+            self.v_read_qword(BxSegregs::from(instr.seg()), laddr)?
+        } else {
+            // Bochs avx512_broadcast.cc VPBROADCASTQ_MASK_VdqWqM.
+            0
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm64u(i, scalar);
         }
-        let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -280,9 +280,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Memory-only (no register form).
     pub fn evex_vbroadcasti32x4(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let laddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let src128 = read_mem_128(self, seg, laddr)?;
+        let mask = read_opmask_for_write(self, instr);
+        // Bochs avx512_broadcast.cc VBROADCASTF32x4_MASK_VpsMps: an empty
+        // opmask performs no memory access at all.
+        let src128 = if (mask & cut_opmask_to(dword_elements(vl))) != 0 {
+            let laddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            read_mem_128(self, seg, laddr)?
+        } else {
+            [0u8; 16]
+        };
 
         let mut result = BxPackedZmmRegister::default();
         let num_lanes = vl_bytes(vl) / 16;
@@ -290,7 +297,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let base = lane * 16;
             result.raw_mut()[base..base + 16].copy_from_slice(&src128);
         }
-        let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -314,9 +320,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Memory-only (no register form).
     pub fn evex_vbroadcasti64x2(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let laddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let src128 = read_mem_128(self, seg, laddr)?;
+        let mask = read_opmask_for_write(self, instr);
+        // Bochs avx512_broadcast.cc VBROADCASTF32x4_MASK_VpsMps: an empty
+        // opmask performs no memory access at all.
+        let src128 = if (mask & cut_opmask_to(dword_elements(vl))) != 0 {
+            let laddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            read_mem_128(self, seg, laddr)?
+        } else {
+            [0u8; 16]
+        };
 
         let mut result = BxPackedZmmRegister::default();
         let num_lanes = vl_bytes(vl) / 16;
@@ -348,9 +361,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Memory-only (no register form).
     pub fn evex_vbroadcasti32x8(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let laddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let src256 = read_mem_256(self, seg, laddr)?;
+        let mask = read_opmask_for_write(self, instr);
+        let src256 = if (mask & cut_opmask_to(dword_elements(vl))) != 0 {
+            let laddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            read_mem_256(self, seg, laddr)?
+        } else {
+            [0u8; 32]
+        };
 
         let mut result = BxPackedZmmRegister::default();
         let num_halves = vl_bytes(vl) / 32;
@@ -358,7 +376,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let base = half * 32;
             result.raw_mut()[base..base + 32].copy_from_slice(&src256);
         }
-        let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -382,9 +399,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Memory-only (no register form).
     pub fn evex_vbroadcasti64x4(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let laddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let src256 = read_mem_256(self, seg, laddr)?;
+        let mask = read_opmask_for_write(self, instr);
+        let src256 = if (mask & cut_opmask_to(dword_elements(vl))) != 0 {
+            let laddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            read_mem_256(self, seg, laddr)?
+        } else {
+            [0u8; 32]
+        };
 
         let mut result = BxPackedZmmRegister::default();
         let num_halves = vl_bytes(vl) / 32;

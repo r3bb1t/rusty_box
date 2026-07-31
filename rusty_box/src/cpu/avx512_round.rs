@@ -6,7 +6,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxSegregs, Instruction},
+    decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
 // Load-bearing in pure no-std builds (core f32/f64 lack these inherent
@@ -290,18 +290,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn read_src_ps(
         &mut self,
         instr: &Instruction,
-        nelements: usize,
+        _nelements: usize,
     ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src()))
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            Ok(tmp)
+            self.evex_load_bcst_d_pair(instr)
         }
     }
 
@@ -310,20 +304,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn read_src_pd(
         &mut self,
         instr: &Instruction,
-        nelements: usize,
+        _nelements: usize,
     ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src()))
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            Ok(tmp)
+            self.evex_load_bcst_q_pair(instr)
         }
     }
 
@@ -332,18 +318,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn read_src2_ps(
         &mut self,
         instr: &Instruction,
-        nelements: usize,
+        _nelements: usize,
     ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src2()))
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            Ok(tmp)
+            self.evex_load_bcst_d_pair(instr)
         }
     }
 
@@ -352,20 +332,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn read_src2_pd(
         &mut self,
         instr: &Instruction,
-        nelements: usize,
+        _nelements: usize,
     ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src2()))
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            Ok(tmp)
+            self.evex_load_bcst_q_pair(instr)
         }
     }
 
@@ -376,10 +348,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src = read_zmm(self, instr.src());
             Ok(src.zmm32f(0))
         } else {
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let val = self.v_read_dword(seg, laddr)?;
-            Ok(f32::from_bits(val))
+            Ok(f32::from_bits(self.evex_load_wss_pair(instr)?.zmm32u(0)))
         }
     }
 
@@ -390,10 +359,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let src = read_zmm(self, instr.src());
             Ok(src.zmm64f(0))
         } else {
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let val = self.v_read_qword(seg, laddr)?;
-            Ok(f64::from_bits(val))
+            Ok(f64::from_bits(self.evex_load_wsd_pair(instr)?.zmm64u(0)))
         }
     }
 
@@ -410,7 +376,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let imm8 = instr.ib();
         // imm8[1:0] = rounding mode, imm8[2] = RC source (0=imm, 1=MXCSR)
         // imm8[3] = suppress inexact, imm8[7:4] = scale (fraction bits)
-        let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 }; // TODO: read MXCSR.RC when bit2=1
+        // imm8[2] set means "keep the MXCSR rounding mode"; only when it is
+        // clear does imm8[1:0] override it. Bochs sse_pfp.cc
+        // mxcsr_to_softfloat_status_word_imm_override.
+        let rc = if (imm8 & 0x04) != 0 {
+            self.mxcsr.rounding_mode()
+        } else {
+            imm8 & 0x03
+        };
         let scale = (imm8 >> 4) & 0x0F;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -432,7 +405,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let nelements = qword_elements(vl);
         let src = self.read_src_pd(instr, nelements)?;
         let imm8 = instr.ib();
-        let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 };
+        let rc = if (imm8 & 0x04) != 0 {
+            self.mxcsr.rounding_mode()
+        } else {
+            imm8 & 0x03
+        };
         let scale = (imm8 >> 4) & 0x0F;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -453,7 +430,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vrndscaless(&mut self, instr: &Instruction) -> super::Result<()> {
         let src_val = self.read_scalar_ss(instr)?;
         let imm8 = instr.ib();
-        let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 };
+        let rc = if (imm8 & 0x04) != 0 {
+            self.mxcsr.rounding_mode()
+        } else {
+            imm8 & 0x03
+        };
         let scale = (imm8 >> 4) & 0x0F;
         let rounded = round_f32(src_val, rc, scale);
 
@@ -489,7 +470,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vrndscalesd(&mut self, instr: &Instruction) -> super::Result<()> {
         let src_val = self.read_scalar_sd(instr)?;
         let imm8 = instr.ib();
-        let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 };
+        let rc = if (imm8 & 0x04) != 0 {
+            self.mxcsr.rounding_mode()
+        } else {
+            imm8 & 0x03
+        };
         let scale = (imm8 >> 4) & 0x0F;
         let rounded = round_f64(src_val, rc, scale);
 

@@ -3086,22 +3086,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             Opcode::EvexVpordVdqHdqWdq | Opcode::EvexVpordVdqHdqWdqKmask => self.evex_vpord(instr),
             Opcode::EvexVporqVdqHdqWdq | Opcode::EvexVporqVdqHdqWdqKmask => {
-                // VPORQ uses qword masking granularity but the bitwise OR operation is identical
-                self.evex_vpord(instr)
+                self.evex_vporq(instr)
             }
             Opcode::EvexVpanddVdqHdqWdq | Opcode::EvexVpanddVdqHdqWdqKmask => {
                 self.evex_vpandd(instr)
             }
             Opcode::EvexVpandqVdqHdqWdq | Opcode::EvexVpandqVdqHdqWdqKmask => {
-                // VPANDQ uses qword masking granularity — same bitwise AND, different mask element size
-                self.evex_vpandd(instr)
+                self.evex_vpandq(instr)
             }
             Opcode::EvexVpandndVdqHdqWdq | Opcode::EvexVpandndVdqHdqWdqKmask => {
                 self.evex_vpandnd(instr)
             }
             Opcode::EvexVpandnqVdqHdqWdq | Opcode::EvexVpandnqVdqHdqWdqKmask => {
-                // VPANDNQ uses qword masking granularity
-                self.evex_vpandnd(instr)
+                self.evex_vpandnq(instr)
             }
             Opcode::EvexVpbroadcastdVdqWd | Opcode::EvexVpbroadcastdVdqWdKmask => {
                 self.evex_vpbroadcastd(instr)
@@ -3995,26 +3992,30 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVgatherqdVdqVsib => self.evex_vpgatherqd(instr),
             Opcode::EvexVgatherqqVdqVsib => self.evex_vpgatherqq(instr),
 
-            // --- EVEX FP logical (reuse integer bitwise handlers) ---
+            // --- EVEX FP logical (reuse the integer bitwise handlers) ---
+            // The single-precision forms are dword-granular and the
+            // double-precision forms qword-granular: the bit result is the same
+            // either way, but opmask bits and embedded broadcast are counted in
+            // elements, so each must use the handler of its own width.
             Opcode::EvexVandpsVpsHpsWps | Opcode::EvexVandpsVpsHpsWpsKmask => {
                 self.evex_vpandd(instr)
             }
             Opcode::EvexVandpdVpdHpdWpd | Opcode::EvexVandpdVpdHpdWpdKmask => {
-                self.evex_vpandd(instr)
+                self.evex_vpandq(instr)
             }
             Opcode::EvexVandnpsVpsHpsWps | Opcode::EvexVandnpsVpsHpsWpsKmask => {
                 self.evex_vpandnd(instr)
             }
             Opcode::EvexVandnpdVpdHpdWpd | Opcode::EvexVandnpdVpdHpdWpdKmask => {
-                self.evex_vpandnd(instr)
+                self.evex_vpandnq(instr)
             }
             Opcode::EvexVorpsVpsHpsWps | Opcode::EvexVorpsVpsHpsWpsKmask => self.evex_vpord(instr),
-            Opcode::EvexVorpdVpdHpdWpd | Opcode::EvexVorpdVpdHpdWpdKmask => self.evex_vpord(instr),
+            Opcode::EvexVorpdVpdHpdWpd | Opcode::EvexVorpdVpdHpdWpdKmask => self.evex_vporq(instr),
             Opcode::EvexVxorpsVpsHpsWps | Opcode::EvexVxorpsVpsHpsWpsKmask => {
                 self.evex_vpxord(instr)
             }
             Opcode::EvexVxorpdVpdHpdWpd | Opcode::EvexVxorpdVpdHpdWpdKmask => {
-                self.evex_vpxord(instr)
+                self.evex_vpxorq(instr)
             }
 
             // --- VEX FP logical (Bochs HANDLE_AVX_2OP<xmm_*ps>) ---

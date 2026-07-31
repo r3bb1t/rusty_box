@@ -125,10 +125,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if instr.mod_c0() {
             Ok(self.vmm[instr.src1() as usize].zmm32f(0))
         } else {
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let bits = self.v_read_dword(seg, laddr)?;
-            Ok(f32::from_bits(bits))
+            // Callers pair LOAD_Wss with LOAD_MASK_Wss, so a masked-off scalar
+            // element must read as zero without touching memory.
+            Ok(f32::from_bits(self.evex_load_wss_pair(instr)?.zmm32u(0)))
         }
     }
 
@@ -141,11 +140,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if instr.mod_c0() {
             Ok(self.vmm[instr.src1() as usize].zmm64f(0))
         } else {
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let lo = self.v_read_dword(seg, laddr)? as u64;
-            let hi = self.v_read_dword(seg, laddr + 4)? as u64;
-            Ok(f64::from_bits(lo | (hi << 32)))
+            // Callers pair LOAD_Wsd with LOAD_MASK_Wsd.
+            Ok(f64::from_bits(self.evex_load_wsd_pair(instr)?.zmm64u(0)))
         }
     }
 
@@ -381,17 +377,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let zmask = instr.is_zero_masking() != 0;
 
         if instr.mod_c0() {
-            // Register form: dst[0] = src2[0], dst[1..3] = src1[1..3], zero upper
-            let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+            // Register form: element 0 comes from src2, the upper elements from
+            // src1 (VEX.vvvv). Bochs avx512_move.cc VMOVSS_MASK_VssHpsWssR
+            // reads `src1()` for the base and `src2()` only for element 0.
+            let src1 = read_zmm(self, instr.src1());
             let src2 = read_zmm(self, instr.src2());
             let val = src2.zmm32f(0);
             write_scalar_ss(self, instr.dst(), &src1, val, mask, zmask);
         } else {
-            // Memory form: dst[0] = mem32, rest zeroed
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let bits = self.v_read_dword(seg, laddr)?;
-            let val = f32::from_bits(bits);
+            // Memory form: dst[0] = mem32, rest zeroed. Bochs
+            // VMOVSS_MASK_VssWssM guards the read on BX_SCALAR_ELEMENT_MASK, so
+            // a masked-off scalar performs no access and cannot fault.
+            let val = if (mask & 1) != 0 {
+                let laddr = self.resolve_addr(instr);
+                let seg = BxSegregs::from(instr.seg());
+                f32::from_bits(self.v_read_dword(seg, laddr)?)
+            } else {
+                0.0
+            };
 
             let dst = &mut self.vmm[instr.dst() as usize];
             // Element [0]: apply opmask bit 0
@@ -415,18 +418,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let zmask = instr.is_zero_masking() != 0;
 
         if instr.mod_c0() {
-            // Register form: dst[0] = src2[0], dst[1] = src1[1], zero upper
-            let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+            // Register form: element 0 from src2, element 1 from src1
+            // (VEX.vvvv). Bochs avx512_move.cc VMOVSD_MASK_VsdHpdWsdR.
+            let src1 = read_zmm(self, instr.src1());
             let src2 = read_zmm(self, instr.src2());
             let val = src2.zmm64f(0);
             write_scalar_sd(self, instr.dst(), &src1, val, mask, zmask);
         } else {
-            // Memory form: dst[0] = mem64, rest zeroed
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let lo = self.v_read_dword(seg, laddr)? as u64;
-            let hi = self.v_read_dword(seg, laddr + 4)? as u64;
-            let val = f64::from_bits(lo | (hi << 32));
+            // Memory form: dst[0] = mem64, rest zeroed; no access when the
+            // scalar element is masked off (Bochs VMOVSD_MASK_VsdWsdM).
+            let val = if (mask & 1) != 0 {
+                let laddr = self.resolve_addr(instr);
+                let seg = BxSegregs::from(instr.seg());
+                f64::from_bits(self.v_read_qword(seg, laddr)?)
+            } else {
+                0.0
+            };
 
             let dst = &mut self.vmm[instr.dst() as usize];
             // Element [0]: apply opmask bit 0

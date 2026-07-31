@@ -8,7 +8,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxSegregs, Instruction},
+    decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
 
@@ -29,26 +29,6 @@ fn word_elements(vl: u8) -> usize {
         0 => 8,
         1 => 16,
         _ => 32,
-    }
-}
-
-/// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
-#[inline]
-fn dword_elements(vl: u8) -> usize {
-    match vl {
-        0 => 4,
-        1 => 8,
-        _ => 16,
-    }
-}
-
-/// Byte size for vector length: VL0=16, VL1=32, VL2=64
-#[inline]
-fn vl_bytes(vl: u8) -> usize {
-    match vl {
-        0 => 16,
-        1 => 32,
-        _ => 64,
     }
 }
 
@@ -125,66 +105,64 @@ fn write_zmm_masked_w<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
     }
 }
 
-/// Read src2 from register or memory as bytes
+// The memory form goes through the loader `ia_opcodes_evex.def` names for each
+// caller, so embedded broadcast and masked fault suppression match Bochs. The
+// UNPCK opcodes below use `LOAD_Vector` for both of their def entries rather
+// than pairing it with a masked loader, so they call `evex_load_vector`
+// directly instead of going through these helpers.
+
+/// Read src2 as bytes — callers (VPADDB, VPSUBB, VPAVGB, VPMAXUB, VPMINUB)
+/// pair `LOAD_Vector` with `LOAD_MASK_VectorB`.
 fn read_src2_bytes<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    vl: u8,
+    _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src2()))
     } else {
-        let nbytes = vl_bytes(vl);
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let mut tmp = BxPackedZmmRegister::default();
-        for i in 0..nbytes {
-            let val = cpu.v_read_byte(seg, laddr + i as u64)?;
-            tmp.set_zmmubyte(i, val);
-        }
-        Ok(tmp)
+        cpu.evex_load_vec_mask_b_pair(instr)
     }
 }
 
-/// Read src2 from register or memory as words
+/// Read src2 as words — callers (VPADDW, VPSUBW, VPMULLW, VPAVGW, VPMAXSW,
+/// VPMINSW) pair `LOAD_Vector` with `LOAD_MASK_VectorW`.
 fn read_src2_words<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    vl: u8,
+    _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src2()))
     } else {
-        let nwords = word_elements(vl);
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let mut tmp = BxPackedZmmRegister::default();
-        for i in 0..nwords {
-            let val = cpu.v_read_word(seg, laddr + (i * 2) as u64)?;
-            tmp.set_zmm16u(i, val);
-        }
-        Ok(tmp)
+        cpu.evex_load_vec_mask_w_pair(instr)
     }
 }
 
-/// Read src2 from register or memory as dwords
+/// Read src2 as dwords — callers (VPACKSSDW, VPACKUSDW) use
+/// `LOAD_BROADCAST_VectorD` for both entries, so there is no masked variant.
 fn read_src2_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    vl: u8,
+    _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
         Ok(read_zmm(cpu, instr.src2()))
     } else {
-        let ndwords = dword_elements(vl);
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let mut tmp = BxPackedZmmRegister::default();
-        for i in 0..ndwords {
-            let val = cpu.v_read_dword(seg, laddr + (i * 4) as u64)?;
-            tmp.set_zmm32u(i, val);
-        }
-        Ok(tmp)
+        cpu.evex_load_broadcast_vector_d(instr)
+    }
+}
+
+/// Read src2 with `LOAD_Vector` regardless of masking — for the UNPCK opcodes,
+/// whose base and `_Kmask` def entries both name `LOAD_Vector`.
+fn read_src2_unmasked_vector<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
+    instr: &Instruction,
+) -> super::Result<BxPackedZmmRegister> {
+    if instr.mod_c0() {
+        Ok(read_zmm(cpu, instr.src2()))
+    } else {
+        cpu.evex_load_vector(instr)
     }
 }
 
@@ -510,7 +488,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpunpcklbw(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_bytes(self, instr, vl)?;
+        let src2 = read_src2_unmasked_vector(self, instr)?;
         let mut result = BxPackedZmmRegister::default();
         let nlanes = match vl {
             0 => 1,
@@ -535,7 +513,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpunpckhbw(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_bytes(self, instr, vl)?;
+        let src2 = read_src2_unmasked_vector(self, instr)?;
         let mut result = BxPackedZmmRegister::default();
         let nlanes = match vl {
             0 => 1,
@@ -564,7 +542,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpunpcklwd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_words(self, instr, vl)?;
+        let src2 = read_src2_unmasked_vector(self, instr)?;
         let mut result = BxPackedZmmRegister::default();
         let nlanes = match vl {
             0 => 1,
@@ -589,7 +567,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpunpckhwd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_words(self, instr, vl)?;
+        let src2 = read_src2_unmasked_vector(self, instr)?;
         let mut result = BxPackedZmmRegister::default();
         let nlanes = match vl {
             0 => 1,
