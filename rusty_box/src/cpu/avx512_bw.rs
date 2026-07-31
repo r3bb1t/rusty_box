@@ -58,7 +58,7 @@ fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
 }
 
 /// Write ZMM register with per-byte masking, zeroing upper bytes beyond VL
-fn write_zmm_masked_b<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+pub(super) fn write_zmm_masked_b<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     reg: u8,
     result: &BxPackedZmmRegister,

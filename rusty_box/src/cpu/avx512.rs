@@ -44,6 +44,26 @@ pub(super) enum PmovWiden {
     Dq,
 }
 
+/// Number of byte elements per vector length: VL0=16, VL1=32, VL2=64
+#[inline]
+fn byte_elements_bcast(vl: u8) -> usize {
+    match vl {
+        0 => 16,
+        1 => 32,
+        _ => 64,
+    }
+}
+
+/// Number of 16-bit elements per vector length: VL0=8, VL1=16, VL2=32
+#[inline]
+fn word_elements_bcast(vl: u8) -> usize {
+    match vl {
+        0 => 8,
+        1 => 16,
+        _ => 32,
+    }
+}
+
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
 fn dword_elements(vl: u8) -> usize {
@@ -548,6 +568,37 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPBROADCASTB Vdq{k}, Gb — EVEX.66.0F38.W0 7A (broadcast from GPR).
+    /// Register-only: the def entry names BxError as its load function.
+    pub fn evex_vpbroadcastb_gpr(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = byte_elements_bcast(vl);
+        let scalar = self.get_gpr32(instr.src() as usize) as u8;
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmmubyte(i, scalar);
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        super::avx512_bw::write_zmm_masked_b(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPBROADCASTW Vdq{k}, Gw — EVEX.66.0F38.W0 7B (broadcast from GPR).
+    pub fn evex_vpbroadcastw_gpr(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = word_elements_bcast(vl);
+        let scalar = self.get_gpr32(instr.src() as usize) as u16;
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16u(i, scalar);
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
 

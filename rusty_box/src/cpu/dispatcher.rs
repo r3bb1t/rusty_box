@@ -3171,6 +3171,35 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- byte/word opmask<->vector, blends, GPR broadcasts ---
+            Opcode::EvexVpmovm2bVdqKeq => self.evex_vpmovm2b(instr),
+            Opcode::EvexVpmovm2wVdqKed => self.evex_vpmovm2w(instr),
+            Opcode::EvexVpmovb2mKgqWdq => self.evex_vpmovb2m(instr),
+            Opcode::EvexVpmovw2mKgdWdq => self.evex_vpmovw2m(instr),
+            Opcode::EvexVpblendmbVdqHdqWdq => self.evex_vpblendmb(instr),
+            Opcode::EvexVpblendmwVdqHdqWdq => self.evex_vpblendmw(instr),
+            Opcode::EvexVpbroadcastbVdqEb | Opcode::EvexVpbroadcastbVdqEbKmask => {
+                self.evex_vpbroadcastb_gpr(instr)
+            }
+            Opcode::EvexVpbroadcastwVdqEw | Opcode::EvexVpbroadcastwVdqEwKmask => {
+                self.evex_vpbroadcastw_gpr(instr)
+            }
+
+            // --- byte/word/qword compares producing an opmask (avx512_cmp.rs) ---
+            Opcode::EvexVpcmpeqbKgqHdqWdq => self.evex_vpcmpeqb(instr),
+            Opcode::EvexVpcmpeqwKgdHdqWdq => self.evex_vpcmpeqw(instr),
+            Opcode::EvexVpcmpgtbKgqHdqWdq => self.evex_vpcmpgtb(instr),
+            Opcode::EvexVpcmpgtwKgdHdqWdq => self.evex_vpcmpgtw(instr),
+            Opcode::EvexVptestmbKgqHdqWdq => self.evex_vptestmb(instr),
+            Opcode::EvexVptestmwKgdHdqWdq => self.evex_vptestmw(instr),
+            Opcode::EvexVptestnmbKgqHdqWdq => self.evex_vptestnmb(instr),
+            Opcode::EvexVptestnmwKgdHdqWdq => self.evex_vptestnmw(instr),
+            Opcode::EvexVpcmpbKgqHdqWdqIb => self.evex_vpcmpb(instr),
+            Opcode::EvexVpcmpwKgdHdqWdqIb => self.evex_vpcmpw(instr),
+            Opcode::EvexVpcmpubKgqHdqWdqIb => self.evex_vpcmpub(instr),
+            Opcode::EvexVpcmpuwKgdHdqWdqIb => self.evex_vpcmpuw(instr),
+            Opcode::EvexVpcmpqKgbHdqWdqIb => self.evex_vpcmpq(instr),
+            Opcode::EvexVpcmpuqKgbHdqWdqIb => self.evex_vpcmpuq(instr),
             Opcode::EvexVpcmpudKgwHdqWdqIb => self.evex_vpcmpud(instr),
             // Multiply / Min / Max
             Opcode::EvexVpmulldVdqHdqWdq | Opcode::EvexVpmulldVdqHdqWdqKmask => {
