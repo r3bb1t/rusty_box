@@ -13,87 +13,87 @@ use super::specialize::*;
 
 // --- float16 ---
 #[inline]
-pub fn sign_f16(a: u16) -> bool {
+pub(in crate::cpu) fn sign_f16(a: u16) -> bool {
     (a >> 15) != 0
 }
 #[inline]
-pub fn exp_f16(a: u16) -> i16 {
+pub(in crate::cpu) fn exp_f16(a: u16) -> i16 {
     ((a >> 10) & 0x1F) as i16
 }
 #[inline]
-pub fn frac_f16(a: u16) -> u16 {
+pub(in crate::cpu) fn frac_f16(a: u16) -> u16 {
     a & 0x03FF
 }
 #[inline]
-pub fn pack_to_f16(sign: bool, exp: i16, sig: u16) -> u16 {
+pub(in crate::cpu) fn pack_to_f16(sign: bool, exp: i16, sig: u16) -> u16 {
     ((sign as u16) << 15)
         .wrapping_add((exp as u16) << 10)
         .wrapping_add(sig)
 }
 #[inline]
-pub fn is_nan_f16(a: u16) -> bool {
+pub(in crate::cpu) fn is_nan_f16(a: u16) -> bool {
     ((!a & 0x7C00) == 0) && ((a & 0x03FF) != 0)
 }
 
 // --- float32 ---
 #[inline]
-pub fn sign_f32(a: u32) -> bool {
+pub(in crate::cpu) fn sign_f32(a: u32) -> bool {
     (a >> 31) != 0
 }
 #[inline]
-pub fn exp_f32(a: u32) -> i16 {
+pub(in crate::cpu) fn exp_f32(a: u32) -> i16 {
     ((a >> 23) & 0xFF) as i16
 }
 #[inline]
-pub fn frac_f32(a: u32) -> u32 {
+pub(in crate::cpu) fn frac_f32(a: u32) -> u32 {
     a & 0x007FFFFF
 }
 #[inline]
-pub fn pack_to_f32(sign: bool, exp: i16, sig: u32) -> u32 {
+pub(in crate::cpu) fn pack_to_f32(sign: bool, exp: i16, sig: u32) -> u32 {
     ((sign as u32) << 31)
         .wrapping_add((exp as u32) << 23)
         .wrapping_add(sig)
 }
 #[inline]
-pub fn is_nan_f32(a: u32) -> bool {
+pub(in crate::cpu) fn is_nan_f32(a: u32) -> bool {
     ((!a & 0x7F800000) == 0) && ((a & 0x007FFFFF) != 0)
 }
 
 // --- float64 ---
 #[inline]
-pub fn sign_f64(a: u64) -> bool {
+pub(in crate::cpu) fn sign_f64(a: u64) -> bool {
     (a >> 63) != 0
 }
 #[inline]
-pub fn exp_f64(a: u64) -> i16 {
+pub(in crate::cpu) fn exp_f64(a: u64) -> i16 {
     ((a >> 52) & 0x7FF) as i16
 }
 #[inline]
-pub fn frac_f64(a: u64) -> u64 {
+pub(in crate::cpu) fn frac_f64(a: u64) -> u64 {
     a & 0x000FFFFFFFFFFFFF
 }
 #[inline]
-pub fn pack_to_f64(sign: bool, exp: i16, sig: u64) -> u64 {
+pub(in crate::cpu) fn pack_to_f64(sign: bool, exp: i16, sig: u64) -> u64 {
     ((sign as u64) << 63)
         .wrapping_add((exp as u64) << 52)
         .wrapping_add(sig)
 }
 #[inline]
-pub fn is_nan_f64(a: u64) -> bool {
+pub(in crate::cpu) fn is_nan_f64(a: u64) -> bool {
     ((!a & 0x7FF0000000000000) == 0) && ((a & 0x000FFFFFFFFFFFFF) != 0)
 }
 
 // --- extFloat80 ---
 #[inline]
-pub fn sign_extf80(a64: u16) -> bool {
+pub(in crate::cpu) fn sign_extf80(a64: u16) -> bool {
     (a64 >> 15) != 0
 }
 #[inline]
-pub fn exp_extf80(a64: u16) -> u16 {
+pub(in crate::cpu) fn exp_extf80(a64: u16) -> u16 {
     a64 & 0x7FFF
 }
 #[inline]
-pub fn pack_to_extf80_sign_exp(sign: bool, exp: u16) -> u16 {
+pub(in crate::cpu) fn pack_to_extf80_sign_exp(sign: bool, exp: u16) -> u16 {
     ((sign as u16) << 15) | exp
 }
 
@@ -101,25 +101,25 @@ pub fn pack_to_extf80_sign_exp(sign: bool, exp: u16) -> u16 {
 // Normalization of subnormal significands
 // ============================================================
 
-pub struct ExpSig16 {
-    pub(crate) exp: i16,
-    pub(crate) sig: u16,
+pub(in crate::cpu) struct ExpSig16 {
+    pub(in crate::cpu) exp: i16,
+    pub(in crate::cpu) sig: u16,
 }
 
-pub struct ExpSig32 {
-    pub(crate) exp: i16,
-    pub(crate) sig: u32,
+pub(in crate::cpu) struct ExpSig32 {
+    pub(in crate::cpu) exp: i16,
+    pub(in crate::cpu) sig: u32,
 }
-pub struct ExpSig64 {
-    pub(crate) exp: i16,
-    pub(crate) sig: u64,
+pub(in crate::cpu) struct ExpSig64 {
+    pub(in crate::cpu) exp: i16,
+    pub(in crate::cpu) sig: u64,
 }
-pub struct ExpSig64_32 {
-    pub(crate) exp: i32,
-    pub(crate) sig: u64,
+pub(in crate::cpu) struct ExpSig64_32 {
+    pub(in crate::cpu) exp: i32,
+    pub(in crate::cpu) sig: u64,
 }
 
-pub fn norm_subnormal_f16_sig(sig: u16) -> ExpSig16 {
+pub(in crate::cpu) fn norm_subnormal_f16_sig(sig: u16) -> ExpSig16 {
     let shift = count_leading_zeros16(sig) as i16 - 5;
     ExpSig16 {
         exp: 1 - shift,
@@ -127,7 +127,7 @@ pub fn norm_subnormal_f16_sig(sig: u16) -> ExpSig16 {
     }
 }
 
-pub fn norm_subnormal_f32_sig(sig: u32) -> ExpSig32 {
+pub(in crate::cpu) fn norm_subnormal_f32_sig(sig: u32) -> ExpSig32 {
     let shift = count_leading_zeros32(sig) as i16 - 8;
     ExpSig32 {
         exp: 1 - shift,
@@ -135,7 +135,7 @@ pub fn norm_subnormal_f32_sig(sig: u32) -> ExpSig32 {
     }
 }
 
-pub fn norm_subnormal_f64_sig(sig: u64) -> ExpSig64 {
+pub(in crate::cpu) fn norm_subnormal_f64_sig(sig: u64) -> ExpSig64 {
     let shift = count_leading_zeros64(sig) as i16 - 11;
     ExpSig64 {
         exp: 1 - shift,
@@ -143,7 +143,7 @@ pub fn norm_subnormal_f64_sig(sig: u64) -> ExpSig64 {
     }
 }
 
-pub fn norm_subnormal_extf80_sig(sig: u64) -> ExpSig64_32 {
+pub(in crate::cpu) fn norm_subnormal_extf80_sig(sig: u64) -> ExpSig64_32 {
     let shift = count_leading_zeros64(sig) as i32;
     ExpSig64_32 {
         exp: -shift,
@@ -155,7 +155,7 @@ pub fn norm_subnormal_extf80_sig(sig: u64) -> ExpSig64_32 {
 // Round-and-pack to float16
 // ============================================================
 
-pub fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatStatus) -> float16 {
+pub(in crate::cpu) fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatStatus) -> float16 {
     let rounding_mode = softfloat_getRoundingMode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
     let mut round_increment: u16 = 0x8;
@@ -220,7 +220,7 @@ pub fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatS
 // Round-and-pack to float32
 // ============================================================
 
-pub fn round_pack_to_f32(
+pub(in crate::cpu) fn round_pack_to_f32(
     sign: bool,
     mut exp: i16,
     mut sig: u32,
@@ -288,7 +288,7 @@ pub fn round_pack_to_f32(
     pack_to_f32(sign, exp, sig)
 }
 
-pub fn norm_round_pack_to_f32(
+pub(in crate::cpu) fn norm_round_pack_to_f32(
     sign: bool,
     exp: i16,
     sig: u32,
@@ -302,7 +302,7 @@ pub fn norm_round_pack_to_f32(
 // Round-and-pack to float64
 // ============================================================
 
-pub fn round_pack_to_f64(
+pub(in crate::cpu) fn round_pack_to_f64(
     sign: bool,
     mut exp: i16,
     mut sig: u64,
@@ -372,7 +372,7 @@ pub fn round_pack_to_f64(
     pack_to_f64(sign, exp, sig)
 }
 
-pub fn norm_round_pack_to_f64(
+pub(in crate::cpu) fn norm_round_pack_to_f64(
     sign: bool,
     exp: i16,
     sig: u64,
@@ -386,7 +386,7 @@ pub fn norm_round_pack_to_f64(
 // softfloat_shiftRightJam64Extra — used by precision-80 path
 // ============================================================
 #[inline]
-pub fn shift_right_jam64_extra(a: u64, extra: u64, dist: u32) -> (u64, u64) {
+pub(in crate::cpu) fn shift_right_jam64_extra(a: u64, extra: u64, dist: u32) -> (u64, u64) {
     if dist < 64 {
         if dist == 0 {
             return (a, extra);
@@ -409,7 +409,7 @@ pub fn shift_right_jam64_extra(a: u64, extra: u64, dist: u32) -> (u64, u64) {
 // Round-and-pack to extFloat80 (the heart of SoftFloat)
 // ============================================================
 
-pub fn round_pack_to_extf80(
+pub(in crate::cpu) fn round_pack_to_extf80(
     sign: bool,
     mut exp: i32,
     mut sig: u64,
@@ -613,7 +613,7 @@ fn round_pack_to_extf80_precision80(
     pack_floatx80(sign, exp, sig)
 }
 
-pub fn norm_round_pack_to_extf80(
+pub(in crate::cpu) fn norm_round_pack_to_extf80(
     sign: bool,
     mut exp: i32,
     mut sig: u64,
@@ -640,7 +640,7 @@ pub fn norm_round_pack_to_extf80(
 // Round-to-integer helpers (for extF80→i32/i64 conversions)
 // ============================================================
 
-pub fn softfloat_round_to_i32(
+pub(in crate::cpu) fn softfloat_round_to_i32(
     sign: bool,
     sig: u64,
     rounding_mode: u8,
@@ -681,7 +681,7 @@ pub fn softfloat_round_to_i32(
     z
 }
 
-pub fn softfloat_round_to_i64(
+pub(in crate::cpu) fn softfloat_round_to_i64(
     sign: bool,
     sig: u64,
     sig_extra: u64,

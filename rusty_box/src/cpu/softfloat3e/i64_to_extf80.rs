@@ -6,7 +6,7 @@ use super::internals::*;
 use super::primitives::*;
 use super::softfloat_types::*;
 
-pub fn i64_to_extf80(a: i64) -> floatx80 {
+pub(in crate::cpu) fn i64_to_extf80(a: i64) -> floatx80 {
     if a == 0 {
         return floatx80 {
             signif: 0,

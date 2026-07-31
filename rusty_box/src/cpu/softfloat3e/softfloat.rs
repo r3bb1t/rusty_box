@@ -6,13 +6,13 @@ use super::softfloat_types::floatx80;
 
 /// Software floating-point status — passed by `&mut` to all operations.
 #[derive(Debug, Clone)]
-pub struct SoftFloatStatus {
+pub(in crate::cpu) struct SoftFloatStatus {
     pub softfloat_roundingMode: u8,
     pub softfloat_exceptionFlags: i32,
     pub softfloat_exceptionMasks: i32,
     pub softfloat_suppressException: i32,
-    pub(crate) softfloat_denormals_are_zeros: bool,
-    pub(crate) softfloat_flush_underflow_to_zero: bool,
+    pub(in crate::cpu) softfloat_denormals_are_zeros: bool,
+    pub(in crate::cpu) softfloat_flush_underflow_to_zero: bool,
     /// Rounding precision for 80-bit extended double-precision.
     /// Valid values are 32, 64, and 80.
     pub extF80_roundingPrecision: u8,
@@ -33,39 +33,39 @@ impl Default for SoftFloatStatus {
 }
 
 // Rounding modes
-pub const ROUND_NEAR_EVEN: u8 = 0;
-pub const ROUND_MIN: u8 = 1;
-pub const ROUND_DOWN: u8 = ROUND_MIN;
-pub const ROUND_MAX: u8 = 2;
-pub const ROUND_UP: u8 = ROUND_MAX;
-pub const ROUND_MINMAG: u8 = 3;
-pub const ROUND_TO_ZERO: u8 = ROUND_MINMAG;
-pub const ROUND_NEAR_MAXMAG: u8 = 4;
+pub(in crate::cpu) const ROUND_NEAR_EVEN: u8 = 0;
+pub(in crate::cpu) const ROUND_MIN: u8 = 1;
+pub(in crate::cpu) const ROUND_DOWN: u8 = ROUND_MIN;
+pub(in crate::cpu) const ROUND_MAX: u8 = 2;
+pub(in crate::cpu) const ROUND_UP: u8 = ROUND_MAX;
+pub(in crate::cpu) const ROUND_MINMAG: u8 = 3;
+pub(in crate::cpu) const ROUND_TO_ZERO: u8 = ROUND_MINMAG;
+pub(in crate::cpu) const ROUND_NEAR_MAXMAG: u8 = 4;
 
 // Exception flags
-pub const FLAG_INVALID: i32 = 0x01;
-pub const FLAG_DENORMAL: i32 = 0x02;
-pub const FLAG_DIVBYZERO: i32 = 0x04;
-pub const FLAG_INFINITE: i32 = FLAG_DIVBYZERO;
-pub const FLAG_OVERFLOW: i32 = 0x08;
-pub const FLAG_UNDERFLOW: i32 = 0x10;
-pub const FLAG_INEXACT: i32 = 0x20;
+pub(in crate::cpu) const FLAG_INVALID: i32 = 0x01;
+pub(in crate::cpu) const FLAG_DENORMAL: i32 = 0x02;
+pub(in crate::cpu) const FLAG_DIVBYZERO: i32 = 0x04;
+pub(in crate::cpu) const FLAG_INFINITE: i32 = FLAG_DIVBYZERO;
+pub(in crate::cpu) const FLAG_OVERFLOW: i32 = 0x08;
+pub(in crate::cpu) const FLAG_UNDERFLOW: i32 = 0x10;
+pub(in crate::cpu) const FLAG_INEXACT: i32 = 0x20;
 
-pub const ALL_EXCEPTIONS_MASK: i32 = 0x3f;
+pub(in crate::cpu) const ALL_EXCEPTIONS_MASK: i32 = 0x3f;
 
 /// C1 flag for floatx80 rounding direction
-pub const RAISE_SW_C1: i32 = 0x0200;
+pub(in crate::cpu) const RAISE_SW_C1: i32 = 0x0200;
 
 // Relation constants
-pub const RELATION_LESS: i32 = -1;
-pub const RELATION_EQUAL: i32 = 0;
-pub const RELATION_GREATER: i32 = 1;
-pub const RELATION_UNORDERED: i32 = 2;
+pub(in crate::cpu) const RELATION_LESS: i32 = -1;
+pub(in crate::cpu) const RELATION_EQUAL: i32 = 0;
+pub(in crate::cpu) const RELATION_GREATER: i32 = 1;
+pub(in crate::cpu) const RELATION_UNORDERED: i32 = 2;
 
 /// Floating-point class
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
-pub enum SoftFloatClass {
+pub(in crate::cpu) enum SoftFloatClass {
     Zero = 0,
     SNaN = 1,
     QNaN = 2,
@@ -78,91 +78,91 @@ pub enum SoftFloatClass {
 // --- Helper functions on SoftFloatStatus ---
 
 #[inline]
-pub fn softfloat_setFlags(status: &mut SoftFloatStatus, flags: i32) {
+pub(in crate::cpu) fn softfloat_setFlags(status: &mut SoftFloatStatus, flags: i32) {
     status.softfloat_exceptionFlags = flags;
 }
 
 #[inline]
-pub fn softfloat_raiseFlags(status: &mut SoftFloatStatus, flags: i32) {
+pub(in crate::cpu) fn softfloat_raiseFlags(status: &mut SoftFloatStatus, flags: i32) {
     status.softfloat_exceptionFlags |= flags;
 }
 
 #[inline]
-pub fn softfloat_isMaskedException(status: &SoftFloatStatus, flags: i32) -> bool {
+pub(in crate::cpu) fn softfloat_isMaskedException(status: &SoftFloatStatus, flags: i32) -> bool {
     (status.softfloat_exceptionMasks & flags) != 0
 }
 
 #[inline]
-pub fn softfloat_suppressException(status: &mut SoftFloatStatus, flags: i32) {
+pub(in crate::cpu) fn softfloat_suppressException(status: &mut SoftFloatStatus, flags: i32) {
     status.softfloat_suppressException |= flags;
 }
 
 #[inline]
-pub fn softfloat_getRoundingMode(status: &SoftFloatStatus) -> u8 {
+pub(in crate::cpu) fn softfloat_getRoundingMode(status: &SoftFloatStatus) -> u8 {
     status.softfloat_roundingMode
 }
 
 #[inline]
-pub fn softfloat_denormalsAreZeros(status: &SoftFloatStatus) -> bool {
+pub(in crate::cpu) fn softfloat_denormalsAreZeros(status: &SoftFloatStatus) -> bool {
     status.softfloat_denormals_are_zeros
 }
 
 #[inline]
-pub fn softfloat_flushUnderflowToZero(status: &SoftFloatStatus) -> bool {
+pub(in crate::cpu) fn softfloat_flushUnderflowToZero(status: &SoftFloatStatus) -> bool {
     status.softfloat_flush_underflow_to_zero
 }
 
 #[inline]
-pub fn softfloat_extF80_roundingPrecision(status: &SoftFloatStatus) -> u8 {
+pub(in crate::cpu) fn softfloat_extF80_roundingPrecision(status: &SoftFloatStatus) -> u8 {
     status.extF80_roundingPrecision
 }
 
 #[inline]
-pub fn softfloat_getExceptionFlags(status: &SoftFloatStatus) -> i32 {
+pub(in crate::cpu) fn softfloat_getExceptionFlags(status: &SoftFloatStatus) -> i32 {
     status.softfloat_exceptionFlags & !status.softfloat_suppressException
 }
 
 #[inline]
-pub fn softfloat_setRoundingUp(status: &mut SoftFloatStatus) {
+pub(in crate::cpu) fn softfloat_setRoundingUp(status: &mut SoftFloatStatus) {
     status.softfloat_exceptionFlags |= RAISE_SW_C1;
 }
 
 // --- floatx80 helpers (from softfloat-extra.h and softfloat-specialize.h) ---
 
 #[inline]
-pub fn extf80_sign(a: floatx80) -> bool {
+pub(in crate::cpu) fn extf80_sign(a: floatx80) -> bool {
     (a.sign_exp >> 15) != 0
 }
 
 #[inline]
-pub fn extf80_exp(a: floatx80) -> i32 {
+pub(in crate::cpu) fn extf80_exp(a: floatx80) -> i32 {
     (a.sign_exp & 0x7FFF) as i32
 }
 
 #[inline]
-pub fn extf80_fraction(a: floatx80) -> u64 {
+pub(in crate::cpu) fn extf80_fraction(a: floatx80) -> u64 {
     a.signif
 }
 
 #[inline]
-pub fn extf80_is_unsupported(a: floatx80) -> bool {
+pub(in crate::cpu) fn extf80_is_unsupported(a: floatx80) -> bool {
     ((a.sign_exp & 0x7FFF) != 0) && (a.signif & 0x8000000000000000 == 0)
 }
 
 #[inline]
-pub fn extf80_is_nan(a: floatx80) -> bool {
+pub(in crate::cpu) fn extf80_is_nan(a: floatx80) -> bool {
     ((a.sign_exp & 0x7FFF) == 0x7FFF) && (a.signif & 0x7FFFFFFFFFFFFFFF != 0)
 }
 
 #[inline]
-pub fn extf80_is_signaling_nan(a: floatx80) -> bool {
+pub(in crate::cpu) fn extf80_is_signaling_nan(a: floatx80) -> bool {
     ((a.sign_exp & 0x7FFF) == 0x7FFF)
         && (a.signif & 0x4000000000000000 == 0)
         && (a.signif & 0x3FFFFFFFFFFFFFFF != 0)
 }
 
 #[inline]
-pub fn floatx80_chs(a: floatx80) -> floatx80 {
+pub(in crate::cpu) fn floatx80_chs(a: floatx80) -> floatx80 {
     floatx80 {
         signif: a.signif,
         sign_exp: a.sign_exp ^ 0x8000,
@@ -170,7 +170,7 @@ pub fn floatx80_chs(a: floatx80) -> floatx80 {
 }
 
 #[inline]
-pub fn floatx80_abs(a: floatx80) -> floatx80 {
+pub(in crate::cpu) fn floatx80_abs(a: floatx80) -> floatx80 {
     floatx80 {
         signif: a.signif,
         sign_exp: a.sign_exp & 0x7FFF,
@@ -179,44 +179,44 @@ pub fn floatx80_abs(a: floatx80) -> floatx80 {
 
 // f16 helpers
 #[inline]
-pub fn f16_is_nan(a: u16) -> bool {
+pub(in crate::cpu) fn f16_is_nan(a: u16) -> bool {
     ((!a & 0x7C00) == 0) && ((a & 0x03FF) != 0)
 }
 
 #[inline]
-pub fn f16_is_signaling_nan(a: u16) -> bool {
+pub(in crate::cpu) fn f16_is_signaling_nan(a: u16) -> bool {
     ((a & 0x7E00) == 0x7C00) && ((a & 0x01FF) != 0)
 }
 
 // f32 helpers
 #[inline]
-pub fn f32_sign(a: u32) -> bool {
+pub(in crate::cpu) fn f32_sign(a: u32) -> bool {
     (a >> 31) != 0
 }
 
 #[inline]
-pub fn f32_exp(a: u32) -> i16 {
+pub(in crate::cpu) fn f32_exp(a: u32) -> i16 {
     ((a >> 23) & 0xFF) as i16
 }
 
 #[inline]
-pub fn f32_fraction(a: u32) -> u32 {
+pub(in crate::cpu) fn f32_fraction(a: u32) -> u32 {
     a & 0x007FFFFF
 }
 
 #[inline]
-pub fn f32_is_nan(a: u32) -> bool {
+pub(in crate::cpu) fn f32_is_nan(a: u32) -> bool {
     ((!a & 0x7F800000) == 0) && ((a & 0x007FFFFF) != 0)
 }
 
 #[inline]
-pub fn f32_is_signaling_nan(a: u32) -> bool {
+pub(in crate::cpu) fn f32_is_signaling_nan(a: u32) -> bool {
     ((a & 0x7FC00000) == 0x7F800000) && ((a & 0x003FFFFF) != 0)
 }
 
 /// Bochs softfloat3e/include/softfloat-extra.h `f32_denormal_to_zero`.
 #[inline]
-pub fn f32_denormal_to_zero(a: u32) -> u32 {
+pub(in crate::cpu) fn f32_denormal_to_zero(a: u32) -> u32 {
     if f32_exp(a) == 0 && f32_fraction(a) != 0 {
         return a & 0x80000000;
     }
@@ -225,33 +225,33 @@ pub fn f32_denormal_to_zero(a: u32) -> u32 {
 
 // f64 helpers
 #[inline]
-pub fn f64_sign(a: u64) -> bool {
+pub(in crate::cpu) fn f64_sign(a: u64) -> bool {
     (a >> 63) != 0
 }
 
 #[inline]
-pub fn f64_exp(a: u64) -> i16 {
+pub(in crate::cpu) fn f64_exp(a: u64) -> i16 {
     ((a >> 52) & 0x7FF) as i16
 }
 
 #[inline]
-pub fn f64_fraction(a: u64) -> u64 {
+pub(in crate::cpu) fn f64_fraction(a: u64) -> u64 {
     a & 0x000FFFFFFFFFFFFF
 }
 
 #[inline]
-pub fn f64_is_nan(a: u64) -> bool {
+pub(in crate::cpu) fn f64_is_nan(a: u64) -> bool {
     ((!a & 0x7FF0000000000000) == 0) && ((a & 0x000FFFFFFFFFFFFF) != 0)
 }
 
 #[inline]
-pub fn f64_is_signaling_nan(a: u64) -> bool {
+pub(in crate::cpu) fn f64_is_signaling_nan(a: u64) -> bool {
     ((a & 0x7FF8000000000000) == 0x7FF0000000000000) && ((a & 0x0007FFFFFFFFFFFF) != 0)
 }
 
 /// Bochs softfloat3e/include/softfloat-extra.h `f64_denormal_to_zero`.
 #[inline]
-pub fn f64_denormal_to_zero(a: u64) -> u64 {
+pub(in crate::cpu) fn f64_denormal_to_zero(a: u64) -> u64 {
     if f64_exp(a) == 0 && f64_fraction(a) != 0 {
         return a & 0x8000000000000000;
     }

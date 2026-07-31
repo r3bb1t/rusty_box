@@ -73,7 +73,7 @@ pub struct I387 {
     pub(crate) fcs: u16,
     pub(crate) fds: u16,
 
-    pub(crate) st_space: [floatx80; 8],
+    pub(in crate::cpu) st_space: [floatx80; 8],
 
     pub(crate) tos: u8,
     pub(crate) align1: u8,
@@ -172,18 +172,18 @@ impl I387 {
     }
 
     #[inline]
-    pub fn fpu_read_regi(&self, stnr: i32) -> floatx80 {
+    pub(in crate::cpu) fn fpu_read_regi(&self, stnr: i32) -> floatx80 {
         self.st_space[((self.tos as usize) + (stnr as usize)) & 7]
     }
 
     #[inline]
-    pub fn fpu_save_regi(&mut self, reg: floatx80, stnr: i32) {
+    pub(in crate::cpu) fn fpu_save_regi(&mut self, reg: floatx80, stnr: i32) {
         self.st_space[((self.tos as usize) + (stnr as usize)) & 7] = reg;
         self.fpu_settagi_valid(stnr);
     }
 
     #[inline]
-    pub fn fpu_save_regi_with_tag(&mut self, reg: floatx80, tag: i32, stnr: i32) {
+    pub(in crate::cpu) fn fpu_save_regi_with_tag(&mut self, reg: floatx80, tag: i32, stnr: i32) {
         self.st_space[((self.tos as usize) + (stnr as usize)) & 7] = reg;
         self.fpu_settagi(tag, stnr);
     }

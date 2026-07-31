@@ -32,7 +32,7 @@ use super::super::softfloat3e::softfloat_types::floatx80;
 /// passing to the SoftFloat 3e arithmetic routines.
 ///
 /// Ported from Bochs `i387cw_to_softfloat_status_word` in `fpu_arith.cc`.
-pub fn i387cw_to_softfloat_status_word(control_word: u16) -> SoftFloatStatus {
+pub(in crate::cpu) fn i387cw_to_softfloat_status_word(control_word: u16) -> SoftFloatStatus {
     let precision = control_word & FPU_CW_PC;
     let rounding_precision = match precision {
         FPU_PR_32_BITS => 32,
@@ -212,7 +212,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     ///
     /// Note: this does NOT return `FPU_TAG_EMPTY` — that is determined by the
     /// tag word, not the register contents.
-    pub fn fpu_tagof(reg: &floatx80) -> i32 {
+    pub(in crate::cpu) fn fpu_tagof(reg: &floatx80) -> i32 {
         let exp = extf80_exp(*reg);
         if exp == 0 {
             if extf80_fraction(*reg) == 0 {
@@ -247,7 +247,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Read the floatx80 value from `st(stnr)`.
     #[inline]
-    pub fn read_fpu_reg(&self, stnr: i32) -> floatx80 {
+    pub(in crate::cpu) fn read_fpu_reg(&self, stnr: i32) -> floatx80 {
         self.the_i387.fpu_read_regi(stnr)
     }
 
@@ -257,7 +257,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Write a floatx80 value to `st(stnr)` and mark its tag as Valid.
     #[inline]
-    pub fn write_fpu_reg(&mut self, reg: floatx80, stnr: i32) {
+    pub(in crate::cpu) fn write_fpu_reg(&mut self, reg: floatx80, stnr: i32) {
         self.the_i387.fpu_save_regi(reg, stnr);
     }
 
@@ -267,7 +267,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Write a floatx80 value to `st(stnr)` with an explicit tag.
     #[inline]
-    pub fn write_fpu_reg_with_tag(&mut self, reg: floatx80, tag: i32, stnr: i32) {
+    pub(in crate::cpu) fn write_fpu_reg_with_tag(&mut self, reg: floatx80, tag: i32, stnr: i32) {
         self.the_i387.fpu_save_regi_with_tag(reg, tag, stnr);
     }
 

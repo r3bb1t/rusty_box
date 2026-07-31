@@ -11,7 +11,7 @@ use super::softfloat_types::*;
 /// Returns RELATION_EQUAL, RELATION_LESS, RELATION_GREATER, or RELATION_UNORDERED.
 /// If `quiet` is false, signaling NaN and quiet NaN both raise invalid.
 /// If `quiet` is true, only signaling NaN raises invalid.
-pub fn extf80_compare(a: floatx80, b: floatx80, quiet: bool, status: &mut SoftFloatStatus) -> i32 {
+pub(in crate::cpu) fn extf80_compare(a: floatx80, b: floatx80, quiet: bool, status: &mut SoftFloatStatus) -> i32 {
     let a_class = extf80_class(a);
     let b_class = extf80_class(b);
 

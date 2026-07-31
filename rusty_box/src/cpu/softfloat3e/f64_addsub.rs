@@ -241,7 +241,7 @@ fn sub_mags_f64(
 }
 
 /// Berkeley SoftFloat `f64_add`.
-pub(crate) fn f64_add(a: float64, b: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_add(a: float64, b: float64, status: &mut SoftFloatStatus) -> float64 {
     let sign_a = sign_f64(a);
     let sign_b = sign_f64(b);
     if sign_a == sign_b {
@@ -252,7 +252,7 @@ pub(crate) fn f64_add(a: float64, b: float64, status: &mut SoftFloatStatus) -> f
 }
 
 /// Berkeley SoftFloat `f64_sub`.
-pub(crate) fn f64_sub(a: float64, b: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_sub(a: float64, b: float64, status: &mut SoftFloatStatus) -> float64 {
     let sign_a = sign_f64(a);
     let sign_b = sign_f64(b);
     if sign_a == sign_b {

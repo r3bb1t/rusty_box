@@ -10,7 +10,7 @@ use super::softfloat_types::*;
 /// Compare two single-precision numbers, returning one of `RELATION_LESS`,
 /// `RELATION_EQUAL`, `RELATION_GREATER` or `RELATION_UNORDERED`.
 /// Bochs softfloat3e/f32_compare.cc `f32_compare`.
-pub(crate) fn f32_compare_full(
+pub(in crate::cpu) fn f32_compare_full(
     mut a: float32,
     mut b: float32,
     quiet: bool,
@@ -65,20 +65,20 @@ pub(crate) fn f32_compare_full(
 /// Signaling compare — raises #I on a QNaN operand.
 /// Bochs softfloat.h `f32_compare(a, b, status)`.
 #[inline]
-pub(crate) fn f32_compare(a: float32, b: float32, status: &mut SoftFloatStatus) -> i32 {
+pub(in crate::cpu) fn f32_compare(a: float32, b: float32, status: &mut SoftFloatStatus) -> i32 {
     f32_compare_full(a, b, false, status)
 }
 
 /// Quiet compare — a QNaN operand does not raise #I.
 /// Bochs softfloat.h `f32_compare_quiet`.
 #[inline]
-pub(crate) fn f32_compare_quiet(a: float32, b: float32, status: &mut SoftFloatStatus) -> i32 {
+pub(in crate::cpu) fn f32_compare_quiet(a: float32, b: float32, status: &mut SoftFloatStatus) -> i32 {
     f32_compare_full(a, b, true, status)
 }
 
 /// Bochs softfloat3e/f32_min.cc `f32_min`. When both operands compare equal
 /// (including ±0.0) the *second* operand is returned, matching SSE MINPS.
-pub(crate) fn f32_min(mut a: float32, mut b: float32, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn f32_min(mut a: float32, mut b: float32, status: &mut SoftFloatStatus) -> float32 {
     if softfloat_denormalsAreZeros(status) {
         a = f32_denormal_to_zero(a);
         b = f32_denormal_to_zero(b);
@@ -91,7 +91,7 @@ pub(crate) fn f32_min(mut a: float32, mut b: float32, status: &mut SoftFloatStat
 }
 
 /// Bochs softfloat3e/f32_max.cc `f32_max`.
-pub(crate) fn f32_max(mut a: float32, mut b: float32, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn f32_max(mut a: float32, mut b: float32, status: &mut SoftFloatStatus) -> float32 {
     if softfloat_denormalsAreZeros(status) {
         a = f32_denormal_to_zero(a);
         b = f32_denormal_to_zero(b);

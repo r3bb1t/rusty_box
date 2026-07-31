@@ -40,7 +40,7 @@ fn poly_atan(x: Float128, status: &mut SoftFloatStatus) -> Float128 {
 /// Compute atan2(b, a) = atan(b/a) with proper quadrant handling.
 /// a = ST(0) (x), b = ST(1) (y).
 /// Ported from Bochs fpatan.cc using Float128 polynomial evaluation.
-pub(crate) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
         softfloat_raiseFlags(status, FLAG_INVALID);

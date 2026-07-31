@@ -12,7 +12,7 @@ use super::softfloat_types::*;
 /// `softfloat_f32UIToCommonNaN` followed by `softfloat_commonNaNToF16UI`
 /// (8086-SSE specialization): the payload is shifted right by 13 and the
 /// quiet bit is forced on.
-pub(crate) fn f32_to_f16(a: float32, status: &mut SoftFloatStatus) -> float16 {
+pub(in crate::cpu) fn f32_to_f16(a: float32, status: &mut SoftFloatStatus) -> float16 {
     let sign = sign_f32(a);
     let exp = exp_f32(a);
     let frac = frac_f32(a);

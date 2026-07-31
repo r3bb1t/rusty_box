@@ -7,7 +7,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub(crate) fn f32_sqrt(mut a: float32, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn f32_sqrt(mut a: float32, status: &mut SoftFloatStatus) -> float32 {
     let sign_a = sign_f32(a);
     let mut exp_a = exp_f32(a);
     let mut sig_a = frac_f32(a);

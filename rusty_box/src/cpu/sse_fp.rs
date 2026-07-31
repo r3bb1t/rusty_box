@@ -10,7 +10,7 @@ use super::xmm::{BxMxcsr, Mxcsr, MXCSR_EXCEPTIONS};
 
 /// Build a SoftFloat status word from the current MXCSR.
 /// Bochs sse_pfp.cc `mxcsr_to_softfloat_status_word`.
-pub fn mxcsr_to_softfloat_status_word(mxcsr: BxMxcsr) -> SoftFloatStatus {
+pub(in crate::cpu) fn mxcsr_to_softfloat_status_word(mxcsr: BxMxcsr) -> SoftFloatStatus {
     SoftFloatStatus {
         // MXCSR RC (0=nearest,1=down,2=up,3=truncate) is identical to the
         // SoftFloat rounding-mode encoding.

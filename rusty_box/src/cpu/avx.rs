@@ -74,7 +74,7 @@ pub(super) enum VexScalarFmaOp {
 /// Bochs encodes this reorder in the opcode operand tuple; here `v`=DEST,
 /// `h`=vvvv, `w`=rm, matching the handler operand sourcing.
 #[inline]
-fn vex_fma_operands_u32(form: VexFmaForm, v: u32, h: u32, w: u32) -> (u32, u32, u32) {
+pub(super) fn vex_fma_operands_u32(form: VexFmaForm, v: u32, h: u32, w: u32) -> (u32, u32, u32) {
     match form {
         VexFmaForm::F132 => (v, w, h),
         VexFmaForm::F213 => (h, v, w),
@@ -83,7 +83,7 @@ fn vex_fma_operands_u32(form: VexFmaForm, v: u32, h: u32, w: u32) -> (u32, u32, 
 }
 
 #[inline]
-fn vex_fma_operands_u64(form: VexFmaForm, v: u64, h: u64, w: u64) -> (u64, u64, u64) {
+pub(super) fn vex_fma_operands_u64(form: VexFmaForm, v: u64, h: u64, w: u64) -> (u64, u64, u64) {
     match form {
         VexFmaForm::F132 => (v, w, h),
         VexFmaForm::F213 => (h, v, w),
@@ -107,7 +107,7 @@ fn scalar_fma_flags(op: VexScalarFmaOp) -> u8 {
 /// FMADDSUB subtracts on even lanes / adds on odd; FMSUBADD is the inverse
 /// (Bochs simd_pfp.h xmm_fmaddsubps / xmm_fmsubaddps).
 #[inline]
-fn packed_fma_flags(op: VexPackedFmaOp, lane: usize) -> u8 {
+pub(super) fn packed_fma_flags(op: VexPackedFmaOp, lane: usize) -> u8 {
     match op {
         VexPackedFmaOp::Fmadd => 0,
         VexPackedFmaOp::Fmsub => SOFTFLOAT_MULADD_SUB_C,
@@ -2545,12 +2545,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let half = u16::from_le_bytes([src[n * 2], src[n * 2 + 1]]);
             result.set_ymm32u(n, f16_to_f32(half, &mut status));
         }
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         if instr.get_vl() >= 1 {
             self.write_ymm_reg(instr.dst(), result);
         } else {
             self.write_xmm_reg(instr.dst(), result.ymm128(0));
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+        Ok(())
     }
 
     /// VCVTPS2PH — narrow packed single-precision to half-precision
@@ -2621,6 +2622,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
                 );
             }
+            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
             self.write_ymm_reg(dst_idx, result);
         } else {
             let v = self.read_xmm_reg(dst_idx);
@@ -2635,9 +2637,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
                 );
             }
+            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
             self.write_xmm_reg(dst_idx, result);
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+        Ok(())
     }
 
     /// VEX FMA packed double-precision helper.
@@ -2664,6 +2667,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
                 );
             }
+            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
             self.write_ymm_reg(dst_idx, result);
         } else {
             let v = self.read_xmm_reg(dst_idx);
@@ -2678,9 +2682,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
                 );
             }
+            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
             self.write_xmm_reg(dst_idx, result);
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+        Ok(())
     }
 
     /// VEX FMA scalar single-precision helper.
@@ -2706,8 +2711,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
         let (a, b, c) = vex_fma_operands_u32(form, v, h, w);
         result.set_xmm32u(0, f32_mul_add(a, b, c, scalar_fma_flags(op), &mut status));
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         self.write_xmm_reg(dst_idx, result);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+        Ok(())
     }
 
     /// VEX FMA scalar double-precision helper.
@@ -2733,8 +2739,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
         let (a, b, c) = vex_fma_operands_u64(form, v, h, w);
         result.set_xmm64u(0, f64_mul_add(a, b, c, scalar_fma_flags(op), &mut status));
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         self.write_xmm_reg(dst_idx, result);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+        Ok(())
     }
 
     /// EVEX FMA scalar single-precision — Bochs avx512_fma.cc
@@ -2770,8 +2777,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             };
             let (a, b, c) = vex_fma_operands_u32(form, v, h, w);
             result.set_xmm32u(0, f32_mul_add(a, b, c, scalar_fma_flags(op), &mut status));
+            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
             self.write_xmm_reg(dst_idx, result);
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+            Ok(())
         } else {
             if instr.is_zero_masking() != 0 {
                 result.set_xmm32u(0, 0);
@@ -2809,8 +2817,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             };
             let (a, b, c) = vex_fma_operands_u64(form, v, h, w);
             result.set_xmm64u(0, f64_mul_add(a, b, c, scalar_fma_flags(op), &mut status));
+            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
             self.write_xmm_reg(dst_idx, result);
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+            Ok(())
         } else {
             if instr.is_zero_masking() != 0 {
                 result.set_xmm64u(0, 0);

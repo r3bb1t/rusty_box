@@ -6,7 +6,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 
 /// Bochs softfloat3e/f64_class.cc `f64_class`.
-pub(crate) fn f64_class(a: float64) -> SoftFloatClass {
+pub(in crate::cpu) fn f64_class(a: float64) -> SoftFloatClass {
     let sign_a = sign_f64(a);
     let exp_a = exp_f64(a);
     let sig_a = frac_f64(a);

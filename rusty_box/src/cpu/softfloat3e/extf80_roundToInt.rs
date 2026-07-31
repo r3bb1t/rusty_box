@@ -8,7 +8,7 @@ use super::softfloat_types::*;
 use super::specialize::*;
 
 /// Round extFloat80 to integer using given rounding mode.
-pub fn extf80_round_to_int(
+pub(in crate::cpu) fn extf80_round_to_int(
     a: floatx80,
     rounding_mode: u8,
     exact: bool,

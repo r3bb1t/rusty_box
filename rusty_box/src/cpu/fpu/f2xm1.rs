@@ -50,14 +50,14 @@ const EXP_ARR: [Float128; 15] = [
 
 /// Polynomial approximation for e^x - 1 (from Bochs f2xm1.cc poly_exp).
 /// Required: -1 < x < 1
-pub(crate) fn poly_exp(x: Float128, status: &mut SoftFloatStatus) -> Float128 {
+pub(in crate::cpu) fn poly_exp(x: Float128, status: &mut SoftFloatStatus) -> Float128 {
     let t = eval_poly(x, &EXP_ARR, status);
     f128_mul(t, x, status)
 }
 
 /// Compute 2^a - 1 for extended precision float `a`.
 /// Ported from Bochs f2xm1.cc using Float128 polynomial evaluation.
-pub(crate) fn f2xm1_impl(a: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn f2xm1_impl(a: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) {
         softfloat_raiseFlags(status, FLAG_INVALID);

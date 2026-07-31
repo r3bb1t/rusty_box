@@ -7,7 +7,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub(crate) fn f64_div(a: float64, b: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_div(a: float64, b: float64, status: &mut SoftFloatStatus) -> float64 {
     let sign_a = sign_f64(a);
     let mut exp_a = exp_f64(a);
     let mut sig_a = frac_f64(a);

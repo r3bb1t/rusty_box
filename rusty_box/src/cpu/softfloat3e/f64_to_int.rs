@@ -15,7 +15,7 @@ use super::softfloat_types::*;
 use super::specialize::*;
 
 /// Bochs softfloat3e `f64_to_i32`.
-pub(crate) fn f64_to_i32(
+pub(in crate::cpu) fn f64_to_i32(
     a: float64,
     rounding_mode: u8,
     exact: bool,
@@ -39,7 +39,7 @@ pub(crate) fn f64_to_i32(
 }
 
 /// Bochs softfloat3e `f64_to_i32_r_minMag` (round toward zero).
-pub(crate) fn f64_to_i32_r_min_mag(
+pub(in crate::cpu) fn f64_to_i32_r_min_mag(
     a: float64,
     exact: bool,
     saturate: bool,
@@ -100,7 +100,7 @@ pub(crate) fn f64_to_i32_r_min_mag(
 }
 
 /// Bochs softfloat3e `f64_to_i64`.
-pub(crate) fn f64_to_i64(
+pub(in crate::cpu) fn f64_to_i64(
     a: float64,
     rounding_mode: u8,
     exact: bool,
@@ -144,7 +144,7 @@ pub(crate) fn f64_to_i64(
 }
 
 /// Bochs softfloat3e `f64_to_i64_r_minMag` (round toward zero).
-pub(crate) fn f64_to_i64_r_min_mag(
+pub(in crate::cpu) fn f64_to_i64_r_min_mag(
     a: float64,
     exact: bool,
     saturate: bool,

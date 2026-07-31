@@ -10,7 +10,7 @@ use super::softfloat_types::*;
 /// Bochs softfloat3e `f64_to_f32`. The NaN path is the closed form of
 /// `softfloat_f64UIToCommonNaN` followed by `softfloat_commonNaNToF32UI`
 /// (8086-SSE specialization).
-pub(crate) fn f64_to_f32(a: float64, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn f64_to_f32(a: float64, status: &mut SoftFloatStatus) -> float32 {
     let sign = sign_f64(a);
     let exp = exp_f64(a);
     let frac = frac_f64(a);

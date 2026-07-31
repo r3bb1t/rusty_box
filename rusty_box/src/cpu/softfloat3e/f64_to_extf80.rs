@@ -7,7 +7,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub fn f64_to_extf80(a: float64, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn f64_to_extf80(a: float64, status: &mut SoftFloatStatus) -> floatx80 {
     let sign = sign_f64(a);
     let exp = exp_f64(a);
     let frac = frac_f64(a);

@@ -9,7 +9,7 @@ use super::softfloat_types::*;
 use super::specialize::*;
 
 /// Convert extFloat80 to i32 using given rounding mode.
-pub fn extf80_to_i32(
+pub(in crate::cpu) fn extf80_to_i32(
     a: floatx80,
     rounding_mode: u8,
     exact: bool,
@@ -35,7 +35,7 @@ pub fn extf80_to_i32(
 }
 
 /// Convert extFloat80 to i32 truncating toward zero.
-pub fn extf80_to_i32_round_to_zero(a: floatx80, exact: bool, status: &mut SoftFloatStatus) -> i32 {
+pub(in crate::cpu) fn extf80_to_i32_round_to_zero(a: floatx80, exact: bool, status: &mut SoftFloatStatus) -> i32 {
     // Handle unsupported
     if extf80_is_unsupported(a) {
         softfloat_raiseFlags(status, FLAG_INVALID);

@@ -121,7 +121,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     /// Read scalar f32 from src2 (register) or memory.
-    /// Register form: returns zmm32f[0] of src2.
+    /// Register form: returns the low dword of src2.
     /// Memory form: reads 4 bytes from memory.
     #[inline]
     /// Read scalar f32 from rm operand (src1 in our convention).
@@ -138,7 +138,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Read scalar f64 from src2 (register) or memory.
-    /// Register form: returns zmm64f[0] of src2.
+    /// Register form: returns the low qword of src2.
     /// Memory form: reads 8 bytes from memory.
     #[inline]
     /// Read scalar f64 from rm operand (src1 in our convention).

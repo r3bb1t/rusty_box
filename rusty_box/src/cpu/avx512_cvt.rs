@@ -7,6 +7,13 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_cvt.cc`.
 
+use super::softfloat3e::f32_to_f64::f32_to_f64;
+use super::softfloat3e::f32_to_int::{f32_to_i32, f32_to_i32_r_min_mag};
+use super::softfloat3e::f64_to_f32::f64_to_f32;
+use super::softfloat3e::f64_to_int::{f64_to_i32, f64_to_i32_r_min_mag};
+use super::softfloat3e::int_to_float::{i32_to_f32, i32_to_f64};
+use super::softfloat3e::softfloat::{softfloat_getExceptionFlags, softfloat_getRoundingMode};
+use super::softfloat3e::uint_convert::{f32_to_ui32, f32_to_ui32_r_min_mag, ui32_to_f32};
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -172,73 +179,6 @@ fn read_src_qword<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// Round an f32 to nearest integer as i32, matching MXCSR rounding mode.
 /// MXCSR RC: 0=nearest, 1=down, 2=up, 3=truncate
-/// Intel integer indefinite: 0x80000000 for ALL out-of-range signed conversions
-/// (positive overflow, negative overflow, NaN). Matches Bochs SoftFloat behavior.
-const I32_INDEFINITE: i32 = i32::MIN; // 0x80000000
-
-/// Intel integer indefinite: 0xFFFFFFFF for ALL out-of-range unsigned conversions.
-const U32_INDEFINITE: u32 = u32::MAX; // 0xFFFFFFFF
-
-/// MXCSR RC value for round-toward-zero. VCVTT* instructions truncate
-/// unconditionally (ignoring MXCSR.RC), so their handlers pass this to the
-/// rc-aware helpers rather than reading MXCSR.
-const RC_TRUNCATE: u8 = 3;
-
-fn round_f32_to_i32(val: f32, rc: u8) -> i32 {
-    if val.is_nan() {
-        return I32_INDEFINITE;
-    }
-    let rounded = match rc {
-        0 => val.round_ties_even(),
-        1 => val.floor(),
-        2 => val.ceil(),
-        _ => val.trunc(),
-    };
-    // Check overflow BEFORE cast (Rust saturates, Intel returns 0x80000000)
-    if rounded >= (i32::MAX as f32 + 1.0) || rounded < (i32::MIN as f32) {
-        I32_INDEFINITE
-    } else {
-        rounded as i32
-    }
-}
-
-#[inline]
-fn round_f64_to_i32(val: f64, rc: u8) -> i32 {
-    if val.is_nan() {
-        return I32_INDEFINITE;
-    }
-    let rounded = match rc {
-        0 => val.round_ties_even(),
-        1 => val.floor(),
-        2 => val.ceil(),
-        _ => val.trunc(),
-    };
-    if rounded >= (i32::MAX as f64 + 1.0) || rounded < (i32::MIN as f64) {
-        I32_INDEFINITE
-    } else {
-        rounded as i32
-    }
-}
-
-/// Intel: ALL invalid unsigned conversions (NaN, negative, overflow) return 0xFFFFFFFF.
-#[inline]
-fn round_f32_to_u32(val: f32, rc: u8) -> u32 {
-    if val.is_nan() {
-        return U32_INDEFINITE;
-    }
-    let rounded = match rc {
-        0 => val.round_ties_even(),
-        1 => val.floor(),
-        2 => val.ceil(),
-        _ => val.trunc(),
-    };
-    if rounded < 0.0 || rounded >= (u32::MAX as f32 + 1.0) {
-        U32_INDEFINITE
-    } else {
-        rounded as u32
-    }
-}
-
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // VCVTDQ2PS — Convert packed signed dwords to SP FP
@@ -250,11 +190,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src = read_src_dword(self, instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm32f(i, src.zmm32s(i) as f32);
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(i, i32_to_f32(src.zmm32s(i), &mut status));
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -270,12 +215,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src = read_src_dword(self, instr, nelements)?;
-        let rc = self.mxcsr.rounding_mode();
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let rc = softfloat_getRoundingMode(&status);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm32s(i, round_f32_to_i32(src.zmm32f(i), rc));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32s(i, f32_to_i32(src.zmm32u(i), rc, true, &mut status));
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -291,16 +241,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src = read_src_dword(self, instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            let v = src.zmm32f(i);
-            // Truncate first, THEN range-check the integer: a value in
-            // (-2^31-1, -2^31) truncates to a valid i32::MIN, but a raw-value
-            // check against -2^31 would wrongly report integer-indefinite.
-            // Bochs softfloat3e f32_to_i32_round_to_zero.
-            result.set_zmm32s(i, round_f32_to_i32(v, RC_TRUNCATE));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32s(
+                    i,
+                    f32_to_i32_r_min_mag(src.zmm32u(i), true, false, &mut status),
+                );
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -322,7 +275,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = read_src_half_dword(self, instr)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm64f(i, src.zmm32s(i) as f64);
+            result.set_zmm64u(i, i32_to_f64(src.zmm32s(i)));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -343,11 +296,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = qword_elements(vl); // number of input qword elements
         let src = read_src_qword(self, instr, nelements)?;
-        let rc = self.mxcsr.rounding_mode();
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let rc = softfloat_getRoundingMode(&status);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm32s(i, round_f64_to_i32(src.zmm64f(i), rc));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32s(i, f64_to_i32(src.zmm64u(i), rc, true, &mut status));
+            }
         }
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         // Output is dword-masked but only nelements dwords are active;
         // upper dword slots (beyond nelements) are zeroed by write_zmm_masked
         // because we use the full VL for zeroing.
@@ -375,15 +334,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
         let src = read_src_qword(self, instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            let v = src.zmm64f(i);
-            // Truncate first, THEN range-check: -2147483648.9 truncates to a
-            // valid i32::MIN; the prior raw-value check reported indefinite.
-            // Bochs softfloat3e f64_to_i32_round_to_zero.
-            result.set_zmm32s(i, round_f64_to_i32(v, RC_TRUNCATE));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32s(
+                    i,
+                    f64_to_i32_r_min_mag(src.zmm64u(i), true, false, &mut status),
+                );
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         let out_vl = match vl {
             0 => 0,
@@ -406,11 +369,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let nelements = qword_elements(vl); // output qword count
                                             // Source is half width: nelements dwords (float32)
         let src = read_src_half_dword(self, instr)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm64f(i, src.zmm32f(i) as f64);
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm64u(i, f32_to_f64(src.zmm32u(i), &mut status));
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -427,11 +394,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = qword_elements(vl); // input qword count
         let src = read_src_qword(self, instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm32f(i, src.zmm64f(i) as f32);
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(i, f64_to_f32(src.zmm64u(i), &mut status));
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         let out_vl = match vl {
             0 => 0,
@@ -452,11 +424,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src = read_src_dword(self, instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm32f(i, src.zmm32u(i) as f32);
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(i, ui32_to_f32(src.zmm32u(i), &mut status));
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -472,12 +449,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src = read_src_dword(self, instr, nelements)?;
-        let rc = self.mxcsr.rounding_mode();
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let rc = softfloat_getRoundingMode(&status);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm32u(i, round_f32_to_u32(src.zmm32f(i), rc));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(i, f32_to_ui32(src.zmm32u(i), rc, true, &mut status));
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -493,16 +475,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src = read_src_dword(self, instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            let val = src.zmm32f(i);
-            // Truncate first, THEN range-check: a value in (-1, 0) truncates
-            // to 0 (valid unsigned), but the raw `val < 0.0` check wrongly
-            // reported indefinite. Bochs softfloat3e f32_to_ui32_round_to_zero
-            // returns 0 for any magnitude < 1 before its sign test.
-            result.set_zmm32u(i, round_f32_to_u32(val, RC_TRUNCATE));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(
+                    i,
+                    f32_to_ui32_r_min_mag(src.zmm32u(i), true, false, &mut status),
+                );
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -511,48 +496,59 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        round_f32_to_i32, round_f32_to_u32, round_f64_to_i32, I32_INDEFINITE, RC_TRUNCATE,
-        U32_INDEFINITE,
-    };
+    use super::super::softfloat3e::softfloat::SoftFloatStatus;
+    use super::*;
 
-    // Boundary semantics of the truncating (VCVTT*) conversion path, which
-    // the vcvttps2dq / vcvttpd2dq / vcvttps2udq handlers now delegate to.
-    // Ground truth: Bochs softfloat3e f{32,64}_to_{i,ui}32_round_to_zero —
-    // truncate first, then the integer-range check decides indefinite.
+    // Boundary semantics of the truncating (VCVTT*) conversion path the
+    // vcvttps2dq / vcvttpd2dq / vcvttps2udq handlers delegate to, now that
+    // it is Bochs softfloat3e f{32,64}_to_{i,ui}32_r_minMag itself: truncate
+    // first, then let the integer-range check decide indefinite.
+
+    fn t_f64_i32(v: f64) -> i32 {
+        let mut st = SoftFloatStatus::default();
+        f64_to_i32_r_min_mag(v.to_bits(), true, false, &mut st)
+    }
+    fn t_f32_i32(v: f32) -> i32 {
+        let mut st = SoftFloatStatus::default();
+        f32_to_i32_r_min_mag(v.to_bits(), true, false, &mut st)
+    }
+    fn t_f32_u32(v: f32) -> u32 {
+        let mut st = SoftFloatStatus::default();
+        f32_to_ui32_r_min_mag(v.to_bits(), true, false, &mut st)
+    }
 
     #[test]
     fn vcvttpd2dq_negative_boundary_truncates_to_i32_min() {
         // -2147483648.9 truncates to exactly -2^31, which IS representable;
-        // the prior raw-value check returned integer-indefinite here.
-        assert_eq!(round_f64_to_i32(-2147483648.9, RC_TRUNCATE), i32::MIN);
+        // a raw-value range check would return integer-indefinite here.
+        assert_eq!(t_f64_i32(-2147483648.9), i32::MIN);
         // Just past the negative edge: truncates to -2^31-1, out of range.
-        assert_eq!(round_f64_to_i32(-2147483649.0, RC_TRUNCATE), I32_INDEFINITE);
+        assert_eq!(t_f64_i32(-2147483649.0), i32::MIN); // integer indefinite
         // Positive: 2^31 does not fit a signed i32 → indefinite.
-        assert_eq!(round_f64_to_i32(2147483648.0, RC_TRUNCATE), I32_INDEFINITE);
+        assert_eq!(t_f64_i32(2147483648.0), i32::MIN);
         // Largest in-range value, fractional part truncated away.
-        assert_eq!(round_f64_to_i32(2147483647.9, RC_TRUNCATE), i32::MAX);
-        assert_eq!(round_f64_to_i32(f64::NAN, RC_TRUNCATE), I32_INDEFINITE);
+        assert_eq!(t_f64_i32(2147483647.9), i32::MAX);
+        assert_eq!(t_f64_i32(f64::NAN), i32::MIN);
     }
 
     #[test]
     fn vcvttps2dq_boundary_matches_f32_grid() {
         // No f32 exists strictly between -2^31-256 and -2^31, so the exact
         // edge value truncates to i32::MIN and the next lower f32 overflows.
-        assert_eq!(round_f32_to_i32(-2147483648.0, RC_TRUNCATE), i32::MIN);
-        assert_eq!(round_f32_to_i32(-2147483904.0, RC_TRUNCATE), I32_INDEFINITE);
-        assert_eq!(round_f32_to_i32(f32::NAN, RC_TRUNCATE), I32_INDEFINITE);
+        assert_eq!(t_f32_i32(-2147483648.0), i32::MIN);
+        assert_eq!(t_f32_i32(-2147483904.0), i32::MIN); // integer indefinite
+        assert_eq!(t_f32_i32(f32::NAN), i32::MIN);
     }
 
     #[test]
     fn vcvttps2udq_small_negative_truncates_to_zero() {
         // Magnitude < 1 truncates to 0 (valid unsigned); Bochs returns 0
-        // before its sign test. The prior `val < 0.0` check said indefinite.
-        assert_eq!(round_f32_to_u32(-0.9, RC_TRUNCATE), 0);
-        assert_eq!(round_f32_to_u32(0.9, RC_TRUNCATE), 0);
+        // before its sign test.
+        assert_eq!(t_f32_u32(-0.9), 0);
+        assert_eq!(t_f32_u32(0.9), 0);
         // At/under -1 the truncated magnitude is negative → indefinite.
-        assert_eq!(round_f32_to_u32(-1.5, RC_TRUNCATE), U32_INDEFINITE);
+        assert_eq!(t_f32_u32(-1.5), u32::MAX);
         // Full unsigned range: 2^32 does not fit → indefinite.
-        assert_eq!(round_f32_to_u32(4294967296.0, RC_TRUNCATE), U32_INDEFINITE);
+        assert_eq!(t_f32_u32(4294967296.0), u32::MAX);
     }
 }

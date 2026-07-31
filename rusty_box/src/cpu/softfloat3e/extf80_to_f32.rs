@@ -8,7 +8,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub fn extf80_to_f32(a: floatx80, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn extf80_to_f32(a: floatx80, status: &mut SoftFloatStatus) -> float32 {
     // Handle unsupported
     if extf80_is_unsupported(a) {
         softfloat_raiseFlags(status, FLAG_INVALID);

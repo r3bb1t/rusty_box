@@ -56,7 +56,7 @@ fn poly_l2p1(x: Float128, status: &mut SoftFloatStatus) -> Float128 {
 
 /// Compute y * log2(x) where x=a (ST(0)) and y=b (ST(1)).
 /// Ported from Bochs fyl2x.cc using Float128 polynomial evaluation.
-pub(crate) fn fyl2x_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn fyl2x_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
         softfloat_raiseFlags(status, FLAG_INVALID);
@@ -188,7 +188,7 @@ pub(crate) fn fyl2x_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus)
 
 /// Compute y * log2(x + 1) where x=a (ST(0)) and y=b (ST(1)).
 /// Ported from Bochs fyl2x.cc fyl2xp1() using Float128 polynomial evaluation.
-pub(crate) fn fyl2xp1_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn fyl2xp1_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
         softfloat_raiseFlags(status, FLAG_INVALID);

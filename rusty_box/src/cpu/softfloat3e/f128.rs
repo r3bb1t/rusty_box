@@ -26,9 +26,9 @@ use super::specialize::*;
 /// v64 = high 64 bits (sign + exponent + upper 48 bits of fraction)
 /// v0  = low 64 bits (lower 64 bits of fraction)
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct Float128 {
-    pub(crate) v64: u64,
-    pub(crate) v0: u64,
+pub(in crate::cpu) struct Float128 {
+    pub(in crate::cpu) v64: u64,
+    pub(in crate::cpu) v0: u64,
 }
 
 impl Float128 {
@@ -57,37 +57,37 @@ impl Float128 {
 // Float128 constants
 // ============================================================
 
-pub const FLOAT128_DEFAULT_NAN_V64: u64 = 0xFFFF800000000000;
-pub const FLOAT128_DEFAULT_NAN_V0: u64 = 0;
-pub const FLOAT128_DEFAULT_NAN: Float128 = Float128 {
+pub(in crate::cpu) const FLOAT128_DEFAULT_NAN_V64: u64 = 0xFFFF800000000000;
+pub(in crate::cpu) const FLOAT128_DEFAULT_NAN_V0: u64 = 0;
+pub(in crate::cpu) const FLOAT128_DEFAULT_NAN: Float128 = Float128 {
     v64: FLOAT128_DEFAULT_NAN_V64,
     v0: FLOAT128_DEFAULT_NAN_V0,
 };
 
-pub const FLOAT128_POSITIVE_ZERO: Float128 = Float128 { v64: 0, v0: 0 };
-pub const FLOAT128_EXP_BIAS: i32 = 0x3FFF;
+pub(in crate::cpu) const FLOAT128_POSITIVE_ZERO: Float128 = Float128 { v64: 0, v0: 0 };
+pub(in crate::cpu) const FLOAT128_EXP_BIAS: i32 = 0x3FFF;
 
 // ============================================================
 // FPU constants (from fpu_constant.h)
 // ============================================================
 
 // PI constants (Pentium-compatible 68-bit precision)
-pub const FLOATX80_PI_EXP: u16 = 0x4000;
-pub const FLOAT_PI_HI: u64 = 0xc90fdaa22168c234;
-pub const FLOAT_PI_LO: u64 = 0xC000000000000000;
+pub(in crate::cpu) const FLOATX80_PI_EXP: u16 = 0x4000;
+pub(in crate::cpu) const FLOAT_PI_HI: u64 = 0xc90fdaa22168c234;
+pub(in crate::cpu) const FLOAT_PI_LO: u64 = 0xC000000000000000;
 
-pub const FLOATX80_PI2_EXP: u16 = 0x3FFF;
-pub const FLOATX80_PI4_EXP: u16 = 0x3FFE;
+pub(in crate::cpu) const FLOATX80_PI2_EXP: u16 = 0x3FFF;
+pub(in crate::cpu) const FLOATX80_PI4_EXP: u16 = 0x3FFE;
 
 // 3PI/4 constants
-pub const FLOATX80_3PI4_EXP: u16 = 0x4000;
-pub const FLOAT_3PI4_HI: u64 = 0x96cbe3f9990e91a7;
-pub const FLOAT_3PI4_LO: u64 = 0x9000000000000000;
+pub(in crate::cpu) const FLOATX80_3PI4_EXP: u16 = 0x4000;
+pub(in crate::cpu) const FLOAT_3PI4_HI: u64 = 0x96cbe3f9990e91a7;
+pub(in crate::cpu) const FLOAT_3PI4_LO: u64 = 0x9000000000000000;
 
 // 1/LN2 constants
-pub const FLOAT_LN2INV_EXP: i32 = 0x3FFF;
-pub const FLOAT_LN2INV_HI: u64 = 0xb8aa3b295c17f0bb;
-pub const FLOAT_LN2INV_LO: u64 = 0xC000000000000000;
+pub(in crate::cpu) const FLOAT_LN2INV_EXP: i32 = 0x3FFF;
+pub(in crate::cpu) const FLOAT_LN2INV_HI: u64 = 0xb8aa3b295c17f0bb;
+pub(in crate::cpu) const FLOAT_LN2INV_LO: u64 = 0xC000000000000000;
 
 // ============================================================
 // Field extraction helpers
@@ -95,31 +95,31 @@ pub const FLOAT_LN2INV_LO: u64 = 0xC000000000000000;
 
 /// Extract sign from Float128 high word.
 #[inline]
-pub(crate) fn sign_f128_ui64(v64: u64) -> bool {
+pub(in crate::cpu) fn sign_f128_ui64(v64: u64) -> bool {
     (v64 >> 63) != 0
 }
 
 /// Extract biased exponent from Float128 high word.
 #[inline]
-pub(crate) fn exp_f128_ui64(v64: u64) -> i32 {
+pub(in crate::cpu) fn exp_f128_ui64(v64: u64) -> i32 {
     ((v64 >> 48) & 0x7FFF) as i32
 }
 
 /// Extract fraction (significand without implicit bit) from Float128 high word.
 #[inline]
-pub(crate) fn frac_f128_ui64(v64: u64) -> u64 {
+pub(in crate::cpu) fn frac_f128_ui64(v64: u64) -> u64 {
     v64 & 0x0000_FFFF_FFFF_FFFF
 }
 
 /// Pack sign, exponent, and significand high bits into Float128 high word.
 #[inline]
-pub(crate) fn pack_to_f128_ui64(sign: bool, exp: i32, sig64: u64) -> u64 {
+pub(in crate::cpu) fn pack_to_f128_ui64(sign: bool, exp: i32, sig64: u64) -> u64 {
     ((sign as u64) << 63) + ((exp as u64) << 48) + sig64
 }
 
 /// Pack a complete Float128.
 #[inline]
-pub(crate) fn pack_float128(sign: bool, exp: i32, sig64: u64, sig0: u64) -> Float128 {
+pub(in crate::cpu) fn pack_float128(sign: bool, exp: i32, sig64: u64, sig0: u64) -> Float128 {
     Float128 {
         v64: pack_to_f128_ui64(sign, exp, sig64),
         v0: sig0,
@@ -132,13 +132,13 @@ pub(crate) fn pack_float128(sign: bool, exp: i32, sig64: u64, sig0: u64) -> Floa
 
 /// Is this a NaN (any NaN)?
 #[inline]
-pub(crate) fn is_nan_f128_ui(v64: u64, v0: u64) -> bool {
+pub(in crate::cpu) fn is_nan_f128_ui(v64: u64, v0: u64) -> bool {
     ((!v64 & 0x7FFF000000000000) == 0) && (v0 != 0 || (v64 & 0x0000FFFFFFFFFFFF) != 0)
 }
 
 /// Is this a signaling NaN?
 #[inline]
-pub(crate) fn is_sig_nan_f128_ui(v64: u64, v0: u64) -> bool {
+pub(in crate::cpu) fn is_sig_nan_f128_ui(v64: u64, v0: u64) -> bool {
     ((v64 & 0x7FFF800000000000) == 0x7FFF000000000000)
         && (v0 != 0 || (v64 & 0x00007FFFFFFFFFFF) != 0)
 }
@@ -148,7 +148,7 @@ pub(crate) fn is_sig_nan_f128_ui(v64: u64, v0: u64) -> bool {
 // ============================================================
 
 /// Propagate NaN for Float128 operands (x86-SSE semantics).
-pub(crate) fn softfloat_propagate_nan_f128_ui(
+pub(in crate::cpu) fn softfloat_propagate_nan_f128_ui(
     ui_a64: u64,
     ui_a0: u64,
     ui_b64: u64,
@@ -173,13 +173,13 @@ pub(crate) fn softfloat_propagate_nan_f128_ui(
 // Subnormal normalization for Float128
 // ============================================================
 
-pub(crate) struct ExpSig128 {
-    pub(crate) exp: i32,
-    pub(crate) sig_v64: u64,
-    pub(crate) sig_v0: u64,
+pub(in crate::cpu) struct ExpSig128 {
+    pub(in crate::cpu) exp: i32,
+    pub(in crate::cpu) sig_v64: u64,
+    pub(in crate::cpu) sig_v0: u64,
 }
 
-pub(crate) fn norm_subnormal_f128_sig(sig64: u64, sig0: u64) -> ExpSig128 {
+pub(in crate::cpu) fn norm_subnormal_f128_sig(sig64: u64, sig0: u64) -> ExpSig128 {
     if sig64 == 0 {
         let shift_dist = count_leading_zeros64(sig0) as i8 - 15;
         let exp = -63 - shift_dist as i32;
@@ -216,7 +216,7 @@ pub(crate) fn norm_subnormal_f128_sig(sig64: u64, sig0: u64) -> ExpSig128 {
 /// Shift right by dist (1..63) with extra jam word.
 /// Returns (v64, v0, extra).
 #[inline]
-pub(crate) fn short_shift_right_jam128_extra(
+pub(in crate::cpu) fn short_shift_right_jam128_extra(
     a64: u64,
     a0: u64,
     extra: u64,
@@ -231,7 +231,7 @@ pub(crate) fn short_shift_right_jam128_extra(
 
 /// Shift right by dist (any value) with extra jam word.
 /// Returns (v64, v0, extra).
-pub(crate) fn shift_right_jam128_extra(
+pub(in crate::cpu) fn shift_right_jam128_extra(
     a64: u64,
     a0: u64,
     mut extra: u64,
@@ -260,7 +260,7 @@ pub(crate) fn shift_right_jam128_extra(
 
 /// Short shift right with jam (1..63), combines shifted-out bits into v0 LSB.
 #[inline]
-pub(crate) fn short_shift_right_jam128(a64: u64, a0: u64, dist: u8) -> (u64, u64) {
+pub(in crate::cpu) fn short_shift_right_jam128(a64: u64, a0: u64, dist: u8) -> (u64, u64) {
     let neg_dist = (-(dist as i8)) as u8;
     let z_v64 = a64 >> dist;
     let z_v0 = (a64 << (neg_dist & 63)) | (a0 >> dist) | (((a0 << (neg_dist & 63)) != 0) as u64);
@@ -272,7 +272,7 @@ pub(crate) fn short_shift_right_jam128(a64: u64, a0: u64, dist: u8) -> (u64, u64
 // ============================================================
 
 /// Multiply 128-bit value by 32-bit scalar, returning 128-bit result.
-pub(crate) fn mul128_by_32(a64: u64, a0: u64, b: u32) -> (u64, u64) {
+pub(in crate::cpu) fn mul128_by_32(a64: u64, a0: u64, b: u32) -> (u64, u64) {
     let b = b as u64;
     let z_v0 = a0.wrapping_mul(b);
     let mid = ((a0 >> 32) as u32 as u64).wrapping_mul(b);
@@ -290,7 +290,7 @@ pub(crate) fn mul128_by_32(a64: u64, a0: u64, b: u32) -> (u64, u64) {
 /// Multiply two 128-bit values to produce a 256-bit result.
 /// Returns [z0, z1, z2, z3] where z0 is the lowest 64 bits
 /// and z3 is the highest 64 bits (little-endian word order).
-pub(crate) fn mul128_to_256(a64: u64, a0: u64, b64: u64, b0: u64) -> [u64; 4] {
+pub(in crate::cpu) fn mul128_to_256(a64: u64, a0: u64, b64: u64, b0: u64) -> [u64; 4] {
     let (p0_v64, p0_v0) = mul64_to_128(a0, b0);
     let (p64_v64, p64_v0) = mul64_to_128(a64, b0);
     let mut z64 = p64_v0.wrapping_add(p0_v64);
@@ -314,7 +314,7 @@ pub(crate) fn mul128_to_256(a64: u64, a0: u64, b64: u64, b0: u64) -> [u64; 4] {
 
 /// Multiply 128-bit value (a_hi, a_lo) by 64-bit value b, producing 192-bit result.
 /// Returns (z2, z1, z0) where z2 is the highest 64 bits.
-pub(crate) fn mul128_by_64_to_192(a_hi: u64, a_lo: u64, b: u64) -> (u64, u64, u64) {
+pub(in crate::cpu) fn mul128_by_64_to_192(a_hi: u64, a_lo: u64, b: u64) -> (u64, u64, u64) {
     // Use mul128_to_256 with b_hi = 0
     let result = mul128_to_256(a_hi, a_lo, 0, b);
     // result[3] should be 0 since b_hi=0
@@ -325,7 +325,7 @@ pub(crate) fn mul128_by_64_to_192(a_hi: u64, a_lo: u64, b: u64) -> (u64, u64, u6
 /// Add two 192-bit values.
 /// (a0, a1, a2) + (b0, b1, b2) = (z0, z1, z2)
 /// where a0/b0/z0 are the highest words and a2/b2/z2 are the lowest.
-pub(crate) fn add192(a0: u64, a1: u64, a2: u64, b0: u64, b1: u64, b2: u64) -> (u64, u64, u64) {
+pub(in crate::cpu) fn add192(a0: u64, a1: u64, a2: u64, b0: u64, b1: u64, b2: u64) -> (u64, u64, u64) {
     let z2 = a2.wrapping_add(b2);
     let carry1 = (z2 < a2) as u64;
     let mut z1 = a1.wrapping_add(b1);
@@ -339,7 +339,7 @@ pub(crate) fn add192(a0: u64, a1: u64, a2: u64, b0: u64, b1: u64, b2: u64) -> (u
 
 /// Subtract two 192-bit values.
 /// (a0, a1, a2) - (b0, b1, b2) = (z0, z1, z2)
-pub(crate) fn sub192(a0: u64, a1: u64, a2: u64, b0: u64, b1: u64, b2: u64) -> (u64, u64, u64) {
+pub(in crate::cpu) fn sub192(a0: u64, a1: u64, a2: u64, b0: u64, b1: u64, b2: u64) -> (u64, u64, u64) {
     let z2 = a2.wrapping_sub(b2);
     let borrow1 = (a2 < b2) as u64;
     let mut z1 = a1.wrapping_sub(b1);
@@ -358,7 +358,7 @@ pub(crate) fn sub192(a0: u64, a1: u64, a2: u64, b0: u64, b1: u64, b2: u64) -> (u
 
 /// Approximation to the 64-bit quotient of dividing (a0, a1) by b.
 /// b must be >= 2^63. Result is within [q, q+2] of exact quotient.
-pub(crate) fn estimate_div_128_to_64(a0: u64, a1: u64, b: u64) -> u64 {
+pub(in crate::cpu) fn estimate_div_128_to_64(a0: u64, a1: u64, b: u64) -> u64 {
     if b <= a0 {
         return 0xFFFFFFFFFFFFFFFF;
     }
@@ -395,7 +395,7 @@ pub(crate) fn estimate_div_128_to_64(a0: u64, a1: u64, b: u64) -> u64 {
 /// NOTE: Bochs trims precision to ~80 bits to match hardware x86 which uses
 /// only 67-bit internal precision for transcendentals. We replicate this
 /// behavior: sigExtra is zeroed and sig0 is masked to upper 32 bits.
-pub(crate) fn round_pack_to_f128(
+pub(in crate::cpu) fn round_pack_to_f128(
     sign: bool,
     mut exp: i32,
     mut sig64: u64,
@@ -472,7 +472,7 @@ pub(crate) fn round_pack_to_f128(
 }
 
 /// Normalize, round, and pack to Float128.
-pub(crate) fn norm_round_pack_to_f128(
+pub(in crate::cpu) fn norm_round_pack_to_f128(
     sign: bool,
     mut exp: i32,
     mut sig64: u64,
@@ -757,7 +757,7 @@ fn sub_mags_f128(
 // ============================================================
 
 /// Float128 addition.
-pub(crate) fn f128_add(a: Float128, b: Float128, status: &mut SoftFloatStatus) -> Float128 {
+pub(in crate::cpu) fn f128_add(a: Float128, b: Float128, status: &mut SoftFloatStatus) -> Float128 {
     let sign_a = sign_f128_ui64(a.v64);
     let sign_b = sign_f128_ui64(b.v64);
     if sign_a == sign_b {
@@ -768,7 +768,7 @@ pub(crate) fn f128_add(a: Float128, b: Float128, status: &mut SoftFloatStatus) -
 }
 
 /// Float128 subtraction.
-pub(crate) fn f128_sub(a: Float128, b: Float128, status: &mut SoftFloatStatus) -> Float128 {
+pub(in crate::cpu) fn f128_sub(a: Float128, b: Float128, status: &mut SoftFloatStatus) -> Float128 {
     let sign_a = sign_f128_ui64(a.v64);
     let sign_b = sign_f128_ui64(b.v64);
     if sign_a == sign_b {
@@ -783,7 +783,7 @@ pub(crate) fn f128_sub(a: Float128, b: Float128, status: &mut SoftFloatStatus) -
 // ============================================================
 
 /// Float128 multiplication.
-pub(crate) fn f128_mul(a: Float128, b: Float128, status: &mut SoftFloatStatus) -> Float128 {
+pub(in crate::cpu) fn f128_mul(a: Float128, b: Float128, status: &mut SoftFloatStatus) -> Float128 {
     let ui_a64 = a.v64;
     let ui_a0 = a.v0;
     let sign_a = sign_f128_ui64(ui_a64);
@@ -879,7 +879,7 @@ pub(crate) fn f128_mul(a: Float128, b: Float128, status: &mut SoftFloatStatus) -
 // ============================================================
 
 /// Float128 division.
-pub(crate) fn f128_div(a: Float128, b: Float128, status: &mut SoftFloatStatus) -> Float128 {
+pub(in crate::cpu) fn f128_div(a: Float128, b: Float128, status: &mut SoftFloatStatus) -> Float128 {
     let ui_a64 = a.v64;
     let ui_a0 = a.v0;
     let sign_a = sign_f128_ui64(ui_a64);
@@ -1021,12 +1021,12 @@ pub(crate) fn f128_div(a: Float128, b: Float128, status: &mut SoftFloatStatus) -
 // ============================================================
 
 /// Fused multiply-add operation flags (matches Bochs enum).
-pub const SOFTFLOAT_MULADD_SUB_C: u8 = 1; // negate addend
-pub const SOFTFLOAT_MULADD_SUB_PROD: u8 = 2; // negate product
+pub(in crate::cpu) const SOFTFLOAT_MULADD_SUB_C: u8 = 1; // negate addend
+pub(in crate::cpu) const SOFTFLOAT_MULADD_SUB_PROD: u8 = 2; // negate product
 
 /// Float128 fused multiply-add: a*b + c (with operation modifier).
 /// op=0: a*b+c, op=1: a*b-c, op=2: -(a*b)+c, op=3: -(a*b)-c
-pub(crate) fn f128_mul_add(
+pub(in crate::cpu) fn f128_mul_add(
     a: Float128,
     b: Float128,
     c: Float128,
@@ -1358,7 +1358,7 @@ pub(crate) fn f128_mul_add(
 // ============================================================
 
 /// Convert extFloat80 (80-bit extended precision) to Float128.
-pub(crate) fn extf80_to_f128(a: floatx80, status: &mut SoftFloatStatus) -> Float128 {
+pub(in crate::cpu) fn extf80_to_f128(a: floatx80, status: &mut SoftFloatStatus) -> Float128 {
     let ui_a64 = a.sign_exp;
     let ui_a0 = a.signif;
 
@@ -1390,7 +1390,7 @@ pub(crate) fn extf80_to_f128(a: floatx80, status: &mut SoftFloatStatus) -> Float
 }
 
 /// Convert Float128 to extFloat80 (80-bit extended precision).
-pub(crate) fn f128_to_extf80(a: Float128, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn f128_to_extf80(a: Float128, status: &mut SoftFloatStatus) -> floatx80 {
     let ui_a64 = a.v64;
     let ui_a0 = a.v0;
     let sign = sign_f128_ui64(ui_a64);
@@ -1432,7 +1432,7 @@ pub(crate) fn f128_to_extf80(a: Float128, status: &mut SoftFloatStatus) -> float
 // ============================================================
 
 /// Convert a signed 32-bit integer to Float128.
-pub(crate) fn i32_to_f128(a: i32) -> Float128 {
+pub(in crate::cpu) fn i32_to_f128(a: i32) -> Float128 {
     if a == 0 {
         return FLOAT128_POSITIVE_ZERO;
     }
@@ -1448,7 +1448,7 @@ pub(crate) fn i32_to_f128(a: i32) -> Float128 {
 }
 
 /// Convert a signed 64-bit integer to Float128.
-pub(crate) fn i64_to_f128(a: i64) -> Float128 {
+pub(in crate::cpu) fn i64_to_f128(a: i64) -> Float128 {
     if a == 0 {
         return FLOAT128_POSITIVE_ZERO;
     }
@@ -1491,7 +1491,7 @@ pub(crate) fn i64_to_f128(a: i64) -> Float128 {
 
 /// Negate a Float128 value (flip the sign bit).
 #[inline]
-pub(crate) fn f128_chs(a: Float128) -> Float128 {
+pub(in crate::cpu) fn f128_chs(a: Float128) -> Float128 {
     Float128 {
         v64: a.v64 ^ 0x8000000000000000,
         v0: a.v0,
@@ -1500,7 +1500,7 @@ pub(crate) fn f128_chs(a: Float128) -> Float128 {
 
 /// Absolute value of a Float128 (clear the sign bit).
 #[inline]
-pub(crate) fn f128_abs(a: Float128) -> Float128 {
+pub(in crate::cpu) fn f128_abs(a: Float128) -> Float128 {
     Float128 {
         v64: a.v64 & 0x7FFFFFFFFFFFFFFF,
         v0: a.v0,
@@ -1509,25 +1509,25 @@ pub(crate) fn f128_abs(a: Float128) -> Float128 {
 
 /// Check if a Float128 is zero (positive or negative).
 #[inline]
-pub(crate) fn f128_is_zero(a: Float128) -> bool {
+pub(in crate::cpu) fn f128_is_zero(a: Float128) -> bool {
     ((a.v64 & 0x7FFFFFFFFFFFFFFF) | a.v0) == 0
 }
 
 /// Check if a Float128 is NaN.
 #[inline]
-pub(crate) fn f128_is_nan(a: Float128) -> bool {
+pub(in crate::cpu) fn f128_is_nan(a: Float128) -> bool {
     is_nan_f128_ui(a.v64, a.v0)
 }
 
 /// Check if a Float128 is infinity.
 #[inline]
-pub(crate) fn f128_is_inf(a: Float128) -> bool {
+pub(in crate::cpu) fn f128_is_inf(a: Float128) -> bool {
     ((a.v64 & 0x7FFFFFFFFFFFFFFF) == 0x7FFF000000000000) && a.v0 == 0
 }
 
 /// Compare Float128 values: return true if a < b (unsigned magnitude comparison).
 #[inline]
-pub(crate) fn f128_lt_mag(a: Float128, b: Float128) -> bool {
+pub(in crate::cpu) fn f128_lt_mag(a: Float128, b: Float128) -> bool {
     let a_mag64 = a.v64 & 0x7FFFFFFFFFFFFFFF;
     let b_mag64 = b.v64 & 0x7FFFFFFFFFFFFFFF;
     lt128(a_mag64, a.v0, b_mag64, b.v0)
@@ -1538,7 +1538,7 @@ pub(crate) fn f128_lt_mag(a: Float128, b: Float128) -> bool {
 // ============================================================
 
 /// Shift a 256-bit value (stored as [u64; 4], little-endian) right by `dist` with jam.
-pub(crate) fn shift_right_jam_256m(a: &[u64; 4], dist: i32) -> [u64; 4] {
+pub(in crate::cpu) fn shift_right_jam_256m(a: &[u64; 4], dist: i32) -> [u64; 4] {
     if dist <= 0 {
         return *a;
     }
@@ -1556,7 +1556,7 @@ pub(crate) fn shift_right_jam_256m(a: &[u64; 4], dist: i32) -> [u64; 4] {
 }
 
 /// Add two 256-bit values stored as [u64; 4] in little-endian word order.
-pub(crate) fn add_256m(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+pub(in crate::cpu) fn add_256m(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     let mut result = [0u64; 4];
     let mut carry = 0u64;
     for i in 0..4 {
@@ -1568,7 +1568,7 @@ pub(crate) fn add_256m(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
 }
 
 /// Subtract two 256-bit values stored as [u64; 4] in little-endian word order.
-pub(crate) fn sub_256m(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+pub(in crate::cpu) fn sub_256m(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     let mut result = [0u64; 4];
     let mut borrow = 0u64;
     for i in 0..4 {
@@ -1590,68 +1590,68 @@ pub(crate) fn sub_256m(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
 // ============================================================
 
 /// PI as Float128 (exponent 0x4000, fraction from FLOAT_PI_HI/LO).
-pub(crate) const FLOAT128_PI: Float128 = Float128 {
+pub(in crate::cpu) const FLOAT128_PI: Float128 = Float128 {
     v64: ((FLOATX80_PI_EXP as u64) << 48) | (FLOAT_PI_HI >> 16),
     v0: (FLOAT_PI_HI << 48) | (FLOAT_PI_LO >> 16),
 };
 
 /// 1/LN2 as Float128.
-pub(crate) const FLOAT128_LN2INV: Float128 = Float128 {
+pub(in crate::cpu) const FLOAT128_LN2INV: Float128 = Float128 {
     v64: ((FLOAT_LN2INV_EXP as u64) << 48) | (FLOAT_LN2INV_HI >> 16),
     v0: (FLOAT_LN2INV_HI << 48) | (FLOAT_LN2INV_LO >> 16),
 };
 
 // LN(2) significand (96-bit precision, BETTER_THAN_PENTIUM variant from Bochs)
-pub const LN2_SIG_HI: u64 = 0xb17217f7d1cf79ab;
-pub const LN2_SIG_LO: u64 = 0xc9e3b39800000000;
+pub(in crate::cpu) const LN2_SIG_HI: u64 = 0xb17217f7d1cf79ab;
+pub(in crate::cpu) const LN2_SIG_LO: u64 = 0xc9e3b39800000000;
 
 // sqrt(2)/2 significand (for fyl2x range check)
-pub const SQRT2_HALF_SIG: u64 = 0xb504f333f9de6484;
+pub(in crate::cpu) const SQRT2_HALF_SIG: u64 = 0xb504f333f9de6484;
 
 /// LN(2) as Float128 (from Bochs f2xm1.cc)
-pub(crate) const FLOAT128_LN2: Float128 = Float128 {
+pub(in crate::cpu) const FLOAT128_LN2: Float128 = Float128 {
     v64: 0x3ffe62e42fefa39e,
     v0: 0xf35793c7673007e6,
 };
 
 /// 2/LN(2) as Float128 (from Bochs fyl2x.cc)
-pub(crate) const FLOAT128_LN2INV2: Float128 = Float128 {
+pub(in crate::cpu) const FLOAT128_LN2INV2: Float128 = Float128 {
     v64: 0x400071547652b82f,
     v0: 0xe1777d0ffda0d23a,
 };
 
 /// 1.0 as Float128
-pub(crate) const FLOAT128_ONE: Float128 = Float128 {
+pub(in crate::cpu) const FLOAT128_ONE: Float128 = Float128 {
     v64: 0x3fff000000000000,
     v0: 0x0000000000000000,
 };
 
 /// 2.0 as Float128
-pub(crate) const FLOAT128_TWO: Float128 = Float128 {
+pub(in crate::cpu) const FLOAT128_TWO: Float128 = Float128 {
     v64: 0x4000000000000000,
     v0: 0x0000000000000000,
 };
 
 /// sqrt(3) as Float128 (from Bochs fpatan.cc)
-pub(crate) const FLOAT128_SQRT3: Float128 = Float128 {
+pub(in crate::cpu) const FLOAT128_SQRT3: Float128 = Float128 {
     v64: 0x3fffbb67ae8584ca,
     v0: 0xa73b25742d7078b8,
 };
 
 /// PI/2 as Float128 (from Bochs fpatan.cc)
-pub(crate) const FLOAT128_PI2: Float128 = Float128 {
+pub(in crate::cpu) const FLOAT128_PI2: Float128 = Float128 {
     v64: 0x3fff921fb54442d1,
     v0: 0x8469898CC5170416,
 };
 
 /// PI/4 as Float128 (from Bochs fpatan.cc)
-pub(crate) const FLOAT128_PI4: Float128 = Float128 {
+pub(in crate::cpu) const FLOAT128_PI4: Float128 = Float128 {
     v64: 0x3ffe921fb54442d1,
     v0: 0x8469898CC5170416,
 };
 
 /// PI/6 as Float128 (from Bochs fpatan.cc)
-pub(crate) const FLOAT128_PI6: Float128 = Float128 {
+pub(in crate::cpu) const FLOAT128_PI6: Float128 = Float128 {
     v64: 0x3ffe0c152382d736,
     v0: 0x58465BB32E0F580F,
 };

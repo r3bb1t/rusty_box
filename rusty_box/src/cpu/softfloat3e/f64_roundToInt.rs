@@ -10,7 +10,7 @@ use super::specialize::*;
 
 /// Bochs softfloat3e `f64_roundToInt`. `scale` is the VRNDSCALE M field
 /// (imm8[7:4]); it is 0 for plain ROUNDPD/ROUNDSD.
-pub(crate) fn f64_round_to_int_scaled(
+pub(in crate::cpu) fn f64_round_to_int_scaled(
     mut a: float64,
     scale: u8,
     rounding_mode: u8,
@@ -90,14 +90,14 @@ pub(crate) fn f64_round_to_int_scaled(
 /// Bochs softfloat.h `f64_roundToInt(a, status)` — scale 0, MXCSR rounding
 /// mode, exact reporting on.
 #[inline]
-pub(crate) fn f64_round_to_int(a: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_round_to_int(a: float64, status: &mut SoftFloatStatus) -> float64 {
     let rc = softfloat_getRoundingMode(status);
     f64_round_to_int_scaled(a, 0, rc, true, status)
 }
 
 /// Bochs softfloat.h `f64_roundToInt(a, scale, status)`.
 #[inline]
-pub(crate) fn f64_round_to_int_with_scale(
+pub(in crate::cpu) fn f64_round_to_int_with_scale(
     a: float64,
     scale: u8,
     status: &mut SoftFloatStatus,

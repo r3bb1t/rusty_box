@@ -3,7 +3,10 @@
 //! Implements VFMADD, VFMSUB, VFNMADD, VFNMSUB in all three forms (132, 213, 231)
 //! for both packed single-precision (PS) and packed double-precision (PD).
 //!
-//! Uses `f32::mul_add` / `f64::mul_add` for fused multiply-add precision.
+//! Every element goes through SoftFloat `f32_mul_add` / `f64_mul_add`
+//! against an MXCSR-seeded status word with the EVEX embedded rounding
+//! control applied, exactly as Bochs does. Elements the writemask disables
+//! are not computed at all, so they raise no exception.
 //!
 //! Decoder convention:
 //!   dst()  = nnn = V (destination register, also an input)
@@ -17,18 +20,17 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_fma.cc`.
 
+use super::avx::{packed_fma_flags, vex_fma_operands_u32, vex_fma_operands_u64, VexFmaForm,
+    VexPackedFmaOp};
+use super::softfloat3e::f32_mul_add::f32_mul_add;
+use super::softfloat3e::f64_mul_add::f64_mul_add;
+use super::softfloat3e::softfloat::softfloat_getExceptionFlags;
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
-// Load-bearing in pure no-std builds (core f32/f64 lack these inherent
-// methods there); redundant in unit graphs where std is linked, so the
-// unused-import lint is allowed rather than losing the no-std resolution.
-#[cfg(not(feature = "std"))]
-#[allow(unused_imports)]
-use crate::cpu::float::FloatExt;
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
@@ -154,535 +156,207 @@ fn read_rm_pd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
 }
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
-    // ========================================================================
-    // VFMADD — Fused Multiply-Add
-    //   132: V * W + H
-    //   213: H * V + W
-    //   231: H * W + V
-    // ========================================================================
+    /// The shared body of all twelve packed single-precision EVEX FMA
+    /// handlers. Bochs avx512_fma.cc `EVEX_FMA_PACKED_SINGLE`.
+    fn evex_fma_packed_ps(
+        &mut self,
+        instr: &Instruction,
+        form: VexFmaForm,
+        op: VexPackedFmaOp,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let v = read_zmm(self, instr.dst()); // V = nnn (destination, also an input)
+        let h = read_zmm(self, instr.src2()); // H = vvvv
+        let w = read_rm_ps(self, instr, vl)?; // W = rm/memory
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 == 0 {
+                continue;
+            }
+            let (a, b, c) = vex_fma_operands_u32(form, v.zmm32u(i), h.zmm32u(i), w.zmm32u(i));
+            result.set_zmm32u(i, f32_mul_add(a, b, c, packed_fma_flags(op, i), &mut status));
+        }
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// The shared body of all twelve packed double-precision EVEX FMA
+    /// handlers. Bochs avx512_fma.cc `EVEX_FMA_PACKED_DOUBLE`.
+    fn evex_fma_packed_pd(
+        &mut self,
+        instr: &Instruction,
+        form: VexFmaForm,
+        op: VexPackedFmaOp,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 == 0 {
+                continue;
+            }
+            let (a, b, c) = vex_fma_operands_u64(form, v.zmm64u(i), h.zmm64u(i), w.zmm64u(i));
+            result.set_zmm64u(i, f64_mul_add(a, b, c, packed_fma_flags(op, i), &mut status));
+        }
+        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
 
     /// VFMADD132PS — EVEX.66.0F38.W0 98
     /// result[i] = V[i] * W[i] + H[i]
     pub fn evex_vfmadd132ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let v = read_zmm(self, instr.dst()); // V = nnn (destination)
-        let h = read_zmm(self, instr.src2()); // H = vvvv
-        let w = read_rm_ps(self, instr, vl)?; // W = rm/memory
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let vf = f32::from_bits(v.zmm32u(i));
-            let wf = f32::from_bits(w.zmm32u(i));
-            let hf = f32::from_bits(h.zmm32u(i));
-            result.set_zmm32u(i, vf.mul_add(wf, hf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::Fmadd)
     }
 
     /// VFMADD132PD — EVEX.66.0F38.W1 98
     /// result[i] = V[i] * W[i] + H[i]
     pub fn evex_vfmadd132pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let vf = f64::from_bits(v.zmm64u(i));
-            let wf = f64::from_bits(w.zmm64u(i));
-            let hf = f64::from_bits(h.zmm64u(i));
-            result.set_zmm64u(i, vf.mul_add(wf, hf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::Fmadd)
     }
 
     /// VFMADD213PS — EVEX.66.0F38.W0 A8
     /// result[i] = H[i] * V[i] + W[i]
     pub fn evex_vfmadd213ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f32::from_bits(h.zmm32u(i));
-            let vf = f32::from_bits(v.zmm32u(i));
-            let wf = f32::from_bits(w.zmm32u(i));
-            result.set_zmm32u(i, hf.mul_add(vf, wf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_ps(instr, VexFmaForm::F213, VexPackedFmaOp::Fmadd)
     }
 
     /// VFMADD213PD — EVEX.66.0F38.W1 A8
     /// result[i] = H[i] * V[i] + W[i]
     pub fn evex_vfmadd213pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f64::from_bits(h.zmm64u(i));
-            let vf = f64::from_bits(v.zmm64u(i));
-            let wf = f64::from_bits(w.zmm64u(i));
-            result.set_zmm64u(i, hf.mul_add(vf, wf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_pd(instr, VexFmaForm::F213, VexPackedFmaOp::Fmadd)
     }
 
     /// VFMADD231PS — EVEX.66.0F38.W0 B8
     /// result[i] = H[i] * W[i] + V[i]
     pub fn evex_vfmadd231ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f32::from_bits(h.zmm32u(i));
-            let wf = f32::from_bits(w.zmm32u(i));
-            let vf = f32::from_bits(v.zmm32u(i));
-            result.set_zmm32u(i, hf.mul_add(wf, vf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_ps(instr, VexFmaForm::F231, VexPackedFmaOp::Fmadd)
     }
 
     /// VFMADD231PD — EVEX.66.0F38.W1 B8
     /// result[i] = H[i] * W[i] + V[i]
     pub fn evex_vfmadd231pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f64::from_bits(h.zmm64u(i));
-            let wf = f64::from_bits(w.zmm64u(i));
-            let vf = f64::from_bits(v.zmm64u(i));
-            result.set_zmm64u(i, hf.mul_add(wf, vf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::Fmadd)
     }
-
-    // ========================================================================
-    // VFMSUB — Fused Multiply-Subtract (negate the addend)
-    //   132: V * W - H    = V * W + (-H)
-    //   213: H * V - W    = H * V + (-W)
-    //   231: H * W - V    = H * W + (-V)
-    // ========================================================================
 
     /// VFMSUB132PS — EVEX.66.0F38.W0 9A
     /// result[i] = V[i] * W[i] - H[i]
     pub fn evex_vfmsub132ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let vf = f32::from_bits(v.zmm32u(i));
-            let wf = f32::from_bits(w.zmm32u(i));
-            let hf = f32::from_bits(h.zmm32u(i));
-            result.set_zmm32u(i, vf.mul_add(wf, -hf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::Fmsub)
     }
 
     /// VFMSUB132PD — EVEX.66.0F38.W1 9A
     /// result[i] = V[i] * W[i] - H[i]
     pub fn evex_vfmsub132pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let vf = f64::from_bits(v.zmm64u(i));
-            let wf = f64::from_bits(w.zmm64u(i));
-            let hf = f64::from_bits(h.zmm64u(i));
-            result.set_zmm64u(i, vf.mul_add(wf, -hf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::Fmsub)
     }
 
     /// VFMSUB213PS — EVEX.66.0F38.W0 AA
     /// result[i] = H[i] * V[i] - W[i]
     pub fn evex_vfmsub213ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f32::from_bits(h.zmm32u(i));
-            let vf = f32::from_bits(v.zmm32u(i));
-            let wf = f32::from_bits(w.zmm32u(i));
-            result.set_zmm32u(i, hf.mul_add(vf, -wf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_ps(instr, VexFmaForm::F213, VexPackedFmaOp::Fmsub)
     }
 
     /// VFMSUB213PD — EVEX.66.0F38.W1 AA
     /// result[i] = H[i] * V[i] - W[i]
     pub fn evex_vfmsub213pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f64::from_bits(h.zmm64u(i));
-            let vf = f64::from_bits(v.zmm64u(i));
-            let wf = f64::from_bits(w.zmm64u(i));
-            result.set_zmm64u(i, hf.mul_add(vf, -wf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_pd(instr, VexFmaForm::F213, VexPackedFmaOp::Fmsub)
     }
 
     /// VFMSUB231PS — EVEX.66.0F38.W0 BA
     /// result[i] = H[i] * W[i] - V[i]
     pub fn evex_vfmsub231ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f32::from_bits(h.zmm32u(i));
-            let wf = f32::from_bits(w.zmm32u(i));
-            let vf = f32::from_bits(v.zmm32u(i));
-            result.set_zmm32u(i, hf.mul_add(wf, -vf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_ps(instr, VexFmaForm::F231, VexPackedFmaOp::Fmsub)
     }
 
     /// VFMSUB231PD — EVEX.66.0F38.W1 BA
     /// result[i] = H[i] * W[i] - V[i]
     pub fn evex_vfmsub231pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f64::from_bits(h.zmm64u(i));
-            let wf = f64::from_bits(w.zmm64u(i));
-            let vf = f64::from_bits(v.zmm64u(i));
-            result.set_zmm64u(i, hf.mul_add(wf, -vf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::Fmsub)
     }
-
-    // ========================================================================
-    // VFNMADD — Fused Negative Multiply-Add (negate the product)
-    //   132: -(V * W) + H  = (-V) * W + H
-    //   213: -(H * V) + W  = (-H) * V + W
-    //   231: -(H * W) + V  = (-H) * W + V
-    // ========================================================================
 
     /// VFNMADD132PS — EVEX.66.0F38.W0 9C
     /// result[i] = -(V[i] * W[i]) + H[i]
     pub fn evex_vfnmadd132ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let vf = f32::from_bits(v.zmm32u(i));
-            let wf = f32::from_bits(w.zmm32u(i));
-            let hf = f32::from_bits(h.zmm32u(i));
-            result.set_zmm32u(i, (-vf).mul_add(wf, hf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::Fnmadd)
     }
 
     /// VFNMADD132PD — EVEX.66.0F38.W1 9C
     /// result[i] = -(V[i] * W[i]) + H[i]
     pub fn evex_vfnmadd132pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let vf = f64::from_bits(v.zmm64u(i));
-            let wf = f64::from_bits(w.zmm64u(i));
-            let hf = f64::from_bits(h.zmm64u(i));
-            result.set_zmm64u(i, (-vf).mul_add(wf, hf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::Fnmadd)
     }
 
     /// VFNMADD213PS — EVEX.66.0F38.W0 AC
     /// result[i] = -(H[i] * V[i]) + W[i]
     pub fn evex_vfnmadd213ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f32::from_bits(h.zmm32u(i));
-            let vf = f32::from_bits(v.zmm32u(i));
-            let wf = f32::from_bits(w.zmm32u(i));
-            result.set_zmm32u(i, (-hf).mul_add(vf, wf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_ps(instr, VexFmaForm::F213, VexPackedFmaOp::Fnmadd)
     }
 
     /// VFNMADD213PD — EVEX.66.0F38.W1 AC
     /// result[i] = -(H[i] * V[i]) + W[i]
     pub fn evex_vfnmadd213pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f64::from_bits(h.zmm64u(i));
-            let vf = f64::from_bits(v.zmm64u(i));
-            let wf = f64::from_bits(w.zmm64u(i));
-            result.set_zmm64u(i, (-hf).mul_add(vf, wf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_pd(instr, VexFmaForm::F213, VexPackedFmaOp::Fnmadd)
     }
 
     /// VFNMADD231PS — EVEX.66.0F38.W0 BC
     /// result[i] = -(H[i] * W[i]) + V[i]
     pub fn evex_vfnmadd231ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f32::from_bits(h.zmm32u(i));
-            let wf = f32::from_bits(w.zmm32u(i));
-            let vf = f32::from_bits(v.zmm32u(i));
-            result.set_zmm32u(i, (-hf).mul_add(wf, vf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_ps(instr, VexFmaForm::F231, VexPackedFmaOp::Fnmadd)
     }
 
     /// VFNMADD231PD — EVEX.66.0F38.W1 BC
     /// result[i] = -(H[i] * W[i]) + V[i]
     pub fn evex_vfnmadd231pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f64::from_bits(h.zmm64u(i));
-            let wf = f64::from_bits(w.zmm64u(i));
-            let vf = f64::from_bits(v.zmm64u(i));
-            result.set_zmm64u(i, (-hf).mul_add(wf, vf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::Fnmadd)
     }
-
-    // ========================================================================
-    // VFNMSUB — Fused Negative Multiply-Subtract (negate both product and addend)
-    //   132: -(V * W) - H  = (-V) * W + (-H)
-    //   213: -(H * V) - W  = (-H) * V + (-W)
-    //   231: -(H * W) - V  = (-H) * W + (-V)
-    // ========================================================================
 
     /// VFNMSUB132PS — EVEX.66.0F38.W0 9E
     /// result[i] = -(V[i] * W[i]) - H[i]
     pub fn evex_vfnmsub132ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let vf = f32::from_bits(v.zmm32u(i));
-            let wf = f32::from_bits(w.zmm32u(i));
-            let hf = f32::from_bits(h.zmm32u(i));
-            result.set_zmm32u(i, (-vf).mul_add(wf, -hf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::Fnmsub)
     }
 
     /// VFNMSUB132PD — EVEX.66.0F38.W1 9E
     /// result[i] = -(V[i] * W[i]) - H[i]
     pub fn evex_vfnmsub132pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let vf = f64::from_bits(v.zmm64u(i));
-            let wf = f64::from_bits(w.zmm64u(i));
-            let hf = f64::from_bits(h.zmm64u(i));
-            result.set_zmm64u(i, (-vf).mul_add(wf, -hf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::Fnmsub)
     }
 
     /// VFNMSUB213PS — EVEX.66.0F38.W0 AE
     /// result[i] = -(H[i] * V[i]) - W[i]
     pub fn evex_vfnmsub213ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f32::from_bits(h.zmm32u(i));
-            let vf = f32::from_bits(v.zmm32u(i));
-            let wf = f32::from_bits(w.zmm32u(i));
-            result.set_zmm32u(i, (-hf).mul_add(vf, -wf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_ps(instr, VexFmaForm::F213, VexPackedFmaOp::Fnmsub)
     }
 
     /// VFNMSUB213PD — EVEX.66.0F38.W1 AE
     /// result[i] = -(H[i] * V[i]) - W[i]
     pub fn evex_vfnmsub213pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f64::from_bits(h.zmm64u(i));
-            let vf = f64::from_bits(v.zmm64u(i));
-            let wf = f64::from_bits(w.zmm64u(i));
-            result.set_zmm64u(i, (-hf).mul_add(vf, -wf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_pd(instr, VexFmaForm::F213, VexPackedFmaOp::Fnmsub)
     }
 
     /// VFNMSUB231PS — EVEX.66.0F38.W0 BE
     /// result[i] = -(H[i] * W[i]) - V[i]
     pub fn evex_vfnmsub231ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f32::from_bits(h.zmm32u(i));
-            let wf = f32::from_bits(w.zmm32u(i));
-            let vf = f32::from_bits(v.zmm32u(i));
-            result.set_zmm32u(i, (-hf).mul_add(wf, -vf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_ps(instr, VexFmaForm::F231, VexPackedFmaOp::Fnmsub)
     }
 
     /// VFNMSUB231PD — EVEX.66.0F38.W1 BE
     /// result[i] = -(H[i] * W[i]) - V[i]
     pub fn evex_vfnmsub231pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let v = read_zmm(self, instr.dst());
-        let h = read_zmm(self, instr.src2());
-        let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister::default();
-        for i in 0..nelements {
-            let hf = f64::from_bits(h.zmm64u(i));
-            let wf = f64::from_bits(w.zmm64u(i));
-            let vf = f64::from_bits(v.zmm64u(i));
-            result.set_zmm64u(i, (-hf).mul_add(wf, -vf).to_bits());
-        }
-        let mask = read_opmask_for_write(self, instr);
-        let zmask = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
-        Ok(())
+        self.evex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::Fnmsub)
     }
 }

@@ -11,7 +11,7 @@ use super::specialize::*;
 
 /// Float32 fused multiply-add: a*b + c (with operation modifier).
 /// op=0: a*b+c, op=1: a*b-c, op=2: -(a*b)+c, op=3: -(a*b)-c
-pub(crate) fn f32_mul_add(
+pub(in crate::cpu) fn f32_mul_add(
     a: float32,
     b: float32,
     c: float32,

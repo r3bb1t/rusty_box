@@ -9,7 +9,7 @@ use super::specialize::*;
 
 /// Scale extFloat80 value `a` by `b`:
 /// Truncates `b` to integer, adds to exponent of `a`.
-pub fn extf80_scale(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn extf80_scale(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
     // Handle unsupported
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
         softfloat_raiseFlags(status, FLAG_INVALID);

@@ -8,7 +8,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub fn extf80_sqrt(a: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn extf80_sqrt(a: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) {
         softfloat_raiseFlags(status, FLAG_INVALID);

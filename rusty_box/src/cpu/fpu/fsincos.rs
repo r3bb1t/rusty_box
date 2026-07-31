@@ -167,7 +167,7 @@ fn sincos_approximation(
 // ---------------------------------------------------------------------------
 
 /// Result type for single sin or cos computation.
-pub(crate) enum SinCosResult {
+pub(in crate::cpu) enum SinCosResult {
     /// Argument out of range (|x| >= 2^63)
     OutOfRange,
     /// Computed value
@@ -175,7 +175,7 @@ pub(crate) enum SinCosResult {
 }
 
 /// Result type for simultaneous sin+cos computation.
-pub(crate) enum SinCosBothResult {
+pub(in crate::cpu) enum SinCosBothResult {
     /// Argument out of range
     OutOfRange,
     /// sin and cos values
@@ -183,7 +183,7 @@ pub(crate) enum SinCosBothResult {
 }
 
 /// Result type for tangent computation.
-pub(crate) enum FtanResult {
+pub(in crate::cpu) enum FtanResult {
     /// Argument out of range
     OutOfRange,
     /// Result is NaN (both sin and cos slots get the same NaN)
@@ -198,7 +198,7 @@ pub(crate) enum FtanResult {
 
 /// Compute sin or cos of a floatx80 value using Float128 polynomial evaluation.
 /// Ported from Bochs fsincos.cc fsincos().
-pub(crate) fn fsincos_single(
+pub(in crate::cpu) fn fsincos_single(
     a: floatx80,
     want_sin: bool,
     status: &mut SoftFloatStatus,
@@ -314,7 +314,7 @@ pub(crate) fn fsincos_single(
 
 /// Compute both sin and cos of a floatx80 value using Float128 polynomial evaluation.
 /// Ported from Bochs fsincos.cc fsincos().
-pub(crate) fn fsincos_both(a: floatx80, status: &mut SoftFloatStatus) -> SinCosBothResult {
+pub(in crate::cpu) fn fsincos_both(a: floatx80, status: &mut SoftFloatStatus) -> SinCosBothResult {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) {
         softfloat_raiseFlags(status, FLAG_INVALID);
@@ -404,7 +404,7 @@ pub(crate) fn fsincos_both(a: floatx80, status: &mut SoftFloatStatus) -> SinCosB
 
 /// Compute tangent of a floatx80 value using Float128 polynomial evaluation.
 /// Ported from Bochs fsincos.cc ftan().
-pub(crate) fn ftan_impl(a: floatx80, status: &mut SoftFloatStatus) -> FtanResult {
+pub(in crate::cpu) fn ftan_impl(a: floatx80, status: &mut SoftFloatStatus) -> FtanResult {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) {
         softfloat_raiseFlags(status, FLAG_INVALID);

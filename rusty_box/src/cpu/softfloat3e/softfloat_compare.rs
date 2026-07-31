@@ -71,7 +71,7 @@ fn relation_matches(base: u8, relation: i32) -> bool {
 /// Evaluate one of the 32 single-precision compare predicates.
 /// Bochs `avx_compare32[predicate]`.
 #[inline]
-pub(crate) fn f32_compare_predicate(
+pub(in crate::cpu) fn f32_compare_predicate(
     predicate: u8,
     a: float32,
     b: float32,
@@ -91,7 +91,7 @@ pub(crate) fn f32_compare_predicate(
 /// Evaluate one of the 32 double-precision compare predicates.
 /// Bochs `avx_compare64[predicate]`.
 #[inline]
-pub(crate) fn f64_compare_predicate(
+pub(in crate::cpu) fn f64_compare_predicate(
     predicate: u8,
     a: float64,
     b: float64,

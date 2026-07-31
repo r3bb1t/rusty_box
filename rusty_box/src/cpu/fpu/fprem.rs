@@ -73,7 +73,7 @@ pub(crate) fn remainder_kernel(
 /// Core FPREM implementation, shared between FPREM (truncation) and FPREM1 (round-to-nearest).
 /// Returns: -1 on error/NaN, 0 on complete, 1 on overflow (incomplete reduction).
 /// Ported from Bochs fprem.cc do_fprem().
-pub(crate) fn do_fprem(
+pub(in crate::cpu) fn do_fprem(
     a: floatx80,
     b: floatx80,
     r: &mut floatx80,

@@ -11,7 +11,7 @@ use super::specialize::*;
 
 /// Float16 fused multiply-add: a*b + c (with operation modifier).
 /// op=0: a*b+c, op=1: a*b-c, op=2: -(a*b)+c, op=3: -(a*b)-c
-pub(crate) fn f16_mul_add(
+pub(in crate::cpu) fn f16_mul_add(
     a: float16,
     b: float16,
     c: float16,

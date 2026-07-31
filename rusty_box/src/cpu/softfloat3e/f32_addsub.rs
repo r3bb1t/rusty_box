@@ -214,7 +214,7 @@ fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> float32 {
 }
 
 /// Berkeley SoftFloat `f32_add`.
-pub(crate) fn f32_add(a: float32, b: float32, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn f32_add(a: float32, b: float32, status: &mut SoftFloatStatus) -> float32 {
     if sign_f32(a ^ b) {
         sub_mags_f32(a, b, status)
     } else {
@@ -223,7 +223,7 @@ pub(crate) fn f32_add(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
 }
 
 /// Berkeley SoftFloat `f32_sub`.
-pub(crate) fn f32_sub(a: float32, b: float32, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn f32_sub(a: float32, b: float32, status: &mut SoftFloatStatus) -> float32 {
     if sign_f32(a ^ b) {
         add_mags_f32(a, b, status)
     } else {

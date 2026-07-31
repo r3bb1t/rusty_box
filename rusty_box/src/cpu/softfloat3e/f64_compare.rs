@@ -10,7 +10,7 @@ use super::softfloat_types::*;
 /// Compare two double-precision numbers, returning one of `RELATION_LESS`,
 /// `RELATION_EQUAL`, `RELATION_GREATER` or `RELATION_UNORDERED`.
 /// Bochs softfloat3e/f64_compare.cc `f64_compare`.
-pub(crate) fn f64_compare_full(
+pub(in crate::cpu) fn f64_compare_full(
     mut a: float64,
     mut b: float64,
     quiet: bool,
@@ -65,20 +65,20 @@ pub(crate) fn f64_compare_full(
 /// Signaling compare — raises #I on a QNaN operand.
 /// Bochs softfloat.h `f64_compare(a, b, status)`.
 #[inline]
-pub(crate) fn f64_compare(a: float64, b: float64, status: &mut SoftFloatStatus) -> i32 {
+pub(in crate::cpu) fn f64_compare(a: float64, b: float64, status: &mut SoftFloatStatus) -> i32 {
     f64_compare_full(a, b, false, status)
 }
 
 /// Quiet compare — a QNaN operand does not raise #I.
 /// Bochs softfloat.h `f64_compare_quiet`.
 #[inline]
-pub(crate) fn f64_compare_quiet(a: float64, b: float64, status: &mut SoftFloatStatus) -> i32 {
+pub(in crate::cpu) fn f64_compare_quiet(a: float64, b: float64, status: &mut SoftFloatStatus) -> i32 {
     f64_compare_full(a, b, true, status)
 }
 
 /// Bochs softfloat3e/f64_min.cc `f64_min`. When both operands compare equal
 /// (including ±0.0) the *second* operand is returned, matching SSE MINPD.
-pub(crate) fn f64_min(mut a: float64, mut b: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_min(mut a: float64, mut b: float64, status: &mut SoftFloatStatus) -> float64 {
     if softfloat_denormalsAreZeros(status) {
         a = f64_denormal_to_zero(a);
         b = f64_denormal_to_zero(b);
@@ -91,7 +91,7 @@ pub(crate) fn f64_min(mut a: float64, mut b: float64, status: &mut SoftFloatStat
 }
 
 /// Bochs softfloat3e/f64_max.cc `f64_max`.
-pub(crate) fn f64_max(mut a: float64, mut b: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_max(mut a: float64, mut b: float64, status: &mut SoftFloatStatus) -> float64 {
     if softfloat_denormalsAreZeros(status) {
         a = f64_denormal_to_zero(a);
         b = f64_denormal_to_zero(b);
