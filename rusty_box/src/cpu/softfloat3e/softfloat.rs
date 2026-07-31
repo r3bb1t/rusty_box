@@ -214,6 +214,15 @@ pub fn f32_is_signaling_nan(a: u32) -> bool {
     ((a & 0x7FC00000) == 0x7F800000) && ((a & 0x003FFFFF) != 0)
 }
 
+/// Bochs softfloat3e/include/softfloat-extra.h `f32_denormal_to_zero`.
+#[inline]
+pub fn f32_denormal_to_zero(a: u32) -> u32 {
+    if f32_exp(a) == 0 && f32_fraction(a) != 0 {
+        return a & 0x80000000;
+    }
+    a
+}
+
 // f64 helpers
 #[inline]
 pub fn f64_sign(a: u64) -> bool {
@@ -238,4 +247,13 @@ pub fn f64_is_nan(a: u64) -> bool {
 #[inline]
 pub fn f64_is_signaling_nan(a: u64) -> bool {
     ((a & 0x7FF8000000000000) == 0x7FF0000000000000) && ((a & 0x0007FFFFFFFFFFFF) != 0)
+}
+
+/// Bochs softfloat3e/include/softfloat-extra.h `f64_denormal_to_zero`.
+#[inline]
+pub fn f64_denormal_to_zero(a: u64) -> u64 {
+    if f64_exp(a) == 0 && f64_fraction(a) != 0 {
+        return a & 0x8000000000000000;
+    }
+    a
 }

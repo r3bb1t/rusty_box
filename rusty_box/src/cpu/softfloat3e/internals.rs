@@ -302,7 +302,14 @@ pub fn norm_round_pack_to_f32(
 // Round-and-pack to float64
 // ============================================================
 
-pub fn round_pack_to_f64(sign: bool, exp: i16, sig: u64, status: &mut SoftFloatStatus) -> float64 {
+pub fn round_pack_to_f64(
+    sign: bool,
+    mut exp: i16,
+    mut sig: u64,
+    status: &mut SoftFloatStatus,
+) -> float64 {
+    // Faithful port of Bochs softfloat3e/s_roundPackToF64.cc
+    // softfloat_roundPackToF64.
     let rounding_mode = softfloat_getRoundingMode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
     let mut round_increment: u64 = 0x200;
@@ -313,56 +320,54 @@ pub fn round_pack_to_f64(sign: bool, exp: i16, sig: u64, status: &mut SoftFloatS
             0
         };
     }
-    let round_bits = (sig & 0x3FF) as u32;
-    let mut exp = exp;
-    let mut sig = sig;
+    let mut round_bits = sig & 0x3FF;
 
     if 0x7FD <= (exp as u16) {
         if exp < 0 {
-            let is_tiny = (exp < -1) || (sig.wrapping_add(round_increment) < 0x8000000000000000);
-            sig = shift_right_jam64(sig, (-(exp as i32)) as u32);
-            exp = 0;
-            let round_bits = (sig & 0x3FF) as u32;
-            if round_bits != 0 {
-                softfloat_raiseFlags(status, FLAG_INEXACT);
+            let is_tiny =
+                (exp < -1) || (sig.wrapping_add(round_increment) < 0x8000_0000_0000_0000);
+            if is_tiny && !softfloat_isMaskedException(status, FLAG_UNDERFLOW) {
+                softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                exp += 1536;
+            } else {
+                sig = shift_right_jam64(sig, (-exp) as u32);
+                exp = 0;
+                round_bits = sig & 0x3FF;
                 if is_tiny {
-                    softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                    if softfloat_flushUnderflowToZero(status) {
+                        softfloat_raiseFlags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
+                        return pack_to_f64(sign, 0, 0);
+                    }
+                    if round_bits != 0 {
+                        softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                    }
                 }
             }
-            sig = sig.wrapping_add(round_increment);
-            exp = ((sig & 0x8000000000000000) != 0) as i16;
-            if round_near_even && ((round_bits ^ 0x200) == 0) {
-                sig &= !0x3FFu64;
-            } else {
-                sig >>= 10;
+        } else if 0x7FD < exp || 0x8000_0000_0000_0000 <= sig.wrapping_add(round_increment) {
+            softfloat_raiseFlags(status, FLAG_OVERFLOW);
+            if round_bits != 0 || softfloat_isMaskedException(status, FLAG_OVERFLOW) {
+                softfloat_raiseFlags(status, FLAG_INEXACT);
+                if round_increment != 0 {
+                    softfloat_setRoundingUp(status);
+                }
             }
-            return pack_to_f64(sign, exp, sig);
-        }
-        if (0x7FD < exp) || (0x8000000000000000 <= sig.wrapping_add(round_increment)) {
-            softfloat_raiseFlags(status, FLAG_OVERFLOW | FLAG_INEXACT);
-            if round_near_even
-                || rounding_mode == ROUND_NEAR_MAXMAG
-                || rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })
-            {
-                return pack_to_f64(sign, 0x7FF, 0);
-            } else {
-                return pack_to_f64(sign, 0x7FE, 0x000FFFFFFFFFFFFF);
-            }
+            return pack_to_f64(sign, 0x7FF, 0).wrapping_sub((round_increment == 0) as u64);
         }
     }
-    sig = sig.wrapping_add(round_increment);
-    if sig < round_increment {
-        exp += 1;
+
+    let sig_ref = sig;
+    sig = sig.wrapping_add(round_increment) >> 10;
+    if round_near_even && round_bits == 0x200 {
+        sig &= !1u64;
     }
-    if round_near_even && ((round_bits ^ 0x200) == 0) {
-        sig &= !0x3FFu64;
+    if sig == 0 {
+        exp = 0;
     }
     if round_bits != 0 {
         softfloat_raiseFlags(status, FLAG_INEXACT);
-    }
-    sig >>= 10;
-    if sig == 0 {
-        exp = 0;
+        if (sig << 10) > sig_ref {
+            softfloat_setRoundingUp(status);
+        }
     }
     pack_to_f64(sign, exp, sig)
 }

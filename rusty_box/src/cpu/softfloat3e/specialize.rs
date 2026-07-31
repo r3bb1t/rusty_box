@@ -24,6 +24,13 @@ pub const I64_FROM_NAN: i64 = i64::MIN;
 pub const UI32_FROM_POS_OVERFLOW: u32 = 0xFFFFFFFF;
 pub const UI32_FROM_NEG_OVERFLOW: u32 = 0xFFFFFFFF;
 pub const UI32_FROM_NAN: u32 = 0xFFFFFFFF;
+// Saturating responses, used only by the `saturate` forms of the
+// float→int conversions (AVX-512 VCVTT*S2*SI with EVEX saturation).
+pub const I32_MIN_NEGATIVE_VALUE: i32 = i32::MIN; // 0x80000000
+pub const I32_MAX_POSITIVE_VALUE: i32 = 0x7FFFFFFF;
+pub const I64_MIN_NEGATIVE_VALUE: i64 = i64::MIN; // 0x8000000000000000
+pub const I64_MAX_POSITIVE_VALUE: i64 = 0x7FFFFFFFFFFFFFFF;
+
 pub const UI64_FROM_POS_OVERFLOW: u64 = 0xFFFFFFFFFFFFFFFF;
 pub const UI64_FROM_NEG_OVERFLOW: u64 = 0xFFFFFFFFFFFFFFFF;
 pub const UI64_FROM_NAN: u64 = 0xFFFFFFFFFFFFFFFF;
