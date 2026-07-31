@@ -5,6 +5,7 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_bw.cc`.
 
+use super::sse::{saturate_word_s_to_byte_s, saturate_word_s_to_byte_u};
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -587,7 +588,204 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Saturating / min-max / pack / absolute byte and word arithmetic.
+    //
+    // Every opcode below pairs `LOAD_Vector` with `LOAD_MASK_VectorB` or
+    // `LOAD_MASK_VectorW` in ia_opcodes_evex.def, except VPACKSSWB and
+    // VPACKUSWB, whose base *and* `_Kmask` entries both name `LOAD_Vector` —
+    // so those two must not go through the masked pair helper.
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Element-wise two-operand byte op: src1 = Hdq (vvvv), src2 = rm.
+    /// Bochs cpu_templates.h `HANDLE_AVX512_2OP_BYTE_EL_MASK`.
+    fn evex_bw_2op_b(&mut self, instr: &Instruction, op: fn(u8, u8) -> u8) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = byte_elements(vl);
+        let src1 = read_zmm(self, instr.src1());
+        let src2 = read_src2_bytes(self, instr, vl)?;
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmmubyte(i, op(src1.zmmubyte(i), src2.zmmubyte(i)));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_b(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// Element-wise two-operand word op.
+    /// Bochs cpu_templates.h `HANDLE_AVX512_2OP_WORD_EL_MASK`.
+    fn evex_bw_2op_w(&mut self, instr: &Instruction, op: fn(u16, u16) -> u16) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = word_elements(vl);
+        let src1 = read_zmm(self, instr.src1());
+        let src2 = read_src2_words(self, instr, vl)?;
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16u(i, op(src1.zmm16u(i), src2.zmm16u(i)));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// Single-operand byte op (VPABSB). Bochs `VPABSB_MASK_VdqWdqR`.
+    fn evex_bw_1op_b(&mut self, instr: &Instruction, op: fn(u8) -> u8) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = byte_elements(vl);
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_vec_mask_b_pair(instr)?
+        };
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmmubyte(i, op(src.zmmubyte(i)));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_b(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// Single-operand word op (VPABSW). Bochs `VPABSW_MASK_VdqWdqR`.
+    fn evex_bw_1op_w(&mut self, instr: &Instruction, op: fn(u16) -> u16) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = word_elements(vl);
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_vec_mask_w_pair(instr)?
+        };
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16u(i, op(src.zmm16u(i)));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPADDSB Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG EC
+    pub fn evex_vpaddsb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_b(instr, |a, b| (a as i8).saturating_add(b as i8) as u8)
+    }
+
+    /// VPADDSW Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG ED
+    pub fn evex_vpaddsw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_w(instr, |a, b| (a as i16).saturating_add(b as i16) as u16)
+    }
+
+    /// VPADDUSB Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG DC
+    pub fn evex_vpaddusb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_b(instr, |a, b| a.saturating_add(b))
+    }
+
+    /// VPADDUSW Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG DD
+    pub fn evex_vpaddusw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_w(instr, |a, b| a.saturating_add(b))
+    }
+
+    /// VPSUBSB Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG E8
+    pub fn evex_vpsubsb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_b(instr, |a, b| (a as i8).saturating_sub(b as i8) as u8)
+    }
+
+    /// VPSUBSW Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG E9
+    pub fn evex_vpsubsw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_w(instr, |a, b| (a as i16).saturating_sub(b as i16) as u16)
+    }
+
+    /// VPSUBUSB Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG D8
+    pub fn evex_vpsubusb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_b(instr, |a, b| a.saturating_sub(b))
+    }
+
+    /// VPSUBUSW Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG D9
+    pub fn evex_vpsubusw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_w(instr, |a, b| a.saturating_sub(b))
+    }
+
+    /// VPMINSB Vdq{k}, Hdq, Wdq — EVEX.66.0F38.WIG 38
+    pub fn evex_vpminsb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_b(instr, |a, b| (a as i8).min(b as i8) as u8)
+    }
+
+    /// VPMAXSB Vdq{k}, Hdq, Wdq — EVEX.66.0F38.WIG 3C
+    pub fn evex_vpmaxsb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_b(instr, |a, b| (a as i8).max(b as i8) as u8)
+    }
+
+    /// VPMINUW Vdq{k}, Hdq, Wdq — EVEX.66.0F38.WIG 3A
+    pub fn evex_vpminuw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_w(instr, |a, b| a.min(b))
+    }
+
+    /// VPMAXUW Vdq{k}, Hdq, Wdq — EVEX.66.0F38.WIG 3E
+    pub fn evex_vpmaxuw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_w(instr, |a, b| a.max(b))
+    }
+
+    /// VPMULHRSW Vdq{k}, Hdq, Wdq — EVEX.66.0F38.WIG 0B
+    /// Bochs simd_int.h `xmm_pmulhrsw`: ((a * b >> 14) + 1) >> 1.
+    pub fn evex_vpmulhrsw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_2op_w(instr, |a, b| {
+            let t = ((a as i16 as i32 * b as i16 as i32) >> 14) + 1;
+            (t >> 1) as u16
+        })
+    }
+
+    /// VPABSB Vdq{k}, Wdq — EVEX.66.0F38.WIG 1C
+    pub fn evex_vpabsb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_1op_b(instr, |a| (a as i8).unsigned_abs())
+    }
+
+    /// VPABSW Vdq{k}, Wdq — EVEX.66.0F38.WIG 1D
+    pub fn evex_vpabsw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_bw_1op_w(instr, |a| (a as i16).unsigned_abs())
+    }
+
+    /// The shared body of VPACKSSWB and VPACKUSWB. Packing interleaves the
+    /// two sources *within each 128-bit lane*: bytes 0..7 of a lane come from
+    /// that lane of src1, bytes 8..15 from the same lane of src2. Both def
+    /// entries name `LOAD_Vector`, so the memory operand is read unmasked
+    /// even in the `_Kmask` form; only the write is byte-granular masked.
+    fn evex_packwb(&mut self, instr: &Instruction, saturate: fn(i16) -> u8) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let lanes = byte_elements(vl) / 16;
+        let src1 = read_zmm(self, instr.src1());
+        let src2 = read_src2_unmasked_vector(self, instr)?;
+        let mut result = BxPackedZmmRegister::default();
+        for lane in 0..lanes {
+            for j in 0..8 {
+                result.set_zmmubyte(lane * 16 + j, saturate(src1.zmm16u(lane * 8 + j) as i16));
+                result.set_zmmubyte(
+                    lane * 16 + 8 + j,
+                    saturate(src2.zmm16u(lane * 8 + j) as i16),
+                );
+            }
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_b(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPACKSSWB Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG 63
+    pub fn evex_vpacksswb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_packwb(instr, |v| saturate_word_s_to_byte_s(v) as u8)
+    }
+
+    /// VPACKUSWB Vdq{k}, Hdq, Wdq — EVEX.66.0F.WIG 67
+    pub fn evex_vpackuswb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_packwb(instr, saturate_word_s_to_byte_u)
+    }
 }
+
 
 // ============================================================================
 // Saturation helpers
@@ -614,5 +812,150 @@ fn saturate_i32_to_u16(val: i32) -> u16 {
         0
     } else {
         val as u16
+    }
+}
+
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    //! The saturating byte/word family is easy to get subtly wrong in two
+    //! ways that a naive test would miss:
+    //!
+    //!   * saturation vs wrapping — a wrapping add produces a plausible
+    //!     value everywhere except at the clamp edges, so the edges are the
+    //!     only place the two differ;
+    //!   * VPACKSSWB/VPACKUSWB interleave the two sources *per 128-bit lane*,
+    //!     not across the whole register, so a whole-register implementation
+    //!     is correct at VL128 and wrong at VL256/512.
+    //!
+    //! These drive `execute_instruction` rather than the handler directly,
+    //! because the dispatcher arm is itself part of what is under test.
+
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::decoder::{BxSegregs, Instruction};
+    use rusty_box_decoder::opcode::Opcode;
+
+    /// Register-form EVEX instruction with no masking (k0): dst=0, src1=1,
+    /// src2=2.
+    fn evex_reg(opcode: Opcode, vl: u8) -> Instruction {
+        let mut i = Instruction::default();
+        i.set_ia_opcode(opcode);
+        i.set_src_reg(0, 0); // dst
+        i.set_src_reg(1, 1); // src1 = Hdq (vvvv)
+        i.set_src_reg(2, 2); // src2 = rm
+        i.set_opmask(0);
+        i.set_vex(true);
+        i.set_vl(vl);
+        i.set_seg(BxSegregs::Ds);
+        // `init` assigns `flags` wholesale, so mod_c0 must be asserted after.
+        i.init(0, 0, 1, 1);
+        i.assert_mod_c0();
+        i
+    }
+
+    #[test]
+    fn saturating_byte_and_word_adds_clamp_instead_of_wrapping() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+
+        // Signed byte: 100 + 100 saturates to +127, -100 + -100 to -128.
+        cpu.vmm[1].set_zmmubyte(0, 100);
+        cpu.vmm[2].set_zmmubyte(0, 100);
+        cpu.vmm[1].set_zmmubyte(1, (-100i8) as u8);
+        cpu.vmm[2].set_zmmubyte(1, (-100i8) as u8);
+        // Unsigned byte: 200 + 100 saturates to 255.
+        cpu.vmm[1].set_zmmubyte(2, 200);
+        cpu.vmm[2].set_zmmubyte(2, 100);
+
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpaddsbVdqHdqWdq, 0))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmmubyte(0), 127i8 as u8, "signed positive clamp");
+        assert_eq!(cpu.vmm[0].zmmubyte(1), (-128i8) as u8, "signed negative clamp");
+
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpaddusbVdqHdqWdq, 0))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmmubyte(2), 255, "unsigned clamp");
+
+        // Signed word: 30000 + 30000 saturates to 32767, and unsigned
+        // subtract clamps at 0 rather than wrapping to 65535.
+        cpu.vmm[1].set_zmm16u(0, 30000);
+        cpu.vmm[2].set_zmm16u(0, 30000);
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpaddswVdqHdqWdq, 0))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm16u(0), 32767);
+
+        cpu.vmm[1].set_zmm16u(0, 5);
+        cpu.vmm[2].set_zmm16u(0, 9);
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpsubuswVdqHdqWdq, 0))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm16u(0), 0, "unsigned subtract must not wrap");
+    }
+
+    #[test]
+    fn vpabsb_maps_int_min_to_its_unsigned_magnitude() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        // abs(-128) is not representable as i8; x86 yields 0x80.
+        cpu.vmm[2].set_zmmubyte(0, 0x80);
+        cpu.vmm[2].set_zmmubyte(1, (-5i8) as u8);
+        cpu.vmm[2].set_zmmubyte(2, 7);
+        let mut i = evex_reg(Opcode::EvexVpabsbVdqWdq, 0);
+        i.set_src_reg(1, 2); // single-operand form reads src()
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.vmm[0].zmmubyte(0), 0x80);
+        assert_eq!(cpu.vmm[0].zmmubyte(1), 5);
+        assert_eq!(cpu.vmm[0].zmmubyte(2), 7);
+    }
+
+    #[test]
+    fn vpacksswb_interleaves_per_128_bit_lane_at_vl256() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+
+        // Tag every source word with its lane so a whole-register pack is
+        // distinguishable from a per-lane one. src1 words -> 0x0n, src2 -> 0x1n.
+        for lane in 0..2usize {
+            for j in 0..8usize {
+                cpu.vmm[1].set_zmm16u(lane * 8 + j, (lane * 8 + j) as u16);
+                cpu.vmm[2].set_zmm16u(lane * 8 + j, (0x10 + lane * 8 + j) as u16);
+            }
+        }
+
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpacksswbVdqHdqWdq, 1))
+            .unwrap();
+
+        // Lane 0: bytes 0..7 from src1 lane 0, bytes 8..15 from src2 lane 0.
+        // Lane 1: bytes 16..23 from src1 lane 1, bytes 24..31 from src2 lane 1.
+        for lane in 0..2usize {
+            for j in 0..8usize {
+                assert_eq!(
+                    cpu.vmm[0].zmmubyte(lane * 16 + j),
+                    (lane * 8 + j) as u8,
+                    "lane {lane} src1 byte {j}"
+                );
+                assert_eq!(
+                    cpu.vmm[0].zmmubyte(lane * 16 + 8 + j),
+                    (0x10 + lane * 8 + j) as u8,
+                    "lane {lane} src2 byte {j}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pack_saturation_differs_between_signed_and_unsigned_forms() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        // 0x0140 = 320: signed-byte saturation gives 127, unsigned gives 255.
+        // -1 stays -1 signed but clamps to 0 unsigned.
+        cpu.vmm[1].set_zmm16u(0, 320);
+        cpu.vmm[1].set_zmm16u(1, (-1i16) as u16);
+
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpacksswbVdqHdqWdq, 0))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmmubyte(0), 127);
+        assert_eq!(cpu.vmm[0].zmmubyte(1), 0xFF, "signed -1 stays -1");
+
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpackuswbVdqHdqWdq, 0))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmmubyte(0), 255);
+        assert_eq!(cpu.vmm[0].zmmubyte(1), 0, "negative clamps to zero");
     }
 }

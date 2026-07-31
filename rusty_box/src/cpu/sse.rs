@@ -28,7 +28,7 @@ use super::{
 
 /// Saturate a signed 16-bit value to signed 8-bit range [-128, 127]
 #[inline]
-fn saturate_word_s_to_byte_s(val: i16) -> i8 {
+pub(super) fn saturate_word_s_to_byte_s(val: i16) -> i8 {
     if val > 127 {
         127
     } else if val < -128 {
@@ -40,7 +40,7 @@ fn saturate_word_s_to_byte_s(val: i16) -> i8 {
 
 /// Saturate a signed 16-bit value to unsigned 8-bit range [0, 255]
 #[inline]
-fn saturate_word_s_to_byte_u(val: i16) -> u8 {
+pub(super) fn saturate_word_s_to_byte_u(val: i16) -> u8 {
     if val > 255 {
         255
     } else if val < 0 {

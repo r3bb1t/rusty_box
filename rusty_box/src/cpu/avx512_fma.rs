@@ -359,4 +359,168 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vfnmsub231pd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::Fnmsub)
     }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Alternating add/subtract FMA. VFMADDSUB subtracts on the even
+    // elements and adds on the odd ones; VFMSUBADD is the inverse
+    // (Bochs simd_pfp.h xmm_fmaddsubps / xmm_fmsubaddps). The parity is
+    // taken on the element index, which agrees with Bochs's per-128-bit-lane
+    // primitives because every lane holds an even number of elements.
+    // ════════════════════════════════════════════════════════════════════
+
+    /// VFMADDSUB132PS — EVEX.66.0F38.W0 96
+    /// result[i] = V[i] * W[i] -+ H[i]
+    pub fn evex_vfmaddsub132ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::FmaddSub)
+    }
+
+    /// VFMADDSUB132PD — EVEX.66.0F38.W1 96
+    /// result[i] = V[i] * W[i] -+ H[i]
+    pub fn evex_vfmaddsub132pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::FmaddSub)
+    }
+
+    /// VFMADDSUB213PS — EVEX.66.0F38.W0 A6
+    /// result[i] = H[i] * V[i] -+ W[i]
+    pub fn evex_vfmaddsub213ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_fma_packed_ps(instr, VexFmaForm::F213, VexPackedFmaOp::FmaddSub)
+    }
+
+    /// VFMADDSUB213PD — EVEX.66.0F38.W1 A6
+    /// result[i] = H[i] * V[i] -+ W[i]
+    pub fn evex_vfmaddsub213pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_fma_packed_pd(instr, VexFmaForm::F213, VexPackedFmaOp::FmaddSub)
+    }
+
+    /// VFMADDSUB231PS — EVEX.66.0F38.W0 B6
+    /// result[i] = H[i] * W[i] -+ V[i]
+    pub fn evex_vfmaddsub231ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_fma_packed_ps(instr, VexFmaForm::F231, VexPackedFmaOp::FmaddSub)
+    }
+
+    /// VFMADDSUB231PD — EVEX.66.0F38.W1 B6
+    /// result[i] = H[i] * W[i] -+ V[i]
+    pub fn evex_vfmaddsub231pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::FmaddSub)
+    }
+
+    /// VFMSUBADD132PS — EVEX.66.0F38.W0 97
+    /// result[i] = V[i] * W[i] +- H[i]
+    pub fn evex_vfmsubadd132ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::FmsubAdd)
+    }
+
+    /// VFMSUBADD132PD — EVEX.66.0F38.W1 97
+    /// result[i] = V[i] * W[i] +- H[i]
+    pub fn evex_vfmsubadd132pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::FmsubAdd)
+    }
+
+    /// VFMSUBADD213PS — EVEX.66.0F38.W0 A7
+    /// result[i] = H[i] * V[i] +- W[i]
+    pub fn evex_vfmsubadd213ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_fma_packed_ps(instr, VexFmaForm::F213, VexPackedFmaOp::FmsubAdd)
+    }
+
+    /// VFMSUBADD213PD — EVEX.66.0F38.W1 A7
+    /// result[i] = H[i] * V[i] +- W[i]
+    pub fn evex_vfmsubadd213pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_fma_packed_pd(instr, VexFmaForm::F213, VexPackedFmaOp::FmsubAdd)
+    }
+
+    /// VFMSUBADD231PS — EVEX.66.0F38.W0 B7
+    /// result[i] = H[i] * W[i] +- V[i]
+    pub fn evex_vfmsubadd231ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_fma_packed_ps(instr, VexFmaForm::F231, VexPackedFmaOp::FmsubAdd)
+    }
+
+    /// VFMSUBADD231PD — EVEX.66.0F38.W1 B7
+    /// result[i] = H[i] * W[i] +- V[i]
+    pub fn evex_vfmsubadd231pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_fma_packed_pd(instr, VexFmaForm::F231, VexPackedFmaOp::FmsubAdd)
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    //! VFMADDSUB and VFMSUBADD differ from the plain FMA forms only in which
+    //! elements subtract, so an inverted parity produces results that are
+    //! individually plausible — every element is still a valid fused
+    //! multiply-add. Only comparing the two mnemonics against each other, on
+    //! the same inputs, pins the parity down.
+
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::decoder::{BxSegregs, Instruction};
+    use crate::cpu::xmm::MXCSR_RESET;
+    use rusty_box_decoder::opcode::Opcode;
+
+    /// Register-form EVEX.128, no masking. The 213 form computes
+    /// H * V + W, with dst doubling as V.
+    fn evex_reg(opcode: Opcode) -> Instruction {
+        let mut i = Instruction::default();
+        i.set_ia_opcode(opcode);
+        i.set_src_reg(0, 0); // dst = V
+        i.set_src_reg(1, 1); // rm = W
+        i.set_src_reg(2, 2); // vvvv = H
+        i.set_opmask(0);
+        i.set_vex(true);
+        i.set_vl(0);
+        i.set_seg(BxSegregs::Ds);
+        i.init(0, 0, 1, 1);
+        i.assert_mod_c0();
+        i
+    }
+
+    /// H=2.0, V=3.0, W=1.0 in every element, so H*V = 6.0 and the two
+    /// possible results are 6+1=7 and 6-1=5 — far apart and exact.
+    fn seed<I: crate::cpu::cpuid::BxCpuIdTrait>(
+        cpu: &mut crate::cpu::cpu::BxCpuC<'_, I, ()>,
+    ) {
+        cpu.mxcsr.mxcsr = MXCSR_RESET;
+        for n in 0..4 {
+            cpu.vmm[0].set_zmm32u(n, 3.0f32.to_bits()); // V
+            cpu.vmm[1].set_zmm32u(n, 1.0f32.to_bits()); // W
+            cpu.vmm[2].set_zmm32u(n, 2.0f32.to_bits()); // H
+        }
+    }
+
+    #[test]
+    fn fmaddsub_subtracts_on_even_elements_and_fmsubadd_is_its_inverse() {
+        let add = 7.0f32.to_bits();
+        let sub = 5.0f32.to_bits();
+
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        seed(&mut cpu);
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVfmaddsub213psVpsHpsWps))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), sub, "FMADDSUB element 0 must subtract");
+        assert_eq!(cpu.vmm[0].zmm32u(1), add, "FMADDSUB element 1 must add");
+        assert_eq!(cpu.vmm[0].zmm32u(2), sub);
+        assert_eq!(cpu.vmm[0].zmm32u(3), add);
+
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        seed(&mut cpu);
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVfmsubadd213psVpsHpsWps))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), add, "FMSUBADD element 0 must add");
+        assert_eq!(cpu.vmm[0].zmm32u(1), sub, "FMSUBADD element 1 must subtract");
+        assert_eq!(cpu.vmm[0].zmm32u(2), add);
+        assert_eq!(cpu.vmm[0].zmm32u(3), sub);
+    }
+
+    #[test]
+    fn fmaddsub_double_precision_keeps_the_same_parity() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.mxcsr.mxcsr = MXCSR_RESET;
+        for n in 0..2 {
+            cpu.vmm[0].set_zmm64u(n, 3.0f64.to_bits()); // V
+            cpu.vmm[1].set_zmm64u(n, 1.0f64.to_bits()); // W
+            cpu.vmm[2].set_zmm64u(n, 2.0f64.to_bits()); // H
+        }
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVfmaddsub213pdVpdHpdWpd))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm64u(0), 5.0f64.to_bits());
+        assert_eq!(cpu.vmm[0].zmm64u(1), 7.0f64.to_bits());
+    }
 }
