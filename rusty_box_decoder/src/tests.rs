@@ -1940,3 +1940,118 @@ fn vl512_entries_are_reachable() {
         assert_eq!(i.get_ia_opcode(), *want, "for {name}");
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// Decode round-trip over every EVEX opcode-map entry.
+//
+// The maps say, per entry, which encoding selects it: SSE prefix, EVEX.W,
+// vector length, whether an opmask is required, register or memory form,
+// and the ModRM reg field for the /digit groups. decode64 independently
+// builds a decmask from a real instruction and matches it against those
+// attributes. Two pieces of code describing one encoding, so they can be
+// checked against each other — synthesise the encoding each entry demands
+// and decode it back.
+//
+// This is the check that would have caught the vector-length defect by
+// itself: 70 entries carrying ATTR_VL512 / ATTR_VL256_512 decoded at xmm and
+// ymm width but #UD'd at zmm, because the decmask field is a thermometer
+// code (0/1/3) while the raw L'L bits (0/1/2) were being shifted in.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+#[ignore = "INSTRUMENT NOT YET TRUSTED, NOT A DISMISSED DEFECT. Reports 311 of             1253 register-form entries as non-decoding, including 0F 7A whose             entry bits are byte-identical to 0F 78 entry 5 — which the same             synthesised encoding does match. One of the two is wrong and it is             not yet established which. Two earlier readings from unvalidated             harnesses in this area were false, so this must be reconciled             against a known-good encoding per opcode byte before any of its             output is treated as a defect list. 942 entries do decode."]
+fn every_evex_map_entry_decodes() {
+    use crate::decoder::opmap_evex::EVEX_TABLE;
+    use crate::decoder::tables::{
+        MASK_K0_OFFSET, MODC0_OFFSET, NNN_OFFSET, SSE_PREFIX_OFFSET, VEX_VL_128_256_OFFSET,
+        VEX_W_OFFSET,
+    };
+    use crate::decoder::OpcodeTableEntry;
+    use crate::opcode::Opcode;
+
+    let mut checked = 0usize;
+    let mut skipped_mem = 0usize;
+    let mut failures: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+
+    for (idx, group) in EVEX_TABLE.iter().enumerate() {
+        let map = idx / 256 + 1;
+        let opcode = (idx % 256) as u8;
+        for raw in group.iter() {
+            let entry = OpcodeTableEntry::new(*raw);
+            // value_bits() carries the packed opcode in its upper bits;
+            // only the low 24 are decmask fields.
+            let value = entry.value_bits() & 0x00FF_FFFF;
+            let mask = entry.mask_bits();
+            let field = |offset: u32, width: u32| -> Option<u32> {
+                let m = ((1u32 << width) - 1) << offset;
+                if mask & m == 0 {
+                    None
+                } else {
+                    Some((value & m) >> offset)
+                }
+            };
+
+            // Memory forms need mod != 11 and a different operand layout;
+            // they are covered by the targeted disp8 tests instead.
+            if field(MODC0_OFFSET, 1) == Some(0) {
+                skipped_mem += 1;
+                continue;
+            }
+
+            let pp = field(SSE_PREFIX_OFFSET, 2).unwrap_or(0) as u8;
+            let w = field(VEX_W_OFFSET, 1).unwrap_or(0) as u8;
+            // Thermometer code: 0 = 128, 1 = 256, 3 = 512. Choose the
+            // narrowest width the entry accepts, then turn it back into the
+            // L'L bits an encoding actually carries.
+            let ll: u8 = match field(VEX_VL_128_256_OFFSET, 2) {
+                Some(3) => 2,
+                Some(1) => 1,
+                Some(0) => 0,
+                Some(_) => 1,
+                None => match field(VEX_VL_128_256_OFFSET, 1) {
+                    Some(1) => 1,
+                    _ => 0,
+                },
+            };
+            // MASK_K0 means "no opmask"; otherwise a non-zero one is required.
+            let aaa: u8 = match field(MASK_K0_OFFSET, 1) {
+                Some(1) => 0,
+                Some(_) => 1,
+                None => 0,
+            };
+            let nnn = field(NNN_OFFSET, 3).unwrap_or(0) as u8;
+
+            let p0 = 0xF0u8 | (map as u8 & 0x07);
+            let p1 = (w << 7) | (0x0F << 3) | 0x04 | pp;
+            let p2 = (ll << 5) | 0x08 | aaa;
+            let modrm = 0xC0u8 | ((nnn & 0x07) << 3) | 0x02;
+            let bytes = [0x62, p0, p1, p2, opcode, modrm, 0x00];
+
+            checked += 1;
+            match crate::decoder::decode64::fetch_decode64(&bytes) {
+                Ok(i) if i.get_ia_opcode() != Opcode::IaError => {}
+                other => failures.push(std::format!(
+                    "map{map} {opcode:02X} {bytes:02X?} wanted {:?} got {}",
+                    entry.opcode(),
+                    match other {
+                        Ok(_) => std::string::String::from("IaError"),
+                        Err(e) => std::format!("{e:?}"),
+                    }
+                )),
+            }
+        }
+    }
+
+    assert!(checked > 900, "expected most entries to be register forms, checked {checked}");
+    assert!(
+        failures.is_empty(),
+        "{} of {checked} EVEX map entries do not decode ({skipped_mem} memory forms skipped):\n  {}",
+        failures.len(),
+        failures
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<std::vec::Vec<_>>()
+            .join("\n  ")
+    );
+}
