@@ -6,24 +6,24 @@ use super::super::softfloat3e::f128::*;
 use super::super::softfloat3e::internals::*;
 use super::super::softfloat3e::primitives::*;
 use super::super::softfloat3e::softfloat::*;
-use super::super::softfloat3e::softfloat_types::floatx80;
+use super::super::softfloat3e::softfloat_types::ExtFloat80;
 use super::super::softfloat3e::specialize::*;
 use super::poly::*;
 
-/// 1.0 in floatx80 format
-const FLOATX80_ONE: floatx80 = floatx80 {
+/// 1.0 in ExtFloat80 format
+const FLOATX80_ONE: ExtFloat80 = ExtFloat80 {
     signif: 0x8000000000000000,
     sign_exp: 0x3FFF,
 };
 
-/// -1.0 in floatx80 format
-const FLOATX80_NEG_ONE: floatx80 = floatx80 {
+/// -1.0 in ExtFloat80 format
+const FLOATX80_NEG_ONE: ExtFloat80 = ExtFloat80 {
     signif: 0x8000000000000000,
     sign_exp: 0xBFFF,
 };
 
-/// -0.5 in floatx80 format
-const FLOATX80_NEG_HALF: floatx80 = floatx80 {
+/// -0.5 in ExtFloat80 format
+const FLOATX80_NEG_HALF: ExtFloat80 = ExtFloat80 {
     signif: 0x8000000000000000,
     sign_exp: 0xBFFE,
 };
@@ -57,10 +57,10 @@ pub(in crate::cpu) fn poly_exp(x: Float128, status: &mut SoftFloatStatus) -> Flo
 
 /// Compute 2^a - 1 for extended precision float `a`.
 /// Ported from Bochs f2xm1.cc using Float128 polynomial evaluation.
-pub(in crate::cpu) fn f2xm1_impl(a: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn f2xm1_impl(a: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
     }
 
@@ -82,7 +82,7 @@ pub(in crate::cpu) fn f2xm1_impl(a: floatx80, status: &mut SoftFloatStatus) -> f
         if a_sig == 0 {
             return a; // 2^0 - 1 = 0
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL | FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_DENORMAL | FLAG_INEXACT);
         let norm = norm_subnormal_extf80_sig(a_sig);
         a_exp = norm.exp + 1;
         let a_sig = norm.sig;
@@ -99,7 +99,7 @@ pub(in crate::cpu) fn f2xm1_impl(a: floatx80, status: &mut SoftFloatStatus) -> f
         return round_pack_to_extf80(a_sign, a_exp, z_sig0, z_sig1, 80, status);
     }
 
-    softfloat_raiseFlags(status, FLAG_INEXACT);
+    softfloat_raise_flags(status, FLAG_INEXACT);
 
     if a_exp < 0x3FFF {
         if a_exp < FLOATX80_EXP_BIAS - 68 {

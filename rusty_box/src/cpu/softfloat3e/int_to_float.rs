@@ -1,5 +1,4 @@
-#![allow(dead_code, non_snake_case)]
-//! Signed-integer to float32/float64 conversions.
+//! Signed-integer to Float32/Float64 conversions.
 //! Ported from Bochs softfloat3e/i32_to_f32.cc, i32_to_f64.cc,
 //! i64_to_f32.cc and i64_to_f64.cc.
 
@@ -9,7 +8,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 
 /// Bochs softfloat3e `i32_to_f32`.
-pub(in crate::cpu) fn i32_to_f32(a: i32, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn i32_to_f32(a: i32, status: &mut SoftFloatStatus) -> Float32 {
     let sign = a < 0;
     if (a & 0x7FFF_FFFF) == 0 {
         return if sign { pack_to_f32(true, 0x9E, 0) } else { 0 };
@@ -24,7 +23,7 @@ pub(in crate::cpu) fn i32_to_f32(a: i32, status: &mut SoftFloatStatus) -> float3
 
 /// Bochs softfloat3e `i32_to_f64`. Always exact — never rounds, so it takes
 /// no status word.
-pub(in crate::cpu) fn i32_to_f64(a: i32) -> float64 {
+pub(in crate::cpu) fn i32_to_f64(a: i32) -> Float64 {
     if a == 0 {
         return 0;
     }
@@ -39,7 +38,7 @@ pub(in crate::cpu) fn i32_to_f64(a: i32) -> float64 {
 }
 
 /// Bochs softfloat3e `i64_to_f32`.
-pub(in crate::cpu) fn i64_to_f32(a: i64, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn i64_to_f32(a: i64, status: &mut SoftFloatStatus) -> Float32 {
     let sign = a < 0;
     let abs_a = if sign {
         (a as u64).wrapping_neg()
@@ -64,7 +63,7 @@ pub(in crate::cpu) fn i64_to_f32(a: i64, status: &mut SoftFloatStatus) -> float3
 }
 
 /// Bochs softfloat3e `i64_to_f64`.
-pub(in crate::cpu) fn i64_to_f64(a: i64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn i64_to_f64(a: i64, status: &mut SoftFloatStatus) -> Float64 {
     let sign = a < 0;
     if (a & 0x7FFF_FFFF_FFFF_FFFF) == 0 {
         return if sign {

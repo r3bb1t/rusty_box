@@ -362,7 +362,7 @@ impl BxMxcsr {
     }
 
     /// The 6 exception-mask bits (IM..PM) shifted down to bit 0, matching the
-    /// SoftFloat `softfloat_exceptionMasks` layout (bit0=IE .. bit5=PE).
+    /// SoftFloat `softfloat_exception_masks` layout (bit0=IE .. bit5=PE).
     /// Bochs `bx_mxcsr_t::get_exceptions_masks()` (xmm.h).
     #[inline]
     pub fn exceptions_masks(&self) -> i32 {

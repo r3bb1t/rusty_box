@@ -1,4 +1,3 @@
-#![allow(non_camel_case_types, dead_code, non_snake_case)]
 //! Float32 to extFloat80 conversion.
 //! Ported from Berkeley SoftFloat 3e: f32_to_extF80.c
 
@@ -7,7 +6,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub(in crate::cpu) fn f32_to_extf80(a: float32, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn f32_to_extf80(a: Float32, status: &mut SoftFloatStatus) -> ExtFloat80 {
     let sign = sign_f32(a);
     let exp = exp_f32(a);
     let frac = frac_f32(a);
@@ -16,7 +15,7 @@ pub(in crate::cpu) fn f32_to_extf80(a: float32, status: &mut SoftFloatStatus) ->
     if exp == 0xFF {
         if frac != 0 {
             // NaN: convert to extF80 NaN
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             let sig = ((frac as u64) | 0x00400000) << 40 | 0x8000000000000000;
             return pack_floatx80(sign, 0x7FFF, sig);
         }
@@ -28,7 +27,7 @@ pub(in crate::cpu) fn f32_to_extf80(a: float32, status: &mut SoftFloatStatus) ->
         if frac == 0 {
             return pack_floatx80(sign, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f32_sig(frac);
         let exp = norm.exp;
         let frac = norm.sig;

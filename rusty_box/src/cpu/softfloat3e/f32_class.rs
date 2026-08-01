@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! Float32 classification. Ported from Bochs softfloat3e/f32_class.cc.
 
 use super::internals::*;
@@ -6,7 +5,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 
 /// Bochs softfloat3e/f32_class.cc `f32_class`.
-pub(in crate::cpu) fn f32_class(a: float32) -> SoftFloatClass {
+pub(in crate::cpu) fn f32_class(a: Float32) -> SoftFloatClass {
     let sign_a = sign_f32(a);
     let exp_a = exp_f32(a);
     let sig_a = frac_f32(a);

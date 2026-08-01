@@ -1,3 +1,7 @@
+// Ported wholesale from Berkeley SoftFloat 3e / Bochs softfloat3e: these
+// modules carry the complete primitive surface, part of which no x86
+// instruction reaches yet. Kept for parity with upstream rather than
+// trimmed to current callers.
 #![allow(dead_code)]
 //! Primitive bit-manipulation and multi-precision integer operations.
 //! Ported from Berkeley SoftFloat 3e primitives.h / s_*.c.

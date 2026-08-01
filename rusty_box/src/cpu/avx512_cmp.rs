@@ -9,7 +9,7 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_cmp.cc`, `avx512_pfp.cc`.
 
-use super::softfloat3e::softfloat::softfloat_getExceptionFlags;
+use super::softfloat3e::softfloat::softfloat_get_exception_flags;
 use super::softfloat3e::softfloat_compare::{f32_compare_predicate, f64_compare_predicate};
 use super::{
     cpu::BxCpuC,
@@ -212,7 +212,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 result |= 1 << i;
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.bx_write_opmask(instr.dst() as usize, result);
         Ok(())
     }

@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! Float64 addition and subtraction.
 //! Ported from Berkeley SoftFloat 3e f64_addsub.c + s_addMagsF64.c + s_subMagsF64.c.
 
@@ -14,13 +13,13 @@ fn add_mags_f64(
     ui_b: u64,
     sign_z: bool,
     status: &mut SoftFloatStatus,
-) -> float64 {
+) -> Float64 {
     let exp_a = exp_f64(ui_a);
     let mut sig_a = frac_f64(ui_a);
     let exp_b = exp_f64(ui_b);
     let mut sig_b = frac_f64(ui_b);
 
-    if softfloat_denormalsAreZeros(status) {
+    if softfloat_denormals_are_zeros(status) {
         if exp_a == 0 {
             sig_a = 0;
             ui_a = pack_to_f64(sign_z, 0, 0);
@@ -37,15 +36,15 @@ fn add_mags_f64(
         if exp_a == 0 {
             let ui_z = ui_a.wrapping_add(sig_b);
             if (sig_a | sig_b) != 0 {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
                 let is_tiny = exp_f64(ui_z) == 0;
                 if is_tiny {
-                    if softfloat_flushUnderflowToZero(status) {
-                        softfloat_raiseFlags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
+                    if softfloat_flush_underflow_to_zero(status) {
+                        softfloat_raise_flags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
                         return pack_to_f64(sign_z, 0, 0);
                     }
-                    if !softfloat_isMaskedException(status, FLAG_UNDERFLOW) {
-                        softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                    if !softfloat_is_masked_exception(status, FLAG_UNDERFLOW) {
+                        softfloat_raise_flags(status, FLAG_UNDERFLOW);
                     }
                 }
             }
@@ -71,13 +70,13 @@ fn add_mags_f64(
                     return softfloat_propagate_nan_f64(ui_a, ui_b, status);
                 }
                 if sig_a != 0 && exp_a == 0 {
-                    softfloat_raiseFlags(status, FLAG_DENORMAL);
+                    softfloat_raise_flags(status, FLAG_DENORMAL);
                 }
                 return pack_to_f64(sign_z, 0x7FF, 0);
             }
 
             if (exp_a == 0 && sig_a != 0) || (exp_b == 0 && sig_b != 0) {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
 
             exp_z = exp_b;
@@ -93,13 +92,13 @@ fn add_mags_f64(
                     return softfloat_propagate_nan_f64(ui_a, ui_b, status);
                 }
                 if sig_b != 0 && exp_b == 0 {
-                    softfloat_raiseFlags(status, FLAG_DENORMAL);
+                    softfloat_raise_flags(status, FLAG_DENORMAL);
                 }
                 return ui_a;
             }
 
             if (exp_a == 0 && sig_a != 0) || (exp_b == 0 && sig_b != 0) {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
 
             exp_z = exp_a;
@@ -127,13 +126,13 @@ fn sub_mags_f64(
     ui_b: u64,
     mut sign_z: bool,
     status: &mut SoftFloatStatus,
-) -> float64 {
+) -> Float64 {
     let mut exp_a = exp_f64(ui_a);
     let mut sig_a = frac_f64(ui_a);
     let exp_b = exp_f64(ui_b);
     let mut sig_b = frac_f64(ui_b);
 
-    if softfloat_denormalsAreZeros(status) {
+    if softfloat_denormals_are_zeros(status) {
         if exp_a == 0 {
             sig_a = 0;
         }
@@ -148,15 +147,15 @@ fn sub_mags_f64(
             if (sig_a | sig_b) != 0 {
                 return softfloat_propagate_nan_f64(ui_a, ui_b, status);
             }
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOAT64_DEFAULT_NAN;
         }
         if exp_a == 0 && (sig_a | sig_b) != 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         let mut sig_diff = sig_a as i64 - sig_b as i64;
         if sig_diff == 0 {
-            return pack_to_f64(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0);
+            return pack_to_f64(softfloat_get_rounding_mode(status) == ROUND_MIN, 0, 0);
         }
         if exp_a != 0 {
             exp_a -= 1;
@@ -172,12 +171,12 @@ fn sub_mags_f64(
             exp_z = 0;
         }
         if exp_z == 0 && sig_diff != 0 {
-            if softfloat_flushUnderflowToZero(status) {
-                softfloat_raiseFlags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
+            if softfloat_flush_underflow_to_zero(status) {
+                softfloat_raise_flags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
                 return pack_to_f64(sign_z, 0, 0);
             }
-            if !softfloat_isMaskedException(status, FLAG_UNDERFLOW) {
-                softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+            if !softfloat_is_masked_exception(status, FLAG_UNDERFLOW) {
+                softfloat_raise_flags(status, FLAG_UNDERFLOW);
             }
         }
         pack_to_f64(sign_z, exp_z, (sig_diff << shift_dist) as u64)
@@ -193,13 +192,13 @@ fn sub_mags_f64(
                     return softfloat_propagate_nan_f64(ui_a, ui_b, status);
                 }
                 if sig_a != 0 && exp_a == 0 {
-                    softfloat_raiseFlags(status, FLAG_DENORMAL);
+                    softfloat_raise_flags(status, FLAG_DENORMAL);
                 }
                 return pack_to_f64(sign_z, 0x7FF, 0);
             }
 
             if (sig_a != 0 && exp_a == 0) || (sig_b != 0 && exp_b == 0) {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
 
             sig_a = sig_a.wrapping_add(if exp_a != 0 {
@@ -217,13 +216,13 @@ fn sub_mags_f64(
                     return softfloat_propagate_nan_f64(ui_a, ui_b, status);
                 }
                 if sig_b != 0 && exp_b == 0 {
-                    softfloat_raiseFlags(status, FLAG_DENORMAL);
+                    softfloat_raise_flags(status, FLAG_DENORMAL);
                 }
                 return ui_a;
             }
 
             if (sig_a != 0 && exp_a == 0) || (sig_b != 0 && exp_b == 0) {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
 
             sig_b = sig_b.wrapping_add(if exp_b != 0 {
@@ -241,7 +240,7 @@ fn sub_mags_f64(
 }
 
 /// Berkeley SoftFloat `f64_add`.
-pub(in crate::cpu) fn f64_add(a: float64, b: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_add(a: Float64, b: Float64, status: &mut SoftFloatStatus) -> Float64 {
     let sign_a = sign_f64(a);
     let sign_b = sign_f64(b);
     if sign_a == sign_b {
@@ -252,7 +251,7 @@ pub(in crate::cpu) fn f64_add(a: float64, b: float64, status: &mut SoftFloatStat
 }
 
 /// Berkeley SoftFloat `f64_sub`.
-pub(in crate::cpu) fn f64_sub(a: float64, b: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_sub(a: Float64, b: Float64, status: &mut SoftFloatStatus) -> Float64 {
     let sign_a = sign_f64(a);
     let sign_b = sign_f64(b);
     if sign_a == sign_b {

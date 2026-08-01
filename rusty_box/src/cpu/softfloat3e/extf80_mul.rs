@@ -1,4 +1,3 @@
-#![allow(non_camel_case_types, dead_code, non_snake_case)]
 //! ExtFloat80 multiplication.
 //! Ported from Berkeley SoftFloat 3e: extF80_mul.c
 
@@ -8,10 +7,10 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub(in crate::cpu) fn extf80_mul(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn extf80_mul(a: ExtFloat80, b: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
     }
 
@@ -35,11 +34,11 @@ pub(in crate::cpu) fn extf80_mul(a: floatx80, b: floatx80, status: &mut SoftFloa
         let mag_bits = (exp_b as u64) | sig_b;
         if mag_bits == 0 {
             // Inf * 0 = invalid
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOATX80_DEFAULT_NAN;
         }
         if (exp_b == 0 && sig_b != 0) || (exp_a == 0 && sig_a != 0) {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return pack_floatx80(sign_z, 0x7FFF, 0x8000000000000000);
     }
@@ -51,11 +50,11 @@ pub(in crate::cpu) fn extf80_mul(a: floatx80, b: floatx80, status: &mut SoftFloa
         }
         let mag_bits = (exp_a as u64) | sig_a;
         if mag_bits == 0 {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOATX80_DEFAULT_NAN;
         }
         if (exp_a == 0 && sig_a != 0) || (exp_b == 0 && sig_b != 0) {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return pack_floatx80(sign_z, 0x7FFF, 0x8000000000000000);
     }
@@ -64,17 +63,17 @@ pub(in crate::cpu) fn extf80_mul(a: floatx80, b: floatx80, status: &mut SoftFloa
     if exp_a == 0 {
         exp_a = 1;
         if sig_a != 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
     }
     if (sig_a & 0x8000000000000000) == 0 {
         if sig_a == 0 {
             if exp_b == 0 && sig_b != 0 {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             return pack_floatx80(sign_z, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(sig_a);
         exp_a += norm.exp;
         sig_a = norm.sig;
@@ -84,14 +83,14 @@ pub(in crate::cpu) fn extf80_mul(a: floatx80, b: floatx80, status: &mut SoftFloa
     if exp_b == 0 {
         exp_b = 1;
         if sig_b != 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
     }
     if (sig_b & 0x8000000000000000) == 0 {
         if sig_b == 0 {
             return pack_floatx80(sign_z, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(sig_b);
         exp_b += norm.exp;
         sig_b = norm.sig;
@@ -110,7 +109,7 @@ pub(in crate::cpu) fn extf80_mul(a: floatx80, b: floatx80, status: &mut SoftFloa
             exp_z,
             sig_z_hi,
             l,
-            softfloat_extF80_roundingPrecision(status),
+            softfloat_extf80_rounding_precision(status),
             status,
         )
     } else {
@@ -119,7 +118,7 @@ pub(in crate::cpu) fn extf80_mul(a: floatx80, b: floatx80, status: &mut SoftFloa
             exp_z,
             sig_z_hi,
             sig_z_lo,
-            softfloat_extF80_roundingPrecision(status),
+            softfloat_extf80_rounding_precision(status),
             status,
         )
     }

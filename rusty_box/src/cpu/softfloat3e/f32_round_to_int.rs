@@ -1,22 +1,21 @@
-#![allow(dead_code, non_snake_case)]
-//! Round float32 to an integral value (SSE4.1 ROUNDPS/ROUNDSS and the
+//! Round Float32 to an integral value (SSE4.1 ROUNDPS/ROUNDSS and the
 //! AVX-512 VRNDSCALEPS/SS scaled forms).
-//! Ported from Bochs softfloat3e/f32_roundToInt.cc.
+//! Ported from Bochs softfloat3e/f32_round_to_int.cc.
 
 use super::internals::*;
 use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-/// Bochs softfloat3e `f32_roundToInt`. `scale` is the VRNDSCALE M field
+/// Bochs softfloat3e `f32_round_to_int`. `scale` is the VRNDSCALE M field
 /// (imm8[7:4]); it is 0 for plain ROUNDPS/ROUNDSS.
 pub(in crate::cpu) fn f32_round_to_int_scaled(
-    mut a: float32,
+    mut a: Float32,
     scale: u8,
     rounding_mode: u8,
     exact: bool,
     status: &mut SoftFloatStatus,
-) -> float32 {
+) -> Float32 {
     let scale = (scale & 0xF) as i16;
     let exp = exp_f32(a);
     let mut frac = frac_f32(a);
@@ -29,7 +28,7 @@ pub(in crate::cpu) fn f32_round_to_int_scaled(
         return a;
     }
 
-    if softfloat_denormalsAreZeros(status) && exp == 0 {
+    if softfloat_denormals_are_zeros(status) && exp == 0 {
         frac = 0;
         a = pack_to_f32(sign, 0, 0);
     }
@@ -39,7 +38,7 @@ pub(in crate::cpu) fn f32_round_to_int_scaled(
             return a;
         }
         if exact {
-            softfloat_raiseFlags(status, FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_INEXACT);
         }
         let mut ui_z = pack_to_f32(sign, 0, 0);
         match rounding_mode {
@@ -82,26 +81,15 @@ pub(in crate::cpu) fn f32_round_to_int_scaled(
     }
     ui_z &= !round_bits_mask;
     if ui_z != a && exact {
-        softfloat_raiseFlags(status, FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_INEXACT);
     }
     ui_z
 }
 
-/// Bochs softfloat.h `f32_roundToInt(a, status)` — scale 0, MXCSR rounding
+/// Bochs softfloat.h `f32_round_to_int(a, status)` — scale 0, MXCSR rounding
 /// mode, exact reporting on.
 #[inline]
-pub(in crate::cpu) fn f32_round_to_int(a: float32, status: &mut SoftFloatStatus) -> float32 {
-    let rc = softfloat_getRoundingMode(status);
+pub(in crate::cpu) fn f32_round_to_int(a: Float32, status: &mut SoftFloatStatus) -> Float32 {
+    let rc = softfloat_get_rounding_mode(status);
     f32_round_to_int_scaled(a, 0, rc, true, status)
-}
-
-/// Bochs softfloat.h `f32_roundToInt(a, scale, status)`.
-#[inline]
-pub(in crate::cpu) fn f32_round_to_int_with_scale(
-    a: float32,
-    scale: u8,
-    status: &mut SoftFloatStatus,
-) -> float32 {
-    let rc = softfloat_getRoundingMode(status);
-    f32_round_to_int_scaled(a, scale, rc, true, status)
 }

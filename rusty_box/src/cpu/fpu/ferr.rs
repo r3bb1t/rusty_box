@@ -22,7 +22,7 @@ use super::super::softfloat3e::softfloat::*;
 use super::super::softfloat3e::specialize::*;
 
 use super::super::cpu::Exception;
-use super::super::softfloat3e::softfloat_types::floatx80;
+use super::super::softfloat3e::softfloat_types::ExtFloat80;
 
 // ---------------------------------------------------------------------------
 // Free function: convert i387 control word → SoftFloat status
@@ -42,13 +42,13 @@ pub(in crate::cpu) fn i387cw_to_softfloat_status_word(control_word: u16) -> Soft
     };
 
     SoftFloatStatus {
-        softfloat_roundingMode: ((control_word & FPU_CW_RC) >> 10) as u8,
-        softfloat_exceptionFlags: 0,
-        softfloat_exceptionMasks: (control_word & FPU_CW_EXCEPTIONS_MASK) as i32,
-        softfloat_suppressException: 0,
+        softfloat_rounding_mode: ((control_word & FPU_CW_RC) >> 10) as u8,
+        softfloat_exception_flags: 0,
+        softfloat_exception_masks: (control_word & FPU_CW_EXCEPTIONS_MASK) as i32,
+        softfloat_suppress_exception: 0,
         softfloat_denormals_are_zeros: false,
         softfloat_flush_underflow_to_zero: false,
-        extF80_roundingPrecision: rounding_precision,
+        extf80_rounding_precision: rounding_precision,
     }
 }
 
@@ -207,12 +207,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // FPU_tagof  (from fpu.cc)
     // -----------------------------------------------------------------------
 
-    /// Classify a floatx80 register value into a tag:
+    /// Classify a ExtFloat80 register value into a tag:
     /// `FPU_TAG_VALID`, `FPU_TAG_ZERO`, or `FPU_TAG_SPECIAL`.
     ///
     /// Note: this does NOT return `FPU_TAG_EMPTY` — that is determined by the
     /// tag word, not the register contents.
-    pub(in crate::cpu) fn fpu_tagof(reg: &floatx80) -> i32 {
+    pub(in crate::cpu) fn fpu_tagof(reg: &ExtFloat80) -> i32 {
         let exp = extf80_exp(*reg);
         if exp == 0 {
             if extf80_fraction(*reg) == 0 {
@@ -245,9 +245,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Helper: read_fpu_reg
     // -----------------------------------------------------------------------
 
-    /// Read the floatx80 value from `st(stnr)`.
+    /// Read the ExtFloat80 value from `st(stnr)`.
     #[inline]
-    pub(in crate::cpu) fn read_fpu_reg(&self, stnr: i32) -> floatx80 {
+    pub(in crate::cpu) fn read_fpu_reg(&self, stnr: i32) -> ExtFloat80 {
         self.the_i387.fpu_read_regi(stnr)
     }
 
@@ -255,9 +255,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Helper: write_fpu_reg
     // -----------------------------------------------------------------------
 
-    /// Write a floatx80 value to `st(stnr)` and mark its tag as Valid.
+    /// Write a ExtFloat80 value to `st(stnr)` and mark its tag as Valid.
     #[inline]
-    pub(in crate::cpu) fn write_fpu_reg(&mut self, reg: floatx80, stnr: i32) {
+    pub(in crate::cpu) fn write_fpu_reg(&mut self, reg: ExtFloat80, stnr: i32) {
         self.the_i387.fpu_save_regi(reg, stnr);
     }
 
@@ -265,9 +265,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Helper: write_fpu_reg_with_tag
     // -----------------------------------------------------------------------
 
-    /// Write a floatx80 value to `st(stnr)` with an explicit tag.
+    /// Write a ExtFloat80 value to `st(stnr)` with an explicit tag.
     #[inline]
-    pub(in crate::cpu) fn write_fpu_reg_with_tag(&mut self, reg: floatx80, tag: i32, stnr: i32) {
+    pub(in crate::cpu) fn write_fpu_reg_with_tag(&mut self, reg: ExtFloat80, tag: i32, stnr: i32) {
         self.the_i387.fpu_save_regi_with_tag(reg, tag, stnr);
     }
 

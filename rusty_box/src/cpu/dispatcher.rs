@@ -3171,6 +3171,47 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- AVX512_DQ qword <-> float conversions (avx512_cvt.rs) ---
+            Opcode::EvexVcvtpd2qqVdqWpd | Opcode::EvexVcvtpd2qqVdqWpdKmask => {
+                self.evex_vcvtpd2qq(instr)
+            }
+            Opcode::EvexVcvttpd2qqVdqWpd | Opcode::EvexVcvttpd2qqVdqWpdKmask => {
+                self.evex_vcvttpd2qq(instr)
+            }
+            Opcode::EvexVcvtpd2uqqVdqWpd | Opcode::EvexVcvtpd2uqqVdqWpdKmask => {
+                self.evex_vcvtpd2uqq(instr)
+            }
+            Opcode::EvexVcvttpd2uqqVdqWpd | Opcode::EvexVcvttpd2uqqVdqWpdKmask => {
+                self.evex_vcvttpd2uqq(instr)
+            }
+            Opcode::EvexVcvtqq2pdVpdWdq | Opcode::EvexVcvtqq2pdVpdWdqKmask => {
+                self.evex_vcvtqq2pd(instr)
+            }
+            Opcode::EvexVcvtuqq2pdVpdWdq | Opcode::EvexVcvtuqq2pdVpdWdqKmask => {
+                self.evex_vcvtuqq2pd(instr)
+            }
+            Opcode::EvexVcvtqq2psVpsWdq | Opcode::EvexVcvtqq2psVpsWdqKmask => {
+                self.evex_vcvtqq2ps(instr)
+            }
+            Opcode::EvexVcvtuqq2psVpsWdq | Opcode::EvexVcvtuqq2psVpsWdqKmask => {
+                self.evex_vcvtuqq2ps(instr)
+            }
+            Opcode::EvexVcvtps2qqVdqWps | Opcode::EvexVcvtps2qqVdqWpsKmask => {
+                self.evex_vcvtps2qq(instr)
+            }
+            Opcode::EvexVcvttps2qqVdqWps | Opcode::EvexVcvttps2qqVdqWpsKmask => {
+                self.evex_vcvttps2qq(instr)
+            }
+            Opcode::EvexVcvtps2uqqVdqWps | Opcode::EvexVcvtps2uqqVdqWpsKmask => {
+                self.evex_vcvtps2uqq(instr)
+            }
+            Opcode::EvexVcvttps2uqqVdqWps | Opcode::EvexVcvttps2uqqVdqWpsKmask => {
+                self.evex_vcvttps2uqq(instr)
+            }
+            Opcode::EvexVcvtudq2pdVpdWdq | Opcode::EvexVcvtudq2pdVpdWdqKmask => {
+                self.evex_vcvtudq2pd(instr)
+            }
+
             // --- EVEX scalar getexp/scalef/getmant + pd->udq (avx512_scalar.rs, avx512_cvt.rs) ---
             Opcode::EvexVgetexpssVssHpsWss | Opcode::EvexVgetexpssVssHpsWssKmask => {
                 self.evex_vgetexpss(instr)
@@ -5964,10 +6005,10 @@ mod tests {
         let (a, b, c) = (h, v, w);
 
         let mut st_rne = SoftFloatStatus::default();
-        st_rne.softfloat_roundingMode = ROUND_NEAR_EVEN;
+        st_rne.softfloat_rounding_mode = ROUND_NEAR_EVEN;
         let expect_rne = f32_mul_add(a, b, c, 0, &mut st_rne);
         let mut st_rtz = SoftFloatStatus::default();
-        st_rtz.softfloat_roundingMode = ROUND_TO_ZERO;
+        st_rtz.softfloat_rounding_mode = ROUND_TO_ZERO;
         let expect_rtz = f32_mul_add(a, b, c, 0, &mut st_rtz);
         assert_ne!(
             expect_rne, expect_rtz,

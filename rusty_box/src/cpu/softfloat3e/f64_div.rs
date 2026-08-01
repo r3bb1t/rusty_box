@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! Float64 division. Ported from Berkeley SoftFloat 3e f64_div.c.
 
 use super::internals::*;
@@ -7,7 +6,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub(in crate::cpu) fn f64_div(a: float64, b: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_div(a: Float64, b: Float64, status: &mut SoftFloatStatus) -> Float64 {
     let sign_a = sign_f64(a);
     let mut exp_a = exp_f64(a);
     let mut sig_a = frac_f64(a);
@@ -16,7 +15,7 @@ pub(in crate::cpu) fn f64_div(a: float64, b: float64, status: &mut SoftFloatStat
     let mut sig_b = frac_f64(b);
     let sign_z = sign_a ^ sign_b;
 
-    if softfloat_denormalsAreZeros(status) {
+    if softfloat_denormals_are_zeros(status) {
         if exp_a == 0 {
             sig_a = 0;
         }
@@ -34,11 +33,11 @@ pub(in crate::cpu) fn f64_div(a: float64, b: float64, status: &mut SoftFloatStat
                 return softfloat_propagate_nan_f64(a, b, status);
             }
             // inf / inf
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOAT64_DEFAULT_NAN;
         }
         if sig_b != 0 && exp_b == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return pack_to_f64(sign_z, 0x7FF, 0); // infinity
     }
@@ -47,7 +46,7 @@ pub(in crate::cpu) fn f64_div(a: float64, b: float64, status: &mut SoftFloatStat
             return softfloat_propagate_nan_f64(a, b, status);
         }
         if sig_a != 0 && exp_a == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return pack_to_f64(sign_z, 0, 0); // finite / inf
     }
@@ -56,13 +55,13 @@ pub(in crate::cpu) fn f64_div(a: float64, b: float64, status: &mut SoftFloatStat
         if sig_b == 0 {
             if (exp_a as u64 | sig_a) == 0 {
                 // 0 / 0
-                softfloat_raiseFlags(status, FLAG_INVALID);
+                softfloat_raise_flags(status, FLAG_INVALID);
                 return FLOAT64_DEFAULT_NAN;
             }
-            softfloat_raiseFlags(status, FLAG_INFINITE); // divide-by-zero
+            softfloat_raise_flags(status, FLAG_INFINITE); // divide-by-zero
             return pack_to_f64(sign_z, 0x7FF, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let ns = norm_subnormal_f64_sig(sig_b);
         exp_b = ns.exp;
         sig_b = ns.sig;
@@ -71,7 +70,7 @@ pub(in crate::cpu) fn f64_div(a: float64, b: float64, status: &mut SoftFloatStat
         if sig_a == 0 {
             return pack_to_f64(sign_z, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let ns = norm_subnormal_f64_sig(sig_a);
         exp_a = ns.exp;
         sig_a = ns.sig;

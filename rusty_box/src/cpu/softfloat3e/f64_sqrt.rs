@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! Float64 square root. Ported from Berkeley SoftFloat 3e f64_sqrt.c.
 
 use super::internals::*;
@@ -7,7 +6,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub(in crate::cpu) fn f64_sqrt(a: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_sqrt(a: Float64, status: &mut SoftFloatStatus) -> Float64 {
     let sign_a = sign_f64(a);
     let mut exp_a = exp_f64(a);
     let mut sig_a = frac_f64(a);
@@ -20,11 +19,11 @@ pub(in crate::cpu) fn f64_sqrt(a: float64, status: &mut SoftFloatStatus) -> floa
         if !sign_a {
             return a; // +inf
         }
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOAT64_DEFAULT_NAN;
     }
 
-    if softfloat_denormalsAreZeros(status) && exp_a == 0 {
+    if softfloat_denormals_are_zeros(status) && exp_a == 0 {
         sig_a = 0;
         ui_a = pack_to_f64(sign_a, 0, 0);
     }
@@ -33,7 +32,7 @@ pub(in crate::cpu) fn f64_sqrt(a: float64, status: &mut SoftFloatStatus) -> floa
         if (exp_a as u64 | sig_a) == 0 {
             return ui_a; // -0
         }
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOAT64_DEFAULT_NAN;
     }
 
@@ -41,7 +40,7 @@ pub(in crate::cpu) fn f64_sqrt(a: float64, status: &mut SoftFloatStatus) -> floa
         if sig_a == 0 {
             return ui_a; // +0
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let ns = norm_subnormal_f64_sig(sig_a);
         exp_a = ns.exp;
         sig_a = ns.sig;

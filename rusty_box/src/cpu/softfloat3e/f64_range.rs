@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! Double-precision exponent/mantissa extraction and scaling — the
 //! primitives behind AVX-512 VGETEXPPD, VGETMANTPD and VSCALEFPD.
 //! Ported from Bochs softfloat3e/f64_getExp.cc, f64_getMant.cc and
@@ -11,7 +10,7 @@ use super::softfloat_types::*;
 use super::specialize::*;
 
 /// Bochs softfloat3e/f64_getExp.cc `f64_getExp`.
-pub(in crate::cpu) fn f64_get_exp(a: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_get_exp(a: Float64, status: &mut SoftFloatStatus) -> Float64 {
     let mut exp_a = exp_f64(a);
     let sig_a = frac_f64(a);
 
@@ -22,10 +21,10 @@ pub(in crate::cpu) fn f64_get_exp(a: float64, status: &mut SoftFloatStatus) -> f
         return pack_to_f64(false, 0x7FF, 0);
     }
     if exp_a == 0 {
-        if sig_a == 0 || softfloat_denormalsAreZeros(status) {
+        if sig_a == 0 || softfloat_denormals_are_zeros(status) {
             return pack_to_f64(true, 0x7FF, 0); // -inf
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         exp_a = norm_subnormal_f64_sig(sig_a).exp;
     }
     i32_to_f64(exp_a as i32 - 0x3FF)
@@ -33,11 +32,11 @@ pub(in crate::cpu) fn f64_get_exp(a: float64, status: &mut SoftFloatStatus) -> f
 
 /// Bochs softfloat3e/f64_getMant.cc `f64_getMant`.
 pub(in crate::cpu) fn f64_get_mant(
-    a: float64,
+    a: Float64,
     status: &mut SoftFloatStatus,
     sign_ctrl: i32,
     interv: i32,
-) -> float64 {
+) -> Float64 {
     let sign_a = sign_f64(a);
     let mut exp_a = exp_f64(a);
     let mut sig_a = frac_f64(a);
@@ -48,20 +47,20 @@ pub(in crate::cpu) fn f64_get_mant(
             return softfloat_propagate_nan_f64(a, 0, status);
         }
         if sign_a && (sign_ctrl & 0x2) != 0 {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOAT64_DEFAULT_NAN;
         }
         return pack_to_f64(out_sign, 0x3FF, 0);
     }
-    if exp_a == 0 && (sig_a == 0 || softfloat_denormalsAreZeros(status)) {
+    if exp_a == 0 && (sig_a == 0 || softfloat_denormals_are_zeros(status)) {
         return pack_to_f64(out_sign, 0x3FF, 0);
     }
     if sign_a && (sign_ctrl & 0x2) != 0 {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOAT64_DEFAULT_NAN;
     }
     if exp_a == 0 {
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let ns = norm_subnormal_f64_sig(sig_a);
         exp_a = ns.exp;
         sig_a = ns.sig & 0xF_FFFF_FFFF_FFFF;
@@ -80,7 +79,7 @@ pub(in crate::cpu) fn f64_get_mant(
 }
 
 /// Bochs softfloat3e/f64_scalef.cc `f64_scalef`.
-pub(in crate::cpu) fn f64_scalef(a: float64, b: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_scalef(a: Float64, b: Float64, status: &mut SoftFloatStatus) -> Float64 {
     let sign_a = sign_f64(a);
     let mut exp_a = exp_f64(a);
     let mut sig_a = frac_f64(a);
@@ -92,7 +91,7 @@ pub(in crate::cpu) fn f64_scalef(a: float64, b: float64, status: &mut SoftFloatS
     if exp_b == 0x7FF && sig_b != 0 {
         return softfloat_propagate_nan_f64(a, b, status);
     }
-    if softfloat_denormalsAreZeros(status) {
+    if softfloat_denormals_are_zeros(status) {
         if exp_a == 0 {
             sig_a = 0;
         }
@@ -110,7 +109,7 @@ pub(in crate::cpu) fn f64_scalef(a: float64, b: float64, status: &mut SoftFloatS
             return if sign_b { 0 } else { pack_to_f64(false, 0x7FF, 0) };
         }
         if exp_b == 0x7FF && sign_b {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOAT64_DEFAULT_NAN;
         }
         return a;
@@ -118,12 +117,12 @@ pub(in crate::cpu) fn f64_scalef(a: float64, b: float64, status: &mut SoftFloatS
     if exp_a == 0 {
         if sig_a == 0 {
             if exp_b == 0x7FF && !sign_b {
-                softfloat_raiseFlags(status, FLAG_INVALID);
+                softfloat_raise_flags(status, FLAG_INVALID);
                 return FLOAT64_DEFAULT_NAN;
             }
             return pack_to_f64(sign_a, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
     }
 
     if (exp_b as u64 | sig_b) == 0 {

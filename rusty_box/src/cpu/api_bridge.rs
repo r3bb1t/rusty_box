@@ -395,11 +395,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Write an x87 FPU register from 10 raw bytes.
     pub(crate) fn fpu_write_st(&mut self, index: usize, val: [u8; 10]) {
-        use super::softfloat3e::softfloat_types::floatx80;
+        use super::softfloat3e::softfloat_types::ExtFloat80;
         let phys = (self.the_i387.tos as usize + index) & 7;
         let signif = u64::from_le_bytes(val[..8].try_into().unwrap());
         let sign_exp = u16::from_le_bytes(val[8..10].try_into().unwrap());
-        self.the_i387.st_space[phys] = floatx80 { signif, sign_exp };
+        self.the_i387.st_space[phys] = ExtFloat80 { signif, sign_exp };
     }
 
     // ── XMM/YMM/ZMM read/write ─────────────────────────────────────

@@ -21,8 +21,8 @@ use super::softfloat3e::f64_range::{f64_get_exp, f64_get_mant, f64_scalef};
 use super::softfloat3e::f64_div::f64_div;
 use super::softfloat3e::f64_mul::f64_mul;
 use super::softfloat3e::f64_sqrt::f64_sqrt;
-use super::softfloat3e::softfloat::{softfloat_getExceptionFlags, SoftFloatStatus};
-use super::softfloat3e::softfloat_types::{float32, float64};
+use super::softfloat3e::softfloat::{softfloat_get_exception_flags, SoftFloatStatus};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -63,7 +63,7 @@ fn write_scalar_ss<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     cpu: &mut BxCpuC<'_, I, T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
-    result_elem0: float32,
+    result_elem0: Float32,
     mask: u64,
     zero_masking: bool,
 ) {
@@ -95,7 +95,7 @@ fn write_scalar_sd<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
     cpu: &mut BxCpuC<'_, I, T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
-    result_elem0: float64,
+    result_elem0: Float64,
     mask: u64,
     zero_masking: bool,
 ) {
@@ -129,7 +129,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Read scalar f32 from rm operand (src1 in our convention).
     /// Register form: XMM element [0] of src1 (rm).
     /// Memory form: reads 4 bytes from memory.
-    fn evex_read_rm_ss(&mut self, instr: &Instruction) -> super::Result<float32> {
+    fn evex_read_rm_ss(&mut self, instr: &Instruction) -> super::Result<Float32> {
         if instr.mod_c0() {
             Ok(self.vmm[instr.src1() as usize].zmm32u(0))
         } else {
@@ -144,7 +144,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Memory form: reads 8 bytes from memory.
     #[inline]
     /// Read scalar f64 from rm operand (src1 in our convention).
-    fn evex_read_rm_sd(&mut self, instr: &Instruction) -> super::Result<float64> {
+    fn evex_read_rm_sd(&mut self, instr: &Instruction) -> super::Result<Float64> {
         if instr.mod_c0() {
             Ok(self.vmm[instr.src1() as usize].zmm64u(0))
         } else {
@@ -168,7 +168,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn evex_scalar_ss(
         &mut self,
         instr: &Instruction,
-        func: impl Fn(float32, float32, &mut SoftFloatStatus) -> float32,
+        func: impl Fn(Float32, Float32, &mut SoftFloatStatus) -> Float32,
     ) -> super::Result<()> {
         let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
         let src2_val = self.evex_read_rm_ss(instr)?;
@@ -179,7 +179,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let mut status = self.sse_status();
             self.softfloat_rc_override(&mut status, instr);
             result = func(src1.zmm32u(0), src2_val, &mut status);
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         }
         write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
         Ok(())
@@ -189,7 +189,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn evex_scalar_sd(
         &mut self,
         instr: &Instruction,
-        func: impl Fn(float64, float64, &mut SoftFloatStatus) -> float64,
+        func: impl Fn(Float64, Float64, &mut SoftFloatStatus) -> Float64,
     ) -> super::Result<()> {
         let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
         let src2_val = self.evex_read_rm_sd(instr)?;
@@ -200,7 +200,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let mut status = self.sse_status();
             self.softfloat_rc_override(&mut status, instr);
             result = func(src1.zmm64u(0), src2_val, &mut status);
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         }
         write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
         Ok(())

@@ -5,7 +5,7 @@
 use super::super::softfloat3e::internals::*;
 use super::super::softfloat3e::primitives::*;
 use super::super::softfloat3e::softfloat::*;
-use super::super::softfloat3e::softfloat_types::floatx80;
+use super::super::softfloat3e::softfloat_types::ExtFloat80;
 use super::super::softfloat3e::specialize::*;
 
 /// Estimate 128/64 division: returns an approximate quotient q such that
@@ -74,9 +74,9 @@ pub(crate) fn remainder_kernel(
 /// Returns: -1 on error/NaN, 0 on complete, 1 on overflow (incomplete reduction).
 /// Ported from Bochs fprem.cc do_fprem().
 pub(in crate::cpu) fn do_fprem(
-    a: floatx80,
-    b: floatx80,
-    r: &mut floatx80,
+    a: ExtFloat80,
+    b: ExtFloat80,
+    r: &mut ExtFloat80,
     q: &mut u64,
     rounding_mode: u8,
     status: &mut SoftFloatStatus,
@@ -85,7 +85,7 @@ pub(in crate::cpu) fn do_fprem(
 
     // handle unsupported extended double-precision floating encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         *r = FLOATX80_DEFAULT_NAN;
         return -1;
     }
@@ -101,7 +101,7 @@ pub(in crate::cpu) fn do_fprem(
             *r = softfloat_propagate_nan_extf80(a.sign_exp, a.signif, b.sign_exp, b.signif, status);
             return -1;
         }
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         *r = FLOATX80_DEFAULT_NAN;
         return -1;
     }
@@ -112,7 +112,7 @@ pub(in crate::cpu) fn do_fprem(
             return -1;
         }
         if a_exp == 0 && a_sig0 != 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
             let norm = norm_subnormal_extf80_sig(a_sig0);
             a_exp = norm.exp + 1;
             a_sig0 = norm.sig;
@@ -129,11 +129,11 @@ pub(in crate::cpu) fn do_fprem(
 
     if b_exp == 0 {
         if b_sig == 0 {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             *r = FLOATX80_DEFAULT_NAN;
             return -1;
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(b_sig);
         b_exp = norm.exp + 1;
         b_sig = norm.sig;
@@ -144,7 +144,7 @@ pub(in crate::cpu) fn do_fprem(
             *r = a;
             return 0;
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(a_sig0);
         a_exp = norm.exp + 1;
         a_sig0 = norm.sig;

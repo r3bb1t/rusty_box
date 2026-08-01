@@ -14,17 +14,17 @@ pub(in crate::cpu) fn mxcsr_to_softfloat_status_word(mxcsr: BxMxcsr) -> SoftFloa
     SoftFloatStatus {
         // MXCSR RC (0=nearest,1=down,2=up,3=truncate) is identical to the
         // SoftFloat rounding-mode encoding.
-        softfloat_roundingMode: mxcsr.rounding_mode(),
-        softfloat_exceptionFlags: 0,
-        softfloat_exceptionMasks: mxcsr.exceptions_masks(),
-        softfloat_suppressException: 0,
+        softfloat_rounding_mode: mxcsr.rounding_mode(),
+        softfloat_exception_flags: 0,
+        softfloat_exception_masks: mxcsr.exceptions_masks(),
+        softfloat_suppress_exception: 0,
         // Flush-to-zero only applies when underflow is masked (Bochs
         // get_flush_masked_underflow() && get_UM()).
         softfloat_flush_underflow_to_zero: mxcsr.flush_to_zero()
             && mxcsr.is_masked(Mxcsr::UE.bits()),
         softfloat_denormals_are_zeros: mxcsr.daz(),
         // Irrelevant for f32/f64 muladd; kept at the 80-bit default.
-        extF80_roundingPrecision: 80,
+        extf80_rounding_precision: 80,
     }
 }
 

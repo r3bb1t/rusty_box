@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! The 32 VEX/EVEX floating-point compare predicates.
 //!
 //! Ported from Bochs softfloat3e/include/softfloat-compare.h together with
@@ -73,8 +72,8 @@ fn relation_matches(base: u8, relation: i32) -> bool {
 #[inline]
 pub(in crate::cpu) fn f32_compare_predicate(
     predicate: u8,
-    a: float32,
-    b: float32,
+    a: Float32,
+    b: Float32,
     status: &mut SoftFloatStatus,
 ) -> bool {
     let base = predicate & 0xF;
@@ -93,8 +92,8 @@ pub(in crate::cpu) fn f32_compare_predicate(
 #[inline]
 pub(in crate::cpu) fn f64_compare_predicate(
     predicate: u8,
-    a: float64,
-    b: float64,
+    a: Float64,
+    b: Float64,
     status: &mut SoftFloatStatus,
 ) -> bool {
     let base = predicate & 0xF;
@@ -162,16 +161,16 @@ mod tests {
 
         let mut st = SoftFloatStatus::default();
         f64_compare_predicate(0, qnan, one, &mut st); // EQ_OQ — quiet
-        assert_eq!(st.softfloat_exceptionFlags & FLAG_INVALID, 0);
+        assert_eq!(st.softfloat_exception_flags & FLAG_INVALID, 0);
 
         let mut st = SoftFloatStatus::default();
         f64_compare_predicate(16, qnan, one, &mut st); // EQ_OS — signalling
-        assert_eq!(st.softfloat_exceptionFlags & FLAG_INVALID, FLAG_INVALID);
+        assert_eq!(st.softfloat_exception_flags & FLAG_INVALID, FLAG_INVALID);
 
         // An SNaN raises #I for both.
         let snan = 0x7FF0_0000_0000_0001u64;
         let mut st = SoftFloatStatus::default();
         f64_compare_predicate(0, snan, one, &mut st);
-        assert_eq!(st.softfloat_exceptionFlags & FLAG_INVALID, FLAG_INVALID);
+        assert_eq!(st.softfloat_exception_flags & FLAG_INVALID, FLAG_INVALID);
     }
 }

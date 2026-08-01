@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! Unsigned-integer conversions used by the AVX-512 VCVT*U* forms.
 //! Ported from Bochs softfloat3e/ui32_to_f32.cc, f32_to_ui32.cc,
 //! f32_to_ui32_r_minMag.cc and s_roundToUI32.cc.
@@ -56,10 +55,10 @@ pub(in crate::cpu) fn softfloat_round_to_ui32(
     }
     if round_bits != 0 {
         if exact {
-            softfloat_raiseFlags(status, FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_INEXACT);
         }
         if z as u64 > orig_sig {
-            softfloat_setRoundingUp(status);
+            softfloat_set_rounding_up(status);
         }
     }
     z
@@ -67,7 +66,7 @@ pub(in crate::cpu) fn softfloat_round_to_ui32(
 
 #[inline]
 fn round_to_ui32_invalid(sign: bool, status: &mut SoftFloatStatus) -> u32 {
-    softfloat_raiseFlags(status, FLAG_INVALID);
+    softfloat_raise_flags(status, FLAG_INVALID);
     if sign {
         UI32_FROM_NEG_OVERFLOW
     } else {
@@ -76,7 +75,7 @@ fn round_to_ui32_invalid(sign: bool, status: &mut SoftFloatStatus) -> u32 {
 }
 
 /// Bochs softfloat3e/ui32_to_f32.cc `ui32_to_f32`.
-pub(in crate::cpu) fn ui32_to_f32(a: u32, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn ui32_to_f32(a: u32, status: &mut SoftFloatStatus) -> Float32 {
     if a == 0 {
         return 0;
     }
@@ -88,7 +87,7 @@ pub(in crate::cpu) fn ui32_to_f32(a: u32, status: &mut SoftFloatStatus) -> float
 }
 
 /// Bochs softfloat3e/ui32_to_f64.cc `ui32_to_f64`. Exact for every u32.
-pub(in crate::cpu) fn ui32_to_f64(a: u32) -> float64 {
+pub(in crate::cpu) fn ui32_to_f64(a: u32) -> Float64 {
     if a == 0 {
         return 0;
     }
@@ -98,7 +97,7 @@ pub(in crate::cpu) fn ui32_to_f64(a: u32) -> float64 {
 
 /// Bochs softfloat3e/f32_to_ui32.cc `f32_to_ui32`.
 pub(in crate::cpu) fn f32_to_ui32(
-    a: float32,
+    a: Float32,
     rounding_mode: u8,
     exact: bool,
     status: &mut SoftFloatStatus,
@@ -109,7 +108,7 @@ pub(in crate::cpu) fn f32_to_ui32(
 
     if exp != 0 {
         sig |= 0x0080_0000;
-    } else if softfloat_denormalsAreZeros(status) {
+    } else if softfloat_denormals_are_zeros(status) {
         return 0;
     }
 
@@ -123,7 +122,7 @@ pub(in crate::cpu) fn f32_to_ui32(
 
 /// Bochs softfloat3e/f32_to_ui32_r_minMag.cc `f32_to_ui32_r_minMag`.
 pub(in crate::cpu) fn f32_to_ui32_r_min_mag(
-    a: float32,
+    a: Float32,
     exact: bool,
     saturate: bool,
     status: &mut SoftFloatStatus,
@@ -131,14 +130,14 @@ pub(in crate::cpu) fn f32_to_ui32_r_min_mag(
     let exp = exp_f32(a);
     let mut sig = frac_f32(a);
 
-    if softfloat_denormalsAreZeros(status) && exp == 0 && sig != 0 {
+    if softfloat_denormals_are_zeros(status) && exp == 0 && sig != 0 {
         return 0;
     }
 
     let shift_dist = 0x9E - exp;
     if 32 <= shift_dist {
         if exact && (exp as u32 | sig) != 0 {
-            softfloat_raiseFlags(status, FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_INEXACT);
         }
         return 0;
     }
@@ -155,7 +154,7 @@ pub(in crate::cpu) fn f32_to_ui32_r_min_mag(
         } else {
             UI32_FROM_POS_OVERFLOW
         };
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return if exp == 0xFF && sig != 0 {
             nan_response
         } else if sign {
@@ -167,14 +166,14 @@ pub(in crate::cpu) fn f32_to_ui32_r_min_mag(
     sig = (sig | 0x0080_0000) << 8;
     let z = sig >> shift_dist;
     if exact && (z << shift_dist) != sig {
-        softfloat_raiseFlags(status, FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_INEXACT);
     }
     z
 }
 
 /// Bochs softfloat3e/f64_to_ui32.cc `f64_to_ui32`.
 pub(in crate::cpu) fn f64_to_ui32(
-    a: float64,
+    a: Float64,
     rounding_mode: u8,
     exact: bool,
     status: &mut SoftFloatStatus,
@@ -185,7 +184,7 @@ pub(in crate::cpu) fn f64_to_ui32(
 
     if exp != 0 {
         sig |= 0x0010_0000_0000_0000;
-    } else if softfloat_denormalsAreZeros(status) {
+    } else if softfloat_denormals_are_zeros(status) {
         return 0;
     }
 
@@ -198,7 +197,7 @@ pub(in crate::cpu) fn f64_to_ui32(
 
 /// Bochs softfloat3e/f64_to_ui32_r_minMag.cc `f64_to_ui32_r_minMag`.
 pub(in crate::cpu) fn f64_to_ui32_r_min_mag(
-    a: float64,
+    a: Float64,
     exact: bool,
     saturate: bool,
     status: &mut SoftFloatStatus,
@@ -206,14 +205,14 @@ pub(in crate::cpu) fn f64_to_ui32_r_min_mag(
     let exp = exp_f64(a);
     let mut sig = frac_f64(a);
 
-    if softfloat_denormalsAreZeros(status) && exp == 0 && sig != 0 {
+    if softfloat_denormals_are_zeros(status) && exp == 0 && sig != 0 {
         return 0;
     }
 
     let shift_dist = 0x433 - exp;
     if 53 <= shift_dist {
         if exact && (exp as u64 | sig) != 0 {
-            softfloat_raiseFlags(status, FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_INEXACT);
         }
         return 0;
     }
@@ -230,7 +229,7 @@ pub(in crate::cpu) fn f64_to_ui32_r_min_mag(
         } else {
             UI32_FROM_POS_OVERFLOW
         };
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return if exp == 0x7FF && sig != 0 {
             nan_response
         } else if sign {
@@ -242,7 +241,7 @@ pub(in crate::cpu) fn f64_to_ui32_r_min_mag(
     sig |= 0x0010_0000_0000_0000;
     let z = (sig >> shift_dist) as u32;
     if exact && ((z as u64) << shift_dist) != sig {
-        softfloat_raiseFlags(status, FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_INEXACT);
     }
     z
 }

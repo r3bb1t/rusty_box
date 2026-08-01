@@ -1,4 +1,3 @@
-#![allow(non_camel_case_types, dead_code, non_snake_case)]
 //! ExtFloat80 scale (FSCALE instruction support).
 //! Ported from Berkeley SoftFloat 3e: extF80_scale.c
 
@@ -9,10 +8,10 @@ use super::specialize::*;
 
 /// Scale extFloat80 value `a` by `b`:
 /// Truncates `b` to integer, adds to exponent of `a`.
-pub(in crate::cpu) fn extf80_scale(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn extf80_scale(a: ExtFloat80, b: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
     // Handle unsupported
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
     }
 
@@ -31,11 +30,11 @@ pub(in crate::cpu) fn extf80_scale(a: floatx80, b: floatx80, status: &mut SoftFl
             );
         }
         if (exp_b == 0x7FFF) && sign_b {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOATX80_DEFAULT_NAN;
         }
         if sig_b != 0 && exp_b == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return a;
     }
@@ -49,13 +48,13 @@ pub(in crate::cpu) fn extf80_scale(a: floatx80, b: floatx80, status: &mut SoftFl
         }
         if (exp_a as u64 | sig_a) == 0 {
             if !sign_b {
-                softfloat_raiseFlags(status, FLAG_INVALID);
+                softfloat_raise_flags(status, FLAG_INVALID);
                 return FLOATX80_DEFAULT_NAN;
             }
             return a;
         }
         if sig_a != 0 && exp_a == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         if sign_b {
             return pack_floatx80(sign_a, 0, 0);
@@ -66,12 +65,12 @@ pub(in crate::cpu) fn extf80_scale(a: floatx80, b: floatx80, status: &mut SoftFl
     // A is denormal
     if exp_a == 0 {
         if sig_b != 0 && exp_b == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         if sig_a == 0 {
             return a;
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(sig_a);
         exp_a = norm.exp + 1;
         sig_a = norm.sig;
@@ -85,7 +84,7 @@ pub(in crate::cpu) fn extf80_scale(a: floatx80, b: floatx80, status: &mut SoftFl
         if sig_b == 0 {
             return a;
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(sig_b);
         let _exp_b = norm.exp + 1;
         let _sig_b = norm.sig;

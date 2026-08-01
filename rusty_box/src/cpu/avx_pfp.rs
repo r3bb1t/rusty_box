@@ -24,20 +24,20 @@ use super::simd_pfp::{
     xmm_haddpd, xmm_haddps, xmm_hsubpd, xmm_hsubps, xmm_maxpd, xmm_maxps, xmm_minpd, xmm_minps,
     xmm_mulpd, xmm_mulps, xmm_sqrtpd, xmm_sqrtps, xmm_subpd, xmm_subps,
 };
-use super::softfloat3e::f32_roundToInt::f32_round_to_int;
+use super::softfloat3e::f32_round_to_int::f32_round_to_int;
 use super::softfloat3e::f32_sqrt::f32_sqrt;
 use super::softfloat3e::f32_to_f64::f32_to_f64;
 use super::softfloat3e::f32_to_int::{f32_to_i32, f32_to_i32_r_min_mag};
-use super::softfloat3e::f64_roundToInt::f64_round_to_int;
+use super::softfloat3e::f64_round_to_int::f64_round_to_int;
 use super::softfloat3e::f64_sqrt::f64_sqrt;
 use super::softfloat3e::f64_to_f32::f64_to_f32;
 use super::softfloat3e::f64_to_int::{f64_to_i32, f64_to_i32_r_min_mag};
 use super::softfloat3e::int_to_float::{i32_to_f32, i32_to_f64, i64_to_f32, i64_to_f64};
 use super::softfloat3e::softfloat::{
-    softfloat_getExceptionFlags, softfloat_getRoundingMode, SoftFloatStatus,
+    softfloat_get_exception_flags, softfloat_get_rounding_mode, SoftFloatStatus,
 };
 use super::softfloat3e::softfloat_compare::{f32_compare_predicate, f64_compare_predicate};
-use super::softfloat3e::softfloat_types::{float32, float64};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::sse_pfp::{dppd_lane, dpps_lane, mxcsr_to_softfloat_status_word_imm_override};
 use super::sse_rcp::{approximate_rcp, approximate_rsqrt};
 use super::{
@@ -72,7 +72,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 func(&mut a, &op2.ymm128(lane), &mut status);
                 op1.set_ymm128(lane, a);
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_ymm_reg(instr.dst(), op1);
         } else {
             let mut op1 = self.read_xmm_reg(instr.src2());
@@ -80,7 +80,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let mut status = self.sse_status();
             self.softfloat_rc_override(&mut status, instr);
             func(&mut op1, &op2, &mut status);
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_xmm_reg(instr.dst(), op1);
         }
         Ok(())
@@ -102,14 +102,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 func(&mut a, &mut status);
                 op.set_ymm128(lane, a);
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_ymm_reg(instr.dst(), op);
         } else {
             let mut op = self.vex_read_src2_xmm(instr)?;
             let mut status = self.sse_status();
             self.softfloat_rc_override(&mut status, instr);
             func(&mut op, &mut status);
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_xmm_reg(instr.dst(), op);
         }
         Ok(())
@@ -120,7 +120,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn avx_scalar_ss(
         &mut self,
         instr: &Instruction,
-        func: fn(float32, float32, &mut SoftFloatStatus) -> float32,
+        func: fn(Float32, Float32, &mut SoftFloatStatus) -> Float32,
     ) -> super::Result<()> {
         self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_ss(instr)?;
@@ -128,7 +128,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut status = self.sse_status();
         self.softfloat_rc_override(&mut status, instr);
         let value = func(result.xmm32u(0), w, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm32u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -138,7 +138,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn avx_scalar_sd(
         &mut self,
         instr: &Instruction,
-        func: fn(float64, float64, &mut SoftFloatStatus) -> float64,
+        func: fn(Float64, Float64, &mut SoftFloatStatus) -> Float64,
     ) -> super::Result<()> {
         self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_sd(instr)?;
@@ -146,7 +146,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut status = self.sse_status();
         self.softfloat_rc_override(&mut status, instr);
         let value = func(result.xmm64u(0), w, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm64u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -167,7 +167,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for i in 0..8 {
                 op.set_ymm32u(i, i32_to_f32(op.ymm32s(i), &mut status));
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_ymm_reg(instr.dst(), op);
         } else {
             let mut op = self.vex_read_src2_xmm(instr)?;
@@ -175,7 +175,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for i in 0..4 {
                 op.set_xmm32u(i, i32_to_f32(op.xmm32s(i), &mut status));
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_xmm_reg(instr.dst(), op);
         }
         Ok(())
@@ -189,7 +189,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if instr.get_vl() >= 1 {
             let mut op = self.vex_read_src2_ymm(instr)?;
             let mut status = self.sse_status();
-            let rc = softfloat_getRoundingMode(&status);
+            let rc = softfloat_get_rounding_mode(&status);
             for i in 0..8 {
                 let v = if truncate {
                     f32_to_i32_r_min_mag(op.ymm32u(i), true, false, &mut status)
@@ -198,12 +198,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 };
                 op.set_ymm32s(i, v);
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_ymm_reg(instr.dst(), op);
         } else {
             let mut op = self.vex_read_src2_xmm(instr)?;
             let mut status = self.sse_status();
-            let rc = softfloat_getRoundingMode(&status);
+            let rc = softfloat_get_rounding_mode(&status);
             for i in 0..4 {
                 let v = if truncate {
                     f32_to_i32_r_min_mag(op.xmm32u(i), true, false, &mut status)
@@ -212,7 +212,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 };
                 op.set_xmm32s(i, v);
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_xmm_reg(instr.dst(), op);
         }
         Ok(())
@@ -274,13 +274,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for i in 0..4 {
                 result.set_ymm64u(i, f32_to_f64(op2.xmm32u(i), &mut status));
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_ymm_reg(instr.dst(), result);
         } else {
             let mut result = BxPackedXmmRegister::default();
             result.set_xmm64u(0, f32_to_f64(op2.xmm32u(0), &mut status));
             result.set_xmm64u(1, f32_to_f64(op2.xmm32u(1), &mut status));
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_xmm_reg(instr.dst(), result);
         }
         Ok(())
@@ -297,13 +297,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for i in 0..4 {
                 result.set_xmm32u(i, f64_to_f32(op2.ymm64u(i), &mut status));
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         } else {
             let op2 = self.vex_read_src2_xmm(instr)?;
             let mut status = self.sse_status();
             result.set_xmm32u(0, f64_to_f32(op2.xmm64u(0), &mut status));
             result.set_xmm32u(1, f64_to_f32(op2.xmm64u(1), &mut status));
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         }
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -317,7 +317,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if instr.get_vl() >= 1 {
             let op2 = self.vex_read_src2_ymm(instr)?;
             let mut status = self.sse_status();
-            let rc = softfloat_getRoundingMode(&status);
+            let rc = softfloat_get_rounding_mode(&status);
             for i in 0..4 {
                 let v = if truncate {
                     f64_to_i32_r_min_mag(op2.ymm64u(i), true, false, &mut status)
@@ -326,11 +326,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 };
                 result.set_xmm32s(i, v);
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         } else {
             let op2 = self.vex_read_src2_xmm(instr)?;
             let mut status = self.sse_status();
-            let rc = softfloat_getRoundingMode(&status);
+            let rc = softfloat_get_rounding_mode(&status);
             for i in 0..2 {
                 let v = if truncate {
                     f64_to_i32_r_min_mag(op2.xmm64u(i), true, false, &mut status)
@@ -339,7 +339,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 };
                 result.set_xmm32s(i, v);
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         }
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -460,7 +460,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut status = self.sse_status();
         self.softfloat_rc_override(&mut status, instr);
         let value = f32_sqrt(w, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm32u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -473,7 +473,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut status = self.sse_status();
         self.softfloat_rc_override(&mut status, instr);
         let value = f64_sqrt(w, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm64u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -506,7 +506,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = self.read_xmm_reg(instr.src2());
         let mut status = self.sse_status();
         let hit = f32_compare_predicate(predicate, result.xmm32u(0), w, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm32u(0, if hit { 0xFFFF_FFFF } else { 0 });
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -519,7 +519,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = self.read_xmm_reg(instr.src2());
         let mut status = self.sse_status();
         let hit = f64_compare_predicate(predicate, result.xmm64u(0), w, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm64u(0, if hit { u64::MAX } else { 0 });
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -743,14 +743,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     dpps_lane(&op1.ymm128(lane), &op2.ymm128(lane), mask, &mut status),
                 );
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_ymm_reg(instr.dst(), result);
         } else {
             let op1 = self.read_xmm_reg(instr.src2());
             let op2 = self.vex_read_src2_xmm(instr)?;
             let mut status = self.sse_status();
             let result = dpps_lane(&op1, &op2, mask, &mut status);
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_xmm_reg(instr.dst(), result);
         }
         Ok(())
@@ -762,7 +762,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let op2 = self.vex_read_src2_xmm(instr)?;
         let mut status = self.sse_status();
         let result = dppd_lane(&op1, &op2, instr.ib(), &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
@@ -1060,7 +1060,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = self.read_xmm_reg(instr.src2());
         let mut status = self.sse_status();
         let value = f32_to_f64(w, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm64u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -1073,7 +1073,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut status = self.sse_status();
         self.softfloat_rc_override(&mut status, instr);
         let value = f64_to_f32(w, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm32u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -1120,7 +1120,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut status = self.sse_status();
         self.softfloat_rc_override(&mut status, instr);
         let value = i64_to_f64(op2, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm64u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -1133,7 +1133,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut status = self.sse_status();
         self.softfloat_rc_override(&mut status, instr);
         let value = i32_to_f32(op2, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm32u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -1146,7 +1146,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut status = self.sse_status();
         self.softfloat_rc_override(&mut status, instr);
         let value = i64_to_f32(op2, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm32u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -1167,7 +1167,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for i in 0..8 {
                 op.set_ymm32u(i, f32_round_to_int(op.ymm32u(i), &mut status));
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_ymm_reg(instr.dst(), op);
         } else {
             let mut op = self.vex_read_src2_xmm(instr)?;
@@ -1176,7 +1176,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for i in 0..4 {
                 op.set_xmm32u(i, f32_round_to_int(op.xmm32u(i), &mut status));
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_xmm_reg(instr.dst(), op);
         }
         Ok(())
@@ -1192,7 +1192,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for i in 0..4 {
                 op.set_ymm64u(i, f64_round_to_int(op.ymm64u(i), &mut status));
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_ymm_reg(instr.dst(), op);
         } else {
             let mut op = self.vex_read_src2_xmm(instr)?;
@@ -1201,7 +1201,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             for i in 0..2 {
                 op.set_xmm64u(i, f64_round_to_int(op.xmm64u(i), &mut status));
             }
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_xmm_reg(instr.dst(), op);
         }
         Ok(())
@@ -1215,7 +1215,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut status = self.sse_status();
         mxcsr_to_softfloat_status_word_imm_override(&mut status, imm8);
         let value = f32_round_to_int(w, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm32u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -1229,7 +1229,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut status = self.sse_status();
         mxcsr_to_softfloat_status_word_imm_override(&mut status, imm8);
         let value = f64_round_to_int(w, &mut status);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         result.set_xmm64u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -1247,7 +1247,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn avx_approx_ps(
         &mut self,
         instr: &Instruction,
-        func: fn(float32) -> float32,
+        func: fn(Float32) -> Float32,
     ) -> super::Result<()> {
         self.prepare_sse()?;
         if instr.get_vl() >= 1 {
@@ -1270,7 +1270,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn avx_approx_ss(
         &mut self,
         instr: &Instruction,
-        func: fn(float32) -> float32,
+        func: fn(Float32) -> Float32,
     ) -> super::Result<()> {
         self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_ss(instr)?;

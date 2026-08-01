@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! Single-precision exponent/mantissa extraction and scaling — the
 //! primitives behind AVX-512 VGETEXPPS, VGETMANTPS and VSCALEFPS.
 //! Ported from Bochs softfloat3e/f32_getExp.cc, f32_getMant.cc and
@@ -11,8 +10,8 @@ use super::softfloat_types::*;
 use super::specialize::*;
 
 /// Bochs softfloat3e/f32_getExp.cc `f32_getExp` — the unbiased exponent of
-/// `a` as a float32.
-pub(in crate::cpu) fn f32_get_exp(a: float32, status: &mut SoftFloatStatus) -> float32 {
+/// `a` as a Float32.
+pub(in crate::cpu) fn f32_get_exp(a: Float32, status: &mut SoftFloatStatus) -> Float32 {
     let mut exp_a = exp_f32(a);
     let sig_a = frac_f32(a);
 
@@ -23,10 +22,10 @@ pub(in crate::cpu) fn f32_get_exp(a: float32, status: &mut SoftFloatStatus) -> f
         return pack_to_f32(false, 0xFF, 0);
     }
     if exp_a == 0 {
-        if sig_a == 0 || softfloat_denormalsAreZeros(status) {
+        if sig_a == 0 || softfloat_denormals_are_zeros(status) {
             return pack_to_f32(true, 0xFF, 0); // -inf
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         exp_a = norm_subnormal_f32_sig(sig_a).exp;
     }
     i32_to_f32(exp_a as i32 - 0x7F, status)
@@ -35,11 +34,11 @@ pub(in crate::cpu) fn f32_get_exp(a: float32, status: &mut SoftFloatStatus) -> f
 /// Bochs softfloat3e/f32_getMant.cc `f32_getMant`. `sign_ctrl` is imm8[3:2]
 /// and `interv` is imm8[1:0] of VGETMANTPS.
 pub(in crate::cpu) fn f32_get_mant(
-    a: float32,
+    a: Float32,
     status: &mut SoftFloatStatus,
     sign_ctrl: i32,
     interv: i32,
-) -> float32 {
+) -> Float32 {
     let sign_a = sign_f32(a);
     let mut exp_a = exp_f32(a);
     let mut sig_a = frac_f32(a);
@@ -51,20 +50,20 @@ pub(in crate::cpu) fn f32_get_mant(
             return softfloat_propagate_nan_f32(a, 0, status);
         }
         if sign_a && (sign_ctrl & 0x2) != 0 {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOAT32_DEFAULT_NAN;
         }
         return pack_to_f32(out_sign, 0x7F, 0);
     }
-    if exp_a == 0 && (sig_a == 0 || softfloat_denormalsAreZeros(status)) {
+    if exp_a == 0 && (sig_a == 0 || softfloat_denormals_are_zeros(status)) {
         return pack_to_f32(out_sign, 0x7F, 0);
     }
     if sign_a && (sign_ctrl & 0x2) != 0 {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOAT32_DEFAULT_NAN;
     }
     if exp_a == 0 {
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let ns = norm_subnormal_f32_sig(sig_a);
         exp_a = ns.exp;
         sig_a = ns.sig & 0x7FFFFF;
@@ -84,7 +83,7 @@ pub(in crate::cpu) fn f32_get_mant(
 
 /// Bochs softfloat3e/f32_scalef.cc `f32_scalef` — `a` multiplied by 2 raised
 /// to the integral part of `b`.
-pub(in crate::cpu) fn f32_scalef(a: float32, b: float32, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn f32_scalef(a: Float32, b: Float32, status: &mut SoftFloatStatus) -> Float32 {
     let sign_a = sign_f32(a);
     let mut exp_a = exp_f32(a);
     let mut sig_a = frac_f32(a);
@@ -96,7 +95,7 @@ pub(in crate::cpu) fn f32_scalef(a: float32, b: float32, status: &mut SoftFloatS
     if exp_b == 0xFF && sig_b != 0 {
         return softfloat_propagate_nan_f32(a, b, status);
     }
-    if softfloat_denormalsAreZeros(status) {
+    if softfloat_denormals_are_zeros(status) {
         if exp_a == 0 {
             sig_a = 0;
         }
@@ -114,7 +113,7 @@ pub(in crate::cpu) fn f32_scalef(a: float32, b: float32, status: &mut SoftFloatS
             return if sign_b { 0 } else { pack_to_f32(false, 0xFF, 0) };
         }
         if exp_b == 0xFF && sign_b {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOAT32_DEFAULT_NAN;
         }
         return a;
@@ -122,12 +121,12 @@ pub(in crate::cpu) fn f32_scalef(a: float32, b: float32, status: &mut SoftFloatS
     if exp_a == 0 {
         if sig_a == 0 {
             if exp_b == 0xFF && !sign_b {
-                softfloat_raiseFlags(status, FLAG_INVALID);
+                softfloat_raise_flags(status, FLAG_INVALID);
                 return FLOAT32_DEFAULT_NAN;
             }
             return pack_to_f32(sign_a, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
     }
 
     if (exp_b as u32 | sig_b) == 0 {

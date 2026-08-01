@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! Float32 ordering comparison and min/max.
 //! Ported from Bochs softfloat3e/f32_compare.cc + f32_min.cc + f32_max.cc.
 
@@ -11,8 +10,8 @@ use super::softfloat_types::*;
 /// `RELATION_EQUAL`, `RELATION_GREATER` or `RELATION_UNORDERED`.
 /// Bochs softfloat3e/f32_compare.cc `f32_compare`.
 pub(in crate::cpu) fn f32_compare_full(
-    mut a: float32,
-    mut b: float32,
+    mut a: Float32,
+    mut b: Float32,
     quiet: bool,
     status: &mut SoftFloatStatus,
 ) -> i32 {
@@ -20,27 +19,27 @@ pub(in crate::cpu) fn f32_compare_full(
     let b_class = f32_class(b);
 
     if a_class == SoftFloatClass::SNaN || b_class == SoftFloatClass::SNaN {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return RELATION_UNORDERED;
     }
     if a_class == SoftFloatClass::QNaN || b_class == SoftFloatClass::QNaN {
         if !quiet {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
         }
         return RELATION_UNORDERED;
     }
     if a_class == SoftFloatClass::Denormal {
-        if softfloat_denormalsAreZeros(status) {
+        if softfloat_denormals_are_zeros(status) {
             a &= 0x8000_0000;
         } else {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
     }
     if b_class == SoftFloatClass::Denormal {
-        if softfloat_denormalsAreZeros(status) {
+        if softfloat_denormals_are_zeros(status) {
             b &= 0x8000_0000;
         } else {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
     }
 
@@ -65,21 +64,21 @@ pub(in crate::cpu) fn f32_compare_full(
 /// Signaling compare — raises #I on a QNaN operand.
 /// Bochs softfloat.h `f32_compare(a, b, status)`.
 #[inline]
-pub(in crate::cpu) fn f32_compare(a: float32, b: float32, status: &mut SoftFloatStatus) -> i32 {
+pub(in crate::cpu) fn f32_compare(a: Float32, b: Float32, status: &mut SoftFloatStatus) -> i32 {
     f32_compare_full(a, b, false, status)
 }
 
 /// Quiet compare — a QNaN operand does not raise #I.
 /// Bochs softfloat.h `f32_compare_quiet`.
 #[inline]
-pub(in crate::cpu) fn f32_compare_quiet(a: float32, b: float32, status: &mut SoftFloatStatus) -> i32 {
+pub(in crate::cpu) fn f32_compare_quiet(a: Float32, b: Float32, status: &mut SoftFloatStatus) -> i32 {
     f32_compare_full(a, b, true, status)
 }
 
 /// Bochs softfloat3e/f32_min.cc `f32_min`. When both operands compare equal
 /// (including ±0.0) the *second* operand is returned, matching SSE MINPS.
-pub(in crate::cpu) fn f32_min(mut a: float32, mut b: float32, status: &mut SoftFloatStatus) -> float32 {
-    if softfloat_denormalsAreZeros(status) {
+pub(in crate::cpu) fn f32_min(mut a: Float32, mut b: Float32, status: &mut SoftFloatStatus) -> Float32 {
+    if softfloat_denormals_are_zeros(status) {
         a = f32_denormal_to_zero(a);
         b = f32_denormal_to_zero(b);
     }
@@ -91,8 +90,8 @@ pub(in crate::cpu) fn f32_min(mut a: float32, mut b: float32, status: &mut SoftF
 }
 
 /// Bochs softfloat3e/f32_max.cc `f32_max`.
-pub(in crate::cpu) fn f32_max(mut a: float32, mut b: float32, status: &mut SoftFloatStatus) -> float32 {
-    if softfloat_denormalsAreZeros(status) {
+pub(in crate::cpu) fn f32_max(mut a: Float32, mut b: Float32, status: &mut SoftFloatStatus) -> Float32 {
+    if softfloat_denormals_are_zeros(status) {
         a = f32_denormal_to_zero(a);
         b = f32_denormal_to_zero(b);
     }

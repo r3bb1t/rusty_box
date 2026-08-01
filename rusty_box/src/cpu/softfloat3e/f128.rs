@@ -1,4 +1,8 @@
-#![allow(dead_code, non_snake_case, non_camel_case_types, unused_assignments)]
+// Ported wholesale from Berkeley SoftFloat 3e / Bochs softfloat3e: these
+// modules carry the complete primitive surface, part of which no x86
+// instruction reaches yet. Kept for parity with upstream rather than
+// trimmed to current callers.
+#![allow(dead_code)]
 //! Float128 (quad-precision) arithmetic library for the Rusty Box FPU.
 //!
 //! Ported from Berkeley SoftFloat 3e f128_*.c files and Bochs
@@ -37,7 +41,7 @@ impl Float128 {
         Self { v64, v0 }
     }
 
-    /// Create from the existing float128_t (u128) type alias.
+    /// Create from the existing Float128 (u128) type alias.
     #[inline]
     pub const fn from_u128(val: u128) -> Self {
         Self {
@@ -157,7 +161,7 @@ pub(in crate::cpu) fn softfloat_propagate_nan_f128_ui(
 ) -> Float128 {
     let is_sig_nan_a = is_sig_nan_f128_ui(ui_a64, ui_a0);
     if is_sig_nan_a || is_sig_nan_f128_ui(ui_b64, ui_b0) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
     }
     let (mut v64, v0) = if is_sig_nan_a || is_nan_f128_ui(ui_a64, ui_a0) {
         (ui_a64, ui_a0)
@@ -400,11 +404,13 @@ pub(in crate::cpu) fn round_pack_to_f128(
     mut exp: i32,
     mut sig64: u64,
     mut sig0: u64,
-    mut sig_extra: u64,
+    _sig_extra: u64,
     status: &mut SoftFloatStatus,
 ) -> Float128 {
-    // Artificially reduce precision to match hardware x86
-    sig_extra = 0;
+    // Artificially reduce precision to match hardware x86: the caller's extra
+    // significand bits are discarded outright, which is why the parameter is
+    // taken and ignored rather than removed — the signature mirrors Bochs.
+    let mut sig_extra = 0u64;
     sig0 &= 0xFFFFFFFF00000000;
 
     let do_increment = 0x8000000000000000 <= sig_extra;
@@ -421,11 +427,11 @@ pub(in crate::cpu) fn round_pack_to_f128(
             sig_extra = new_extra;
             exp = 0;
             if is_tiny && sig_extra != 0 {
-                softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                softfloat_raise_flags(status, FLAG_UNDERFLOW);
             }
             let do_increment = 0x8000000000000000 <= sig_extra;
             if sig_extra != 0 {
-                softfloat_raiseFlags(status, FLAG_INEXACT);
+                softfloat_raise_flags(status, FLAG_INEXACT);
             }
             if do_increment {
                 let (new64, new0) = add128(sig64, sig0, 0, 1);
@@ -445,7 +451,7 @@ pub(in crate::cpu) fn round_pack_to_f128(
                 && eq128(sig64, sig0, 0x0001FFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF)
                 && do_increment)
         {
-            softfloat_raiseFlags(status, FLAG_OVERFLOW | FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_OVERFLOW | FLAG_INEXACT);
             return Float128 {
                 v64: pack_to_f128_ui64(sign, 0x7FFF, 0),
                 v0: 0,
@@ -454,7 +460,7 @@ pub(in crate::cpu) fn round_pack_to_f128(
     }
 
     if sig_extra != 0 {
-        softfloat_raiseFlags(status, FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_INEXACT);
     }
     if do_increment {
         let (new64, new0) = add128(sig64, sig0, 0, 1);
@@ -718,7 +724,7 @@ fn sub_mags_f128(
         if (sig_a.0 | sig_a.1 | sig_b.0 | sig_b.1) != 0 {
             return softfloat_propagate_nan_f128_ui(ui_a64, ui_a0, ui_b64, ui_b0, status);
         }
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOAT128_DEFAULT_NAN;
     }
     let mut exp_z = exp_a;
@@ -747,7 +753,7 @@ fn sub_mags_f128(
     }
     // exact zero
     Float128 {
-        v64: pack_to_f128_ui64(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0),
+        v64: pack_to_f128_ui64(softfloat_get_rounding_mode(status) == ROUND_MIN, 0, 0),
         v0: 0,
     }
 }
@@ -805,7 +811,7 @@ pub(in crate::cpu) fn f128_mul(a: Float128, b: Float128, status: &mut SoftFloatS
         }
         let mag_bits = (exp_b as u64) | sig_b.0 | sig_b.1;
         if mag_bits == 0 {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOAT128_DEFAULT_NAN;
         }
         return Float128 {
@@ -820,7 +826,7 @@ pub(in crate::cpu) fn f128_mul(a: Float128, b: Float128, status: &mut SoftFloatS
         }
         let mag_bits = (exp_a as u64) | sig_a.0 | sig_a.1;
         if mag_bits == 0 {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOAT128_DEFAULT_NAN;
         }
         return Float128 {
@@ -838,7 +844,7 @@ pub(in crate::cpu) fn f128_mul(a: Float128, b: Float128, status: &mut SoftFloatS
                 v0: 0,
             };
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f128_sig(sig_a.0, sig_a.1);
         exp_a = norm.exp;
         sig_a = (norm.sig_v64, norm.sig_v0);
@@ -850,7 +856,7 @@ pub(in crate::cpu) fn f128_mul(a: Float128, b: Float128, status: &mut SoftFloatS
                 v0: 0,
             };
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f128_sig(sig_b.0, sig_b.1);
         exp_b = norm.exp;
         sig_b = (norm.sig_v64, norm.sig_v0);
@@ -904,7 +910,7 @@ pub(in crate::cpu) fn f128_div(a: Float128, b: Float128, status: &mut SoftFloatS
                 return softfloat_propagate_nan_f128_ui(ui_a64, ui_a0, ui_b64, ui_b0, status);
             }
             // Inf / Inf = invalid
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOAT128_DEFAULT_NAN;
         }
         return Float128 {
@@ -930,17 +936,17 @@ pub(in crate::cpu) fn f128_div(a: Float128, b: Float128, status: &mut SoftFloatS
         if (sig_b.0 | sig_b.1) == 0 {
             if (exp_a as u64 | sig_a.0 | sig_a.1) == 0 {
                 // 0/0 = invalid
-                softfloat_raiseFlags(status, FLAG_INVALID);
+                softfloat_raise_flags(status, FLAG_INVALID);
                 return FLOAT128_DEFAULT_NAN;
             }
             // A/0 = inf
-            softfloat_raiseFlags(status, FLAG_DIVBYZERO);
+            softfloat_raise_flags(status, FLAG_DIVBYZERO);
             return Float128 {
                 v64: pack_to_f128_ui64(sign_z, 0x7FFF, 0),
                 v0: 0,
             };
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f128_sig(sig_b.0, sig_b.1);
         exp_b = norm.exp;
         sig_b = (norm.sig_v64, norm.sig_v0);
@@ -952,7 +958,7 @@ pub(in crate::cpu) fn f128_div(a: Float128, b: Float128, status: &mut SoftFloatS
                 v0: 0,
             };
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f128_sig(sig_a.0, sig_a.1);
         exp_a = norm.exp;
         sig_a = (norm.sig_v64, norm.sig_v0);
@@ -1077,7 +1083,7 @@ pub(in crate::cpu) fn f128_mul_add(
                 return uiz;
             }
         }
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         let uiz = FLOAT128_DEFAULT_NAN;
         return softfloat_propagate_nan_f128_ui(uiz.v64, uiz.v0, ui_c64, ui_c0, status);
     }
@@ -1104,7 +1110,7 @@ pub(in crate::cpu) fn f128_mul_add(
                 return uiz;
             }
         }
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         let uiz = FLOAT128_DEFAULT_NAN;
         return softfloat_propagate_nan_f128_ui(uiz.v64, uiz.v0, ui_c64, ui_c0, status);
     }
@@ -1130,13 +1136,13 @@ pub(in crate::cpu) fn f128_mul_add(
             };
             if (exp_c as u64 | sig_c.0 | sig_c.1) == 0 && sign_z != sign_c {
                 return Float128 {
-                    v64: pack_to_f128_ui64(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0),
+                    v64: pack_to_f128_ui64(softfloat_get_rounding_mode(status) == ROUND_MIN, 0, 0),
                     v0: 0,
                 };
             }
             return uiz;
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f128_sig(sig_a.0, sig_a.1);
         exp_a = norm.exp;
         sig_a = (norm.sig_v64, norm.sig_v0);
@@ -1150,13 +1156,13 @@ pub(in crate::cpu) fn f128_mul_add(
             };
             if (exp_c as u64 | sig_c.0 | sig_c.1) == 0 && sign_z != sign_c {
                 return Float128 {
-                    v64: pack_to_f128_ui64(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0),
+                    v64: pack_to_f128_ui64(softfloat_get_rounding_mode(status) == ROUND_MIN, 0, 0),
                     v0: 0,
                 };
             }
             return uiz;
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f128_sig(sig_b.0, sig_b.1);
         exp_b = norm.exp;
         sig_b = (norm.sig_v64, norm.sig_v0);
@@ -1187,7 +1193,7 @@ pub(in crate::cpu) fn f128_mul_add(
             let (z64, z0) = short_shift_right128(sig_z.0, sig_z.1, shift_dist as u8);
             return round_pack_to_f128(sign_z, exp_z - 1, z64, z0, sig_z_extra_jammed, status);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f128_sig(sig_c.0, sig_c.1);
         exp_c = norm.exp;
         sig_c = (norm.sig_v64, norm.sig_v0);
@@ -1310,7 +1316,7 @@ pub(in crate::cpu) fn f128_mul_add(
             if (zz64 | zz0) == 0 && sig256z[1] == 0 && sig256z[0] == 0 {
                 // Complete cancellation
                 return Float128 {
-                    v64: pack_to_f128_ui64(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0),
+                    v64: pack_to_f128_ui64(softfloat_get_rounding_mode(status) == ROUND_MIN, 0, 0),
                     v0: 0,
                 };
             }
@@ -1358,13 +1364,13 @@ pub(in crate::cpu) fn f128_mul_add(
 // ============================================================
 
 /// Convert extFloat80 (80-bit extended precision) to Float128.
-pub(in crate::cpu) fn extf80_to_f128(a: floatx80, status: &mut SoftFloatStatus) -> Float128 {
+pub(in crate::cpu) fn extf80_to_f128(a: ExtFloat80, status: &mut SoftFloatStatus) -> Float128 {
     let ui_a64 = a.sign_exp;
     let ui_a0 = a.signif;
 
     // Handle unsupported encodings
     if extf80_is_unsupported(a) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOAT128_DEFAULT_NAN;
     }
 
@@ -1374,7 +1380,7 @@ pub(in crate::cpu) fn extf80_to_f128(a: floatx80, status: &mut SoftFloatStatus) 
     if exp == 0x7FFF && frac != 0 {
         // NaN — convert through common NaN representation
         // Quieten signaling NaN
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         let sign = sign_f128_ui64((ui_a64 as u64) << 48);
         let mut v64 = pack_to_f128_ui64(sign, 0x7FFF, 0);
         v64 |= 0x0000800000000000; // set quiet bit
@@ -1390,7 +1396,7 @@ pub(in crate::cpu) fn extf80_to_f128(a: floatx80, status: &mut SoftFloatStatus) 
 }
 
 /// Convert Float128 to extFloat80 (80-bit extended precision).
-pub(in crate::cpu) fn f128_to_extf80(a: Float128, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn f128_to_extf80(a: Float128, status: &mut SoftFloatStatus) -> ExtFloat80 {
     let ui_a64 = a.v64;
     let ui_a0 = a.v0;
     let sign = sign_f128_ui64(ui_a64);
@@ -1401,20 +1407,20 @@ pub(in crate::cpu) fn f128_to_extf80(a: Float128, status: &mut SoftFloatStatus) 
     if exp == 0x7FFF {
         if (frac64 | frac0) != 0 {
             // NaN
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOATX80_DEFAULT_NAN;
         }
         // Infinity
         let sign_exp = pack_to_extf80_sign_exp(sign, 0x7FFF);
-        return floatx80::new(sign_exp, 0x8000000000000000);
+        return ExtFloat80::new(sign_exp, 0x8000000000000000);
     }
 
     if exp == 0 {
         if (frac64 | frac0) == 0 {
             let sign_exp = pack_to_extf80_sign_exp(sign, 0);
-            return floatx80::new(sign_exp, 0);
+            return ExtFloat80::new(sign_exp, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f128_sig(frac64, frac0);
         let exp = norm.exp;
         frac64 = norm.sig_v64;

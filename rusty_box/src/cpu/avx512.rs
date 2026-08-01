@@ -17,8 +17,8 @@ use super::softfloat3e::f64_compare::{f64_max, f64_min};
 use super::softfloat3e::f64_div::f64_div;
 use super::softfloat3e::f64_mul::f64_mul;
 use super::softfloat3e::f64_sqrt::f64_sqrt;
-use super::softfloat3e::softfloat::{softfloat_getExceptionFlags, SoftFloatStatus};
-use super::softfloat3e::softfloat_types::{float32, float64};
+use super::softfloat3e::softfloat::{softfloat_get_exception_flags, SoftFloatStatus};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -2283,7 +2283,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn evex_pfp_2op_ps(
         &mut self,
         instr: &Instruction,
-        func: fn(float32, float32, &mut SoftFloatStatus) -> float32,
+        func: fn(Float32, Float32, &mut SoftFloatStatus) -> Float32,
     ) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = dword_elements(vl);
@@ -2298,7 +2298,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 r.set_zmm32u(i, func(s1.zmm32u(i), s2.zmm32u(i), &mut status));
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let z = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &r, m, z, vl);
         Ok(())
@@ -2308,7 +2308,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn evex_pfp_2op_pd(
         &mut self,
         instr: &Instruction,
-        func: fn(float64, float64, &mut SoftFloatStatus) -> float64,
+        func: fn(Float64, Float64, &mut SoftFloatStatus) -> Float64,
     ) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = qword_elements(vl);
@@ -2323,7 +2323,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 r.set_zmm64u(i, func(s1.zmm64u(i), s2.zmm64u(i), &mut status));
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let z = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
         Ok(())
@@ -2383,7 +2383,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 r.set_zmm32u(i, f32_sqrt(src.zmm32u(i), &mut status));
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let z = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &r, m, z, vl);
         Ok(())
@@ -2405,7 +2405,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 r.set_zmm64u(i, f64_sqrt(src.zmm64u(i), &mut status));
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let z = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
         Ok(())

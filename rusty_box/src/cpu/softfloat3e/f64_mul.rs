@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! Float64 multiplication. Ported from Berkeley SoftFloat 3e f64_mul.c.
 
 use super::internals::*;
@@ -7,7 +6,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub(in crate::cpu) fn f64_mul(a: float64, b: float64, status: &mut SoftFloatStatus) -> float64 {
+pub(in crate::cpu) fn f64_mul(a: Float64, b: Float64, status: &mut SoftFloatStatus) -> Float64 {
     let sign_a = sign_f64(a);
     let mut exp_a = exp_f64(a);
     let mut sig_a = frac_f64(a);
@@ -16,7 +15,7 @@ pub(in crate::cpu) fn f64_mul(a: float64, b: float64, status: &mut SoftFloatStat
     let mut sig_b = frac_f64(b);
     let sign_z = sign_a ^ sign_b;
 
-    if softfloat_denormalsAreZeros(status) {
+    if softfloat_denormals_are_zeros(status) {
         if exp_a == 0 {
             sig_a = 0;
         }
@@ -32,7 +31,7 @@ pub(in crate::cpu) fn f64_mul(a: float64, b: float64, status: &mut SoftFloatStat
         }
         let mag_bits = (exp_b as u64) | sig_b;
         if sig_b != 0 && exp_b == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return mul_inf_arg(sign_z, mag_bits, status);
     }
@@ -42,7 +41,7 @@ pub(in crate::cpu) fn f64_mul(a: float64, b: float64, status: &mut SoftFloatStat
         }
         let mag_bits = (exp_a as u64) | sig_a;
         if sig_a != 0 && exp_a == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return mul_inf_arg(sign_z, mag_bits, status);
     }
@@ -50,11 +49,11 @@ pub(in crate::cpu) fn f64_mul(a: float64, b: float64, status: &mut SoftFloatStat
     if exp_a == 0 {
         if sig_a == 0 {
             if sig_b != 0 && exp_b == 0 {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             return pack_to_f64(sign_z, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let ns = norm_subnormal_f64_sig(sig_a);
         exp_a = ns.exp;
         sig_a = ns.sig;
@@ -62,11 +61,11 @@ pub(in crate::cpu) fn f64_mul(a: float64, b: float64, status: &mut SoftFloatStat
     if exp_b == 0 {
         if sig_b == 0 {
             if sig_a != 0 && exp_a == 0 {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             return pack_to_f64(sign_z, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let ns = norm_subnormal_f64_sig(sig_b);
         exp_b = ns.exp;
         sig_b = ns.sig;
@@ -86,9 +85,9 @@ pub(in crate::cpu) fn f64_mul(a: float64, b: float64, status: &mut SoftFloatStat
 
 /// Berkeley SoftFloat `f64_mul` `infArg` label: an infinite operand yields
 /// infinity, except against a zero operand, which is invalid.
-fn mul_inf_arg(sign_z: bool, mag_bits: u64, status: &mut SoftFloatStatus) -> float64 {
+fn mul_inf_arg(sign_z: bool, mag_bits: u64, status: &mut SoftFloatStatus) -> Float64 {
     if mag_bits == 0 {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         FLOAT64_DEFAULT_NAN
     } else {
         pack_to_f64(sign_z, 0x7FF, 0)

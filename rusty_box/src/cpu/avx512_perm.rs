@@ -101,7 +101,7 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
-    // VSHUFF32x4 — Shuffle 128-bit lanes of two float32 sources (EVEX)
+    // VSHUFF32x4 — Shuffle 128-bit lanes of two Float32 sources (EVEX)
     // Bochs: VSHUFF32x4_MASK_VpsHpsWpsIbR
     //
     // VL256: result.lane[0] = src1.lane[order[0:0]]
@@ -148,7 +148,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // ========================================================================
-    // VSHUFF64x2 — Shuffle 128-bit lanes of two float64 sources (EVEX)
+    // VSHUFF64x2 — Shuffle 128-bit lanes of two Float64 sources (EVEX)
     // Bochs: VSHUFF64x2_MASK_VpdHpdWpdIbR
     // Same lane selection as VSHUFF32x4, but qword masking granularity.
     // ========================================================================

@@ -1,4 +1,8 @@
-#![allow(dead_code, non_snake_case, unused_assignments)]
+// Ported wholesale from Berkeley SoftFloat 3e / Bochs softfloat3e: these
+// modules carry the complete primitive surface, part of which no x86
+// instruction reaches yet. Kept for parity with upstream rather than
+// trimmed to current callers.
+#![allow(dead_code)]
 //! Float16 fused multiply-add: a*b + c (with operation modifier).
 //! Ported from Berkeley SoftFloat 3e f16_mulAdd.c.
 
@@ -12,12 +16,12 @@ use super::specialize::*;
 /// Float16 fused multiply-add: a*b + c (with operation modifier).
 /// op=0: a*b+c, op=1: a*b-c, op=2: -(a*b)+c, op=3: -(a*b)-c
 pub(in crate::cpu) fn f16_mul_add(
-    a: float16,
-    b: float16,
-    c: float16,
+    a: Float16,
+    b: Float16,
+    c: Float16,
     op: u8,
     status: &mut SoftFloatStatus,
-) -> float16 {
+) -> Float16 {
     let ui_a = a;
     let ui_b = b;
     let ui_c = c;
@@ -47,7 +51,7 @@ pub(in crate::cpu) fn f16_mul_add(
     }
 
     // Denormals-are-zeros
-    if softfloat_denormalsAreZeros(status) {
+    if softfloat_denormals_are_zeros(status) {
         if exp_a == 0 {
             sig_a = 0;
         }
@@ -76,7 +80,7 @@ pub(in crate::cpu) fn f16_mul_add(
     // Infinity handling for C
     if exp_c == 0x1F {
         if (sig_a != 0 && exp_a == 0) || (sig_b != 0 && exp_b == 0) {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return pack_to_f16(sign_c, 0x1F, 0);
     }
@@ -86,11 +90,11 @@ pub(in crate::cpu) fn f16_mul_add(
         if sig_a == 0 {
             // Denormal check for sigB before zeroProd
             if sig_b != 0 && exp_b == 0 {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             return zero_prod_f16(sign_prod, sign_c, exp_c, sig_c, status);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f16_sig(sig_a);
         exp_a = norm.exp;
         sig_a = norm.sig;
@@ -100,7 +104,7 @@ pub(in crate::cpu) fn f16_mul_add(
         if sig_b == 0 {
             return zero_prod_f16(sign_prod, sign_c, exp_c, sig_c, status);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f16_sig(sig_b);
         exp_b = norm.exp;
         sig_b = norm.sig;
@@ -126,7 +130,7 @@ pub(in crate::cpu) fn f16_mul_add(
             sig_z = (sig_prod >> 15) as u16 | (((sig_prod & 0x7FFF) != 0) as u16);
             return round_pack_to_f16(sign_z, exp_z, sig_z, status);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f16_sig(sig_c);
         exp_c = norm.exp;
         sig_c = norm.sig;
@@ -160,7 +164,7 @@ pub(in crate::cpu) fn f16_mul_add(
             exp_z = exp_prod;
             let diff = sig_prod.wrapping_sub(sig32c);
             if diff == 0 {
-                return pack_to_f16(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0);
+                return pack_to_f16(softfloat_get_rounding_mode(status) == ROUND_MIN, 0, 0);
             }
             if diff & 0x80000000 != 0 {
                 sign_z = !sign_z;
@@ -192,18 +196,18 @@ fn zero_prod_f16(
     exp_c: i16,
     sig_c: u16,
     status: &mut SoftFloatStatus,
-) -> float16 {
+) -> Float16 {
     let mut ui_z = pack_to_f16(sign_c, exp_c, sig_c);
     if exp_c == 0 && sig_c != 0 {
         // Exact zero plus a denormal
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
-        if softfloat_flushUnderflowToZero(status) {
-            softfloat_raiseFlags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
+        if softfloat_flush_underflow_to_zero(status) {
+            softfloat_raise_flags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
             return pack_to_f16(sign_c, 0, 0);
         }
     }
     if ((exp_c as u16) | sig_c) == 0 && sign_prod != sign_c {
-        ui_z = pack_to_f16(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0);
+        ui_z = pack_to_f16(softfloat_get_rounding_mode(status) == ROUND_MIN, 0, 0);
     }
     ui_z
 }
@@ -219,9 +223,9 @@ fn inf_prod_arg(
     exp_c: i16,
     sig_c: u16,
     mag_bits: u16,
-    ui_c: float16,
+    ui_c: Float16,
     status: &mut SoftFloatStatus,
-) -> float16 {
+) -> Float16 {
     if mag_bits != 0 {
         let ui_z = pack_to_f16(sign_prod, 0x1F, 0);
         if sign_prod == sign_c || exp_c != 0x1F {
@@ -229,12 +233,12 @@ fn inf_prod_arg(
                 || (sig_b != 0 && exp_b == 0)
                 || (sig_c != 0 && exp_c == 0)
             {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             return ui_z;
         }
     }
-    softfloat_raiseFlags(status, FLAG_INVALID);
+    softfloat_raise_flags(status, FLAG_INVALID);
     let ui_z = FLOAT16_DEFAULT_NAN;
     softfloat_propagate_nan_f16(ui_z, ui_c, status)
 }

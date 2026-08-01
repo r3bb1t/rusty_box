@@ -17,7 +17,7 @@ use super::sse_rcp_tables::{RCP_TABLE, RSQRT_TABLE0, RSQRT_TABLE1};
 use super::softfloat3e::f32_class::f32_class;
 use super::softfloat3e::internals::pack_to_f32;
 use super::softfloat3e::softfloat::{f32_sign, SoftFloatClass};
-use super::softfloat3e::softfloat_types::float32;
+use super::softfloat3e::softfloat_types::Float32;
 use super::softfloat3e::specialize::{FLOAT32_DEFAULT_NAN, FLOAT32_EXP_BIAS};
 use super::{
     cpu::BxCpuC,
@@ -28,7 +28,7 @@ use super::{
 
 /// Bochs xmm.h `convert_to_QNaN` — force the quiet bit on a NaN.
 #[inline]
-fn convert_to_qnan(op: float32) -> float32 {
+fn convert_to_qnan(op: Float32) -> Float32 {
     op | 0x7FC0_0000
 }
 
@@ -37,7 +37,7 @@ fn convert_to_qnan(op: float32) -> float32 {
 /// Computes 1/1.yyyyyyyyyyy1 rounded to the 12th fraction bit by
 /// round-to-nearest regardless of the current rounding mode, from a
 /// 2048-entry table.
-pub(super) fn approximate_rcp(op: float32) -> float32 {
+pub(super) fn approximate_rcp(op: Float32) -> Float32 {
     let sign = f32_sign(op);
     match f32_class(op) {
         SoftFloatClass::Zero | SoftFloatClass::Denormal => return pack_to_f32(sign, 0xFF, 0),
@@ -65,7 +65,7 @@ pub(super) fn approximate_rcp(op: float32) -> float32 {
 /// Computes 1/sqrt(1.yyyyyyyyyy1) rounded to the 11th fraction bit by
 /// round-to-nearest regardless of the current rounding mode, from two
 /// 1024-entry tables selected by the low bit of the exponent.
-pub(super) fn approximate_rsqrt(op: float32) -> float32 {
+pub(super) fn approximate_rsqrt(op: Float32) -> Float32 {
     let sign = f32_sign(op);
     match f32_class(op) {
         SoftFloatClass::Zero | SoftFloatClass::Denormal => return pack_to_f32(sign, 0xFF, 0),

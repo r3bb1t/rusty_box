@@ -6,12 +6,12 @@ use super::super::softfloat3e::extf80_addsub::{extf80_add, extf80_sub};
 use super::super::softfloat3e::f128::*;
 use super::super::softfloat3e::internals::*;
 use super::super::softfloat3e::softfloat::*;
-use super::super::softfloat3e::softfloat_types::floatx80;
+use super::super::softfloat3e::softfloat_types::ExtFloat80;
 use super::super::softfloat3e::specialize::*;
 use super::poly::*;
 
-/// PI as floatx80 (for fpatan)
-const FLOATX80_PI: floatx80 = floatx80 {
+/// PI as ExtFloat80 (for fpatan)
+const FLOATX80_PI: ExtFloat80 = ExtFloat80 {
     signif: 0xc90fdaa22168c235,
     sign_exp: 0x4000,
 };
@@ -40,10 +40,10 @@ fn poly_atan(x: Float128, status: &mut SoftFloatStatus) -> Float128 {
 /// Compute atan2(b, a) = atan(b/a) with proper quadrant handling.
 /// a = ST(0) (x), b = ST(1) (y).
 /// Ported from Bochs fpatan.cc using Float128 polynomial evaluation.
-pub(in crate::cpu) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn fpatan_impl(a: ExtFloat80, b: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
     }
 
@@ -92,7 +92,7 @@ pub(in crate::cpu) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFlo
             }
         }
         if a_sig != 0 && a_exp == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         // atan2(inf, finite) = pi/2 * sign(y)
         return round_pack_to_extf80(
@@ -111,7 +111,7 @@ pub(in crate::cpu) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFlo
             return softfloat_propagate_nan_extf80(a.sign_exp, a_sig, b.sign_exp, b_sig, status);
         }
         if b_sig != 0 && b_exp == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         // a is infinity
         if a_sign {
@@ -134,7 +134,7 @@ pub(in crate::cpu) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFlo
     if b_exp == 0 {
         if b_sig == 0 {
             if a_sig != 0 && a_exp == 0 {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             // atan2(0, x): if x negative -> pi, if x positive -> 0
             if a_sign {
@@ -150,7 +150,7 @@ pub(in crate::cpu) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFlo
                 return pack_floatx80(b_sign, 0, 0);
             }
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(b_sig);
         b_exp = norm.exp + 1;
     }
@@ -168,12 +168,12 @@ pub(in crate::cpu) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFlo
                 status,
             );
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(a_sig);
         a_exp = norm.exp + 1;
     }
 
-    softfloat_raiseFlags(status, FLAG_INEXACT);
+    softfloat_raise_flags(status, FLAG_INEXACT);
 
     // Re-read sigs in case they were normalized
     let a_sig = if extf80_exp(a) == 0 && extf80_fraction(a) != 0 {

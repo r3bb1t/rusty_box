@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! Single-precision to half-precision conversion.
 //! Ported from Berkeley SoftFloat 3e `f32_to_f16.cc`.
 
@@ -6,13 +5,13 @@ use super::internals::*;
 use super::softfloat::*;
 use super::softfloat_types::*;
 
-/// Convert a float32 to float16.
+/// Convert a Float32 to Float16.
 ///
 /// Bochs softfloat3e `f32_to_f16`. The NaN path is the closed form of
 /// `softfloat_f32UIToCommonNaN` followed by `softfloat_commonNaNToF16UI`
 /// (8086-SSE specialization): the payload is shifted right by 13 and the
 /// quiet bit is forced on.
-pub(in crate::cpu) fn f32_to_f16(a: float32, status: &mut SoftFloatStatus) -> float16 {
+pub(in crate::cpu) fn f32_to_f16(a: Float32, status: &mut SoftFloatStatus) -> Float16 {
     let sign = sign_f32(a);
     let exp = exp_f32(a);
     let frac = frac_f32(a);
@@ -21,7 +20,7 @@ pub(in crate::cpu) fn f32_to_f16(a: float32, status: &mut SoftFloatStatus) -> fl
         if frac != 0 {
             // softfloat_f32UIToCommonNaN raises #I on a signaling NaN.
             if f32_is_signaling_nan(a) {
-                softfloat_raiseFlags(status, FLAG_INVALID);
+                softfloat_raise_flags(status, FLAG_INVALID);
             }
             return ((sign as u16) << 15) | 0x7E00 | ((a >> 13) as u16);
         }
@@ -29,10 +28,10 @@ pub(in crate::cpu) fn f32_to_f16(a: float32, status: &mut SoftFloatStatus) -> fl
     }
 
     if exp == 0 && frac != 0 {
-        if softfloat_denormalsAreZeros(status) {
+        if softfloat_denormals_are_zeros(status) {
             return pack_to_f16(sign, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
     }
 
     // Sticky-collapse the 9 bits that do not survive the narrowing.

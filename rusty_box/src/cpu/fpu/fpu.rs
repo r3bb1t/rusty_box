@@ -7,7 +7,7 @@ use super::super::cpu::{BxCpuC, CpuMode};
 use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::{BxSegregs, Instruction};
 use super::super::i387::*;
-use super::super::softfloat3e::softfloat_types::floatx80;
+use super::super::softfloat3e::softfloat_types::ExtFloat80;
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// FNINIT — Initialize FPU state
@@ -172,7 +172,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let hi = self.v_read_dword(seg, reg_offset.wrapping_add(4) & asize_mask)? as u64;
             let signif = lo | (hi << 32);
             let sign_exp = self.v_read_word(seg, reg_offset.wrapping_add(8) & asize_mask)?;
-            let tmp = floatx80 { signif, sign_exp };
+            let tmp = ExtFloat80 { signif, sign_exp };
 
             let tag = if self.is_tag_empty(n) {
                 FPU_TAG_EMPTY as i32

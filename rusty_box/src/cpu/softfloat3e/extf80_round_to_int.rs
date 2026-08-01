@@ -1,4 +1,3 @@
-#![allow(non_camel_case_types, dead_code, non_snake_case)]
 //! ExtFloat80 round-to-integer.
 //! Ported from Berkeley SoftFloat 3e: extF80_roundToInt.c
 
@@ -9,14 +8,14 @@ use super::specialize::*;
 
 /// Round extFloat80 to integer using given rounding mode.
 pub(in crate::cpu) fn extf80_round_to_int(
-    a: floatx80,
+    a: ExtFloat80,
     rounding_mode: u8,
     exact: bool,
     status: &mut SoftFloatStatus,
-) -> floatx80 {
+) -> ExtFloat80 {
     // Handle unsupported
     if extf80_is_unsupported(a) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
     }
 
@@ -45,10 +44,10 @@ pub(in crate::cpu) fn extf80_round_to_int(
             if sig_a == 0 {
                 return a; // ±0
             }
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         if exact {
-            softfloat_raiseFlags(status, FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_INEXACT);
         }
         match rounding_mode {
             ROUND_NEAR_EVEN => {
@@ -58,28 +57,28 @@ pub(in crate::cpu) fn extf80_round_to_int(
                 }
                 if exp == 0x3FFE {
                     // >= 0.5: round up to 1.0
-                    softfloat_setRoundingUp(status);
+                    softfloat_set_rounding_up(status);
                     return pack_floatx80(sign_extf80(sign_ui64), 0x3FFF, 0x8000000000000000);
                 }
                 return pack_to_extf80(sign_ui64, 0);
             }
             ROUND_NEAR_MAXMAG => {
                 if exp == 0x3FFE {
-                    softfloat_setRoundingUp(status);
+                    softfloat_set_rounding_up(status);
                     return pack_floatx80(sign_extf80(sign_ui64), 0x3FFF, 0x8000000000000000);
                 }
                 return pack_to_extf80(sign_ui64, 0);
             }
             ROUND_MIN => {
                 if sign_ui64 != 0 {
-                    softfloat_setRoundingUp(status);
+                    softfloat_set_rounding_up(status);
                     return pack_floatx80(true, 0x3FFF, 0x8000000000000000);
                 }
                 return pack_to_extf80(sign_ui64, 0);
             }
             ROUND_MAX => {
                 if sign_ui64 == 0 {
-                    softfloat_setRoundingUp(status);
+                    softfloat_set_rounding_up(status);
                     return pack_floatx80(false, 0x3FFF, 0x8000000000000000);
                 }
                 return pack_to_extf80(sign_ui64, 0);
@@ -124,14 +123,14 @@ pub(in crate::cpu) fn extf80_round_to_int(
     if sig_z == 0 {
         ui_z64 = ui_z64.wrapping_add(1);
         sig_z = 0x8000000000000000;
-        softfloat_setRoundingUp(status);
+        softfloat_set_rounding_up(status);
     }
     if sig_z != sig_a {
         if exact {
-            softfloat_raiseFlags(status, FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_INEXACT);
         }
         if sig_z > sig_a {
-            softfloat_setRoundingUp(status);
+            softfloat_set_rounding_up(status);
         }
     }
     pack_to_extf80(ui_z64, sig_z)

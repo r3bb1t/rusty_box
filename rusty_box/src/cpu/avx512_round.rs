@@ -4,13 +4,13 @@
 //! Mirrors Bochs `cpu/avx/avx512_pfpmisc.cc`.
 
 use super::softfloat3e::f32_range::{f32_get_exp, f32_get_mant, f32_scalef};
-use super::softfloat3e::f32_roundToInt::f32_round_to_int_scaled;
+use super::softfloat3e::f32_round_to_int::f32_round_to_int_scaled;
 use super::softfloat3e::f64_range::{f64_get_exp, f64_get_mant, f64_scalef};
-use super::softfloat3e::f64_roundToInt::f64_round_to_int_scaled;
+use super::softfloat3e::f64_round_to_int::f64_round_to_int_scaled;
 use super::softfloat3e::softfloat::{
-    softfloat_getExceptionFlags, softfloat_getRoundingMode, SoftFloatStatus, FLAG_INEXACT,
+    softfloat_get_exception_flags, softfloat_get_rounding_mode, SoftFloatStatus, FLAG_INEXACT,
 };
-use super::softfloat3e::softfloat_types::{float32, float64};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -173,7 +173,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Read scalar f32 from src or memory
     #[inline]
-    fn read_scalar_ss(&mut self, instr: &Instruction) -> super::Result<float32> {
+    fn read_scalar_ss(&mut self, instr: &Instruction) -> super::Result<Float32> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src()).zmm32u(0))
         } else {
@@ -183,7 +183,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Read scalar f64 from src or memory
     #[inline]
-    fn read_scalar_sd(&mut self, instr: &Instruction) -> super::Result<float64> {
+    fn read_scalar_sd(&mut self, instr: &Instruction) -> super::Result<Float64> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src()).zmm64u(0))
         } else {
@@ -201,12 +201,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut status = self.sse_status();
         self.softfloat_rc_override(&mut status, instr);
         if (imm8 & 0x04) == 0 {
-            status.softfloat_roundingMode = imm8 & 0x03;
+            status.softfloat_rounding_mode = imm8 & 0x03;
         }
         if (imm8 & 0x08) != 0 {
-            status.softfloat_suppressException |= FLAG_INEXACT;
+            status.softfloat_suppress_exception |= FLAG_INEXACT;
         }
-        let rc = softfloat_getRoundingMode(&status);
+        let rc = softfloat_get_rounding_mode(&status);
         (status, rc, (imm8 >> 4) & 0x0F)
     }
 
@@ -231,7 +231,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 );
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -257,7 +257,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 );
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -278,7 +278,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if (mask & 1) != 0 {
             let (mut status, rc, scale) = self.rndscale_status(instr);
             let rounded = f32_round_to_int_scaled(src_val, scale, rc, true, &mut status);
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             result.set_zmm32u(0, rounded);
         }
 
@@ -314,7 +314,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if (mask & 1) != 0 {
             let (mut status, rc, scale) = self.rndscale_status(instr);
             let rounded = f64_round_to_int_scaled(src_val, scale, rc, true, &mut status);
-            self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             result.set_zmm64u(0, rounded);
         }
 
@@ -354,7 +354,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 result.set_zmm32u(i, f32_scalef(src1.zmm32u(i), src2.zmm32u(i), &mut status));
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -379,7 +379,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 result.set_zmm64u(i, f64_scalef(src1.zmm64u(i), src2.zmm64u(i), &mut status));
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -404,7 +404,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 result.set_zmm32u(i, f32_get_exp(src.zmm32u(i), &mut status));
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -428,7 +428,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 result.set_zmm64u(i, f64_get_exp(src.zmm64u(i), &mut status));
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -462,7 +462,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 );
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -491,7 +491,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 );
             }
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())

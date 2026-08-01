@@ -1,4 +1,3 @@
-#![allow(non_camel_case_types, dead_code, non_snake_case)]
 //! ExtFloat80 square root.
 //! Ported from Berkeley SoftFloat 3e: extF80_sqrt.c
 
@@ -8,10 +7,10 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub(in crate::cpu) fn extf80_sqrt(a: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn extf80_sqrt(a: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
     }
 
@@ -28,7 +27,7 @@ pub(in crate::cpu) fn extf80_sqrt(a: floatx80, status: &mut SoftFloatStatus) -> 
             return a; // sqrt(+Inf) = +Inf
         }
         // sqrt(-Inf) = invalid
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
     }
 
@@ -37,7 +36,7 @@ pub(in crate::cpu) fn extf80_sqrt(a: floatx80, status: &mut SoftFloatStatus) -> 
         if (exp_a as u64 | sig_a) == 0 {
             return pack_floatx80(sign_a, 0, 0); // sqrt(-0) = -0
         }
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
     }
 
@@ -45,7 +44,7 @@ pub(in crate::cpu) fn extf80_sqrt(a: floatx80, status: &mut SoftFloatStatus) -> 
     if exp_a == 0 {
         exp_a = 1;
         if sig_a != 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
     }
     if (sig_a & 0x8000000000000000) == 0 {
@@ -122,7 +121,7 @@ pub(in crate::cpu) fn extf80_sqrt(a: floatx80, status: &mut SoftFloatStatus) -> 
         exp_z,
         sig_z,
         sig_z_extra,
-        softfloat_extF80_roundingPrecision(status),
+        softfloat_extf80_rounding_precision(status),
         status,
     )
 }

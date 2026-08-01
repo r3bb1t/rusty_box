@@ -24,7 +24,7 @@ use super::avx::{packed_fma_flags, vex_fma_operands_u32, vex_fma_operands_u64, V
     VexPackedFmaOp};
 use super::softfloat3e::f32_mul_add::f32_mul_add;
 use super::softfloat3e::f64_mul_add::f64_mul_add;
-use super::softfloat3e::softfloat::softfloat_getExceptionFlags;
+use super::softfloat3e::softfloat::softfloat_get_exception_flags;
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -180,7 +180,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let (a, b, c) = vex_fma_operands_u32(form, v.zmm32u(i), h.zmm32u(i), w.zmm32u(i));
             result.set_zmm32u(i, f32_mul_add(a, b, c, packed_fma_flags(op, i), &mut status));
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -210,7 +210,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             let (a, b, c) = vex_fma_operands_u64(form, v.zmm64u(i), h.zmm64u(i), w.zmm64u(i));
             result.set_zmm64u(i, f64_mul_add(a, b, c, packed_fma_flags(op, i), &mut status));
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))?;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())

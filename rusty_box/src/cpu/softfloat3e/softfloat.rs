@@ -1,33 +1,37 @@
-#![allow(non_camel_case_types, non_snake_case, dead_code)]
+// Ported wholesale from Berkeley SoftFloat 3e / Bochs softfloat3e: these
+// modules carry the complete primitive surface, part of which no x86
+// instruction reaches yet. Kept for parity with upstream rather than
+// trimmed to current callers.
+#![allow(dead_code)]
 //! SoftFloat status, rounding modes, exception flags, and helper functions.
 //! Ported from Berkeley SoftFloat 3e.
 
-use super::softfloat_types::floatx80;
+use super::softfloat_types::ExtFloat80;
 
 /// Software floating-point status — passed by `&mut` to all operations.
 #[derive(Debug, Clone)]
 pub(in crate::cpu) struct SoftFloatStatus {
-    pub softfloat_roundingMode: u8,
-    pub softfloat_exceptionFlags: i32,
-    pub softfloat_exceptionMasks: i32,
-    pub softfloat_suppressException: i32,
+    pub softfloat_rounding_mode: u8,
+    pub softfloat_exception_flags: i32,
+    pub softfloat_exception_masks: i32,
+    pub softfloat_suppress_exception: i32,
     pub(in crate::cpu) softfloat_denormals_are_zeros: bool,
     pub(in crate::cpu) softfloat_flush_underflow_to_zero: bool,
     /// Rounding precision for 80-bit extended double-precision.
     /// Valid values are 32, 64, and 80.
-    pub extF80_roundingPrecision: u8,
+    pub extf80_rounding_precision: u8,
 }
 
 impl Default for SoftFloatStatus {
     fn default() -> Self {
         Self {
-            softfloat_roundingMode: ROUND_NEAR_EVEN,
-            softfloat_exceptionFlags: 0,
-            softfloat_exceptionMasks: 0x3f,
-            softfloat_suppressException: 0,
+            softfloat_rounding_mode: ROUND_NEAR_EVEN,
+            softfloat_exception_flags: 0,
+            softfloat_exception_masks: 0x3f,
+            softfloat_suppress_exception: 0,
             softfloat_denormals_are_zeros: false,
             softfloat_flush_underflow_to_zero: false,
-            extF80_roundingPrecision: 80,
+            extf80_rounding_precision: 80,
         }
     }
 }
@@ -53,7 +57,7 @@ pub(in crate::cpu) const FLAG_INEXACT: i32 = 0x20;
 
 pub(in crate::cpu) const ALL_EXCEPTIONS_MASK: i32 = 0x3f;
 
-/// C1 flag for floatx80 rounding direction
+/// C1 flag for ExtFloat80 rounding direction
 pub(in crate::cpu) const RAISE_SW_C1: i32 = 0x0200;
 
 // Relation constants
@@ -78,100 +82,100 @@ pub(in crate::cpu) enum SoftFloatClass {
 // --- Helper functions on SoftFloatStatus ---
 
 #[inline]
-pub(in crate::cpu) fn softfloat_setFlags(status: &mut SoftFloatStatus, flags: i32) {
-    status.softfloat_exceptionFlags = flags;
+pub(in crate::cpu) fn softfloat_set_flags(status: &mut SoftFloatStatus, flags: i32) {
+    status.softfloat_exception_flags = flags;
 }
 
 #[inline]
-pub(in crate::cpu) fn softfloat_raiseFlags(status: &mut SoftFloatStatus, flags: i32) {
-    status.softfloat_exceptionFlags |= flags;
+pub(in crate::cpu) fn softfloat_raise_flags(status: &mut SoftFloatStatus, flags: i32) {
+    status.softfloat_exception_flags |= flags;
 }
 
 #[inline]
-pub(in crate::cpu) fn softfloat_isMaskedException(status: &SoftFloatStatus, flags: i32) -> bool {
-    (status.softfloat_exceptionMasks & flags) != 0
+pub(in crate::cpu) fn softfloat_is_masked_exception(status: &SoftFloatStatus, flags: i32) -> bool {
+    (status.softfloat_exception_masks & flags) != 0
 }
 
 #[inline]
-pub(in crate::cpu) fn softfloat_suppressException(status: &mut SoftFloatStatus, flags: i32) {
-    status.softfloat_suppressException |= flags;
+pub(in crate::cpu) fn softfloat_suppress_exception(status: &mut SoftFloatStatus, flags: i32) {
+    status.softfloat_suppress_exception |= flags;
 }
 
 #[inline]
-pub(in crate::cpu) fn softfloat_getRoundingMode(status: &SoftFloatStatus) -> u8 {
-    status.softfloat_roundingMode
+pub(in crate::cpu) fn softfloat_get_rounding_mode(status: &SoftFloatStatus) -> u8 {
+    status.softfloat_rounding_mode
 }
 
 #[inline]
-pub(in crate::cpu) fn softfloat_denormalsAreZeros(status: &SoftFloatStatus) -> bool {
+pub(in crate::cpu) fn softfloat_denormals_are_zeros(status: &SoftFloatStatus) -> bool {
     status.softfloat_denormals_are_zeros
 }
 
 #[inline]
-pub(in crate::cpu) fn softfloat_flushUnderflowToZero(status: &SoftFloatStatus) -> bool {
+pub(in crate::cpu) fn softfloat_flush_underflow_to_zero(status: &SoftFloatStatus) -> bool {
     status.softfloat_flush_underflow_to_zero
 }
 
 #[inline]
-pub(in crate::cpu) fn softfloat_extF80_roundingPrecision(status: &SoftFloatStatus) -> u8 {
-    status.extF80_roundingPrecision
+pub(in crate::cpu) fn softfloat_extf80_rounding_precision(status: &SoftFloatStatus) -> u8 {
+    status.extf80_rounding_precision
 }
 
 #[inline]
-pub(in crate::cpu) fn softfloat_getExceptionFlags(status: &SoftFloatStatus) -> i32 {
-    status.softfloat_exceptionFlags & !status.softfloat_suppressException
+pub(in crate::cpu) fn softfloat_get_exception_flags(status: &SoftFloatStatus) -> i32 {
+    status.softfloat_exception_flags & !status.softfloat_suppress_exception
 }
 
 #[inline]
-pub(in crate::cpu) fn softfloat_setRoundingUp(status: &mut SoftFloatStatus) {
-    status.softfloat_exceptionFlags |= RAISE_SW_C1;
+pub(in crate::cpu) fn softfloat_set_rounding_up(status: &mut SoftFloatStatus) {
+    status.softfloat_exception_flags |= RAISE_SW_C1;
 }
 
-// --- floatx80 helpers (from softfloat-extra.h and softfloat-specialize.h) ---
+// --- ExtFloat80 helpers (from softfloat-extra.h and softfloat-specialize.h) ---
 
 #[inline]
-pub(in crate::cpu) fn extf80_sign(a: floatx80) -> bool {
+pub(in crate::cpu) fn extf80_sign(a: ExtFloat80) -> bool {
     (a.sign_exp >> 15) != 0
 }
 
 #[inline]
-pub(in crate::cpu) fn extf80_exp(a: floatx80) -> i32 {
+pub(in crate::cpu) fn extf80_exp(a: ExtFloat80) -> i32 {
     (a.sign_exp & 0x7FFF) as i32
 }
 
 #[inline]
-pub(in crate::cpu) fn extf80_fraction(a: floatx80) -> u64 {
+pub(in crate::cpu) fn extf80_fraction(a: ExtFloat80) -> u64 {
     a.signif
 }
 
 #[inline]
-pub(in crate::cpu) fn extf80_is_unsupported(a: floatx80) -> bool {
+pub(in crate::cpu) fn extf80_is_unsupported(a: ExtFloat80) -> bool {
     ((a.sign_exp & 0x7FFF) != 0) && (a.signif & 0x8000000000000000 == 0)
 }
 
 #[inline]
-pub(in crate::cpu) fn extf80_is_nan(a: floatx80) -> bool {
+pub(in crate::cpu) fn extf80_is_nan(a: ExtFloat80) -> bool {
     ((a.sign_exp & 0x7FFF) == 0x7FFF) && (a.signif & 0x7FFFFFFFFFFFFFFF != 0)
 }
 
 #[inline]
-pub(in crate::cpu) fn extf80_is_signaling_nan(a: floatx80) -> bool {
+pub(in crate::cpu) fn extf80_is_signaling_nan(a: ExtFloat80) -> bool {
     ((a.sign_exp & 0x7FFF) == 0x7FFF)
         && (a.signif & 0x4000000000000000 == 0)
         && (a.signif & 0x3FFFFFFFFFFFFFFF != 0)
 }
 
 #[inline]
-pub(in crate::cpu) fn floatx80_chs(a: floatx80) -> floatx80 {
-    floatx80 {
+pub(in crate::cpu) fn floatx80_chs(a: ExtFloat80) -> ExtFloat80 {
+    ExtFloat80 {
         signif: a.signif,
         sign_exp: a.sign_exp ^ 0x8000,
     }
 }
 
 #[inline]
-pub(in crate::cpu) fn floatx80_abs(a: floatx80) -> floatx80 {
-    floatx80 {
+pub(in crate::cpu) fn floatx80_abs(a: ExtFloat80) -> ExtFloat80 {
+    ExtFloat80 {
         signif: a.signif,
         sign_exp: a.sign_exp & 0x7FFF,
     }

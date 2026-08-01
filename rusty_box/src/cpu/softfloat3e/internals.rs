@@ -1,4 +1,8 @@
-#![allow(non_camel_case_types, dead_code, non_snake_case, unused_assignments)]
+// Ported wholesale from Berkeley SoftFloat 3e / Bochs softfloat3e: these
+// modules carry the complete primitive surface, part of which no x86
+// instruction reaches yet. Kept for parity with upstream rather than
+// trimmed to current callers.
+#![allow(dead_code)]
 //! Internal routines: field extraction, normalization, round-and-pack.
 //! Ported from Berkeley SoftFloat 3e internals.h / s_roundPackTo*.c / s_normRoundPackTo*.c.
 
@@ -11,7 +15,7 @@ use super::specialize::*;
 // Field extraction macros (from internals.h)
 // ============================================================
 
-// --- float16 ---
+// --- Float16 ---
 #[inline]
 pub(in crate::cpu) fn sign_f16(a: u16) -> bool {
     (a >> 15) != 0
@@ -35,7 +39,7 @@ pub(in crate::cpu) fn is_nan_f16(a: u16) -> bool {
     ((!a & 0x7C00) == 0) && ((a & 0x03FF) != 0)
 }
 
-// --- float32 ---
+// --- Float32 ---
 #[inline]
 pub(in crate::cpu) fn sign_f32(a: u32) -> bool {
     (a >> 31) != 0
@@ -59,7 +63,7 @@ pub(in crate::cpu) fn is_nan_f32(a: u32) -> bool {
     ((!a & 0x7F800000) == 0) && ((a & 0x007FFFFF) != 0)
 }
 
-// --- float64 ---
+// --- Float64 ---
 #[inline]
 pub(in crate::cpu) fn sign_f64(a: u64) -> bool {
     (a >> 63) != 0
@@ -152,11 +156,11 @@ pub(in crate::cpu) fn norm_subnormal_extf80_sig(sig: u64) -> ExpSig64_32 {
 }
 
 // ============================================================
-// Round-and-pack to float16
+// Round-and-pack to Float16
 // ============================================================
 
-pub(in crate::cpu) fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatStatus) -> float16 {
-    let rounding_mode = softfloat_getRoundingMode(status);
+pub(in crate::cpu) fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatStatus) -> Float16 {
+    let rounding_mode = softfloat_get_rounding_mode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
     let mut round_increment: u16 = 0x8;
     if !round_near_even && rounding_mode != ROUND_NEAR_MAXMAG {
@@ -178,20 +182,20 @@ pub(in crate::cpu) fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: 
             exp = 0;
             let round_bits = sig & 0xF;
             if is_tiny {
-                if !softfloat_isMaskedException(status, FLAG_UNDERFLOW) || round_bits != 0 {
-                    softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                if !softfloat_is_masked_exception(status, FLAG_UNDERFLOW) || round_bits != 0 {
+                    softfloat_raise_flags(status, FLAG_UNDERFLOW);
                 }
-                if softfloat_flushUnderflowToZero(status) {
-                    softfloat_raiseFlags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
+                if softfloat_flush_underflow_to_zero(status) {
+                    softfloat_raise_flags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
                     return pack_to_f16(sign, 0, 0);
                 }
             }
         } else if (0x1D < exp) || (0x8000 <= (sig as u32).wrapping_add(round_increment as u32)) {
-            softfloat_raiseFlags(status, FLAG_OVERFLOW);
-            if round_bits != 0 || softfloat_isMaskedException(status, FLAG_OVERFLOW) {
-                softfloat_raiseFlags(status, FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_OVERFLOW);
+            if round_bits != 0 || softfloat_is_masked_exception(status, FLAG_OVERFLOW) {
+                softfloat_raise_flags(status, FLAG_INEXACT);
                 if round_increment != 0 {
-                    softfloat_setRoundingUp(status);
+                    softfloat_set_rounding_up(status);
                 }
             }
             return pack_to_f16(sign, 0x1F, 0).wrapping_sub(if round_increment == 0 {
@@ -208,16 +212,16 @@ pub(in crate::cpu) fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: 
         exp = 0;
     }
     if round_bits != 0 {
-        softfloat_raiseFlags(status, FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_INEXACT);
         if (sig << 4) > sig_ref {
-            softfloat_setRoundingUp(status);
+            softfloat_set_rounding_up(status);
         }
     }
     pack_to_f16(sign, exp, sig)
 }
 
 // ============================================================
-// Round-and-pack to float32
+// Round-and-pack to Float32
 // ============================================================
 
 pub(in crate::cpu) fn round_pack_to_f32(
@@ -225,9 +229,9 @@ pub(in crate::cpu) fn round_pack_to_f32(
     mut exp: i16,
     mut sig: u32,
     status: &mut SoftFloatStatus,
-) -> float32 {
+) -> Float32 {
     // Faithful port of Berkeley SoftFloat 3e s_roundPackToF32.c.
-    let rounding_mode = softfloat_getRoundingMode(status);
+    let rounding_mode = softfloat_get_rounding_mode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
     let mut round_increment: u32 = 0x40;
     if !round_near_even && rounding_mode != ROUND_NEAR_MAXMAG {
@@ -242,29 +246,29 @@ pub(in crate::cpu) fn round_pack_to_f32(
     if 0xFD <= (exp as u16) {
         if exp < 0 {
             let is_tiny = (exp < -1) || (sig.wrapping_add(round_increment) < 0x8000_0000);
-            if is_tiny && !softfloat_isMaskedException(status, FLAG_UNDERFLOW) {
-                softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+            if is_tiny && !softfloat_is_masked_exception(status, FLAG_UNDERFLOW) {
+                softfloat_raise_flags(status, FLAG_UNDERFLOW);
                 exp += 192;
             } else {
                 sig = shift_right_jam32(sig, (-exp) as u16);
                 exp = 0;
                 round_bits = sig & 0x7F;
                 if is_tiny {
-                    if softfloat_flushUnderflowToZero(status) {
-                        softfloat_raiseFlags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
+                    if softfloat_flush_underflow_to_zero(status) {
+                        softfloat_raise_flags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
                         return pack_to_f32(sign, 0, 0);
                     }
                     if round_bits != 0 {
-                        softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                        softfloat_raise_flags(status, FLAG_UNDERFLOW);
                     }
                 }
             }
         } else if 0xFD < exp || 0x8000_0000 <= sig.wrapping_add(round_increment) {
-            softfloat_raiseFlags(status, FLAG_OVERFLOW);
-            if round_bits != 0 || softfloat_isMaskedException(status, FLAG_OVERFLOW) {
-                softfloat_raiseFlags(status, FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_OVERFLOW);
+            if round_bits != 0 || softfloat_is_masked_exception(status, FLAG_OVERFLOW) {
+                softfloat_raise_flags(status, FLAG_INEXACT);
                 if round_increment != 0 {
-                    softfloat_setRoundingUp(status);
+                    softfloat_set_rounding_up(status);
                 }
             }
             return pack_to_f32(sign, 0xFF, 0).wrapping_sub((round_increment == 0) as u32);
@@ -280,9 +284,9 @@ pub(in crate::cpu) fn round_pack_to_f32(
         exp = 0;
     }
     if round_bits != 0 {
-        softfloat_raiseFlags(status, FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_INEXACT);
         if (sig << 7) > sig_ref {
-            softfloat_setRoundingUp(status);
+            softfloat_set_rounding_up(status);
         }
     }
     pack_to_f32(sign, exp, sig)
@@ -293,13 +297,13 @@ pub(in crate::cpu) fn norm_round_pack_to_f32(
     exp: i16,
     sig: u32,
     status: &mut SoftFloatStatus,
-) -> float32 {
+) -> Float32 {
     let shift = count_leading_zeros32(sig) as i16 - 1;
     round_pack_to_f32(sign, exp - shift, sig << shift, status)
 }
 
 // ============================================================
-// Round-and-pack to float64
+// Round-and-pack to Float64
 // ============================================================
 
 pub(in crate::cpu) fn round_pack_to_f64(
@@ -307,10 +311,10 @@ pub(in crate::cpu) fn round_pack_to_f64(
     mut exp: i16,
     mut sig: u64,
     status: &mut SoftFloatStatus,
-) -> float64 {
+) -> Float64 {
     // Faithful port of Bochs softfloat3e/s_roundPackToF64.cc
     // softfloat_roundPackToF64.
-    let rounding_mode = softfloat_getRoundingMode(status);
+    let rounding_mode = softfloat_get_rounding_mode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
     let mut round_increment: u64 = 0x200;
     if !round_near_even && rounding_mode != ROUND_NEAR_MAXMAG {
@@ -326,29 +330,29 @@ pub(in crate::cpu) fn round_pack_to_f64(
         if exp < 0 {
             let is_tiny =
                 (exp < -1) || (sig.wrapping_add(round_increment) < 0x8000_0000_0000_0000);
-            if is_tiny && !softfloat_isMaskedException(status, FLAG_UNDERFLOW) {
-                softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+            if is_tiny && !softfloat_is_masked_exception(status, FLAG_UNDERFLOW) {
+                softfloat_raise_flags(status, FLAG_UNDERFLOW);
                 exp += 1536;
             } else {
                 sig = shift_right_jam64(sig, (-exp) as u32);
                 exp = 0;
                 round_bits = sig & 0x3FF;
                 if is_tiny {
-                    if softfloat_flushUnderflowToZero(status) {
-                        softfloat_raiseFlags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
+                    if softfloat_flush_underflow_to_zero(status) {
+                        softfloat_raise_flags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
                         return pack_to_f64(sign, 0, 0);
                     }
                     if round_bits != 0 {
-                        softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                        softfloat_raise_flags(status, FLAG_UNDERFLOW);
                     }
                 }
             }
         } else if 0x7FD < exp || 0x8000_0000_0000_0000 <= sig.wrapping_add(round_increment) {
-            softfloat_raiseFlags(status, FLAG_OVERFLOW);
-            if round_bits != 0 || softfloat_isMaskedException(status, FLAG_OVERFLOW) {
-                softfloat_raiseFlags(status, FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_OVERFLOW);
+            if round_bits != 0 || softfloat_is_masked_exception(status, FLAG_OVERFLOW) {
+                softfloat_raise_flags(status, FLAG_INEXACT);
                 if round_increment != 0 {
-                    softfloat_setRoundingUp(status);
+                    softfloat_set_rounding_up(status);
                 }
             }
             return pack_to_f64(sign, 0x7FF, 0).wrapping_sub((round_increment == 0) as u64);
@@ -364,9 +368,9 @@ pub(in crate::cpu) fn round_pack_to_f64(
         exp = 0;
     }
     if round_bits != 0 {
-        softfloat_raiseFlags(status, FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_INEXACT);
         if (sig << 10) > sig_ref {
-            softfloat_setRoundingUp(status);
+            softfloat_set_rounding_up(status);
         }
     }
     pack_to_f64(sign, exp, sig)
@@ -377,7 +381,7 @@ pub(in crate::cpu) fn norm_round_pack_to_f64(
     exp: i16,
     sig: u64,
     status: &mut SoftFloatStatus,
-) -> float64 {
+) -> Float64 {
     let shift = count_leading_zeros64(sig) as i16 - 1;
     round_pack_to_f64(sign, exp - shift, sig << shift, status)
 }
@@ -416,8 +420,8 @@ pub(in crate::cpu) fn round_pack_to_extf80(
     sig_extra: u64,
     rounding_precision: u8,
     status: &mut SoftFloatStatus,
-) -> floatx80 {
-    let rounding_mode = softfloat_getRoundingMode(status);
+) -> ExtFloat80 {
+    let rounding_mode = softfloat_get_rounding_mode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
 
     if rounding_precision != 80 {
@@ -445,8 +449,8 @@ pub(in crate::cpu) fn round_pack_to_extf80(
         if 0x7FFD <= (exp.wrapping_sub(1) as u32) {
             if exp <= 0 {
                 let is_tiny = (exp < 0) || (sig <= sig.wrapping_add(round_increment));
-                if is_tiny && sig != 0 && !softfloat_isMaskedException(status, FLAG_UNDERFLOW) {
-                    softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                if is_tiny && sig != 0 && !softfloat_is_masked_exception(status, FLAG_UNDERFLOW) {
+                    softfloat_raise_flags(status, FLAG_UNDERFLOW);
                     exp += 0x6000;
                 } else {
                     sig = shift_right_jam64(sig, (1 - exp) as u32);
@@ -461,31 +465,31 @@ pub(in crate::cpu) fn round_pack_to_extf80(
                     }
                     sig &= !round_mask;
                     if round_bits != 0 {
-                        softfloat_raiseFlags(status, FLAG_INEXACT);
+                        softfloat_raise_flags(status, FLAG_INEXACT);
                         if sig > sig_exact {
-                            softfloat_setRoundingUp(status);
+                            softfloat_set_rounding_up(status);
                         }
                         if is_tiny {
-                            softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                            softfloat_raise_flags(status, FLAG_UNDERFLOW);
                         }
                     }
                     return pack_floatx80(sign, exp, sig);
                 }
             }
             if (0x7FFE < exp) || ((exp == 0x7FFE) && (sig.wrapping_add(round_increment) < sig)) {
-                if !softfloat_isMaskedException(status, FLAG_OVERFLOW) {
-                    softfloat_raiseFlags(status, FLAG_OVERFLOW);
+                if !softfloat_is_masked_exception(status, FLAG_OVERFLOW) {
+                    softfloat_raise_flags(status, FLAG_OVERFLOW);
                     exp -= 0x6000;
                 }
                 if (0x7FFE < exp) || ((exp == 0x7FFE) && (sig.wrapping_add(round_increment) < sig))
                 {
                     // overflow
-                    softfloat_raiseFlags(status, FLAG_OVERFLOW | FLAG_INEXACT);
+                    softfloat_raise_flags(status, FLAG_OVERFLOW | FLAG_INEXACT);
                     if round_near_even
                         || rounding_mode == ROUND_NEAR_MAXMAG
                         || rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })
                     {
-                        softfloat_setRoundingUp(status);
+                        softfloat_set_rounding_up(status);
                         return pack_floatx80(sign, 0x7FFF, 0x8000000000000000);
                     } else {
                         return pack_floatx80(sign, 0x7FFE, !round_mask);
@@ -507,9 +511,9 @@ pub(in crate::cpu) fn round_pack_to_extf80(
         }
         sig &= !round_mask;
         if round_bits != 0 {
-            softfloat_raiseFlags(status, FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_INEXACT);
             if sig > sig_exact {
-                softfloat_setRoundingUp(status);
+                softfloat_set_rounding_up(status);
             }
         }
         return pack_floatx80(sign, exp, sig);
@@ -525,8 +529,8 @@ fn round_pack_to_extf80_precision80(
     mut sig: u64,
     sig_extra: u64,
     status: &mut SoftFloatStatus,
-) -> floatx80 {
-    let rounding_mode = softfloat_getRoundingMode(status);
+) -> ExtFloat80 {
+    let rounding_mode = softfloat_get_rounding_mode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
 
     let mut do_increment = 0x8000000000000000 <= sig_extra;
@@ -538,8 +542,8 @@ fn round_pack_to_extf80_precision80(
     if 0x7FFD <= (exp.wrapping_sub(1) as u32) {
         if exp <= 0 {
             let is_tiny = (exp < 0) || !do_increment || (sig < 0xFFFFFFFFFFFFFFFF);
-            if is_tiny && sig != 0 && !softfloat_isMaskedException(status, FLAG_UNDERFLOW) {
-                softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+            if is_tiny && sig != 0 && !softfloat_is_masked_exception(status, FLAG_UNDERFLOW) {
+                softfloat_raise_flags(status, FLAG_UNDERFLOW);
                 exp += 0x6000;
             } else {
                 let (new_sig, new_extra) =
@@ -548,9 +552,9 @@ fn round_pack_to_extf80_precision80(
                 sig = new_sig;
                 let sig_extra = new_extra;
                 if sig_extra != 0 {
-                    softfloat_raiseFlags(status, FLAG_INEXACT);
+                    softfloat_raise_flags(status, FLAG_INEXACT);
                     if is_tiny {
-                        softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                        softfloat_raise_flags(status, FLAG_UNDERFLOW);
                     }
                 }
                 do_increment = 0x8000000000000000 <= sig_extra;
@@ -564,24 +568,24 @@ fn round_pack_to_extf80_precision80(
                     sig &= !((((sig_extra & 0x7FFFFFFFFFFFFFFF) == 0) && round_near_even) as u64);
                     exp = ((sig & 0x8000000000000000) != 0) as i32;
                     if sig > sig_exact {
-                        softfloat_setRoundingUp(status);
+                        softfloat_set_rounding_up(status);
                     }
                 }
                 return pack_floatx80(sign, exp, sig);
             }
         }
         if (0x7FFE < exp) || ((exp == 0x7FFE) && (sig == 0xFFFFFFFFFFFFFFFF) && do_increment) {
-            if !softfloat_isMaskedException(status, FLAG_OVERFLOW) {
-                softfloat_raiseFlags(status, FLAG_OVERFLOW);
+            if !softfloat_is_masked_exception(status, FLAG_OVERFLOW) {
+                softfloat_raise_flags(status, FLAG_OVERFLOW);
                 exp -= 0x6000;
             }
             if (0x7FFE < exp) || ((exp == 0x7FFE) && (sig == 0xFFFFFFFFFFFFFFFF) && do_increment) {
-                softfloat_raiseFlags(status, FLAG_OVERFLOW | FLAG_INEXACT);
+                softfloat_raise_flags(status, FLAG_OVERFLOW | FLAG_INEXACT);
                 if round_near_even
                     || rounding_mode == ROUND_NEAR_MAXMAG
                     || rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })
                 {
-                    softfloat_setRoundingUp(status);
+                    softfloat_set_rounding_up(status);
                     return pack_floatx80(sign, 0x7FFF, 0x8000000000000000);
                 } else {
                     return pack_floatx80(sign, 0x7FFE, 0xFFFFFFFFFFFFFFFF);
@@ -591,7 +595,7 @@ fn round_pack_to_extf80_precision80(
     }
 
     if sig_extra != 0 {
-        softfloat_raiseFlags(status, FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_INEXACT);
     }
     if do_increment {
         let sig_exact = sig;
@@ -603,7 +607,7 @@ fn round_pack_to_extf80_precision80(
             sig &= !((((sig_extra & 0x7FFFFFFFFFFFFFFF) == 0) && round_near_even) as u64);
         }
         if sig > sig_exact {
-            softfloat_setRoundingUp(status);
+            softfloat_set_rounding_up(status);
         }
     } else {
         if sig == 0 {
@@ -620,7 +624,7 @@ pub(in crate::cpu) fn norm_round_pack_to_extf80(
     mut sig_extra: u64,
     rounding_precision: u8,
     status: &mut SoftFloatStatus,
-) -> floatx80 {
+) -> ExtFloat80 {
     if sig == 0 {
         exp -= 64;
         sig = sig_extra;
@@ -668,7 +672,7 @@ pub(in crate::cpu) fn softfloat_round_to_i32(
         z = -z;
     }
     if z != 0 && ((z < 0) ^ sign) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return if sign {
             I32_FROM_NEG_OVERFLOW
         } else {
@@ -676,7 +680,7 @@ pub(in crate::cpu) fn softfloat_round_to_i32(
         };
     }
     if round_bits != 0 && exact {
-        softfloat_raiseFlags(status, FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_INEXACT);
     }
     z
 }
@@ -699,7 +703,7 @@ pub(in crate::cpu) fn softfloat_round_to_i64(
     if do_increment {
         sig = sig.wrapping_add(1);
         if sig == 0 {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return if sign {
                 I64_FROM_NEG_OVERFLOW
             } else {
@@ -715,7 +719,7 @@ pub(in crate::cpu) fn softfloat_round_to_i64(
         z = -z;
     }
     if z != 0 && ((z < 0) ^ sign) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return if sign {
             I64_FROM_NEG_OVERFLOW
         } else {
@@ -723,7 +727,7 @@ pub(in crate::cpu) fn softfloat_round_to_i64(
         };
     }
     if sig_extra != 0 && exact {
-        softfloat_raiseFlags(status, FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_INEXACT);
     }
     z
 }
