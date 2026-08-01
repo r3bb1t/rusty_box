@@ -966,6 +966,76 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.evex_pshuf_half_words(instr, true)
     }
 
+
+    // ========================================================================
+    // Word-granular permutes (AVX512_BW). Bochs avx512.cc VPERMW /
+    // VPERMT2W / VPERMI2W. All three pair LOAD_Vector with itself.
+    // ========================================================================
+
+    /// Read the r/m operand of a word-granular permute.
+    fn perm_rm_w(&mut self, instr: &Instruction) -> super::Result<BxPackedZmmRegister> {
+        if instr.mod_c0() {
+            Ok(read_zmm(self, instr.src1()))
+        } else {
+            self.evex_load_vector(instr)
+        }
+    }
+
+    /// VPERMW Vdq{k}{z}, Hdq, Wdq — EVEX.66.0F38.W1 8D
+    pub fn evex_vpermw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let elements = word_elements(vl);
+        let control_mask = (elements - 1) as u16;
+        let op1 = read_zmm(self, instr.src2()); // vvvv — the indices
+        let op2 = self.perm_rm_w(instr)?; // rm — the table
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..elements {
+            result.set_zmm16u(n, op2.zmm16u((op1.zmm16u(n) & control_mask) as usize));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// The shared two-table word body; `index_from_dst` selects VPERMI2W.
+    fn evex_perm2_w(&mut self, instr: &Instruction, index_from_dst: bool) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let elements = word_elements(vl);
+        let control_mask = (elements - 1) as u16;
+        let op1 = read_zmm(self, instr.src2());
+        let op2 = self.perm_rm_w(instr)?;
+        let dst = read_zmm(self, instr.dst());
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..elements {
+            let control = if index_from_dst { dst.zmm16u(n) } else { op1.zmm16u(n) };
+            let sel = (control & control_mask) as usize;
+            let from_op2 = control & (elements as u16) != 0;
+            let v = if from_op2 {
+                op2.zmm16u(sel)
+            } else if index_from_dst {
+                op1.zmm16u(sel)
+            } else {
+                dst.zmm16u(sel)
+            };
+            result.set_zmm16u(n, v);
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPERMT2W Vdq{k}{z}, Hdq, Wdq — EVEX.66.0F38.W1 7D
+    pub fn evex_vpermt2w(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_perm2_w(instr, false)
+    }
+
+    /// VPERMI2W Vdq{k}{z}, Hdq, Wdq — EVEX.66.0F38.W1 75
+    pub fn evex_vpermi2w(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_perm2_w(instr, true)
+    }
+
 }
 
 // ============================================================================

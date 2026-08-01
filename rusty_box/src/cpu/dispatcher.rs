@@ -3012,7 +3012,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // =========================================================================
             // AVX/AVX-512 specific opcodes
             // =========================================================================
-            Opcode::EvexVpermi2dVdqHdqWdqKmask => self.vpermi2d(instr),
             // VPRORD/VPROLD: dispatched below with other EVEX rotate handlers
 
             // EVEX AVX-512F integer instructions (avx512.rs handlers)
@@ -3171,6 +3170,28 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- two-table permutes, VPERMW/PD variable forms, VPMULLQ ---
+            // The PS/PD spellings are bit-identical to the D/Q ones; upstream
+            // gives them separate symbols with the same body.
+            Opcode::EvexVpermt2dVdqHdqWdqKmask => self.evex_vpermt2d(instr),
+            Opcode::EvexVpermt2psVpsHpsWpsKmask => self.evex_vpermt2d(instr),
+            Opcode::EvexVpermi2dVdqHdqWdqKmask => self.evex_vpermi2d(instr),
+            Opcode::EvexVpermi2psVpsHpsWpsKmask => self.evex_vpermi2d(instr),
+            Opcode::EvexVpermt2qVdqHdqWdqKmask => self.evex_vpermt2q(instr),
+            Opcode::EvexVpermt2pdVpdHpdWpdKmask => self.evex_vpermt2q(instr),
+            Opcode::EvexVpermi2qVdqHdqWdqKmask => self.evex_vpermi2q(instr),
+            Opcode::EvexVpermi2pdVpdHpdWpdKmask => self.evex_vpermi2q(instr),
+            Opcode::EvexVpermt2wVdqHdqWdqKmask => self.evex_vpermt2w(instr),
+            Opcode::EvexVpermi2wVdqHdqWdqKmask => self.evex_vpermi2w(instr),
+            Opcode::EvexVpermwVdqHdqWdqKmask => self.evex_vpermw(instr),
+            Opcode::EvexVpermpdVpdHpdWpdKmask => self.evex_vpermpd_var(instr),
+            Opcode::EvexVpermilpdVpdHpdWpd | Opcode::EvexVpermilpdVpdHpdWpdKmask => {
+                self.evex_vpermilpd_reg(instr)
+            }
+            Opcode::EvexVpmullqVdqHdqWdq | Opcode::EvexVpmullqVdqHdqWdqKmask => {
+                self.evex_vpmullq(instr)
+            }
+
             // --- element duplication, align, FP blend, scalar compare ---
             Opcode::EvexVmovsldupVpsWps | Opcode::EvexVmovsldupVpsWpsKmask => {
                 self.evex_vmovsldup(instr)
