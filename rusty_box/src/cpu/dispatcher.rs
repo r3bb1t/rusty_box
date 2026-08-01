@@ -3170,6 +3170,36 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- VMOVDQU8 / VMOVDQU16 (byte- and word-granular masked moves) ---
+            Opcode::EvexVmovdqu8VdqWdq | Opcode::EvexVmovdqu8VdqWdqKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu8_load_r(instr)
+                } else {
+                    self.evex_vmovdqu8_load_m(instr)
+                }
+            }
+            Opcode::EvexVmovdqu8WdqVdq | Opcode::EvexVmovdqu8WdqVdqKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu8_store_r(instr)
+                } else {
+                    self.evex_vmovdqu8_store_m(instr)
+                }
+            }
+            Opcode::EvexVmovdqu16VdqWdq | Opcode::EvexVmovdqu16VdqWdqKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu16_load_r(instr)
+                } else {
+                    self.evex_vmovdqu16_load_m(instr)
+                }
+            }
+            Opcode::EvexVmovdqu16WdqVdq | Opcode::EvexVmovdqu16WdqVdqKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu16_store_r(instr)
+                } else {
+                    self.evex_vmovdqu16_store_m(instr)
+                }
+            }
+
             // --- EVEX MOVD/MOVQ/MOVHLPS/MOVLHPS/MOVHP/MOVLP ---
             // Upstream's EVEX def entries name these same legacy and VEX
             // symbols: none of them takes a writemask, and the register-form

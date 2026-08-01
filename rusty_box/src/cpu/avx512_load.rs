@@ -1020,4 +1020,81 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(tmp)
     }
 
+
+    /// Bochs avx512_helpers.cc `avx_masked_store8`. Byte granularity, so the
+    /// opmask can reach all 64 bits at VL512.
+    pub(super) fn avx_masked_store8(
+        &mut self,
+        instr: &Instruction,
+        eaddr: u64,
+        op: &BxPackedZmmRegister,
+        mask: u64,
+    ) -> super::Result<()> {
+        let seg = BxSegregs::from(instr.seg());
+        let elements = byte_elements(instr.get_vl());
+
+        if instr.as64_l() != 0 {
+            let laddr = self.get_laddr64(seg as usize, eaddr);
+            for n in 0..elements {
+                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(n as u64)) {
+                    return self.exception(Self::seg_exception(seg), 0);
+                }
+            }
+        }
+
+        let saved_ac = self.alignment_check_mask;
+        self.alignment_check_mask = 0;
+        // Probe every active element before committing any of them.
+        for n in (0..elements).rev() {
+            if (mask & (1u64 << n)) != 0 {
+                self.v_read_rmw_byte(seg, eaddr.wrapping_add(n as u64))?;
+            }
+        }
+        for n in 0..elements {
+            if (mask & (1u64 << n)) != 0 {
+                self.v_write_byte(seg, eaddr.wrapping_add(n as u64), op.zmmubyte(n))?;
+            }
+        }
+        self.alignment_check_mask = saved_ac;
+        Ok(())
+    }
+
+    /// Word-granular counterpart. Bochs `avx_masked_store16`.
+    pub(super) fn avx_masked_store16(
+        &mut self,
+        instr: &Instruction,
+        eaddr: u64,
+        op: &BxPackedZmmRegister,
+        mask: u64,
+    ) -> super::Result<()> {
+        let seg = BxSegregs::from(instr.seg());
+        let elements = word_elements(instr.get_vl());
+
+        if instr.as64_l() != 0 {
+            let laddr = self.get_laddr64(seg as usize, eaddr);
+            for n in 0..elements {
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(2 * n as u64))
+                {
+                    return self.exception(Self::seg_exception(seg), 0);
+                }
+            }
+        }
+
+        let saved_ac = self.alignment_check_mask;
+        self.alignment_check_mask = 0;
+        for n in (0..elements).rev() {
+            if (mask & (1u64 << n)) != 0 {
+                self.v_read_rmw_word(seg, eaddr.wrapping_add(2 * n as u64))?;
+            }
+        }
+        for n in 0..elements {
+            if (mask & (1u64 << n)) != 0 {
+                self.v_write_word(seg, eaddr.wrapping_add(2 * n as u64), op.zmm16u(n))?;
+            }
+        }
+        self.alignment_check_mask = saved_ac;
+        Ok(())
+    }
+
 }

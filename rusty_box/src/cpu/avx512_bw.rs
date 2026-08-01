@@ -5,6 +5,7 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_bw.cc`.
 
+use super::avx512_load::cut_opmask_to;
 use super::sse::{saturate_word_s_to_byte_s, saturate_word_s_to_byte_u};
 use super::{
     cpu::BxCpuC,
@@ -1036,6 +1037,119 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.evex_perm2_w(instr, true)
     }
 
+
+    // ========================================================================
+    // VMOVDQU8 / VMOVDQU16 — the byte- and word-granular unaligned moves.
+    // Bochs avx512_move.cc VMOVDQU8/16_MASK_*. Same shape as the dword and
+    // qword forms already here, but the opmask reaches 64 bits at byte
+    // granularity, which is exactly the width where CUT_OPMASK would shift by
+    // 64 — so, as elsewhere, the cut is skipped at VL512.
+    // ========================================================================
+
+    /// The writemask for a byte-granular move, cut to the element count.
+    fn movdqu8_mask(&self, instr: &Instruction) -> u64 {
+        let vl = instr.get_vl();
+        let mask = read_opmask_for_write(self, instr);
+        if vl == 2 {
+            mask
+        } else {
+            mask & cut_opmask_to(byte_elements(vl))
+        }
+    }
+
+    /// VMOVDQU8 Vdq{k}{z}, Wdq — register form.
+    pub fn evex_vmovdqu8_load_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let src = read_zmm(self, instr.src());
+        let mask = self.movdqu8_mask(instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_b(self, instr.dst(), &src, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VMOVDQU8 Vdq{k}{z}, Mdq — masked load.
+    pub fn evex_vmovdqu8_load_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let eaddr = self.resolve_addr(instr);
+        let mask = self.movdqu8_mask(instr);
+        let mut src = BxPackedZmmRegister::default();
+        self.avx_masked_load8(instr, eaddr, &mut src, mask)?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_b(self, instr.dst(), &src, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VMOVDQU8 Wdq{k}, Vdq — register form of the store direction.
+    pub fn evex_vmovdqu8_store_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let src = read_zmm(self, instr.src());
+        let mask = self.movdqu8_mask(instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_b(self, instr.dst(), &src, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VMOVDQU8 Mdq{k}, Vdq — masked store. Masked-off bytes are not written
+    /// and cannot fault.
+    pub fn evex_vmovdqu8_store_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let eaddr = self.resolve_addr(instr);
+        let mask = self.movdqu8_mask(instr);
+        if mask == 0 {
+            return Ok(());
+        }
+        let src = read_zmm(self, instr.src());
+        self.avx_masked_store8(instr, eaddr, &src, mask)
+    }
+
+    /// The writemask for a word-granular move.
+    fn movdqu16_mask(&self, instr: &Instruction) -> u64 {
+        let vl = instr.get_vl();
+        read_opmask_for_write(self, instr) & cut_opmask_to(word_elements(vl))
+    }
+
+    /// VMOVDQU16 Vdq{k}{z}, Wdq — register form.
+    pub fn evex_vmovdqu16_load_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let src = read_zmm(self, instr.src());
+        let mask = self.movdqu16_mask(instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &src, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VMOVDQU16 Vdq{k}{z}, Mdq — masked load.
+    pub fn evex_vmovdqu16_load_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let eaddr = self.resolve_addr(instr);
+        let mask = self.movdqu16_mask(instr);
+        let mut src = BxPackedZmmRegister::default();
+        self.avx_masked_load16(instr, eaddr, &mut src, mask)?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &src, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VMOVDQU16 Wdq{k}, Vdq — register form of the store direction.
+    pub fn evex_vmovdqu16_store_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let src = read_zmm(self, instr.src());
+        let mask = self.movdqu16_mask(instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &src, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VMOVDQU16 Mdq{k}, Vdq — masked store.
+    pub fn evex_vmovdqu16_store_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let eaddr = self.resolve_addr(instr);
+        let mask = self.movdqu16_mask(instr);
+        if mask == 0 {
+            return Ok(());
+        }
+        let src = read_zmm(self, instr.src());
+        self.avx_masked_store16(instr, eaddr, &src, mask)
+    }
+
 }
 
 // ============================================================================
@@ -1322,6 +1436,59 @@ mod tests {
             [0, 1, 2, 3, 7, 6, 5, 4],
             "high four words reversed, low four untouched"
         );
+    }
+
+
+    #[test]
+    fn vmovdqu8_masks_at_byte_granularity_across_all_64_lanes() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for n in 0..64 {
+            cpu.vmm[1].set_zmmubyte(n, 0x11);
+            cpu.vmm[0].set_zmmubyte(n, 0x22);
+        }
+        // At VL512 a byte-granular opmask fills all 64 bits — the width at
+        // which the element-count cut would shift by 64, so it is skipped.
+        cpu.bx_write_opmask(1, 0x0F0F_0F0F_0F0F_0F0F);
+        let mut i = evex_reg(Opcode::EvexVmovdqu8VdqWdqKmask, 2);
+        i.set_opmask(1);
+        i.set_vl(2);
+        cpu.execute_instruction(&i).unwrap();
+        for n in 0..64 {
+            let want = if (n % 8) < 4 { 0x11 } else { 0x22 };
+            assert_eq!(cpu.vmm[0].zmmubyte(n), want, "byte {n} merge-masked");
+        }
+
+        // Zero masking clears the unselected bytes instead of merging them.
+        for n in 0..64 {
+            cpu.vmm[0].set_zmmubyte(n, 0x22);
+        }
+        let mut i = evex_reg(Opcode::EvexVmovdqu8VdqWdqKmask, 2);
+        i.set_opmask(1);
+        i.set_vl(2);
+        i.set_zero_masking(1);
+        cpu.execute_instruction(&i).unwrap();
+        for n in 0..64 {
+            let want = if (n % 8) < 4 { 0x11 } else { 0x00 };
+            assert_eq!(cpu.vmm[0].zmmubyte(n), want, "byte {n} zero-masked");
+        }
+    }
+
+    #[test]
+    fn vmovdqu16_masks_at_word_granularity() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for n in 0..8 {
+            cpu.vmm[1].set_zmm16u(n, 0x1111);
+            cpu.vmm[0].set_zmm16u(n, 0x2222);
+        }
+        cpu.bx_write_opmask(1, 0b0101_0101);
+        let mut i = evex_reg(Opcode::EvexVmovdqu16VdqWdqKmask, 1);
+        i.set_opmask(1);
+        i.set_vl(1);
+        cpu.execute_instruction(&i).unwrap();
+        for n in 0..8 {
+            let want = if n % 2 == 0 { 0x1111 } else { 0x2222 };
+            assert_eq!(cpu.vmm[0].zmm16u(n), want, "word {n}");
+        }
     }
 
 }
