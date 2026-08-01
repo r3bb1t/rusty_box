@@ -1828,3 +1828,35 @@ fn evex_encodings_glibc_emits_all_decode() {
         assert_eq!(i.get_ia_opcode(), *want, "for encoding {bytes:02X?}");
     }
 }
+
+#[test]
+fn evex_disp8_is_scaled_by_the_tuple_size() {
+    use crate::opcode::Opcode;
+    // 62 E1 FD 28 6F 4E 01 = VMOVDQA64 ymm1, [rsi+0x20]
+    // EVEX.256.66.0F.W1 6F, mod=01 disp8=1, full-vector tuple at VL256 so
+    // N=32. This is the encoding glibc emits right after `and rsi,-32`; left
+    // unscaled it addresses rsi+1 and the aligned move takes a spurious #GP.
+    let i = crate::decoder::decode64::fetch_decode64(&[0x62, 0xE1, 0xFD, 0x28, 0x6F, 0x4E, 0x01])
+        .expect("VMOVDQA64 with disp8 must decode");
+    assert_eq!(i.get_ia_opcode(), Opcode::EvexVmovdqa64VdqWdq);
+    assert_eq!(
+        i.displacement, 32,
+        "disp8=1 with a full-vector tuple at VL256 scales to 32, not 1"
+    );
+
+    // Same opcode at VL512 (L'L=10) scales by 64 instead.
+    let i = crate::decoder::decode64::fetch_decode64(&[0x62, 0xE1, 0xFD, 0x48, 0x6F, 0x4E, 0x01])
+        .expect("VMOVDQA64 zmm form must decode");
+    assert_eq!(i.displacement, 64, "full-vector tuple at VL512 scales by 64");
+
+    // A scalar-qword tuple ignores the vector length: VMOVSD zmm/xmm form,
+    // EVEX.LIG.F2.0F.W1 10 with mod=01 -> N=8.
+    let i = crate::decoder::decode64::fetch_decode64(&[0x62, 0xF1, 0xFF, 0x48, 0x10, 0x4E, 0x03])
+        .expect("VMOVSD load must decode");
+    assert_eq!(i.displacement, 24, "scalar qword scales by 8, so disp8=3 is 24");
+
+    // Legacy and VEX encodings must be untouched: MOVDQA xmm1, [rsi+1].
+    let i = crate::decoder::decode64::fetch_decode64(&[0x66, 0x0F, 0x6F, 0x4E, 0x01])
+        .expect("legacy MOVDQA must decode");
+    assert_eq!(i.displacement, 1, "non-EVEX displacements are never scaled");
+}

@@ -1046,6 +1046,31 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     // borrowing an entry from them would decode to the wrong handler.
     if is_evex {
         instr.opcode = lookup_evex_opcode(opcode_map, (b1 & 0xFF) as u8, decmask);
+
+        // EVEX compressed displacement. A mod=01 memory operand stores its
+        // displacement already divided by N, the size of the memory element
+        // the instruction actually touches, so the byte has to be scaled back
+        // up before it can be used as an address. Bochs recovers N in
+        // evex_displ8_compression and applies it in assign_srcs — after the
+        // opcode is known, which is why this runs here and not where the
+        // displacement byte was read.
+        //
+        // Left unscaled, `vmovdqa64 ymm1, [rsi+0x20]` (encoded disp8=1)
+        // addresses rsi+1, so an access glibc had just aligned with
+        // `and rsi,-32` faults the alignment check and the guest takes a #GP
+        // it never earned.
+        if needs_modrm && ((modrm_byte >> 6) & 0x3) == 1 {
+            let scale = super::evex_disp8::evex_tuple(instr.opcode).scale(
+                vex_l,
+                evex_b_flag != 0,
+                vex_w != 0,
+            );
+            if scale > 1 {
+                instr.displacement =
+                    (instr.displacement as i32).wrapping_mul(scale as i32) as u32;
+            }
+        }
+
         // The VSIB gather/scatter groups are the only EVEX entries carrying
         // ATTR_MOD_MEM | ATTR_MASK_REQUIRED (Bochs fetchdecode_opmap_evex.cc
         // BxOpcodeGroup_EVEX_0F3890..93 and 0F38A0..A3): they have no register
