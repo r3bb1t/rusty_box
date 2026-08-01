@@ -851,6 +851,53 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.bx_write_opmask(instr.dst() as usize, r as u64);
         Ok(())
     }
+    // ========================================================================
+    // VCMPSS / VCMPSD — scalar compare whose result is a single opmask bit.
+    // Bochs avx512_pfp.cc VCMPSS/VCMPSD_MASK_KGbH..W..IbR.
+    // ========================================================================
+
+    /// VCMPSS Kk{k}, Hss, Wss, Ib — EVEX.F3.0F.W0 C2
+    pub fn evex_vcmpss(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut result = 0u64;
+        if read_opmask_for_write(self, instr) & 1 != 0 {
+            let op1 = read_zmm(self, instr.src2()).zmm32u(0); // vvvv
+            let op2 = if instr.mod_c0() {
+                read_zmm(self, instr.src1()).zmm32u(0)
+            } else {
+                self.evex_load_wss_pair(instr)?.zmm32u(0)
+            };
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            if f32_compare_predicate(instr.ib() & 0x1F, op1, op2, &mut status) {
+                result = 1;
+            }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// VCMPSD Kk{k}, Hsd, Wsd, Ib — EVEX.F2.0F.W1 C2
+    pub fn evex_vcmpsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut result = 0u64;
+        if read_opmask_for_write(self, instr) & 1 != 0 {
+            let op1 = read_zmm(self, instr.src2()).zmm64u(0);
+            let op2 = if instr.mod_c0() {
+                read_zmm(self, instr.src1()).zmm64u(0)
+            } else {
+                self.evex_load_wsd_pair(instr)?.zmm64u(0)
+            };
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            if f64_compare_predicate(instr.ib() & 0x1F, op1, op2, &mut status) {
+                result = 1;
+            }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
 }
 
 /// Bochs avx512_pfp.cc `fpclass` — imm8 selects which floating-point
@@ -1186,6 +1233,32 @@ mod tests {
         ins.set_opmask(2);
         c.execute_instruction(&ins).unwrap();
         assert_eq!(c.opmask[0].rrx(), 0);
+    }
+
+
+    #[test]
+    fn vcmpss_writes_one_opmask_bit_and_honours_the_predicate() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET;
+        c.vmm[2].set_zmm32u(0, 1.5f32.to_bits()); // vvvv
+        c.vmm[1].set_zmm32u(0, 1.5f32.to_bits()); // rm
+        c.opmask[0].set_rrx(0xFFFF); // must be overwritten wholesale
+
+        let mut i = evex_reg(Opcode::EvexVcmpssKgbHssWssIb, 0);
+        i.set_iq(0); // EQ_OQ
+        c.execute_instruction(&i).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 1);
+
+        let mut i = evex_reg(Opcode::EvexVcmpssKgbHssWssIb, 0);
+        i.set_iq(1); // LT_OS
+        c.execute_instruction(&i).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 0, "1.5 is not less than 1.5");
+
+        c.vmm[2].set_zmm32u(0, 1.0f32.to_bits());
+        let mut i = evex_reg(Opcode::EvexVcmpssKgbHssWssIb, 0);
+        i.set_iq(1);
+        c.execute_instruction(&i).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 1, "vvvv < rm, not the reverse");
     }
 
 }

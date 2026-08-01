@@ -919,6 +919,53 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.evex_wshift_variable(instr, word_sll)
     }
 
+    // ========================================================================
+    // VPSHUFLW / VPSHUFHW — shuffle one half of each 128-bit lane by imm8 and
+    // copy the other half through. Bochs avx512.cc VPSHUFLW/HW_MASK_VdqWdqIbR.
+    // ========================================================================
+
+    /// The shared body; `high` selects the upper four words of each lane.
+    fn evex_pshuf_half_words(&mut self, instr: &Instruction, high: bool) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_vector(instr)?
+        };
+        let order = instr.ib();
+        let mut result = BxPackedZmmRegister::default();
+        let lanes = match vl {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
+        for lane in 0..lanes {
+            let base = lane * 8; // 8 words per 128-bit lane
+            let (shuffled, copied) = if high { (base + 4, base) } else { (base, base + 4) };
+            for n in 0..4 {
+                let sel = ((order >> (2 * n)) & 3) as usize;
+                result.set_zmm16u(shuffled + n, src.zmm16u(shuffled + sel));
+            }
+            for n in 0..4 {
+                result.set_zmm16u(copied + n, src.zmm16u(copied + n));
+            }
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPSHUFLW Vdq{k}{z}, Wdq, Ib — EVEX.F2.0F.W0 70
+    pub fn evex_vpshuflw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_pshuf_half_words(instr, false)
+    }
+
+    /// VPSHUFHW Vdq{k}{z}, Wdq, Ib — EVEX.F3.0F.W0 70
+    pub fn evex_vpshufhw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_pshuf_half_words(instr, true)
+    }
+
 }
 
 // ============================================================================
@@ -1173,4 +1220,38 @@ mod tests {
         assert_eq!(cpu.vmm[0].zmmubyte(0), 255);
         assert_eq!(cpu.vmm[0].zmmubyte(1), 0, "negative clamps to zero");
     }
+
+    #[test]
+    fn pshuflw_and_pshufhw_each_touch_only_their_own_half_of_every_lane() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        // Two 128-bit lanes, words numbered 0..15 so any misplacement shows.
+        for n in 0..16 {
+            cpu.vmm[1].set_zmm16u(n, n as u16);
+        }
+        let mut i = evex_reg(Opcode::EvexVpshuflwVdqWdqIb, 1);
+        i.set_iq(0x1B); // 00_01_10_11 — reverse the four selected words
+        i.set_vl(1);
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(
+            (0..8).map(|n| cpu.vmm[0].zmm16u(n)).collect::<alloc::vec::Vec<_>>(),
+            [3, 2, 1, 0, 4, 5, 6, 7],
+            "low four words reversed, high four untouched"
+        );
+        assert_eq!(
+            (8..16).map(|n| cpu.vmm[0].zmm16u(n)).collect::<alloc::vec::Vec<_>>(),
+            [11, 10, 9, 8, 12, 13, 14, 15],
+            "the second 128-bit lane is shuffled independently"
+        );
+
+        let mut i = evex_reg(Opcode::EvexVpshufhwVdqWdqIb, 1);
+        i.set_iq(0x1B);
+        i.set_vl(1);
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(
+            (0..8).map(|n| cpu.vmm[0].zmm16u(n)).collect::<alloc::vec::Vec<_>>(),
+            [0, 1, 2, 3, 7, 6, 5, 4],
+            "high four words reversed, low four untouched"
+        );
+    }
+
 }

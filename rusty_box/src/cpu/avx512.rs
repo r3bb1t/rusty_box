@@ -2410,6 +2410,109 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
         Ok(())
     }
+    // ========================================================================
+    // Element duplication, dword/qword rotate-align, and the FP blends.
+    // Bochs avx512.cc VMOVSLDUP/VMOVSHDUP/VMOVDDUP, VALIGND/Q, VBLENDMPS/PD.
+    // ========================================================================
+
+    /// Read a whole vector from the r/m operand. All the callers below pair
+    /// `LOAD_Vector` with itself, so there is no masked variant to choose.
+    fn read_rm_vector(&mut self, instr: &Instruction) -> super::Result<BxPackedZmmRegister> {
+        if instr.mod_c0() {
+            Ok(read_zmm(self, instr.src()))
+        } else {
+            self.evex_load_vector(instr)
+        }
+    }
+
+    /// VMOVSLDUP Vps{k}{z}, Wps — EVEX.F3.0F.W0 12. Each even dword is copied
+    /// over the odd one above it.
+    pub fn evex_vmovsldup(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let mut op = self.read_rm_vector(instr)?;
+        for n in (0..dword_elements(vl)).step_by(2) {
+            op.set_zmm32u(n + 1, op.zmm32u(n));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &op, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VMOVSHDUP Vps{k}{z}, Wps — EVEX.F3.0F.W0 16. The odd dword is copied
+    /// down over the even one below it.
+    pub fn evex_vmovshdup(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let mut op = self.read_rm_vector(instr)?;
+        for n in (0..dword_elements(vl)).step_by(2) {
+            op.set_zmm32u(n, op.zmm32u(n + 1));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &op, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VMOVDDUP Vpd{k}{z}, Wpd — EVEX.F2.0F.W1 12. Qword granularity.
+    pub fn evex_vmovddup(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let mut op = self.read_rm_vector(instr)?;
+        for n in (0..qword_elements(vl)).step_by(2) {
+            op.set_zmm64u(n + 1, op.zmm64u(n));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &op, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VALIGND Vdq{k}{z}, Hdq, Wdq, Ib — EVEX.66.0F3A.W0 03. Concatenates
+    /// vvvv:rm and extracts a dword-granular window starting at imm8.
+    pub fn evex_valignd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let elements_mask = dword_elements(vl) - 1;
+        let op1 = read_zmm(self, instr.src2()); // vvvv — the high half
+        let op2 = self.read_evex_rm_ps(instr, dword_elements(vl))?; // rm — the low half
+        let shift = (instr.ib() as usize) & elements_mask;
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..=elements_mask {
+            let index = (shift + n) & elements_mask;
+            let v = if (n + shift) <= elements_mask {
+                op2.zmm32u(index)
+            } else {
+                op1.zmm32u(index)
+            };
+            result.set_zmm32u(n, v);
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VALIGNQ Vdq{k}{z}, Hdq, Wdq, Ib — EVEX.66.0F3A.W1 03.
+    pub fn evex_valignq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let elements_mask = qword_elements(vl) - 1;
+        let op1 = read_zmm(self, instr.src2());
+        let op2 = self.read_evex_rm_pd(instr, qword_elements(vl))?;
+        let shift = (instr.ib() as usize) & elements_mask;
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..=elements_mask {
+            let index = (shift + n) & elements_mask;
+            let v = if (n + shift) <= elements_mask {
+                op2.zmm64u(index)
+            } else {
+                op1.zmm64u(index)
+            };
+            result.set_zmm64u(n, v);
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
 }
 
 #[cfg(all(test, feature = "alloc"))]
@@ -2659,6 +2762,64 @@ mod tests {
         i.set_opmask(0);
         cpu.execute_instruction(&i).unwrap();
         assert_eq!(cpu.opmask[0].rrx(), 0xFF0F, "(!vvvv) & rm");
+    }
+
+
+    // ---- duplication and align ------------------------------------------
+
+    #[test]
+    fn duplication_moves_copy_in_the_direction_the_opcode_names() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for (n, v) in [10u32, 11, 12, 13].into_iter().enumerate() {
+            cpu.vmm[1].set_zmm32u(n, v); // one-operand form reads src() = src1()
+        }
+        cpu.execute_instruction(&evex_unmasked(Opcode::EvexVmovsldupVpsWps))
+            .unwrap();
+        assert_eq!(
+            [0, 1, 2, 3].map(|n| cpu.vmm[0].zmm32u(n)),
+            [10, 10, 12, 12],
+            "SLDUP copies each even dword up"
+        );
+
+        cpu.execute_instruction(&evex_unmasked(Opcode::EvexVmovshdupVpsWps))
+            .unwrap();
+        assert_eq!(
+            [0, 1, 2, 3].map(|n| cpu.vmm[0].zmm32u(n)),
+            [11, 11, 13, 13],
+            "SHDUP copies each odd dword down"
+        );
+
+        cpu.vmm[1].set_zmm64u(0, 0xAAAA);
+        cpu.vmm[1].set_zmm64u(1, 0xBBBB);
+        cpu.execute_instruction(&evex_unmasked(Opcode::EvexVmovddupVpdWpd))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm64u(0), 0xAAAA);
+        assert_eq!(cpu.vmm[0].zmm64u(1), 0xAAAA, "DDUP duplicates the even qword");
+    }
+
+    #[test]
+    fn valignd_concatenates_vvvv_above_rm_and_windows_from_the_bottom() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for (n, v) in [20u32, 21, 22, 23].into_iter().enumerate() {
+            cpu.vmm[2].set_zmm32u(n, v); // vvvv — the high half
+        }
+        for (n, v) in [10u32, 11, 12, 13].into_iter().enumerate() {
+            cpu.vmm[1].set_zmm32u(n, v); // rm — the low half
+        }
+        let mut i = evex_unmasked(Opcode::EvexValigndVdqHdqWdqIbKmask);
+        i.set_iq(1); // must precede set_vl/set_opmask: they share one u32
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(
+            [0, 1, 2, 3].map(|n| cpu.vmm[0].zmm32u(n)),
+            [11, 12, 13, 20],
+            "a shift of one dword pulls the lowest element of vvvv in at the top"
+        );
+
+        // A shift of zero is the r/m operand unchanged.
+        let mut i = evex_unmasked(Opcode::EvexValigndVdqHdqWdqIbKmask);
+        i.set_iq(0);
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!([0, 1, 2, 3].map(|n| cpu.vmm[0].zmm32u(n)), [10, 11, 12, 13]);
     }
 
 }

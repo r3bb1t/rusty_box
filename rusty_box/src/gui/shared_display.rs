@@ -447,7 +447,7 @@ mod tests {
         // Glyph 'A' (0x41): a single lit pixel at the LEFTMOST column.
         // MSB-first, that is 0x80.
         let mut map = vec![0u8; GUEST_CHARMAP_LEN];
-        map[(0x41usize << 5)] = 0x80;
+        map[0x41usize << 5] = 0x80;
         shared.set_text_charmap(0, &map);
         shared.set_text_charmap(1, &map);
         assert!(shared.charmap_loaded);

@@ -3171,6 +3171,37 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- element duplication, align, FP blend, scalar compare ---
+            Opcode::EvexVmovsldupVpsWps | Opcode::EvexVmovsldupVpsWpsKmask => {
+                self.evex_vmovsldup(instr)
+            }
+            Opcode::EvexVmovshdupVpsWps | Opcode::EvexVmovshdupVpsWpsKmask => {
+                self.evex_vmovshdup(instr)
+            }
+            Opcode::EvexVmovddupVpdWpd | Opcode::EvexVmovddupVpdWpdKmask => {
+                self.evex_vmovddup(instr)
+            }
+            Opcode::EvexVpshuflwVdqWdqIb | Opcode::EvexVpshuflwVdqWdqIbKmask => {
+                self.evex_vpshuflw(instr)
+            }
+            Opcode::EvexVpshufhwVdqWdqIb | Opcode::EvexVpshufhwVdqWdqIbKmask => {
+                self.evex_vpshufhw(instr)
+            }
+            Opcode::EvexValigndVdqHdqWdqIbKmask => self.evex_valignd(instr),
+            Opcode::EvexValignqVdqHdqWdqIbKmask => self.evex_valignq(instr),
+            Opcode::EvexVcmpssKgbHssWssIb => self.evex_vcmpss(instr),
+            Opcode::EvexVcmpsdKgbHsdWsdIb => self.evex_vcmpsd(instr),
+            // VBLENDMPS/PD select per mask bit exactly as VPBLENDMD/Q do —
+            // upstream implements both with the same simd_blendp[sd].
+            Opcode::EvexVblendmpsVpsHpsWps => self.evex_vpblendmd(instr),
+            Opcode::EvexVblendmpdVpdHpdWpd => self.evex_vpblendmq(instr),
+            // COMISS/UCOMISS set EFLAGS and have no vvvv operand, so the
+            // legacy handlers are the EVEX behaviour unchanged.
+            Opcode::EvexVcomissVssWss => self.comiss_vss_wss(instr),
+            Opcode::EvexVcomisdVsdWsd => self.comisd_vsd_wsd(instr),
+            Opcode::EvexVucomissVssWss => self.ucomiss_vss_wss(instr),
+            Opcode::EvexVucomisdVsdWsd => self.ucomisd_vsd_wsd(instr),
+
             // --- EVEX scalar GPR <-> float conversions ---
             // The float -> signed GPR forms have no vvvv operand and are
             // byte-identical to the legacy handlers, which already apply the
