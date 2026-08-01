@@ -500,8 +500,19 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     }
 
     // === Phase 2.5: Check for UD64 opcodes (invalid in 64-bit mode) ===
-    // Matching Bochs decoder_ud64 entries in decode64_descriptor table
-    if opcode_map == 0 {
+    // Matching Bochs decoder_ud64 entries in decode64_descriptor table.
+    //
+    // Legacy encodings only. These lists say which *legacy* opcode bytes are
+    // undefined in 64-bit mode, and Bochs applies them from the legacy
+    // decode path alone — a VEX- or EVEX-encoded instruction is resolved
+    // against BxOpcodeTableVEX/EVEX and never consults them. The byte after
+    // an EVEX prefix means something entirely different: 0F 7A and 0F 7B are
+    // undefined legacy, but under EVEX they are VCVTTPS2QQ, VCVTUDQ2PD,
+    // VCVTPS2QQ and friends. Applying the legacy list to them made every
+    // such encoding #UD before the EVEX lookup could run.
+    if is_vex || is_evex {
+        // resolved by the VEX/EVEX maps below
+    } else if opcode_map == 0 {
         let is_ud64 = matches!(
             b1 as u8,
             0x06 | 0x07       // PUSH/POP ES

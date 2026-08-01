@@ -1959,7 +1959,6 @@ fn vl512_entries_are_reachable() {
 // ════════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "INSTRUMENT NOT YET TRUSTED, NOT A DISMISSED DEFECT. Reports 311 of             1253 register-form entries as non-decoding, including 0F 7A whose             entry bits are byte-identical to 0F 78 entry 5 — which the same             synthesised encoding does match. One of the two is wrong and it is             not yet established which. Two earlier readings from unvalidated             harnesses in this area were false, so this must be reconciled             against a known-good encoding per opcode byte before any of its             output is treated as a defect list. 942 entries do decode."]
 fn every_evex_map_entry_decodes() {
     use crate::decoder::opmap_evex::EVEX_TABLE;
     use crate::decoder::tables::{
@@ -1974,10 +1973,28 @@ fn every_evex_map_entry_decodes() {
     let mut failures: std::vec::Vec<std::string::String> = std::vec::Vec::new();
 
     for (idx, group) in EVEX_TABLE.iter().enumerate() {
-        let map = idx / 256 + 1;
+        // Block index -> EVEX.mm. The table has no block for map 4, so the
+        // last two blocks are MAP5 and MAP6 (Bochs folds 5 and 6 down by one
+        // when indexing). Synthesise the mm the encoding must actually carry.
+        let map = [1usize, 2, 3, 5, 6][idx / 256];
         let opcode = (idx % 256) as u8;
+        // An entry whose own opcode is IaError is an encoding rusty does not
+        // implement (the FP16/BF16 forms Skylake-X never advertises); #UD is
+        // the correct outcome for it. If such an entry comes first it also
+        // shadows the rest of the group for any encoding it matches, so those
+        // cannot be reached by synthesis either.
+        let group_shadowed = group
+            .first()
+            .map(|r| OpcodeTableEntry::new(*r).opcode() == Opcode::IaError)
+            .unwrap_or(false);
+        if group_shadowed {
+            continue;
+        }
         for raw in group.iter() {
             let entry = OpcodeTableEntry::new(*raw);
+            if entry.opcode() == Opcode::IaError {
+                continue;
+            }
             // value_bits() carries the packed opcode in its upper bits;
             // only the low 24 are decmask fields.
             let value = entry.value_bits() & 0x00FF_FFFF;
@@ -2042,7 +2059,11 @@ fn every_evex_map_entry_decodes() {
         }
     }
 
-    assert!(checked > 900, "expected most entries to be register forms, checked {checked}");
+    // Guard against the exclusions above quietly hollowing the harness out.
+    assert!(
+        checked > 1150,
+        "harness should still cover the bulk of the maps, only checked {checked}"
+    );
     assert!(
         failures.is_empty(),
         "{} of {checked} EVEX map entries do not decode ({skipped_mem} memory forms skipped):\n  {}",
