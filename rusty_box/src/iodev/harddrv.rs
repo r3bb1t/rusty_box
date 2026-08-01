@@ -2167,7 +2167,9 @@ impl BxHardDriveC {
             } else {
                 drive.controller.current_command
             };
-            eprintln!("SEEK ch{channel} cmd={cmd:02x} prev={prev_pos} new={new_pos} t={seek_time}");
+            tracing::debug!(
+                "SEEK ch{channel} cmd={cmd:02x} prev={prev_pos} new={new_pos} t={seek_time}"
+            );
         }
         self.pending_seek_arm_usec[channel][device] = Some(seek_time);
     }

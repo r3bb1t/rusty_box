@@ -3609,7 +3609,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         }
         if !quiesced {
             #[cfg(test)]
-            eprintln!(
+            tracing::debug!(
                 "machine boundary failed to quiesce: pending={:?}",
                 (
                     self.device_manager.pci_ide_bar4_needs_reregister,

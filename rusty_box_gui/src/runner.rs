@@ -151,7 +151,7 @@ where
                 source,
             }
         })?;
-        eprintln!("guest-trace: recording guest evidence to {trace_log}");
+        tracing::info!("guest-trace: recording guest evidence to {trace_log}");
         Emulator::<Corei7SkylakeX, crate::guest_trace::GuestTracer>::new_with_instrumentation(
             emulator_config,
             tracer,
