@@ -3170,6 +3170,29 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- insert/extract, conflict, opmask broadcast, VDBPSADBW ---
+            // The insert and extract forms take no writemask, so upstream's EVEX
+            // def entries name the same VEX and legacy symbols used here.
+            Opcode::EvexVpinsrbVdqEbIb => self.vpinsrb(instr),
+            Opcode::EvexVpinsrwVdqEwIb => self.vpinsrw(instr),
+            Opcode::EvexVpinsrdVdqEdIb => self.vpinsrd(instr),
+            Opcode::EvexVpinsrqVdqEqIb => self.vpinsrq(instr),
+            Opcode::EvexVpextrbEdVdqIbR => self.pextrb_ed_vdq_ib_r(instr),
+            Opcode::EvexVpextrbMbVdqIbM => self.pextrb_mb_vdq_ib_m(instr),
+            Opcode::EvexVpextrwEdVdqIbR => self.pextrw_ed_vdq_ib_r(instr),
+            Opcode::EvexVpextrwMwVdqIbM => self.pextrw_mw_vdq_ib_m(instr),
+            Opcode::EvexVpextrwGdUdqIb => self.pextrw_gd_udq_ib(instr),
+            Opcode::EvexVpextrdEdVdqIb => self.pextrd_ed_vdq_ib(instr),
+            Opcode::EvexVpextrqEqVdqIb => self.pextrq_eq_vdq_ib(instr),
+            Opcode::EvexVinsertpsVpsWssIb => self.vinsertps(instr),
+            Opcode::EvexVpconflictqVdqWdqKmask => self.evex_vpconflictq(instr),
+            Opcode::EvexVpbroadcastmb2qVdqKeb => self.evex_vpbroadcastmb2q(instr),
+            Opcode::EvexVpbroadcastmw2dVdqKew => self.evex_vpbroadcastmw2d(instr),
+            Opcode::EvexVdbpsadbwVdqHdqWdqIbKmask => self.evex_vdbpsadbw(instr),
+            Opcode::EvexVbroadcastf32x2VpsWq | Opcode::EvexVbroadcastf32x2VpsWqKmask => {
+                self.evex_vbroadcastf32x2(instr)
+            }
+
             // --- VMOVDQU8 / VMOVDQU16 (byte- and word-granular masked moves) ---
             Opcode::EvexVmovdqu8VdqWdq | Opcode::EvexVmovdqu8VdqWdqKmask => {
                 if instr.mod_c0() {

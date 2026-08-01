@@ -466,4 +466,145 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
+
+    /// VPCONFLICTQ Vdq{k}{z}, Wdq — EVEX.66.0F38.W1 C4. Qword counterpart of
+    /// [`Self::evex_vpconflictd`]: each element gets a bitmask of the earlier
+    /// elements it equals.
+    pub fn evex_vpconflictq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_broadcast_vector_q(instr)?
+        };
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let mut conflict_bits: u64 = 0;
+            for j in 0..i {
+                if src.zmm64u(j) == src.zmm64u(i) {
+                    conflict_bits |= 1u64 << j;
+                }
+            }
+            result.set_zmm64u(i, conflict_bits);
+        }
+
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPBROADCASTMB2Q Vdq, k — EVEX.F3.0F38.W1 2A. Broadcasts the opmask
+    /// itself, zero-extended, into every qword. Bochs avx512_bitalg.cc; the
+    /// opmask here is the *source*, not a writemask, so the write is unmasked.
+    pub fn evex_vpbroadcastmb2q(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let value = self.opmask_rrx(instr.src() as usize) & 0xFF;
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..qword_elements(vl) {
+            result.set_zmm64u(n, value);
+        }
+        write_zmm_masked_q(self, instr.dst(), &result, u64::MAX, true, vl);
+        Ok(())
+    }
+
+    /// VPBROADCASTMW2D Vdq, k — EVEX.F3.0F38.W0 3A.
+    pub fn evex_vpbroadcastmw2d(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let value = (self.opmask_rrx(instr.src() as usize) & 0xFFFF) as u32;
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..dword_elements(vl) {
+            result.set_zmm32u(n, value);
+        }
+        write_zmm_masked(self, instr.dst(), &result, u64::MAX, true, vl);
+        Ok(())
+    }
+
+    /// VBROADCASTF32x2 Vps{k}{z}, Wq — EVEX.66.0F38.W0 19. Broadcasts a
+    /// *qword* — a pair of singles — but writemasks at dword granularity.
+    pub fn evex_vbroadcastf32x2(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let value = if instr.mod_c0() {
+            read_zmm(self, instr.src()).zmm64u(0)
+        } else {
+            self.evex_load_wsd_pair(instr)?.zmm64u(0)
+        };
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..qword_elements(vl) {
+            result.set_zmm64u(n, value);
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    //! VPBROADCASTMB2Q/MW2D are the one place an opmask register is read as
+    //! *data* rather than as a writemask, and VPCONFLICT looks only backwards
+    //! — element n never sees elements above it.
+
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::decoder::BxSegregs;
+    use rusty_box_decoder::opcode::Opcode;
+
+    use super::*;
+
+    fn evex_misc(opcode: Opcode, vl: u8) -> Instruction {
+        let mut i = Instruction::default();
+        i.set_ia_opcode(opcode);
+        i.set_src_reg(0, 0);
+        i.set_src_reg(1, 1);
+        i.set_src_reg(2, 2);
+        i.set_opmask(0);
+        i.set_vl(vl);
+        i.set_vex(true);
+        i.set_seg(BxSegregs::Ds);
+        i.init(0, 0, 1, 1);
+        i.assert_mod_c0();
+        i
+    }
+
+    #[test]
+    fn opmask_broadcasts_read_the_mask_as_data() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.bx_write_opmask(1, 0xFFFF_00AB);
+
+        c.execute_instruction(&evex_misc(Opcode::EvexVpbroadcastmb2qVdqKeb, 1))
+            .unwrap();
+        for n in 0..4 {
+            assert_eq!(c.vmm[0].zmm64u(n), 0xAB, "qword {n} takes the low 8 bits");
+        }
+
+        c.execute_instruction(&evex_misc(Opcode::EvexVpbroadcastmw2dVdqKew, 1))
+            .unwrap();
+        for n in 0..8 {
+            assert_eq!(c.vmm[0].zmm32u(n), 0x00AB, "dword {n} takes the low 16 bits");
+        }
+    }
+
+    #[test]
+    fn vpconflictq_marks_only_earlier_matching_elements() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.vmm[1].set_zmm64u(0, 7);
+        c.vmm[1].set_zmm64u(1, 9);
+        c.vmm[1].set_zmm64u(2, 7);
+        c.vmm[1].set_zmm64u(3, 7);
+        c.execute_instruction(&evex_misc(Opcode::EvexVpconflictqVdqWdqKmask, 1))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm64u(0), 0b0000, "nothing precedes element 0");
+        assert_eq!(c.vmm[0].zmm64u(1), 0b0000, "9 matches nothing earlier");
+        assert_eq!(c.vmm[0].zmm64u(2), 0b0001, "element 2 equals element 0");
+        assert_eq!(
+            c.vmm[0].zmm64u(3),
+            0b0101,
+            "element 3 equals elements 0 and 2"
+        );
+    }
 }

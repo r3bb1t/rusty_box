@@ -1150,6 +1150,68 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.avx_masked_store16(instr, eaddr, &src, mask)
     }
 
+
+    /// VDBPSADBW Vdq{k}{z}, Hdq, Wdq, Ib — EVEX.66.0F3A.W0 42.
+    ///
+    /// Per 128-bit lane: the r/m operand is first dword-shuffled by imm8, then
+    /// eight sums-of-absolute-differences are taken over sliding quadruples.
+    /// Bochs avx512.cc VDBPSADBW_MASK_VdqHdqWdqIbR and simd_int.h
+    /// `xmm_dbpsadbw` / `sad_quadruple`.
+    pub fn evex_vdbpsadbw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let op1 = read_zmm(self, instr.src2()); // vvvv
+        let op2 = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_load_vector(instr)?
+        };
+        let order = instr.ib();
+        let lanes = match vl {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
+        let mut result = BxPackedZmmRegister::default();
+        for lane in 0..lanes {
+            let base_b = lane * 16; // bytes per 128-bit lane
+            let base_w = lane * 8; // words per 128-bit lane
+
+            // xmm_shufps(tmp, op2, op2, imm8) — both halves come from op2.
+            let mut tmp = [0u8; 16];
+            for (i, sel) in [order & 3, (order >> 2) & 3, (order >> 4) & 3, (order >> 6) & 3]
+                .into_iter()
+                .enumerate()
+            {
+                let from = base_b + (sel as usize) * 4;
+                tmp[i * 4..i * 4 + 4]
+                    .copy_from_slice(&[
+                        op2.zmmubyte(from),
+                        op2.zmmubyte(from + 1),
+                        op2.zmmubyte(from + 2),
+                        op2.zmmubyte(from + 3),
+                    ]);
+            }
+
+            // The eight quadruple offsets are fixed by the instruction.
+            const OFFSETS: [(usize, usize); 8] = [
+                (0, 0), (0, 1), (4, 2), (4, 3), (8, 8), (8, 9), (12, 10), (12, 11),
+            ];
+            for (w, (o1, o2)) in OFFSETS.into_iter().enumerate() {
+                let mut sum: u32 = 0;
+                for n in 0..4 {
+                    let a = op1.zmmubyte(base_b + n + o1) as i32;
+                    let b = tmp[n + o2] as i32;
+                    sum += (a - b).unsigned_abs();
+                }
+                result.set_zmm16u(base_w + w, sum as u16);
+            }
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
 }
 
 // ============================================================================
@@ -1489,6 +1551,39 @@ mod tests {
             let want = if n % 2 == 0 { 0x1111 } else { 0x2222 };
             assert_eq!(cpu.vmm[0].zmm16u(n), want, "word {n}");
         }
+    }
+
+
+    #[test]
+    fn vdbpsadbw_sums_absolute_differences_over_sliding_quadruples() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        // Bytes 0..15 in both operands, and imm8 0xE4 = the identity dword
+        // shuffle, so the r/m operand passes through unchanged.
+        for n in 0..16 {
+            cpu.vmm[2].set_zmmubyte(n, n as u8); // vvvv
+            cpu.vmm[1].set_zmmubyte(n, n as u8); // rm
+        }
+        let mut i = evex_reg(Opcode::EvexVdbpsadbwVdqHdqWdqIbKmask, 0);
+        i.set_iq(0xE4);
+        cpu.execute_instruction(&i).unwrap();
+        // The eight quadruple offsets are fixed: (0,0) (0,1) (4,2) (4,3)
+        // (8,8) (8,9) (12,10) (12,11).
+        assert_eq!(
+            (0..8).map(|n| cpu.vmm[0].zmm16u(n)).collect::<alloc::vec::Vec<_>>(),
+            [0, 4, 8, 4, 0, 4, 8, 4]
+        );
+
+        // A shuffle of 0x00 replaces every dword of the r/m operand with its
+        // dword 0, i.e. bytes 0,1,2,3 repeated.
+        let mut i = evex_reg(Opcode::EvexVdbpsadbwVdqHdqWdqIbKmask, 0);
+        i.set_iq(0x00);
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.vmm[0].zmm16u(0), 0, "quadruple 0 still matches exactly");
+        assert_eq!(
+            cpu.vmm[0].zmm16u(4),
+            32,
+            "op1 bytes 8..11 against the repeated 0..3 differ by 8 each"
+        );
     }
 
 }
