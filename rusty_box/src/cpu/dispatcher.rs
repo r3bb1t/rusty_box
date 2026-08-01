@@ -5161,6 +5161,16 @@ mod tests {
         // inexact result there would raise #XM (or #UD, since these tests
         // leave CR4.OSXMMEXCPT clear). Apply the architectural reset value.
         cpu.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET;
+
+        // A VEX-encoded write clears only as much of the register file as
+        // XCR0 has made architecturally visible (Bochs `maxvl`). A builder-made
+        // CPU has CR4.OSXSAVE and XCR0 clear, which on real hardware is a state
+        // where every VEX instruction would #UD before reaching a handler — so
+        // give these tests the register file an AVX-512-capable guest actually
+        // runs with, rather than asserting against an unreachable one.
+        cpu.cr4.insert(BxCr4::OSXSAVE);
+        cpu.xcr0.set32(0xE7);
+        cpu.handle_avx_mode_change();
     }
 
     fn make_legacy_round_instr(opcode: Opcode, dst: u8, src: u8, imm: u8) -> Instruction {

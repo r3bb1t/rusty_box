@@ -126,6 +126,20 @@ bitflags! {
     }
 }
 
+/// The maximum architecturally-visible vector length, as enabled by XCR0.
+/// Bochs decoder.h `bx_avx_vector_length`; the discriminants are upstream's
+/// so that comparisons read the same way (`maxvl > Vl256`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub(crate) enum BxAvxVectorLength {
+    /// XCR0 enables neither YMM nor ZMM state: writes clear nothing above 128.
+    #[default]
+    Vl128 = 1,
+    /// XCR0.YMM only.
+    Vl256 = 2,
+    /// XCR0 also enables OPMASK / ZMM_HI256 / HI_ZMM.
+    Vl512 = 4,
+}
+
 /// Structure for opcode table entries
 ///
 /// This matches the original C++ `bxIAOpcodeTable` structure from `fetchdecode.h`.

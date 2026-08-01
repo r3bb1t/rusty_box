@@ -419,12 +419,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.vmm[index as usize].zmm128(0)
     }
 
-    /// Write XMM register (writes lower 128 bits, clears upper bits for VEX-encoded SSE)
+    /// Write XMM register (writes lower 128 bits, clears upper bits for
+    /// VEX-encoded SSE). Bochs xmm.h `BX_WRITE_XMM_REGZ` -> `BX_CLEAR_AVX_HIGH128`.
+    ///
+    /// How much is cleared depends on how much of the register file XCR0 has
+    /// made architecturally visible: a guest that never enabled ZMM state does
+    /// not have bits 256..511 zeroed by a VEX write, because for that guest
+    /// they do not exist.
     #[inline]
     pub(super) fn write_xmm_reg(&mut self, index: u8, val: BxPackedXmmRegister) {
+        use super::opcodes_table::BxAvxVectorLength;
         let i = index as usize;
-        self.vmm[i].clear();
         self.vmm[i].set_zmm128(0, val);
+        if self.maxvl > BxAvxVectorLength::Vl128 {
+            self.vmm[i].set_zmm128(1, BxPackedXmmRegister::default());
+            if self.maxvl > BxAvxVectorLength::Vl256 {
+                self.vmm[i].set_zmm256(1, BxPackedYmmRegister::default());
+            }
+        }
     }
 
     /// Write XMM register preserving upper bits (for legacy SSE without VEX)
@@ -495,12 +507,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.vmm[index as usize].zmm256(0)
     }
 
-    /// Write YMM register (writes lower 256 bits, clears upper 256 bits)
+    /// Write YMM register (writes lower 256 bits, clears the upper 256 only
+    /// when XCR0 has made them visible). Bochs xmm.h `BX_WRITE_YMM_REGZ` ->
+    /// `BX_CLEAR_AVX_HIGH256`.
     #[inline]
     pub(super) fn write_ymm_reg(&mut self, index: u8, val: BxPackedYmmRegister) {
+        use super::opcodes_table::BxAvxVectorLength;
         let i = index as usize;
-        self.vmm[i].clear();
         self.vmm[i].set_zmm256(0, val);
+        if self.maxvl > BxAvxVectorLength::Vl256 {
+            self.vmm[i].set_zmm256(1, BxPackedYmmRegister::default());
+        }
     }
 
     /// Prepare for SSE instruction — check CR0.EM, CR4.OSFXSR, CR0.TS

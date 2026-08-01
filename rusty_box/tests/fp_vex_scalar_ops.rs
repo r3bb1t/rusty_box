@@ -269,6 +269,7 @@ fn run_all_cases() {
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
     );
+    enable_guest_avx_state(&mut emu);
     eprintln!(
         "harness: cr0={:#x} cr4={:#x} rip={:#x}",
         emu.reg_read(X86Reg::Cr0),
@@ -381,6 +382,7 @@ fn run_go_runtime_cases() {
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
     );
+    enable_guest_avx_state(&mut emu);
 
     let programs: &[(&str, &[u8], u64)] = &[
         // AESENC xmm0, xmm1 (66 0F 38 DC /r)
@@ -499,6 +501,7 @@ fn run_split_load_cases() {
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
     );
+    enable_guest_avx_state(&mut emu);
 
     let programs: &[(&str, &[u8], u64)] = &[
         // movdqu xmm0, [rax] (F3 0F 6F /r)
@@ -612,6 +615,28 @@ fn run_split_load_cases() {
 // as the 2-operand SSE form silently corrupts data.
 // ════════════════════════════════════════════════════════════════════════
 
+
+/// Enable the guest's XCR0 FPU+SSE+YMM state, the way a real OS does before
+/// it runs any VEX instruction. Without it CR4.OSXSAVE is set but XCR0 is
+/// still zero — a configuration in which every VEX encoding would #UD, and in
+/// which `maxvl` leaves the upper half of the register file architecturally
+/// invisible, so a VEX write does not clear it.
+fn enable_guest_avx_state(emu: &mut Emulator<'static, Corei7SkylakeX>) {
+    const XSETBV_SETUP_BASE: u64 = CASE_BASE + 0x800;
+    emu.reg_write(X86Reg::Rax, 0x7);
+    emu.reg_write(X86Reg::Rcx, 0);
+    emu.reg_write(X86Reg::Rdx, 0);
+    emu.mem_write(XSETBV_SETUP_BASE, &[0x0F, 0x01, 0xD1])
+        .expect("write xsetbv");
+    emu.emu_start(
+        XSETBV_SETUP_BASE,
+        Some(XSETBV_SETUP_BASE + 3),
+        None,
+        Some(1),
+    )
+    .expect("enable guest AVX state");
+}
+
 #[test]
 fn vex_vpinsrw_sources_vvvv_and_clears_upper() {
     std::thread::Builder::new()
@@ -698,6 +723,7 @@ fn vex_vtestps_vtestpd_set_zf_cf_from_sign_bits() {
                 X86Reg::Cr4,
                 emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
             );
+            enable_guest_avx_state(&mut emu);
             emu.reg_write(X86Reg::Rax, 0x7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
@@ -880,6 +906,7 @@ fn with_avx_emu(f: impl FnOnce(&mut Emulator<'static, Corei7SkylakeX>) + Send + 
                 X86Reg::Cr4,
                 emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
             );
+            enable_guest_avx_state(&mut emu);
             emu.reg_write(X86Reg::Rax, 0x7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
@@ -1672,6 +1699,7 @@ fn indexbyte_avx2_ingredients() {
                 X86Reg::Cr4,
                 emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
             );
+            enable_guest_avx_state(&mut emu);
 
             // vpbroadcastb ymm3, xmm1 (VEX.256.66.0F38.W0 78 /r); park jump.
             emu.mem_write(CASE_BASE, &[0xC4, 0xE2, 0x7D, 0x78, 0xD9, 0xEB, 0xFE])
@@ -1745,6 +1773,7 @@ fn run_aeshash_cases() {
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
     );
+    enable_guest_avx_state(&mut emu);
 
     // Go aeshash17to32 core (seeds preloaded in xmm0/xmm1; ptr=rax len=rcx):
     //   movdqu xmm2, [rax]
@@ -1860,6 +1889,7 @@ fn run_packed_cases() {
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
     );
+    enable_guest_avx_state(&mut emu);
 
     // Each case: (name, code) at CASE_BASE + i*CASE_STRIDE with a park jump.
     let programs: &[(&str, &[u8])] = &[
@@ -2151,6 +2181,7 @@ fn run_hadd_blend_dpp_cases() {
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
     );
+    enable_guest_avx_state(&mut emu);
 
     let programs: &[(&str, &[u8])] = &[
         ("haddps xmm0,xmm1 (SSE3)", &[0xF2, 0x0F, 0x7C, 0xC1]),
@@ -2367,6 +2398,7 @@ fn run_vex_integer_cases() {
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
     );
+    enable_guest_avx_state(&mut emu);
 
     let programs: &[(&str, &[u8])] = &[
         // vptest ymm0, ymm1; pushfq; pop rax
@@ -2681,6 +2713,7 @@ fn run_cvt_boundary_cases() {
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
     );
+    enable_guest_avx_state(&mut emu);
 
     let programs: &[(&str, &[u8])] = &[
         ("cvttsd2si eax,xmm1", &[0xF2, 0x0F, 0x2C, 0xC1]),
@@ -2805,6 +2838,7 @@ fn run_remap_gap_cases() {
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
     );
+    enable_guest_avx_state(&mut emu);
     emu.reg_write(X86Reg::Rsp, STACK_TOP); // pushfq/pop in the vptest case
 
     // idx, name, bytes, insns

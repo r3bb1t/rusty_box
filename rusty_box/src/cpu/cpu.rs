@@ -754,6 +754,10 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     // cached per decoded instruction.
     pub(super) fetch_mode_mask: super::opcodes_table::FetchModeMask,
 
+    /// Maximum architecturally-visible vector length, recomputed from XCR0
+    /// by `handle_avx_mode_change`. Bochs cpu.h `maxvl`.
+    pub(super) maxvl: super::opcodes_table::BxAvxVectorLength,
+
     pub(super) address_xlation: AddressXlation,
 
     /* Now other not so obvious fields */

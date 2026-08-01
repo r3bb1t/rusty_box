@@ -112,17 +112,52 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
-    // Bochs proc_ctrl.cc — update AVX permission
+    /// Bochs proc_ctrl.cc `handleAvxModeChange` — recompute AVX, opmask and
+    /// EVEX decode permission, plus the maximum architecturally-visible
+    /// vector length, from CR0.TS / CR4.OSXSAVE / XCR0.
+    ///
+    /// EVEX needs three XCR0 bits beyond AVX's: OPMASK, ZMM_HI256 and HI_ZMM.
+    /// Upstream keeps opmask and EVEX on a single fetch-mode bit — its
+    /// `BX_PREPARE_OPMASK` is literally `#define`d to `BX_PREPARE_EVEX` — so
+    /// the two move together here even though this decoder tracks them
+    /// separately.
     pub(super) fn handle_avx_mode_change(&mut self) {
-        use super::opcodes_table::FetchModeMask;
-        if self.cr0.ts()
-            || !self.protected_mode()
-            || !self.cr4.osxsave()
-            || (self.xcr0.get32() & 0x6) != 0x6
+        use super::opcodes_table::{BxAvxVectorLength, FetchModeMask};
+        const XCR0_SSE: u32 = 1 << 1;
+        const XCR0_YMM: u32 = 1 << 2;
+        const XCR0_OPMASK: u32 = 1 << 5;
+        const XCR0_ZMM_HI256: u32 = 1 << 6;
+        const XCR0_HI_ZMM: u32 = 1 << 7;
+        const XCR0_AVX: u32 = XCR0_SSE | XCR0_YMM;
+        const XCR0_EVEX: u32 = XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI_ZMM;
+
+        let xcr0 = self.xcr0.get32();
+        let evex_state = (!xcr0 & XCR0_EVEX) == 0;
+
+        if self.cr0.ts() || !self.protected_mode() || !self.cr4.osxsave() || (!xcr0 & XCR0_AVX) != 0
         {
-            self.fetch_mode_mask.remove(FetchModeMask::AVX_OK);
+            // Upstream's clear_avx_ok() drops EVEX along with AVX.
+            self.fetch_mode_mask
+                .remove(FetchModeMask::AVX_OK | FetchModeMask::OPMASK_OK | FetchModeMask::EVEX_OK);
         } else {
             self.fetch_mode_mask.insert(FetchModeMask::AVX_OK);
+            self.fetch_mode_mask.set(
+                FetchModeMask::OPMASK_OK | FetchModeMask::EVEX_OK,
+                evex_state,
+            );
+        }
+
+        // maxvl is *not* gated on CR0.TS — a task switch does not shrink the
+        // register file, it only makes it unavailable until the state is
+        // restored.
+        if self.cr4.osxsave() {
+            self.maxvl = if (xcr0 & XCR0_EVEX) != 0 {
+                BxAvxVectorLength::Vl512
+            } else if (xcr0 & XCR0_YMM) != 0 {
+                BxAvxVectorLength::Vl256
+            } else {
+                BxAvxVectorLength::Vl128
+            };
         }
     }
 
@@ -4365,5 +4400,106 @@ mod tests {
             .expect("x2APIC ICR write must queue the destination from the high dword");
         assert_eq!(pending.dest, TARGET_APIC_ID);
         assert_eq!(pending.lo_cmd as u64 & 0xff, FIXED_VECTOR);
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod avx_mode_tests {
+    //! `handle_avx_mode_change` is the only thing that opens the EVEX decode
+    //! gate. Before this was wired, OPMASK_OK and EVEX_OK were never set by
+    //! anything, so every EVEX opcode carrying PREPARE_EVEX became #UD at
+    //! decode no matter what the guest had enabled in XCR0.
+
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::crregs::{BxCr0, BxCr4};
+    use crate::cpu::opcodes_table::{BxAvxVectorLength, FetchModeMask};
+
+    const XCR0_X87: u32 = 1 << 0;
+    const XCR0_SSE: u32 = 1 << 1;
+    const XCR0_YMM: u32 = 1 << 2;
+    const XCR0_AVX512: u32 = (1 << 5) | (1 << 6) | (1 << 7);
+
+    fn cpu_with(xcr0: u32) -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC<'static, AmdRyzen>> {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.cr0.insert(BxCr0::PE);
+        // protected_mode() reads cpu_mode, which CR0.PE alone does not update.
+        c.cpu_mode = crate::cpu::cpu::CpuMode::Ia32Protected;
+        c.cr4.insert(BxCr4::OSXSAVE);
+        c.xcr0.set32(xcr0);
+        c.handle_avx_mode_change();
+        c
+    }
+
+    #[test]
+    fn evex_decode_gate_needs_opmask_and_both_zmm_halves() {
+        // AVX state alone opens AVX but not EVEX.
+        let c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM);
+        assert!(c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
+        assert!(!c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+        assert!(!c.fetch_mode_mask.contains(FetchModeMask::OPMASK_OK));
+        assert_eq!(c.maxvl, BxAvxVectorLength::Vl256);
+
+        // All three AVX-512 bits open it.
+        let c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        assert!(c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
+        assert!(c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+        assert!(c.fetch_mode_mask.contains(FetchModeMask::OPMASK_OK));
+        assert_eq!(c.maxvl, BxAvxVectorLength::Vl512);
+
+        // Any one of them missing closes it again.
+        for missing in [1u32 << 5, 1 << 6, 1 << 7] {
+            let c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | (XCR0_AVX512 & !missing));
+            assert!(
+                !c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK),
+                "XCR0 without bit {missing:#x} must not enable EVEX"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pending_task_switch_closes_avx_and_evex_together() {
+        let mut c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        assert!(c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+
+        c.cr0.insert(BxCr0::TS);
+        c.handle_avx_mode_change();
+        assert!(!c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
+        assert!(!c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+        // CR0.TS does not shrink the register file, only make it unavailable.
+        assert_eq!(c.maxvl, BxAvxVectorLength::Vl512);
+
+        c.cr0.remove(BxCr0::TS);
+        c.handle_avx_mode_change();
+        assert!(c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+    }
+
+    #[test]
+    fn a_vex_write_clears_only_what_xcr0_makes_visible() {
+        use crate::cpu::xmm::BxPackedXmmRegister;
+
+        // An AVX guest with no ZMM state: bits 256..511 are not architecturally
+        // visible, so a VEX write does not touch them.
+        let mut c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM);
+        for q in 0..8 {
+            c.vmm[1].set_zmm64u(q, 0xA5A5_A5A5_A5A5_A5A5);
+        }
+        c.write_xmm_reg(1, BxPackedXmmRegister::default());
+        assert_eq!(c.vmm[1].zmm64u(2), 0, "bits 128..255 are cleared");
+        assert_eq!(
+            c.vmm[1].zmm64u(4),
+            0xA5A5_A5A5_A5A5_A5A5,
+            "bits 256..511 are invisible to this guest and stay put"
+        );
+
+        // With ZMM state enabled the same write clears the whole register.
+        let mut c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        for q in 0..8 {
+            c.vmm[1].set_zmm64u(q, 0xA5A5_A5A5_A5A5_A5A5);
+        }
+        c.write_xmm_reg(1, BxPackedXmmRegister::default());
+        for q in 2..8 {
+            assert_eq!(c.vmm[1].zmm64u(q), 0, "qword {q}");
+        }
     }
 }
