@@ -999,14 +999,16 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     #[test]
-    fn isa_gate_turns_unadvertised_avx512_into_a_guest_ud() {
+    fn isa_gate_turns_unimplemented_avx512_into_a_guest_ud() {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let emu = avx_emulator();
 
-                // Skylake-X advertises exactly these four, as upstream's
-                // corei7_skylake-x.cc does.
+                // Corei7SkylakeX deliberately advertises no AVX-512 (see the
+                // FIXME in core_i7_skylake.rs: the EVEX executor does not cover
+                // the guest-visible surface, and advertising AVX512F made glibc
+                // IFUNCs pick paths that hit unimplemented lanes).
                 for f in [
                     X86Feature::IsaAvx512,
                     X86Feature::IsaAvx512Bw,
@@ -1014,23 +1016,16 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     X86Feature::IsaAvx512Cd,
                 ] {
                     assert!(
-                        emu.cpu().bx_cpuid_support_isa_extension(f),
-                        "{f:?} is part of Skylake-X"
-                    );
-                }
-                // …and not these, which are later parts.
-                for f in [
-                    X86Feature::IsaAvx512Vbmi,
-                    X86Feature::IsaAvx512Ifma52,
-                    X86Feature::IsaAvx512Vnni,
-                ] {
-                    assert!(
                         !emu.cpu().bx_cpuid_support_isa_extension(f),
-                        "{f:?} is not part of Skylake-X"
+                        "{f:?} must stay disabled while the EVEX executor is incomplete"
                     );
                 }
 
-                // Opcodes of an advertised feature resolve to themselves.
+                // Before the ISA gate existed these reached the dispatcher
+                // catch-all and produced CpuError::UnimplementedOpcode — an
+                // emulator-level error, i.e. the host stops rather than the
+                // guest faulting. Bochs points them at BxError, so the guest
+                // must simply see #UD.
                 for op in [
                     Opcode::EvexVpaddbVdqHdqWdq,
                     Opcode::EvexVmovdqu16VdqWdq,
@@ -1038,24 +1033,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 ] {
                     assert_eq!(
                         emu.cpu().isa_resolve_opcode(op),
-                        op,
-                        "{op:?} belongs to an advertised AVX-512 feature"
-                    );
-                }
-
-                // An opcode of a feature this model does not have must become a
-                // guest #UD. Before the ISA gate existed it reached the
-                // dispatcher catch-all and produced CpuError::UnimplementedOpcode
-                // — an emulator-level error, i.e. the host stops rather than the
-                // guest faulting. Upstream points it at BxError.
-                for op in [
-                    Opcode::EvexVpermt2bVdqHdqWdqKmask,
-                    Opcode::EvexVpermi2bVdqHdqWdqKmask,
-                ] {
-                    assert_eq!(
-                        emu.cpu().isa_resolve_opcode(op),
                         Opcode::IaError,
-                        "{op:?} is AVX512_VBMI, which Skylake-X does not have"
+                        "{op:?} belongs to an unadvertised AVX-512 feature and must #UD"
                     );
                 }
             })
