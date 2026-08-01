@@ -3171,6 +3171,42 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- EVEX scalar GPR <-> float conversions ---
+            // The float -> signed GPR forms have no vvvv operand and are
+            // byte-identical to the legacy handlers, which already apply the
+            // EVEX embedded-rounding override; upstream's def file names those
+            // same symbols for its EVEX entries.
+            Opcode::EvexVcvtss2siGdWss => self.cvtss2si_gd_wss(instr),
+            Opcode::EvexVcvtss2siGqWss => self.cvtss2si_gq_wss(instr),
+            Opcode::EvexVcvtsd2siGdWsd => self.cvtsd2si_gd_wsd(instr),
+            Opcode::EvexVcvtsd2siGqWsd => self.cvtsd2si_gq_wsd(instr),
+            Opcode::EvexVcvttss2siGdWss => self.cvttss2si_gd_wss(instr),
+            Opcode::EvexVcvttss2siGqWss => self.cvttss2si_gq_wss(instr),
+            Opcode::EvexVcvttsd2siGdWsd => self.cvttsd2si_gd_wsd(instr),
+            Opcode::EvexVcvttsd2siGqWsd => self.cvttsd2si_gq_wsd(instr),
+            Opcode::EvexVcvtss2usiGdWss => self.evex_vcvtss2usi_gd(instr),
+            Opcode::EvexVcvtss2usiGqWss => self.evex_vcvtss2usi_gq(instr),
+            Opcode::EvexVcvttss2usiGdWss => self.evex_vcvttss2usi_gd(instr),
+            Opcode::EvexVcvttss2usiGqWss => self.evex_vcvttss2usi_gq(instr),
+            Opcode::EvexVcvtsd2usiGdWsd => self.evex_vcvtsd2usi_gd(instr),
+            Opcode::EvexVcvtsd2usiGqWsd => self.evex_vcvtsd2usi_gq(instr),
+            Opcode::EvexVcvttsd2usiGdWsd => self.evex_vcvttsd2usi_gd(instr),
+            Opcode::EvexVcvttsd2usiGqWsd => self.evex_vcvttsd2usi_gq(instr),
+            Opcode::EvexVcvtsi2ssVssEd => self.evex_vcvtsi2ss_ed(instr),
+            Opcode::EvexVcvtsi2ssVssEq => self.evex_vcvtsi2ss_eq(instr),
+            Opcode::EvexVcvtsi2sdVsdEd => self.evex_vcvtsi2sd_ed(instr),
+            Opcode::EvexVcvtsi2sdVsdEq => self.evex_vcvtsi2sd_eq(instr),
+            Opcode::EvexVcvtusi2ssVssEd => self.evex_vcvtusi2ss_ed(instr),
+            Opcode::EvexVcvtusi2ssVssEq => self.evex_vcvtusi2ss_eq(instr),
+            Opcode::EvexVcvtusi2sdVsdEd => self.evex_vcvtusi2sd_ed(instr),
+            Opcode::EvexVcvtusi2sdVsdEq => self.evex_vcvtusi2sd_eq(instr),
+            Opcode::EvexVcvtsd2ssVssWsd | Opcode::EvexVcvtsd2ssVssWsdKmask => {
+                self.evex_vcvtsd2ss(instr)
+            }
+            Opcode::EvexVcvtss2sdVsdWss | Opcode::EvexVcvtss2sdVsdWssKmask => {
+                self.evex_vcvtss2sd(instr)
+            }
+
             // --- VFPCLASS / VREDUCE / VRANGE (avx512_cmp.rs, avx512_round.rs, avx512_scalar.rs) ---
             Opcode::EvexVfpclasspsKgwWpsIbKmask => self.evex_vfpclassps(instr),
             Opcode::EvexVfpclasspdKgbWpdIbKmask => self.evex_vfpclasspd(instr),

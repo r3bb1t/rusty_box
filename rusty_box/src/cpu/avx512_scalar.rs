@@ -22,6 +22,14 @@ use super::softfloat3e::f64_div::f64_div;
 use super::softfloat3e::f64_mul::f64_mul;
 use super::softfloat3e::f64_sqrt::f64_sqrt;
 use super::avx512_round::{f32_reduce, f64_reduce, range_control};
+use super::softfloat3e::f32_to_f64::f32_to_f64;
+use super::softfloat3e::f64_to_f32::f64_to_f32;
+use super::softfloat3e::int_to_float::{i32_to_f32, i32_to_f64, i64_to_f32, i64_to_f64};
+use super::softfloat3e::uint64_convert::{f32_to_ui64, f32_to_ui64_r_min_mag, f64_to_ui64,
+    f64_to_ui64_r_min_mag, ui64_to_f32, ui64_to_f64};
+use super::softfloat3e::uint_convert::{f32_to_ui32, f32_to_ui32_r_min_mag, f64_to_ui32,
+    f64_to_ui32_r_min_mag, ui32_to_f32, ui32_to_f64};
+use super::softfloat3e::softfloat::softfloat_get_rounding_mode;
 use super::softfloat3e::softfloat::{
     softfloat_get_exception_flags, softfloat_suppress_exception, SoftFloatStatus,
     FLAG_DENORMAL, FLAG_OVERFLOW, FLAG_UNDERFLOW,
@@ -386,6 +394,239 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         })
     }
 
+
+    // ========================================================================
+    // Scalar conversions between a GPR and a scalar float, and between the two
+    // float widths. Bochs avx512_cvt.cc and avx_cvt.cc.
+    //
+    // The float -> GPR direction has no vvvv operand, so upstream's EVEX def
+    // entries name the legacy handlers and this file only adds the unsigned
+    // forms. The GPR -> float direction does have one: the destination's upper
+    // elements come from vvvv, which the legacy handler cannot express because
+    // it writes the low element of the destination in place.
+    // ========================================================================
+
+    /// VCVTSS2USI / VCVTTSS2USI — scalar single to unsigned GPR.
+    /// `wide` selects the 64-bit destination, `truncate` round-toward-zero.
+    fn evex_cvt_ss2usi(
+        &mut self,
+        instr: &Instruction,
+        wide: bool,
+        truncate: bool,
+    ) -> super::Result<()> {
+        let op = self.evex_read_rm_ss(instr)?;
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let rc = softfloat_get_rounding_mode(&status);
+        if wide {
+            let r = if truncate {
+                f32_to_ui64_r_min_mag(op, true, false, &mut status)
+            } else {
+                f32_to_ui64(op, rc, true, &mut status)
+            };
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.set_gpr64(instr.dst() as usize, r);
+        } else {
+            let r = if truncate {
+                f32_to_ui32_r_min_mag(op, true, false, &mut status)
+            } else {
+                f32_to_ui32(op, rc, true, &mut status)
+            };
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.set_gpr32(instr.dst().into(), r);
+        }
+        Ok(())
+    }
+
+    /// Double-precision counterpart of [`Self::evex_cvt_ss2usi`].
+    fn evex_cvt_sd2usi(
+        &mut self,
+        instr: &Instruction,
+        wide: bool,
+        truncate: bool,
+    ) -> super::Result<()> {
+        let op = self.evex_read_rm_sd(instr)?;
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let rc = softfloat_get_rounding_mode(&status);
+        if wide {
+            let r = if truncate {
+                f64_to_ui64_r_min_mag(op, true, false, &mut status)
+            } else {
+                f64_to_ui64(op, rc, true, &mut status)
+            };
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.set_gpr64(instr.dst() as usize, r);
+        } else {
+            let r = if truncate {
+                f64_to_ui32_r_min_mag(op, true, false, &mut status)
+            } else {
+                f64_to_ui32(op, rc, true, &mut status)
+            };
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.set_gpr32(instr.dst().into(), r);
+        }
+        Ok(())
+    }
+
+    /// VCVTSS2USI Gd, Wss — EVEX.F3.0F.W0 79
+    pub fn evex_vcvtss2usi_gd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cvt_ss2usi(instr, false, false)
+    }
+    /// VCVTSS2USI Gq, Wss — EVEX.F3.0F.W1 79
+    pub fn evex_vcvtss2usi_gq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cvt_ss2usi(instr, true, false)
+    }
+    /// VCVTTSS2USI Gd, Wss — EVEX.F3.0F.W0 78
+    pub fn evex_vcvttss2usi_gd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cvt_ss2usi(instr, false, true)
+    }
+    /// VCVTTSS2USI Gq, Wss — EVEX.F3.0F.W1 78
+    pub fn evex_vcvttss2usi_gq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cvt_ss2usi(instr, true, true)
+    }
+    /// VCVTSD2USI Gd, Wsd — EVEX.F2.0F.W0 79
+    pub fn evex_vcvtsd2usi_gd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cvt_sd2usi(instr, false, false)
+    }
+    /// VCVTSD2USI Gq, Wsd — EVEX.F2.0F.W1 79
+    pub fn evex_vcvtsd2usi_gq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cvt_sd2usi(instr, true, false)
+    }
+    /// VCVTTSD2USI Gd, Wsd — EVEX.F2.0F.W0 78
+    pub fn evex_vcvttsd2usi_gd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cvt_sd2usi(instr, false, true)
+    }
+    /// VCVTTSD2USI Gq, Wsd — EVEX.F2.0F.W1 78
+    pub fn evex_vcvttsd2usi_gq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cvt_sd2usi(instr, true, true)
+    }
+
+    /// VCVTSI2SS xmm1, xmm2, r/m32 — EVEX.F3.0F.W0 2A
+    pub fn evex_vcvtsi2ss_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op = self.cvtsi_read_src32(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv supplies the upper elements
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = i32_to_f32(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        write_scalar_ss(self, instr.dst(), &src1, value, u64::MAX, false);
+        Ok(())
+    }
+
+    /// VCVTSI2SS xmm1, xmm2, r/m64 — EVEX.F3.0F.W1 2A
+    pub fn evex_vcvtsi2ss_eq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op = self.cvtsi_read_src64(instr)?;
+        let src1 = read_zmm(self, instr.src2());
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = i64_to_f32(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        write_scalar_ss(self, instr.dst(), &src1, value, u64::MAX, false);
+        Ok(())
+    }
+
+    /// VCVTSI2SD xmm1, xmm2, r/m32 — EVEX.F2.0F.W0 2A. Exact for every i32,
+    /// so upstream raises nothing and uses no status word.
+    pub fn evex_vcvtsi2sd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op = self.cvtsi_read_src32(instr)?;
+        let src1 = read_zmm(self, instr.src2());
+        write_scalar_sd(self, instr.dst(), &src1, i32_to_f64(op), u64::MAX, false);
+        Ok(())
+    }
+
+    /// VCVTSI2SD xmm1, xmm2, r/m64 — EVEX.F2.0F.W1 2A
+    pub fn evex_vcvtsi2sd_eq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op = self.cvtsi_read_src64(instr)?;
+        let src1 = read_zmm(self, instr.src2());
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = i64_to_f64(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        write_scalar_sd(self, instr.dst(), &src1, value, u64::MAX, false);
+        Ok(())
+    }
+
+    /// VCVTUSI2SS xmm1, xmm2, r/m32 — EVEX.F3.0F.W0 7B
+    pub fn evex_vcvtusi2ss_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op = self.cvtsi_read_src32(instr)? as u32;
+        let src1 = read_zmm(self, instr.src2());
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = ui32_to_f32(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        write_scalar_ss(self, instr.dst(), &src1, value, u64::MAX, false);
+        Ok(())
+    }
+
+    /// VCVTUSI2SS xmm1, xmm2, r/m64 — EVEX.F3.0F.W1 7B
+    pub fn evex_vcvtusi2ss_eq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op = self.cvtsi_read_src64(instr)? as u64;
+        let src1 = read_zmm(self, instr.src2());
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = ui64_to_f32(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        write_scalar_ss(self, instr.dst(), &src1, value, u64::MAX, false);
+        Ok(())
+    }
+
+    /// VCVTUSI2SD xmm1, xmm2, r/m32 — EVEX.F2.0F.W0 7B. Exact for every u32.
+    pub fn evex_vcvtusi2sd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op = self.cvtsi_read_src32(instr)? as u32;
+        let src1 = read_zmm(self, instr.src2());
+        write_scalar_sd(self, instr.dst(), &src1, ui32_to_f64(op), u64::MAX, false);
+        Ok(())
+    }
+
+    /// VCVTUSI2SD xmm1, xmm2, r/m64 — EVEX.F2.0F.W1 7B
+    pub fn evex_vcvtusi2sd_eq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op = self.cvtsi_read_src64(instr)? as u64;
+        let src1 = read_zmm(self, instr.src2());
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = ui64_to_f64(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        write_scalar_sd(self, instr.dst(), &src1, value, u64::MAX, false);
+        Ok(())
+    }
+
+    /// VCVTSD2SS xmm1{k1}{z}, xmm2, xmm3/m64 — EVEX.F2.0F.W1 5A.
+    /// Narrowing, so the destination is a single and the upper *dwords* come
+    /// from vvvv.
+    pub fn evex_vcvtsd2ss(&mut self, instr: &Instruction) -> super::Result<()> {
+        let src1 = read_zmm(self, instr.src2());
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        let mut result = 0;
+        if (mask & 1) != 0 {
+            let op2 = self.evex_read_rm_sd(instr)?;
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            result = f64_to_f32(op2, &mut status);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        }
+        write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
+        Ok(())
+    }
+
+    /// VCVTSS2SD xmm1{k1}{z}, xmm2, xmm3/m32 — EVEX.F3.0F.W0 5A
+    pub fn evex_vcvtss2sd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let src1 = read_zmm(self, instr.src2());
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        let mut result = 0;
+        if (mask & 1) != 0 {
+            let op2 = self.evex_read_rm_ss(instr)?;
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            result = f32_to_f64(op2, &mut status);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        }
+        write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
+        Ok(())
+    }
+
     /// VMOVSS xmm1{k1}{z}, xmm2, xmm3 (register form load)
     /// VMOVSS xmm1{k1}{z}, m32 (memory form load)
     pub fn evex_vmovss_load(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -622,4 +863,133 @@ mod tests {
         cpu.execute_instruction(&i).unwrap();
         assert!(f32::from_bits(cpu.vmm[0].zmm32u(0)).is_nan());
     }
+
+    // ---- scalar GPR <-> float conversions -------------------------------
+
+    #[test]
+    fn unsigned_destination_conversions_differ_from_the_signed_ones() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.mxcsr.mxcsr = MXCSR_RESET;
+        // The signed float -> GPR forms route to the legacy handlers, which
+        // begin with prepare_sse(); a builder-made CPU has CR4.OSFXSR clear,
+        // so without this they raise #UD before converting anything.
+        c.cr4.insert(crate::cpu::crregs::BxCr4::OSFXSR);
+
+        // 3e9 exceeds i32::MAX but fits a u32, so the signed form saturates to
+        // the integer indefinite value while the unsigned one converts.
+        c.vmm[1].set_zmm32u(0, 3.0e9f32.to_bits());
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvttss2usiGdWss))
+            .unwrap();
+        assert_eq!(c.get_gpr32(0), 3_000_000_000);
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvttss2siGdWss))
+            .unwrap();
+        assert_eq!(c.get_gpr32(0), 0x8000_0000, "signed form is out of range");
+
+        // A negative value has no unsigned representation at all.
+        c.vmm[1].set_zmm32u(0, (-1.0f32).to_bits());
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvttss2usiGdWss))
+            .unwrap();
+        assert_eq!(c.get_gpr32(0), 0xFFFF_FFFF);
+
+        // …but a negative fraction truncates to zero first, which is legal.
+        c.vmm[1].set_zmm32u(0, (-0.5f32).to_bits());
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvttss2usiGdWss))
+            .unwrap();
+        assert_eq!(c.get_gpr32(0), 0);
+    }
+
+    #[test]
+    fn scalar_float_to_gpr_rounds_or_truncates_by_opcode() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.mxcsr.mxcsr = MXCSR_RESET;
+        c.vmm[1].set_zmm64u(0, 2.5f64.to_bits());
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvtsd2usiGdWsd))
+            .unwrap();
+        assert_eq!(c.get_gpr32(0), 2, "round-to-nearest-even");
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvttsd2usiGdWsd))
+            .unwrap();
+        assert_eq!(c.get_gpr32(0), 2, "truncation agrees here");
+
+        c.vmm[1].set_zmm64u(0, 3.5f64.to_bits());
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvtsd2usiGdWsd))
+            .unwrap();
+        assert_eq!(c.get_gpr32(0), 4, "ties to even rounds up");
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvttsd2usiGdWsd))
+            .unwrap();
+        assert_eq!(c.get_gpr32(0), 3, "truncation does not");
+
+        // 64-bit destination.
+        c.vmm[1].set_zmm64u(0, 1.0e19f64.to_bits());
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvttsd2usiGqWsd))
+            .unwrap();
+        assert_eq!(c.get_gpr64(0), 10_000_000_000_000_000_000);
+    }
+
+    #[test]
+    fn gpr_to_scalar_float_takes_its_upper_elements_from_vvvv() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.mxcsr.mxcsr = MXCSR_RESET;
+        // vvvv (= vmm[2]) supplies dwords 1..3; the destination's own previous
+        // contents must not survive.
+        c.vmm[0].set_zmm32u(1, 0xDEAD_BEEF);
+        c.vmm[2].set_zmm32u(1, 0x1111_1111);
+        c.vmm[2].set_zmm32u(2, 0x2222_2222);
+        c.vmm[2].set_zmm32u(3, 0x3333_3333);
+        c.set_gpr32(1, 7); // the r/m operand is src1() = register 1
+
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvtsi2ssVssEd))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), 7.0f32.to_bits());
+        assert_eq!(c.vmm[0].zmm32u(1), 0x1111_1111);
+        assert_eq!(c.vmm[0].zmm32u(2), 0x2222_2222);
+        assert_eq!(c.vmm[0].zmm32u(3), 0x3333_3333);
+        assert_eq!(c.vmm[0].zmm32u(4), 0, "EVEX clears above 128 bits");
+    }
+
+    #[test]
+    fn usi_to_scalar_float_reads_the_gpr_as_unsigned() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.mxcsr.mxcsr = MXCSR_RESET;
+        c.set_gpr32(1, 0xFFFF_FFFF);
+
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvtusi2sdVsdEd))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm64u(0), 4294967295.0f64.to_bits());
+
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvtsi2sdVsdEd))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm64u(0), (-1.0f64).to_bits(), "signed reads -1");
+
+        // 64-bit source: 2^64-1 is not exactly representable, so it rounds.
+        c.set_gpr64(1, u64::MAX);
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvtusi2sdVsdEq))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm64u(0), 18446744073709551616.0f64.to_bits());
+    }
+
+    #[test]
+    fn scalar_float_width_conversions_keep_the_vvvv_upper_elements() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.mxcsr.mxcsr = MXCSR_RESET;
+        c.vmm[1].set_zmm64u(0, 1.5f64.to_bits()); // rm
+        c.vmm[2].set_zmm32u(1, 0xAAAA_AAAA); // vvvv
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvtsd2ssVssWsd))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), 1.5f32.to_bits());
+        assert_eq!(c.vmm[0].zmm32u(1), 0xAAAA_AAAA);
+
+        c.vmm[1].set_zmm32u(0, 1.5f32.to_bits());
+        c.vmm[2].set_zmm64u(1, 0xBBBB_BBBB_BBBB_BBBB);
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvtss2sdVsdWss))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm64u(0), 1.5f64.to_bits());
+        assert_eq!(c.vmm[0].zmm64u(1), 0xBBBB_BBBB_BBBB_BBBB);
+
+        // Narrowing a double that has no exact single is inexact but defined.
+        c.vmm[1].set_zmm64u(0, 0.1f64.to_bits());
+        c.execute_instruction(&evex_scalar(Opcode::EvexVcvtsd2ssVssWsd))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), 0.1f32.to_bits());
+    }
+
 }

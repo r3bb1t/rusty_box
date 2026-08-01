@@ -686,7 +686,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Read the 32-bit integer source of a CVTSI2xx.
     #[inline]
-    fn cvtsi_read_src32(&mut self, instr: &Instruction) -> super::Result<i32> {
+    pub(super) fn cvtsi_read_src32(&mut self, instr: &Instruction) -> super::Result<i32> {
         if instr.mod_c0() {
             Ok(self.get_gpr32(instr.src1().into()) as i32)
         } else {
@@ -698,7 +698,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Read the 64-bit integer source of a CVTSI2xx (long mode).
     #[inline]
-    fn cvtsi_read_src64(&mut self, instr: &Instruction) -> super::Result<i64> {
+    pub(super) fn cvtsi_read_src64(&mut self, instr: &Instruction) -> super::Result<i64> {
         if instr.mod_c0() {
             Ok(self.get_gpr64(instr.src1() as usize) as i64)
         } else {
