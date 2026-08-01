@@ -1767,3 +1767,22 @@ fn evex_vvvv_lands_in_src2_and_modrm_rm_in_src1() {
     assert_eq!(i.src2(), 2, "EVEX.vvvv");
     assert_eq!(i.src1(), 3, "ModRM.rm");
 }
+
+#[test]
+#[ignore = "EVEX opcode maps are incomplete: only 268 of 1333 EVEX opcodes have \
+            a decoder table entry. This is the exact repro that blocks the \
+            Skylake-X AVX-512 CPUID flip — see docs/evex-decoder-map-gap.md."]
+fn evex_vpbroadcastb_from_gpr_decodes() {
+    // 62 E2 7D 28 7A C6 = VPBROADCASTB ymm0, esi (EVEX.256.66.0F38.W0 7A /r).
+    // glibc's AVX-512 strlen/memchr IFUNC emits exactly this. With AVX-512
+    // advertised, Ubuntu's init took #UD on it and the kernel panicked with
+    // "Attempted to kill init!". The handler exists and is dispatched; the
+    // opcode map slot that would produce it does not.
+    let i = crate::decoder::decode64::fetch_decode64(&[0x62, 0xE2, 0x7D, 0x28, 0x7A, 0xC6])
+        .expect("EVEX VPBROADCASTB Vdq, Eb must decode");
+    assert_ne!(
+        i.get_ia_opcode(),
+        crate::opcode::Opcode::IaError,
+        "EVEX.66.0F38.W0 7A must not be an empty opcode-map slot"
+    );
+}
