@@ -3170,6 +3170,54 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- EVEX MOVD/MOVQ/MOVHLPS/MOVLHPS/MOVHP/MOVLP ---
+            // Upstream's EVEX def entries name these same legacy and VEX
+            // symbols: none of them takes a writemask, and the register-form
+            // writers already clear the upper register file exactly when the
+            // encoding is VEX or EVEX (Bochs BX_WRITE_XMM_REGZ's `if (vlen)`).
+            Opcode::EvexVmovdVdqEd => {
+                if instr.mod_c0() {
+                    self.movd_vdq_ed_r(instr)
+                } else {
+                    self.movd_vdq_ed_m(instr)
+                }
+            }
+            Opcode::EvexVmovdEdVd => {
+                if instr.mod_c0() {
+                    self.movd_ed_vdq_r(instr)
+                } else {
+                    self.movd_ed_vdq_m(instr)
+                }
+            }
+            Opcode::EvexVmovqVqWq => {
+                if instr.mod_c0() {
+                    self.movq_vq_wq_r(instr)
+                } else {
+                    self.movq_vq_wq_m(instr)
+                }
+            }
+            Opcode::EvexVmovqWqVq => {
+                if instr.mod_c0() {
+                    self.movq_wq_vq_r(instr)
+                } else {
+                    self.movq_wq_vq_m(instr)
+                }
+            }
+            Opcode::EvexVmovqVdqEq => self.movq_vdq_eq(instr),
+            Opcode::EvexVmovqEqVq => self.movq_eq_vq(instr),
+            Opcode::EvexVmovhlpsVpsHpsWps => self.vmovhlps(instr),
+            Opcode::EvexVmovlhpsVpsHpsWps => self.vmovlhps(instr),
+            Opcode::EvexVmovhpsMqVps => self.movhps_mq_vps(instr),
+            Opcode::EvexVmovhpdMqVsd => self.movhps_mq_vps(instr),
+            Opcode::EvexVmovlpsMqVps => self.movlps_mq_vps(instr),
+            Opcode::EvexVmovlpdMqVsd => self.movlps_mq_vps(instr),
+            Opcode::EvexVmovhpsVpsHpsMq | Opcode::EvexVmovhpdVpdHpdMq => {
+                self.vmovhp(instr)
+            }
+            Opcode::EvexVmovlpsVpsHpsMq | Opcode::EvexVmovlpdVpdHpdMq => {
+                self.vmovlp(instr)
+            }
+
             // --- two-table permutes, VPERMW/PD variable forms, VPMULLQ ---
             // The PS/PD spellings are bit-identical to the D/Q ones; upstream
             // gives them separate symbols with the same body.

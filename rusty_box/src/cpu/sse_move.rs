@@ -523,7 +523,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut op = BxPackedXmmRegister::default();
         op.set_xmm64u(0, self.xmm_lo_qword(instr.src1()));
         op.set_xmm64u(1, 0);
-        self.write_xmm_reg_lo128(instr.dst(), op);
+        self.write_xmm_regz(instr, instr.dst(), op);
         Ok(())
     }
 
@@ -536,7 +536,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut op = BxPackedXmmRegister::default();
         op.set_xmm64u(0, val64);
         op.set_xmm64u(1, 0);
-        self.write_xmm_reg_lo128(instr.dst(), op);
+        self.write_xmm_regz(instr, instr.dst(), op);
         Ok(())
     }
 
@@ -549,7 +549,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut op = BxPackedXmmRegister::default();
         op.set_xmm64u(0, src_lo);
         op.set_xmm64u(1, 0);
-        self.write_xmm_reg_lo128(instr.dst(), op);
+        self.write_xmm_regz(instr, instr.dst(), op);
         Ok(())
     }
 
