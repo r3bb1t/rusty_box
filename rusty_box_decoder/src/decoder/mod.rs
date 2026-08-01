@@ -8,6 +8,7 @@ pub mod decode64;
 pub(crate) mod opmap;
 pub(crate) mod opmap_0f38;
 pub(crate) mod opmap_0f3a;
+pub(crate) mod opmap_evex;
 pub mod tables;
 mod x87;
 

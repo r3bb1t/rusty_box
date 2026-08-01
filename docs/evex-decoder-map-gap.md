@@ -1,67 +1,96 @@
-# The EVEX opcode maps are the real blocker for advertising AVX-512
+# The EVEX decoder map gap, and what it was hiding
 
-**Found 2026-08-01**, while verifying the Skylake-X CPUID flip against an
-Ubuntu 26.04 live-server boot. The flip was reverted; this is what has to
-land first.
+**Opened 2026-08-01**, when advertising AVX-512 on Skylake-X panicked an
+Ubuntu 26.04 guest. **Closed the same day.** An earlier revision of this file
+concluded the CPUID flip could not land; that conclusion is superseded — the
+maps are generated and the flip is in place. What follows is the record of
+both defects, because the second one is the more instructive.
 
-## Symptom
+## Defect 1 — opcode map slots that were never filled
 
-With AVX512F/DQ/CD/BW/VL advertised, Ubuntu's kernel boots normally and then
-panics a few seconds in:
+With AVX512F/DQ/CD/BW/VL advertised, Ubuntu's kernel booted and then init
+took #UD:
 
 ```
 exc_invalid_op+0x5d/0x80
 Attempted to kill init! exit code=0x00000004
-RIP: 0033:0x7b4e55d82b46
 Code: ... f3 0f 1e fa 89 f8 <62> e2 7d 28 7a c6 25 ff 0f 00 00 ...
 ```
 
-The faulting byte is `62` — the EVEX prefix. `62 E2 7D 28 7A C6` decodes as
-**VPBROADCASTB ymm0, esi**, EVEX.256.66.0F38.W0 7A /r, which glibc's
-AVX-512 `strlen`/`memchr` IFUNC emits. RIP is userspace, so this is the
-dynamic loader or early init taking #UD on the first AVX-512 string routine
-it selects.
+The faulting byte is `62`, the EVEX prefix. `62 E2 7D 28 7A C6` is
+`VPBROADCASTB ymm0, esi` (EVEX.256.66.0F38.W0 7A /r), emitted by glibc's
+AVX-512 `strlen`/`memchr` IFUNC. `fetch_decode64` rejected it with
+`BxIllegalOpcode`: the opcode-map slot was empty.
 
-## Root cause
+The handler was not missing. `evex_vpbroadcastb_gpr` existed and was
+dispatched. Nothing in the decoder tables *produced* the opcode, so it never
+reached the ISA gate or the dispatcher.
 
-`fetch_decode64` rejects that encoding outright with `BxIllegalOpcode`: the
-opcode-map slot for EVEX.66.0F38.W0 7A is empty.
+    EVEX opcodes in the Opcode enum      1333
+    ...referenced by a decoder table       268   (before)
+    ...referenced by a decoder table      1314   (after)
 
-This is *not* a missing handler. `evex_vpbroadcastb_gpr` exists and is
-dispatched. The gap is one layer earlier — nothing in the decoder tables
-produces the opcode, so it never reaches the ISA gate or the dispatcher.
+This corrects the standard the earlier work was held to. "All 898 Skylake-X
+EVEX opcodes are dispatched" was measured enum-to-dispatcher; it was true and
+insufficient. An opcode can have a correct, tested handler and remain
+unreachable. Completeness has to be measured decoder-to-dispatcher.
 
-## Scale
+Fixed by generating the maps from Bochs's own
+`cpu/decoder/fetchdecode_opmap_evex.cc` — which *is* the table — so the Rust
+is a transcription rather than a re-derivation. See
+`scripts/gen_opmap_evex.py`.
 
-    EVEX opcodes in the Opcode enum         1333
-    ...referenced by a decoder table          268
-    ...unreachable from the decoder          1065
+Of the 19 opcodes still unreachable, 14 belong to groups Bochs defines but
+never references from its own master table (`BxOpcodeGroup_EVEX_0F38D2`,
+`_0F38D3`, `_0F38DA`, `_0F38DB` — VPDPWSUD, VSM4KEY4 and friends). They are
+unreachable upstream too, so matching that is parity, not a gap. The other 5
+are BF16/FP16 forms Skylake-X does not advertise.
 
-Measured by matching every `Evex*` enum variant against the contents of
-`rusty_box_decoder/src/decoder/*.rs`.
+## Defect 2 — the one the #UD was hiding
 
-Note what this means for the earlier "all 898 Skylake-X EVEX opcodes are
-dispatched" result: that was measured enum-to-dispatcher and is still true,
-but it is not sufficient. An opcode can have a correct, tested handler and
-still be unreachable because no decode path yields it. Any future
-completeness claim about EVEX has to measure *decoder → dispatcher*, not
-just enum → dispatcher.
+With the maps in place Ubuntu got further and failed differently: init exited
+127 at ~9.1s, no fault, just a wrong answer somewhere. A control run with
+`RUSTY_BOX_NO_AVX=1` on the same binary reached 19.8s and kept going, which
+established that AVX-512 really was the trigger.
 
-## What has to happen
+A first-seen probe over the dispatcher showed the guest executes only nine
+distinct EVEX opcodes before dying:
 
-Build the EVEX opcode maps, the counterpart of Bochs's
-`cpu/decoder/fetchdecode_evex.cc`. The def file
-(`cpu/decoder/ia_opcodes_evex.def`) already carries every entry with its
-map, prefix, W bit, ISA feature and operand form, and `evex_scope.py` in the
-session scratchpad already parses it — so the tables can be generated rather
-than hand-written, the same way `scripts/gen_opcode_isa.py` generates the
-ISA gate.
+    VPERMI2D  VPRORD  VPTERNLOGD  VPBROADCASTB  VMOVDQU64
+    VPTESTNMB  VPCMPEQB  VPXORQ  VPTESTMB
 
-Until then the CPUID flip must stay reverted: advertising AVX-512 without
-the decode paths turns a working Ubuntu boot into a kernel panic.
+VPRORD was writing the wrong register. Groups 12-14 (`0F 71/72/73`,
+shift/rotate by immediate) were being given the legacy SSE operand layout, in
+which the rm register is shifted in place and is therefore both source and
+destination. Upstream distinguishes the encodings explicitly:
 
-## Repro
+| opcode | first operand (destination) |
+|---|---|
+| `BX_IA_PSRLD_UdqIb` (legacy) | `OP_Wdq` — the rm operand |
+| `BX_IA_V128_VPSRLD_UdqIb` (VEX) | `OP_Hdq` — VEX.vvvv |
+| `BX_IA_EVEX_VPRORD_UdqIb` (EVEX) | `OP_Hdq` — EVEX.vvvv |
 
-`rusty_box_decoder`'s `evex_vpbroadcastb_from_gpr_decodes` is the exact
-one-instruction repro, marked `#[ignore]` with a pointer here. Un-ignore it
-when the maps land; it should pass.
+The VEX and EVEX forms are non-destructive three-operand instructions whose
+destination is `vvvv`. Taking the legacy assignment made them write their own
+source register and read whichever register the `/digit` happened to name —
+`VPRORD zmm1, zmm2, 8` left `zmm1` untouched and clobbered `zmm2` with the
+rotation of `zmm0`.
+
+No fault, just corruption, which is why it presented as init exiting 127
+rather than as a crash. This defect predates the map work; it became
+reachable only once a guest could execute AVX-512 at all.
+
+## Note on method
+
+Two probe runs reported "zero EVEX opcodes executed". Both were instrument
+failures, not findings: `tracing` is a no-op with no subscriber installed,
+and `--display egui` routes console output into the in-app pane. Validating
+the probe against a known-good case first would have caught both immediately.
+A diagnostic that has not been shown to fire on a positive control is not
+evidence.
+
+## Still open
+
+The Ubuntu boot has **not** been re-verified since the VPRORD fix. Both
+defects are fixed and covered by tests, but until that boot runs, whether
+Ubuntu reaches userspace with AVX-512 advertised is unknown.

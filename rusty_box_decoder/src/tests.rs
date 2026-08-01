@@ -1769,20 +1769,62 @@ fn evex_vvvv_lands_in_src2_and_modrm_rm_in_src1() {
 }
 
 #[test]
-#[ignore = "EVEX opcode maps are incomplete: only 268 of 1333 EVEX opcodes have \
-            a decoder table entry. This is the exact repro that blocks the \
-            Skylake-X AVX-512 CPUID flip — see docs/evex-decoder-map-gap.md."]
 fn evex_vpbroadcastb_from_gpr_decodes() {
     // 62 E2 7D 28 7A C6 = VPBROADCASTB ymm0, esi (EVEX.256.66.0F38.W0 7A /r).
-    // glibc's AVX-512 strlen/memchr IFUNC emits exactly this. With AVX-512
-    // advertised, Ubuntu's init took #UD on it and the kernel panicked with
-    // "Attempted to kill init!". The handler exists and is dispatched; the
-    // opcode map slot that would produce it does not.
+    // glibc's AVX-512 strlen/memchr IFUNC emits exactly this. When the EVEX
+    // maps were hand-written this slot was empty, so Ubuntu's init took #UD
+    // and the kernel panicked with "Attempted to kill init!".
     let i = crate::decoder::decode64::fetch_decode64(&[0x62, 0xE2, 0x7D, 0x28, 0x7A, 0xC6])
         .expect("EVEX VPBROADCASTB Vdq, Eb must decode");
-    assert_ne!(
+    assert_eq!(
         i.get_ia_opcode(),
-        crate::opcode::Opcode::IaError,
-        "EVEX.66.0F38.W0 7A must not be an empty opcode-map slot"
+        crate::opcode::Opcode::EvexVpbroadcastbVdqEb,
+        "EVEX.66.0F38.W0 7A must resolve to VPBROADCASTB from a GPR"
     );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// EVEX opcode-map coverage.
+//
+// The maps are generated from Bochs's own tables by
+// scripts/gen_opmap_evex.py. These tests pin the result so a regeneration
+// that silently drops entries fails loudly — the previous hand-written
+// maps covered 268 of 1333 opcodes and nothing caught it until a guest
+// kernel panicked.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn evex_master_table_has_every_slot_bochs_defines() {
+    use crate::decoder::opmap_evex::EVEX_TABLE;
+    let defined = EVEX_TABLE.iter().filter(|g| !g.is_empty()).count();
+    assert_eq!(
+        defined, 389,
+        "BxOpcodeTableEVEX defines 389 non-ERR slots; regenerate with \
+         scripts/gen_opmap_evex.py if upstream changed"
+    );
+    assert_eq!(EVEX_TABLE.len(), 256 * 5, "Bochs BxOpcodeTableEVEX[256*5]");
+}
+
+#[test]
+fn evex_encodings_glibc_emits_all_decode() {
+    use crate::opcode::Opcode;
+    // Real encodings taken from glibc's AVX-512 string/memory IFUNCs — the
+    // family that panicked Ubuntu's init when these slots were empty.
+    let cases: &[(&[u8], Opcode)] = &[
+        // VPBROADCASTB ymm0, esi          EVEX.256.66.0F38.W0 7A
+        (&[0x62, 0xE2, 0x7D, 0x28, 0x7A, 0xC6], Opcode::EvexVpbroadcastbVdqEb),
+        // VPCMPEQB k0, ymm0, [rdi]        EVEX.256.66.0F.W0 74
+        (&[0x62, 0xF1, 0x7D, 0x28, 0x74, 0x07], Opcode::EvexVpcmpeqbKgqHdqWdq),
+        // VPMINUB ymm1, ymm0, ymm2        EVEX.256.66.0F.W0 DA
+        (&[0x62, 0xF1, 0x7D, 0x28, 0xDA, 0xCA], Opcode::EvexVpminubVdqHdqWdq),
+        // VMOVDQU64 zmm0, [rdi]           EVEX.512.F3.0F.W1 6F
+        (&[0x62, 0xF1, 0xFE, 0x48, 0x6F, 0x07], Opcode::EvexVmovdqu64VdqWdq),
+        // VPTESTMB k1, ymm0, ymm1         EVEX.256.66.0F38.W0 26
+        (&[0x62, 0xF2, 0x7D, 0x28, 0x26, 0xC9], Opcode::EvexVptestmbKgqHdqWdq),
+    ];
+    for (bytes, want) in cases {
+        let i = crate::decoder::decode64::fetch_decode64(bytes)
+            .unwrap_or_else(|e| panic!("{bytes:02X?} must decode, got {e:?}"));
+        assert_eq!(i.get_ia_opcode(), *want, "for encoding {bytes:02X?}");
+    }
 }

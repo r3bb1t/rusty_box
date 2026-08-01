@@ -3049,3 +3049,254 @@ fn evex_is_reachable_by_a_guest_end_to_end() {
         .join()
         .expect("join test thread");
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// XSAVE/XRSTOR of the AVX-512 components.
+//
+// Advertising AVX-512 puts XCR0 bits 5/6/7 (OPMASK, ZMM_HI256, HI_ZMM) in
+// reach for the first time, so the kernel starts saving and restoring 2688
+// bytes of state on every context switch through code paths no guest could
+// previously execute. A round-trip that loses or misplaces bytes corrupts
+// vector state across a switch, which shows up as userspace computing
+// garbage rather than as any fault.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn xsave_xrstor_round_trips_the_avx512_components() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            const BUF: u64 = CASE_BASE + 0x1_0000; // 64-byte aligned scratch
+
+            let cfg = EmulatorConfig::default();
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                .expect("new emulator");
+            emu.reg_write(
+                X86Reg::Cr4,
+                emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+            );
+
+            // XSETBV: XCR0 = FPU|SSE|YMM|OPMASK|ZMM_HI256|HI_ZMM
+            emu.reg_write(X86Reg::Rax, 0xE7);
+            emu.reg_write(X86Reg::Rcx, 0);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("write xsetbv");
+            emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                .expect("enable AVX-512 guest state");
+
+            // A pattern that differs in every 64-bit lane, so a swapped or
+            // dropped lane cannot coincidentally compare equal.
+            let pattern = |reg: u64| {
+                let mut v = [0u8; 64];
+                for lane in 0..8 {
+                    let w = 0xC0DE_0000_0000_0000u64 | (reg << 32) | lane as u64;
+                    v[lane * 8..lane * 8 + 8].copy_from_slice(&w.to_le_bytes());
+                }
+                v
+            };
+            for (i, reg) in [X86Reg::Zmm0, X86Reg::Zmm1, X86Reg::Zmm15].iter().enumerate() {
+                emu.reg_write_zmm(*reg, pattern(i as u64));
+            }
+
+            // XSAVE [rdi] with RFBM = 0xE7, then clobber, then XRSTOR [rdi].
+            emu.reg_write(X86Reg::Rdi, BUF);
+            emu.reg_write(X86Reg::Rax, 0xE7);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CASE_BASE, &[0x0F, 0xAE, 0x27, 0xEB, 0xFE]).expect("write xsave");
+            emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                .expect("XSAVE must not fault");
+
+            for reg in [X86Reg::Zmm0, X86Reg::Zmm1, X86Reg::Zmm15] {
+                emu.reg_write_zmm(reg, [0x5A; 64]);
+            }
+
+            emu.reg_write(X86Reg::Rdi, BUF);
+            emu.reg_write(X86Reg::Rax, 0xE7);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CASE_BASE, &[0x0F, 0xAE, 0x2F, 0xEB, 0xFE]).expect("write xrstor");
+            emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                .expect("XRSTOR must not fault");
+
+            for (i, reg) in [X86Reg::Zmm0, X86Reg::Zmm1, X86Reg::Zmm15].iter().enumerate() {
+                let got = emu.reg_read_zmm(*reg);
+                let want = pattern(i as u64);
+                assert_eq!(
+                    got, want,
+                    "{reg:?} did not survive the XSAVE/XRSTOR round trip \
+                     (upper lanes live in ZMM_HI256 at offset 1152)"
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// The EVEX opcodes an Ubuntu guest actually executes during boot.
+//
+// Captured with a first-seen probe against ubuntu-26.04-live-server: nine
+// distinct opcodes run before init dies. VPTERNLOGD is the sharpest test of
+// the three-source operand order, because imm8 can select a source
+// outright: 0xF0 yields A (dest), 0xCC yields B (EVEX.vvvv), 0xAA yields C
+// (the rm operand). A handler that swaps B and C returns the wrong vector
+// with no fault, which is exactly the failure shape being chased.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn evex_vpternlogd_selects_the_right_source_for_each_imm8() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let a = {
+                let mut v = [0u8; 64];
+                for i in 0..16 { v[i * 4..i * 4 + 4].copy_from_slice(&0xAAAA_0000u32.to_le_bytes()); }
+                v
+            };
+            let b = {
+                let mut v = [0u8; 64];
+                for i in 0..16 { v[i * 4..i * 4 + 4].copy_from_slice(&0xBBBB_1111u32.to_le_bytes()); }
+                v
+            };
+            let c = {
+                let mut v = [0u8; 64];
+                for i in 0..16 { v[i * 4..i * 4 + 4].copy_from_slice(&0xCCCC_2222u32.to_le_bytes()); }
+                v
+            };
+
+            // VPTERNLOGD zmm0, zmm1, zmm2, imm8 = EVEX.512.66.0F3A.W0 25 /r ib
+            //   62 F3 75 48 25 C2 ib   (dest=zmm0=A, vvvv=zmm1=B, rm=zmm2=C)
+            for (imm, want, which) in [
+                (0xF0u8, a, "A (the destination operand)"),
+                (0xCC, b, "B (EVEX.vvvv)"),
+                (0xAA, c, "C (the rm operand)"),
+            ] {
+                let cfg = EmulatorConfig::default();
+                let mut emu =
+                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                        .expect("new emulator");
+                emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
+                emu.reg_write(X86Reg::Rax, 0xE7);
+                emu.reg_write(X86Reg::Rcx, 0);
+                emu.reg_write(X86Reg::Rdx, 0);
+                emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("write xsetbv");
+                emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                    .expect("enable AVX-512 state");
+
+                emu.reg_write_zmm(X86Reg::Zmm0, a);
+                emu.reg_write_zmm(X86Reg::Zmm1, b);
+                emu.reg_write_zmm(X86Reg::Zmm2, c);
+
+                emu.mem_write(CASE_BASE, &[0x62, 0xF3, 0x75, 0x48, 0x25, 0xC2, imm, 0xEB, 0xFE])
+                    .expect("write vpternlogd");
+                emu.emu_start(CASE_BASE, None, None, Some(1))
+                    .expect("VPTERNLOGD must execute");
+
+                let got = emu.reg_read_zmm(X86Reg::Zmm0);
+                let g = u32::from_le_bytes(got[0..4].try_into().unwrap());
+                let w = u32::from_le_bytes(want[0..4].try_into().unwrap());
+                assert_eq!(
+                    g, w,
+                    "VPTERNLOGD imm8={imm:#04X} must yield source {which}: got {g:#010X}, want {w:#010X}"
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}
+
+#[test]
+fn evex_vprord_rotates_each_dword_right() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let cfg = EmulatorConfig::default();
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                .expect("new emulator");
+            emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
+            emu.reg_write(X86Reg::Rax, 0xE7);
+            emu.reg_write(X86Reg::Rcx, 0);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("write xsetbv");
+            emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                .expect("enable AVX-512 state");
+
+            let mut src = [0u8; 64];
+            for i in 0..16 {
+                src[i * 4..i * 4 + 4].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+            }
+            emu.reg_write_zmm(X86Reg::Zmm2, src);
+            emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
+
+            // VPRORD zmm1, zmm2, 8 = EVEX.512.66.0F.W0 72 /0 ib (vvvv is the dest)
+            emu.mem_write(CASE_BASE, &[0x62, 0xF1, 0x75, 0x48, 0x72, 0xC2, 0x08, 0xEB, 0xFE])
+                .expect("write vprord");
+            emu.emu_start(CASE_BASE, None, None, Some(1))
+                .expect("VPRORD must execute");
+
+            let got = emu.reg_read_zmm(X86Reg::Zmm1);
+            for lane in 0..16 {
+                let v = u32::from_le_bytes(got[lane * 4..lane * 4 + 4].try_into().unwrap());
+                assert_eq!(
+                    v, 0x7812_3456,
+                    "dword {lane}: 0x12345678 rotated right by 8 is 0x78123456"
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}
+
+#[test]
+fn evex_vpermi2d_reads_the_first_table_from_vvvv() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let cfg = EmulatorConfig::default();
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                .expect("new emulator");
+            emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
+            emu.reg_write(X86Reg::Rax, 0xE7);
+            emu.reg_write(X86Reg::Rcx, 0);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("write xsetbv");
+            emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                .expect("enable AVX-512 state");
+
+            // Indices 0..15 all have bit 4 clear, so every element must come
+            // from SRC1 (EVEX.vvvv), per the SDM's
+            //   DEST := TMP_DEST[i+log2(KL)] ? SRC2 : SRC1
+            let mut idx = [0u8; 64];
+            let mut t1 = [0u8; 64];
+            let mut t2 = [0u8; 64];
+            for i in 0..16 {
+                idx[i * 4..i * 4 + 4].copy_from_slice(&(i as u32).to_le_bytes());
+                t1[i * 4..i * 4 + 4].copy_from_slice(&(0xAAAA_0000u32 + i as u32).to_le_bytes());
+                t2[i * 4..i * 4 + 4].copy_from_slice(&(0xBBBB_0000u32 + i as u32).to_le_bytes());
+            }
+            emu.reg_write_zmm(X86Reg::Zmm0, idx);
+            emu.reg_write_zmm(X86Reg::Zmm1, t1);
+            emu.reg_write_zmm(X86Reg::Zmm2, t2);
+
+            // VPERMI2D zmm0, zmm1, zmm2 = EVEX.512.66.0F38.W0 76 /r
+            emu.mem_write(CASE_BASE, &[0x62, 0xF2, 0x75, 0x48, 0x76, 0xC2, 0xEB, 0xFE])
+                .expect("write vpermi2d");
+            emu.emu_start(CASE_BASE, None, None, Some(1))
+                .expect("VPERMI2D must execute");
+
+            let got = emu.reg_read_zmm(X86Reg::Zmm0);
+            for lane in 0..16 {
+                let v = u32::from_le_bytes(got[lane * 4..lane * 4 + 4].try_into().unwrap());
+                assert_eq!(
+                    v,
+                    0xAAAA_0000u32 + lane as u32,
+                    "dword {lane}: index {lane} has bit 4 clear so it selects SRC1 (vvvv)"
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}
