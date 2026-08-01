@@ -3,11 +3,21 @@
 //! Implements VRNDSCALE, VSCALEF, VGETEXP, VGETMANT (packed and scalar).
 //! Mirrors Bochs `cpu/avx/avx512_pfpmisc.cc`.
 
+use super::softfloat3e::f32_class::f32_class;
+use super::softfloat3e::f64_class::f64_class;
+use super::softfloat3e::internals::{sign_f32, sign_f64};
+use super::softfloat3e::softfloat::{f32_denormal_to_zero, f64_denormal_to_zero,
+    softfloat_denormals_are_zeros, softfloat_raise_flags, SoftFloatClass, FLAG_DIVBYZERO,
+    FLAG_INVALID};
 use super::softfloat3e::f32_addsub::f32_sub;
 use super::softfloat3e::f32_range::f32_range;
 use super::softfloat3e::f64_addsub::f64_sub;
 use super::softfloat3e::f64_range::f64_range;
 use super::softfloat3e::specialize::{
+    FLOAT32_DEFAULT_NAN, FLOAT32_MAX_FLOAT, FLOAT32_MIN_FLOAT, FLOAT32_NEGATIVE_ONE,
+    FLOAT32_NEGATIVE_ZERO, FLOAT32_POSITIVE_ONE, FLOAT32_POSITIVE_ZERO, FLOAT64_DEFAULT_NAN,
+    FLOAT64_MAX_FLOAT, FLOAT64_MIN_FLOAT, FLOAT64_NEGATIVE_ONE, FLOAT64_NEGATIVE_ZERO,
+    FLOAT64_POSITIVE_ONE, FLOAT64_POSITIVE_ZERO,
     FLOAT32_NEGATIVE_INF, FLOAT32_POSITIVE_INF, FLOAT64_NEGATIVE_INF, FLOAT64_POSITIVE_INF,
 };
 use super::sse_pfp::mxcsr_to_softfloat_status_word_imm_override;
@@ -636,6 +646,76 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+
+    // ========================================================================
+    // VFIXUPIMM — replace special-cased operands with table-selected
+    // constants. Bochs avx512_pfp.cc VFIXUPIMMPS/PD/SS/SD_MASK_*.
+    //
+    // Note the operand roles: the *destination* supplies the fallback value,
+    // vvvv the operand being classified, and r/m the 8-entry response table.
+    // ========================================================================
+
+    /// VFIXUPIMMPS Vps{k}{z}, Hps, Wps, Ib — EVEX.66.0F3A.W0 54
+    pub fn evex_vfixupimmps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let op1 = read_zmm(self, instr.src2()); // vvvv
+        let op2 = self.read_rm_ps(instr, nelements)?; // rm — the response table
+        let dst = read_zmm(self, instr.dst());
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let imm8 = instr.ib();
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..nelements {
+            if (mask >> n) & 1 != 0 {
+                let v = f32_fixupimm(
+                    dst.zmm32u(n),
+                    op1.zmm32u(n),
+                    op2.zmm32u(n),
+                    imm8,
+                    &mut status,
+                );
+                result.set_zmm32u(n, v);
+            }
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VFIXUPIMMPD Vpd{k}{z}, Hpd, Wpd, Ib — EVEX.66.0F3A.W1 54
+    pub fn evex_vfixupimmpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let op1 = read_zmm(self, instr.src2());
+        let op2 = self.read_rm_pd(instr, nelements)?;
+        let dst = read_zmm(self, instr.dst());
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let imm8 = instr.ib();
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..nelements {
+            if (mask >> n) & 1 != 0 {
+                // The response table is read as the low dword of each qword.
+                let v = f64_fixupimm(
+                    dst.zmm64u(n),
+                    op1.zmm64u(n),
+                    op2.zmm64u(n) as u32,
+                    imm8,
+                    &mut status,
+                );
+                result.set_zmm64u(n, v);
+            }
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
 }
 
 /// Bochs avx512_pfp.cc `float32_reduce`. An infinite operand reduces to zero;
@@ -846,4 +926,174 @@ mod tests {
         assert_eq!(c.vmm[0].zmm64u(0), 12.0f64.to_bits());
     }
 
+}
+
+/// The eight operand classes VFIXUPIMM's response table is indexed by.
+/// Bochs avx512_pfp.cc.
+const FIXUPIMM_QNAN_TOKEN: u32 = 0;
+const FIXUPIMM_SNAN_TOKEN: u32 = 1;
+const FIXUPIMM_ZERO_VALUE_TOKEN: u32 = 2;
+const FIXUPIMM_POS_ONE_VALUE_TOKEN: u32 = 3;
+const FIXUPIMM_NEG_INF_TOKEN: u32 = 4;
+const FIXUPIMM_POS_INF_TOKEN: u32 = 5;
+const FIXUPIMM_NEG_VALUE_TOKEN: u32 = 6;
+const FIXUPIMM_POS_VALUE_TOKEN: u32 = 7;
+
+/// Constants the response table can select that are not already in
+/// specialize.rs. Bochs avx512_pfp.cc.
+const FLOAT32_VALUE_90: Float32 = 0x42B4_0000;
+const FLOAT32_PI_HALF: Float32 = 0x3FC9_0FDB;
+const FLOAT32_POSITIVE_HALF: Float32 = 0x3F00_0000;
+const FLOAT64_VALUE_90: Float64 = 0x4056_8000_0000_0000;
+const FLOAT64_PI_HALF: Float64 = 0x3FF9_21FB_5444_2D18;
+const FLOAT64_POSITIVE_HALF: Float64 = 0x3FE0_0000_0000_0000;
+
+/// Classify `op1` into a token, and report which imm8 bits make that class
+/// raise #I and #Z. Shared by both widths — only the classification and the
+/// "is it exactly +1.0" test differ, and both are passed in.
+#[inline]
+fn fixupimm_token(op1_class: SoftFloatClass, is_positive_one: bool) -> (u32, u8, u8) {
+    match op1_class {
+        SoftFloatClass::Zero => (FIXUPIMM_ZERO_VALUE_TOKEN, 0x02, 0x01),
+        SoftFloatClass::NegativeInf => (FIXUPIMM_NEG_INF_TOKEN, 0x20, 0),
+        SoftFloatClass::PositiveInf => (FIXUPIMM_POS_INF_TOKEN, 0x80, 0),
+        SoftFloatClass::SNaN => (FIXUPIMM_SNAN_TOKEN, 0x10, 0),
+        SoftFloatClass::QNaN => (FIXUPIMM_QNAN_TOKEN, 0, 0),
+        SoftFloatClass::Denormal | SoftFloatClass::Normalized => {
+            if is_positive_one {
+                (FIXUPIMM_POS_ONE_VALUE_TOKEN, 0x08, 0x04)
+            } else {
+                (0, 0, 0) // the sign decides; filled in by the caller
+            }
+        }
+    }
+}
+
+/// Bochs avx512_pfp.cc `float32_fixupimm`. `op2` is a table of eight 4-bit
+/// responses, indexed by the class of `op1`; `dst` is the fallback.
+pub(super) fn f32_fixupimm(
+    dst: Float32,
+    op1: Float32,
+    op2: u32,
+    imm8: u8,
+    status: &mut SoftFloatStatus,
+) -> Float32 {
+    let tmp_op1 = if softfloat_denormals_are_zeros(status) {
+        f32_denormal_to_zero(op1)
+    } else {
+        op1
+    };
+    let op1_class = f32_class(tmp_op1);
+    let sign = sign_f32(tmp_op1);
+
+    let (mut token, mut ie_fault_mask, divz_fault_mask) =
+        fixupimm_token(op1_class, tmp_op1 == FLOAT32_POSITIVE_ONE);
+    if matches!(
+        op1_class,
+        SoftFloatClass::Denormal | SoftFloatClass::Normalized
+    ) && tmp_op1 != FLOAT32_POSITIVE_ONE
+    {
+        if sign {
+            token = FIXUPIMM_NEG_VALUE_TOKEN;
+            ie_fault_mask = 0x40;
+        } else {
+            token = FIXUPIMM_POS_VALUE_TOKEN;
+        }
+    }
+
+    if imm8 & ie_fault_mask != 0 {
+        softfloat_raise_flags(status, FLAG_INVALID);
+    }
+    if imm8 & divz_fault_mask != 0 {
+        softfloat_raise_flags(status, FLAG_DIVBYZERO);
+    }
+
+    match (op2 >> (token * 4)) & 0xF {
+        0x1 => tmp_op1, // apply DAZ to the op1 value
+        0x2 => tmp_op1 | 0x0040_0000, // quieten
+        0x3 => FLOAT32_DEFAULT_NAN,
+        0x4 => FLOAT32_NEGATIVE_INF,
+        0x5 => FLOAT32_POSITIVE_INF,
+        0x6 => {
+            if sign {
+                FLOAT32_NEGATIVE_INF
+            } else {
+                FLOAT32_POSITIVE_INF
+            }
+        }
+        0x7 => FLOAT32_NEGATIVE_ZERO,
+        0x8 => FLOAT32_POSITIVE_ZERO,
+        0x9 => FLOAT32_NEGATIVE_ONE,
+        0xA => FLOAT32_POSITIVE_ONE,
+        0xB => FLOAT32_POSITIVE_HALF,
+        0xC => FLOAT32_VALUE_90,
+        0xD => FLOAT32_PI_HALF,
+        0xE => FLOAT32_MAX_FLOAT,
+        0xF => FLOAT32_MIN_FLOAT,
+        _ => dst, // preserve
+    }
+}
+
+/// Bochs avx512_pfp.cc `float64_fixupimm`.
+pub(super) fn f64_fixupimm(
+    dst: Float64,
+    op1: Float64,
+    op2: u32,
+    imm8: u8,
+    status: &mut SoftFloatStatus,
+) -> Float64 {
+    let tmp_op1 = if softfloat_denormals_are_zeros(status) {
+        f64_denormal_to_zero(op1)
+    } else {
+        op1
+    };
+    let op1_class = f64_class(tmp_op1);
+    let sign = sign_f64(tmp_op1);
+
+    let (mut token, mut ie_fault_mask, divz_fault_mask) =
+        fixupimm_token(op1_class, tmp_op1 == FLOAT64_POSITIVE_ONE);
+    if matches!(
+        op1_class,
+        SoftFloatClass::Denormal | SoftFloatClass::Normalized
+    ) && tmp_op1 != FLOAT64_POSITIVE_ONE
+    {
+        if sign {
+            token = FIXUPIMM_NEG_VALUE_TOKEN;
+            ie_fault_mask = 0x40;
+        } else {
+            token = FIXUPIMM_POS_VALUE_TOKEN;
+        }
+    }
+
+    if imm8 & ie_fault_mask != 0 {
+        softfloat_raise_flags(status, FLAG_INVALID);
+    }
+    if imm8 & divz_fault_mask != 0 {
+        softfloat_raise_flags(status, FLAG_DIVBYZERO);
+    }
+
+    match (op2 >> (token * 4)) & 0xF {
+        0x1 => tmp_op1,
+        0x2 => tmp_op1 | 0x0008_0000_0000_0000,
+        0x3 => FLOAT64_DEFAULT_NAN,
+        0x4 => FLOAT64_NEGATIVE_INF,
+        0x5 => FLOAT64_POSITIVE_INF,
+        0x6 => {
+            if sign {
+                FLOAT64_NEGATIVE_INF
+            } else {
+                FLOAT64_POSITIVE_INF
+            }
+        }
+        0x7 => FLOAT64_NEGATIVE_ZERO,
+        0x8 => FLOAT64_POSITIVE_ZERO,
+        0x9 => FLOAT64_NEGATIVE_ONE,
+        0xA => FLOAT64_POSITIVE_ONE,
+        0xB => FLOAT64_POSITIVE_HALF,
+        0xC => FLOAT64_VALUE_90,
+        0xD => FLOAT64_PI_HALF,
+        0xE => FLOAT64_MAX_FLOAT,
+        0xF => FLOAT64_MIN_FLOAT,
+        _ => dst,
+    }
 }

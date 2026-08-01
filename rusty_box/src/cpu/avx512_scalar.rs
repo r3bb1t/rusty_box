@@ -9,6 +9,7 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_pfp.cc`.
 
+use super::avx512_round::{f32_fixupimm, f64_fixupimm};
 use super::softfloat3e::f32_addsub::{f32_add, f32_sub};
 use super::softfloat3e::f32_compare::{f32_max, f32_min};
 use super::softfloat3e::f32_range::{f32_get_exp, f32_get_mant, f32_range, f32_scalef};
@@ -759,6 +760,51 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         Ok(())
     }
+
+    /// VFIXUPIMMSS xmm1{k1}{z}, xmm2, xmm3/m32, Ib — EVEX.66.0F3A.W0 55.
+    /// The upper elements come from vvvv; the destination supplies only the
+    /// per-element fallback value.
+    pub fn evex_vfixupimmss(&mut self, instr: &Instruction) -> super::Result<()> {
+        let src1 = read_zmm(self, instr.src2()); // vvvv
+        let dst_elem = read_zmm(self, instr.dst()).zmm32u(0);
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        let mut result = 0;
+        if (mask & 1) != 0 {
+            let op2 = self.evex_read_rm_ss(instr)?;
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            result = f32_fixupimm(dst_elem, src1.zmm32u(0), op2, instr.ib(), &mut status);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        }
+        write_scalar_ss(self, instr.dst(), &src1, result, mask, zmask);
+        Ok(())
+    }
+
+    /// VFIXUPIMMSD xmm1{k1}{z}, xmm2, xmm3/m64, Ib — EVEX.66.0F3A.W1 55
+    pub fn evex_vfixupimmsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let src1 = read_zmm(self, instr.src2());
+        let dst_elem = read_zmm(self, instr.dst()).zmm64u(0);
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        let mut result = 0;
+        if (mask & 1) != 0 {
+            let op2 = self.evex_read_rm_sd(instr)?;
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            result = f64_fixupimm(
+                dst_elem,
+                src1.zmm64u(0),
+                op2 as u32,
+                instr.ib(),
+                &mut status,
+            );
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        }
+        write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
+        Ok(())
+    }
+
 }
 
 #[cfg(all(test, feature = "alloc"))]

@@ -7,6 +7,7 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512.cc`, `avx512_move.cc`, `avx512_conflict.cc`.
 
+use super::avx512_load::cut_opmask_to;
 use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, xmm::BxPackedZmmRegister};
 
 // ============================================================================
@@ -541,6 +542,157 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    // ========================================================================
+    // VEXPAND / VCOMPRESS — gather the set opmask bits to or from a
+    // contiguous run. Bochs avx512.cc VEXPANDPS/PD and VCOMPRESSPS/PD.
+    //
+    // The memory forms touch only as many elements as the opmask has bits
+    // set, contiguously from the effective address, so they go through the
+    // masked load and store with a *density* mask rather than the writemask.
+    // ========================================================================
+
+    /// VEXPANDPS Vps{k}{z}, Wps — EVEX.66.0F38.W0 88
+    pub fn evex_vexpandps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let zmask = instr.is_zero_masking() != 0;
+        let opmask = read_opmask_for_write(self, instr) & cut_opmask_to(nelements);
+
+        let mut result = if zmask {
+            BxPackedZmmRegister::default()
+        } else {
+            read_zmm(self, instr.dst())
+        };
+
+        if opmask != 0 {
+            let op = if instr.mod_c0() {
+                read_zmm(self, instr.src())
+            } else {
+                // Only popcount(opmask) elements are read, from the bottom up.
+                let load_mask = (1u64 << opmask.count_ones()) - 1;
+                let eaddr = self.resolve_addr(instr);
+                let mut tmp = BxPackedZmmRegister::default();
+                self.avx_masked_load32(instr, eaddr, &mut tmp, load_mask)?;
+                tmp
+            };
+            let mut k = 0;
+            for n in 0..nelements {
+                if (opmask >> n) == 0 {
+                    break;
+                }
+                if (opmask >> n) & 1 != 0 {
+                    result.set_zmm32u(n, op.zmm32u(k));
+                    k += 1;
+                }
+            }
+        }
+
+        write_zmm_masked(self, instr.dst(), &result, u64::MAX, true, vl);
+        Ok(())
+    }
+
+    /// VEXPANDPD Vpd{k}{z}, Wpd — EVEX.66.0F38.W1 88
+    pub fn evex_vexpandpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let zmask = instr.is_zero_masking() != 0;
+        let opmask = read_opmask_for_write(self, instr) & cut_opmask_to(nelements);
+
+        let mut result = if zmask {
+            BxPackedZmmRegister::default()
+        } else {
+            read_zmm(self, instr.dst())
+        };
+
+        if opmask != 0 {
+            let op = if instr.mod_c0() {
+                read_zmm(self, instr.src())
+            } else {
+                let load_mask = (1u64 << opmask.count_ones()) - 1;
+                let eaddr = self.resolve_addr(instr);
+                let mut tmp = BxPackedZmmRegister::default();
+                self.avx_masked_load64(instr, eaddr, &mut tmp, load_mask)?;
+                tmp
+            };
+            let mut k = 0;
+            for n in 0..nelements {
+                if (opmask >> n) == 0 {
+                    break;
+                }
+                if (opmask >> n) & 1 != 0 {
+                    result.set_zmm64u(n, op.zmm64u(k));
+                    k += 1;
+                }
+            }
+        }
+
+        write_zmm_masked_q(self, instr.dst(), &result, u64::MAX, true, vl);
+        Ok(())
+    }
+
+    /// VCOMPRESSPS Wps{k}, Vps — EVEX.66.0F38.W0 8A. The inverse: the
+    /// selected elements are packed down to a contiguous run.
+    pub fn evex_vcompressps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let opmask = read_opmask_for_write(self, instr) & cut_opmask_to(nelements);
+        let op = read_zmm(self, instr.src());
+
+        let mut result = BxPackedZmmRegister::default();
+        let mut k = 0usize;
+        for n in 0..nelements {
+            if (opmask >> n) == 0 {
+                break;
+            }
+            if (opmask >> n) & 1 != 0 {
+                result.set_zmm32u(k, op.zmm32u(n));
+                k += 1;
+            }
+        }
+        // The destination run is as long as the number of selected elements.
+        let writemask = if k >= 64 { u64::MAX } else { (1u64 << k) - 1 };
+
+        if instr.mod_c0() {
+            let zmask = instr.is_zero_masking() != 0;
+            write_zmm_masked(self, instr.dst(), &result, writemask, zmask, vl);
+            Ok(())
+        } else {
+            let eaddr = self.resolve_addr(instr);
+            self.avx_masked_store32(instr, eaddr, &result, writemask)
+        }
+    }
+
+    /// VCOMPRESSPD Wpd{k}, Vpd — EVEX.66.0F38.W1 8A
+    pub fn evex_vcompresspd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let opmask = read_opmask_for_write(self, instr) & cut_opmask_to(nelements);
+        let op = read_zmm(self, instr.src());
+
+        let mut result = BxPackedZmmRegister::default();
+        let mut k = 0usize;
+        for n in 0..nelements {
+            if (opmask >> n) == 0 {
+                break;
+            }
+            if (opmask >> n) & 1 != 0 {
+                result.set_zmm64u(k, op.zmm64u(n));
+                k += 1;
+            }
+        }
+        let writemask = (1u64 << k) - 1;
+
+        if instr.mod_c0() {
+            let zmask = instr.is_zero_masking() != 0;
+            write_zmm_masked_q(self, instr.dst(), &result, writemask, zmask, vl);
+            Ok(())
+        } else {
+            let eaddr = self.resolve_addr(instr);
+            self.avx_masked_store64(instr, eaddr, &result, writemask)
+        }
+    }
+
+
 }
 
 #[cfg(all(test, feature = "alloc"))]
@@ -607,4 +759,46 @@ mod tests {
             "element 3 equals elements 0 and 2"
         );
     }
+
+    #[test]
+    fn expand_and_compress_are_inverses_over_the_opmask() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        // Source holds 10,11,12,13 contiguously.
+        for (n, v) in [10u32, 11, 12, 13].into_iter().enumerate() {
+            c.vmm[1].set_zmm32u(n, v);
+        }
+        for n in 0..4 {
+            c.vmm[0].set_zmm32u(n, 0xDEAD_BEEF);
+        }
+        // EXPAND scatters them to the set mask positions, taking the source
+        // elements in order from the bottom.
+        c.bx_write_opmask(1, 0b1010);
+        let mut i = evex_misc(Opcode::EvexVexpandpsVpsWpsKmask, 0);
+        i.set_opmask(1);
+        c.execute_instruction(&i).unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), 0xDEAD_BEEF, "unselected element merges");
+        assert_eq!(c.vmm[0].zmm32u(1), 10, "first set bit takes source[0]");
+        assert_eq!(c.vmm[0].zmm32u(2), 0xDEAD_BEEF);
+        assert_eq!(c.vmm[0].zmm32u(3), 11, "second set bit takes source[1]");
+
+        // COMPRESS packs the selected elements back down to a contiguous run
+        // and leaves the rest of the destination alone.
+        for (n, v) in [20u32, 21, 22, 23].into_iter().enumerate() {
+            c.vmm[1].set_zmm32u(n, v);
+        }
+        for n in 0..4 {
+            c.vmm[0].set_zmm32u(n, 0xDEAD_BEEF);
+        }
+        let mut i = evex_misc(Opcode::EvexVcompresspsWpsVpsKmask, 0);
+        i.set_opmask(1);
+        c.execute_instruction(&i).unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), 21, "element 1 was selected first");
+        assert_eq!(c.vmm[0].zmm32u(1), 23, "element 3 second");
+        assert_eq!(
+            c.vmm[0].zmm32u(2),
+            0xDEAD_BEEF,
+            "the run is only as long as the popcount"
+        );
+    }
+
 }

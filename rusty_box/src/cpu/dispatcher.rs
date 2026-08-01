@@ -3170,6 +3170,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- VFIXUPIMM, VEXPAND, VCOMPRESS ---
+            Opcode::EvexVfixupimmpsVpsHpsWpsIb | Opcode::EvexVfixupimmpsVpsHpsWpsIbKmask => {
+                self.evex_vfixupimmps(instr)
+            }
+            Opcode::EvexVfixupimmpdVpdHpdWpdIb | Opcode::EvexVfixupimmpdVpdHpdWpdIbKmask => {
+                self.evex_vfixupimmpd(instr)
+            }
+            Opcode::EvexVfixupimmssVssHssWssIbKmask => {
+                self.evex_vfixupimmss(instr)
+            }
+            Opcode::EvexVfixupimmsdVsdHsdWsdIbKmask => {
+                self.evex_vfixupimmsd(instr)
+            }
+            Opcode::EvexVexpandpsVpsWps | Opcode::EvexVexpandpsVpsWpsKmask => {
+                self.evex_vexpandps(instr)
+            }
+            Opcode::EvexVexpandpdVpdWpd | Opcode::EvexVexpandpdVpdWpdKmask => {
+                self.evex_vexpandpd(instr)
+            }
+            Opcode::EvexVcompresspsWpsVps | Opcode::EvexVcompresspsWpsVpsKmask => {
+                self.evex_vcompressps(instr)
+            }
+            Opcode::EvexVcompresspdWpdVpd | Opcode::EvexVcompresspdWpdVpdKmask => {
+                self.evex_vcompresspd(instr)
+            }
+
             // --- insert/extract, conflict, opmask broadcast, VDBPSADBW ---
             // The insert and extract forms take no writemask, so upstream's EVEX
             // def entries name the same VEX and legacy symbols used here.
