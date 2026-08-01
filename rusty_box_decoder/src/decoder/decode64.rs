@@ -769,6 +769,26 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // register.
             instr.operands.dst = vex_vvv;
             instr.operands.src1 = rm as u8;
+        } else if is_vex && matches!(b1, 0x190 | 0x192 | 0x193) {
+            // KMOV opmask moves (VEX 0F 90/92/93) share their opcode bytes
+            // with SETcc, whose destination is the rm operand. These go the
+            // other way: Bochs ia_opcodes.def leads each of them with the
+            // reg-field operand, so the reg field is the destination.
+            //
+            //     0F 90  k <- k/m       KMOVQ_KGqKEq   OP_KGq, OP_KEq
+            //     0F 92  k <- r32/r64   KMOVW_KGwEw    OP_KGw, OP_Ed
+            //     0F 93  r32/r64 <- k   KMOVW_GdKEw    OP_Gd,  OP_KEw
+            //
+            // 0F 91 stores an opmask to memory (KMOVQ_KEqKGq: OP_KEq, OP_KGq)
+            // and really does write rm, so it keeps the assignment below.
+            //
+            // Under the SETcc rule `kmovd %k0, %eax` wrote k0 and left eax
+            // untouched — and that is exactly the sequence glibc's AVX-512
+            // strlen and memchr use to turn a compare mask into an index, so
+            // every such string call silently returned a stale value.
+            // SETcc has no VEX form, so gating on the prefix is exact.
+            instr.operands.dst = nnn as u8;
+            instr.operands.src1 = rm as u8;
         } else if (b1 < 0x100 && ((b1 & 0x0F) == 0x01 || (b1 & 0x0F) == 0x09) && b1 != 0x69)
             || b1 == 0x89
             // Two-byte Ed,Gd opcodes (DST=rm): Group 7, store-form SSE, MOV Rd/DRn, Groups 12-14

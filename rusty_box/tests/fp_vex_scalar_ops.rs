@@ -3300,3 +3300,58 @@ fn evex_vpermi2d_reads_the_first_table_from_vvvv() {
         .join()
         .expect("join test thread");
 }
+
+// VPCMPEQB writing an opmask is the core of glibc's strlen/memchr: a wrong
+// mask bit means a wrong string length, with no fault anywhere. Read back
+// through KMOVQ so the opmask write path is exercised end to end.
+#[test]
+fn evex_vpcmpeqb_sets_one_opmask_bit_per_equal_byte() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let cfg = EmulatorConfig::default();
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                .expect("new emulator");
+            emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
+            emu.reg_write(X86Reg::Rax, 0xE7);
+            emu.reg_write(X86Reg::Rcx, 0);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("write xsetbv");
+            emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                .expect("enable AVX-512 state");
+
+            // 32 bytes of 0x41, with bytes 3 and 17 differing in the second
+            // operand, so exactly those two mask bits must be clear.
+            let a = [0x41u8; 64];
+            let mut b = [0x41u8; 64];
+            b[3] = 0x42;
+            b[17] = 0x42;
+            emu.reg_write_zmm(X86Reg::Zmm0, a);
+            emu.reg_write_zmm(X86Reg::Zmm1, b);
+            emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF);
+
+            // VPCMPEQB k1, ymm0, ymm1   62 F1 7D 28 74 C9
+            // KMOVQ    rax, k1          C4 E1 FB 93 C1
+            emu.mem_write(
+                CASE_BASE,
+                &[0x62, 0xF1, 0x7D, 0x28, 0x74, 0xC9, 0xC4, 0xE1, 0xFB, 0x93, 0xC1, 0xEB, 0xFE],
+            )
+            .expect("write vpcmpeqb + kmovq");
+            let stop = emu
+                .emu_start(CASE_BASE, None, None, Some(2))
+                .expect("VPCMPEQB and KMOVQ must execute");
+            let rip = emu.reg_read(X86Reg::Rip);
+
+            let got = emu.reg_read(X86Reg::Rax);
+            let want: u64 = (!((1u64 << 3) | (1u64 << 17))) & 0xFFFF_FFFF;
+            assert_eq!(
+                got, want,
+                "k1 = {got:#018X}, want {want:#018X}: one bit per byte, 32 bits at VL256, \
+                 clear only where the bytes differ. stop={stop:?} rip={rip:#X} \
+                 (base={CASE_BASE:#X}, +6 after vpcmpeqb, +11 after kmovq)"
+            );
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}
