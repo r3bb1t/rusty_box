@@ -3410,3 +3410,52 @@ fn evex_vextractf32x4_writes_the_rm_operand() {
         .join()
         .expect("join test thread");
 }
+
+// The 0F 7A / 0F 7B EVEX conversions became reachable only when the legacy
+// UD64 list stopped being applied to EVEX encodings. VCVTUDQ2PD is the
+// sharpest of them: it is the *unsigned* conversion, so a signed handler
+// turns the top half of the range negative.
+#[test]
+fn evex_vcvtudq2pd_converts_unsigned() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let cfg = EmulatorConfig::default();
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                .expect("new emulator");
+            emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
+            emu.reg_write(X86Reg::Rax, 0xE7);
+            emu.reg_write(X86Reg::Rcx, 0);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("write xsetbv");
+            emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                .expect("enable AVX-512 state");
+
+            let src_vals: [u32; 4] = [1, 2, 0x8000_0000, 0xFFFF_FFFF];
+            let mut src = [0u8; 64];
+            for (i, v) in src_vals.iter().enumerate() {
+                src[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            emu.reg_write_zmm(X86Reg::Zmm2, src);
+            emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
+
+            // VCVTUDQ2PD ymm1, xmm2 = EVEX.256.F3.0F.W0 7A /r
+            emu.mem_write(CASE_BASE, &[0x62, 0xF1, 0x7E, 0x28, 0x7A, 0xCA, 0xEB, 0xFE])
+                .expect("write vcvtudq2pd");
+            emu.emu_start(CASE_BASE, None, None, Some(1))
+                .expect("VCVTUDQ2PD must execute");
+
+            let got = emu.reg_read_zmm(X86Reg::Zmm1);
+            for (i, v) in src_vals.iter().enumerate() {
+                let d = f64::from_le_bytes(got[i * 8..i * 8 + 8].try_into().unwrap());
+                assert_eq!(
+                    d, *v as f64,
+                    "qword {i}: {v:#010X} must convert as unsigned to {}, got {d}",
+                    *v as f64
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}
