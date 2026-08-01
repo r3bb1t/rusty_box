@@ -3355,3 +3355,58 @@ fn evex_vpcmpeqb_sets_one_opmask_bit_per_equal_byte() {
         .join()
         .expect("join test thread");
 }
+
+// Store-form EVEX opcodes (VEXTRACT*, VPMOV* truncating stores, VCOMPRESS*,
+// VPEXTR*) write the rm operand and read the reg field — the opposite of the
+// usual vector form. Upstream marks this by leading with OP_W*/OP_E*:
+// EVEX_VEXTRACTF32x4_WpsVpsIb is Wps (rm) then Vps (reg).
+#[test]
+fn evex_vextractf32x4_writes_the_rm_operand() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let cfg = EmulatorConfig::default();
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                .expect("new emulator");
+            emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
+            emu.reg_write(X86Reg::Rax, 0xE7);
+            emu.reg_write(X86Reg::Rcx, 0);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("write xsetbv");
+            emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                .expect("enable AVX-512 state");
+
+            // zmm1 = four distinguishable 128-bit lanes.
+            let mut src = [0u8; 64];
+            for lane in 0..4 {
+                for d in 0..4 {
+                    let v = 0x1000_0000u32 * (lane as u32 + 1) + d as u32;
+                    let off = lane * 16 + d * 4;
+                    src[off..off + 4].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            emu.reg_write_zmm(X86Reg::Zmm1, src);
+            emu.reg_write_zmm(X86Reg::Zmm2, [0x5A; 64]);
+
+            // VEXTRACTF32X4 xmm2, zmm1, 1 = EVEX.512.66.0F3A.W0 19 /r ib
+            // reg=zmm1 (source), rm=zmm2 (destination), imm8=1 selects lane 1.
+            emu.mem_write(
+                CASE_BASE,
+                &[0x62, 0xF3, 0x7D, 0x48, 0x19, 0xCA, 0x01, 0xEB, 0xFE],
+            )
+            .expect("write vextractf32x4");
+            emu.emu_start(CASE_BASE, None, None, Some(1))
+                .expect("VEXTRACTF32X4 must execute");
+
+            let got = emu.reg_read_zmm(X86Reg::Zmm2);
+            let v = u32::from_le_bytes(got[0..4].try_into().unwrap());
+            assert_eq!(
+                v, 0x2000_0000,
+                "xmm2 dword 0 must hold zmm1's lane 1; the destination is the \
+                 rm operand, not the reg field"
+            );
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}

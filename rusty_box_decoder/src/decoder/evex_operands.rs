@@ -1,15 +1,185 @@
-//! EVEX compressed displacement (disp8*N) — generated, do not edit.
+//! EVEX per-opcode operand tables — generated, do not edit.
 //!
-//! Regenerate with `python scripts/gen_evex_disp8.py`.
+//! Regenerate with `python scripts/gen_evex_operands.py`.
 //!
-//! An EVEX instruction with a mod=01 memory operand stores its
-//! displacement divided by N, where N is the size of the memory element
-//! it touches. Bochs recovers N in `evex_displ8_compression`
-//! (cpu/decoder/fetchdecode32.cc) from the memory operand's type, the
-//! vector length, EVEX.b and EVEX.W. This table carries the type; the
-//! arithmetic lives in `EvexTuple::scale`.
+//! Both tables come from the operand lists in Bochs's
+//! `cpu/decoder/ia_opcodes_evex.def`, where each `OP_*` is
+//! `BX_FORM_SRC(type, src)`. The first operand's `src` gives the
+//! destination field; the memory operand's `type` gives the disp8 scale
+//! that `evex_displ8_compression` computes upstream.
 
 use crate::opcode::Opcode;
+
+/// Which ModRM field names the register an EVEX opcode writes.
+///
+/// Most write the reg field. The store forms — VEXTRACT*, the truncating
+/// VPMOV* stores, VCOMPRESS*, VPEXTR*, VSCATTER* — write rm, and the
+/// shift/rotate-by-immediate groups write EVEX.vvvv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvexDst {
+    Nnn,
+    Rm,
+    Vvvv,
+}
+
+/// Destination field for an EVEX opcode; the reg field unless listed.
+pub(crate) const fn evex_dst(op: Opcode) -> EvexDst {
+    match op {
+        Opcode::EvexVcompresspdWpdVpd => EvexDst::Rm,
+        Opcode::EvexVcompresspdWpdVpdKmask => EvexDst::Rm,
+        Opcode::EvexVcompresspsWpsVps => EvexDst::Rm,
+        Opcode::EvexVcompresspsWpsVpsKmask => EvexDst::Rm,
+        Opcode::EvexVcvtps2phWpsVpsIb => EvexDst::Rm,
+        Opcode::EvexVcvtps2phWpsVpsIbKmask => EvexDst::Rm,
+        Opcode::EvexVextractf32x4WpsVpsIb => EvexDst::Rm,
+        Opcode::EvexVextractf32x4WpsVpsIbKmask => EvexDst::Rm,
+        Opcode::EvexVextractf32x8WpsVpsIb => EvexDst::Rm,
+        Opcode::EvexVextractf32x8WpsVpsIbKmask => EvexDst::Rm,
+        Opcode::EvexVextractf64x2WpdVpdIb => EvexDst::Rm,
+        Opcode::EvexVextractf64x2WpdVpdIbKmask => EvexDst::Rm,
+        Opcode::EvexVextractf64x4WpdVpdIb => EvexDst::Rm,
+        Opcode::EvexVextractf64x4WpdVpdIbKmask => EvexDst::Rm,
+        Opcode::EvexVextracti32x4WdqVdqIb => EvexDst::Rm,
+        Opcode::EvexVextracti32x4WdqVdqIbKmask => EvexDst::Rm,
+        Opcode::EvexVextracti32x8WdqVdqIb => EvexDst::Rm,
+        Opcode::EvexVextracti32x8WdqVdqIbKmask => EvexDst::Rm,
+        Opcode::EvexVextracti64x2WdqVdqIb => EvexDst::Rm,
+        Opcode::EvexVextracti64x2WdqVdqIbKmask => EvexDst::Rm,
+        Opcode::EvexVextracti64x4WdqVdqIb => EvexDst::Rm,
+        Opcode::EvexVextracti64x4WdqVdqIbKmask => EvexDst::Rm,
+        Opcode::EvexVextractpsEdVpsIb => EvexDst::Rm,
+        Opcode::EvexVmovapdWpdVpd => EvexDst::Rm,
+        Opcode::EvexVmovapdWpdVpdKmask => EvexDst::Rm,
+        Opcode::EvexVmovapsWpsVps => EvexDst::Rm,
+        Opcode::EvexVmovapsWpsVpsKmask => EvexDst::Rm,
+        Opcode::EvexVmovdEdVd => EvexDst::Rm,
+        Opcode::EvexVmovdWdVd => EvexDst::Rm,
+        Opcode::EvexVmovdqa32WdqVdq => EvexDst::Rm,
+        Opcode::EvexVmovdqa32WdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVmovdqa64WdqVdq => EvexDst::Rm,
+        Opcode::EvexVmovdqa64WdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVmovdqu16WdqVdq => EvexDst::Rm,
+        Opcode::EvexVmovdqu16WdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVmovdqu32WdqVdq => EvexDst::Rm,
+        Opcode::EvexVmovdqu32WdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVmovdqu64WdqVdq => EvexDst::Rm,
+        Opcode::EvexVmovdqu64WdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVmovdqu8WdqVdq => EvexDst::Rm,
+        Opcode::EvexVmovdqu8WdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVmovhpdMqVsd => EvexDst::Rm,
+        Opcode::EvexVmovhpsMqVps => EvexDst::Rm,
+        Opcode::EvexVmovlpdMqVsd => EvexDst::Rm,
+        Opcode::EvexVmovlpsMqVps => EvexDst::Rm,
+        Opcode::EvexVmovntdqMdqVdq => EvexDst::Rm,
+        Opcode::EvexVmovntpdMpdVpd => EvexDst::Rm,
+        Opcode::EvexVmovntpsMpsVps => EvexDst::Rm,
+        Opcode::EvexVmovqEqVq => EvexDst::Rm,
+        Opcode::EvexVmovqWqVq => EvexDst::Rm,
+        Opcode::EvexVmovsdWsdHpdVsd => EvexDst::Rm,
+        Opcode::EvexVmovsdWsdHpdVsdKmask => EvexDst::Rm,
+        Opcode::EvexVmovsdWsdVsd => EvexDst::Rm,
+        Opcode::EvexVmovsdWsdVsdKmask => EvexDst::Rm,
+        Opcode::EvexVmovshWshHphVsh => EvexDst::Rm,
+        Opcode::EvexVmovshWshHphVshKmask => EvexDst::Rm,
+        Opcode::EvexVmovshWshVsh => EvexDst::Rm,
+        Opcode::EvexVmovshWshVshKmask => EvexDst::Rm,
+        Opcode::EvexVmovssWssHpsVss => EvexDst::Rm,
+        Opcode::EvexVmovssWssHpsVssKmask => EvexDst::Rm,
+        Opcode::EvexVmovssWssVss => EvexDst::Rm,
+        Opcode::EvexVmovssWssVssKmask => EvexDst::Rm,
+        Opcode::EvexVmovupdWpdVpd => EvexDst::Rm,
+        Opcode::EvexVmovupdWpdVpdKmask => EvexDst::Rm,
+        Opcode::EvexVmovupsWpsVps => EvexDst::Rm,
+        Opcode::EvexVmovupsWpsVpsKmask => EvexDst::Rm,
+        Opcode::EvexVmovwEdVsh => EvexDst::Rm,
+        Opcode::EvexVmovwWshVsh => EvexDst::Rm,
+        Opcode::EvexVpcompressbWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpcompressbWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpcompressdWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpcompressdWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpcompressqWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpcompressqWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpcompresswWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpcompresswWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpextrbEdVdqIbR => EvexDst::Rm,
+        Opcode::EvexVpextrdEdVdqIb => EvexDst::Rm,
+        Opcode::EvexVpextrqEqVdqIb => EvexDst::Rm,
+        Opcode::EvexVpextrwEdVdqIbR => EvexDst::Rm,
+        Opcode::EvexVpmovdbWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovdbWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovdwWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovdwWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovqbWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovqbWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovqdWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovqdWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovqwWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovqwWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovsdbWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovsdbWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovsdwWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovsdwWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovsqbWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovsqbWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovsqdWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovsqdWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovsqwWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovsqwWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovswbWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovswbWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovusdbWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovusdbWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovusdwWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovusdwWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovusqbWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovusqbWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovusqdWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovusqdWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovusqwWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovusqwWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovuswbWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovuswbWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVpmovwbWdqVdq => EvexDst::Rm,
+        Opcode::EvexVpmovwbWdqVdqKmask => EvexDst::Rm,
+        Opcode::EvexVproldUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVproldUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVprolqUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVprolqUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVprordUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVprordUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVprorqUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVprorqUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVpslldUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVpslldUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVpslldqUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVpsllqUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVpsllqUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVpsllwUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVpsllwUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVpsradUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVpsradUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVpsraqUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVpsraqUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVpsrawUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVpsrawUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVpsrldUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVpsrldUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVpsrldqUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVpsrlqUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVpsrlqUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVpsrlwUdqIb => EvexDst::Vvvv,
+        Opcode::EvexVpsrlwUdqIbKmask => EvexDst::Vvvv,
+        Opcode::EvexVscatterddVsibVdq => EvexDst::Rm,
+        Opcode::EvexVscatterdpdVsibVpd => EvexDst::Rm,
+        Opcode::EvexVscatterdpsVsibVps => EvexDst::Rm,
+        Opcode::EvexVscatterdqVsibVdq => EvexDst::Rm,
+        Opcode::EvexVscatterqdVsibVdq => EvexDst::Rm,
+        Opcode::EvexVscatterqpdVsibVpd => EvexDst::Rm,
+        Opcode::EvexVscatterqpsVsibVps => EvexDst::Rm,
+        Opcode::EvexVscatterqqVsibVdq => EvexDst::Rm,
+        _ => EvexDst::Nnn,
+    }
+}
 
 /// Memory-operand tuple kind, mirroring Bochs's `BX_VMM_*` constants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

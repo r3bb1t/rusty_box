@@ -986,7 +986,15 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         | ((nnn & 0x7) << NNN_OFFSET)
         | ((rm & 0x7) << RRR_OFFSET)
         | ((vex_w as u32) << VEX_W_OFFSET)
-        | ((vex_l as u32) << VEX_VL_128_256_OFFSET)
+        // The vector-length field is a thermometer code, not the raw L'L bits:
+        // Bochs builds it as `i->getVL()-1` over a getVL() of 1/2/4, giving
+        // 0 for VL128, 1 for VL256 and 3 for VL512 (fetchdecode64.cc). The
+        // attributes rely on that shape — ATTR_VL512 tests both bits against
+        // 3, ATTR_VL256_512 tests only the low bit — so feeding the raw 2 for
+        // 512-bit makes every VL512 and VL256_512 entry fail to match and the
+        // instruction decode as #UD. VEX only ever reaches 1, so the mapping
+        // is a no-op there.
+        | ((if vex_l == 2 { 3u32 } else { vex_l as u32 }) << VEX_VL_128_256_OFFSET)
         | (if is_evex && evex_aaa == 0 { 1u32 << MASK_K0_OFFSET } else { 0 });
     // SRC_EQ_DST: Bochs sets this for zero-idiom detection (XOR reg,reg; SUB reg,reg)
     // Bochs uses full nnn == rm comparison (not masked to 3 bits) — prevents false positives
@@ -1047,6 +1055,33 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     if is_evex {
         instr.opcode = lookup_evex_opcode(opcode_map, (b1 & 0xFF) as u8, decmask);
 
+        // Which field holds the destination is a property of the opcode, not
+        // of the encoding, so the byte-based rules above cannot express it:
+        // most EVEX opcodes write the reg field, the store forms (VEXTRACT*,
+        // the truncating VPMOV* stores, VCOMPRESS*, VPEXTR*, VSCATTER*) write
+        // rm, and the shift/rotate groups write vvvv. Upstream takes it from
+        // the first operand in ia_opcodes_evex.def and the generated table
+        // carries the same information, so this replaces the byte rules
+        // wholesale for EVEX rather than patching them one opcode at a time.
+        //
+        // For a memory form the rm field is an address rather than a register
+        // and the handlers branch on mod, exactly as Bochs does; assigning it
+        // here is harmless and keeps the register forms right.
+        match super::evex_operands::evex_dst(instr.opcode) {
+            super::evex_operands::EvexDst::Nnn => {
+                instr.operands.dst = nnn as u8;
+                instr.operands.src1 = rm as u8;
+            }
+            super::evex_operands::EvexDst::Rm => {
+                instr.operands.dst = rm as u8;
+                instr.operands.src1 = nnn as u8;
+            }
+            super::evex_operands::EvexDst::Vvvv => {
+                instr.operands.dst = vex_vvv;
+                instr.operands.src1 = rm as u8;
+            }
+        }
+
         // EVEX compressed displacement. A mod=01 memory operand stores its
         // displacement already divided by N, the size of the memory element
         // the instruction actually touches, so the byte has to be scaled back
@@ -1060,7 +1095,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         // `and rsi,-32` faults the alignment check and the guest takes a #GP
         // it never earned.
         if needs_modrm && ((modrm_byte >> 6) & 0x3) == 1 {
-            let scale = super::evex_disp8::evex_tuple(instr.opcode).scale(
+            let scale = super::evex_operands::evex_tuple(instr.opcode).scale(
                 vex_l,
                 evex_b_flag != 0,
                 vex_w != 0,

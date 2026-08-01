@@ -1860,3 +1860,83 @@ fn evex_disp8_is_scaled_by_the_tuple_size() {
         .expect("legacy MOVDQA must decode");
     assert_eq!(i.displacement, 1, "non-EVEX displacements are never scaled");
 }
+
+#[test]
+fn vvvv_destination_opcodes_reach_vvvv() {
+    // Upstream declares 72 opcodes whose first operand (the destination) is
+    // BX_SRC_VVV: the shift/rotate-by-immediate groups 0F 71/72/73 in both
+    // their VEX and EVEX forms, and the BMI1/TBM group at 0F38 F3 and
+    // 0F38 01/02.
+    //
+    // rusty reaches vvvv through two different accessors, so both have to
+    // hold. `src2` is unconditionally vvvv for any VEX/EVEX encoding, and the
+    // BMI handlers write their result there (bmi32.rs blsr_bd_ed uses
+    // `instr.src2()`). The shift handlers instead write `instr.dst()`
+    // (avx512.rs evex_vprord_imm), so for those the decoder must also place
+    // vvvv in dst — which is what the 0F 71/72/73 branch in decode64 does.
+    //
+    // Encodings give nnn, rm and vvvv distinct values so a wrong pick shows.
+    let cases: &[(&str, &[u8], u8, u8, bool)] = &[
+        // name, bytes, vvvv, rm, dst-must-also-be-vvvv
+        // BLSR eax, ebx = VEX.NDD.LZ.0F38.W0 F3 /1 — handler reads src2
+        ("BLSR", &[0xC4, 0xE2, 0x78, 0xF3, 0xCB], 0, 3, false),
+        ("BLSMSK", &[0xC4, 0xE2, 0x78, 0xF3, 0xD3], 0, 3, false),
+        ("BLSI", &[0xC4, 0xE2, 0x78, 0xF3, 0xDB], 0, 3, false),
+        // VPSRLD xmm1, xmm2, 8 = VEX.NDD.128.66.0F.W0 72 /2 — handler reads dst
+        ("VEX VPSRLD", &[0xC5, 0xF1, 0x72, 0xD2, 0x08], 1, 2, true),
+        // VPRORD zmm1, zmm2, 8 = EVEX.512.66.0F.W0 72 /0 — handler reads dst
+        ("EVEX VPRORD", &[0x62, 0xF1, 0x75, 0x48, 0x72, 0xC2, 0x08], 1, 2, true),
+    ];
+    for (name, bytes, vvvv, rm, dst_is_vvvv) in cases {
+        let i = crate::decoder::decode64::fetch_decode64(bytes)
+            .unwrap_or_else(|e| panic!("{name} must decode: {e:?}"));
+        assert_eq!(
+            i.operands.src2, *vvvv,
+            "{name}: src2 must carry VEX.vvvv for every VEX/EVEX encoding"
+        );
+        if *dst_is_vvvv {
+            assert_eq!(
+                i.operands.dst, *vvvv,
+                "{name}: this handler reads dst(), so dst must be VEX.vvvv"
+            );
+            assert_eq!(
+                i.operands.src1, *rm,
+                "{name}: the shifted value comes from the rm field"
+            );
+        }
+    }
+}
+
+#[test]
+fn vl512_entries_are_reachable() {
+    use crate::opcode::Opcode;
+    // The decmask vector-length field is a thermometer code (0 / 1 / 3), not
+    // the raw L'L bits (0 / 1 / 2). Feeding the raw value made every table
+    // entry carrying ATTR_VL512 or ATTR_VL256_512 unreachable at 512-bit, so
+    // a large family of instructions decoded as #UD only at zmm width.
+    let cases: &[(&str, &[u8], Opcode)] = &[
+        // VEXTRACTF32X4 xmm2, zmm1, 1 — ATTR_VL256_512
+        (
+            "VEXTRACTF32X4 512",
+            &[0x62, 0xF3, 0x7D, 0x48, 0x19, 0xCA, 0x01],
+            Opcode::EvexVextractf32x4WpsVpsIb,
+        ),
+        // Same opcode at 256-bit must keep working.
+        (
+            "VEXTRACTF32X4 256",
+            &[0x62, 0xF3, 0x7D, 0x28, 0x19, 0xCA, 0x01],
+            Opcode::EvexVextractf32x4WpsVpsIb,
+        ),
+        // VINSERTF32X8 zmm0, zmm1, ymm2, 0 — ATTR_VL512, 512-bit only
+        (
+            "VINSERTF32X8",
+            &[0x62, 0xF3, 0x75, 0x48, 0x1A, 0xC2, 0x00],
+            Opcode::EvexVinsertf32x8VpsHpsWpsIb,
+        ),
+    ];
+    for (name, bytes, want) in cases {
+        let i = crate::decoder::decode64::fetch_decode64(bytes)
+            .unwrap_or_else(|e| panic!("{name} must decode, got {e:?}"));
+        assert_eq!(i.get_ia_opcode(), *want, "for {name}");
+    }
+}
