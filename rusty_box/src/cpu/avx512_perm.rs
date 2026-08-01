@@ -114,8 +114,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn evex_vshuff32x4(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         let order = instr.ib();
         let mut result = BxPackedZmmRegister::default();
 
@@ -155,8 +155,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn evex_vshuff64x2(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         let order = instr.ib();
         let mut result = BxPackedZmmRegister::default();
 
@@ -267,8 +267,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn evex_vpermilps_reg(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src = read_zmm(self, instr.src1());
-        let ctrl = read_zmm(self, instr.src2());
+        let src = read_zmm(self, instr.src2());
+        let ctrl = read_zmm(self, instr.src1());
         let nlanes = match vl {
             0 => 1,
             1 => 2,
@@ -338,8 +338,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpermps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let idx = read_zmm(self, instr.src1());
-        let src = read_zmm(self, instr.src2());
+        let idx = read_zmm(self, instr.src2());
+        let src = read_zmm(self, instr.src1());
         let shuffle_mask = (nelements - 1) as u32;
         let mut result = BxPackedZmmRegister::default();
 
@@ -367,8 +367,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn evex_vshufps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         let order = instr.ib();
         let nlanes = match vl {
             0 => 1,
@@ -403,8 +403,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn evex_vshufpd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         let mut order = instr.ib();
         let nlanes = match vl {
             0 => 1,
@@ -437,8 +437,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn evex_vunpcklps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         let nlanes = match vl {
             0 => 1,
             1 => 2,
@@ -471,8 +471,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn evex_vunpckhps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         let nlanes = match vl {
             0 => 1,
             1 => 2,
@@ -504,8 +504,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn evex_vunpcklpd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         let nlanes = match vl {
             0 => 1,
             1 => 2,
@@ -535,8 +535,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     pub fn evex_vunpckhpd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         let nlanes = match vl {
             0 => 1,
             1 => 2,

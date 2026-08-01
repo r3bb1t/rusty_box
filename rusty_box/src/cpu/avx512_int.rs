@@ -156,13 +156,13 @@ fn write_zmm_masked_w<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 
 /// Read src2 as dwords — callers (VPMINUD, VPMAXUD) pair
 /// `LOAD_BROADCAST_VectorD` with `LOAD_BROADCAST_MASK_VectorD`.
-fn read_src2_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+fn read_rm_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
-        Ok(read_zmm(cpu, instr.src2()))
+        Ok(read_zmm(cpu, instr.src1()))
     } else {
         cpu.evex_load_bcst_d_pair(instr)
     }
@@ -170,13 +170,13 @@ fn read_src2_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 
 /// Read src2 as qwords — callers (VPMULDQ, VPMIN/MAXUQ, VPMIN/MAXSQ) pair
 /// `LOAD_BROADCAST_VectorQ` with `LOAD_BROADCAST_MASK_VectorQ`.
-fn read_src2_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+fn read_rm_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
-        Ok(read_zmm(cpu, instr.src2()))
+        Ok(read_zmm(cpu, instr.src1()))
     } else {
         cpu.evex_load_bcst_q_pair(instr)
     }
@@ -185,13 +185,13 @@ fn read_src2_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 /// Read src2 as words — VPMULHUW / VPMULHW pair `LOAD_Vector` with
 /// `LOAD_MASK_VectorW`. VPMADDWD uses `LOAD_Vector` for both entries and so
 /// calls `evex_load_vector` directly rather than using this.
-fn read_src2_words<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+fn read_rm_words<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
-        Ok(read_zmm(cpu, instr.src2()))
+        Ok(read_zmm(cpu, instr.src1()))
     } else {
         cpu.evex_load_vec_mask_w_pair(instr)
     }
@@ -199,13 +199,13 @@ fn read_src2_words<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentat
 
 /// Read src2 as raw bytes — callers (VPMADDUBSW, VPSADBW) use `LOAD_Vector`
 /// for every entry, so there is no masked variant to select.
-fn read_src2_bytes<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+fn read_rm_bytes<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
-        Ok(read_zmm(cpu, instr.src2()))
+        Ok(read_zmm(cpu, instr.src1()))
     } else {
         cpu.evex_load_vector(instr)
     }
@@ -241,8 +241,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpmuldq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_qwords(self, instr, vl)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_qwords(self, instr, vl)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             // Multiply the low (even-indexed) dwords of each qword pair
@@ -268,8 +268,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpmulhuw(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = word_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_words(self, instr, vl)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_words(self, instr, vl)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             let product = (src1.zmm16u(i) as u32) * (src2.zmm16u(i) as u32);
@@ -293,8 +293,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpmulhw(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = word_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_words(self, instr, vl)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_words(self, instr, vl)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             let product = (src1.zmm16s(i) as i32) * (src2.zmm16s(i) as i32);
@@ -319,11 +319,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpmaddwd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ndwords = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         // Both def entries use LOAD_Vector — the masked form is not
-        // fault-suppressing here, so this does not use read_src2_words.
+        // fault-suppressing here, so this does not use read_rm_words.
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
             self.evex_load_vector(instr)?
         };
@@ -354,8 +354,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpmaddubsw(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nwords = word_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_bytes(self, instr, vl)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_bytes(self, instr, vl)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nwords {
             let a0 = src1.zmmubyte(i * 2) as i32;
@@ -384,8 +384,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsadbw(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nqwords = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_bytes(self, instr, vl)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_bytes(self, instr, vl)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nqwords {
             let base = i * 8;
@@ -413,8 +413,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpminud(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_dwords(self, instr, vl)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_dwords(self, instr, vl)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm32u(i, core::cmp::min(src1.zmm32u(i), src2.zmm32u(i)));
@@ -429,8 +429,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpmaxud(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_dwords(self, instr, vl)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_dwords(self, instr, vl)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm32u(i, core::cmp::max(src1.zmm32u(i), src2.zmm32u(i)));
@@ -450,8 +450,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpminuq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_qwords(self, instr, vl)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_qwords(self, instr, vl)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm64u(i, core::cmp::min(src1.zmm64u(i), src2.zmm64u(i)));
@@ -466,8 +466,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpmaxuq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_qwords(self, instr, vl)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_qwords(self, instr, vl)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm64u(i, core::cmp::max(src1.zmm64u(i), src2.zmm64u(i)));
@@ -487,8 +487,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpminsq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_qwords(self, instr, vl)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_qwords(self, instr, vl)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm64s(i, core::cmp::min(src1.zmm64s(i), src2.zmm64s(i)));
@@ -503,8 +503,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpmaxsq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_qwords(self, instr, vl)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_qwords(self, instr, vl)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm64s(i, core::cmp::max(src1.zmm64s(i), src2.zmm64s(i)));

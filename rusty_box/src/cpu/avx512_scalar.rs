@@ -396,8 +396,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // Register form: element 0 comes from src2, the upper elements from
             // src1 (VEX.vvvv). Bochs avx512_move.cc VMOVSS_MASK_VssHpsWssR
             // reads `src1()` for the base and `src2()` only for element 0.
-            let src1 = read_zmm(self, instr.src1());
-            let src2 = read_zmm(self, instr.src2());
+            let src1 = read_zmm(self, instr.src2());
+            let src2 = read_zmm(self, instr.src1());
             let val = src2.zmm32u(0);
             write_scalar_ss(self, instr.dst(), &src1, val, mask, zmask);
         } else {
@@ -436,8 +436,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if instr.mod_c0() {
             // Register form: element 0 from src2, element 1 from src1
             // (VEX.vvvv). Bochs avx512_move.cc VMOVSD_MASK_VsdHpdWsdR.
-            let src1 = read_zmm(self, instr.src1());
-            let src2 = read_zmm(self, instr.src2());
+            let src1 = read_zmm(self, instr.src2());
+            let src2 = read_zmm(self, instr.src1());
             let val = src2.zmm64u(0);
             write_scalar_sd(self, instr.dst(), &src1, val, mask, zmask);
         } else {

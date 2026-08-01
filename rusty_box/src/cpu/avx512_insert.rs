@@ -255,10 +255,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let num_lanes = vl_bytes(vl) / 16;
         let imm = (instr.ib() as usize) & (num_lanes - 1);
         // Start with src1 (the full vector from VEX.vvvv)
-        let mut result = read_zmm(self, instr.src1());
+        let mut result = read_zmm(self, instr.src2());
         // Read 128-bit insert value (2 qwords)
         let insert = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
             self.evex_loadu_wdq(instr)?
         };
@@ -288,10 +288,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let half = (instr.ib() & 0x01) as usize;
         // Start with src1 (the full vector)
-        let mut result = read_zmm(self, instr.src1());
+        let mut result = read_zmm(self, instr.src2());
         // Read 256-bit insert value (8 dwords)
         let insert = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
             // Both def entries name LOAD_Half_Vector.
             self.evex_load_half_vector(instr)?
@@ -323,10 +323,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let half = (instr.ib() & 0x01) as usize;
         // Start with src1 (the full vector)
-        let mut result = read_zmm(self, instr.src1());
+        let mut result = read_zmm(self, instr.src2());
         // Read 256-bit insert value (4 qwords)
         let insert = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
             self.evex_load_half_vector(instr)?
         };

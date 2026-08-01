@@ -214,145 +214,145 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// KANDB KGb, KHb, KEb
     pub fn kandb_kgb_khb_keb_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), s1 & s2, MASK_B);
         Ok(())
     }
     /// KANDW KGw, KHw, KEw
     pub fn kandw_kgw_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), s1 & s2, MASK_W);
         Ok(())
     }
     /// KANDD KGd, KHd, KEd
     pub fn kandd_kgd_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), s1 & s2, MASK_D);
         Ok(())
     }
     /// KANDQ KGq, KHq, KEq
     pub fn kandq_kgq_khq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         self.bx_write_opmask(instr.dst() as usize, s1 & s2);
         Ok(())
     }
 
     /// KANDNB KGb, KHb, KEb
     pub fn kandnb_kgb_khb_keb_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), (!s1) & s2, MASK_B);
         Ok(())
     }
     /// KANDNW KGw, KHw, KEw
     pub fn kandnw_kgw_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), (!s1) & s2, MASK_W);
         Ok(())
     }
     /// KANDND KGd, KHd, KEd
     pub fn kandnd_kgd_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), (!s1) & s2, MASK_D);
         Ok(())
     }
     /// KANDNQ KGq, KHq, KEq
     pub fn kandnq_kgq_khq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         self.bx_write_opmask(instr.dst() as usize, (!s1) & s2);
         Ok(())
     }
 
     /// KORB KGb, KHb, KEb
     pub fn korb_kgb_khb_keb_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), s1 | s2, MASK_B);
         Ok(())
     }
     /// KORW KGw, KHw, KEw
     pub fn korw_kgw_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), s1 | s2, MASK_W);
         Ok(())
     }
     /// KORD KGd, KHd, KEd
     pub fn kord_kgd_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), s1 | s2, MASK_D);
         Ok(())
     }
     /// KORQ KGq, KHq, KEq
     pub fn korq_kgq_khq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         self.bx_write_opmask(instr.dst() as usize, s1 | s2);
         Ok(())
     }
 
     /// KXORB KGb, KHb, KEb
     pub fn kxorb_kgb_khb_keb_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), s1 ^ s2, MASK_B);
         Ok(())
     }
     /// KXORW KGw, KHw, KEw
     pub fn kxorw_kgw_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), s1 ^ s2, MASK_W);
         Ok(())
     }
     /// KXORD KGd, KHd, KEd
     pub fn kxord_kgd_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), s1 ^ s2, MASK_D);
         Ok(())
     }
     /// KXORQ KGq, KHq, KEq
     pub fn kxorq_kgq_khq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         self.bx_write_opmask(instr.dst() as usize, s1 ^ s2);
         Ok(())
     }
 
     /// KXNORB KGb, KHb, KEb
     pub fn kxnorb_kgb_khb_keb_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), !(s1 ^ s2), MASK_B);
         Ok(())
     }
     /// KXNORW KGw, KHw, KEw
     pub fn kxnorw_kgw_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), !(s1 ^ s2), MASK_W);
         Ok(())
     }
     /// KXNORD KGd, KHd, KEd
     pub fn kxnord_kgd_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         write_opmask_masked(self, instr.dst(), !(s1 ^ s2), MASK_D);
         Ok(())
     }
     /// KXNORQ KGq, KHq, KEq
     pub fn kxnorq_kgq_khq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         self.bx_write_opmask(instr.dst() as usize, !(s1 ^ s2));
         Ok(())
     }
@@ -392,29 +392,29 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// KADDB KGb, KHb, KEb
     pub fn kaddb_kgb_khb_keb_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1()) as u8;
-        let s2 = read_opmask(self, instr.src2()) as u8;
+        let s1 = read_opmask(self, instr.src2()) as u8;
+        let s2 = read_opmask(self, instr.src1()) as u8;
         write_opmask_masked(self, instr.dst(), s1.wrapping_add(s2) as u64, MASK_B);
         Ok(())
     }
     /// KADDW KGw, KHw, KEw
     pub fn kaddw_kgw_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1()) as u16;
-        let s2 = read_opmask(self, instr.src2()) as u16;
+        let s1 = read_opmask(self, instr.src2()) as u16;
+        let s2 = read_opmask(self, instr.src1()) as u16;
         write_opmask_masked(self, instr.dst(), s1.wrapping_add(s2) as u64, MASK_W);
         Ok(())
     }
     /// KADDD KGd, KHd, KEd
     pub fn kaddd_kgd_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1()) as u32;
-        let s2 = read_opmask(self, instr.src2()) as u32;
+        let s1 = read_opmask(self, instr.src2()) as u32;
+        let s2 = read_opmask(self, instr.src1()) as u32;
         write_opmask_masked(self, instr.dst(), s1.wrapping_add(s2) as u64, MASK_D);
         Ok(())
     }
     /// KADDQ KGq, KHq, KEq
     pub fn kaddq_kgq_khq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1());
-        let s2 = read_opmask(self, instr.src2());
+        let s1 = read_opmask(self, instr.src2());
+        let s2 = read_opmask(self, instr.src1());
         self.bx_write_opmask(instr.dst() as usize, s1.wrapping_add(s2));
         Ok(())
     }
@@ -633,24 +633,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// KUNPCKBW KGw, KHb, KEb — unpack two 8-bit masks into one 16-bit mask
     pub fn kunpckbw_kgw_khb_keb_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1()) & MASK_B;
-        let s2 = read_opmask(self, instr.src2()) & MASK_B;
+        let s1 = read_opmask(self, instr.src2()) & MASK_B;
+        let s2 = read_opmask(self, instr.src1()) & MASK_B;
         let result = (s1 << 8) | s2;
         write_opmask_masked(self, instr.dst(), result, MASK_W);
         Ok(())
     }
     /// KUNPCKWD KGd, KHw, KEw — unpack two 16-bit masks into one 32-bit mask
     pub fn kunpckwd_kgd_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1()) & MASK_W;
-        let s2 = read_opmask(self, instr.src2()) & MASK_W;
+        let s1 = read_opmask(self, instr.src2()) & MASK_W;
+        let s2 = read_opmask(self, instr.src1()) & MASK_W;
         let result = (s1 << 16) | s2;
         write_opmask_masked(self, instr.dst(), result, MASK_D);
         Ok(())
     }
     /// KUNPCKDQ KGq, KHd, KEd — unpack two 32-bit masks into one 64-bit mask
     pub fn kunpckdq_kgq_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let s1 = read_opmask(self, instr.src1()) & MASK_D;
-        let s2 = read_opmask(self, instr.src2()) & MASK_D;
+        let s1 = read_opmask(self, instr.src2()) & MASK_D;
+        let s2 = read_opmask(self, instr.src1()) & MASK_D;
         let result = (s1 << 32) | s2;
         self.bx_write_opmask(instr.dst() as usize, result);
         Ok(())
