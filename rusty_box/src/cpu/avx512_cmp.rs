@@ -9,7 +9,13 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_cmp.cc`, `avx512_pfp.cc`.
 
-use super::softfloat3e::softfloat::softfloat_get_exception_flags;
+use super::softfloat3e::f32_class::f32_class;
+use super::softfloat3e::f64_class::f64_class;
+use super::softfloat3e::internals::{sign_f32, sign_f64};
+use super::softfloat3e::softfloat::{
+    f32_denormal_to_zero, f64_denormal_to_zero, softfloat_get_exception_flags, SoftFloatClass,
+};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::softfloat3e::softfloat_compare::{f32_compare_predicate, f64_compare_predicate};
 use super::{
     cpu::BxCpuC,
@@ -770,6 +776,109 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    // ========================================================================
+    // VFPCLASS — classify each element against the imm8 selector, result to an
+    // opmask. Bochs avx512_pfp.cc VFPCLASSPS/PD/SS/SD_MASK_*. No softfloat
+    // status is involved: classification raises no exception at all.
+    // ========================================================================
+
+    /// VFPCLASSPS Kk{k}, Wps, Ib — EVEX.66.0F3A.W0 66
+    pub fn evex_vfpclassps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let nelements = dword_elements(instr.get_vl());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_broadcast_mask_vector_d(instr)?
+        };
+        let selector = instr.ib();
+        let daz = self.mxcsr.daz();
+        let write_mask = read_opmask_for_write(self, instr);
+        let mut result: u64 = 0;
+        for i in 0..nelements {
+            if (write_mask >> i) & 1 != 0 && f32_fpclass(src.zmm32u(i), selector, daz) {
+                result |= 1 << i;
+            }
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// VFPCLASSPD Kk{k}, Wpd, Ib — EVEX.66.0F3A.W1 66
+    pub fn evex_vfpclasspd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let nelements = qword_elements(instr.get_vl());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_broadcast_mask_vector_q(instr)?
+        };
+        let selector = instr.ib();
+        let daz = self.mxcsr.daz();
+        let write_mask = read_opmask_for_write(self, instr);
+        let mut result: u64 = 0;
+        for i in 0..nelements {
+            if (write_mask >> i) & 1 != 0 && f64_fpclass(src.zmm64u(i), selector, daz) {
+                result |= 1 << i;
+            }
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// VFPCLASSSS Kk{k}, Wss, Ib — EVEX.66.0F3A.W0 67
+    pub fn evex_vfpclassss(&mut self, instr: &Instruction) -> super::Result<()> {
+        // Single-operand form: src() is src1(), the rm operand.
+        let src = if instr.mod_c0() {
+            self.vmm[instr.src() as usize].zmm32u(0)
+        } else {
+            self.evex_load_wss_pair(instr)?.zmm32u(0)
+        };
+        let active = read_opmask_for_write(self, instr) & 1 != 0;
+        let r = active && f32_fpclass(src, instr.ib(), self.mxcsr.daz());
+        self.bx_write_opmask(instr.dst() as usize, r as u64);
+        Ok(())
+    }
+
+    /// VFPCLASSSD Kk{k}, Wsd, Ib — EVEX.66.0F3A.W1 67
+    pub fn evex_vfpclasssd(&mut self, instr: &Instruction) -> super::Result<()> {
+        // Single-operand form: src() is src1(), the rm operand.
+        let src = if instr.mod_c0() {
+            self.vmm[instr.src() as usize].zmm64u(0)
+        } else {
+            self.evex_load_wsd_pair(instr)?.zmm64u(0)
+        };
+        let active = read_opmask_for_write(self, instr) & 1 != 0;
+        let r = active && f64_fpclass(src, instr.ib(), self.mxcsr.daz());
+        self.bx_write_opmask(instr.dst() as usize, r as u64);
+        Ok(())
+    }
+}
+
+/// Bochs avx512_pfp.cc `fpclass` — imm8 selects which floating-point
+/// categories the element is tested against.
+fn fpclass(op_class: SoftFloatClass, sign: bool, selector: u8) -> bool {
+    (op_class == SoftFloatClass::QNaN && selector & 0x01 != 0)
+        || (op_class == SoftFloatClass::Zero && !sign && selector & 0x02 != 0)
+        || (op_class == SoftFloatClass::Zero && sign && selector & 0x04 != 0)
+        || (op_class == SoftFloatClass::PositiveInf && selector & 0x08 != 0)
+        || (op_class == SoftFloatClass::NegativeInf && selector & 0x10 != 0)
+        || (op_class == SoftFloatClass::Denormal && selector & 0x20 != 0)
+        || ((op_class == SoftFloatClass::Denormal || op_class == SoftFloatClass::Normalized)
+            && sign
+            && selector & 0x40 != 0)
+        || (op_class == SoftFloatClass::SNaN && selector & 0x80 != 0)
+}
+
+/// Bochs avx512_pfp.cc `f32_fpclass`. DAZ is applied to the operand first;
+/// classification itself raises nothing, not even on a signalling NaN.
+fn f32_fpclass(op: Float32, selector: u8, daz: bool) -> bool {
+    let op = if daz { f32_denormal_to_zero(op) } else { op };
+    fpclass(f32_class(op), sign_f32(op), selector)
+}
+
+/// Bochs avx512_pfp.cc `f64_fpclass`.
+fn f64_fpclass(op: Float64, selector: u8, daz: bool) -> bool {
+    let op = if daz { f64_denormal_to_zero(op) } else { op };
+    fpclass(f64_class(op), sign_f64(op), selector)
 }
 
 
@@ -984,4 +1093,99 @@ mod tests {
         assert_eq!(cpu.vmm[0].zmmubyte(3), 0x11);
         assert_eq!(cpu.vmm[0].zmmubyte(15), 0x11);
     }
+
+    // ---- VFPCLASS -----------------------------------------------------
+
+    /// Every category VFPCLASS can select, with the imm8 bit that picks it.
+    /// Bochs `fpclass` treats "negative finite" (bit 6) as covering both
+    /// denormals and normals, so a negative denormal answers to two bits.
+    const CLASS_CASES: [(u32, u8, &str); 8] = [
+        (0x7FC0_0000, 0x01, "QNaN"),
+        (0x0000_0000, 0x02, "+0"),
+        (0x8000_0000, 0x04, "-0"),
+        (0x7F80_0000, 0x08, "+inf"),
+        (0xFF80_0000, 0x10, "-inf"),
+        (0x0000_0001, 0x20, "+denormal"),
+        (0xBF80_0000, 0x40, "negative finite (-1.0)"),
+        (0x7F80_0001, 0x80, "SNaN"),
+    ];
+
+    #[test]
+    fn vfpclassps_matches_exactly_the_selected_category() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for (bits, sel, name) in CLASS_CASES {
+            for i in 0..4 {
+                c.vmm[1].set_zmm32u(i, bits);
+            }
+            // Its own selector matches every element.
+            let mut ins = evex_reg(Opcode::EvexVfpclasspsKgwWpsIbKmask, 0);
+            ins.set_iq(sel as u64);
+            ins.set_opmask(0);
+            c.execute_instruction(&ins).unwrap();
+            assert_eq!(c.opmask[0].rrx(), 0b1111, "{name} should match imm8={sel:#04x}");
+
+            // Every other selector rejects it, except that a negative
+            // denormal is also "negative finite".
+            let others = 0xFFu8 & !sel;
+            let mut ins = evex_reg(Opcode::EvexVfpclasspsKgwWpsIbKmask, 0);
+            ins.set_opmask(0);
+            ins.set_iq((others & !0x40) as u64);
+            c.execute_instruction(&ins).unwrap();
+            assert_eq!(c.opmask[0].rrx(), 0, "{name} should reject the other classes");
+        }
+    }
+
+    #[test]
+    fn vfpclass_classification_raises_nothing_and_respects_the_writemask() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET;
+        // A signalling NaN is classified, not signalled: with every SSE
+        // exception unmasked this must still complete.
+        c.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET & !0x1F80;
+        for i in 0..4 {
+            c.vmm[1].set_zmm32u(i, 0x7F80_0001);
+        }
+        let mut ins = evex_reg(Opcode::EvexVfpclasspsKgwWpsIbKmask, 0);
+        ins.set_iq(0x80);
+        ins.set_opmask(0);
+        c.execute_instruction(&ins).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 0b1111);
+
+        // The writemask gates which elements may set a result bit.
+        c.opmask[2].set_rrx(0b0101);
+        let mut ins = evex_reg(Opcode::EvexVfpclasspsKgwWpsIbKmask, 0);
+        ins.set_iq(0x80);
+        ins.set_opmask(2);
+        c.execute_instruction(&ins).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 0b0101);
+    }
+
+    #[test]
+    fn vfpclassss_writes_a_single_bit_gated_on_opmask_bit_zero() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.vmm[1].set_zmm32u(0, 0x7F80_0000); // +inf
+        c.opmask[0].set_rrx(0xFFFF); // must be overwritten, not merged
+
+        let mut ins = evex_reg(Opcode::EvexVfpclassssKgbWssIbKmask, 0);
+        ins.set_iq(0x08);
+        ins.set_opmask(0); // +inf
+        c.execute_instruction(&ins).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 1);
+
+        // Wrong category -> zero.
+        let mut ins = evex_reg(Opcode::EvexVfpclassssKgbWssIbKmask, 0);
+        ins.set_iq(0x10);
+        ins.set_opmask(0); // -inf
+        c.execute_instruction(&ins).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 0);
+
+        // Opmask bit 0 clear suppresses the test entirely.
+        c.opmask[2].set_rrx(0b10);
+        let mut ins = evex_reg(Opcode::EvexVfpclassssKgbWssIbKmask, 0);
+        ins.set_iq(0x08);
+        ins.set_opmask(2);
+        c.execute_instruction(&ins).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 0);
+    }
+
 }

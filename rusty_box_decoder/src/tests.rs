@@ -1754,3 +1754,16 @@ fn evex_b_is_rejected_where_the_opcode_allows_neither_sae_nor_broadcast() {
         "EVEX.b (SAE) on a register-form VADDPS is legal and must decode"
     );
 }
+
+#[test]
+fn evex_vvvv_lands_in_src2_and_modrm_rm_in_src1() {
+    // VADDPS zmm1, zmm2, zmm3  =  62 F1 6C 48 58 CB
+    //   EVEX.vvvv encodes zmm2 (the first source), ModRM.rm encodes zmm3.
+    // Bochs names those i->src1() and i->src2() respectively; this decoder
+    // puts vvvv in src2() and rm in src1(), i.e. the two are swapped
+    // relative to upstream. Handlers must account for that.
+    let i = crate::decoder::decode64::fetch_decode64(&[0x62, 0xF1, 0x6C, 0x48, 0x58, 0xCB]).unwrap();
+    assert_eq!(i.dst(), 1, "ModRM.reg is the destination");
+    assert_eq!(i.src2(), 2, "EVEX.vvvv");
+    assert_eq!(i.src1(), 3, "ModRM.rm");
+}

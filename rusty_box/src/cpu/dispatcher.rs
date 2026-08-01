@@ -3171,6 +3171,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- VFPCLASS / VREDUCE / VRANGE (avx512_cmp.rs, avx512_round.rs, avx512_scalar.rs) ---
+            Opcode::EvexVfpclasspsKgwWpsIbKmask => self.evex_vfpclassps(instr),
+            Opcode::EvexVfpclasspdKgbWpdIbKmask => self.evex_vfpclasspd(instr),
+            Opcode::EvexVfpclassssKgbWssIbKmask => self.evex_vfpclassss(instr),
+            Opcode::EvexVfpclasssdKgbWsdIbKmask => self.evex_vfpclasssd(instr),
+            Opcode::EvexVreducepsVpsWpsIbKmask => self.evex_vreduceps(instr),
+            Opcode::EvexVreducepdVpdWpdIbKmask => self.evex_vreducepd(instr),
+            Opcode::EvexVreducessVssHpsWssIbKmask => self.evex_vreducess(instr),
+            Opcode::EvexVreducesdVsdHpdWsdIbKmask => self.evex_vreducesd(instr),
+            Opcode::EvexVrangepsVpsHpsWpsIbKmask => self.evex_vrangeps(instr),
+            Opcode::EvexVrangepdVpdHpdWpdIbKmask => self.evex_vrangepd(instr),
+            Opcode::EvexVrangessVssHpsWssIbKmask => self.evex_vrangess(instr),
+            Opcode::EvexVrangesdVsdHpdWsdIbKmask => self.evex_vrangesd(instr),
+
             // --- AVX512_DQ qword <-> float conversions (avx512_cvt.rs) ---
             Opcode::EvexVcvtpd2qqVdqWpd | Opcode::EvexVcvtpd2qqVdqWpdKmask => {
                 self.evex_vcvtpd2qq(instr)

@@ -167,3 +167,80 @@ pub(in crate::cpu) fn f32_scalef(a: Float32, b: Float32, status: &mut SoftFloatS
     sig_a <<= 7;
     norm_round_pack_to_f32(sign_a, exp_a, sig_a, status)
 }
+
+/// Bochs softfloat3e/f32_range.cc `f32_range` — the VRANGE element function.
+/// `is_max` picks max over min, `is_abs` compares magnitudes, and `sign_ctrl`
+/// (imm8[3:2]) decides the sign of the result.
+pub(in crate::cpu) fn f32_range(
+    mut a: Float32,
+    mut b: Float32,
+    is_max: bool,
+    is_abs: bool,
+    sign_ctrl: i32,
+    status: &mut SoftFloatStatus,
+) -> Float32 {
+    let mut sign_a = sign_f32(a);
+    let exp_a = exp_f32(a);
+    let sig_a = frac_f32(a);
+    let sign_b = sign_f32(b);
+    let exp_b = exp_f32(b);
+    let sig_b = frac_f32(b);
+
+    if f32_is_signaling_nan(a) {
+        return softfloat_propagate_nan_f32(a, 0, status);
+    }
+    if f32_is_signaling_nan(b) {
+        return softfloat_propagate_nan_f32(b, 0, status);
+    }
+
+    let a_is_nan = is_nan_f32(a);
+    let b_is_nan = is_nan_f32(b);
+
+    // A denormal operand raises #D, but only if the *other* operand is not a
+    // NaN — a NaN result short-circuits the comparison entirely.
+    if exp_a == 0 && sig_a != 0 {
+        if softfloat_denormals_are_zeros(status) {
+            a = pack_to_f32(sign_a, 0, 0);
+        } else if !b_is_nan {
+            softfloat_raise_flags(status, FLAG_DENORMAL);
+        }
+    }
+    if exp_b == 0 && sig_b != 0 {
+        if softfloat_denormals_are_zeros(status) {
+            b = pack_to_f32(sign_b, 0, 0);
+        } else if !a_is_nan {
+            softfloat_raise_flags(status, FLAG_DENORMAL);
+        }
+    }
+
+    let mut z = if b_is_nan {
+        a
+    } else if a_is_nan {
+        b
+    } else if sign_a != sign_b && !is_abs {
+        // Opposite signs with magnitude comparison off: the sign alone decides.
+        if !is_max {
+            if sign_a { a } else { b }
+        } else if sign_a { b } else { a }
+    } else {
+        let (tmp_a, tmp_b) = if is_abs {
+            sign_a = false;
+            (a & !0x8000_0000, b & !0x8000_0000)
+        } else {
+            (a, b)
+        };
+        // Same sign, so the raw bit patterns order like the magnitudes, and a
+        // negative sign inverts the sense of the comparison.
+        if !is_max {
+            if sign_a ^ (tmp_a < tmp_b) { a } else { b }
+        } else if sign_a ^ (tmp_a < tmp_b) { b } else { a }
+    };
+
+    match sign_ctrl {
+        0 => z = (z & !0x8000_0000) | (a & 0x8000_0000), // keep the sign of a
+        1 => {}                              // keep the comparison result's sign
+        2 => z &= !0x8000_0000,                     // force positive
+        _ => z |= 0x8000_0000,                      // force negative
+    }
+    z
+}

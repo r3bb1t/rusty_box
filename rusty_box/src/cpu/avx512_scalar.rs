@@ -11,17 +11,22 @@
 
 use super::softfloat3e::f32_addsub::{f32_add, f32_sub};
 use super::softfloat3e::f32_compare::{f32_max, f32_min};
-use super::softfloat3e::f32_range::{f32_get_exp, f32_get_mant, f32_scalef};
+use super::softfloat3e::f32_range::{f32_get_exp, f32_get_mant, f32_range, f32_scalef};
 use super::softfloat3e::f32_div::f32_div;
 use super::softfloat3e::f32_mul::f32_mul;
 use super::softfloat3e::f32_sqrt::f32_sqrt;
 use super::softfloat3e::f64_addsub::{f64_add, f64_sub};
 use super::softfloat3e::f64_compare::{f64_max, f64_min};
-use super::softfloat3e::f64_range::{f64_get_exp, f64_get_mant, f64_scalef};
+use super::softfloat3e::f64_range::{f64_get_exp, f64_get_mant, f64_range, f64_scalef};
 use super::softfloat3e::f64_div::f64_div;
 use super::softfloat3e::f64_mul::f64_mul;
 use super::softfloat3e::f64_sqrt::f64_sqrt;
-use super::softfloat3e::softfloat::{softfloat_get_exception_flags, SoftFloatStatus};
+use super::avx512_round::{f32_reduce, f64_reduce, range_control};
+use super::softfloat3e::softfloat::{
+    softfloat_get_exception_flags, softfloat_suppress_exception, SoftFloatStatus,
+    FLAG_DENORMAL, FLAG_OVERFLOW, FLAG_UNDERFLOW,
+};
+use super::sse_pfp::mxcsr_to_softfloat_status_word_imm_override;
 use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
     cpu::BxCpuC,
@@ -333,6 +338,51 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let (sign_ctrl, interv) = (((imm8 >> 2) & 0x3) as i32, (imm8 & 0x3) as i32);
         self.evex_scalar_sd(instr, move |_, b, status| {
             f64_get_mant(b, status, sign_ctrl, interv)
+        })
+    }
+
+
+    // ========================================================================
+    // VREDUCE / VRANGE scalar forms. Bochs avx512_pfp.cc
+    // VREDUCESS/SD_MASK_* and VRANGESS/SD_MASK_*.
+    //
+    // VREDUCE reduces the *rm* operand and takes only the upper elements from
+    // vvvv, the way VSQRTSS does; VRANGE uses both.
+    // ========================================================================
+
+    /// VREDUCESS xmm1{k1}{z}, xmm2, xmm3/m32, Ib — EVEX.66.0F3A.W0 57
+    pub fn evex_vreducess(&mut self, instr: &Instruction) -> super::Result<()> {
+        let control = instr.ib();
+        self.evex_scalar_ss(instr, move |_, b, status| {
+            mxcsr_to_softfloat_status_word_imm_override(status, control);
+            softfloat_suppress_exception(status, FLAG_DENORMAL | FLAG_UNDERFLOW | FLAG_OVERFLOW);
+            f32_reduce(b, control >> 4, status)
+        })
+    }
+
+    /// VREDUCESD xmm1{k1}{z}, xmm2, xmm3/m64, Ib — EVEX.66.0F3A.W1 57
+    pub fn evex_vreducesd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let control = instr.ib();
+        self.evex_scalar_sd(instr, move |_, b, status| {
+            mxcsr_to_softfloat_status_word_imm_override(status, control);
+            softfloat_suppress_exception(status, FLAG_DENORMAL | FLAG_UNDERFLOW | FLAG_OVERFLOW);
+            f64_reduce(b, control >> 4, status)
+        })
+    }
+
+    /// VRANGESS xmm1{k1}{z}, xmm2, xmm3/m32, Ib — EVEX.66.0F3A.W0 51
+    pub fn evex_vrangess(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (is_max, is_abs, sign_ctrl) = range_control(instr.ib());
+        self.evex_scalar_ss(instr, move |a, b, status| {
+            f32_range(a, b, is_max, is_abs, sign_ctrl, status)
+        })
+    }
+
+    /// VRANGESD xmm1{k1}{z}, xmm2, xmm3/m64, Ib — EVEX.66.0F3A.W1 51
+    pub fn evex_vrangesd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (is_max, is_abs, sign_ctrl) = range_control(instr.ib());
+        self.evex_scalar_sd(instr, move |a, b, status| {
+            f64_range(a, b, is_max, is_abs, sign_ctrl, status)
         })
     }
 
