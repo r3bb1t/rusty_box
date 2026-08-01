@@ -9,6 +9,9 @@ use super::softfloat3e::internals::{sign_f32, sign_f64};
 use super::softfloat3e::softfloat::{f32_denormal_to_zero, f64_denormal_to_zero,
     softfloat_denormals_are_zeros, softfloat_raise_flags, SoftFloatClass, FLAG_DIVBYZERO,
     FLAG_INVALID};
+use super::avx512_rcp14::{
+    approximate_rcp14_f32, approximate_rcp14_f64, approximate_rsqrt14_f32, approximate_rsqrt14_f64,
+};
 use super::softfloat3e::f32_addsub::f32_sub;
 use super::softfloat3e::f32_range::f32_range;
 use super::softfloat3e::f64_addsub::f64_sub;
@@ -716,6 +719,186 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    // ========================================================================
+    // VRCP14 / VRSQRT14 — table-driven 14-bit approximations. Bochs
+    // avx512_rcp14.cc / avx512_rsqrt14.cc.
+    //
+    // These raise no floating-point exception at all — not even on a
+    // signalling NaN, which is merely quietened — so unlike every other FP
+    // handler here they carry no softfloat status word and never call
+    // check_exceptions_sse. They read DAZ and FTZ from MXCSR directly.
+    // ========================================================================
+
+    /// VRCP14PS Vps{k}{z}, Wps — EVEX.66.0F38.W0 4C
+    pub fn evex_vrcp14ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (daz, ftz) = (self.mxcsr.daz(), self.mxcsr.flush_to_zero());
+        self.evex_approx_ps(instr, |v| approximate_rcp14_f32(v, daz, ftz))
+    }
+
+    /// VRCP14PD Vpd{k}{z}, Wpd — EVEX.66.0F38.W1 4C
+    pub fn evex_vrcp14pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (daz, ftz) = (self.mxcsr.daz(), self.mxcsr.flush_to_zero());
+        self.evex_approx_pd(instr, |v| approximate_rcp14_f64(v, daz, ftz))
+    }
+
+    /// VRSQRT14PS Vps{k}{z}, Wps — EVEX.66.0F38.W0 4E
+    pub fn evex_vrsqrt14ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let daz = self.mxcsr.daz();
+        self.evex_approx_ps(instr, |v| approximate_rsqrt14_f32(v, daz))
+    }
+
+    /// VRSQRT14PD Vpd{k}{z}, Wpd — EVEX.66.0F38.W1 4E
+    pub fn evex_vrsqrt14pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let daz = self.mxcsr.daz();
+        self.evex_approx_pd(instr, |v| approximate_rsqrt14_f64(v, daz))
+    }
+
+    /// The shared packed body. Masked-off elements are not computed.
+    fn evex_approx_ps(
+        &mut self,
+        instr: &Instruction,
+        func: impl Fn(Float32) -> Float32,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let src = self.read_src_ps(instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(i, func(src.zmm32u(i)));
+            }
+        }
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// Double-precision counterpart of [`Self::evex_approx_ps`].
+    fn evex_approx_pd(
+        &mut self,
+        instr: &Instruction,
+        func: impl Fn(Float64) -> Float64,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src = self.read_src_pd(instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm64u(i, func(src.zmm64u(i)));
+            }
+        }
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VRCP14SS xmm1{k1}{z}, xmm2, xmm3/m32 — EVEX.66.0F38.W0 4D
+    pub fn evex_vrcp14ss(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (daz, ftz) = (self.mxcsr.daz(), self.mxcsr.flush_to_zero());
+        self.evex_approx_ss(instr, |v| approximate_rcp14_f32(v, daz, ftz))
+    }
+
+    /// VRCP14SD xmm1{k1}{z}, xmm2, xmm3/m64 — EVEX.66.0F38.W1 4D
+    pub fn evex_vrcp14sd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (daz, ftz) = (self.mxcsr.daz(), self.mxcsr.flush_to_zero());
+        self.evex_approx_sd(instr, |v| approximate_rcp14_f64(v, daz, ftz))
+    }
+
+    /// VRSQRT14SS xmm1{k1}{z}, xmm2, xmm3/m32 — EVEX.66.0F38.W0 4F
+    pub fn evex_vrsqrt14ss(&mut self, instr: &Instruction) -> super::Result<()> {
+        let daz = self.mxcsr.daz();
+        self.evex_approx_ss(instr, |v| approximate_rsqrt14_f32(v, daz))
+    }
+
+    /// VRSQRT14SD xmm1{k1}{z}, xmm2, xmm3/m64 — EVEX.66.0F38.W1 4F
+    pub fn evex_vrsqrt14sd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let daz = self.mxcsr.daz();
+        self.evex_approx_sd(instr, |v| approximate_rsqrt14_f64(v, daz))
+    }
+
+    /// The shared scalar body: element 0 from the r/m operand, the upper
+    /// elements from vvvv.
+    fn evex_approx_ss(
+        &mut self,
+        instr: &Instruction,
+        func: impl Fn(Float32) -> Float32,
+    ) -> super::Result<()> {
+        let src1 = read_zmm(self, instr.src2()); // vvvv
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        let mut result = 0;
+        if (mask & 1) != 0 {
+            result = func(self.read_scalar_ss(instr)?);
+        }
+        write_scalar_ss_round(self, instr.dst(), &src1, result, mask, zmask);
+        Ok(())
+    }
+
+    /// Double-precision counterpart of [`Self::evex_approx_ss`].
+    fn evex_approx_sd(
+        &mut self,
+        instr: &Instruction,
+        func: impl Fn(Float64) -> Float64,
+    ) -> super::Result<()> {
+        let src1 = read_zmm(self, instr.src2());
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        let mut result = 0;
+        if (mask & 1) != 0 {
+            result = func(self.read_scalar_sd(instr)?);
+        }
+        write_scalar_sd_round(self, instr.dst(), &src1, result, mask, zmask);
+        Ok(())
+    }
+}
+
+/// Write a scalar single result: element 0 masked, elements 1..3 from `src1`,
+/// everything above cleared. Bochs BX_WRITE_XMM_REG_CLEAR_HIGH on the merged
+/// operand.
+fn write_scalar_ss_round<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
+    dst_reg: u8,
+    src1: &BxPackedZmmRegister,
+    result_elem0: Float32,
+    mask: u64,
+    zero_masking: bool,
+) {
+    let dst = &mut cpu.vmm[dst_reg as usize];
+    if (mask & 1) != 0 {
+        dst.set_zmm32u(0, result_elem0);
+    } else if zero_masking {
+        dst.set_zmm32u(0, 0);
+    }
+    for i in 1..4 {
+        dst.set_zmm32u(i, src1.zmm32u(i));
+    }
+    for i in 4..16 {
+        dst.set_zmm32u(i, 0);
+    }
+}
+
+/// Qword counterpart of [`write_scalar_ss_round`].
+fn write_scalar_sd_round<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
+    dst_reg: u8,
+    src1: &BxPackedZmmRegister,
+    result_elem0: Float64,
+    mask: u64,
+    zero_masking: bool,
+) {
+    let dst = &mut cpu.vmm[dst_reg as usize];
+    if (mask & 1) != 0 {
+        dst.set_zmm64u(0, result_elem0);
+    } else if zero_masking {
+        dst.set_zmm64u(0, 0);
+    }
+    dst.set_zmm64u(1, src1.zmm64u(1));
+    for i in 2..8 {
+        dst.set_zmm64u(i, 0);
+    }
 }
 
 /// Bochs avx512_pfp.cc `float32_reduce`. An infinite operand reduces to zero;

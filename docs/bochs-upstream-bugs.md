@@ -157,3 +157,53 @@ would observe.
 than an intended-precise restore; filed as low confidence. Rusty Box
 deliberately reproduces Bochs's behavior here (zeroes the reference fields on
 restore) for parity — see `rusty_box/src/iodev/hpet.rs` `restore_snapshot_v3`.
+
+---
+
+## VRSQRT14 returns the wrong result for exact powers of two with an odd unbiased exponent
+
+**Files**: `cpu/avx/avx512_rsqrt14.cc` — `approximate_rsqrt14(float16)`,
+`approximate_rsqrt14(float32)`, `approximate_rsqrt14(float64)`
+**Confidence**: high — arithmetic, reproducible from the source alone
+**Rusty Box**: reproduced deliberately for parity, see
+`rusty_box/src/cpu/avx512_rcp14.rs` and the test
+`rsqrt14_reproduces_the_upstream_power_of_two_bug`
+
+VRSQRT14 selects one of two 32K-entry tables by the parity of the biased
+exponent, because halving an odd unbiased exponent leaves a factor of
+sqrt(2) that the table has to absorb. `rsqrt14_table0` covers the odd
+unbiased exponents (its entry 0 is ~0.4142 = 2/sqrt(2) - 1) and
+`rsqrt14_table1` the even ones (entry 0 ~1.0).
+
+All three width variants then do:
+
+```c
+  const Bit16u *rsqrt_table = (exp & 1) ? rsqrt14_table1 : rsqrt14_table0;
+  exp = 0x7E - ((exp - 0x7F) >> 1);
+  if (fraction)
+    fraction = rsqrt_table[fraction >> 8];
+  else
+    exp++;                       // <-- only valid on rsqrt14_table1
+```
+
+The `else exp++` shortcut assumes a zero significand means the result is an
+exact power of two. That holds on the even-exponent table — 1/sqrt(2^2k) is
+2^-k — but not on the odd one, where the significand should come from table
+entry 0 instead. So for any exact power of two with an odd unbiased
+exponent the answer is the reciprocal square root of the *next* power of
+two:
+
+| input | Bochs  | hardware / correct |
+|-------|--------|--------------------|
+| 2.0   | 1.0    | 0.70709…           |
+| 8.0   | 0.5    | 0.35355…           |
+| 32.0  | 0.25   | 0.17677…           |
+| 0.5   | 2.0    | 1.41418…           |
+
+That is a relative error of about 41%, far outside the 2^-14 the
+instruction guarantees. Even-exponent powers of two (1.0, 4.0, 16.0) and
+all non-power-of-two inputs are unaffected.
+
+The fix is to consult the table in both cases and keep `exp++` for the
+even-exponent table only, or equivalently to seed `fraction` from
+`rsqrt_table[0]` before the branch.

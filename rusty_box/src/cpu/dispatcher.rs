@@ -3170,6 +3170,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- VRCP14 / VRSQRT14 (table-driven, raise no exception) ---
+            Opcode::EvexVrcp14psVpsWpsKmask => {
+                self.evex_vrcp14ps(instr)
+            }
+            Opcode::EvexVrcp14pdVpdWpdKmask => {
+                self.evex_vrcp14pd(instr)
+            }
+            Opcode::EvexVrsqrt14psVpsWpsKmask => {
+                self.evex_vrsqrt14ps(instr)
+            }
+            Opcode::EvexVrsqrt14pdVpdWpdKmask => {
+                self.evex_vrsqrt14pd(instr)
+            }
+            Opcode::EvexVrcp14ssVssHpsWssKmask => {
+                self.evex_vrcp14ss(instr)
+            }
+            Opcode::EvexVrcp14sdVsdHpdWsdKmask => {
+                self.evex_vrcp14sd(instr)
+            }
+            Opcode::EvexVrsqrt14ssVssHpsWssKmask => {
+                self.evex_vrsqrt14ss(instr)
+            }
+            Opcode::EvexVrsqrt14sdVsdHpdWsdKmask => {
+                self.evex_vrsqrt14sd(instr)
+            }
+
             // --- VFIXUPIMM, VEXPAND, VCOMPRESS ---
             Opcode::EvexVfixupimmpsVpsHpsWpsIb | Opcode::EvexVfixupimmpsVpsHpsWpsIbKmask => {
                 self.evex_vfixupimmps(instr)
