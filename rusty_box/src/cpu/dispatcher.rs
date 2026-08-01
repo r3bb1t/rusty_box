@@ -3047,28 +3047,28 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 if instr.mod_c0() {
                     self.evex_vmovdqu32_load_r(instr)
                 } else {
-                    self.evex_vmovdqu32_load_m(instr)
+                    self.evex_vmovaps_load_m(instr)
                 }
             }
             Opcode::EvexVmovdqa32WdqVdq | Opcode::EvexVmovdqa32WdqVdqKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu32_store_r(instr)
                 } else {
-                    self.evex_vmovdqu32_store_m(instr)
+                    self.evex_vmovaps_store_m(instr)
                 }
             }
             Opcode::EvexVmovdqa64VdqWdq | Opcode::EvexVmovdqa64VdqWdqKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu64_load_r(instr)
                 } else {
-                    self.evex_vmovdqu64_load_m(instr)
+                    self.evex_vmovaps_load_m(instr)
                 }
             }
             Opcode::EvexVmovdqa64WdqVdq | Opcode::EvexVmovdqa64WdqVdqKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu64_store_r(instr)
                 } else {
-                    self.evex_vmovdqu64_store_m(instr)
+                    self.evex_vmovaps_store_m(instr)
                 }
             }
             Opcode::EvexVpadddVdqHdqWdq | Opcode::EvexVpadddVdqHdqWdqKmask => {
@@ -3170,6 +3170,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- F16C. VCVTPH2PSX/VCVTPS2PHX are AVX512_FP16 and stay #UD. ---
+            Opcode::EvexVcvtph2psVpsWps | Opcode::EvexVcvtph2psVpsWpsKmask => {
+                self.evex_vcvtph2ps(instr)
+            }
+            Opcode::EvexVcvtps2phWpsVpsIb | Opcode::EvexVcvtps2phWpsVpsIbKmask => {
+                self.evex_vcvtps2ph(instr)
+            }
+
             // --- VRCP14 / VRSQRT14 (table-driven, raise no exception) ---
             Opcode::EvexVrcp14psVpsWpsKmask => {
                 self.evex_vrcp14ps(instr)
@@ -3241,9 +3249,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVpbroadcastmb2qVdqKeb => self.evex_vpbroadcastmb2q(instr),
             Opcode::EvexVpbroadcastmw2dVdqKew => self.evex_vpbroadcastmw2d(instr),
             Opcode::EvexVdbpsadbwVdqHdqWdqIbKmask => self.evex_vdbpsadbw(instr),
-            Opcode::EvexVbroadcastf32x2VpsWq | Opcode::EvexVbroadcastf32x2VpsWqKmask => {
-                self.evex_vbroadcastf32x2(instr)
-            }
+            // VBROADCASTI32x2 is the integer spelling of the same operation and
+            // shares upstream's handler.
+            Opcode::EvexVbroadcastf32x2VpsWq
+            | Opcode::EvexVbroadcastf32x2VpsWqKmask
+            | Opcode::EvexVbroadcasti32x2VdqWq
+            | Opcode::EvexVbroadcasti32x2VdqWqKmask => self.evex_vbroadcastf32x2(instr),
 
             // --- VMOVDQU8 / VMOVDQU16 (byte- and word-granular masked moves) ---
             Opcode::EvexVmovdqu8VdqWdq | Opcode::EvexVmovdqu8VdqWdqKmask => {
@@ -3639,47 +3650,78 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVpalignrVdqHdqWdqIb | Opcode::EvexVpalignrVdqHdqWdqIbKmask => {
                 self.evex_vpalignr(instr)
             }
-            // VMOVUPS/VMOVUPD/VMOVAPS/VMOVAPD (EVEX) — all reuse VMOVDQU32 handlers
-            Opcode::EvexVmovupsVpsWps
-            | Opcode::EvexVmovupsVpsWpsKmask
-            | Opcode::EvexVmovapsVpsWps
-            | Opcode::EvexVmovapsVpsWpsKmask => {
+            // VMOVUPS/VMOVUPD reuse the VMOVDQU handlers directly. VMOVAPS and
+            // VMOVAPD are the same operation except that the memory form must
+            // be aligned to the full vector width, so they take the checking
+            // wrapper — Bochs avx512_move.cc raises #GP(0) there.
+            Opcode::EvexVmovupsVpsWps | Opcode::EvexVmovupsVpsWpsKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu32_load_r(instr)
                 } else {
                     self.evex_vmovdqu32_load_m(instr)
                 }
             }
-            Opcode::EvexVmovupsWpsVps
-            | Opcode::EvexVmovupsWpsVpsKmask
-            | Opcode::EvexVmovapsWpsVps
-            | Opcode::EvexVmovapsWpsVpsKmask => {
+            Opcode::EvexVmovapsVpsWps | Opcode::EvexVmovapsVpsWpsKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu32_load_r(instr)
+                } else {
+                    self.evex_vmovaps_load_m(instr)
+                }
+            }
+            Opcode::EvexVmovupsWpsVps | Opcode::EvexVmovupsWpsVpsKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu32_store_r(instr)
                 } else {
                     self.evex_vmovdqu32_store_m(instr)
                 }
             }
-            Opcode::EvexVmovupdVpdWpd
-            | Opcode::EvexVmovupdVpdWpdKmask
-            | Opcode::EvexVmovapdVpdWpd
-            | Opcode::EvexVmovapdVpdWpdKmask => {
+            Opcode::EvexVmovapsWpsVps | Opcode::EvexVmovapsWpsVpsKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu32_store_r(instr)
+                } else {
+                    self.evex_vmovaps_store_m(instr)
+                }
+            }
+            Opcode::EvexVmovupdVpdWpd | Opcode::EvexVmovupdVpdWpdKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu64_load_r(instr)
                 } else {
                     self.evex_vmovdqu64_load_m(instr)
                 }
             }
-            Opcode::EvexVmovupdWpdVpd
-            | Opcode::EvexVmovupdWpdVpdKmask
-            | Opcode::EvexVmovapdWpdVpd
-            | Opcode::EvexVmovapdWpdVpdKmask => {
+            Opcode::EvexVmovapdVpdWpd | Opcode::EvexVmovapdVpdWpdKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu64_load_r(instr)
+                } else {
+                    self.evex_vmovaps_load_m(instr)
+                }
+            }
+            Opcode::EvexVmovupdWpdVpd | Opcode::EvexVmovupdWpdVpdKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu64_store_r(instr)
                 } else {
                     self.evex_vmovdqu64_store_m(instr)
                 }
             }
+            Opcode::EvexVmovapdWpdVpd | Opcode::EvexVmovapdWpdVpdKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu64_store_r(instr)
+                } else {
+                    self.evex_vmovaps_store_m(instr)
+                }
+            }
+            // VMOVNT* are memory-only and unmasked, but otherwise the aligned
+            // full-vector move. Bochs routes them to VMOVAPS_*psM.
+            Opcode::EvexVmovntdqaVdqMdq => self.evex_vmovaps_load_m(instr),
+            Opcode::EvexVmovntdqMdqVdq
+            | Opcode::EvexVmovntpsMpsVps
+            | Opcode::EvexVmovntpdMpdVpd => self.evex_vmovaps_store_m(instr),
+            // The FP gathers are bit-identical to the integer ones: the
+            // element width, not the interpretation, is all that matters.
+            Opcode::EvexVgatherdpsVpsVsib => self.evex_vpgatherdd(instr),
+            Opcode::EvexVgatherdpdVpdVsib => self.evex_vpgatherdq(instr),
+            Opcode::EvexVgatherqpsVpsVsib => self.evex_vpgatherqd(instr),
+            Opcode::EvexVgatherqpdVpdVsib => self.evex_vpgatherqq(instr),
 
             // --- EVEX FP scalar (avx512_scalar.rs) ---
             Opcode::EvexVaddssVssHpsWss | Opcode::EvexVaddssVssHpsWssKmask => {

@@ -6,7 +6,10 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_cvt.cc`.
 
+use super::softfloat3e::f16_to_f32::f16_to_f32;
+use super::softfloat3e::f32_to_f16::f32_to_f16;
 use super::softfloat3e::f32_to_f64::f32_to_f64;
+use super::softfloat3e::softfloat::{softfloat_suppress_exception, FLAG_DENORMAL};
 use super::softfloat3e::f32_to_int::{
     f32_to_i32, f32_to_i32_r_min_mag, f32_to_i64, f32_to_i64_r_min_mag,
 };
@@ -128,6 +131,29 @@ fn write_zmm_masked_n<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
     // Zero upper elements beyond VL (EVEX always clears upper)
     for i in nelements..16 {
         dst.set_zmm32u(i, 0);
+    }
+}
+
+/// Write `nelements` *words* with masking and clear everything above. Used by
+/// VCVTPS2PH, whose n singles become n words — half a vector.
+fn write_zmm_masked_w_half<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
+    reg: u8,
+    result: &BxPackedZmmRegister,
+    mask: u64,
+    zero_masking: bool,
+    nelements: usize,
+) {
+    let dst = &mut cpu.vmm[reg as usize];
+    for i in 0..nelements {
+        if (mask >> i) & 1 != 0 {
+            dst.set_zmm16u(i, result.zmm16u(i));
+        } else if zero_masking {
+            dst.set_zmm16u(i, 0);
+        }
+    }
+    for i in nelements..32 {
+        dst.set_zmm16u(i, 0);
     }
 }
 
@@ -539,6 +565,72 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VCVTTPD2UDQ Vdq{k}, Wpd — EVEX.0F.W1 78 (truncate)
     pub fn evex_vcvttpd2udq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_cvt_pd2udq(instr, true)
+    }
+
+    // ========================================================================
+    // F16C. Bochs avx512_cvt.cc VCVTPH2PS/VCVTPS2PH_MASK_*.
+    //
+    // Both deviate from MXCSR in one direction each, and upstream is explicit
+    // about it: the widening direction ignores DAZ and reports no denormal
+    // exception, and the narrowing direction ignores FTZ and takes its
+    // rounding mode from imm8 unless imm8[2] says to keep MXCSR's.
+    // ========================================================================
+
+    /// VCVTPH2PS Vps{k}{z}, Wps — EVEX.66.0F38.W0 13. The source is half
+    /// width: one word per resulting single.
+    pub fn evex_vcvtph2ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_half_vec_mask_w_pair(instr)?
+        };
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        status.softfloat_denormals_are_zeros = false; // ignore MXCSR.DAZ
+        softfloat_suppress_exception(&mut status, FLAG_DENORMAL);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(i, f16_to_f32(src.zmm16u(i), &mut status));
+            }
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VCVTPS2PH Wps{k}{z}, Vps, Ib — EVEX.66.0F3A.W0 1D. Half-width output.
+    pub fn evex_vcvtps2ph(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let src = read_zmm(self, instr.src());
+        let mask = read_opmask_for_write(self, instr);
+        let control = instr.ib();
+        let mut status = self.sse_status();
+        status.softfloat_flush_underflow_to_zero = false; // ignore MXCSR.FUZ
+        if control & 0x4 == 0 {
+            status.softfloat_rounding_mode = control & 0x3;
+        }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm16u(i, f32_to_f16(src.zmm32u(i), &mut status));
+            }
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+
+        if instr.mod_c0() {
+            // n singles become n words, i.e. half a vector.
+            let zmask = instr.is_zero_masking() != 0;
+            write_zmm_masked_w_half(self, instr.dst(), &result, mask, zmask, nelements);
+            Ok(())
+        } else {
+            let eaddr = self.resolve_addr(instr);
+            self.avx_masked_store16(instr, eaddr, &result, mask & ((1u64 << nelements) - 1))
+        }
     }
     // ========================================================================
     // AVX512_DQ qword <-> floating-point.

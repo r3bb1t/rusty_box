@@ -173,6 +173,39 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     /// VMOVDQU32 Vdq{k}, Wdq — EVEX.0F.W0 6F (load, register form)
+    /// The aligned vector moves (VMOVAPS/APD, VMOVDQA32/64, VMOVNT*) require
+    /// the effective address to be aligned to the full vector width and raise
+    /// #GP(0) otherwise. The unaligned forms (VMOVUPS/UPD, VMOVDQU*) do not.
+    /// Bochs avx512_move.cc VMOVAPS_MASK_VpsWpsM.
+    fn evex_check_vector_alignment(&mut self, instr: &Instruction, eaddr: u64) -> super::Result<()> {
+        let len_in_bytes = match instr.get_vl() {
+            0 => 16u64,
+            1 => 32,
+            _ => 64,
+        };
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = self.get_laddr64(seg as usize, eaddr);
+        if laddr & (len_in_bytes - 1) != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        Ok(())
+    }
+
+    /// VMOVAPS/APD, VMOVDQA32/64 — memory load. Identical to the unaligned
+    /// form except for the alignment requirement.
+    pub fn evex_vmovaps_load_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let eaddr = self.resolve_addr(instr);
+        self.evex_check_vector_alignment(instr, eaddr)?;
+        self.evex_vmovdqu32_load_m(instr)
+    }
+
+    /// VMOVAPS/APD, VMOVDQA32/64 — memory store.
+    pub fn evex_vmovaps_store_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let eaddr = self.resolve_addr(instr);
+        self.evex_check_vector_alignment(instr, eaddr)?;
+        self.evex_vmovdqu32_store_m(instr)
+    }
+
     pub fn evex_vmovdqu32_load_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let src = read_zmm(self, instr.src());
