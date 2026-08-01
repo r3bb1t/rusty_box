@@ -2978,3 +2978,74 @@ fn run_remap_gap_cases() {
         "vcvtpd2dq(2147483647.5) rounds up out of range → 0x80000000"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// End-to-end proof that AVX-512 is reachable by a guest.
+//
+// Every link in the chain has to hold: CPUID must advertise AVX512F so the
+// ISA gate resolves the opcode instead of rewriting it to IaError; XSETBV
+// must accept the OPMASK|ZMM_HI256|HI_ZMM bits, which needs leaf 0xD to
+// report them in xcr0_suppmask; handle_avx_mode_change must then open
+// EVEX_OK so decode does not substitute BxNoEVEX; and the handler must run.
+// Any one of those missing turns this into a #UD.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn evex_is_reachable_by_a_guest_end_to_end() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let cfg = EmulatorConfig::default();
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                .expect("new emulator");
+            emu.reg_write(
+                X86Reg::Cr4,
+                emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+            );
+
+            // XSETBV with the full AVX-512 XCR0: FPU|SSE|YMM|OPMASK|ZMM_HI256|HI_ZMM.
+            // This #GPs unless CPUID leaf 0xD advertises all six.
+            emu.reg_write(X86Reg::Rax, 0xE7);
+            emu.reg_write(X86Reg::Rcx, 0);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+                .expect("write xsetbv");
+            emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                .expect("XSETBV with the AVX-512 XCR0 bits must succeed");
+
+            // VPADDD zmm0, zmm1, zmm2 = EVEX.512.66.0F.W0 FE /r
+            //   62 F1 75 48 FE C2
+            //   P0=F1: mm=01 (0F map), R/X/B/R' inverted-high
+            //   P1=75: W=0, vvvv=1110 -> zmm1, pp=01 (66)
+            //   P2=48: L'L=10 (512-bit), z=0, b=0, V'=1(inv->0), aaa=000
+            //   ModRM C2: reg=zmm0, rm=zmm2
+            emu.mem_write(CASE_BASE, &[0x62, 0xF1, 0x75, 0x48, 0xFE, 0xC2, 0xEB, 0xFE])
+                .expect("write vpaddd");
+
+            let mut a = [0u8; 64];
+            let mut b = [0u8; 64];
+            for lane in 0..16 {
+                a[lane * 4..lane * 4 + 4].copy_from_slice(&(lane as u32 + 1).to_le_bytes());
+                b[lane * 4..lane * 4 + 4].copy_from_slice(&(100u32).to_le_bytes());
+            }
+            emu.reg_write_zmm(X86Reg::Zmm1, a);
+            emu.reg_write_zmm(X86Reg::Zmm2, b);
+            emu.reg_write_zmm(X86Reg::Zmm0, [0xAA; 64]);
+
+            emu.emu_start(CASE_BASE, None, None, Some(1))
+                .expect("EVEX VPADDD must execute, not #UD");
+
+            let got = emu.reg_read_zmm(X86Reg::Zmm0);
+            for lane in 0..16 {
+                let v = u32::from_le_bytes(got[lane * 4..lane * 4 + 4].try_into().unwrap());
+                assert_eq!(
+                    v,
+                    lane as u32 + 101,
+                    "zmm0 dword {lane}: all 16 lanes must be added, including those above 256 bits"
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}
