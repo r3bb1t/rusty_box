@@ -106,6 +106,9 @@ pub(super) mod mult8;
 pub(super) mod mwait;
 pub(super) mod opcodes_table;
 pub(super) mod paging;
+/// Null-page write-fault tripwire (see the module docs). Diagnostic-only.
+#[cfg(feature = "std")]
+pub(super) mod pf_diag;
 pub(super) mod proc_ctrl;
 pub(super) mod protect_ctrl;
 pub(super) mod protected_interrupts;

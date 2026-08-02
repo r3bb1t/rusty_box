@@ -283,6 +283,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.diag_exception_counts[vec_idx] += 1;
             }
         }
+        // Diagnostic ring for the pf_diag tripwire (see cpu.rs field docs).
+        #[cfg(feature = "std")]
+        {
+            self.exc_diag_ring[self.exc_diag_idx % 32] =
+                (self.icount, vector as u8, error_code, self.prev_rip);
+            self.exc_diag_idx = self.exc_diag_idx.wrapping_add(1);
+        }
         // Log the caller site for #GP to identify spurious exceptions during debugging
         if vector == Exception::Gp && !self.real_mode() {
             let caller = core::panic::Location::caller();

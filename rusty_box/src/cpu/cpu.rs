@@ -587,6 +587,20 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /// Exception counts by vector (0=DE, 6=UD, 13=GP, 14=PF, etc.)
     #[cfg(debug_assertions)]
     pub(crate) diag_exception_counts: [u64; 32],
+    /// Diagnostic ring of recent external-interrupt injections
+    /// `(icount, vector, rip-at-delivery)` — dumped by the cpu/pf_diag.rs
+    /// tripwire to expose interrupt timing around a fault. The zeroed
+    /// initial state is a valid empty ring. std-only diagnostic state.
+    #[cfg(feature = "std")]
+    pub(crate) irq_diag_ring: [(u64, u8, u64); 32],
+    #[cfg(feature = "std")]
+    pub(crate) irq_diag_idx: usize,
+    /// Diagnostic ring of recent exceptions `(icount, vector, error_code,
+    /// prev_rip)`. Same lifecycle as `irq_diag_ring`.
+    #[cfg(feature = "std")]
+    pub(crate) exc_diag_ring: [(u64, u8, u16, u64); 32],
+    #[cfg(feature = "std")]
+    pub(crate) exc_diag_idx: usize,
     /// Count of IaError (decoder failures) encountered
     #[cfg(debug_assertions)]
     pub(crate) diag_ia_error_count: u64,
@@ -2280,6 +2294,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.instrumentation.fire_hwinterrupt(&ev);
         }
 
+        // Diagnostic ring for the pf_diag tripwire (see field docs).
+        #[cfg(feature = "std")]
+        {
+            self.irq_diag_ring[self.irq_diag_idx % 32] = (self.icount, vector, self.rip());
+            self.irq_diag_idx = self.irq_diag_idx.wrapping_add(1);
+        }
+
         // Wake from halt/wait state.
         self.activity_state = CpuActivityState::Active;
         // Clear stop-trace and sleep sentinel so execution can resume.
@@ -3051,12 +3072,15 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if let Some(target) = self.i_cache.trace_links[branch_idx].target(stamp, rip) {
             return Some(target);
         }
-        // Store path — Bochs linkTrace's find_entry hit case.
-        let eip_biased = (rip as i64).wrapping_add(self.eip_page_bias as i64) as u32;
-        if self.eip_page_window_size == 0 || eip_biased >= self.eip_page_window_size {
+        // Store path — Bochs linkTrace's find_entry hit case. The distance
+        // check runs at full 64-bit width for the same reason as
+        // get_icache_entry: a branch target >= 4 GiB away must never pass as
+        // in-window via u32 truncation.
+        let eip_biased = rip.wrapping_add(self.eip_page_bias);
+        if self.eip_page_window_size == 0 || eip_biased >= u64::from(self.eip_page_window_size) {
             return None;
         }
-        let p_addr: BxPhyAddress = self.p_addr_fetch_page.wrapping_add(u64::from(eip_biased));
+        let p_addr: BxPhyAddress = self.p_addr_fetch_page.wrapping_add(eip_biased);
         let hash_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
         let entry = &self.i_cache.entry[hash_idx];
         if entry.p_addr != p_addr {
@@ -3088,15 +3112,21 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         if mem.smc_seq_next() > self.smc_seq_seen {
             self.smc_apply_pending(mem, false);
         }
-        // Check if we need to prefetch a new page (matching C++ lines 289-292)
-        let needs_prefetch = self.eip_page_window_size == 0 || {
-            let eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
-            eip_biased >= self.eip_page_window_size
-        };
+        // Check if we need to prefetch a new page. Bochs cpu.cc getICacheEntry:
+        // `bx_address eipBiased = RIP + eipPageBias; if (eipBiased >=
+        // eipPageWindowSize) prefetch();` — the compare runs at full bx_address
+        // (64-bit) width. Near indirect transfers (JMP/CALL r/m64, RET) never
+        // invalidate the prefetch window (Bochs ctrl_xfer64.cc parity) and rely
+        // on this compare to leave it; truncating the distance to u32 first
+        // would let a target >= 4 GiB away whose bits 12..31 match the stale
+        // window's page base alias back into it and execute the OLD page's
+        // bytes at the new RIP (the Ubuntu 'logger' ASLR segfault).
+        let mut eip_biased_64 = self.rip().wrapping_add(self.eip_page_bias);
+        let needs_prefetch = self.eip_page_window_size == 0
+            || eip_biased_64 >= u64::from(self.eip_page_window_size);
         // Get raw pointer to mem before calling prefetch() to work around borrow checker
         // SAFETY: addr_of_mut avoids creating intermediate reference; pointer valid for fn scope
         let mem_ptr: *mut BxMemC<'c> = unsafe { core::ptr::addr_of_mut!(*mem) };
-        let mut eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
 
         if needs_prefetch {
             #[cfg(feature = "profiling")]
@@ -3122,11 +3152,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     continue;
                 }
 
-                eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
+                eip_biased_64 = self.rip().wrapping_add(self.eip_page_bias);
 
-                if eip_biased >= self.eip_page_window_size {
+                if eip_biased_64 >= u64::from(self.eip_page_window_size) {
                     tracing::trace!("eip_biased ({}) >= eip_page_window_size ({}) after prefetch, RIP={:#x}, retrying",
-                        eip_biased, self.eip_page_window_size, self.rip());
+                        eip_biased_64, self.eip_page_window_size, self.rip());
                     self.eip_fetch_ptr = None;
                     self.eip_page_window_size = 0;
                     retry_count += 1;
@@ -3140,6 +3170,9 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 break;
             }
         }
+
+        // In-window by the 64-bit check above, so the narrowing is exact.
+        let eip_biased = eip_biased_64 as u32;
 
         // Physical address for this instruction
         let p_addr: BxPhyAddress = self
@@ -3435,8 +3468,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             );
             page_offset = super::tlb::page_offset(laddr);
 
-            // Calculate RIP at the beginning of the page.
-            let eip_page_bias_calc = BxAddress::from(page_offset.wrapping_sub(eip));
+            // Calculate RIP at the beginning of the page. Bochs cpu.cc
+            // prefetch: `eipPageBias = (bx_address) pageOffset - EIP` — the
+            // subtraction wraps at 64 bits (bx_address), NOT 32. RIP's high
+            // bits were cleared above, so `RIP + bias` (mod 2^64) lands
+            // exactly on the in-page offset; a 32-bit-wrapped bias would put
+            // it at 2^32 + offset and fail get_icache_entry's full-width
+            // window compare in every legacy mode.
+            let eip_page_bias_calc = u64::from(page_offset).wrapping_sub(u64::from(eip));
 
             let limit: u32 = self.sregs[BxSegregs::Cs as usize]
                 .cache
@@ -3471,14 +3510,17 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
             self.eip_page_window_size = 4096;
 
-            // Check if segment limit constrains the fetch window to less than 4096 bytes.
-            // Use u64 to avoid u32 overflow when limit is 0xFFFFFFFF (flat 4GB segment).
-            // Matches Bochs cpu.cc — but Bochs relies on C unsigned wrapping which
-            // coincidentally produces the right behavior in most cases because the resulting
-            // large eipPageWindowSize still allows eip_biased (a page offset) through.
-            // We must be precise here because Rust bounds-checks the fetch buffer.
-            if (limit as u64) + (self.eip_page_window_size as u64) < 4096 {
-                self.eip_page_window_size = (u64::from(limit) + self.eip_page_bias + 1) as u32;
+            // Bochs cpu.cc prefetch: `if (limit + eipPageBias + 1 < 4096)
+            // eipPageWindowSize = (Bit32u)(limit + eipPageBias + 1);` —
+            // mod-2^64 bx_address arithmetic. `limit >= EIP` was enforced
+            // above, so the sum is the exclusive end offset of the fetchable
+            // bytes in this page under the CS limit; >= 4096 means the limit
+            // does not constrain the window.
+            let limit_window = u64::from(limit)
+                .wrapping_add(self.eip_page_bias)
+                .wrapping_add(1);
+            if limit_window < 4096 {
+                self.eip_page_window_size = limit_window as u32;
             }
         }
         // skip the
@@ -3498,6 +3540,11 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         // Track whether translate_linear succeeded so we can populate the iTLB afterward.
         let mut itlb_should_update = false;
+        // The walk's true page-size mask for the ITLB fill below. Bochs
+        // paging.cc translate_linear stores it in the entry and sets
+        // `ITLB.split_large` for large execute leaves so INVLPG flushes every
+        // 4 KiB frame of the huge page.
+        let mut itlb_lpf_mask: u32 = 0xFFF;
 
         let fetch_ptr_option = if tlb_hit {
             self.p_addr_fetch_page = tlb_ppf;
@@ -3528,9 +3575,10 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 a20_mask,
                 mem,
             ) {
-                Ok(p_addr) => {
+                Ok((p_addr, walk_lpf_mask)) => {
                     self.p_addr_fetch_page = ppf_of(p_addr);
                     itlb_should_update = true;
+                    itlb_lpf_mask = walk_lpf_mask;
                     tracing::trace!(
                         "prefetch: translate_linear OK, p_addr={:#x}, p_addr_fetch_page={:#x}",
                         p_addr,
@@ -3658,8 +3706,17 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                     tlb_entry.lpf = lpf;
                     tlb_entry.ppf = ppf;
                     tlb_entry.access_bits = access_bits;
-                    tlb_entry.lpf_mask = 0xFFF;
+                    // The walk's true page-size mask — INVLPG matches
+                    // `(laddr & !mask) == (lpf & !mask)`, so a large code
+                    // page's every 4 KiB frame dies on one INVLPG (Bochs
+                    // paging.cc translate_linear `tlbEntry->lpf_mask`).
+                    tlb_entry.lpf_mask = itlb_lpf_mask;
                     tlb_entry.host_page_addr = host_page_ptr;
+                }
+                if itlb_lpf_mask > 0xFFF {
+                    // Bochs paging.cc: `if (isExecute) ITLB.split_large = true`
+                    // — routes INVLPG through the mask-aware scan path.
+                    self.itlb.split_large = true;
                 }
                 self.sync_itlb_pin_slot(lpf, 0);
             }
