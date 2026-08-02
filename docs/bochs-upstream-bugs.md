@@ -207,3 +207,41 @@ all non-power-of-two inputs are unaffected.
 The fix is to consult the table in both cases and keep `exp++` for the
 even-exponent table only, or equivalently to seed `fraction` from
 `rsqrt_table[0]` before the branch.
+
+---
+
+## EVEX opcode groups that the master table never references
+
+**Found 2026-08-01**, while generating rusty's EVEX opcode maps from
+`cpu/decoder/fetchdecode_opmap_evex.cc`.
+
+Four groups are defined in that file and then never referenced from
+`BxOpcodeTableEVEX`, so nothing can ever select them:
+
+| group | instructions | ISA |
+|---|---|---|
+| `BxOpcodeGroup_EVEX_0F38D2` | VPDPWSUD, VPDPWSUDS | AVX-VNNI-INT16 |
+| `BxOpcodeGroup_EVEX_0F38D3` | VPDPWUSD, VPDPWUSDS | AVX-VNNI-INT16 |
+| `BxOpcodeGroup_EVEX_0F38DA` | VSM4KEY4 | SM4 |
+| `BxOpcodeGroup_EVEX_0F38DB` | VSM4RNDS4 | SM4 |
+
+`BxOpcodeGroup_EVEX_0F38DB` is not referenced at all — not even by its own
+definition site being reachable — and the other three appear exactly once,
+at their definition. The corresponding master-table slots hold
+`BxOpcodeGroup_ERR`, so a guest executing any of these encodings takes #UD
+even on a CPU model that advertises the ISA.
+
+The handlers exist (`BX_IA_EVEX_VPDPWSUD_VdqHdqWdq` and friends are defined
+in `ia_opcodes_evex.def` with real execute functions), so this is missing
+wiring rather than missing implementation — the same shape of defect as the
+gap this project hit on its own side: an opcode can have a correct,
+dispatched handler and still be unreachable because no decoder table slot
+produces it.
+
+Reproduced deliberately in rusty for parity: `scripts/gen_opmap_evex.py`
+transcribes the master table as it stands, so those slots are empty there
+too. 14 of the 19 EVEX opcodes rusty cannot reach are these; if upstream
+wires them up, regenerating picks them up automatically.
+
+Detection is mechanical — for each `BxOpcodeGroup_EVEX_*` definition, count
+references in the same file; a count of one means the group is orphaned.

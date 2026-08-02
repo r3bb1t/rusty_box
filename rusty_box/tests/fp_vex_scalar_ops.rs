@@ -3459,3 +3459,222 @@ fn evex_vcvtudq2pd_converts_unsigned() {
         .join()
         .expect("join test thread");
 }
+
+// The float-to-qword conversions at 0F 7A / 0F 7B. These produce integers
+// that callers use as indices and offsets, so a wrong result turns into a
+// bad pointer rather than a visibly wrong number. 7A truncates, 7B rounds
+// to nearest even — testing both against the same inputs also catches the
+// two being swapped.
+#[test]
+fn evex_float_to_qword_conversions() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            // (name, bytes, source bytes, expected two qwords)
+            let ps = |a: f32, b: f32| {
+                let mut v = [0u8; 64];
+                v[0..4].copy_from_slice(&a.to_le_bytes());
+                v[4..8].copy_from_slice(&b.to_le_bytes());
+                v
+            };
+            let pd = |a: f64, b: f64| {
+                let mut v = [0u8; 64];
+                v[0..8].copy_from_slice(&a.to_le_bytes());
+                v[8..16].copy_from_slice(&b.to_le_bytes());
+                v
+            };
+            let cases: &[(&str, [u8; 6], [u8; 64], [i64; 2])] = &[
+                ("VCVTTPS2QQ", [0x62, 0xF1, 0x7D, 0x08, 0x7A, 0xCA], ps(1.5, -2.7), [1, -2]),
+                ("VCVTPS2QQ", [0x62, 0xF1, 0x7D, 0x08, 0x7B, 0xCA], ps(1.5, -2.7), [2, -3]),
+                ("VCVTTPD2QQ", [0x62, 0xF1, 0xFD, 0x08, 0x7A, 0xCA], pd(1.5, -2.7), [1, -2]),
+                ("VCVTPD2QQ", [0x62, 0xF1, 0xFD, 0x08, 0x7B, 0xCA], pd(1.5, -2.7), [2, -3]),
+            ];
+
+            for (name, enc, src, want) in cases {
+                let cfg = EmulatorConfig::default();
+                let mut emu =
+                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                        .expect("new emulator");
+                emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
+                emu.reg_write(X86Reg::Rax, 0xE7);
+                emu.reg_write(X86Reg::Rcx, 0);
+                emu.reg_write(X86Reg::Rdx, 0);
+                emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+                emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                    .expect("enable AVX-512 state");
+
+                emu.reg_write_zmm(X86Reg::Zmm2, *src);
+                emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
+
+                let mut code = [0u8; 8];
+                code[..6].copy_from_slice(enc);
+                code[6] = 0xEB;
+                code[7] = 0xFE;
+                emu.mem_write(CASE_BASE, &code).expect("write conversion");
+                emu.emu_start(CASE_BASE, None, None, Some(1))
+                    .unwrap_or_else(|e| panic!("{name} must execute: {e:?}"));
+
+                let got = emu.reg_read_zmm(X86Reg::Zmm1);
+                for lane in 0..2 {
+                    let v = i64::from_le_bytes(got[lane * 8..lane * 8 + 8].try_into().unwrap());
+                    assert_eq!(v, want[lane], "{name} qword {lane}");
+                }
+            }
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}
+
+// The remaining unsigned conversions at 0F 7A. Values above 2^31 (dword) and
+// 2^63 (qword) are where a signed handler diverges, so each case includes one.
+#[test]
+fn evex_unsigned_int_to_float_conversions() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            fn mk(emu: &mut Emulator<'static, Corei7SkylakeX>) {
+                emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
+                emu.reg_write(X86Reg::Rax, 0xE7);
+                emu.reg_write(X86Reg::Rcx, 0);
+                emu.reg_write(X86Reg::Rdx, 0);
+                emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+                emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                    .expect("enable AVX-512 state");
+            }
+
+            // VCVTUQQ2PD xmm1, xmm2 — EVEX.128.F3.0F.W1 7A
+            {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(), CpuSetupMode::FlatLong64).expect("emu");
+                mk(&mut emu);
+                let vals: [u64; 2] = [5, 0x8000_0000_0000_0000];
+                let mut src = [0u8; 64];
+                for (i, v) in vals.iter().enumerate() {
+                    src[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+                }
+                emu.reg_write_zmm(X86Reg::Zmm2, src);
+                emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
+                emu.mem_write(CASE_BASE, &[0x62, 0xF1, 0xFE, 0x08, 0x7A, 0xCA, 0xEB, 0xFE])
+                    .expect("write");
+                emu.emu_start(CASE_BASE, None, None, Some(1)).expect("VCVTUQQ2PD");
+                let got = emu.reg_read_zmm(X86Reg::Zmm1);
+                for (i, v) in vals.iter().enumerate() {
+                    let d = f64::from_le_bytes(got[i * 8..i * 8 + 8].try_into().unwrap());
+                    assert_eq!(d, *v as f64, "VCVTUQQ2PD qword {i} ({v:#018X})");
+                }
+            }
+
+            // VCVTUDQ2PS xmm1, xmm2 — EVEX.128.F2.0F.W0 7A
+            {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(), CpuSetupMode::FlatLong64).expect("emu");
+                mk(&mut emu);
+                let vals: [u32; 4] = [1, 7, 0x8000_0000, 0xFFFF_FF00];
+                let mut src = [0u8; 64];
+                for (i, v) in vals.iter().enumerate() {
+                    src[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+                }
+                emu.reg_write_zmm(X86Reg::Zmm2, src);
+                emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
+                emu.mem_write(CASE_BASE, &[0x62, 0xF1, 0x7F, 0x08, 0x7A, 0xCA, 0xEB, 0xFE])
+                    .expect("write");
+                emu.emu_start(CASE_BASE, None, None, Some(1)).expect("VCVTUDQ2PS");
+                let got = emu.reg_read_zmm(X86Reg::Zmm1);
+                for (i, v) in vals.iter().enumerate() {
+                    let f = f32::from_le_bytes(got[i * 4..i * 4 + 4].try_into().unwrap());
+                    assert_eq!(f, *v as f32, "VCVTUDQ2PS dword {i} ({v:#010X})");
+                }
+            }
+
+            // VCVTUQQ2PS xmm1, xmm2 — EVEX.128.F2.0F.W1 7A (2 qwords -> 2 floats)
+            {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(), CpuSetupMode::FlatLong64).expect("emu");
+                mk(&mut emu);
+                let vals: [u64; 2] = [9, 0xFFFF_FFFF_0000_0000];
+                let mut src = [0u8; 64];
+                for (i, v) in vals.iter().enumerate() {
+                    src[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+                }
+                emu.reg_write_zmm(X86Reg::Zmm2, src);
+                emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
+                emu.mem_write(CASE_BASE, &[0x62, 0xF1, 0xFF, 0x08, 0x7A, 0xCA, 0xEB, 0xFE])
+                    .expect("write");
+                emu.emu_start(CASE_BASE, None, None, Some(1)).expect("VCVTUQQ2PS");
+                let got = emu.reg_read_zmm(X86Reg::Zmm1);
+                for (i, v) in vals.iter().enumerate() {
+                    let f = f32::from_le_bytes(got[i * 4..i * 4 + 4].try_into().unwrap());
+                    assert_eq!(f, *v as f32, "VCVTUQQ2PS qword {i} ({v:#018X})");
+                }
+            }
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}
+
+// VCVTUSI2SS / VCVTUSI2SD at 0F 7B take their source from a GPR and are the
+// unsigned forms, so 0xFFFFFFFF and 0xFFFFFFFFFFFFFFFF must convert to large
+// positives rather than -1.
+#[test]
+fn evex_vcvtusi2_scalar_conversions() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            // (name, encoding, rdx value, 32-bit source?, expected as f64)
+            let cases: &[(&str, [u8; 6], u64, bool)] = &[
+                // VCVTUSI2SD xmm1, xmm0, rdx  — EVEX.F2.0F.W1 7B
+                ("VCVTUSI2SD r64", [0x62, 0xF1, 0xFF, 0x08, 0x7B, 0xCA], 0xFFFF_FFFF_FFFF_FFFF, false),
+                // VCVTUSI2SD xmm1, xmm0, edx  — EVEX.F2.0F.W0 7B
+                ("VCVTUSI2SD r32", [0x62, 0xF1, 0x7F, 0x08, 0x7B, 0xCA], 0xFFFF_FFFF, true),
+                // VCVTUSI2SS xmm1, xmm0, rdx  — EVEX.F3.0F.W1 7B
+                ("VCVTUSI2SS r64", [0x62, 0xF1, 0xFE, 0x08, 0x7B, 0xCA], 0xFFFF_FFFF_FFFF_FFFF, false),
+                // VCVTUSI2SS xmm1, xmm0, edx  — EVEX.F3.0F.W0 7B
+                ("VCVTUSI2SS r32", [0x62, 0xF1, 0x7E, 0x08, 0x7B, 0xCA], 0xFFFF_FFFF, true),
+            ];
+
+            for (name, enc, val, is32) in cases {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatLong64,
+                )
+                .expect("new emulator");
+                emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
+                emu.reg_write(X86Reg::Rax, 0xE7);
+                emu.reg_write(X86Reg::Rcx, 0);
+                emu.reg_write(X86Reg::Rdx, 0);
+                emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+                emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                    .expect("enable AVX-512 state");
+
+                emu.reg_write(X86Reg::Rdx, *val);
+                emu.reg_write_zmm(X86Reg::Zmm0, [0u8; 64]);
+                emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
+
+                let mut code = [0u8; 8];
+                code[..6].copy_from_slice(enc);
+                code[6] = 0xEB;
+                code[7] = 0xFE;
+                emu.mem_write(CASE_BASE, &code).expect("write conversion");
+                emu.emu_start(CASE_BASE, None, None, Some(1))
+                    .unwrap_or_else(|e| panic!("{name} must execute: {e:?}"));
+
+                let got = emu.reg_read_zmm(X86Reg::Zmm1);
+                let want = if *is32 { (*val as u32) as f64 } else { *val as f64 };
+                let actual = if name.contains("SS") {
+                    f32::from_le_bytes(got[0..4].try_into().unwrap()) as f64
+                } else {
+                    f64::from_le_bytes(got[0..8].try_into().unwrap())
+                };
+                let want = if name.contains("SS") { want as f32 as f64 } else { want };
+                assert_eq!(
+                    actual, want,
+                    "{name}: {val:#X} is unsigned, so it must convert to {want}, not a negative"
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}
