@@ -94,3 +94,25 @@ evidence.
 The Ubuntu boot has **not** been re-verified since the VPRORD fix. Both
 defects are fixed and covered by tests, but until that boot runs, whether
 Ubuntu reaches userspace with AVX-512 advertised is unknown.
+
+## Correction: the `logger` segfault is not a cb23a6c regression
+
+`fac0f6c` recorded a userspace segfault during `Adding live session user` as
+a regression introduced by `cb23a6c`, on the strength of one run of each
+commit: `cb23a6c` segfaulted, `29449d3` did not.
+
+That inference does not hold. A second run of `cb23a6c` passes the same step
+cleanly — `passwd: password changed.`, then init setup, accessibility
+options, KDE services, APT cache — matching `29449d3` exactly. The fault is
+**intermittent**, and one run per side cannot tell an intermittent fault from
+a regression.
+
+The whole `0F 7A` / `0F 7B` family that `cb23a6c` made reachable has since
+been tested and is correct: float→qword in both truncating and rounding
+forms, the unsigned integer→float vector forms at values above 2^31 and
+2^63, GPR-sourced VCVTUSI2SS/SD in both widths, the memory form including
+disp8×N scaling, and the masked merge form.
+
+The segfault's cause is therefore unknown. Chasing it starts with a
+reproduction rate — run one build several times and count — not with a
+build-to-build comparison.
