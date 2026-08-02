@@ -116,3 +116,35 @@ disp8×N scaling, and the masked merge form.
 The segfault's cause is therefore unknown. Chasing it starts with a
 reproduction rate — run one build several times and count — not with a
 build-to-build comparison.
+
+## Resolution (2026-08-02): root cause found and fixed — not EVEX at all
+
+An adversarial parity audit found the mechanism, and it explains why the
+fault looked intermittent while being fully deterministic per address
+layout:
+
+`get_icache_entry` (cpu.rs) truncated the prefetch-window distance
+`RIP + eip_page_bias` to `u32` *before* comparing it against the 4 KiB
+window. Bochs (`cpu.cc getICacheEntry`) compares in full `bx_address`
+width, and near indirect transfers (`JMP/CALL r/m64`, `RET`) rely on that
+compare — they deliberately do not invalidate the prefetch window. So an
+indirect branch or return whose target lies ≥ 4 GiB away (PIE executable ↔
+libc under ASLR, constantly) with bits 12..31 matching the stale window's
+page base (a 2⁻²⁰ coincidence per pair, re-rolled every `exec`) falsely
+passed the check and executed the **old page's bytes at the new RIP** —
+which is why the kernel's `Code:` dump (the real bytes) could not decode
+into the fault the CPU actually took.
+
+Three sibling defects in the same arithmetic chain were fixed with it: the
+legacy-mode page bias wrapped at 32 bits instead of 64 (masked by the
+truncation; Bochs wraps mod 2⁶⁴), the CS-limit fetch-window clamp was dead
+code (its condition tested the wrong variable), and ITLB entries for 2 MiB/
+1 GiB code pages were filled with a hardcoded 4 KiB `lpf_mask` and never
+set `ITLB.split_large`, so INVLPG left stale large-page code translations
+alive after guest remaps.
+
+Deterministic regression tests: `tests/prefetch_window_wrap.rs` (a
+`V + 2³² + 0x10` alias flips which page's bytes execute) and
+`tests/itlb_large_page_invlpg.rs` (huge-page remap + sibling-frame INVLPG).
+Both were red before the fix and green after. Upstream Bochs never had the
+bug — every piece was a Rust-port divergence.
