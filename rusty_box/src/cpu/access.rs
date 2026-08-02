@@ -730,7 +730,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.user_pl = saved_user_pl;
             result
         } else {
-            self.translate_linear_system_read(laddr)
+            // Bochs access.cc funnels system reads through access_read_linear,
+            // which raises a nested #PF (CR2 = laddr, supervisor read error
+            // code) on a translation fault — a raw error must never escape to
+            // the caller: during exception/interrupt delivery it would
+            // escalate straight to #DF where the is_exception_OK table wants
+            // a recoverable nested #PF. (The long-mode arm above already
+            // nests via translate_data_read; system WRITES nest inside
+            // translate_linear_system_write.)
+            match self.translate_linear_system_read(laddr) {
+                Ok(paddr) => Ok(paddr),
+                Err(super::error::CpuError::Memory(mem_err)) => {
+                    use super::paging::PageFaultError;
+                    let fault = match mem_err {
+                        crate::memory::MemoryError::PageProtectionViolation => {
+                            PageFaultError::PROTECTION.bits()
+                        }
+                        crate::memory::MemoryError::PageReservedBitViolation => {
+                            PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits()
+                        }
+                        _ => PageFaultError::NOT_PRESENT.bits(),
+                    };
+                    self.page_fault(fault, laddr, false, false)?;
+                    unreachable!("page_fault always raises")
+                }
+                Err(e) => Err(e),
+            }
         }
     }
 

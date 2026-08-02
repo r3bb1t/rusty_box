@@ -144,7 +144,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Bochs event.cc — check inhibition FIRST, then debug_trap
         if !self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG) {
             // Bochs event.cc: OR code breakpoint matches into debug_trap
-            self.debug_trap |= self.code_breakpoint_match(self.prev_rip);
+            self.debug_trap |= self.pending_code_breakpoint_trap();
             if self.debug_trap & 0xF000 != 0 {
                 // BX_DEBUG_SINGLE_STEP_BIT or BX_DEBUG_DR_ACCESS_BIT set
                 // Bochs: exception() longjmps — propagate restart
@@ -667,6 +667,20 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         true
     }
 
+    /// Priority-4 code-breakpoint probe for the previous instruction.
+    /// Bochs event.cc: `debug_trap |= code_breakpoint_match(get_laddr(
+    /// BX_SEG_REG_CS, prev_rip))` — DR0-3 hold LINEAR addresses, so the CS
+    /// base must be applied (nonzero in real mode and non-flat protected
+    /// segments; zero in 64-bit).
+    fn pending_code_breakpoint_trap(&self) -> u32 {
+        let laddr = if self.long64_mode() {
+            self.get_laddr64(BxSegregs::Cs as usize, self.prev_rip)
+        } else {
+            u64::from(self.get_laddr32(BxSegregs::Cs as usize, self.prev_rip as u32))
+        };
+        self.code_breakpoint_match(laddr)
+    }
+
     /// Check code (instruction-execution) breakpoints at `laddr`.
     /// Bochs crregs.cc `code_breakpoint_match`.
     fn code_breakpoint_match(&self, laddr: u64) -> u32 {
@@ -940,6 +954,40 @@ mod tests {
         // RF suppresses instruction breakpoints for one instruction.
         cpu.eflags.insert(crate::cpu::eflags::EFlags::RF);
         assert_eq!(cpu.code_breakpoint_match(0x1234), 0);
+    }
+
+    /// Bochs event.cc Priority 4 compares DR0-3 against
+    /// `get_laddr(BX_SEG_REG_CS, prev_rip)` — the LINEAR address. With a
+    /// nonzero CS base (real mode, non-flat protected), matching the raw
+    /// EIP misses breakpoints armed on the linear address.
+    #[test]
+    fn code_breakpoint_check_applies_cs_base() {
+        use crate::cpu::crregs::BxDr7;
+
+        let mut cpu = make_cpu(0);
+        cpu.reset(ResetReason::Hardware);
+        // The reset state already has a nonzero CS base (0xFFFF0000).
+        let cs_base = cpu.get_cs_base();
+        assert_ne!(cs_base, 0, "reset CS base must be nonzero for this test");
+
+        const EIP: u64 = 0x0123;
+        cpu.prev_rip = EIP;
+        cpu.dr[0] = cs_base + EIP; // linear breakpoint address
+        cpu.dr7 = BxDr7::from_bits_retain(0x1); // L0=1, R/W0=insn, LEN0=1
+        cpu.eflags.remove(crate::cpu::eflags::EFlags::RF);
+
+        let bits = cpu.pending_code_breakpoint_trap();
+        assert_ne!(
+            bits & BxCpuC::<Corei7SkylakeX>::BX_DEBUG_TRAP_HIT,
+            0,
+            "a DR0 armed on CS.base + EIP must hit (Bochs event.cc \
+             code_breakpoint_match(get_laddr(CS, prev_rip)))"
+        );
+
+        // The raw EIP itself must NOT match — DR registers hold linear
+        // addresses.
+        cpu.dr[0] = EIP;
+        assert_eq!(cpu.pending_code_breakpoint_trap(), 0);
     }
 
     #[test]

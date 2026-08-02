@@ -2334,7 +2334,20 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
         // CpuLoopRestart is expected from interrupt() — convert to Ok for external callers
         match result {
-            Err(super::error::CpuError::CpuLoopRestart) => Ok(()),
+            Err(super::error::CpuError::CpuLoopRestart) => {
+                // Delivery itself faulted and the nested exception was
+                // delivered instead. Bochs longjmps into cpu_loop's setjmp
+                // handler, which runs `icount++; prev_rip = RIP;
+                // speculative_rsp = false` before resuming (cpu.cc); our
+                // caller resumes the loop without passing through the
+                // fetch-path restart arm, so commit the same state here. A
+                // stale prev_rip would make the next fault in the nested
+                // handler push the WRONG return address.
+                self.icount += 1;
+                self.prev_rip = self.rip();
+                self.speculative_rsp = false;
+                Ok(())
+            }
             other => other,
         }
     }

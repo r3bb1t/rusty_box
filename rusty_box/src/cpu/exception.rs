@@ -543,8 +543,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     return self.exception(new_vector, new_error_code);
                 }
                 Err(super::error::CpuError::Memory(crate::memory::MemoryError::PageNotPresent)) => {
-                    // Exception delivery hit an unmapped page — escalate to #DF
-                    tracing::trace!("Exception delivery: PageNotPresent for vec={:?} CR3={:#x} — escalating to #DF", vector, self.cr3);
+                    // Should be unreachable: delivery-path memory accesses
+                    // raise nested #PFs at the access layer (system reads via
+                    // translate_system_read_via_dtlb, system writes inside
+                    // translate_linear_system_write), exactly like Bochs
+                    // access.cc access_read/write_linear. A raw error here
+                    // means some access path still bypasses that — scream,
+                    // then fall back to #DF as the least-wrong escalation.
+                    tracing::error!("Exception delivery: raw PageNotPresent for vec={:?} CR3={:#x} — a delivery access path bypassed nested-#PF raising; escalating to #DF", vector, self.cr3);
                     return self.exception(Exception::Df, 0);
                 }
                 Err(e) => return Err(e),

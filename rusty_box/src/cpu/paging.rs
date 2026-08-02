@@ -1519,7 +1519,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Deliver a #PF exception.
-    fn page_fault(&mut self, fault: u32, laddr: u64, user: bool, is_write: bool) -> Result<()> {
+    pub(super) fn page_fault(
+        &mut self,
+        fault: u32,
+        laddr: u64,
+        user: bool,
+        is_write: bool,
+    ) -> Result<()> {
         self.cr2 = laddr;
         let error_code = fault | ((user as u32) << 2) | ((is_write as u32) << 1);
         // Diagnostic tripwire: a write fault in the guest's low 64 KiB is
@@ -2687,6 +2693,55 @@ mod tests {
     };
     use core::ptr::NonNull;
 
+
+    /// Bochs access.cc funnels system reads through `access_read_linear`,
+    /// which raises a nested #PF (CR2 = laddr, supervisor read error code)
+    /// on a translation fault. A raw `Memory` error escaping instead makes
+    /// exception/interrupt delivery escalate straight to #DF (or bubble a
+    /// host-level error) where the architecture wants a recoverable #PF.
+    #[test]
+    fn system_read_fault_raises_nested_page_fault() {
+        const PAGE_DIRECTORY: u64 = 0x3000;
+        // PDE index 1 (vaddr 0x20_0000..0x40_0000) is never written → the
+        // walk fails with not-present at the PDE level.
+        const UNMAPPED_VADDR: u64 = 0x0020_0000;
+
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
+            false,
+        );
+        let pin = CpuTlbPin::new(&cpu);
+        let pins = core::slice::from_ref(&pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
+
+        cpu.pdptrcache.entry[0] = PAGE_DIRECTORY | 0x1;
+        cpu.cr0 = BxCr0::PE | BxCr0::PG;
+        cpu.cr4 = BxCr4::PAE;
+        cpu.cpu_mode = CpuMode::Ia32Protected;
+
+        let err = cpu
+            .system_read_qword(UNMAPPED_VADDR)
+            .expect_err("the walk must fail");
+
+        // The raw memory error must have been converted into a delivered
+        // #PF (the delivery itself cascades without an IDT here, so the
+        // final error variant only needs to not be the raw one).
+        assert!(
+            !matches!(err, crate::cpu::CpuError::Memory(_)),
+            "a system-read translation fault must raise #PF, not return \
+             the raw walk error (Bochs access.cc access_read_linear): {err:?}"
+        );
+        #[cfg(feature = "std")]
+        {
+            let (_, vec, err_code, _) = cpu.exc_diag_ring[0];
+            assert_eq!(vec, 14, "first raised exception must be #PF");
+            assert_eq!(
+                err_code, 0,
+                "supervisor read of a not-present page → error code 0"
+            );
+        }
+    }
 
     #[test]
     fn page_walk_handler_write_qword_syncs_writer() {

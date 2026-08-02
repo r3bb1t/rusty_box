@@ -6024,6 +6024,70 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const MAX_SUPPORTED_TEST_CPUS: u32 = 254;
     const CPUID_LEAF_FEATURE_INFO: u32 = 0x0000_0001;
     const CPUID_LEAF_EXTENDED_TOPOLOGY: u32 = 0x0000_000B;
+
+    /// Bochs cpu_loop's setjmp handler commits `prev_rip = RIP` whenever an
+    /// exception longjmps out — including one raised while DELIVERING an
+    /// external interrupt (event.cc HandleExtInterrupt only commits on the
+    /// success path). Our injection converts that unwind to `Ok`, so it must
+    /// perform the same commit itself: a stale prev_rip would make the next
+    /// fault in the nested handler push the WRONG return address.
+    #[test]
+    fn faulted_interrupt_delivery_commits_prev_rip() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let cfg = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    cfg,
+                    CpuSetupMode::FlatLong64,
+                )
+                .expect("new emulator");
+
+                const HANDLER: u64 = 0x0040_0000;
+                // Valid 16-byte long-mode interrupt gate for #GP (vector 13)
+                // at the reset IDT base (0). Vector 0x20's gate stays all
+                // zero (P=0), so delivering it raises #NP/#GP, which nests
+                // into this gate.
+                let mut gate = [0u8; 16];
+                gate[0..2].copy_from_slice(&(HANDLER as u16).to_le_bytes());
+                gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
+                gate[5] = 0x8E; // P=1 DPL=0 type=interrupt gate
+                gate[6..8].copy_from_slice(&(((HANDLER >> 16) & 0xFFFF) as u16).to_le_bytes());
+                gate[8..12].copy_from_slice(&((HANDLER >> 32) as u32).to_le_bytes());
+                // #NP (11) and #GP (13) share the same handler for this test.
+                emu.mem_write(11 * 16, &gate).expect("write #NP gate");
+                emu.mem_write(13 * 16, &gate).expect("write #GP gate");
+                emu.mem_write(HANDLER, &[0xEB, 0xFE]).expect("write handler");
+                // The FlatLong64 harness GDT (install_flat_gdt) holds a
+                // 32-bit code descriptor at selector 0x08 (the API loads
+                // descriptor CACHES directly); gate delivery reloads CS from
+                // the GDT and requires L=1 in long mode, so give it a real
+                // 64-bit code descriptor.
+                emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
+                    .expect("write 64-bit code descriptor");
+                emu.reg_write(X86Reg::Rsp, 0x0058_0000);
+
+                // SAFETY: memory-bus wiring invariants held by the emulator.
+                unsafe { emu.inject_interrupt(0x20) }.expect("inject");
+
+                assert_eq!(
+                    emu.cpu().rip(),
+                    HANDLER,
+                    "the nested exception must have been delivered; \
+                     exception ring: {:?}",
+                    &emu.cpu().exc_diag_ring[..8]
+                );
+                assert_eq!(
+                    emu.cpu().prev_rip_for_test(),
+                    HANDLER,
+                    "prev_rip must be committed to the nested handler's RIP \
+                     (Bochs cpu.cc setjmp: prev_rip = RIP)"
+                );
+            })
+            .expect("spawn test thread")
+            .join()
+            .expect("join test thread");
+    }
     const CPUID_LEAF1_LOGICAL_COUNT_SHIFT: u32 = 16;
     const CPUID_LEAF1_APIC_ID_SHIFT: u32 = 24;
     const CPUID_APIC_ID_BYTE_MASK: u32 = 0xFF;
