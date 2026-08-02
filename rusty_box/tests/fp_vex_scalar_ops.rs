@@ -3678,3 +3678,109 @@ fn evex_vcvtusi2_scalar_conversions() {
         .join()
         .expect("join test thread");
 }
+
+// Memory form of a 0F 7A conversion, exercising compressed disp8. VCVTUDQ2PD
+// reads half a vector (2 dwords for a 128-bit result), so its tuple is
+// HalfVector and N = 8*len = 8 at VL128: disp8=1 must address base+8, not
+// base+1.
+#[test]
+fn evex_vcvtudq2pd_memory_form_scales_disp8() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            const DATA: u64 = CASE_BASE + 0x1_0000;
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                EmulatorConfig::default(),
+                CpuSetupMode::FlatLong64,
+            )
+            .expect("new emulator");
+            emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
+            emu.reg_write(X86Reg::Rax, 0xE7);
+            emu.reg_write(X86Reg::Rcx, 0);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+            emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                .expect("enable AVX-512 state");
+
+            // Decoy at +1 so an unscaled displacement reads obviously wrong data.
+            let mut buf = [0u8; 32];
+            buf[1..5].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+            buf[8..12].copy_from_slice(&7u32.to_le_bytes());
+            buf[12..16].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+            emu.mem_write(DATA, &buf).expect("write data");
+
+            emu.reg_write(X86Reg::Rax, DATA);
+            emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
+
+            // VCVTUDQ2PD xmm1, [rax+8]  — EVEX.128.F3.0F.W0 7A, mod=01 disp8=1
+            emu.mem_write(CASE_BASE, &[0x62, 0xF1, 0x7E, 0x08, 0x7A, 0x48, 0x01, 0xEB, 0xFE])
+                .expect("write conversion");
+            emu.emu_start(CASE_BASE, None, None, Some(1))
+                .expect("VCVTUDQ2PD memory form must execute");
+
+            let got = emu.reg_read_zmm(X86Reg::Zmm1);
+            let d0 = f64::from_le_bytes(got[0..8].try_into().unwrap());
+            let d1 = f64::from_le_bytes(got[8..16].try_into().unwrap());
+            assert_eq!(d0, 7.0, "disp8=1 with a half-vector tuple must address base+8");
+            assert_eq!(d1, 2147483648.0, "second dword converts as unsigned");
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}
+
+// Masked (_Kmask) form: with k1 = 0b01 only element 0 is written and merge
+// masking must leave element 1 untouched.
+#[test]
+fn evex_vcvtudq2pd_kmask_merges() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                EmulatorConfig::default(),
+                CpuSetupMode::FlatLong64,
+            )
+            .expect("new emulator");
+            emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
+            emu.reg_write(X86Reg::Rax, 0xE7);
+            emu.reg_write(X86Reg::Rcx, 0);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+            emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
+                .expect("enable AVX-512 state");
+
+            let mut src = [0u8; 64];
+            src[0..4].copy_from_slice(&11u32.to_le_bytes());
+            src[4..8].copy_from_slice(&22u32.to_le_bytes());
+            emu.reg_write_zmm(X86Reg::Zmm2, src);
+
+            // Preload the destination with a recognisable pattern.
+            let mut dst = [0u8; 64];
+            dst[8..16].copy_from_slice(&(-1.5f64).to_le_bytes());
+            emu.reg_write_zmm(X86Reg::Zmm1, dst);
+
+            // KMOVQ k1, rax with rax = 1, then
+            // VCVTUDQ2PD xmm1{k1}, xmm2  — EVEX.128.F3.0F.W0 7A, aaa=1
+            emu.reg_write(X86Reg::Rax, 1);
+            emu.mem_write(
+                CASE_BASE,
+                &[
+                    0xC4, 0xE1, 0xFB, 0x92, 0xC8, // KMOVQ k1, rax
+                    0x62, 0xF1, 0x7E, 0x09, 0x7A, 0xCA, // VCVTUDQ2PD xmm1{k1}, xmm2
+                    0xEB, 0xFE,
+                ],
+            )
+            .expect("write");
+            emu.emu_start(CASE_BASE, None, None, Some(2))
+                .expect("masked VCVTUDQ2PD must execute");
+
+            let got = emu.reg_read_zmm(X86Reg::Zmm1);
+            let d0 = f64::from_le_bytes(got[0..8].try_into().unwrap());
+            let d1 = f64::from_le_bytes(got[8..16].try_into().unwrap());
+            assert_eq!(d0, 11.0, "element 0 is selected by k1 and must be converted");
+            assert_eq!(d1, -1.5, "element 1 is masked off; merge masking preserves it");
+        })
+        .unwrap()
+        .join()
+        .expect("join test thread");
+}
