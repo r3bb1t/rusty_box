@@ -1664,6 +1664,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if !is_write {
                 access_bits &= !(TlbAccess::SYS_WRITE_OK.bits() | TlbAccess::USER_WRITE_OK.bits());
             }
+
+            // Bochs paging.cc, inside the user-page arm of the TLB fill:
+            //
+            //     if (isExecute) { if (cr4.get_SMEP()) accessBits &= ~TLB_SysExecuteOK; }
+            //     else           { if (cr4.get_SMAP()) accessBits &= ~(TLB_SysReadOK | TLB_SysWriteOK); }
+            //
+            // The entry caches all four user/write combinations so later
+            // accesses of any kind can hit it, so the SMAP-forbidden ones must
+            // be stripped HERE. The walk's own SMAP check only runs on a miss:
+            // a fill performed by a legitimate user access would otherwise
+            // leave SYS_READ_OK cached on a user page, and the next supervisor
+            // access would hit the TLB and bypass SMAP entirely.
+            if (combined_access & CombinedAccess::USER.bits()) != 0 && self.cr4.smap() {
+                access_bits &=
+                    !(TlbAccess::SYS_READ_OK.bits() | TlbAccess::SYS_WRITE_OK.bits());
+            }
         }
 
         let ppf = paddr & LPF_MASK;

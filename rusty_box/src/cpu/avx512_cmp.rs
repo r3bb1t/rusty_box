@@ -199,7 +199,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             dword_elements(vl)
         };
-        let src1 = read_zmm(self, instr.src1());
+        // Bochs avx512_pfp.cc VCMPPS_MASK_KGwHpsWpsIbR compares
+        // `op1 = src1()` (Hps = EVEX.vvvv) against `op2 = src2()` (Wps = rm).
+        // rusty_box's accessors are the other way round — `src2()` is vvvv —
+        // so vvvv is read here and the rm/memory operand arrives as `src2`.
+        let src1 = read_zmm(self, instr.src2());
         let predicate = instr.ib() & 0x1F;
         let write_mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
@@ -225,7 +229,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VCMPPS Kk{k}, Hps, Wps, Ib — register form
     pub fn evex_vcmpps_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src2 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         self.evex_cmp_pfp(instr, src2, false)
     }
 
@@ -237,7 +241,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VCMPPD Kk{k}, Hpd, Wpd, Ib — register form
     pub fn evex_vcmppd_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src2 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         self.evex_cmp_pfp(instr, src2, true)
     }
 

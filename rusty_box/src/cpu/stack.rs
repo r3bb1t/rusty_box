@@ -122,33 +122,36 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Stack memory access functions
     // =========================================================================
 
+    // Bochs stack.cc `stack_write_word` / `stack_read_word` (and the dword
+    // siblings) take a fast path through the stack prefetch window, whose
+    // `stackPrefetch(offset, len)` guarantees the window covers the whole
+    // access — so that path can never span two pages — and otherwise fall
+    // back to `write_virtual_word(BX_SEG_REG_SS, offset, data)`.
+    //
+    // rusty_box has no stack prefetch window, so the fallback is the whole
+    // implementation. Translating once and then issuing a PHYSICAL access of
+    // the full width (the previous shape) silently treated a word or dword
+    // straddling a page boundary as physically contiguous: the bytes past the
+    // boundary landed in whatever frame happened to follow, and a fault on
+    // the second page was never raised.
+
     /// Write a 16-bit value to stack at SS:offset.
     pub(super) fn stack_write_word(&mut self, offset: u32, value: u16) -> super::Result<()> {
-        let laddr = self.get_laddr32(BxSegregs::Ss as usize, offset) as u64;
-        let paddr = self.translate_data_write(laddr)?;
-        self.mem_write_word(paddr, value);
-        Ok(())
+        self.write_virtual_word(BxSegregs::Ss, offset, value)
     }
 
     /// Write a 32-bit value to stack at SS:offset.
     pub(super) fn stack_write_dword(&mut self, offset: u32, value: u32) -> super::Result<()> {
-        let laddr = self.get_laddr32(BxSegregs::Ss as usize, offset) as u64;
-        let paddr = self.translate_data_write(laddr)?;
-        self.mem_write_dword(paddr, value);
-        Ok(())
+        self.write_virtual_dword(BxSegregs::Ss, offset, value)
     }
 
     /// Read a 16-bit value from stack at SS:offset.
     pub(super) fn stack_read_word(&mut self, offset: u32) -> super::Result<u16> {
-        let laddr = self.get_laddr32(BxSegregs::Ss as usize, offset) as u64;
-        let paddr = self.translate_data_read(laddr)?;
-        Ok(self.mem_read_word(paddr))
+        self.read_virtual_word(BxSegregs::Ss, offset)
     }
 
     /// Read a 32-bit value from stack at SS:offset.
     pub(super) fn stack_read_dword(&mut self, offset: u32) -> super::Result<u32> {
-        let laddr = self.get_laddr32(BxSegregs::Ss as usize, offset) as u64;
-        let paddr = self.translate_data_read(laddr)?;
-        Ok(self.mem_read_dword(paddr))
+        self.read_virtual_dword(BxSegregs::Ss, offset)
     }
 }

@@ -866,6 +866,22 @@ impl Instruction {
         }
     }
 
+    /// Effective-address wraparound mask for this instruction's address size.
+    ///
+    /// Bochs decoder/instr.h `bxInstruction_c::asize_mask()` indexing
+    /// access.cc `bx_asize_mask[]`: 0xffff for as16, 0xffffffff for as32,
+    /// all-ones for as64. Operand components computed by adding to an
+    /// effective address (e.g. the selector half of a far pointer) must wrap
+    /// within this mask before the segment base is applied.
+    #[inline]
+    pub const fn asize_mask(&self) -> u64 {
+        match self.asize() {
+            0 => 0xFFFF,
+            1 => 0xFFFF_FFFF,
+            _ => u64::MAX,
+        }
+    }
+
     /// Get the address size as a typed enum.
     pub const fn address_size(&self) -> AddressSize {
         match self.asize() {

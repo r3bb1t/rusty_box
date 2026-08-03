@@ -151,6 +151,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 if let Err(super::error::CpuError::CpuLoopRestart) =
                     self.exception(super::cpu::Exception::Db, 0)
                 {
+                    // Bochs's longjmp lands in cpu_loop's setjmp handler,
+                    // which commits `prev_rip = RIP` before resuming (cpu.cc).
+                    // Every other delivery arm here does the same; without it
+                    // the #DB handler runs with prev_rip still pointing at the
+                    // interrupted instruction, so the next fault inside the
+                    // handler reports the wrong address.
+                    self.prev_rip = self.rip();
                     return false;
                 }
             } else {

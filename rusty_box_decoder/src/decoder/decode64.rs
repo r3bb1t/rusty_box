@@ -780,15 +780,24 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // register.
             instr.operands.dst = vex_vvv;
             instr.operands.src1 = rm as u8;
-        } else if is_vex && matches!(b1, 0x190 | 0x192 | 0x193) {
-            // KMOV opmask moves (VEX 0F 90/92/93) share their opcode bytes
-            // with SETcc, whose destination is the rm operand. These go the
-            // other way: Bochs ia_opcodes.def leads each of them with the
-            // reg-field operand, so the reg field is the destination.
+        } else if is_vex && matches!(b1, 0x190 | 0x192 | 0x193 | 0x198 | 0x199) {
+            // KMOV opmask moves (VEX 0F 90/92/93) and the opmask flag tests
+            // (VEX 0F 98/99) share their opcode bytes with SETcc, whose
+            // destination is the rm operand. These go the other way: Bochs
+            // ia_opcodes.def leads each of them with the reg-field operand.
             //
-            //     0F 90  k <- k/m       KMOVQ_KGqKEq   OP_KGq, OP_KEq
-            //     0F 92  k <- r32/r64   KMOVW_KGwEw    OP_KGw, OP_Ed
-            //     0F 93  r32/r64 <- k   KMOVW_GdKEw    OP_Gd,  OP_KEw
+            //     0F 90  k <- k/m       KMOVQ_KGqKEq     OP_KGq, OP_KEq
+            //     0F 92  k <- r32/r64   KMOVW_KGwEw      OP_KGw, OP_Ed
+            //     0F 93  r32/r64 <- k   KMOVW_GdKEw      OP_Gd,  OP_KEw
+            //     0F 98  flags only     KORTESTQ_KGqKEq  OP_NONE, OP_KGq, OP_KEq
+            //     0F 99  flags only     KTESTQ_KGqKEq    OP_NONE, OP_KGq, OP_KEq
+            //
+            // KORTEST/KTEST write no register at all; the reg field is their
+            // FIRST source. Under the SETcc rule the two sources arrived
+            // transposed, which KORTEST survives (OR is commutative and both
+            // its flag tests are symmetric) but KTEST does not: its
+            // `CF = ((~op1 & op2) == 0)` term is asymmetric, so `ktestb k1,k2`
+            // reported the flags of `ktestb k2,k1`.
             //
             // 0F 91 stores an opmask to memory (KMOVQ_KEqKGq: OP_KEq, OP_KGq)
             // and really does write rm, so it keeps the assignment below.

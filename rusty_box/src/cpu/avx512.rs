@@ -275,8 +275,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// VMOVDQU64 Wdq{k}{z}, Vdq — EVEX.0F.W1 7F, register form.
+    ///
+    /// Bochs avx512_move.cc routes the masked W1 register move through
+    /// `avx512_write_regq_masked` — one mask bit per QWORD. This is NOT the
+    /// same as the W0 form: sharing the dword handler makes each mask bit gate
+    /// only 32 bits, so a qword whose two halves disagree in the mask ends up
+    /// half-written.
     pub fn evex_vmovdqu64_store_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.evex_vmovdqu32_store_r(instr) // register form is identical
+        let vl = instr.get_vl();
+        let src = read_zmm(self, instr.src());
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &src, mask, zmask, vl);
+        Ok(())
     }
 
     /// Bochs avx512_move.cc VMOVUPD_MASK_WpdVpdM -> avx_masked_store64.

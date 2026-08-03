@@ -219,6 +219,11 @@ impl BxICache {
         if entry.p_addr != BX_ICACHE_INVALID_PHY_ADDRESS {
             flush_smc(entry);
         }
+        // Bochs icache.h `alloc_trace` resets `e->tlen = 0` here. serve_icache_miss
+        // publishes the entry's p_addr before the decode loop fills it, so an
+        // early exit (a fatal decode error) would otherwise leave the entry
+        // lookup-valid while still carrying the PREVIOUS trace's length.
+        entry.tlen = 0;
     }
 
     pub fn commit_trace(&mut self, _tlen: usize) {
@@ -894,7 +899,19 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                             &current_fetch_ptr[..core::cmp::min(32, current_fetch_ptr.len())]
                         );
 
-                        return Err(crate::cpu::CpuError::Decoder(decode_err));
+                        // Bochs icache.cc `boundaryFetch`:
+                        //   if (remainingInPage >= 15) {
+                        //     BX_ERROR(("boundaryFetch #GP(0): too many instruction prefixes"));
+                        //     exception(BX_GP_EXCEPTION, 0);
+                        //   }
+                        // Architectural decode failures are already rewritten to
+                        // IaError by normalize_decode_result, so what reaches here
+                        // with a full 15 bytes available is an instruction longer
+                        // than the 15-byte limit. That is a GUEST fault, not a host
+                        // error: returning CpuError::Decoder tore down the whole CPU
+                        // loop, letting unprivileged guest code stop the emulator.
+                        self.exception(crate::cpu::cpu::Exception::Gp, 0)?;
+                        return Err(crate::cpu::CpuError::CpuLoopRestart);
                     }
 
                     // First instruction is boundary fetch, leave the trace cache entry

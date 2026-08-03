@@ -1789,129 +1789,84 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
     // Based on Bochs segment_ctrl.cc load_segw/load_segd helpers
 
-    /// LES r16, m16:16 - Load ES:r16 from memory far pointer
-    /// Matching Bochs segment_ctrl.cc LES_GwMp -> load_segw(i, BX_SEG_REG_ES)
+    /// Shared m16:16 far-pointer load — Bochs segment_ctrl.cc `load_segw`.
+    ///
+    /// The SELECTOR is read first and the offset second, both before the
+    /// segment register is loaded, so a fault on either half leaves the whole
+    /// instruction architecturally un-executed and reports the selector's
+    /// address when both halves fault. The selector's effective address wraps
+    /// within the instruction's address size (`(eaddr + 2) & asize_mask`).
+    fn load_segw(&mut self, instr: &Instruction, target_seg: BxSegregs) -> Result<()> {
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2) & instr.asize_mask())?;
+        let reg_16 = self.v_read_word(seg, eaddr)?;
+
+        self.load_seg_reg(target_seg, segsel)?;
+        self.set_gpr16(instr.dst() as usize, reg_16);
+        Ok(())
+    }
+
+    /// Shared m16:32 far-pointer load — Bochs segment_ctrl.cc `load_segd`.
+    /// Same ordering and masking rules as [`Self::load_segw`].
+    fn load_segd(&mut self, instr: &Instruction, target_seg: BxSegregs) -> Result<()> {
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4) & instr.asize_mask())?;
+        let reg_32 = self.v_read_dword(seg, eaddr)?;
+
+        self.load_seg_reg(target_seg, segsel)?;
+        self.set_gpr32(instr.dst() as usize, reg_32);
+        Ok(())
+    }
+
+    /// LES r16, m16:16 — Bochs segment_ctrl.cc LES_GwMp.
     pub fn les_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let reg_16 = self.v_read_word(seg, eaddr)?;
-        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2))?;
-
-        self.load_seg_reg(BxSegregs::Es, segsel)?;
-        let dst = instr.dst() as usize;
-        self.set_gpr16(dst, reg_16);
-        Ok(())
+        self.load_segw(instr, BxSegregs::Es)
     }
 
-    /// LES r32, m16:32 - Load ES:r32 from memory far pointer
-    /// Matching Bochs segment_ctrl.cc LES_GdMp -> load_segd(i, BX_SEG_REG_ES)
+    /// LES r32, m16:32 — Bochs segment_ctrl.cc LES_GdMp.
     pub fn les_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let reg_32 = self.v_read_dword(seg, eaddr)?;
-        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4))?;
-        self.load_seg_reg(BxSegregs::Es, segsel)?;
-        let dst = instr.dst() as usize;
-        self.set_gpr32(dst, reg_32);
-        Ok(())
+        self.load_segd(instr, BxSegregs::Es)
     }
 
-    /// LDS r16, m16:16 - Load DS:r16 from memory far pointer
-    /// Matching Bochs segment_ctrl.cc LDS_GwMp -> load_segw(i, BX_SEG_REG_DS)
+    /// LDS r16, m16:16 — Bochs segment_ctrl.cc LDS_GwMp.
     pub fn lds_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let reg_16 = self.v_read_word(seg, eaddr)?;
-        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2))?;
-
-        self.load_seg_reg(BxSegregs::Ds, segsel)?;
-        let dst = instr.dst() as usize;
-        self.set_gpr16(dst, reg_16);
-        Ok(())
+        self.load_segw(instr, BxSegregs::Ds)
     }
 
-    /// LDS r32, m16:32 - Load DS:r32 from memory far pointer
-    /// Matching Bochs segment_ctrl.cc LDS_GdMp -> load_segd(i, BX_SEG_REG_DS)
+    /// LDS r32, m16:32 — Bochs segment_ctrl.cc LDS_GdMp.
     pub fn lds_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let reg_32 = self.v_read_dword(seg, eaddr)?;
-        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4))?;
-        self.load_seg_reg(BxSegregs::Ds, segsel)?;
-        let dst = instr.dst() as usize;
-        self.set_gpr32(dst, reg_32);
-        Ok(())
+        self.load_segd(instr, BxSegregs::Ds)
     }
 
-    /// LSS r16, m16:16 - Load SS:r16 from memory far pointer
+    /// LSS r16, m16:16 — Bochs segment_ctrl.cc LSS_GwMp.
     pub fn lss_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let reg_16 = self.v_read_word(seg, eaddr)?;
-        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2))?;
-        self.load_seg_reg(BxSegregs::Ss, segsel)?;
-        let dst = instr.dst() as usize;
-        self.set_gpr16(dst, reg_16);
-        Ok(())
+        self.load_segw(instr, BxSegregs::Ss)
     }
 
-    /// LSS r32, m16:32 - Load SS:r32 from memory far pointer
+    /// LSS r32, m16:32 — Bochs segment_ctrl.cc LSS_GdMp.
     pub fn lss_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let reg_32 = self.v_read_dword(seg, eaddr)?;
-        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4))?;
-        self.load_seg_reg(BxSegregs::Ss, segsel)?;
-        let dst = instr.dst() as usize;
-        self.set_gpr32(dst, reg_32);
-        Ok(())
+        self.load_segd(instr, BxSegregs::Ss)
     }
 
-    /// LFS r16, m16:16 - Load FS:r16 from memory far pointer
+    /// LFS r16, m16:16 — Bochs segment_ctrl.cc LFS_GwMp.
     pub fn lfs_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let reg_16 = self.v_read_word(seg, eaddr)?;
-        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2))?;
-        self.load_seg_reg(BxSegregs::Fs, segsel)?;
-        let dst = instr.dst() as usize;
-        self.set_gpr16(dst, reg_16);
-        Ok(())
+        self.load_segw(instr, BxSegregs::Fs)
     }
 
-    /// LFS r32, m16:32 - Load FS:r32 from memory far pointer
+    /// LFS r32, m16:32 — Bochs segment_ctrl.cc LFS_GdMp.
     pub fn lfs_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let reg_32 = self.v_read_dword(seg, eaddr)?;
-        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4))?;
-        self.load_seg_reg(BxSegregs::Fs, segsel)?;
-        let dst = instr.dst() as usize;
-        self.set_gpr32(dst, reg_32);
-        Ok(())
+        self.load_segd(instr, BxSegregs::Fs)
     }
 
-    /// LGS r16, m16:16 - Load GS:r16 from memory far pointer
+    /// LGS r16, m16:16 — Bochs segment_ctrl.cc LGS_GwMp.
     pub fn lgs_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let reg_16 = self.v_read_word(seg, eaddr)?;
-        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2))?;
-        self.load_seg_reg(BxSegregs::Gs, segsel)?;
-        let dst = instr.dst() as usize;
-        self.set_gpr16(dst, reg_16);
-        Ok(())
+        self.load_segw(instr, BxSegregs::Gs)
     }
 
-    /// LGS r32, m16:32 - Load GS:r32 from memory far pointer
+    /// LGS r32, m16:32 — Bochs segment_ctrl.cc LGS_GdMp.
     pub fn lgs_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let reg_32 = self.v_read_dword(seg, eaddr)?;
-        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4))?;
-        self.load_seg_reg(BxSegregs::Gs, segsel)?;
-        let dst = instr.dst() as usize;
-        self.set_gpr32(dst, reg_32);
-        Ok(())
+        self.load_segd(instr, BxSegregs::Gs)
     }
 }

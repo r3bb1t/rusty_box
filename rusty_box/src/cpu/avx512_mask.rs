@@ -142,11 +142,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let val = read_opmask(self, instr.src());
         let laddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        if self.long64_mode() {
-            self.write_virtual_qword_64(seg, laddr, val)?;
-        } else {
-            self.v_write_dword(seg, laddr, val as u32)?;
-        }
+        // Bochs avx512_mask64.cc KMOVQ_KEqKGqM stores with write_virtual_qword
+        // in every mode: an opmask is 64 bits wide regardless of the CPU's
+        // operand size, and VEX.W1 here selects the opmask width, not the
+        // operand size. Writing a dword outside 64-bit mode truncated k[63:32]
+        // and left the upper four bytes of the destination stale.
+        self.v_write_qword(seg, laddr, val)?;
         Ok(())
     }
 

@@ -322,8 +322,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let mask = read_opmask_for_write(self, instr);
         // Bochs avx512_broadcast.cc VBROADCASTF32x4_MASK_VpsMps: an empty
-        // opmask performs no memory access at all.
-        let src128 = if (mask & cut_opmask_to(dword_elements(vl))) != 0 {
+        // opmask performs no memory access at all. This form masks at QWORD
+        // granularity, so the cut must use the qword element count —
+        // cutting to the dword count keeps bits above the operation's own
+        // width and makes a mask selecting only those bits look non-empty.
+        let src128 = if (mask & cut_opmask_to(qword_elements(vl))) != 0 {
             let laddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             read_mem_128(self, seg, laddr)?
@@ -400,7 +403,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vbroadcasti64x4(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let mask = read_opmask_for_write(self, instr);
-        let src256 = if (mask & cut_opmask_to(dword_elements(vl))) != 0 {
+        // Qword-masked: cut to the qword element count, not the dword one
+        // (see evex_vbroadcasti64x2).
+        let src256 = if (mask & cut_opmask_to(qword_elements(vl))) != 0 {
             let laddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             read_mem_256(self, seg, laddr)?
@@ -438,17 +443,29 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpbroadcastb(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nbytes = vl_bytes(vl);
+        let mask = read_opmask_for_write(self, instr);
+        // Bochs avx512_broadcast.cc VPBROADCASTB_MASK_VdqWbM: the opmask is
+        // cut to the element count — skipping VL512, where the count is 64
+        // and `1 << 64` would overflow — and the memory operand is read only
+        // when something is still selected. Without this an all-zero mask
+        // takes a #PF on an operand the instruction never uses.
+        let active = if nbytes >= 64 {
+            mask
+        } else {
+            mask & cut_opmask_to(nbytes)
+        };
         let scalar = if instr.mod_c0() {
             read_zmm(self, instr.src()).zmmubyte(0)
-        } else {
+        } else if active != 0 {
             let laddr = self.resolve_addr(instr);
             self.v_read_byte(BxSegregs::from(instr.seg()), laddr)?
+        } else {
+            0
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nbytes {
             result.set_zmmubyte(i, scalar);
         }
-        let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_b(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -465,17 +482,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpbroadcastw(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = word_elements(vl);
+        let mask = read_opmask_for_write(self, instr);
+        // Same empty-opmask fault suppression as VPBROADCASTB; the word
+        // element count peaks at 32, so the cut never overflows.
         let scalar = if instr.mod_c0() {
             read_zmm(self, instr.src()).zmm16u(0)
-        } else {
+        } else if (mask & cut_opmask_to(nelements)) != 0 {
             let laddr = self.resolve_addr(instr);
             self.v_read_word(BxSegregs::from(instr.seg()), laddr)?
+        } else {
+            0
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm16u(i, scalar);
         }
-        let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
