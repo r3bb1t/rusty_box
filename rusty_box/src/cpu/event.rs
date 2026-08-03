@@ -674,6 +674,24 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         true
     }
 
+    /// Whether this CPU would deliver a Priority-4 debug trap at its next
+    /// async-event boundary.
+    ///
+    /// Bochs event.cc `handleAsyncEvent` orders "traps on the previous
+    /// instruction" (TF single-step, data/IO breakpoints, code breakpoints)
+    /// at Priority 4, strictly BEFORE external interrupts at Priority 5. The
+    /// emulator's PIC-injection path implements only Priority 5, and
+    /// `interrupt()` unconditionally clears `debug_trap` (matching Bochs), so
+    /// injecting an interrupt while a #DB is pending would destroy it. That
+    /// path consults this to defer the interrupt by one boundary.
+    #[inline]
+    pub(crate) fn debug_trap_pending(&self) -> bool {
+        if self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG) {
+            return false;
+        }
+        (self.debug_trap | self.pending_code_breakpoint_trap()) & 0xF000 != 0
+    }
+
     /// Priority-4 code-breakpoint probe for the previous instruction.
     /// Bochs event.cc: `debug_trap |= code_breakpoint_match(get_laddr(
     /// BX_SEG_REG_CS, prev_rip))` — DR0-3 hold LINEAR addresses, so the CS

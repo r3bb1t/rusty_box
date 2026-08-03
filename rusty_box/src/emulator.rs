@@ -4887,6 +4887,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 if self.device_manager.has_interrupt()
                                     && self.cpu.get_b_if() != 0
                                     && !self.cpu.interrupts_inhibited(0x01)
+                                    // Priority-4 debug traps come first —
+                                    // see the main loop's injection site.
+                                    && !self.cpu.debug_trap_pending()
                                 {
                                     let vec = self.iac();
                                     // SAFETY: see borrow_memory_for_cpu / inject_interrupt
@@ -5022,7 +5025,18 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     if self.device_manager.has_interrupt()
                         && self.cpu.get_b_if() != 0
                         && !self.cpu.interrupts_inhibited(0x01)
-                    // BX_INHIBIT_INTERRUPTS
+                        // BX_INHIBIT_INTERRUPTS
+                        //
+                        // Bochs event.cc handleAsyncEvent delivers Priority-4
+                        // traps on the previous instruction (TF single-step,
+                        // data/IO and code breakpoints) BEFORE Priority-5
+                        // external interrupts. This path implements only
+                        // Priority 5, and interrupt() unconditionally clears
+                        // debug_trap, so injecting here while a #DB is pending
+                        // silently destroyed it. Deferring by one boundary
+                        // keeps the interrupt latched in the PIC (iac() is not
+                        // called) and lets the CPU deliver #DB first.
+                        && !self.cpu.debug_trap_pending()
                     {
                         let vector = self.iac();
 
@@ -5294,6 +5308,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             if self.device_manager.has_interrupt()
                 && self.cpu.get_b_if() != 0
                 && !self.cpu.interrupts_inhibited(0x01)
+                // Bochs event.cc delivers Priority-4 debug traps before
+                // Priority-5 external interrupts; defer one boundary so the
+                // CPU can deliver #DB first. The interrupt stays latched in
+                // the PIC because iac() is not called.
+                && !self.cpu.debug_trap_pending()
             {
                 let vector = self.iac();
                 // SAFETY: see borrow_memory_for_cpu / inject_interrupt
