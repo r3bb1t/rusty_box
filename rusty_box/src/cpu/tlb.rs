@@ -82,6 +82,22 @@ impl TLBEntry {
         }
     }
 
+    /// Page can be read from the given privilege level.
+    /// Bochs tlb.h `isReadOK`: `accessBits & (0x01 << user) & rd_pkey[pkey]`.
+    /// The protection-key allow-mask is AND-ed in on EVERY hit, not just on
+    /// the walk — callers built without PKEY support pass `u32::MAX`.
+    #[inline]
+    pub(crate) fn is_read_ok(&self, user: u32, pkey_mask: u32) -> bool {
+        (self.access_bits & (0x01u32 << user) & pkey_mask) != 0
+    }
+
+    /// Page can be written from the given privilege level.
+    /// Bochs tlb.h `isWriteOK`: `accessBits & (0x04 << user) & wr_pkey[pkey]`.
+    #[inline]
+    pub(crate) fn is_write_ok(&self, user: u32, pkey_mask: u32) -> bool {
+        (self.access_bits & (0x04u32 << user) & pkey_mask) != 0
+    }
+
     /// CET: page can be read as shadow stack from the given privilege level.
     /// Bochs tlb.h isShadowStackReadOK macro. With protection keys enabled
     /// (BX_SUPPORT_PKEYS), the entry's PKEY allow-mask (passed as `pkey_mask`)

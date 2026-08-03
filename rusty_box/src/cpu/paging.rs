@@ -1518,6 +1518,23 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         paddr & self.a20_mask
     }
 
+    /// Whether a physical address may be reached through the page-walk fast
+    /// path's direct host-RAM pointer.
+    ///
+    /// The legacy `0xA0000-0xFFFFF` window is not plain RAM: PAM shadowing,
+    /// the VGA aperture and SMRAM re-route reads and writes there, and Bochs
+    /// performs every paging-structure access through
+    /// `access_read_physical`/`access_write_physical`, which apply that
+    /// routing. `bx_guest_ram_span` alone excludes only the PCI hole, so
+    /// without this test a page table placed in the legacy window was read
+    /// and had its A/D bits written straight to host RAM, behind whatever
+    /// mapping the chipset had in effect. The DTLB fill uses the same test
+    /// when deciding whether to cache a `host_page_addr`.
+    #[inline]
+    fn is_plain_ram_for_walk(a20_addr: u64) -> bool {
+        a20_addr < 0xA0000 || a20_addr >= 0x100000
+    }
+
     /// Deliver a #PF exception.
     pub(super) fn page_fault(
         &mut self,
@@ -1600,7 +1617,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let needed_bit = 1u32 << ((is_ss << 2) | ((is_write as u32) << 1) | (user as u32));
         {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
-            if tlb_entry.lpf == lpf && (tlb_entry.access_bits & needed_bit) != 0 {
+            // Bochs tlb.h isReadOK/isWriteOK AND the entry's protection-key
+            // allow-mask into every hit test, not just into the walk below.
+            // Shadow-stack accesses use bits 0x10/0x40, which the read side
+            // of the mask governs (Bochs isShadowStack*OK use rd_pkey/wr_pkey
+            // the same way).
+            let pkey_mask = if is_write {
+                self.wr_pkey[tlb_entry.pkey as usize]
+            } else {
+                self.rd_pkey[tlb_entry.pkey as usize]
+            };
+            if tlb_entry.lpf == lpf && (tlb_entry.access_bits & needed_bit & pkey_mask) != 0 {
                 // TLB hit — return cached physical address directly.
                 #[cfg(feature = "profiling")]
                 {
@@ -1722,7 +1749,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Fast physical dword read for page walks — bypass full mem_read_dword overhead.
-    /// Page table entries are always in plain RAM, so we can use mem_host_base directly.
     /// Used by both &self and &mut self callers.
     #[inline(always)]
     fn page_walk_read_dword_ro(&self, paddr: u64) -> u32 {
@@ -1733,7 +1759,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn page_walk_read_dword(&self, paddr: u64) -> u32 {
         let a20_addr = paddr & self.a20_mask;
         let host_base = self.mem_host_base;
-        if !host_base.is_null() {
+        if !host_base.is_null() && Self::is_plain_ram_for_walk(a20_addr) {
             if let Some(span) = bx_guest_ram_span(a20_addr, 4, self.mem_host_len) {
                 return super::access::read_unaligned_u32(super::access::host_offset(
                     host_base, span.start,
@@ -1748,7 +1774,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let a20_addr = paddr & self.a20_mask;
         self.smc_write_check(a20_addr, 4);
         let host_base = self.mem_host_base;
-        if !host_base.is_null() {
+        if !host_base.is_null() && Self::is_plain_ram_for_walk(a20_addr) {
             if let Some(span) = bx_guest_ram_span(a20_addr, 4, self.mem_host_len) {
                 super::access::write_unaligned_u32(
                     super::access::host_offset_mut(host_base, span.start),
@@ -1764,7 +1790,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn page_walk_read_qword(&self, paddr: u64) -> u64 {
         let a20_addr = paddr & self.a20_mask;
         let host_base = self.mem_host_base;
-        if !host_base.is_null() {
+        if !host_base.is_null() && Self::is_plain_ram_for_walk(a20_addr) {
             if let Some(span) = bx_guest_ram_span(a20_addr, 8, self.mem_host_len) {
                 return super::access::read_unaligned_u64(super::access::host_offset(
                     host_base, span.start,
@@ -1779,7 +1805,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let a20_addr = paddr & self.a20_mask;
         self.smc_write_check(a20_addr, 8);
         let host_base = self.mem_host_base;
-        if !host_base.is_null() {
+        if !host_base.is_null() && Self::is_plain_ram_for_walk(a20_addr) {
             if let Some(span) = bx_guest_ram_span(a20_addr, 8, self.mem_host_len) {
                 super::access::write_unaligned_u64(
                     super::access::host_offset_mut(host_base, span.start),

@@ -53,6 +53,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             .set_tsc_deadline_supported(tsc_deadline_supported);
         self.cpu_topology = _config.cpu_topology();
 
+        // Establish the per-pkey allow-mask invariant documented on `rd_pkey`
+        // ("when no protection keys are enabled all bits should be set for all
+        // keys") from CONSTRUCTION, not only from `reset`. The masks are AND-ed
+        // into every TLB permission test, so a zeroed array denies every access.
+        // Bochs only needs this in reset() because its CPU is always reset
+        // before use; here a builder-constructed CPU is directly usable, and
+        // set_pkeys is idempotent — PKRU/PKRS/CR0.WP/CR4.PKE are all zero at
+        // this point, exactly as they are when reset() calls it.
+        self.set_pkeys(0, 0);
+
         // Populate VMX/SVM bitmasks — matches Bochs init.cc
         self.vmx_extensions_bitmask = self.cpuid.get_vmx_extensions_bitmask();
         self.svm_extensions_bitmask = self.cpuid.get_svm_extensions_bitmask();
