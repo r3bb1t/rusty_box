@@ -1124,6 +1124,28 @@ mod tests {
             "in SMM the save area reads back from DRAM"
         );
 
+        // A DEVICE access never reaches SMRAM, even with the window wide open.
+        // Bochs memory.cc guards the whole SMRAM block with `if (cpu != NULL)`,
+        // so DMA and device-issued writes fall through to the VGA handler.
+        mem.enable_smram(true, false);
+        let mut via_cpu = [0xffu8; 4];
+        mem.read_physical_page(&pins, CpuMemoryPolicy::default(), 0xafefc, 4, &mut via_cpu)
+            .expect("CPU read with SMRAM open");
+        assert_eq!(
+            u32::from_le_bytes(via_cpu),
+            SMM_REVISION_ID,
+            "with SMRAM open a CPU access sees the save area"
+        );
+        let mut via_device = [0xffu8; 4];
+        mem.read_physical_page(&pins, CpuMemoryPolicy::device(), 0xafefc, 4, &mut via_device)
+            .expect("device read with SMRAM open");
+        assert_ne!(
+            u32::from_le_bytes(via_device),
+            SMM_REVISION_ID,
+            "a device access must never see SMRAM (Bochs memory.cc cpu != NULL)"
+        );
+        mem.enable_smram(false, false);
+
         // Instruction fetch inside SMM must get a direct DRAM span for the
         // handler page (Bochs getHostMemAddr: SMRAM direct access is granted
         // for code only), while a data access to the same page is vetoed so it

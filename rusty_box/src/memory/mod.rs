@@ -156,10 +156,28 @@ impl CpuTlbPin {
 ///
 /// It is computed while the CPU is ordinarily reborrowed, before memory is
 /// mutably borrowed.  Memory must never need a shared `BxCpuC` reference.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CpuMemoryPolicy {
     smm_mode: bool,
     monitor_hit: bool,
+    /// Whether this access comes from CPU context. Bochs memory.cc wraps the
+    /// whole SMRAM window in `if (cpu != NULL) { ... }`, so a device access
+    /// (DMA, an MMIO device writing memory) never reaches SMRAM through it
+    /// and falls through to the normal handler/VGA routing instead.
+    cpu_context: bool,
+}
+
+/// CPU context is the default: every production caller except the device
+/// paths below computes its policy from live CPU state, and defaulting the
+/// other way would silently hide SMRAM from the CPU.
+impl Default for CpuMemoryPolicy {
+    fn default() -> Self {
+        Self {
+            smm_mode: false,
+            monitor_hit: false,
+            cpu_context: true,
+        }
+    }
 }
 
 impl CpuMemoryPolicy {
@@ -168,7 +186,25 @@ impl CpuMemoryPolicy {
         Self {
             smm_mode,
             monitor_hit,
+            cpu_context: true,
         }
+    }
+
+    /// Policy for an access issued by a device rather than a CPU — Bochs's
+    /// `cpu == NULL`. Such accesses never see the SMRAM window.
+    #[inline]
+    pub(crate) const fn device() -> Self {
+        Self {
+            smm_mode: false,
+            monitor_hit: false,
+            cpu_context: false,
+        }
+    }
+
+    /// Bochs memory.cc `cpu != NULL` — gates the SMRAM shortcut.
+    #[inline]
+    pub(crate) const fn is_cpu_context(self) -> bool {
+        self.cpu_context
     }
 
     #[inline]

@@ -454,7 +454,11 @@ impl BxMemC<'_> {
         };
 
         // Check SMRAM first (before memory handlers).
-        let smram_hit = (0x000a0000..0x000c0000).contains(&a20_addr)
+        // Bochs memory.cc wraps the SMRAM window in `if (cpu != NULL)`, so a
+        // device access (DMA, a device writing memory) never reaches SMRAM
+        // through it and falls through to the handler/VGA routing below.
+        let smram_hit = policy.is_cpu_context()
+            && (0x000a0000..0x000c0000).contains(&a20_addr)
             && self.smram_available
             && (self.smram_enable || (policy.smm_mode() && !self.smram_restricted));
         if smram_hit {
@@ -626,8 +630,10 @@ impl BxMemC<'_> {
             is_bios
         };
 
-        // Check SMRAM first (before memory handlers).
-        if (0x000a0000..0x000c0000).contains(&a20_addr)
+        // Check SMRAM first (before memory handlers). Gated on CPU context —
+        // Bochs memory.cc reaches the SMRAM window only when `cpu != NULL`.
+        if policy.is_cpu_context()
+            && (0x000a0000..0x000c0000).contains(&a20_addr)
             && self.smram_available
             && (self.smram_enable || (policy.smm_mode() && !self.smram_restricted))
         {

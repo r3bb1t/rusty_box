@@ -3737,7 +3737,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             let mut bytes = value.to_le_bytes();
             if let Err(error) = self.memory.write_physical_page(
                 &[],
-                crate::memory::CpuMemoryPolicy::default(),
+                // DEV_MEM_WRITE_PHYSICAL — a device access, so it must not see
+                // SMRAM (Bochs memory.cc `cpu == NULL`).
+                crate::memory::CpuMemoryPolicy::device(),
                 address,
                 bytes.len(),
                 &mut bytes,
