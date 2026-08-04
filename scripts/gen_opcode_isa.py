@@ -28,6 +28,21 @@ REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "rusty_box_decoder/src/opcode_isa.rs"
 ALWAYS = 0xFFFF
 
+# Prepare classes, mirroring the BX_PREPARE_* attributes of Bochs
+# `cpu/decoder/fetchdecode.h`. Numbered densely rather than reusing Bochs's bit
+# values because exactly one applies per opcode.
+STATE_NONE, STATE_FPU, STATE_MMX, STATE_SSE = 0, 1, 2, 3
+STATE_AVX, STATE_EVEX, STATE_AMX = 4, 5, 6
+PREPARE_NAMES = {
+    STATE_NONE: "STATE_NONE",
+    STATE_FPU: "STATE_FPU",
+    STATE_MMX: "STATE_MMX",
+    STATE_SSE: "STATE_SSE",
+    STATE_AVX: "STATE_AVX",
+    STATE_EVEX: "STATE_EVEX",
+    STATE_AMX: "STATE_AMX",
+}
+
 # Opcodes with no Bochs counterpart. They stay ungated, which preserves the
 # behaviour rusty_box had before the gate existed — a missing gate is the status
 # quo, a wrong gate would #UD a working guest. Listed explicitly so that new
@@ -37,6 +52,11 @@ KNOWN_UNMATCHED = {
     "IaError",
     "InsertedOpcode",
     "Int0",
+    # Substituted by the icache fill path when the guest has not enabled the
+    # CPU state the decoded instruction needs. Bochs expresses the same thing
+    # as a handler swap to BxNoAVX / BxNoEVEX, so there is no BX_IA_* to match.
+    "NoAvxState",
+    "NoEvexState",
     "Tmmultf32psTnnnTrmTreg",
     # Bochs defines only the masked form BX_IA_EVEX_VPMULTISHIFTQB_..._Kmask;
     # this unmasked variant is a rusty-side invention.
@@ -46,6 +66,19 @@ KNOWN_UNMATCHED = {
     "EvexVminpbf16VphHphWphKmask",
     "EvexVmaxpbf16VphHphWph",
     "EvexVmaxpbf16VphHphWphKmask",
+}
+
+# An opcode with no Bochs counterpart gets no BX_PREPARE_* either, and
+# defaulting it to STATE_NONE would exempt it from the state gate entirely.
+# Every unmatched opcode that is nevertheless a real VEX/EVEX encoding needs its
+# class stated here. The invariant below makes forgetting one an error rather
+# than a silently ungated instruction.
+STATE_OVERRIDES = {
+    "EvexVpmultishiftqbVdqHdqWdq": STATE_EVEX,
+    "EvexVminpbf16VphHphWph": STATE_EVEX,
+    "EvexVminpbf16VphHphWphKmask": STATE_EVEX,
+    "EvexVmaxpbf16VphHphWph": STATE_EVEX,
+    "EvexVmaxpbf16VphHphWphKmask": STATE_EVEX,
 }
 
 
@@ -79,6 +112,8 @@ def main():
     bochs = {}
     # Bochs opcode name -> the BX_PREPARE_EVEX* encoding-restriction bits
     evex_flags = {}
+    # Bochs opcode name -> which CPU state must be enabled to execute it
+    prepare_class = {}
     for name in ("ia_opcodes.def", "ia_opcodes_evex.def"):
         text = read("cpp_orig/bochs/bochs/cpu/decoder/" + name)
         # Drop trailing line comments first. The entry regex anchors on the
@@ -105,6 +140,29 @@ def main():
             if "BX_PREPARE_EVEX" in attrs:
                 flags |= 0x080
             evex_flags[norm(fields[0].replace("BX_IA_", ""))] = flags
+
+            # The same field also names the CPU state the instruction needs
+            # enabled. Bochs turns this into a BxNo* handler substitution in
+            # `assignHandler`; rusty_box applies it at icache fill. The classes
+            # are mutually exclusive except AMX, which some opcodes carry
+            # alongside EVEX — AMX is the stricter of the two, so it wins.
+            # BX_PREPARE_OPMASK is #defined to BX_PREPARE_EVEX, so the two are
+            # the same class and the EVEX test below catches both.
+            if "BX_PREPARE_AMX" in attrs:
+                cls = STATE_AMX
+            elif "BX_PREPARE_EVEX" in attrs or "BX_PREPARE_OPMASK" in attrs:
+                cls = STATE_EVEX
+            elif "BX_PREPARE_AVX" in attrs:
+                cls = STATE_AVX
+            elif "BX_PREPARE_SSE" in attrs:
+                cls = STATE_SSE
+            elif "BX_PREPARE_MMX" in attrs:
+                cls = STATE_MMX
+            elif "BX_PREPARE_FPU" in attrs:
+                cls = STATE_FPU
+            else:
+                cls = STATE_NONE
+            prepare_class[norm(fields[0].replace("BX_IA_", ""))] = cls
 
     # rusty X86Feature variants, declaration order == discriminant
     feat_src = read("rusty_box_decoder/src/features.rs")
@@ -228,6 +286,72 @@ def main():
         "",
         "/// Number of opcodes carrying EVEX prepare attributes, pinned by tests.",
         f"pub const EVEX_FLAGGED_OPCODE_COUNT: usize = {evex_gated};",
+        "",
+    ]
+
+    # ---- prepare class (which CPU state must be enabled) ----
+    lines += [
+        "// Required CPU state — the BX_PREPARE_* attribute of",
+        "// `bx_define_opcode`. Bochs consults it in `assignHandler` and swaps",
+        "// the handler for BxNoFPU/BxNoMMX/BxNoSSE/BxNoAVX/BxNoEVEX when the",
+        "// state is unavailable; rusty_box applies it at icache fill, so the",
+        "// dispatch loop pays nothing and the check cannot be forgotten by an",
+        "// individual handler.",
+        "/// No CPU-state requirement beyond the base ISA.",
+        f"pub const STATE_NONE: u8 = {STATE_NONE};",
+        "/// Needs x87 state (CR0.EM/TS).",
+        f"pub const STATE_FPU: u8 = {STATE_FPU};",
+        "/// Needs MMX state.",
+        f"pub const STATE_MMX: u8 = {STATE_MMX};",
+        "/// Needs SSE state (CR0.EM, CR4.OSFXSR, CR0.TS).",
+        f"pub const STATE_SSE: u8 = {STATE_SSE};",
+        "/// Needs AVX state (protected mode, CR4.OSXSAVE, XCR0.SSE|YMM).",
+        f"pub const STATE_AVX: u8 = {STATE_AVX};",
+        "/// Needs AVX-512 state (AVX plus XCR0.OPMASK|ZMM_HI256|HI_ZMM).",
+        f"pub const STATE_EVEX: u8 = {STATE_EVEX};",
+        "/// Needs AMX state.",
+        f"pub const STATE_AMX: u8 = {STATE_AMX};",
+        "",
+        "/// CPU state each opcode requires, from field 10 of `bx_define_opcode`.",
+        "// A `const` for the same reason as OPCODE_EVEX_FLAGS.",
+        f"pub const OPCODE_PREPARE: [u8; {len(opcodes)}] = [",
+    ]
+    # A VEX/EVEX-encoded opcode that ends up needing no state is almost always a
+    # missing mapping rather than a real ungated instruction, and the failure
+    # mode is silent: the icache state gate would wave it through for a guest
+    # that never enabled AVX. Catch it here instead.
+    ungated_vector = [
+        op
+        for op in opcodes
+        if op.startswith(("Evex", "V128", "V256", "V512"))
+        and STATE_OVERRIDES.get(op, prepare_class.get(norm(op), STATE_NONE)) == STATE_NONE
+    ]
+    if ungated_vector:
+        print("ERROR: VEX/EVEX opcodes with no state class:", file=sys.stderr)
+        for op in sorted(ungated_vector):
+            print(f"  {op} — add it to STATE_OVERRIDES", file=sys.stderr)
+        return 1
+
+    prepare_counts = {}
+    for op in opcodes:
+        cls = STATE_OVERRIDES.get(op, prepare_class.get(norm(op), STATE_NONE))
+        prepare_counts[cls] = prepare_counts.get(cls, 0) + 1
+        lines.append(f"    {cls}, // {op} -> {PREPARE_NAMES[cls]}")
+    lines += [
+        "];",
+        "",
+        "/// CPU state `opcode` requires before it may execute.",
+        "#[inline]",
+        "pub const fn opcode_prepare_class(opcode: Opcode) -> u8 {",
+        "    OPCODE_PREPARE[opcode as usize]",
+        "}",
+        "",
+        "/// Opcodes requiring AVX state, pinned by tests so a regeneration that",
+        "/// silently drops the gate is caught.",
+        f"pub const STATE_AVX_OPCODE_COUNT: usize = {prepare_counts.get(STATE_AVX, 0)};",
+        "",
+        "/// Opcodes requiring AVX-512 state.",
+        f"pub const STATE_EVEX_OPCODE_COUNT: usize = {prepare_counts.get(STATE_EVEX, 0)};",
         "",
         "#[allow(dead_code)]",
         "fn _feature_type_is_used(f: X86Feature) -> u16 {",

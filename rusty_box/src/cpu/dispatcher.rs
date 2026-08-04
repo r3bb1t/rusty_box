@@ -3009,6 +3009,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 Ok(())
             }
 
+            // The instruction decoded fine but needs CPU state the guest has
+            // not enabled. `state_resolve_opcode` substituted these at icache
+            // fill, exactly as Bochs assignHandler substitutes BxNoAVX /
+            // BxNoEVEX; the handlers pick #UD or #NM from the actual reason.
+            Opcode::NoAvxState => self.bx_no_avx(instr),
+            Opcode::NoEvexState => self.bx_no_evex(instr),
+
             // =========================================================================
             // AVX/AVX-512 specific opcodes
             // =========================================================================

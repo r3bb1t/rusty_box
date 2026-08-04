@@ -101,6 +101,17 @@ fn vex_encodings_ud_when_guest_has_not_enabled_avx_state() {
                 ("vpslldq_imm", &[0xC5, 0xF9, 0x73, 0xF9, 0x04]),
                 // VPSRAW xmm0, xmm1, 4        C5 F9 71 /4
                 ("vpsraw_imm", &[0xC5, 0xF9, 0x71, 0xE1, 0x04]),
+                // Handlers that still gate on SSE internally. They are covered
+                // by the icache-fill state gate rather than by their own
+                // prepare_* call, so they exercise the central path.
+                // VPADDB xmm0, xmm1, xmm2     VEX.128.66.0F.W0 FC /r
+                ("vpaddb", &[0xC5, 0xF1, 0xFC, 0xC2]),
+                // VMPSADBW ymm0, ymm1, ymm2, 0  VEX.256.66.0F3A.W0 42 /r ib
+                ("vmpsadbw", &[0xC4, 0xE3, 0x75, 0x42, 0xC2, 0x00]),
+                // VMOVDQA [rax], ymm0         VEX.256.66.0F.W0 7F /r
+                ("vmovdqa_store", &[0xC5, 0xFD, 0x7F, 0x00]),
+                // EVEX VPADDD zmm0, zmm1, zmm2  EVEX.512.66.0F.W0 FE /r
+                ("evex_vpaddd", &[0x62, 0xF1, 0x75, 0x48, 0xFE, 0xC2]),
                 // Controls — these already gate on AVX, so they anchor the
                 // fixture: if these ever stop faulting the harness is wrong,
                 // not the handler.
@@ -120,6 +131,104 @@ fn vex_encodings_ud_when_guest_has_not_enabled_avx_state() {
                      Bochs BxNoAVX tests, and CR4.OSFXSR is not a substitute"
                 );
             }
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+}
+
+/// CR0.TS owes the guest #NM, not #UD.
+///
+/// This is why the gate substitutes a sentinel opcode that dispatches to
+/// `bx_no_avx` rather than plain `Opcode::IaError`: `BxNoAVX` raises #UD only
+/// when the state is genuinely unavailable, and #NM when the state is fine but
+/// CR0.TS is set. Collapsing both into #UD would break lazy FPU/AVX context
+/// switching, where the #NM handler is what restores the register file.
+#[test]
+fn cr0_ts_raises_nm_rather_than_ud() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            const NM_VECTOR: usize = 7;
+            let mut emu = avx_state_disabled_emulator();
+
+            // Enable AVX state properly, so the only thing left is CR0.TS.
+            emu.reg_write(X86Reg::Rax, 0x7);
+            emu.reg_write(X86Reg::Rcx, 0);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CODE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+            emu.emu_start(CODE, Some(CODE + 3), None, Some(1))
+                .expect("enable AVX state");
+
+            // CR0.TS — the guest deferred saving the vector register file.
+            emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | (1 << 3));
+
+            let ud_before = emu.cpu().get_exception_diag()[UD_VECTOR];
+            let nm_before = emu.cpu().get_exception_diag()[NM_VECTOR];
+
+            // vpaddd xmm0, xmm1, xmm2
+            let code = [0xC5, 0xF1, 0xFE, 0xC2];
+            let mut image = code.to_vec();
+            image.extend_from_slice(&[0xEB, 0xFE]);
+            emu.mem_write(CODE, &image).expect("write code");
+            emu.emu_start(CODE, Some(CODE + code.len() as u64), None, Some(4))
+                .expect("emu_start");
+
+            assert_eq!(
+                emu.cpu().get_exception_diag()[NM_VECTOR] - nm_before,
+                1,
+                "CR0.TS must raise #NM so the guest's lazy-restore handler runs"
+            );
+            assert_eq!(
+                emu.cpu().get_exception_diag()[UD_VECTOR] - ud_before,
+                0,
+                "CR0.TS must not be reported as #UD — the instruction is legal, \
+                 the register file is merely not loaded yet"
+            );
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+}
+
+/// Clearing CR4.OSXSAVE must take effect immediately.
+///
+/// The gate reads `fetch_mode_mask`, which is recomputed by
+/// `handle_avx_mode_change` rather than derived on each lookup, so every path
+/// that changes CR0/CR4/XCR0 has to refresh it. A stale bit here would be
+/// invisible until a guest disabled AVX and kept executing it.
+#[test]
+fn clearing_cr4_osxsave_disables_avx_immediately() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let mut emu = avx_state_disabled_emulator();
+            emu.reg_write(X86Reg::Rax, 0x7);
+            emu.reg_write(X86Reg::Rcx, 0);
+            emu.reg_write(X86Reg::Rdx, 0);
+            emu.mem_write(CODE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+            emu.emu_start(CODE, Some(CODE + 3), None, Some(1))
+                .expect("enable AVX state");
+
+            // vpaddd xmm0, xmm1, xmm2 — runs while AVX state is enabled.
+            let code = [0xC5u8, 0xF1, 0xFE, 0xC2];
+            assert_eq!(
+                ud_raised_by(&mut emu, &code),
+                0,
+                "sanity: the instruction must execute while AVX state is on"
+            );
+
+            // Drop CR4.OSXSAVE. XCR0 still reads 7, but without OSXSAVE the
+            // CPU is no longer in a state where AVX may execute.
+            emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) & !(1 << 18));
+
+            assert_eq!(
+                ud_raised_by(&mut emu, &code),
+                1,
+                "clearing CR4.OSXSAVE must #UD the next AVX instruction — if it \
+                 does not, fetch_mode_mask went stale and the icache state gate \
+                 is running on out-of-date CPU state"
+            );
         })
         .expect("spawn")
         .join()

@@ -6196,6 +6196,10 @@ pub enum TypedInstruction {
     },
     /// InsertedOpcode — internal sentinel (not a real instruction)
     InsertedOpcodeTyped,
+    /// NoAvxState — internal sentinel: the guest has not enabled AVX state.
+    NoAvxStateTyped,
+    /// NoEvexState — internal sentinel: the guest has not enabled AVX-512 state.
+    NoEvexStateTyped,
 
     // =====================================================================
     // Extension — SSE crossover instructions
@@ -31697,6 +31701,8 @@ impl Instruction {
                 mem: self.memory_operand(),
             },
             O::InsertedOpcode => T::InsertedOpcodeTyped,
+            O::NoAvxState => T::NoAvxStateTyped,
+            O::NoEvexState => T::NoEvexStateTyped,
 
             // =================================================================
             // Extension — SSE crossover
