@@ -103,22 +103,35 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `fetch_mode_mask` (see `BxICache::hash`), so a trace decoded while AVX
     /// was disabled cannot be reused after the guest enables it.
     ///
-    /// Only the AVX and AVX-512 classes are resolved here. `PREPARE_SSE`,
-    /// `PREPARE_MMX` and `PREPARE_FPU` are enforced inside their handlers by
-    /// `prepare_sse` / `prepare_fpu`, which is already correct for them; AMX is
-    /// not implemented and its opcodes are stopped by the ISA gate above.
+    /// Only [`CpuState::Avx`] and [`CpuState::Evex`] are resolved here; the
+    /// match below says what happens to the rest and why.
+    ///
+    /// [`CpuState::Avx`]: rusty_box_decoder::opcode_isa::CpuState::Avx
+    /// [`CpuState::Evex`]: rusty_box_decoder::opcode_isa::CpuState::Evex
     pub(in crate::cpu) fn state_resolve_opcode(&self, opcode: Opcode) -> Opcode {
         use super::opcodes_table::FetchModeMask;
-        use rusty_box_decoder::opcode_isa::{opcode_prepare_class, STATE_AVX, STATE_EVEX};
+        use rusty_box_decoder::opcode_isa::{opcode_state, CpuState};
 
-        match opcode_prepare_class(opcode) {
-            STATE_AVX if !self.fetch_mode_mask.contains(FetchModeMask::AVX_OK) => {
-                Opcode::NoAvxState
-            }
-            STATE_EVEX if !self.fetch_mode_mask.contains(FetchModeMask::EVEX_OK) => {
-                Opcode::NoEvexState
-            }
-            _ => opcode,
+        // Deliberately exhaustive, with no catch-all arm: a new `CpuState`
+        // must be considered here rather than silently inheriting "ungated".
+        let (required, fault) = match opcode_state(opcode) {
+            CpuState::Avx => (FetchModeMask::AVX_OK, Opcode::NoAvxState),
+            CpuState::Evex => (FetchModeMask::EVEX_OK, Opcode::NoEvexState),
+
+            // Enforced inside the handlers by `prepare_fpu` / `prepare_sse`,
+            // which is correct for them because those handlers are also reached
+            // from legacy encodings that need exactly that check.
+            CpuState::Base | CpuState::Fpu | CpuState::Mmx | CpuState::Sse => return opcode,
+
+            // AMX is not implemented; its opcodes never survive the ISA gate,
+            // so there is no state to check.
+            CpuState::Amx => return opcode,
+        };
+
+        if self.fetch_mode_mask.contains(required) {
+            opcode
+        } else {
+            fault
         }
     }
 

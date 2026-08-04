@@ -34,13 +34,13 @@ ALWAYS = 0xFFFF
 STATE_NONE, STATE_FPU, STATE_MMX, STATE_SSE = 0, 1, 2, 3
 STATE_AVX, STATE_EVEX, STATE_AMX = 4, 5, 6
 PREPARE_NAMES = {
-    STATE_NONE: "STATE_NONE",
-    STATE_FPU: "STATE_FPU",
-    STATE_MMX: "STATE_MMX",
-    STATE_SSE: "STATE_SSE",
-    STATE_AVX: "STATE_AVX",
-    STATE_EVEX: "STATE_EVEX",
-    STATE_AMX: "STATE_AMX",
+    STATE_NONE: "Base",
+    STATE_FPU: "Fpu",
+    STATE_MMX: "Mmx",
+    STATE_SSE: "Sse",
+    STATE_AVX: "Avx",
+    STATE_EVEX: "Evex",
+    STATE_AMX: "Amx",
 }
 
 # Opcodes with no Bochs counterpart. They stay ungated, which preserves the
@@ -291,30 +291,40 @@ def main():
 
     # ---- prepare class (which CPU state must be enabled) ----
     lines += [
-        "// Required CPU state — the BX_PREPARE_* attribute of",
-        "// `bx_define_opcode`. Bochs consults it in `assignHandler` and swaps",
-        "// the handler for BxNoFPU/BxNoMMX/BxNoSSE/BxNoAVX/BxNoEVEX when the",
-        "// state is unavailable; rusty_box applies it at icache fill, so the",
-        "// dispatch loop pays nothing and the check cannot be forgotten by an",
-        "// individual handler.",
-        "/// No CPU-state requirement beyond the base ISA.",
-        f"pub const STATE_NONE: u8 = {STATE_NONE};",
-        "/// Needs x87 state (CR0.EM/TS).",
-        f"pub const STATE_FPU: u8 = {STATE_FPU};",
-        "/// Needs MMX state.",
-        f"pub const STATE_MMX: u8 = {STATE_MMX};",
-        "/// Needs SSE state (CR0.EM, CR4.OSFXSR, CR0.TS).",
-        f"pub const STATE_SSE: u8 = {STATE_SSE};",
-        "/// Needs AVX state (protected mode, CR4.OSXSAVE, XCR0.SSE|YMM).",
-        f"pub const STATE_AVX: u8 = {STATE_AVX};",
-        "/// Needs AVX-512 state (AVX plus XCR0.OPMASK|ZMM_HI256|HI_ZMM).",
-        f"pub const STATE_EVEX: u8 = {STATE_EVEX};",
-        "/// Needs AMX state.",
-        f"pub const STATE_AMX: u8 = {STATE_AMX};",
+        "/// The CPU state an instruction needs enabled before it may execute —",
+        "/// the `BX_PREPARE_*` attribute of Bochs `bx_define_opcode`.",
+        "///",
+        "/// Bochs consults it in `assignHandler` and swaps the handler for",
+        "/// `BxNoFPU` / `BxNoMMX` / `BxNoSSE` / `BxNoAVX` / `BxNoEVEX` when the",
+        "/// state is unavailable; rusty_box applies it at icache fill, so the",
+        "/// dispatch loop pays nothing and no individual handler can forget it.",
+        "///",
+        "/// Exactly one applies per opcode. This is an enum rather than a set of",
+        "/// integer constants so that a `match` over it is exhaustive: adding a",
+        "/// class breaks every consumer at compile time instead of silently",
+        "/// falling through a catch-all arm and leaving instructions ungated.",
+        "#[derive(Clone, Copy, PartialEq, Eq, Debug)]",
+        "#[repr(u8)]",
+        "pub enum CpuState {",
+        "    /// Base ISA — no state beyond an ordinary integer instruction.",
+        "    Base,",
+        "    /// x87 state (CR0.EM, CR0.TS).",
+        "    Fpu,",
+        "    /// MMX state.",
+        "    Mmx,",
+        "    /// SSE state (CR0.EM, CR4.OSFXSR, CR0.TS).",
+        "    Sse,",
+        "    /// AVX state (protected mode, CR4.OSXSAVE, XCR0.SSE|YMM, CR0.TS).",
+        "    Avx,",
+        "    /// AVX-512 state (AVX plus XCR0.OPMASK|ZMM_HI256|HI_ZMM).",
+        "    Evex,",
+        "    /// AMX tile state.",
+        "    Amx,",
+        "}",
         "",
         "/// CPU state each opcode requires, from field 10 of `bx_define_opcode`.",
         "// A `const` for the same reason as OPCODE_EVEX_FLAGS.",
-        f"pub const OPCODE_PREPARE: [u8; {len(opcodes)}] = [",
+        f"pub const OPCODE_STATE: [CpuState; {len(opcodes)}] = [",
     ]
     # A VEX/EVEX-encoded opcode that ends up needing no state is almost always a
     # missing mapping rather than a real ungated instruction, and the failure
@@ -336,14 +346,14 @@ def main():
     for op in opcodes:
         cls = STATE_OVERRIDES.get(op, prepare_class.get(norm(op), STATE_NONE))
         prepare_counts[cls] = prepare_counts.get(cls, 0) + 1
-        lines.append(f"    {cls}, // {op} -> {PREPARE_NAMES[cls]}")
+        lines.append(f"    CpuState::{PREPARE_NAMES[cls]}, // {op}")
     lines += [
         "];",
         "",
         "/// CPU state `opcode` requires before it may execute.",
         "#[inline]",
-        "pub const fn opcode_prepare_class(opcode: Opcode) -> u8 {",
-        "    OPCODE_PREPARE[opcode as usize]",
+        "pub const fn opcode_state(opcode: Opcode) -> CpuState {",
+        "    OPCODE_STATE[opcode as usize]",
         "}",
         "",
         "/// Opcodes requiring AVX state, pinned by tests so a regeneration that",
