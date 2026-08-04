@@ -1327,8 +1327,21 @@ mod tests {
                     Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                         .unwrap();
                 let code_addr = 0x20_0000;
-                emu.mem_write(code_addr, &[0xC4, 0xE3, 0x45, 0x06, 0xC6, 0x03])
-                    .unwrap();
+
+                // CR4.OSFXSR | CR4.OSXSAVE, then XSETBV to put XCR0 at
+                // FPU|SSE|YMM. Both are needed: with CR4.OSXSAVE set but XCR0
+                // still at its reset value, every VEX encoding #UDs — that is
+                // what Bochs `BxNoAVX` tests, and rusty_box applies the same
+                // gate at icache fill.
+                emu.reg_write(
+                    X86Reg::Cr4,
+                    emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
+                );
+                emu.reg_write(X86Reg::Rax, 0x7);
+                emu.reg_write(X86Reg::Rcx, 0);
+                emu.reg_write(X86Reg::Rdx, 0);
+                emu.mem_write(code_addr, &[0x0F, 0x01, 0xD1]).unwrap();
+                emu.emu_start(code_addr, None, None, Some(1)).unwrap();
 
                 let mut ymm6 = [0u8; 32];
                 let mut ymm7 = [0u8; 32];
@@ -1338,11 +1351,9 @@ mod tests {
                 }
                 emu.reg_write_ymm(X86Reg::Ymm6, ymm6);
                 emu.reg_write_ymm(X86Reg::Ymm7, ymm7);
-                emu.reg_write(
-                    X86Reg::Cr4,
-                    emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
-                );
 
+                emu.mem_write(code_addr, &[0xC4, 0xE3, 0x45, 0x06, 0xC6, 0x03])
+                    .unwrap();
                 emu.emu_start(code_addr, None, None, Some(1)).unwrap();
 
                 let mut expected = [0u8; 32];

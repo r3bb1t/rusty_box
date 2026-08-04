@@ -88,6 +88,40 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Opcode::IaError
     }
 
+    /// Resolve a decoded opcode against the CPU state the guest has enabled.
+    ///
+    /// Bochs tags each instruction with the state it needs — the `BX_PREPARE_*`
+    /// field of `bx_define_opcode` — and `assignHandler`
+    /// (`cpu/decoder/fetchdecode32.cc`) swaps the handler for `BxNoAVX` or
+    /// `BxNoEVEX` when the matching `BX_FETCH_MODE_*_OK` bit is clear. Those
+    /// handlers raise #UD when the state is unavailable and #NM when CR0.TS is
+    /// set, which is why this returns a sentinel opcode rather than
+    /// [`Opcode::IaError`]: only the handler can tell the two faults apart.
+    ///
+    /// Applied at icache fill next to [`Self::isa_resolve_opcode`], so the
+    /// dispatch loop pays nothing. That is sound because the icache is keyed on
+    /// `fetch_mode_mask` (see `BxICache::hash`), so a trace decoded while AVX
+    /// was disabled cannot be reused after the guest enables it.
+    ///
+    /// Only the AVX and AVX-512 classes are resolved here. `PREPARE_SSE`,
+    /// `PREPARE_MMX` and `PREPARE_FPU` are enforced inside their handlers by
+    /// `prepare_sse` / `prepare_fpu`, which is already correct for them; AMX is
+    /// not implemented and its opcodes are stopped by the ISA gate above.
+    pub(in crate::cpu) fn state_resolve_opcode(&self, opcode: Opcode) -> Opcode {
+        use super::opcodes_table::FetchModeMask;
+        use rusty_box_decoder::opcode_isa::{opcode_prepare_class, STATE_AVX, STATE_EVEX};
+
+        match opcode_prepare_class(opcode) {
+            STATE_AVX if !self.fetch_mode_mask.contains(FetchModeMask::AVX_OK) => {
+                Opcode::NoAvxState
+            }
+            STATE_EVEX if !self.fetch_mode_mask.contains(FetchModeMask::EVEX_OK) => {
+                Opcode::NoEvexState
+            }
+            _ => opcode,
+        }
+    }
+
     /// True when the raw `X86Feature` discriminant is set for this CPU.
     /// Companion to [`Self::bx_cpuid_support_isa_extension`] for the generated
     /// table, which stores discriminants rather than enum values.
