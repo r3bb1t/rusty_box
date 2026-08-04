@@ -2333,19 +2333,19 @@ pub(super) const BxOpcodeTable0F90: [u64; 5] = [
 // opcode 0F 91 — KMOV store (VEX.L0) + SETcc (non-VEX)
 pub(super) const BxOpcodeTable0F91: [u64; 5] = [
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_NO_PREFIX),
+        attrs!(VEX | VL128 | VEX_W0 | MOD_MEM | SSE_NO_PREFIX),
         Opcode::KmovwKewKgw,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W1 | SSE_NO_PREFIX),
+        attrs!(VEX | VL128 | VEX_W1 | MOD_MEM | SSE_NO_PREFIX),
         Opcode::KmovqKeqKgq,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_66),
+        attrs!(VEX | VL128 | VEX_W0 | MOD_MEM | SSE_PREFIX_66),
         Opcode::KmovbKebKgb,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W1 | SSE_PREFIX_66),
+        attrs!(VEX | VL128 | VEX_W1 | MOD_MEM | SSE_PREFIX_66),
         Opcode::KmovdKedKgd,
     ),
     form_opcode(attrs!(), Opcode::SetnoEb),
@@ -2353,19 +2353,19 @@ pub(super) const BxOpcodeTable0F91: [u64; 5] = [
 // opcode 0F 92 — KMOV GPR→K (VEX.L0) + SETcc (non-VEX)
 pub(super) const BxOpcodeTable0F92: [u64; 5] = [
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_NO_PREFIX),
+        attrs!(VEX | VL128 | VEX_W0 | MOD_REG | SSE_NO_PREFIX),
         Opcode::KmovwKgwEw,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_66),
+        attrs!(VEX | VL128 | VEX_W0 | MOD_REG | SSE_PREFIX_66),
         Opcode::KmovbKgbEb,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_F2),
+        attrs!(VEX | VL128 | VEX_W0 | MOD_REG | SSE_PREFIX_F2),
         Opcode::KmovdKgdEd,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W1 | SSE_PREFIX_F2),
+        attrs!(VEX | VL128 | VEX_W1 | MOD_REG | IS64 | SSE_PREFIX_F2),
         Opcode::KmovqKgqEq,
     ),
     form_opcode(attrs!(), Opcode::SetbEb),
@@ -2373,19 +2373,19 @@ pub(super) const BxOpcodeTable0F92: [u64; 5] = [
 // opcode 0F 93 — KMOV K→GPR (VEX.L0) + SETcc (non-VEX)
 pub(super) const BxOpcodeTable0F93: [u64; 5] = [
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_NO_PREFIX),
+        attrs!(VEX | VL128 | VEX_W0 | MOD_REG | SSE_NO_PREFIX),
         Opcode::KmovwGdKew,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_66),
+        attrs!(VEX | VL128 | VEX_W0 | MOD_REG | SSE_PREFIX_66),
         Opcode::KmovbGdKeb,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_F2),
+        attrs!(VEX | VL128 | VEX_W0 | MOD_REG | SSE_PREFIX_F2),
         Opcode::KmovdGdKed,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W1 | SSE_PREFIX_F2),
+        attrs!(VEX | VL128 | VEX_W1 | MOD_REG | IS64 | SSE_PREFIX_F2),
         Opcode::KmovqGqKeq,
     ),
     form_opcode(attrs!(), Opcode::SetnbEb),
@@ -2397,19 +2397,19 @@ pub(super) const BxOpcodeTable0F97: [u64; 1] = [form_opcode(attrs!(), Opcode::Se
 // opcode 0F 98 — KORTEST (VEX.L0) + SETcc (non-VEX)
 pub(super) const BxOpcodeTable0F98: [u64; 5] = [
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_NO_PREFIX),
+        attrs!(VEX | VL128 | VEX_W0 | MOD_REG | SSE_NO_PREFIX),
         Opcode::KortestwKgwKew,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W1 | SSE_NO_PREFIX),
+        attrs!(VEX | VL128 | VEX_W1 | MOD_REG | SSE_NO_PREFIX),
         Opcode::KortestqKgqKeq,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_66),
+        attrs!(VEX | VL128 | VEX_W0 | MOD_REG | SSE_PREFIX_66),
         Opcode::KortestbKgbKeb,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W1 | SSE_PREFIX_66),
+        attrs!(VEX | VL128 | VEX_W1 | MOD_REG | SSE_PREFIX_66),
         Opcode::KortestdKgdKed,
     ),
     form_opcode(attrs!(), Opcode::SetsEb),
@@ -2417,19 +2417,19 @@ pub(super) const BxOpcodeTable0F98: [u64; 5] = [
 // opcode 0F 99 — KTEST (VEX.L0) + SETcc (non-VEX)
 pub(super) const BxOpcodeTable0F99: [u64; 5] = [
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_NO_PREFIX),
+        attrs!(VEX | VL128 | VEX_W0 | MOD_REG | SSE_NO_PREFIX),
         Opcode::KtestwKgwKew,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W1 | SSE_NO_PREFIX),
+        attrs!(VEX | VL128 | VEX_W1 | MOD_REG | SSE_NO_PREFIX),
         Opcode::KtestqKgqKeq,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W0 | SSE_PREFIX_66),
+        attrs!(VEX | VL128 | VEX_W0 | MOD_REG | SSE_PREFIX_66),
         Opcode::KtestbKgbKeb,
     ),
     form_opcode(
-        attrs!(VEX | VL128 | VEX_W1 | SSE_PREFIX_66),
+        attrs!(VEX | VL128 | VEX_W1 | MOD_REG | SSE_PREFIX_66),
         Opcode::KtestdKgdKed,
     ),
     form_opcode(attrs!(), Opcode::SetnsEb),

@@ -26,8 +26,9 @@ use super::x87::{
 
 // Decoding mask bit offsets
 use super::tables::{
-    AS32_OFFSET, LOCK_PREFIX_OFFSET, MODC0_OFFSET, NNN_OFFSET, OS32_OFFSET, RRR_OFFSET,
-    SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET,
+    AS32_OFFSET, LOCK_PREFIX_OFFSET, MASK_K0_OFFSET, MODC0_OFFSET, NNN_OFFSET, OS32_OFFSET,
+    RRR_OFFSET, SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET, VEX_OFFSET, VEX_VL_128_256_OFFSET,
+    VEX_W_OFFSET,
 };
 use super::{find_opcode_in_table, read_u16_le, read_u32_le};
 
@@ -201,25 +202,173 @@ pub const fn fetch_decode32_inplace(
     let mut b1 = bytes[pos] as u32;
     pos += 1;
 
-    // Check for VEX/EVEX/XOP prefixes in 32-bit mode
-    if b1 == 0xC4 || b1 == 0xC5 {
-        // VEX prefix - check if it's actually VEX (mod=11)
-        if pos < max_len && (bytes[pos] & 0xC0) == 0xC0 {
-            // This is VEX, not LES/LDS
+    // VEX/EVEX state. Outside 64-bit mode there is no REX prefix and no fifth
+    // register bit, so VEX.R/X/B and EVEX.R' have nothing to extend: Bochs
+    // `decoder_vex32` never reads R/X/B at all, and `decoder_evex32` rejects an
+    // encoding that clears ~V'. Register numbers stay within 0-7 throughout, and
+    // VEX.W is an opcode-selection bit only — it does not promote operand size
+    // the way REX.W does, so `metainfo1_bits` is deliberately left alone here.
+    let mut vex_vvv: u8 = 0; // VEX.vvvv, already un-inverted
+    let mut is_vex = false;
+    let mut is_evex = false;
+    let mut opcode_map: u8 = 0; // 0=1-byte, 1=0F, 2=0F38, 3=0F3A, 4/5=EVEX maps 5/6
+    let mut vex_l: u8 = 0; // 0=128-bit, 1=256-bit, 2=512-bit (EVEX), 3=reserved
+    let mut vex_w: u8 = 0;
+    let mut evex_z: u8 = 0; // EVEX zeroing-masking
+    let mut evex_b_flag: u8 = 0; // EVEX broadcast/RC/SAE
+    let mut evex_aaa: u8 = 0; // EVEX opmask register
+
+    // C4/C5 are LES/LDS unless the following byte has mod=11: a real LES/LDS
+    // loads a far pointer from memory, so it can never encode a register
+    // operand. Bochs `decoder_vex32` makes exactly this split on
+    // `(*iptr & 0xc0) == 0xc0` before touching anything else, and falls back to
+    // `decoder32_modrm` when it does not hold.
+    if (b1 == 0xC4 || b1 == 0xC5) && pos < max_len && (bytes[pos] & 0xC0) == 0xC0 {
+        // A legacy SSE prefix cannot precede VEX — the pp field carries it.
+        if sse_prefix != SsePrefix::PrefixNone as u8 {
             return Err(DecodeError::Decoder(
-                BxDecodeError::BxIllegalVexXopOpcodeMap,
-            )); // VEX not fully supported in const
+                BxDecodeError::BxIllegalVexXopWithSsePrefix,
+            ));
+        }
+
+        is_vex = true;
+        let mut vex_opc_map: u8 = 1; // 2-byte VEX implies map 1 (0F)
+        let mut vex_byte = bytes[pos];
+        pos += 1;
+
+        if b1 == 0xC4 {
+            // 3-byte VEX: C4 [RXBmmmmm] [WvvvvLpp]. R/X/B are ignored.
+            vex_opc_map = vex_byte & 0x1F;
+            if pos >= max_len {
+                return Err(DecodeError::OpcodeBufferUnderflow);
+            }
+            vex_byte = bytes[pos];
+            pos += 1;
+            vex_w = (vex_byte >> 7) & 0x1;
+        }
+
+        vex_vvv = 15 - ((vex_byte >> 3) & 0xF);
+        vex_l = (vex_byte >> 2) & 0x1;
+        sse_prefix = vex_byte & 0x3; // pp field = SSE prefix
+
+        if pos >= max_len {
+            return Err(DecodeError::OpcodeBufferUnderflow);
+        }
+        let opcode_byte = bytes[pos] as u32;
+        pos += 1;
+
+        // Only maps 1 (0F), 2 (0F38) and 3 (0F3A) are populated outside 64-bit
+        // mode — Bochs `if (vex_opc_map < 1 || vex_opc_map >= 4)`.
+        match vex_opc_map {
+            1 => {
+                b1 = 0x100 | opcode_byte;
+                opcode_map = 1;
+            }
+            2 => {
+                b1 = 0x200 | opcode_byte;
+                opcode_map = 2;
+            }
+            3 => {
+                b1 = 0x300 | opcode_byte;
+                opcode_map = 3;
+            }
+            _ => {
+                return Err(DecodeError::Decoder(
+                    BxDecodeError::BxIllegalVexXopOpcodeMap,
+                ));
+            }
         }
     }
 
-    // Note: 0x62 is EVEX prefix in 64-bit mode, but BOUND instruction in 32/16-bit mode.
-    // In 32-bit mode, we need to check if it's actually EVEX or BOUND:
-    // - EVEX requires P0 bit 3 = 0 AND P1 bit 2 (EVEX.U) = 1
-    // - If these conditions aren't met, it's BOUND instruction
-    // For now, we don't support EVEX in 32-bit mode, so 0x62 is always BOUND.
-    // The BOUND instruction requires ModRM, which will be handled below.
+    // 0x62 is BOUND unless the following byte has mod=11. BOUND's first operand
+    // is always memory, and an EVEX P0 outside 64-bit mode always carries ~R and
+    // ~X set (there is nothing for R and X to extend), so the two never overlap.
+    // Bochs `decoder_evex32` splits on the same test and hands the rest to
+    // `decoder32_modrm`. Past this point a malformed EVEX is a guest #UD, not a
+    // second chance at BOUND.
+    if b1 == 0x62 && pos < max_len && (bytes[pos] & 0xC0) == 0xC0 {
+        if sse_prefix != SsePrefix::PrefixNone as u8 {
+            return Err(DecodeError::Decoder(
+                BxDecodeError::BxIllegalVexXopWithSsePrefix,
+            ));
+        }
+        // P0 P1 P2 opcode — Bochs fetches all four at once as a dword.
+        if pos + 4 > max_len {
+            return Err(DecodeError::OpcodeBufferUnderflow);
+        }
 
-    if b1 == 0x8F {
+        is_vex = true; // EVEX shares the VEX operand handling
+        is_evex = true;
+        let p0 = bytes[pos];
+        let p1 = bytes[pos + 1];
+        let p2 = bytes[pos + 2];
+        let opcode_byte = bytes[pos + 3] as u32;
+        pos += 4;
+
+        // P0: ~R(7) ~X(6) ~B(5) ~R'(4) 0(3) mmm(2:0) — bit 3 is reserved.
+        if (p0 & 0x08) != 0 {
+            return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
+        }
+        // P1: W(7) ~vvvv(6:3) U(2) pp(1:0) — EVEX.U must be 1.
+        if (p1 & 0x04) == 0 {
+            return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
+        }
+
+        let evex_map = p0 & 0x07;
+        vex_w = (p1 >> 7) & 1;
+        vex_vvv = 15 - ((p1 >> 3) & 0xF);
+        sse_prefix = p1 & 0x03;
+        // vvvv can only name vmm0-7 here; Bochs `if (vvv >= 8) return`.
+        if vex_vvv >= 8 {
+            return Err(DecodeError::Decoder(BxDecodeError::BxIllegalVexXopVvv));
+        }
+
+        // P2: z(7) L'L(6:5) b(4) ~V'(3) aaa(2:0). V' is the fifth bit of vvvv
+        // (or, for the VSIB forms, of the SIB index); with only eight vector
+        // registers reachable it must be zero, so the encoded ~V' bit must be 1.
+        if (p2 & 0x08) == 0 {
+            return Err(DecodeError::Decoder(BxDecodeError::BxIllegalVexXopVvv));
+        }
+        vex_l = (p2 >> 5) & 0x03;
+        evex_z = (p2 >> 7) & 1;
+        evex_b_flag = (p2 >> 4) & 1;
+        evex_aaa = p2 & 0x07;
+
+        // Bochs: maps 0, 4 and 7 are unpopulated; 5 and 6 shift down one slot
+        // because the table skips map 4.
+        match evex_map {
+            1 => {
+                b1 = 0x100 | opcode_byte;
+                opcode_map = 1;
+            }
+            2 => {
+                b1 = 0x200 | opcode_byte;
+                opcode_map = 2;
+            }
+            3 => {
+                b1 = 0x300 | opcode_byte;
+                opcode_map = 3;
+            }
+            5 => {
+                b1 = 0x400 | opcode_byte;
+                opcode_map = 4;
+            }
+            6 => {
+                b1 = 0x500 | opcode_byte;
+                opcode_map = 5;
+            }
+            _ => {
+                return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
+            }
+        }
+
+        // Zeroing-masking against k0 would select no elements at all.
+        if evex_z != 0 && evex_aaa == 0 {
+            return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
+        }
+    }
+
+    if !is_vex && b1 == 0x8F {
         // XOP prefix - check if it's actually XOP (Bochs: (modrm & 0xC8) == 0xC8)
         // Must check mod=11 AND map>=8 to distinguish from POP [mem] (mod!=11)
         if pos < max_len && (bytes[pos] & 0xC8) == 0xC8 {
@@ -229,9 +378,8 @@ pub const fn fetch_decode32_inplace(
         }
     }
 
-    // Two-byte escape (0F xx)
-    let mut opcode_map: u8 = 0;
-    if b1 == 0x0F {
+    // Two-byte escape (0F xx) — for non-VEX instructions
+    if !is_vex && b1 == 0x0F {
         if pos >= max_len {
             return Err(DecodeError::OpcodeBufferUnderflow);
         }
@@ -289,7 +437,9 @@ pub const fn fetch_decode32_inplace(
         // MOV CR/DR (0F 20-26) always treat as register form regardless of mod field.
         // Bochs uses decoder_creg32 for 0F 20-24,26 (0F 25 is decoder_ud32).
         // Including 0F 25 in the range is harmless since it hits UD anyway.
-        let force_modc0 = opcode_map == 1 && matches!(b1 & 0xFF, 0x20..=0x26);
+        // Only reachable from the legacy path — decoder_creg32 sits in the
+        // one-byte descriptor table, so a VEX/EVEX 0F 20-26 never gets here.
+        let force_modc0 = !is_vex && opcode_map == 1 && matches!(b1 & 0xFF, 0x20..=0x26);
 
         if mod_field == 3 || force_modc0 {
             metainfo1_bits |= InstructionFlags::ModC0.bits();
@@ -493,6 +643,21 @@ pub const fn fetch_decode32_inplace(
             // MOV Sw,Ew: nnn is destination (segment), rm is source (gpr)
             instr.operands.dst = nnn as u8;
             instr.operands.src1 = rm as u8;
+        } else if let Some(rule) = super::vex_shared::vex_modrm_dst(b1, is_vex) {
+            // Opcode bytes whose VEX/EVEX meaning puts the destination in a
+            // different field than their legacy meaning does — see
+            // vex_shared::vex_modrm_dst for the two ranges and why each one is
+            // wrong under the byte rules below.
+            match rule {
+                super::vex_shared::VexModrmDst::Vvvv => {
+                    instr.operands.dst = vex_vvv;
+                    instr.operands.src1 = rm as u8;
+                }
+                super::vex_shared::VexModrmDst::Nnn => {
+                    instr.operands.dst = nnn as u8;
+                    instr.operands.src1 = rm as u8;
+                }
+            }
         } else if (b1 < 0x100 && ((b1 & 0x0F) == 0x01 || (b1 & 0x0F) == 0x09) && b1 != 0x69)
             || b1 == 0x89
             // Two-byte Ed,Gd opcodes (DST=rm): Group 7, store-form SSE, MOV Rd/DRn, Groups 12-14
@@ -556,9 +721,51 @@ pub const fn fetch_decode32_inplace(
         }
     }
 
+    // Store VEX/EVEX fields in the instruction. There is no V' outside 64-bit
+    // mode (the EVEX parse above rejected any encoding that set it), so vvvv is
+    // already the whole register number.
+    if is_vex {
+        instr.operands.src2 = vex_vvv;
+        instr.set_vex_w(vex_w);
+        instr.set_vex(true);
+    }
+    // Vector length after EVEX.b's register-form override; for plain VEX this is
+    // `vex_l` unchanged. Everything downstream — the instruction field, the
+    // decoding mask and the reserved-L'L check — reads this, matching the order
+    // Bochs uses in decoder_evex32.
+    let effective_vl = if is_evex {
+        super::vex_shared::evex_effective_vl(
+            vex_l,
+            evex_b_flag != 0,
+            (metainfo1_bits & InstructionFlags::ModC0.bits()) != 0,
+        )
+    } else {
+        vex_l
+    };
+    if is_vex {
+        instr.set_vl(effective_vl);
+    }
+    if is_evex {
+        instr.set_opmask(evex_aaa);
+        instr.set_evex_b(evex_b_flag);
+        instr.set_zero_masking(evex_z);
+        // L'L is overloaded: normally the vector length, but on a register
+        // operand with EVEX.b it is the embedded rounding mode instead. Bochs
+        // keeps both — `setRC(evex_vl_rc)` unconditionally, then `setVL` — so
+        // the rounding mode survives for the handlers to apply.
+        instr.set_rc(vex_l);
+        // `L'L = 11b` is reserved unless the override above replaced it.
+        if !super::vex_shared::evex_vector_length_ok(effective_vl) {
+            return Err(DecodeError::Decoder(BxDecodeError::BxVexXopBadVectorLength));
+        }
+    }
+
     // === Phase 3.5: Read 3DNow! suffix byte (comes after ModRM/displacement) ===
+    // `opcode_map == 4` means 3DNow! only on the legacy `0F 0F` path; an EVEX
+    // prefix reuses the same slot for its map 5 (the AVX512-FP16 block), whose
+    // instructions have no trailing suffix byte.
     let mut dnow_suffix: u8 = 0;
-    if opcode_map == 4 {
+    if opcode_map == 4 && !is_evex {
         // 3DNow! instructions: suffix byte is read AFTER ModRM and displacement
         if pos >= max_len {
             return Err(DecodeError::ImmediateBufferUnderflow);
@@ -569,7 +776,11 @@ pub const fn fetch_decode32_inplace(
 
     // === Phase 4: Parse immediate and moffs (direct memory offset) ===
     // Pass nnn to distinguish Group 3a/3b variants (TEST vs NOT/NEG/etc)
-    let imm_size = get_immediate_size_32(b1, opcode_map, os_32, as_32, nnn);
+    let imm_size = if is_vex {
+        super::vex_shared::vex_immediate_size(opcode_map, (b1 & 0xFF) as u8)
+    } else {
+        get_immediate_size_32(b1, opcode_map, os_32, as_32, nnn)
+    };
 
     if imm_size > 0 {
         if pos + (imm_size as usize) > max_len {
@@ -654,6 +865,23 @@ pub const fn fetch_decode32_inplace(
             0
         } << LOCK_PREFIX_OFFSET)
         | (if mod_c0 { 1 } else { 0 } << MODC0_OFFSET)
+        // VEX prefix present — required by VEX-only table entries (e.g.
+        // VBLENDVPS/VBLENDVPD, KSHIFT*) so their legacy encodings #UD. Bochs
+        // uses separate BxOpcodeTableVEX tables instead of a decmask bit; this
+        // port shares tables, so the bit carries the distinction. EVEX has its
+        // own lookup and, like Bochs, must not match VEX-only entries.
+        //
+        // IS64_OFFSET stays clear, which is what gates the 64-bit-only VEX
+        // forms (KMOVQ to/from a GPR, the BMI *_GqEq family, RORX Gq) out of
+        // 32-bit mode — Bochs marks those ATTR_IS64.
+        | (if is_vex && !is_evex { 1 } else { 0 } << VEX_OFFSET)
+        | ((vex_w as u32) << VEX_W_OFFSET)
+        | (super::vex_shared::vl_thermometer(effective_vl) << VEX_VL_128_256_OFFSET)
+        | (if is_evex && evex_aaa == 0 {
+            1u32 << MASK_K0_OFFSET
+        } else {
+            0
+        })
         | if needs_modrm {
             (rm << RRR_OFFSET) | (nnn << NNN_OFFSET)
         } else {
@@ -691,7 +919,7 @@ pub const fn fetch_decode32_inplace(
         // Can't call set_foo() in const fn, so set id directly (foo is in lower 16 bits of id)
         let foo_val = ((modrm_byte as u16) | ((b1 as u16) << 8)) & 0x7FF;
         instr.immediate = foo_val as u32;
-    } else if opcode_map == 4 {
+    } else if opcode_map == 4 && !is_evex {
         // 3DNow! instruction: use suffix to look up opcode directly
         instr.opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
     } else if opcode_map == 0 && b1 == 0x90 {
@@ -705,6 +933,93 @@ pub const fn fetch_decode32_inplace(
         }
     } else {
         instr.opcode = lookup_opcode_32(b1, opcode_map, decmask, nnn);
+    }
+
+    // EVEX resolves against its own map, exactly as Bochs does: an EVEX-encoded
+    // byte is looked up in BxOpcodeTableEVEX and nowhere else. There is no
+    // fallback to the SSE/VEX tables — those describe different instructions
+    // (VPXOR vs VPXORD differ in masking granularity, not just encoding), so
+    // borrowing an entry from them would decode to the wrong handler.
+    if is_evex {
+        instr.opcode = super::vex_shared::lookup_evex_opcode(opcode_map, (b1 & 0xFF) as u8, decmask);
+
+        // Which field holds the destination is a property of the opcode, not of
+        // the encoding, so the byte-based rules above cannot express it: most
+        // EVEX opcodes write the reg field, the store forms (VEXTRACT*, the
+        // truncating VPMOV* stores, VCOMPRESS*, VPEXTR*, VSCATTER*) write rm,
+        // and the shift/rotate groups write vvvv. Upstream takes it from the
+        // first operand in ia_opcodes_evex.def and the generated table carries
+        // the same information.
+        match super::evex_operands::evex_dst(instr.opcode) {
+            super::evex_operands::EvexDst::Nnn => {
+                instr.operands.dst = nnn as u8;
+                instr.operands.src1 = rm as u8;
+            }
+            super::evex_operands::EvexDst::Rm => {
+                instr.operands.dst = rm as u8;
+                instr.operands.src1 = nnn as u8;
+            }
+            super::evex_operands::EvexDst::Vvvv => {
+                instr.operands.dst = vex_vvv;
+                instr.operands.src1 = rm as u8;
+            }
+        }
+
+        // EVEX compressed displacement — see vex_shared::evex_scale_displ8.
+        if needs_modrm && ((modrm_byte >> 6) & 0x3) == 1 {
+            instr.displacement = super::vex_shared::evex_scale_displ8(
+                instr.opcode,
+                instr.displacement,
+                vex_l,
+                evex_b_flag != 0,
+                vex_w != 0,
+            );
+        }
+
+        // Gather/scatter have no register form and no meaning for k0.
+        if super::vex_shared::evex_vsib_form_illegal(instr.opcode, mod_c0, evex_aaa) {
+            return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+        }
+
+        // EVEX.b must name a broadcast or a rounding mode the opcode supports.
+        if evex_b_flag != 0 {
+            match super::vex_shared::validate_evex_b(instr.opcode, mod_c0) {
+                Ok(()) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    // VEX SSE→VEX opcode remapping: the opcode tables are shared with SSE, so a
+    // table hit may be the 2-operand SSE opcode that ignores VEX.vvvv. Remap to
+    // the 3-operand VEX opcode so the right handler is dispatched.
+    if is_vex && !is_evex {
+        // Bochs looks a VEX encoding up in BxOpcodeTableVEX and nowhere else;
+        // a slot with no group there is #UD no matter what the shared legacy
+        // table would have said for the same byte.
+        if !super::vex_shared::vex_slot_populated(opcode_map, (b1 & 0xFF) as u8) {
+            return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+        }
+        instr.opcode = super::vex_shared::remap_sse_to_vex(instr.opcode, vex_l);
+        // Legacy table entries carry no VEX attributes, so the vector-length
+        // and ModRM-form limits Bochs states in its VEX groups are applied here
+        // rather than by the table match.
+        match super::vex_shared::validate_vex_legacy_form(instr.opcode, vex_l, mod_c0) {
+            Ok(()) => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    // VEX is4 operand: VBLENDVPS/VBLENDVPD/VPBLENDVB encode a fourth (mask)
+    // register in imm8[7:4]; outside 64-bit mode only three of those bits are
+    // significant, since there are just eight vector registers to name.
+    if let Some(src3) = super::vex_shared::vex_is4_src3(instr.opcode, instr.immediate, false) {
+        instr.operands.src3 = src3;
+    }
+
+    match super::vex_shared::validate_reserved_vex_vvvv(instr.opcode, vex_vvv) {
+        Ok(()) => {}
+        Err(error) => return Err(error),
     }
 
     // Check if opcode lookup failed
@@ -1641,5 +1956,241 @@ mod tests {
             "0x83 imm8 0xFF should be sign-extended to 0xFFFFFFFF, got {:#x}",
             instr.id()
         );
+    }
+
+    // ========================================================================
+    // VEX / EVEX — Bochs decoder_vex32 and decoder_evex32
+    // ========================================================================
+
+    /// C4/C5 stay LES/LDS when the next byte is not a register form, and become
+    /// VEX when it is. Bochs `decoder_vex32` splits on `(*iptr & 0xc0) == 0xc0`.
+    #[test]
+    fn vex32_c4_c5_split_from_les_lds() {
+        // C4 /r with mod=00 → LES ecx, [eax]
+        let i = fetch_decode32(&[0xC4, 0x08], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::LesGdMp);
+        assert_eq!(i.ilen(), 2);
+        assert!(!i.is_vex());
+
+        // C5 /r with mod=00 → LDS ecx, [eax]
+        let i = fetch_decode32(&[0xC5, 0x08], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::LdsGdMp);
+        assert_eq!(i.ilen(), 2);
+
+        // C5 with mod=11 in the next byte → 2-byte VEX.
+        // VPADDD xmm1, xmm2, xmm3 = C5 E9 FE CB
+        let i = fetch_decode32(&[0xC5, 0xE9, 0xFE, 0xCB], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::V128VpadddVdqHdqWdq);
+        assert_eq!(i.ilen(), 4);
+        assert!(i.is_vex());
+        assert_eq!(i.get_vl(), 0);
+        assert_eq!(i.dst(), 1);
+        assert_eq!(i.src2(), 2); // VEX.vvvv
+        assert_eq!(i.src1(), 3); // ModRM.rm
+    }
+
+    /// VEX.L selects the 256-bit form exactly as in 64-bit mode.
+    #[test]
+    fn vex32_vector_length_selects_ymm_form() {
+        // VPADDD ymm1, ymm2, ymm3 = C5 ED FE CB
+        let i = fetch_decode32(&[0xC5, 0xED, 0xFE, 0xCB], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::V256VpadddVdqHdqWdq);
+        assert_eq!(i.get_vl(), 1);
+    }
+
+    /// The three-byte form carries the opcode map in VEX.mmmmm; only 1, 2 and 3
+    /// are populated outside 64-bit mode.
+    #[test]
+    fn vex32_three_byte_maps() {
+        // map 2 (0F38): VPSHUFB xmm1, xmm2, xmm3 = C4 E2 69 00 CB
+        let i = fetch_decode32(&[0xC4, 0xE2, 0x69, 0x00, 0xCB], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::V128VpshufbVdqHdqWdq);
+        assert_eq!(i.ilen(), 5);
+        assert_eq!(i.src2(), 2);
+
+        // map 3 (0F3A) carries an imm8: VPALIGNR xmm1,xmm2,xmm3,4
+        let i = fetch_decode32(&[0xC4, 0xE3, 0x69, 0x0F, 0xCB, 0x04], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::V128VpalignrVdqHdqWdqIb);
+        assert_eq!(i.ilen(), 6);
+        assert_eq!(i.ib(), 4);
+
+        // map 4 has no VEX table.
+        assert!(fetch_decode32(&[0xC4, 0xE4, 0x69, 0x00, 0xCB], true).is_err());
+    }
+
+    /// VZEROUPPER/VZEROALL are the one VEX encoding with no ModRM byte.
+    #[test]
+    fn vex32_vzeroupper_has_no_modrm() {
+        let i = fetch_decode32(&[0xC5, 0xF8, 0x77], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::Vzeroupper);
+        assert_eq!(i.ilen(), 3);
+
+        let i = fetch_decode32(&[0xC5, 0xFC, 0x77], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::Vzeroall);
+        assert_eq!(i.ilen(), 3);
+    }
+
+    /// A legacy SSE prefix cannot precede VEX — pp carries it instead.
+    /// Bochs `decoder_vex32`: `if (sse_prefix) return BX_IA_ERROR;`
+    #[test]
+    fn vex32_rejects_legacy_sse_prefix() {
+        for prefix in [0x66u8, 0xF2, 0xF3] {
+            assert!(
+                fetch_decode32(&[prefix, 0xC5, 0xE9, 0xFE, 0xCB], true).is_err(),
+                "prefix {prefix:#04x} before VEX must be #UD"
+            );
+        }
+    }
+
+    /// VEX forms with no `vvvv` source reserve every encoding but 1111b.
+    #[test]
+    fn vex32_reserved_vvvv_is_ud() {
+        // VTESTPS xmm1, xmm2 with VEX.vvvv = 1111b decodes.
+        assert!(fetch_decode32(&[0xC4, 0xE2, 0x79, 0x0E, 0xCA], true).is_ok());
+        // VEX.vvvv = 1110b names xmm1 and is reserved here.
+        assert!(fetch_decode32(&[0xC4, 0xE2, 0x71, 0x0E, 0xCA], true).is_err());
+    }
+
+    /// BMI is VEX-encoded but operates on GPRs, so it is ordinary 32-bit code.
+    /// The VEX.W1 qword forms are ATTR_IS64 in Bochs and must not decode here.
+    #[test]
+    fn vex32_bmi_gpr_forms() {
+        // ANDN eax, ecx, edx = C4 E2 70 F2 C2
+        let i = fetch_decode32(&[0xC4, 0xE2, 0x70, 0xF2, 0xC2], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::AndnGdBdEd);
+        assert_eq!(i.dst(), 0);
+        assert_eq!(i.src2(), 1); // vvvv = ecx
+        assert_eq!(i.src1(), 2); // rm = edx
+
+        // The same encoding with VEX.W1 is ANDN r64 — 64-bit mode only.
+        assert!(fetch_decode32(&[0xC4, 0xE2, 0xF0, 0xF2, 0xC2], true).is_err());
+    }
+
+    /// The opmask block shares opcode bytes 0F 90..9F with SETcc; under VEX the
+    /// reg field is the destination, and a form the VEX group does not define
+    /// must not fall through to the SETcc entry.
+    #[test]
+    fn vex32_opmask_moves() {
+        // KMOVD k1, ecx = VEX.L0.F2.0F.W0 92 /r
+        let i = fetch_decode32(&[0xC4, 0xE1, 0x7B, 0x92, 0xC8], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::KmovdKgdEd);
+        assert_eq!(i.dst(), 1); // ModRM.reg = k1
+        assert_eq!(i.src1(), 0); // ModRM.rm = ecx
+
+        // KMOVQ k1, r64 is ATTR_IS64 — reserved outside 64-bit mode.
+        assert!(fetch_decode32(&[0xC4, 0xE1, 0xFB, 0x92, 0xC8], true).is_err());
+
+        // 0F 91 is the store form and is ATTR_MOD_MEM: no register encoding.
+        assert!(fetch_decode32(&[0xC4, 0xE1, 0x78, 0x91, 0xCA], true).is_err());
+
+        // KTEST reads the reg field as its first source, not as an opcode
+        // extension the way SETcc does.
+        let i = fetch_decode32(&[0xC4, 0xE1, 0x78, 0x99, 0xCA], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::KtestwKgwKew);
+        assert_eq!(i.dst(), 1);
+        assert_eq!(i.src1(), 2);
+    }
+
+    /// KMOVQ k -> m64 carries no ATTR_IS64 in Bochs `BxOpcodeGroup_VEX_0F91`,
+    /// so it is reachable from 32-bit code and must store a full qword. This is
+    /// the encoding that made the store-width fix untestable while decode32
+    /// rejected every VEX prefix.
+    #[test]
+    fn vex32_kmovq_stores_to_memory() {
+        // KMOVQ [eax], k1 = C4 E1 F8 91 08
+        let i = fetch_decode32(&[0xC4, 0xE1, 0xF8, 0x91, 0x08], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::KmovqKeqKgq);
+        assert_eq!(i.ilen(), 5);
+        assert!(!i.mod_c0());
+        assert_eq!(i.src1(), 1); // ModRM.reg = k1, the value being stored
+        assert_eq!(i.get_vex_w(), 1);
+    }
+
+    /// The is4 register of VBLENDV* comes from imm8[7:4], but only three of
+    /// those bits are significant outside 64-bit mode.
+    #[test]
+    fn vex32_is4_operand_is_three_bits() {
+        // VPBLENDVB xmm1, xmm2, xmm3, xmm15 — imm8 = 0xF0
+        let i = fetch_decode32(&[0xC4, 0xE3, 0x69, 0x4C, 0xCB, 0xF0], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::V128VpblendvbVdqHdqWdqIb);
+        assert_eq!(i.src3(), 7, "imm8[7] must not select xmm8-15 in 32-bit mode");
+    }
+
+    /// 0x62 stays BOUND unless the next byte is a register form.
+    #[test]
+    fn evex32_split_from_bound() {
+        let i = fetch_decode32(&[0x62, 0x08], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::BoundGdMa);
+        assert_eq!(i.ilen(), 2);
+        assert!(!i.is_vex());
+
+        // EVEX VPADDD xmm1, xmm2, xmm3 = 62 F1 6D 08 FE CB
+        let i = fetch_decode32(&[0x62, 0xF1, 0x6D, 0x08, 0xFE, 0xCB], true).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::EvexVpadddVdqHdqWdq);
+        assert_eq!(i.ilen(), 6);
+        assert!(i.is_vex());
+        assert_eq!(i.dst(), 1);
+        assert_eq!(i.src2(), 2);
+        assert_eq!(i.src1(), 3);
+    }
+
+    /// The EVEX fields that can only describe registers 8-31, or lengths that
+    /// do not exist, are reserved outside 64-bit mode.
+    #[test]
+    fn evex32_reserved_encodings() {
+        // Baseline: the encoding these mutate is valid.
+        assert!(fetch_decode32(&[0x62, 0xF1, 0x6D, 0x08, 0xFE, 0xCB], true).is_ok());
+
+        // P0 bit 3 is reserved and must be 0.
+        assert!(fetch_decode32(&[0x62, 0xF9, 0x6D, 0x08, 0xFE, 0xCB], true).is_err());
+        // EVEX.U (P1 bit 2) must be 1.
+        assert!(fetch_decode32(&[0x62, 0xF1, 0x69, 0x08, 0xFE, 0xCB], true).is_err());
+        // vvvv = 0101b names vmm10 — out of reach with eight registers.
+        assert!(fetch_decode32(&[0x62, 0xF1, 0x2D, 0x08, 0xFE, 0xCB], true).is_err());
+        // ~V' clear means V' set, likewise unreachable.
+        assert!(fetch_decode32(&[0x62, 0xF1, 0x6D, 0x00, 0xFE, 0xCB], true).is_err());
+        // L'L = 11b is reserved.
+        assert!(fetch_decode32(&[0x62, 0xF1, 0x6D, 0x68, 0xFE, 0xCB], true).is_err());
+        // Zeroing-masking against k0 selects nothing.
+        assert!(fetch_decode32(&[0x62, 0xF1, 0x6D, 0x88, 0xFE, 0xCB], true).is_err());
+        // Maps 0, 4 and 7 are unpopulated.
+        for p0 in [0xF0u8, 0xF4, 0xF7] {
+            assert!(fetch_decode32(&[0x62, p0, 0x6D, 0x08, 0xFE, 0xCB], true).is_err());
+        }
+        // A legacy SSE prefix cannot precede EVEX.
+        assert!(fetch_decode32(&[0x66, 0x62, 0xF1, 0x6D, 0x08, 0xFE, 0xCB], true).is_err());
+    }
+
+    /// EVEX disp8 is compressed by the element size, in 32-bit mode too.
+    #[test]
+    fn evex32_scales_compressed_displacement() {
+        // VMOVDQA64 ymm1, [eax+0x20] — encoded disp8 = 1, tuple scale = 32.
+        let i = fetch_decode32(&[0x62, 0xF1, 0xFD, 0x28, 0x6F, 0x48, 0x01], true).unwrap();
+        assert_eq!(i.get_vl(), 1);
+        assert_eq!(
+            i.displacement, 0x20,
+            "disp8=1 at VL256 must scale to 32, got {:#x}",
+            i.displacement
+        );
+    }
+
+    /// EVEX.b on a register operand means embedded rounding and forces the
+    /// operation to full width, which is also what the decoding mask must see.
+    #[test]
+    fn evex32_embedded_rounding_forces_vl512() {
+        // VADDPS zmm1, zmm2, zmm3 {ru-sae} = 62 F1 6C 58 58 CB
+        //   P2 = z(0) L'L(10 = RU) b(1) ~V'(1) aaa(000)
+        let i = fetch_decode32(&[0x62, 0xF1, 0x6C, 0x58, 0x58, 0xCB], true).unwrap();
+        assert_eq!(i.get_vl(), 2, "EVEX.b in register form implies VL512");
+        assert_eq!(i.get_rc(), 2, "L'L is the rounding mode here, not the length");
+    }
+
+    /// The decoder is shared with 16-bit mode, exactly as Bochs shares
+    /// fetchDecode32 between them.
+    #[test]
+    fn vex32_decodes_in_16bit_mode() {
+        let i = fetch_decode32(&[0xC5, 0xE9, 0xFE, 0xCB], false).unwrap();
+        assert_eq!(i.get_ia_opcode(), Opcode::V128VpadddVdqHdqWdq);
+        assert_eq!(i.ilen(), 4);
     }
 }

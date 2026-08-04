@@ -2076,3 +2076,167 @@ fn every_evex_map_entry_decodes() {
             .join("\n  ")
     );
 }
+
+// ============================================================================
+// Encoding rules that decode64 got wrong, found while porting decoder_vex32 /
+// decoder_evex32. Each of these is a Bochs behaviour the 64-bit path missed.
+// ============================================================================
+
+/// EVEX map 5 lands in the same internal `opcode_map` slot as the legacy
+/// `0F 0F` 3DNow! escape, which reads a trailing suffix byte. An EVEX
+/// instruction has no such byte, so reading one stole a byte from the next
+/// instruction. Bochs never conflates them: 3DNow! is `decoder32_3dnow` off the
+/// one-byte table and map 5 is reached only through `decoder_evex64`.
+#[test]
+fn evex_map5_does_not_consume_a_3dnow_suffix_byte() {
+    // VADDPH zmm1, zmm2, zmm3 = 62 F5 6C 48 58 CB (EVEX.512.NP.MAP5.W0 58 /r)
+    let i = fetch_decode64(&[0x62, 0xF5, 0x6C, 0x48, 0x58, 0xCB]).unwrap();
+    assert_eq!(i.get_ia_opcode(), Opcode::EvexVaddphVphHphWph);
+    assert_eq!(i.ilen(), 6, "map 5 has no suffix byte");
+    assert_eq!(i.dst(), 1);
+    assert_eq!(i.src2(), 2);
+    assert_eq!(i.src1(), 3);
+}
+
+/// `EVEX.L'L = 11b` is reserved. Bochs closes both EVEX decoders with
+/// `if (i->getVL() > BX_VL512) ia_opcode = BX_IA_ERROR;`.
+#[test]
+fn evex_reserved_vector_length_is_ud() {
+    // Baseline with L'L = 00.
+    assert!(fetch_decode64(&[0x62, 0xF1, 0x6D, 0x08, 0xFE, 0xCB]).is_ok());
+    // Same encoding with L'L = 11.
+    assert!(fetch_decode64(&[0x62, 0xF1, 0x6D, 0x68, 0xFE, 0xCB]).is_err());
+    // EVEX.b in register form replaces the length outright, so L'L is free to
+    // carry a rounding mode — including 11b (round-to-zero).
+    let i = fetch_decode64(&[0x62, 0xF1, 0x6C, 0x78, 0x58, 0xCB]).unwrap();
+    assert_eq!(i.get_vl(), 2);
+    assert_eq!(i.get_rc(), 3);
+}
+
+/// The opmask groups constrain the ModRM form and, for the qword GPR moves, the
+/// mode — Bochs `BxOpcodeGroup_VEX_0F91` is ATTR_MOD_MEM throughout, and
+/// `_0F92`/`_0F93` are ATTR_MODC0 with ATTR_IS64 on their VEX.W1 entries.
+#[test]
+fn vex_opmask_group_form_constraints() {
+    // 0F 91 stores an opmask to memory; there is no register form.
+    let i = fetch_decode64(&[0xC4, 0xE1, 0x78, 0x91, 0x08]).unwrap();
+    assert_eq!(i.get_ia_opcode(), Opcode::KmovwKewKgw);
+    assert!(fetch_decode64(&[0xC4, 0xE1, 0x78, 0x91, 0xCA]).is_err());
+
+    // 0F 92 moves a GPR into an opmask; there is no memory form.
+    let i = fetch_decode64(&[0xC4, 0xE1, 0x78, 0x92, 0xC8]).unwrap();
+    assert_eq!(i.get_ia_opcode(), Opcode::KmovwKgwEw);
+    assert!(fetch_decode64(&[0xC4, 0xE1, 0x78, 0x92, 0x08]).is_err());
+
+    // 0F 93 goes the other way, same constraint.
+    let i = fetch_decode64(&[0xC4, 0xE1, 0x78, 0x93, 0xC8]).unwrap();
+    assert_eq!(i.get_ia_opcode(), Opcode::KmovwGdKew);
+    assert!(fetch_decode64(&[0xC4, 0xE1, 0x78, 0x93, 0x08]).is_err());
+
+    // The VEX.W1 qword GPR forms stay available in 64-bit mode.
+    let i = fetch_decode64(&[0xC4, 0xE1, 0xFB, 0x92, 0xC8]).unwrap();
+    assert_eq!(i.get_ia_opcode(), Opcode::KmovqKgqEq);
+
+    // KORTEST/KTEST are register-only.
+    assert!(fetch_decode64(&[0xC4, 0xE1, 0x78, 0x98, 0x08]).is_err());
+    assert!(fetch_decode64(&[0xC4, 0xE1, 0x78, 0x99, 0x08]).is_err());
+}
+
+/// SETcc has no VEX encoding, so a VEX-prefixed 0F 90..9F that no opmask entry
+/// claims must be #UD rather than falling through to the shared SETcc entry,
+/// whose attribute mask constrains nothing.
+#[test]
+fn vex_setcc_bytes_do_not_fall_through() {
+    // VEX.F3 0F 90 matches no entry in BxOpcodeGroup_VEX_0F90.
+    assert!(fetch_decode64(&[0xC4, 0xE1, 0x7A, 0x90, 0xC8]).is_err());
+    // 0F 9F has no opmask meaning at all.
+    assert!(fetch_decode64(&[0xC4, 0xE1, 0x78, 0x9F, 0xC8]).is_err());
+    // The legacy encodings are untouched.
+    let i = fetch_decode64(&[0x0F, 0x90, 0xC0]).unwrap();
+    assert_eq!(i.get_ia_opcode(), Opcode::SetoEb);
+}
+
+/// The is4 register of VBLENDV* is four bits wide in 64-bit mode.
+#[test]
+fn vex64_is4_operand_is_four_bits() {
+    let i = fetch_decode64(&[0xC4, 0xE3, 0x69, 0x4C, 0xCB, 0xF0]).unwrap();
+    assert_eq!(i.get_ia_opcode(), Opcode::V128VpblendvbVdqHdqWdqIb);
+    assert_eq!(i.src3(), 0xF);
+}
+
+/// A VEX-prefixed byte with no VEX form must not have the *legacy* immediate
+/// rules applied to it before the table lookup rejects it. `0F 8x` is a rel32
+/// Jcc without a prefix, so the legacy rules would consume four bytes the
+/// instruction does not own — a real over-read at a page boundary. Bochs
+/// derives the VEX immediate size from the opcode number alone.
+#[test]
+fn vex_immediate_size_follows_the_vex_rule_not_the_legacy_one() {
+    // VEX.0F 80 is not a Jcc and is not a VEX opcode: #UD, and it must reach
+    // that verdict without asking for a rel32 that is not there.
+    assert!(fetch_decode64(&[0xC4, 0xE1, 0x78, 0x80, 0xC0]).is_err());
+    assert!(fetch_decode32(&[0xC4, 0xE1, 0x78, 0x80, 0xC0], true).is_err());
+
+    // The bytes that really do carry an imm8 under VEX still consume it.
+    // VPSHUFD xmm1, xmm2, 0x1B = C5 F9 70 CA 1B
+    let i = fetch_decode64(&[0xC5, 0xF9, 0x70, 0xCA, 0x1B]).unwrap();
+    assert_eq!(i.ilen(), 5);
+    assert_eq!(i.ib(), 0x1B);
+    let i = fetch_decode32(&[0xC5, 0xF9, 0x70, 0xCA, 0x1B], true).unwrap();
+    assert_eq!(i.ilen(), 5);
+    assert_eq!(i.ib(), 0x1B);
+
+    // VCMPPS xmm1, xmm2, xmm3, 0 = C5 E8 C2 CB 00
+    let i = fetch_decode64(&[0xC5, 0xE8, 0xC2, 0xCB, 0x00]).unwrap();
+    assert_eq!(i.ilen(), 5);
+    // Map 3 always carries one: VPALIGNR xmm1,xmm2,xmm3,4
+    let i = fetch_decode64(&[0xC4, 0xE3, 0x69, 0x0F, 0xCB, 0x04]).unwrap();
+    assert_eq!(i.ilen(), 6);
+    assert_eq!(i.ib(), 4);
+}
+
+/// A VEX prefix on an opcode byte Bochs leaves as `BxOpcodeGroup_ERR` is a
+/// guest #UD, whatever the shared legacy table holds for that byte.
+///
+/// Upstream never consults the legacy tables from the VEX path — it resolves
+/// against `BxOpcodeTableVEX` alone. Sharing the tables meant `VEX.0F 80`
+/// resolved to `JO rel32` and the guest *took the branch*; CPUID, RDTSC, MOV
+/// CR/DR, CMPXCHG, the BT group and the SHLD/SHRD pair were all reachable the
+/// same way.
+#[test]
+fn vex_unpopulated_opcode_slots_are_ud() {
+    // VEX.128.NP.0F <byte> /r, register form. Every byte below is
+    // BxOpcodeGroup_ERR in BxOpcodeTableVEX.
+    for byte in [
+        0x00u8, 0x01, 0x0B, 0x20, 0x22, 0x31, 0x80, 0x82, 0xA2, 0xA3, 0xA4, 0xAB, 0xAC, 0xB0,
+        0xB6, 0xBA, 0xBC, 0xC0, 0xC1, 0xC3, 0xC7,
+    ] {
+        let enc = [0xC4u8, 0xE1, 0x78, byte, 0xC1, 0x00, 0x00, 0x00, 0x00];
+        assert!(
+            fetch_decode64(&enc).is_err(),
+            "VEX.0F {byte:02X} has no VEX form and must be #UD in 64-bit mode"
+        );
+        assert!(
+            fetch_decode32(&enc, true).is_err(),
+            "VEX.0F {byte:02X} has no VEX form and must be #UD in 32-bit mode"
+        );
+    }
+
+    // 0F38 F0/F1 (MOVBE) and 0F3A FF have no VEX form either.
+    for enc in [
+        [0xC4u8, 0xE2, 0x78, 0xF0, 0xC1, 0x00],
+        [0xC4, 0xE2, 0x78, 0xF1, 0xC1, 0x00],
+        [0xC4, 0xE3, 0x78, 0xFF, 0xC1, 0x00],
+    ] {
+        assert!(fetch_decode64(&enc).is_err());
+        assert!(fetch_decode32(&enc, true).is_err());
+    }
+
+    // The neighbouring populated slots still decode, in both modes.
+    assert!(fetch_decode64(&[0xC4, 0xE2, 0x69, 0x00, 0xCB]).is_ok()); // VPSHUFB
+    assert!(fetch_decode32(&[0xC4, 0xE2, 0x69, 0x00, 0xCB], true).is_ok());
+    assert!(fetch_decode64(&[0xC4, 0xE3, 0x69, 0x44, 0xCB, 0x00]).is_ok()); // VPCLMULQDQ
+    assert!(fetch_decode32(&[0xC4, 0xE3, 0x69, 0x44, 0xCB, 0x00], true).is_ok());
+    // ...and so do the legacy encodings of the same bytes.
+    assert!(fetch_decode64(&[0x0F, 0xA2]).is_ok()); // CPUID
+    assert!(fetch_decode32(&[0x0F, 0x31], true).is_ok()); // RDTSC
+}

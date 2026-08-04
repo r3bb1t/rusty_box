@@ -157,8 +157,9 @@ bitflags! {
         const ModC0 = 1 << 4;
         /// REX prefix present — enables SPL/BPL/SIL/DIL register mapping
         const Extend8bit = 1 << 5;
-        /// VEX prefix present (reliable flag, unlike is_vex() which shares immediate field)
-        const VexPresent = 1 << 6;
+        // Bits 6-7 are the LOCK/REP field (see LOCK_REP_SHIFT below) and are
+        // not available as flags. Whether a VEX or EVEX prefix was present is
+        // recorded by `set_vex` / `is_vex` in the immediate word instead.
     }
 }
 
