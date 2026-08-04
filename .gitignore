@@ -82,3 +82,7 @@ examples/rusty_box_uefi/alpine.iso
 /c.img
 /.clangd
 /compile_commands.json
+
+# Python bytecode from the scripts/ generators
+__pycache__/
+*.py[cod]
