@@ -854,14 +854,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.load_far_pointer64(instr, BxSegregs::Gs)
     }
 
+    /// Shared m16:64 far-pointer load — Bochs segment_ctrl.cc `load_segq`.
+    ///
+    /// Both halves are read through the paging-aware virtual accessors, which
+    /// translate and can raise #PF; `mem_read_qword`/`mem_read_word` take
+    /// PHYSICAL addresses and would silently read unrelated memory whenever
+    /// linear != physical. As in `load_segw`/`load_segd`, the SELECTOR is read
+    /// first (so it is the address reported when both halves fault) and its
+    /// effective address wraps within the instruction's address size.
     fn load_far_pointer64(&mut self, instr: &Instruction, target_seg: BxSegregs) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
-        let laddr = self.get_laddr64(seg as usize, eaddr);
 
-        // Read 64-bit offset + 16-bit selector
-        let offset = self.mem_read_qword(laddr);
-        let selector = self.mem_read_word(laddr.wrapping_add(8));
+        let selector = self.v_read_word(seg, eaddr.wrapping_add(8) & instr.asize_mask())?;
+        let offset = self.v_read_qword(seg, eaddr)?;
 
         self.load_seg_reg(target_seg, selector)?;
         self.set_gpr64(instr.dst() as usize, offset);

@@ -82,6 +82,22 @@ impl TLBEntry {
         }
     }
 
+    /// Page can be read from the given privilege level.
+    /// Bochs tlb.h `isReadOK`: `accessBits & (0x01 << user) & rd_pkey[pkey]`.
+    /// The protection-key allow-mask is AND-ed in on EVERY hit, not just on
+    /// the walk — callers built without PKEY support pass `u32::MAX`.
+    #[inline]
+    pub(crate) fn is_read_ok(&self, user: u32, pkey_mask: u32) -> bool {
+        (self.access_bits & (0x01u32 << user) & pkey_mask) != 0
+    }
+
+    /// Page can be written from the given privilege level.
+    /// Bochs tlb.h `isWriteOK`: `accessBits & (0x04 << user) & wr_pkey[pkey]`.
+    #[inline]
+    pub(crate) fn is_write_ok(&self, user: u32, pkey_mask: u32) -> bool {
+        (self.access_bits & (0x04u32 << user) & pkey_mask) != 0
+    }
+
     /// CET: page can be read as shadow stack from the given privilege level.
     /// Bochs tlb.h isShadowStackReadOK macro. With protection keys enabled
     /// (BX_SUPPORT_PKEYS), the entry's PKEY allow-mask (passed as `pkey_mask`)
@@ -162,11 +178,21 @@ impl<const SIZE: usize> Tlb<SIZE> {
 
     /// Invalidate all non‐global entries (only if CPU ≥ 6)
     pub fn flush_non_global(&mut self) {
+        self.flush_non_global_publishing(|_| {});
+    }
+
+    /// Non‐global flush that reports each invalidated slot index so the caller
+    /// can fuse pin‐sidecar removal into the same pass (Track B). Behaviourally
+    /// identical to `flush_non_global`; `on_invalidate(slot)` runs for every
+    /// entry this clears and for none of the entries it keeps.
+    #[inline]
+    pub(super) fn flush_non_global_publishing<F: FnMut(usize)>(&mut self, mut on_invalidate: F) {
         let mut lpf_mask_accum: u32 = 0;
-        for entry in &mut self.entries {
+        for (slot, entry) in self.entries.iter_mut().enumerate() {
             if entry.valid() {
                 if (entry.access_bits & TLB_GLOBAL_PAGE) == 0 {
                     entry.invalidate();
+                    on_invalidate(slot);
                 } else {
                     lpf_mask_accum |= entry.lpf_mask;
                 }
@@ -178,14 +204,24 @@ impl<const SIZE: usize> Tlb<SIZE> {
 
     /// Invalidate a single page (INVLPG)
     pub fn invlpg(&mut self, laddr: u64) {
+        self.invlpg_publishing(laddr, |_| {});
+    }
+
+    /// INVLPG that reports each invalidated slot index so the caller can fuse
+    /// pin‐sidecar removal into the same invalidation (Track B). Behaviourally
+    /// identical to `invlpg`: the non‐split path clears at most one slot, the
+    /// split‐large path clears every entry whose page contains `laddr`.
+    #[inline]
+    pub(super) fn invlpg_publishing<F: FnMut(usize)>(&mut self, laddr: u64, mut on_invalidate: F) {
         if self.split_large {
             // We have to scan all entries to handle large pages specially
             let mut lpf_mask_accum: u32 = 0;
-            for entry in &mut self.entries {
+            for (slot, entry) in self.entries.iter_mut().enumerate() {
                 if entry.valid() {
                     let emask = entry.lpf_mask as u64;
                     if (laddr & !emask) == (entry.lpf & !emask) {
                         entry.invalidate();
+                        on_invalidate(slot);
                     } else {
                         lpf_mask_accum |= entry.lpf_mask;
                     }
@@ -201,6 +237,7 @@ impl<const SIZE: usize> Tlb<SIZE> {
         let entry = &mut self.entries[idx];
         if lpf_of(entry.lpf) == lpf_of(laddr) {
             entry.invalidate();
+            on_invalidate(idx);
         }
     }
 

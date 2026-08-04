@@ -1,5 +1,12 @@
 #[cfg(test)]
 mod tests {
+
+/// Emulator construction needs a bigger stack than the default 2 MiB test
+/// thread: `Emulator` is ~4 MiB and the debug build materialises a few
+/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
+/// enough concurrent reservations to intermittently exhaust the process
+/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use crate::cpu::{builder::BxCpuBuilder, core_i7_skylake::Corei7SkylakeX};
     use crate::memory::{BxMemC, BxMemoryStubC, CpuTlbPin};
 
@@ -7,7 +14,7 @@ mod tests {
     fn test_short_unconditional_jump() {
         // BxICache contains ~19MB fixed arrays; debug-mode struct literal needs large stack
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
                 let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
@@ -31,7 +38,7 @@ mod tests {
     #[test]
     fn test_short_conditional_je() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
                 let mem_stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();

@@ -8,10 +8,120 @@ pub use rusty_box_decoder::instruction::{
 };
 pub use rusty_box_decoder::opcode::Opcode;
 
-// BxCpuC impl block requires alloc (BxCpuC lives behind alloc gate)
-#[cfg(feature = "alloc")]
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
+/// The ISA gate itself is needed by the icache fill path, which compiles
+/// without `alloc`, so it lives outside the alloc-gated block below.
+impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+    /// Resolve a freshly decoded opcode against this CPU's CPUID feature set.
+    ///
+    /// Returns the opcode to place in the trace: the original when the model
+    /// supports it, the legacy alias for LZCNT/TZCNT when their feature bit is
+    /// absent, or [`Opcode::IaError`] (which dispatches to #UD) otherwise.
+    ///
+    /// Bochs does the equivalent once at init in
+    /// `cpu/decoder/fetchdecode32.cc` `init_FetchDecodeTables()`, by rewriting
+    /// a **process-global** `BxOpcodesTable` so unsupported opcodes point at
+    /// `BxError`. That construct is not thread safe and cannot represent two
+    /// CPUs with different models, so rusty_box keeps the generated table
+    /// immutable (`opcode_isa::OPCODE_ISA`, shared read-only across threads)
+    /// and consults each CPU's own `ia_extensions_bitmask` instead. Same
+    /// observable behaviour, no shared mutable state.
+    ///
+    /// Called from the icache fill path, so the dispatch loop pays nothing.
+    pub(in crate::cpu) fn isa_resolve_opcode(&self, opcode: Opcode) -> Opcode {
+        let feature = rusty_box_decoder::opcode_isa::opcode_isa_feature(opcode);
+        if feature == rusty_box_decoder::opcode_isa::ISA_ALWAYS {
+            return opcode;
+        }
+        if self.isa_feature_index_enabled(feature) {
+            return opcode;
+        }
+
+        // Bochs init_FetchDecodeTables special case 1: these MMX-era opcodes
+        // are also available when 3DNow! Extensions are present, even though
+        // their declared feature (SSE) is not.
+        if self.bx_cpuid_support_isa_extension(X86Feature::Isa3dnowExt)
+            && matches!(
+                opcode,
+                Opcode::MaskmovqPqNq
+                    | Opcode::MovntqMqPq
+                    | Opcode::PavgbPqQq
+                    | Opcode::PavgwPqQq
+                    | Opcode::PextrwGdNqIb
+                    | Opcode::PinsrwPqEwIb
+                    | Opcode::PmaxswPqQq
+                    | Opcode::PmaxubPqQq
+                    | Opcode::PminswPqQq
+                    | Opcode::PminubPqQq
+                    | Opcode::PmovmskbGdNq
+                    | Opcode::PmulhuwPqQq
+                    | Opcode::PsadbwPqQq
+                    | Opcode::PshufwPqQqIb
+                    | Opcode::Sfence
+            )
+        {
+            return opcode;
+        }
+
+        // Bochs special case 2: AVX10.1 subsumes every AVX-512 sub-extension,
+        // so a model advertising it may run them without the individual bits.
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaAvx10_1)
+            && Self::is_avx512_subfeature(feature)
+        {
+            return opcode;
+        }
+
+        // Bochs special case 3: without LZCNT/BMI1 the F3-prefixed encodings
+        // are architecturally BSR/BSF, not #UD — Bochs copies the BSR/BSF
+        // table entry over the LZCNT/TZCNT one.
+        match opcode {
+            Opcode::LzcntGwEw => return Opcode::BsrGwEw,
+            Opcode::LzcntGdEd => return Opcode::BsrGdEd,
+            Opcode::LzcntGqEq => return Opcode::BsrGqEq,
+            Opcode::TzcntGwEw => return Opcode::BsfGwEw,
+            Opcode::TzcntGdEd => return Opcode::BsfGdEd,
+            Opcode::TzcntGqEq => return Opcode::BsfGqEq,
+            _ => {}
+        }
+
+        Opcode::IaError
+    }
+
+    /// True when the raw `X86Feature` discriminant is set for this CPU.
+    /// Companion to [`Self::bx_cpuid_support_isa_extension`] for the generated
+    /// table, which stores discriminants rather than enum values.
+    #[inline]
+    fn isa_feature_index_enabled(&self, feature: u16) -> bool {
+        let index = feature as usize;
+        match self.ia_extensions_bitmask.get(index / 32) {
+            Some(word) => (word & (1 << (index % 32))) != 0,
+            None => false,
+        }
+    }
+
+    /// The AVX-512 sub-extensions that AVX10.1 implies (Bochs
+    /// `init_FetchDecodeTables` switch).
+    fn is_avx512_subfeature(feature: u16) -> bool {
+        const SUBFEATURES: [X86Feature; 12] = [
+            X86Feature::IsaAvx512,
+            X86Feature::IsaAvx512Dq,
+            X86Feature::IsaAvx512Bw,
+            X86Feature::IsaAvx512Cd,
+            X86Feature::IsaAvx512Vbmi,
+            X86Feature::IsaAvx512Vbmi2,
+            X86Feature::IsaAvx512Ifma52,
+            X86Feature::IsaAvx512Vpopcntdq,
+            X86Feature::IsaAvx512Vnni,
+            X86Feature::IsaAvx512Bitalg,
+            X86Feature::IsaAvx512Bf16,
+            X86Feature::IsaAvx512Fp16,
+        ];
+        SUBFEATURES.iter().any(|f| *f as u16 == feature)
+    }
+}
+
+// The remaining init-time reporting is only reachable from the alloc build.
 #[cfg(feature = "alloc")]
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Validate CPU feature bitmask and configure decode tables.
@@ -20,9 +130,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// whose ISA feature isn't in ia_extensions_bitmask. Also handles special
     /// cases like LZCNT→BSR and TZCNT→BSF fallback.
     ///
-    /// Our decoder uses const tables so we can't patch them at runtime.
-    /// Instead, unsupported opcodes hit the dispatcher catch-all which raises #UD.
-    /// This function validates the bitmask is populated and logs the configuration.
+    /// rusty_box applies the same gate per decoded instruction in
+    /// [`Self::isa_resolve_opcode`] rather than by patching a global table;
+    /// this function keeps Bochs's "bitmask must be populated" panic and logs
+    /// the resulting configuration.
     pub(in crate::cpu) fn init_fetch_decode_tables(&mut self) -> crate::cpu::Result<()> {
         // Bochs panics if bitmask is empty (fetchdecode32.cc)
         if self.ia_extensions_bitmask[0] == 0 {
@@ -53,13 +164,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             has_lzcnt
         );
 
-        // LZCNT/TZCNT fallback (Bochs fetchdecode32.cc):
-        // When LZCNT not supported, F3 0F BD decodes as BSR (REP prefix ignored).
-        // When BMI1 (TZCNT) not supported, F3 0F BC decodes as BSF.
-        // Our CPUID reports both as supported for Skylake-X, so no fallback needed.
-        // If a different CPU model doesn't support them, the decoder will still
-        // decode LZCNT/TZCNT, and they'll execute correctly (our handlers exist).
-        // The only difference from Bochs is we won't alias them to BSR/BSF.
+        tracing::debug!(
+            "ISA opcode gate active: {} of {} opcodes carry a CPUID feature",
+            rusty_box_decoder::opcode_isa::GATED_OPCODE_COUNT,
+            rusty_box_decoder::opcode_isa::OPCODE_ISA.len()
+        );
 
         Ok(())
     }

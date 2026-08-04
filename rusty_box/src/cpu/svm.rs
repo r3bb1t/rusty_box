@@ -1073,6 +1073,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // Restore host state
         self.svm_exit_load_host_state();
 
+        // The host always resumes running — Bochs svm.cc Svm_Vmexit. Placed
+        // after the guest-state save so a #VMEXIT out of HLT still records the
+        // sleeping state in the guest area.
+        self.activity_state = super::cpu::CpuActivityState::Active;
+
         // Clear EXT and last_exception_type
         self.ext = false;
         self.last_exception_type = -1; // BX_ET_NONE
@@ -1838,10 +1843,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
-        // Invalidate TLB entry
-        self.dtlb.invlpg(laddr);
-        self.itlb.invlpg(laddr);
-        self.sync_active_tlb_pin();
+        // Bochs svm.cc INVLPGA — TLB_invlpg(laddr) (FIXME: flush all ASID
+        // entries). The prior code skipped the prefetch/stack invalidation and
+        // icache link break that Bochs paging.cc TLB_invlpg performs.
+        self.tlb_invlpg(laddr);
         Ok(())
     }
 }

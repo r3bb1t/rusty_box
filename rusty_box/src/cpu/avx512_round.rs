@@ -3,10 +3,40 @@
 //! Implements VRNDSCALE, VSCALEF, VGETEXP, VGETMANT (packed and scalar).
 //! Mirrors Bochs `cpu/avx/avx512_pfpmisc.cc`.
 
+use super::softfloat3e::f32_class::f32_class;
+use super::softfloat3e::f64_class::f64_class;
+use super::softfloat3e::internals::{sign_f32, sign_f64};
+use super::softfloat3e::softfloat::{f32_denormal_to_zero, f64_denormal_to_zero,
+    softfloat_denormals_are_zeros, softfloat_raise_flags, SoftFloatClass, FLAG_DIVBYZERO,
+    FLAG_INVALID};
+use super::avx512_rcp14::{
+    approximate_rcp14_f32, approximate_rcp14_f64, approximate_rsqrt14_f32, approximate_rsqrt14_f64,
+};
+use super::softfloat3e::f32_addsub::f32_sub;
+use super::softfloat3e::f32_range::f32_range;
+use super::softfloat3e::f64_addsub::f64_sub;
+use super::softfloat3e::f64_range::f64_range;
+use super::softfloat3e::specialize::{
+    FLOAT32_DEFAULT_NAN, FLOAT32_MAX_FLOAT, FLOAT32_MIN_FLOAT, FLOAT32_NEGATIVE_ONE,
+    FLOAT32_NEGATIVE_ZERO, FLOAT32_POSITIVE_ONE, FLOAT32_POSITIVE_ZERO, FLOAT64_DEFAULT_NAN,
+    FLOAT64_MAX_FLOAT, FLOAT64_MIN_FLOAT, FLOAT64_NEGATIVE_ONE, FLOAT64_NEGATIVE_ZERO,
+    FLOAT64_POSITIVE_ONE, FLOAT64_POSITIVE_ZERO,
+    FLOAT32_NEGATIVE_INF, FLOAT32_POSITIVE_INF, FLOAT64_NEGATIVE_INF, FLOAT64_POSITIVE_INF,
+};
+use super::sse_pfp::mxcsr_to_softfloat_status_word_imm_override;
+use super::softfloat3e::f32_range::{f32_get_exp, f32_get_mant, f32_scalef};
+use super::softfloat3e::f32_round_to_int::f32_round_to_int_scaled;
+use super::softfloat3e::f64_range::{f64_get_exp, f64_get_mant, f64_scalef};
+use super::softfloat3e::f64_round_to_int::f64_round_to_int_scaled;
+use super::softfloat3e::softfloat::{
+    softfloat_suppress_exception, FLAG_DENORMAL, FLAG_OVERFLOW, FLAG_UNDERFLOW,
+    softfloat_get_exception_flags, softfloat_get_rounding_mode, SoftFloatStatus, FLAG_INEXACT,
+};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxSegregs, Instruction},
+    decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
 // Load-bearing in pure no-std builds (core f32/f64 lack these inherent
@@ -106,202 +136,18 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
     }
 }
 
-// ============================================================================
-// Rounding helpers
-// ============================================================================
-
-/// Round f32 according to imm8[1:0] rounding mode.
-/// 0 = nearest even, 1 = floor, 2 = ceil, 3 = truncate
-#[inline]
-/// Round f32 with scale support (Bochs f32_roundToInt).
-/// `mode`: rounding mode (0=nearest-even, 1=floor, 2=ceil, 3=trunc).
-/// `scale`: number of fraction bits to preserve (imm8[7:4]).
-/// Rounds to nearest multiple of 2^(-scale).
-fn round_f32(val: f32, mode: u8, scale: u8) -> f32 {
-    if val.is_nan() || val.is_infinite() {
-        return val;
-    }
-    // Scale factor: multiply by 2^scale, round to int, divide by 2^scale
-    let factor = (2.0f32).powi(scale as i32);
-    let scaled = val * factor;
-    let rounded = match mode & 0x3 {
-        0 => scaled.round_ties_even(),
-        1 => scaled.floor(),
-        2 => scaled.ceil(),
-        _ => scaled.trunc(),
-    };
-    rounded / factor
-}
-
-/// Round f64 according to imm8[1:0] rounding mode.
-/// 0 = nearest even, 1 = floor, 2 = ceil, 3 = truncate
-#[inline]
-fn round_f64(val: f64, mode: u8, scale: u8) -> f64 {
-    if val.is_nan() || val.is_infinite() {
-        return val;
-    }
-    let factor = (2.0f64).powi(scale as i32);
-    let scaled = val * factor;
-    let rounded = match mode & 0x3 {
-        0 => scaled.round_ties_even(),
-        1 => scaled.floor(),
-        2 => scaled.ceil(),
-        _ => scaled.trunc(),
-    };
-    rounded / factor
-}
-
-// ============================================================================
-// VGETEXP helpers
-// ============================================================================
-
-/// Get unbiased exponent of f32 as float (logb).
-/// Returns floor(log2(|src|)) for normal values.
-/// Special cases: 0 -> -inf, inf -> +inf, NaN -> NaN.
-#[inline]
-fn getexp_f32(val: f32) -> f32 {
-    let bits = val.to_bits();
-    let exp_field = (bits >> 23) & 0xFF;
-    if exp_field == 0 {
-        if (bits & 0x007F_FFFF) == 0 {
-            // +/- zero -> -inf
-            f32::NEG_INFINITY
-        } else {
-            // Denormal: normalize and compute exponent
-            // Count leading zeros in mantissa to find the effective exponent
-            let mantissa = bits & 0x007F_FFFF;
-            let shift = mantissa.leading_zeros() - 8; // 8 = 32 - 24 (mantissa is 23 bits)
-            let effective_exp = -126i32 - shift as i32;
-            effective_exp as f32
-        }
-    } else if exp_field == 0xFF {
-        if (bits & 0x007F_FFFF) == 0 {
-            // +/- infinity -> +inf
-            f32::INFINITY
-        } else {
-            // NaN -> NaN (propagate)
-            f32::NAN
-        }
-    } else {
-        // Normal: unbiased exponent
-        (exp_field as i32 - 127) as f32
-    }
-}
-
-/// Get unbiased exponent of f64 as float (logb).
-/// Returns floor(log2(|src|)) for normal values.
-/// Special cases: 0 -> -inf, inf -> +inf, NaN -> NaN.
-#[inline]
-fn getexp_f64(val: f64) -> f64 {
-    let bits = val.to_bits();
-    let exp_field = (bits >> 52) & 0x7FF;
-    if exp_field == 0 {
-        if (bits & 0x000F_FFFF_FFFF_FFFF) == 0 {
-            f64::NEG_INFINITY
-        } else {
-            let mantissa = bits & 0x000F_FFFF_FFFF_FFFF;
-            let shift = mantissa.leading_zeros() - 11; // 11 = 64 - 53
-            let effective_exp = -1022i32 - shift as i32;
-            effective_exp as f64
-        }
-    } else if exp_field == 0x7FF {
-        if (bits & 0x000F_FFFF_FFFF_FFFF) == 0 {
-            f64::INFINITY
-        } else {
-            f64::NAN
-        }
-    } else {
-        (exp_field as i32 - 1023) as f64
-    }
-}
-
-// ============================================================================
-// VSCALEF helpers
-// ============================================================================
-
-/// Scale f32: result = src1 * 2^floor(src2)
-/// Special handling for large/small exponents clamped to avoid overflow.
-#[inline]
-fn scalef_f32(src1: f32, src2: f32) -> f32 {
-    if src2.is_nan() || src1.is_nan() {
-        return f32::NAN;
-    }
-    // Bochs: inf * 2^(-inf) = NaN (invalid), 0 * 2^(+inf) = NaN (invalid)
-    if src1.is_infinite() && src2.is_infinite() && src2.is_sign_negative() {
-        return f32::NAN; // inf * 2^(-inf)
-    }
-    if src1 == 0.0 && src2.is_infinite() && src2.is_sign_positive() {
-        return f32::NAN; // 0 * 2^(+inf)
-    }
-    if src1.is_infinite() {
-        return src1;
-    }
-    if src1 == 0.0 {
-        return src1;
-    }
-    let n = src2.floor();
-    // Clamp exponent to prevent overflow in powi
-    let n_clamped = if n > 127.0 {
-        127
-    } else if n < -149.0 {
-        -149
-    } else {
-        n as i32
-    };
-    src1 * (2.0f32).powi(n_clamped)
-}
-
-/// Scale f64: result = src1 * 2^floor(src2)
-#[inline]
-fn scalef_f64(src1: f64, src2: f64) -> f64 {
-    if src2.is_nan() || src1.is_nan() {
-        return f64::NAN;
-    }
-    if src1.is_infinite() && src2.is_infinite() && src2.is_sign_negative() {
-        return f64::NAN;
-    }
-    if src1 == 0.0 && src2.is_infinite() && src2.is_sign_positive() {
-        return f64::NAN;
-    }
-    if src1.is_infinite() {
-        return src1;
-    }
-    if src1 == 0.0 {
-        return src1;
-    }
-    let n = src2.floor();
-    let n_clamped = if n > 1023.0 {
-        1023
-    } else if n < -1074.0 {
-        -1074
-    } else {
-        n as i32
-    };
-    src1 * (2.0f64).powi(n_clamped)
-}
-
-// ============================================================================
-// Read helpers for memory operands
-// ============================================================================
-
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     /// Read packed SP source: register or memory, dword-element granularity
     #[inline]
     fn read_src_ps(
         &mut self,
         instr: &Instruction,
-        nelements: usize,
+        _nelements: usize,
     ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src()))
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            Ok(tmp)
+            self.evex_load_bcst_d_pair(instr)
         }
     }
 
@@ -310,91 +156,83 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn read_src_pd(
         &mut self,
         instr: &Instruction,
-        nelements: usize,
+        _nelements: usize,
     ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src()))
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            Ok(tmp)
+            self.evex_load_bcst_q_pair(instr)
         }
     }
 
     /// Read 2-operand packed SP source (src2 for 3-operand instructions)
     #[inline]
-    fn read_src2_ps(
+    /// Read the r/m operand — Bochs calls it `i->src2()`, but this decoder
+    /// puts EVEX.vvvv in `src2()` and ModRM.rm in `src1()`.
+    fn read_rm_ps(
         &mut self,
         instr: &Instruction,
-        nelements: usize,
+        _nelements: usize,
     ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
-            Ok(read_zmm(self, instr.src2()))
+            Ok(read_zmm(self, instr.src1()))
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            Ok(tmp)
+            self.evex_load_bcst_d_pair(instr)
         }
     }
 
     /// Read 2-operand packed DP source (src2 for 3-operand instructions)
     #[inline]
-    fn read_src2_pd(
+    /// Qword counterpart of [`Self::read_rm_ps`].
+    fn read_rm_pd(
         &mut self,
         instr: &Instruction,
-        nelements: usize,
+        _nelements: usize,
     ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
-            Ok(read_zmm(self, instr.src2()))
+            Ok(read_zmm(self, instr.src1()))
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            Ok(tmp)
+            self.evex_load_bcst_q_pair(instr)
         }
     }
 
     /// Read scalar f32 from src or memory
     #[inline]
-    fn read_scalar_ss(&mut self, instr: &Instruction) -> super::Result<f32> {
+    fn read_scalar_ss(&mut self, instr: &Instruction) -> super::Result<Float32> {
         if instr.mod_c0() {
-            let src = read_zmm(self, instr.src());
-            Ok(src.zmm32f(0))
+            Ok(read_zmm(self, instr.src()).zmm32u(0))
         } else {
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let val = self.v_read_dword(seg, laddr)?;
-            Ok(f32::from_bits(val))
+            Ok(self.evex_load_wss_pair(instr)?.zmm32u(0))
         }
     }
 
     /// Read scalar f64 from src or memory
     #[inline]
-    fn read_scalar_sd(&mut self, instr: &Instruction) -> super::Result<f64> {
+    fn read_scalar_sd(&mut self, instr: &Instruction) -> super::Result<Float64> {
         if instr.mod_c0() {
-            let src = read_zmm(self, instr.src());
-            Ok(src.zmm64f(0))
+            Ok(read_zmm(self, instr.src()).zmm64u(0))
         } else {
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let val = self.v_read_qword(seg, laddr)?;
-            Ok(f64::from_bits(val))
+            Ok(self.evex_load_wsd_pair(instr)?.zmm64u(0))
         }
+    }
+
+
+    /// VRNDSCALE imm8: bit 2 keeps MXCSR.RC, bits[1:0] otherwise override it,
+    /// and bit 3 suppresses the precision exception. Bochs avx512_pfp.cc
+    /// VRNDSCALEPS_MASK_VpsWpsIb via `mxcsr_to_softfloat_status_word_imm_override`.
+    #[inline]
+    fn rndscale_status(&self, instr: &Instruction) -> (SoftFloatStatus, u8, u8) {
+        let imm8 = instr.ib();
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        if (imm8 & 0x04) == 0 {
+            status.softfloat_rounding_mode = imm8 & 0x03;
+        }
+        if (imm8 & 0x08) != 0 {
+            status.softfloat_suppress_exception |= FLAG_INEXACT;
+        }
+        let rc = softfloat_get_rounding_mode(&status);
+        (status, rc, (imm8 >> 4) & 0x0F)
     }
 
     // ========================================================================
@@ -407,16 +245,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src = self.read_src_ps(instr, nelements)?;
-        let imm8 = instr.ib();
-        // imm8[1:0] = rounding mode, imm8[2] = RC source (0=imm, 1=MXCSR)
-        // imm8[3] = suppress inexact, imm8[7:4] = scale (fraction bits)
-        let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 }; // TODO: read MXCSR.RC when bit2=1
-        let scale = (imm8 >> 4) & 0x0F;
+        let mask = read_opmask_for_write(self, instr);
+        let (mut status, rc, scale) = self.rndscale_status(instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm32f(i, round_f32(src.zmm32f(i), rc, scale));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(
+                    i,
+                    f32_round_to_int_scaled(src.zmm32u(i), scale, rc, true, &mut status),
+                );
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -431,14 +271,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
         let src = self.read_src_pd(instr, nelements)?;
-        let imm8 = instr.ib();
-        let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 };
-        let scale = (imm8 >> 4) & 0x0F;
+        let mask = read_opmask_for_write(self, instr);
+        let (mut status, rc, scale) = self.rndscale_status(instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm64f(i, round_f64(src.zmm64f(i), rc, scale));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm64u(
+                    i,
+                    f64_round_to_int_scaled(src.zmm64u(i), scale, rc, true, &mut status),
+                );
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -452,16 +296,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Scalar: rounds element [0] from src, copies [1..3] from src1 (vvvv).
     pub fn evex_vrndscaless(&mut self, instr: &Instruction) -> super::Result<()> {
         let src_val = self.read_scalar_ss(instr)?;
-        let imm8 = instr.ib();
-        let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 };
-        let scale = (imm8 >> 4) & 0x0F;
-        let rounded = round_f32(src_val, rc, scale);
+        let mask = read_opmask_for_write(self, instr);
 
         // Start with src1 (vvvv) to preserve upper elements
         let mut result = read_zmm(self, instr.src1());
-        result.set_zmm32f(0, rounded);
+        if (mask & 1) != 0 {
+            let (mut status, rc, scale) = self.rndscale_status(instr);
+            let rounded = f32_round_to_int_scaled(src_val, scale, rc, true, &mut status);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            result.set_zmm32u(0, rounded);
+        }
 
-        let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         // Scalar: only element 0 is masked; elements 1..3 always from src1
         if (mask & 1) == 0 {
@@ -488,15 +333,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VRNDSCALESD Vsd{k}, Hsd, Wsd, imm8
     pub fn evex_vrndscalesd(&mut self, instr: &Instruction) -> super::Result<()> {
         let src_val = self.read_scalar_sd(instr)?;
-        let imm8 = instr.ib();
-        let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 };
-        let scale = (imm8 >> 4) & 0x0F;
-        let rounded = round_f64(src_val, rc, scale);
+        let mask = read_opmask_for_write(self, instr);
 
         let mut result = read_zmm(self, instr.src1());
-        result.set_zmm64f(0, rounded);
+        if (mask & 1) != 0 {
+            let (mut status, rc, scale) = self.rndscale_status(instr);
+            let rounded = f64_round_to_int_scaled(src_val, scale, rc, true, &mut status);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            result.set_zmm64u(0, rounded);
+        }
 
-        let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         if (mask & 1) == 0 {
             if zmask {
@@ -522,13 +368,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vscalefps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = self.read_src2_ps(instr, nelements)?;
+        let src1 = read_zmm(self, instr.src2()); // EVEX.vvvv = Bochs i->src1()
+        let src2 = self.read_rm_ps(instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm32f(i, scalef_f32(src1.zmm32f(i), src2.zmm32f(i)));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(i, f32_scalef(src1.zmm32u(i), src2.zmm32u(i), &mut status));
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -542,13 +393,18 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vscalefpd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = self.read_src2_pd(instr, nelements)?;
+        let src1 = read_zmm(self, instr.src2()); // EVEX.vvvv = Bochs i->src1()
+        let src2 = self.read_rm_pd(instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm64f(i, scalef_f64(src1.zmm64f(i), src2.zmm64f(i)));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm64u(i, f64_scalef(src1.zmm64u(i), src2.zmm64u(i), &mut status));
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -564,11 +420,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src = self.read_src_ps(instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm32f(i, getexp_f32(src.zmm32f(i)));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(i, f32_get_exp(src.zmm32u(i), &mut status));
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -583,11 +444,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
         let src = self.read_src_pd(instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm64f(i, getexp_f64(src.zmm64f(i)));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm64u(i, f64_get_exp(src.zmm64u(i), &mut status));
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -608,11 +474,20 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let nelements = dword_elements(vl);
         let src = self.read_src_ps(instr, nelements)?;
         let imm8 = instr.ib();
+        let (sign_ctrl, interv) = (((imm8 >> 2) & 0x3) as i32, (imm8 & 0x3) as i32);
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm32f(i, getmant_f32(src.zmm32f(i), imm8));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(
+                    i,
+                    f32_get_mant(src.zmm32u(i), &mut status, sign_ctrl, interv),
+                );
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
@@ -628,150 +503,780 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let nelements = qword_elements(vl);
         let src = self.read_src_pd(instr, nelements)?;
         let imm8 = instr.ib();
+        let (sign_ctrl, interv) = (((imm8 >> 2) & 0x3) as i32, (imm8 & 0x3) as i32);
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
-            result.set_zmm64f(i, getmant_f64(src.zmm64f(i), imm8));
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm64u(
+                    i,
+                    f64_get_mant(src.zmm64u(i), &mut status, sign_ctrl, interv),
+                );
+            }
         }
-        let mask = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
-}
 
-// ============================================================================
-// VGETMANT helpers
-// ============================================================================
+    // ========================================================================
+    // VREDUCE — a - roundToInt(a, M), i.e. the fractional remainder after
+    // rounding away the top M fraction bits. Bochs avx512_pfp.cc
+    // float32_reduce / VREDUCEPS_MASK_VpsWpsIbR.
+    //
+    // Bochs suppresses #D, #U and #O here: the subtraction of a value derived
+    // from the operand itself cannot overflow, and any underflow is an
+    // artefact of the decomposition rather than of the instruction.
+    // ========================================================================
 
-/// Get normalized mantissa of f32.
-/// interval selects normalization range:
-///   0: [1, 2)   — set exponent bits to 127 (biased 0)
-///   1: (0.5, 2) — same as 0 but if mantissa < 1.0, use [0.5, 1) form
-///   2: (0.5, 1] — set exponent bits to 126 (biased -1), mantissa in [1,2) -> [0.5,1)
-///   3: [0.75, 1.5) — adjust based on mantissa magnitude
-/// Simplified implementation: handles intervals 0 and 2 exactly; 1 and 3 approximate.
-#[inline]
-/// Get mantissa of f32 (Bochs f32_getMant).
-/// `imm8[1:0]` = interval, `imm8[3:2]` = sign_ctrl.
-/// sign_ctrl: bit 0 = force positive when set, bit 1 = NaN on negative input.
-fn getmant_f32(val: f32, imm8: u8) -> f32 {
-    let interval = imm8 & 0x03;
-    let sign_ctrl = (imm8 >> 2) & 0x03;
-    let bits = val.to_bits();
-    let sign_bit = bits & 0x8000_0000;
-    let is_negative = sign_bit != 0;
-    let exp_field = (bits >> 23) & 0xFF;
-    let mantissa = bits & 0x007F_FFFF;
-
-    // Output sign: if sign_ctrl bit 0 set, force positive
-    let out_sign = if (sign_ctrl & 1) != 0 { 0u32 } else { sign_bit };
-
-    // NaN
-    if exp_field == 0xFF && mantissa != 0 {
-        return f32::NAN;
-    }
-    // Infinity: negative inf with sign_ctrl bit 1 → NaN
-    if exp_field == 0xFF && mantissa == 0 {
-        if is_negative && (sign_ctrl & 2) != 0 {
-            return f32::NAN;
-        }
-        return f32::from_bits(out_sign | 0x3F80_0000); // 1.0 with output sign
-    }
-    // Zero → 1.0 with output sign (Bochs: packToF32UI(~sign_ctrl & signA, 0x7F, 0))
-    if exp_field == 0 && mantissa == 0 {
-        return f32::from_bits(out_sign | 0x3F80_0000);
-    }
-    // Negative input with sign_ctrl bit 1 → NaN
-    if is_negative && (sign_ctrl & 2) != 0 {
-        return f32::NAN;
+    /// The status word VREDUCE runs under: MXCSR, then embedded-RC, then the
+    /// imm8 rounding override, then the three suppressed exceptions.
+    fn reduce_status(&self, instr: &Instruction) -> (SoftFloatStatus, u8) {
+        let control = instr.ib();
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        mxcsr_to_softfloat_status_word_imm_override(&mut status, control);
+        softfloat_suppress_exception(
+            &mut status,
+            FLAG_DENORMAL | FLAG_UNDERFLOW | FLAG_OVERFLOW,
+        );
+        (status, control >> 4)
     }
 
-    // Get normalized exponent and mantissa
-    let (norm_exp, norm_mant) = if exp_field == 0 {
-        // Denormal: normalize
-        let shift = mantissa.leading_zeros() - 8; // leading zeros in 23-bit field
-        let normalized_mant = (mantissa << shift) & 0x007F_FFFF;
-        let norm_exp = 1u32.wrapping_sub(shift); // unbiased exponent
-        (norm_exp, normalized_mant)
-    } else {
-        (exp_field, mantissa)
-    };
-
-    // Select target exponent based on interval
-    let target_exp = match interval {
-        0 => 127u32, // [1, 2)
-        1 => {
-            // [1/2, 2): Bochs: expA -= 0x7F; expA = 0x7F - (expA & 0x1)
-            let unbiased = norm_exp.wrapping_sub(127);
-            127 - (unbiased & 1)
-        }
-        2 => 126, // [0.5, 1)
-        _ => {
-            // [3/4, 3/2): Bochs: expA = 0x7F - ((sigA >> 22) & 0x1)
-            if (norm_mant & 0x0040_0000) != 0 {
-                126
-            } else {
-                127
+    /// VREDUCEPS Vps{k}, Wps, Ib — EVEX.66.0F3A.W0 56
+    pub fn evex_vreduceps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let src = self.read_src_ps(instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let (mut status, scale) = self.reduce_status(instr);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(i, f32_reduce(src.zmm32u(i), scale, &mut status));
             }
         }
-    };
-
-    f32::from_bits(out_sign | (target_exp << 23) | norm_mant)
-}
-
-/// Get normalized mantissa of f64.
-#[inline]
-fn getmant_f64(val: f64, imm8: u8) -> f64 {
-    let interval = imm8 & 0x03;
-    let sign_ctrl = (imm8 >> 2) & 0x03;
-    let bits = val.to_bits();
-    let sign_bit = bits & 0x8000_0000_0000_0000;
-    let is_negative = sign_bit != 0;
-    let exp_field = (bits >> 52) & 0x7FF;
-    let mantissa = bits & 0x000F_FFFF_FFFF_FFFF;
-
-    let out_sign = if (sign_ctrl & 1) != 0 { 0u64 } else { sign_bit };
-
-    if exp_field == 0x7FF && mantissa != 0 {
-        return f64::NAN;
-    }
-    if exp_field == 0x7FF && mantissa == 0 {
-        if is_negative && (sign_ctrl & 2) != 0 {
-            return f64::NAN;
-        }
-        return f64::from_bits(out_sign | 0x3FF0_0000_0000_0000);
-    }
-    if exp_field == 0 && mantissa == 0 {
-        return f64::from_bits(out_sign | 0x3FF0_0000_0000_0000);
-    }
-    if is_negative && (sign_ctrl & 2) != 0 {
-        return f64::NAN;
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
     }
 
-    let (norm_exp, norm_mant) = if exp_field == 0 {
-        let shift = mantissa.leading_zeros() - 11;
-        let normalized_mant = (mantissa << shift) & 0x000F_FFFF_FFFF_FFFF;
-        let norm_exp = 1u64.wrapping_sub(shift as u64);
-        (norm_exp, normalized_mant)
-    } else {
-        (exp_field, mantissa)
-    };
-
-    let target_exp = match interval {
-        0 => 1023u64,
-        1 => {
-            let unbiased = norm_exp.wrapping_sub(1023);
-            1023 - (unbiased & 1)
-        }
-        2 => 1022,
-        _ => {
-            if (norm_mant & 0x0008_0000_0000_0000) != 0 {
-                1022
-            } else {
-                1023
+    /// VREDUCEPD Vpd{k}, Wpd, Ib — EVEX.66.0F3A.W1 56
+    pub fn evex_vreducepd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src = self.read_src_pd(instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let (mut status, scale) = self.reduce_status(instr);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm64u(i, f64_reduce(src.zmm64u(i), scale, &mut status));
             }
         }
-    };
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
 
-    f64::from_bits(out_sign | (target_exp << 52) | norm_mant)
+    // ========================================================================
+    // VRANGE — min/max with imm8-controlled magnitude comparison and result
+    // sign. Bochs avx512_pfp.cc VRANGEPS/PD_MASK_*.
+    // ========================================================================
+
+    /// VRANGEPS Vps{k}, Hps, Wps, Ib — EVEX.66.0F3A.W0 50
+    pub fn evex_vrangeps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let src1 = read_zmm(self, instr.src2()); // EVEX.vvvv = Bochs i->src1()
+        let src2 = self.read_rm_ps(instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let (is_max, is_abs, sign_ctrl) = range_control(instr.ib());
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 != 0 {
+                let v = f32_range(
+                    src1.zmm32u(i),
+                    src2.zmm32u(i),
+                    is_max,
+                    is_abs,
+                    sign_ctrl,
+                    &mut status,
+                );
+                result.set_zmm32u(i, v);
+            }
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VRANGEPD Vpd{k}, Hpd, Wpd, Ib — EVEX.66.0F3A.W1 50
+    pub fn evex_vrangepd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src1 = read_zmm(self, instr.src2()); // EVEX.vvvv = Bochs i->src1()
+        let src2 = self.read_rm_pd(instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let (is_max, is_abs, sign_ctrl) = range_control(instr.ib());
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 != 0 {
+                let v = f64_range(
+                    src1.zmm64u(i),
+                    src2.zmm64u(i),
+                    is_max,
+                    is_abs,
+                    sign_ctrl,
+                    &mut status,
+                );
+                result.set_zmm64u(i, v);
+            }
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+
+    // ========================================================================
+    // VFIXUPIMM — replace special-cased operands with table-selected
+    // constants. Bochs avx512_pfp.cc VFIXUPIMMPS/PD/SS/SD_MASK_*.
+    //
+    // Note the operand roles: the *destination* supplies the fallback value,
+    // vvvv the operand being classified, and r/m the 8-entry response table.
+    // ========================================================================
+
+    /// VFIXUPIMMPS Vps{k}{z}, Hps, Wps, Ib — EVEX.66.0F3A.W0 54
+    pub fn evex_vfixupimmps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let op1 = read_zmm(self, instr.src2()); // vvvv
+        let op2 = self.read_rm_ps(instr, nelements)?; // rm — the response table
+        let dst = read_zmm(self, instr.dst());
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let imm8 = instr.ib();
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..nelements {
+            if (mask >> n) & 1 != 0 {
+                let v = f32_fixupimm(
+                    dst.zmm32u(n),
+                    op1.zmm32u(n),
+                    op2.zmm32u(n),
+                    imm8,
+                    &mut status,
+                );
+                result.set_zmm32u(n, v);
+            }
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VFIXUPIMMPD Vpd{k}{z}, Hpd, Wpd, Ib — EVEX.66.0F3A.W1 54
+    pub fn evex_vfixupimmpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let op1 = read_zmm(self, instr.src2());
+        let op2 = self.read_rm_pd(instr, nelements)?;
+        let dst = read_zmm(self, instr.dst());
+        let mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let imm8 = instr.ib();
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..nelements {
+            if (mask >> n) & 1 != 0 {
+                // The response table is read as the low dword of each qword.
+                let v = f64_fixupimm(
+                    dst.zmm64u(n),
+                    op1.zmm64u(n),
+                    op2.zmm64u(n) as u32,
+                    imm8,
+                    &mut status,
+                );
+                result.set_zmm64u(n, v);
+            }
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    // ========================================================================
+    // VRCP14 / VRSQRT14 — table-driven 14-bit approximations. Bochs
+    // avx512_rcp14.cc / avx512_rsqrt14.cc.
+    //
+    // These raise no floating-point exception at all — not even on a
+    // signalling NaN, which is merely quietened — so unlike every other FP
+    // handler here they carry no softfloat status word and never call
+    // check_exceptions_sse. They read DAZ and FTZ from MXCSR directly.
+    // ========================================================================
+
+    /// VRCP14PS Vps{k}{z}, Wps — EVEX.66.0F38.W0 4C
+    pub fn evex_vrcp14ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (daz, ftz) = (self.mxcsr.daz(), self.mxcsr.flush_to_zero());
+        self.evex_approx_ps(instr, |v| approximate_rcp14_f32(v, daz, ftz))
+    }
+
+    /// VRCP14PD Vpd{k}{z}, Wpd — EVEX.66.0F38.W1 4C
+    pub fn evex_vrcp14pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (daz, ftz) = (self.mxcsr.daz(), self.mxcsr.flush_to_zero());
+        self.evex_approx_pd(instr, |v| approximate_rcp14_f64(v, daz, ftz))
+    }
+
+    /// VRSQRT14PS Vps{k}{z}, Wps — EVEX.66.0F38.W0 4E
+    pub fn evex_vrsqrt14ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let daz = self.mxcsr.daz();
+        self.evex_approx_ps(instr, |v| approximate_rsqrt14_f32(v, daz))
+    }
+
+    /// VRSQRT14PD Vpd{k}{z}, Wpd — EVEX.66.0F38.W1 4E
+    pub fn evex_vrsqrt14pd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let daz = self.mxcsr.daz();
+        self.evex_approx_pd(instr, |v| approximate_rsqrt14_f64(v, daz))
+    }
+
+    /// The shared packed body. Masked-off elements are not computed.
+    fn evex_approx_ps(
+        &mut self,
+        instr: &Instruction,
+        func: impl Fn(Float32) -> Float32,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let src = self.read_src_ps(instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm32u(i, func(src.zmm32u(i)));
+            }
+        }
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// Double-precision counterpart of [`Self::evex_approx_ps`].
+    fn evex_approx_pd(
+        &mut self,
+        instr: &Instruction,
+        func: impl Fn(Float64) -> Float64,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src = self.read_src_pd(instr, nelements)?;
+        let mask = read_opmask_for_write(self, instr);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            if (mask >> i) & 1 != 0 {
+                result.set_zmm64u(i, func(src.zmm64u(i)));
+            }
+        }
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VRCP14SS xmm1{k1}{z}, xmm2, xmm3/m32 — EVEX.66.0F38.W0 4D
+    pub fn evex_vrcp14ss(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (daz, ftz) = (self.mxcsr.daz(), self.mxcsr.flush_to_zero());
+        self.evex_approx_ss(instr, |v| approximate_rcp14_f32(v, daz, ftz))
+    }
+
+    /// VRCP14SD xmm1{k1}{z}, xmm2, xmm3/m64 — EVEX.66.0F38.W1 4D
+    pub fn evex_vrcp14sd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (daz, ftz) = (self.mxcsr.daz(), self.mxcsr.flush_to_zero());
+        self.evex_approx_sd(instr, |v| approximate_rcp14_f64(v, daz, ftz))
+    }
+
+    /// VRSQRT14SS xmm1{k1}{z}, xmm2, xmm3/m32 — EVEX.66.0F38.W0 4F
+    pub fn evex_vrsqrt14ss(&mut self, instr: &Instruction) -> super::Result<()> {
+        let daz = self.mxcsr.daz();
+        self.evex_approx_ss(instr, |v| approximate_rsqrt14_f32(v, daz))
+    }
+
+    /// VRSQRT14SD xmm1{k1}{z}, xmm2, xmm3/m64 — EVEX.66.0F38.W1 4F
+    pub fn evex_vrsqrt14sd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let daz = self.mxcsr.daz();
+        self.evex_approx_sd(instr, |v| approximate_rsqrt14_f64(v, daz))
+    }
+
+    /// The shared scalar body: element 0 from the r/m operand, the upper
+    /// elements from vvvv.
+    fn evex_approx_ss(
+        &mut self,
+        instr: &Instruction,
+        func: impl Fn(Float32) -> Float32,
+    ) -> super::Result<()> {
+        let src1 = read_zmm(self, instr.src2()); // vvvv
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        let mut result = 0;
+        if (mask & 1) != 0 {
+            result = func(self.read_scalar_ss(instr)?);
+        }
+        write_scalar_ss_round(self, instr.dst(), &src1, result, mask, zmask);
+        Ok(())
+    }
+
+    /// Double-precision counterpart of [`Self::evex_approx_ss`].
+    fn evex_approx_sd(
+        &mut self,
+        instr: &Instruction,
+        func: impl Fn(Float64) -> Float64,
+    ) -> super::Result<()> {
+        let src1 = read_zmm(self, instr.src2());
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        let mut result = 0;
+        if (mask & 1) != 0 {
+            result = func(self.read_scalar_sd(instr)?);
+        }
+        write_scalar_sd_round(self, instr.dst(), &src1, result, mask, zmask);
+        Ok(())
+    }
+}
+
+/// Write a scalar single result: element 0 masked, elements 1..3 from `src1`,
+/// everything above cleared. Bochs BX_WRITE_XMM_REG_CLEAR_HIGH on the merged
+/// operand.
+fn write_scalar_ss_round<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
+    dst_reg: u8,
+    src1: &BxPackedZmmRegister,
+    result_elem0: Float32,
+    mask: u64,
+    zero_masking: bool,
+) {
+    let dst = &mut cpu.vmm[dst_reg as usize];
+    if (mask & 1) != 0 {
+        dst.set_zmm32u(0, result_elem0);
+    } else if zero_masking {
+        dst.set_zmm32u(0, 0);
+    }
+    for i in 1..4 {
+        dst.set_zmm32u(i, src1.zmm32u(i));
+    }
+    for i in 4..16 {
+        dst.set_zmm32u(i, 0);
+    }
+}
+
+/// Qword counterpart of [`write_scalar_ss_round`].
+fn write_scalar_sd_round<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
+    dst_reg: u8,
+    src1: &BxPackedZmmRegister,
+    result_elem0: Float64,
+    mask: u64,
+    zero_masking: bool,
+) {
+    let dst = &mut cpu.vmm[dst_reg as usize];
+    if (mask & 1) != 0 {
+        dst.set_zmm64u(0, result_elem0);
+    } else if zero_masking {
+        dst.set_zmm64u(0, 0);
+    }
+    dst.set_zmm64u(1, src1.zmm64u(1));
+    for i in 2..8 {
+        dst.set_zmm64u(i, 0);
+    }
+}
+
+/// Bochs avx512_pfp.cc `float32_reduce`. An infinite operand reduces to zero;
+/// otherwise the result is the operand minus its own scaled rounding.
+pub(super) fn f32_reduce(a: Float32, scale: u8, status: &mut SoftFloatStatus) -> Float32 {
+    if a == FLOAT32_NEGATIVE_INF || a == FLOAT32_POSITIVE_INF {
+        return 0;
+    }
+    let rc = softfloat_get_rounding_mode(status);
+    let tmp = f32_round_to_int_scaled(a, scale, rc, false, status);
+    f32_sub(a, tmp, status)
+}
+
+/// Bochs avx512_pfp.cc `float64_reduce`.
+pub(super) fn f64_reduce(a: Float64, scale: u8, status: &mut SoftFloatStatus) -> Float64 {
+    if a == FLOAT64_NEGATIVE_INF || a == FLOAT64_POSITIVE_INF {
+        return 0;
+    }
+    let rc = softfloat_get_rounding_mode(status);
+    let tmp = f64_round_to_int_scaled(a, scale, rc, false, status);
+    f64_sub(a, tmp, status)
+}
+
+/// VRANGE imm8: bit 0 selects max over min, bit 1 compares magnitudes, and
+/// bits [3:2] control the sign of the result.
+#[inline]
+pub(super) fn range_control(imm8: u8) -> (bool, bool, i32) {
+    (imm8 & 0x1 != 0, imm8 & 0x2 != 0, ((imm8 >> 2) & 0x3) as i32)
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    //! VREDUCE and VRANGE are both imm8-driven, and in both cases the
+    //! interesting behaviour lives in the immediate rather than in the
+    //! arithmetic: VREDUCE's imm8 carries a rounding mode *and* a binary
+    //! scale, and VRANGE's carries a magnitude flag and a sign override that
+    //! can hand back a value whose sign belongs to neither input's ordering.
+
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::decoder::BxSegregs;
+    use crate::cpu::xmm::MXCSR_RESET;
+    use rusty_box_decoder::opcode::Opcode;
+
+    use super::*;
+
+    /// Register-form EVEX: dst=0, rm=1, vvvv=2, k0 (all elements active).
+    fn evex(opcode: Opcode, vl: u8, imm8: u8) -> Instruction {
+        let mut i = Instruction::default();
+        i.set_ia_opcode(opcode);
+        i.set_src_reg(0, 0);
+        i.set_src_reg(1, 1);
+        i.set_src_reg(2, 2);
+        i.set_opmask(0);
+        i.set_iq(imm8 as u64);
+        i.set_vex(true);
+        i.set_vl(vl);
+        i.set_seg(BxSegregs::Ds);
+        i.init(0, 0, 1, 1);
+        i.assert_mod_c0();
+        i
+    }
+
+    fn cpu() -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC<'static, AmdRyzen>> {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.mxcsr.mxcsr = MXCSR_RESET;
+        c
+    }
+
+    #[test]
+    fn vreduce_subtracts_the_scaled_rounding_of_its_operand() {
+        let mut c = cpu();
+        c.vmm[1].set_zmm32u(0, 1.75f32.to_bits());
+
+        // scale 0, round-to-nearest-even: 1.75 rounds to 2, remainder -0.25.
+        c.execute_instruction(&evex(Opcode::EvexVreducepsVpsWpsIbKmask, 0, 0x00))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), (-0.25f32).to_bits());
+
+        // imm8[1:0] = 3 selects truncation: 1.75 -> 1, remainder 0.75.
+        c.execute_instruction(&evex(Opcode::EvexVreducepsVpsWpsIbKmask, 0, 0x03))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), 0.75f32.to_bits());
+
+        // imm8[7:4] = 2 rounds to a multiple of 1/4, which 1.75 already is.
+        c.execute_instruction(&evex(Opcode::EvexVreducepsVpsWpsIbKmask, 0, 0x20))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), 0.0f32.to_bits());
+
+        // An infinite operand reduces to zero rather than to a NaN.
+        c.vmm[1].set_zmm32u(0, f32::INFINITY.to_bits());
+        c.execute_instruction(&evex(Opcode::EvexVreducepsVpsWpsIbKmask, 0, 0x00))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), 0);
+        c.vmm[1].set_zmm32u(0, f32::NEG_INFINITY.to_bits());
+        c.execute_instruction(&evex(Opcode::EvexVreducepsVpsWpsIbKmask, 0, 0x00))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), 0);
+    }
+
+    #[test]
+    fn vreducepd_matches_the_single_precision_behaviour() {
+        let mut c = cpu();
+        c.vmm[1].set_zmm64u(0, 1.75f64.to_bits());
+        c.execute_instruction(&evex(Opcode::EvexVreducepdVpdWpdIbKmask, 0, 0x00))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm64u(0), (-0.25f64).to_bits());
+        c.execute_instruction(&evex(Opcode::EvexVreducepdVpdWpdIbKmask, 0, 0x03))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm64u(0), 0.75f64.to_bits());
+    }
+
+    #[test]
+    fn vrange_sign_control_can_override_the_comparison_result() {
+        let mut c = cpu();
+        // src1 (vvvv) = -3.0, src2 (rm) = 2.0.
+        c.vmm[2].set_zmm32u(0, (-3.0f32).to_bits());
+        c.vmm[1].set_zmm32u(0, 2.0f32.to_bits());
+
+        // imm8 0: min, signed compare, sign taken from src1. -3 < 2, so the
+        // value is -3 and src1's sign is already negative.
+        c.execute_instruction(&evex(Opcode::EvexVrangepsVpsHpsWpsIbKmask, 0, 0b0000))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), (-3.0f32).to_bits());
+
+        // imm8 1: max picks 2.0, but sign_ctrl 0 still forces src1's sign.
+        c.execute_instruction(&evex(Opcode::EvexVrangepsVpsHpsWpsIbKmask, 0, 0b0001))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), (-2.0f32).to_bits());
+
+        // sign_ctrl 1 preserves the compared value's own sign.
+        c.execute_instruction(&evex(Opcode::EvexVrangepsVpsHpsWpsIbKmask, 0, 0b0101))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), 2.0f32.to_bits());
+
+        // sign_ctrl 2 forces positive, 3 forces negative.
+        c.execute_instruction(&evex(Opcode::EvexVrangepsVpsHpsWpsIbKmask, 0, 0b1001))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), 2.0f32.to_bits());
+        c.execute_instruction(&evex(Opcode::EvexVrangepsVpsHpsWpsIbKmask, 0, 0b1101))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), (-2.0f32).to_bits());
+    }
+
+    #[test]
+    fn vrange_magnitude_mode_ignores_the_operand_signs() {
+        let mut c = cpu();
+        c.vmm[2].set_zmm64u(0, (-3.0f64).to_bits());
+        c.vmm[1].set_zmm64u(0, 2.0f64.to_bits());
+
+        // imm8 bit 1 compares |−3| against |2|: the minimum is 2, and
+        // sign_ctrl 0 gives it src1's negative sign.
+        c.execute_instruction(&evex(Opcode::EvexVrangepdVpdHpdWpdIbKmask, 0, 0b0010))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm64u(0), (-2.0f64).to_bits());
+
+        // Magnitude maximum is 3, again re-signed from src1.
+        c.execute_instruction(&evex(Opcode::EvexVrangepdVpdHpdWpdIbKmask, 0, 0b0011))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm64u(0), (-3.0f64).to_bits());
+    }
+
+    #[test]
+    fn vrange_and_vreduce_scalar_forms_touch_only_element_zero() {
+        let mut c = cpu();
+        // vvvv supplies the upper elements of the destination.
+        c.vmm[2].set_zmm32u(0, (-3.0f32).to_bits());
+        c.vmm[2].set_zmm32u(1, 0x1111_1111);
+        c.vmm[2].set_zmm32u(2, 0x2222_2222);
+        c.vmm[2].set_zmm32u(3, 0x3333_3333);
+        c.vmm[1].set_zmm32u(0, 2.0f32.to_bits());
+
+        c.execute_instruction(&evex(Opcode::EvexVrangessVssHpsWssIbKmask, 0, 0b0101))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), 2.0f32.to_bits());
+        assert_eq!(c.vmm[0].zmm32u(1), 0x1111_1111);
+        assert_eq!(c.vmm[0].zmm32u(2), 0x2222_2222);
+        assert_eq!(c.vmm[0].zmm32u(3), 0x3333_3333);
+        assert_eq!(c.vmm[0].zmm32u(4), 0, "EVEX clears above 128 bits");
+
+        // VREDUCESS reduces the rm operand, not vvvv's element 0.
+        c.vmm[1].set_zmm32u(0, 1.75f32.to_bits());
+        c.execute_instruction(&evex(Opcode::EvexVreducessVssHpsWssIbKmask, 0, 0x00))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm32u(0), (-0.25f32).to_bits());
+        assert_eq!(c.vmm[0].zmm32u(1), 0x1111_1111);
+    }
+
+    #[test]
+    fn vscalef_scales_vvvv_by_the_rm_operand_not_the_other_way_round() {
+        // Bochs VSCALEFPS computes f32_scalef(i->src1(), i->src2()) — that is,
+        // vvvv * 2^floor(rm). This decoder puts vvvv in src2() and rm in
+        // src1(), so a handler that reads them positionally computes
+        // rm * 2^floor(vvvv) instead. scalef is not commutative, so the two
+        // give different answers for every asymmetric pair.
+        let mut c = cpu();
+        c.vmm[2].set_zmm32u(0, 3.0f32.to_bits()); // vvvv: the value
+        c.vmm[1].set_zmm32u(0, 2.0f32.to_bits()); // rm:   the exponent
+        c.execute_instruction(&evex(Opcode::EvexVscalefpsVpsHpsWps, 0, 0))
+            .unwrap();
+        // 3 * 2^2 = 12, not 2 * 2^3 = 16.
+        assert_eq!(c.vmm[0].zmm32u(0), 12.0f32.to_bits());
+
+        c.vmm[2].set_zmm64u(0, 3.0f64.to_bits());
+        c.vmm[1].set_zmm64u(0, 2.0f64.to_bits());
+        c.execute_instruction(&evex(Opcode::EvexVscalefpdVpdHpdWpd, 0, 0))
+            .unwrap();
+        assert_eq!(c.vmm[0].zmm64u(0), 12.0f64.to_bits());
+    }
+
+}
+
+/// The eight operand classes VFIXUPIMM's response table is indexed by.
+/// Bochs avx512_pfp.cc.
+const FIXUPIMM_QNAN_TOKEN: u32 = 0;
+const FIXUPIMM_SNAN_TOKEN: u32 = 1;
+const FIXUPIMM_ZERO_VALUE_TOKEN: u32 = 2;
+const FIXUPIMM_POS_ONE_VALUE_TOKEN: u32 = 3;
+const FIXUPIMM_NEG_INF_TOKEN: u32 = 4;
+const FIXUPIMM_POS_INF_TOKEN: u32 = 5;
+const FIXUPIMM_NEG_VALUE_TOKEN: u32 = 6;
+const FIXUPIMM_POS_VALUE_TOKEN: u32 = 7;
+
+/// Constants the response table can select that are not already in
+/// specialize.rs. Bochs avx512_pfp.cc.
+const FLOAT32_VALUE_90: Float32 = 0x42B4_0000;
+const FLOAT32_PI_HALF: Float32 = 0x3FC9_0FDB;
+const FLOAT32_POSITIVE_HALF: Float32 = 0x3F00_0000;
+const FLOAT64_VALUE_90: Float64 = 0x4056_8000_0000_0000;
+const FLOAT64_PI_HALF: Float64 = 0x3FF9_21FB_5444_2D18;
+const FLOAT64_POSITIVE_HALF: Float64 = 0x3FE0_0000_0000_0000;
+
+/// Classify `op1` into a token, and report which imm8 bits make that class
+/// raise #I and #Z. Shared by both widths — only the classification and the
+/// "is it exactly +1.0" test differ, and both are passed in.
+#[inline]
+fn fixupimm_token(op1_class: SoftFloatClass, is_positive_one: bool) -> (u32, u8, u8) {
+    match op1_class {
+        SoftFloatClass::Zero => (FIXUPIMM_ZERO_VALUE_TOKEN, 0x02, 0x01),
+        SoftFloatClass::NegativeInf => (FIXUPIMM_NEG_INF_TOKEN, 0x20, 0),
+        SoftFloatClass::PositiveInf => (FIXUPIMM_POS_INF_TOKEN, 0x80, 0),
+        SoftFloatClass::SNaN => (FIXUPIMM_SNAN_TOKEN, 0x10, 0),
+        SoftFloatClass::QNaN => (FIXUPIMM_QNAN_TOKEN, 0, 0),
+        SoftFloatClass::Denormal | SoftFloatClass::Normalized => {
+            if is_positive_one {
+                (FIXUPIMM_POS_ONE_VALUE_TOKEN, 0x08, 0x04)
+            } else {
+                (0, 0, 0) // the sign decides; filled in by the caller
+            }
+        }
+    }
+}
+
+/// Bochs avx512_pfp.cc `float32_fixupimm`. `op2` is a table of eight 4-bit
+/// responses, indexed by the class of `op1`; `dst` is the fallback.
+pub(super) fn f32_fixupimm(
+    dst: Float32,
+    op1: Float32,
+    op2: u32,
+    imm8: u8,
+    status: &mut SoftFloatStatus,
+) -> Float32 {
+    let tmp_op1 = if softfloat_denormals_are_zeros(status) {
+        f32_denormal_to_zero(op1)
+    } else {
+        op1
+    };
+    let op1_class = f32_class(tmp_op1);
+    let sign = sign_f32(tmp_op1);
+
+    let (mut token, mut ie_fault_mask, divz_fault_mask) =
+        fixupimm_token(op1_class, tmp_op1 == FLOAT32_POSITIVE_ONE);
+    if matches!(
+        op1_class,
+        SoftFloatClass::Denormal | SoftFloatClass::Normalized
+    ) && tmp_op1 != FLOAT32_POSITIVE_ONE
+    {
+        if sign {
+            token = FIXUPIMM_NEG_VALUE_TOKEN;
+            ie_fault_mask = 0x40;
+        } else {
+            token = FIXUPIMM_POS_VALUE_TOKEN;
+        }
+    }
+
+    if imm8 & ie_fault_mask != 0 {
+        softfloat_raise_flags(status, FLAG_INVALID);
+    }
+    if imm8 & divz_fault_mask != 0 {
+        softfloat_raise_flags(status, FLAG_DIVBYZERO);
+    }
+
+    match (op2 >> (token * 4)) & 0xF {
+        0x1 => tmp_op1, // apply DAZ to the op1 value
+        0x2 => tmp_op1 | 0x0040_0000, // quieten
+        0x3 => FLOAT32_DEFAULT_NAN,
+        0x4 => FLOAT32_NEGATIVE_INF,
+        0x5 => FLOAT32_POSITIVE_INF,
+        0x6 => {
+            if sign {
+                FLOAT32_NEGATIVE_INF
+            } else {
+                FLOAT32_POSITIVE_INF
+            }
+        }
+        0x7 => FLOAT32_NEGATIVE_ZERO,
+        0x8 => FLOAT32_POSITIVE_ZERO,
+        0x9 => FLOAT32_NEGATIVE_ONE,
+        0xA => FLOAT32_POSITIVE_ONE,
+        0xB => FLOAT32_POSITIVE_HALF,
+        0xC => FLOAT32_VALUE_90,
+        0xD => FLOAT32_PI_HALF,
+        0xE => FLOAT32_MAX_FLOAT,
+        0xF => FLOAT32_MIN_FLOAT,
+        _ => dst, // preserve
+    }
+}
+
+/// Bochs avx512_pfp.cc `float64_fixupimm`.
+pub(super) fn f64_fixupimm(
+    dst: Float64,
+    op1: Float64,
+    op2: u32,
+    imm8: u8,
+    status: &mut SoftFloatStatus,
+) -> Float64 {
+    let tmp_op1 = if softfloat_denormals_are_zeros(status) {
+        f64_denormal_to_zero(op1)
+    } else {
+        op1
+    };
+    let op1_class = f64_class(tmp_op1);
+    let sign = sign_f64(tmp_op1);
+
+    let (mut token, mut ie_fault_mask, divz_fault_mask) =
+        fixupimm_token(op1_class, tmp_op1 == FLOAT64_POSITIVE_ONE);
+    if matches!(
+        op1_class,
+        SoftFloatClass::Denormal | SoftFloatClass::Normalized
+    ) && tmp_op1 != FLOAT64_POSITIVE_ONE
+    {
+        if sign {
+            token = FIXUPIMM_NEG_VALUE_TOKEN;
+            ie_fault_mask = 0x40;
+        } else {
+            token = FIXUPIMM_POS_VALUE_TOKEN;
+        }
+    }
+
+    if imm8 & ie_fault_mask != 0 {
+        softfloat_raise_flags(status, FLAG_INVALID);
+    }
+    if imm8 & divz_fault_mask != 0 {
+        softfloat_raise_flags(status, FLAG_DIVBYZERO);
+    }
+
+    match (op2 >> (token * 4)) & 0xF {
+        0x1 => tmp_op1,
+        0x2 => tmp_op1 | 0x0008_0000_0000_0000,
+        0x3 => FLOAT64_DEFAULT_NAN,
+        0x4 => FLOAT64_NEGATIVE_INF,
+        0x5 => FLOAT64_POSITIVE_INF,
+        0x6 => {
+            if sign {
+                FLOAT64_NEGATIVE_INF
+            } else {
+                FLOAT64_POSITIVE_INF
+            }
+        }
+        0x7 => FLOAT64_NEGATIVE_ZERO,
+        0x8 => FLOAT64_POSITIVE_ZERO,
+        0x9 => FLOAT64_NEGATIVE_ONE,
+        0xA => FLOAT64_POSITIVE_ONE,
+        0xB => FLOAT64_POSITIVE_HALF,
+        0xC => FLOAT64_VALUE_90,
+        0xD => FLOAT64_PI_HALF,
+        0xE => FLOAT64_MAX_FLOAT,
+        0xF => FLOAT64_MIN_FLOAT,
+        _ => dst,
+    }
 }

@@ -91,6 +91,7 @@ impl BxMemC<'_> {
 
             // A20 starts DISABLED at boot (synced from PC system during init)
             a20_mask: 0xFFFF_FFFF_FFEF_FFFFu64,
+            hpet_access_clock: core::cell::Cell::new((0, 0)),
             _marker: core::marker::PhantomData,
         }
     }
@@ -127,7 +128,17 @@ impl<'c> BxMemC<'c> {
         };
         let write = (rw as u32 & 1) != 0;
 
-        if (0x000a0000..0x000c0000).contains(&a20_addr)
+        // Bochs misc_mem.cc getHostMemAddr: "allow direct access to SMRAM
+        // memory space for code and veto data". The direct span is handed out
+        // for INSTRUCTION FETCH only — data reads/writes deliberately fall
+        // through to the VGA memory handler's veto below so they take the slow
+        // read/writePhysicalPage path, which applies the stricter
+        // `smram_enable || (smm_mode && !smram_restricted)` routing. Note the
+        // condition here is the LOOSER one (no `!smram_restricted`), matching
+        // Bochs. The `cpu != NULL` guard is structural here: every caller of
+        // this function is a CPU path (the DMA paths never take it).
+        if rw as u32 == MemoryAccessType::Execute as u32
+            && (0x000a0000..0x000c0000).contains(&a20_addr)
             && self.smram_available
             && (self.smram_enable || policy.smm_mode())
         {
@@ -443,10 +454,14 @@ impl BxMemC<'_> {
         };
 
         // Check SMRAM first (before memory handlers).
-        if (0x000a0000..0x000c0000).contains(&a20_addr)
+        // Bochs memory.cc wraps the SMRAM window in `if (cpu != NULL)`, so a
+        // device access (DMA, a device writing memory) never reaches SMRAM
+        // through it and falls through to the handler/VGA routing below.
+        let smram_hit = policy.is_cpu_context()
+            && (0x000a0000..0x000c0000).contains(&a20_addr)
             && self.smram_available
-            && (self.smram_enable || (policy.smm_mode() && !self.smram_restricted))
-        {
+            && (self.smram_enable || (policy.smm_mode() && !self.smram_restricted));
+        if smram_hit {
             // Write to SMRAM - delegate to stub for regular memory write
             return self.inherited_memory_stub.write_physical_page(
                 pins,
@@ -471,6 +486,11 @@ impl BxMemC<'_> {
                             return Ok(());
                         } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
                             ioapic.mem_write(a20_addr, len as u32, &data[..len]);
+                            return Ok(());
+                        } else if let Some(hpet) = handler.device_id.hpet_mut() {
+                            let (ticks, ips) = self.hpet_access_clock.get();
+                            hpet.set_now(ticks, ips);
+                            hpet.mem_write(a20_addr, len as u32, &data[..len]);
                             return Ok(());
                         }
                     }
@@ -610,8 +630,10 @@ impl BxMemC<'_> {
             is_bios
         };
 
-        // Check SMRAM first (before memory handlers).
-        if (0x000a0000..0x000c0000).contains(&a20_addr)
+        // Check SMRAM first (before memory handlers). Gated on CPU context —
+        // Bochs memory.cc reaches the SMRAM window only when `cpu != NULL`.
+        if policy.is_cpu_context()
+            && (0x000a0000..0x000c0000).contains(&a20_addr)
             && self.smram_available
             && (self.smram_enable || (policy.smm_mode() && !self.smram_restricted))
         {
@@ -636,6 +658,11 @@ impl BxMemC<'_> {
                         // Bochs: memory_handler->read_handler(a20addr, 1, buf, param)
                         if let Some(vga) = handler.device_id.vga_mut() {
                             vga.mem_read(a20_addr, len as u32, data);
+                            return Ok(());
+                        } else if let Some(hpet) = handler.device_id.hpet_mut() {
+                            let (ticks, ips) = self.hpet_access_clock.get();
+                            hpet.set_now(ticks, ips);
+                            hpet.mem_read(a20_addr, len as u32, data);
                             return Ok(());
                         } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
                             ioapic.mem_read(a20_addr, len as u32, data);
@@ -1198,6 +1225,13 @@ impl BxMemC<'_> {
 
 #[cfg(test)]
 mod handler_tests {
+
+/// Emulator construction needs a bigger stack than the default 2 MiB test
+/// thread: `Emulator` is ~4 MiB and the debug build materialises a few
+/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
+/// enough concurrent reservations to intermittently exhaust the process
+/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::*;
     use crate::memory::MemoryDeviceId;
 
@@ -1243,6 +1277,7 @@ mod handler_tests {
             MemoryDeviceId::Vga(pointer) => (0, pointer as usize),
             MemoryDeviceId::IoApic(pointer) => (1, pointer as usize),
             MemoryDeviceId::None => (2, 0),
+            MemoryDeviceId::Hpet(pointer) => (3, pointer as usize),
         }
     }
 
@@ -1473,7 +1508,7 @@ mod handler_tests {
         // stack (2MB on win32), so this must run on a big-stack thread —
         // same pattern as cpu/tests_jumps.rs.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
                 let mut mem = test_mem();
 
@@ -1543,7 +1578,7 @@ mod handler_tests {
         use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
 
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
                 let mut mem = test_mem();
                 mem.set_a20_mask(0xFFFF_FFFF_FFFF_FFFF); // A20 enabled: no address wraparound

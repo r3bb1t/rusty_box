@@ -27,6 +27,29 @@ use crate::{
 /// segment limit checks.  Matches the largest scalar access (qword=8).
 const BX_MAX_MEM_ACCESS_LENGTH: u32 = 8;
 
+/// The protection-key allow-mask that applies to a TLB permission bit.
+///
+/// Bochs tlb.h ANDs the entry's key mask into EVERY hit test, not just into
+/// the page walk:
+///
+/// ```text
+/// #define isReadOK(tlbEntry, user)  (tlbEntry->accessBits & (0x01 << user) & rd_pkey[tlbEntry->pkey])
+/// #define isWriteOK(tlbEntry, user) (tlbEntry->accessBits & (0x04 << user) & wr_pkey[tlbEntry->pkey])
+/// ```
+///
+/// `needed_bit` says which side applies: bits 0-1 are the read permissions,
+/// bits 2-3 the write permissions. Taking the arrays by reference (rather
+/// than `&self`) keeps this usable while a `&mut` TLB entry borrowed from the
+/// disjoint `dtlb` field is live.
+#[inline]
+fn pkey_allow(needed_bit: u32, pkey: u32, rd_pkey: &[u32; 16], wr_pkey: &[u32; 16]) -> u32 {
+    if needed_bit & 0x0C != 0 {
+        wr_pkey[pkey as usize]
+    } else {
+        rd_pkey[pkey as usize]
+    }
+}
+
 /// Compute a pointer into a host-mapped page at the given linear address's page offset.
 #[inline(always)]
 pub(super) fn host_at_page_offset(host: *const u8, laddr: u64) -> *const u8 {
@@ -232,10 +255,34 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         true
     }
 
+    /// Raise #AC(0) when this access is misaligned and alignment checking is
+    /// armed. Bochs `access_read_linear` / `access_write_linear` (access.cc)
+    /// perform exactly this test — `alignment_check() && user`, then
+    /// `pageOffset & ac_mask` — *before* the TLB lookup, so #AC takes
+    /// precedence over #PF.
+    ///
+    /// `alignment_check_mask` is 0xF only while CS.RPL==3 && CR0.AM &&
+    /// EFLAGS.AC (see `handle_alignment_check`), and `user_pl` is forced false
+    /// around descriptor and other CPL-0 accesses, so both conditions must
+    /// hold. Byte accesses are never checked; vector accesses use the separate
+    /// `_aligned` #GP path, matching Bochs access2.cc.
+    #[inline(always)]
+    pub(super) fn check_alignment(&mut self, laddr: u64, ac_mask: u32) -> Result<()> {
+        // Near-always-false: the mask is zero unless a CPL-3 guest has armed
+        // both CR0.AM and EFLAGS.AC.
+        if self.alignment_check_mask != 0
+            && self.user_pl
+            && (laddr as u32 & (ac_mask & self.alignment_check_mask)) != 0
+        {
+            return self.exception(Exception::Ac, 0);
+        }
+        Ok(())
+    }
+
     // ===== Exception selector: #SS for SS, #GP for others (Bochs int_number) =====
 
     #[inline]
-    fn seg_exception(seg: BxSegregs) -> Exception {
+    pub(super) fn seg_exception(seg: BxSegregs) -> Exception {
         if matches!(seg, BxSegregs::Ss) {
             Exception::Ss
         } else {
@@ -706,7 +753,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.user_pl = saved_user_pl;
             result
         } else {
-            self.translate_linear_system_read(laddr)
+            // Bochs access.cc funnels system reads through access_read_linear,
+            // which raises a nested #PF (CR2 = laddr, supervisor read error
+            // code) on a translation fault — a raw error must never escape to
+            // the caller: during exception/interrupt delivery it would
+            // escalate straight to #DF where the is_exception_OK table wants
+            // a recoverable nested #PF. (The long-mode arm above already
+            // nests via translate_data_read; system WRITES nest inside
+            // translate_linear_system_write.)
+            match self.translate_linear_system_read(laddr) {
+                Ok(paddr) => Ok(paddr),
+                Err(super::error::CpuError::Memory(mem_err)) => {
+                    use super::paging::PageFaultError;
+                    let fault = match mem_err {
+                        crate::memory::MemoryError::PageProtectionViolation => {
+                            PageFaultError::PROTECTION.bits()
+                        }
+                        crate::memory::MemoryError::PageReservedBitViolation => {
+                            PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits()
+                        }
+                        _ => PageFaultError::NOT_PRESENT.bits(),
+                    };
+                    self.page_fault(fault, laddr, false, false)?;
+                    unreachable!("page_fault always raises")
+                }
+                Err(e) => Err(e),
+            }
         }
     }
 
@@ -1118,7 +1190,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         loop {
             let tlb = self.dtlb.get_entry_of(laddr, 0);
             if tlb.lpf == lpf
-                && (tlb.access_bits & needed_bit) != 0
+                && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0
                 && tlb.host_page_addr != 0
                 && !self.mem_host_base.is_null()
             {
@@ -1194,7 +1269,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         loop {
             let tlb = self.dtlb.get_entry_of(laddr, 0);
             if tlb.lpf == lpf
-                && (tlb.access_bits & needed_bit) != 0
+                && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0
                 && tlb.host_page_addr != 0
                 && !self.mem_host_base.is_null()
             {
@@ -1369,7 +1447,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 0);
-        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+        if tlb.lpf == lpf && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0 && tlb.host_page_addr != 0 {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *const u8;
@@ -1411,10 +1492,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Read a word given a pre-computed linear address with cross-page handling.
     /// Bochs: read_linear_word (access2.cc)
     pub(crate) fn read_linear_word(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u16> {
+        self.check_alignment(laddr, 1)?;
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 1);
-        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+        if tlb.lpf == lpf && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0 && tlb.host_page_addr != 0 {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *const u8;
@@ -1467,10 +1552,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Read a dword given a pre-computed linear address with cross-page handling.
     /// Bochs: read_linear_dword (access2.cc)
     pub(crate) fn read_linear_dword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u32> {
+        self.check_alignment(laddr, 3)?;
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 3);
-        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+        if tlb.lpf == lpf && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0 && tlb.host_page_addr != 0 {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *const u8;
@@ -1524,10 +1613,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Read a qword given a pre-computed linear address with cross-page handling.
     /// Bochs: read_linear_qword (access2.cc)
     pub(crate) fn read_linear_qword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u64> {
+        self.check_alignment(laddr, 7)?;
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 7);
-        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+        if tlb.lpf == lpf && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0 && tlb.host_page_addr != 0 {
             #[cfg_attr(not(feature = "instrumentation"), allow(unused_variables))]
             let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *const u8;
@@ -1584,7 +1677,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 0);
-        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+        if tlb.lpf == lpf && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0 && tlb.host_page_addr != 0 {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
             #[cfg(feature = "instrumentation")]
@@ -1632,10 +1728,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         val: u16,
     ) -> Result<()> {
+        self.check_alignment(laddr, 1)?;
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 1);
-        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+        if tlb.lpf == lpf && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0 && tlb.host_page_addr != 0 {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
             #[cfg(feature = "instrumentation")]
@@ -1724,11 +1824,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         val: u32,
     ) -> Result<()> {
+        self.check_alignment(laddr, 3)?;
         self.check_gdt_watchpoint(laddr, val as u64, 4);
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 3);
-        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+        if tlb.lpf == lpf && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0 && tlb.host_page_addr != 0 {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
             #[cfg(feature = "instrumentation")]
@@ -1788,12 +1892,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         laddr: u64,
         val: u64,
     ) -> Result<()> {
+        self.check_alignment(laddr, 7)?;
         self.check_gdt_watchpoint(laddr, val, 8);
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 7);
         // DIAGNOSTIC: bypass TLB for writes to test stale-TLB theory
-        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+        if tlb.lpf == lpf && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0 && tlb.host_page_addr != 0 {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             let host = tlb.host_page_addr as *mut u8;
             #[cfg(feature = "instrumentation")]
@@ -1961,7 +2069,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 7);
-        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+        if tlb.lpf == lpf && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0 && tlb.host_page_addr != 0 {
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
             let host_addr = tlb.host_page_addr | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
@@ -2018,7 +2129,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let tlb = self.dtlb.get_entry_of(laddr, 0);
         if self.mmio.is_empty()
             && tlb.lpf == lpf
-            && (tlb.access_bits & needed_bit) != 0
+            && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0
             && tlb.host_page_addr != 0
         {
             self.address_xlation.pages =
@@ -2065,7 +2179,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let tlb = self.dtlb.get_entry_of(laddr, 1);
         if self.mmio.is_empty()
             && tlb.lpf == lpf
-            && (tlb.access_bits & needed_bit) != 0
+            && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0
             && tlb.host_page_addr != 0
         {
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
@@ -2141,7 +2258,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let tlb = self.dtlb.get_entry_of(laddr, 3);
         if self.mmio.is_empty()
             && tlb.lpf == lpf
-            && (tlb.access_bits & needed_bit) != 0
+            && (tlb.access_bits
+                & needed_bit
+                & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
+                != 0
             && tlb.host_page_addr != 0
         {
             self.address_xlation.pages =
@@ -2540,6 +2660,62 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.write_virtual_qword_64(seg, offset.wrapping_add(16), val.ymm64u(2))?;
         self.write_virtual_qword_64(seg, offset.wrapping_add(24), val.ymm64u(3))?;
         Ok(())
+    }
+
+    // ===== 64-bit zmmword read/write functions =====
+
+    /// Read a 512-bit ZMM word from virtual memory in 64-bit mode.
+    ///
+    /// Bochs `read_virtual_zmmword` (access.h) issues one 64-byte access; like
+    /// the ymmword path above we compose it from qword accesses, which differ
+    /// only in how a segment-limit violation part-way through the operand is
+    /// reported.
+    pub(super) fn read_virtual_zmmword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: u64,
+    ) -> Result<super::xmm::BxPackedZmmRegister> {
+        let mut r = super::xmm::BxPackedZmmRegister::default();
+        for n in 0..8u64 {
+            let q = self.read_virtual_qword_64(seg, offset.wrapping_add(n * 8))?;
+            r.set_zmm64u(n as usize, q);
+        }
+        Ok(r)
+    }
+
+    /// Write a 512-bit ZMM word to virtual memory in 64-bit mode.
+    pub(super) fn write_virtual_zmmword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: u64,
+        val: &super::xmm::BxPackedZmmRegister,
+    ) -> Result<()> {
+        for n in 0..8u64 {
+            self.write_virtual_qword_64(seg, offset.wrapping_add(n * 8), val.zmm64u(n as usize))?;
+        }
+        Ok(())
+    }
+
+    // ===== Mode-dispatching wrappers for zmmword =====
+
+    pub fn v_read_zmmword(
+        &mut self,
+        seg: BxSegregs,
+        offset: impl Into<u64>,
+    ) -> Result<super::xmm::BxPackedZmmRegister> {
+        let offset = offset.into();
+        // ZMM operands only exist under EVEX, which rusty_box decodes in long mode.
+        self.read_virtual_zmmword_64(seg, offset)
+    }
+
+    pub fn v_write_zmmword(
+        &mut self,
+        seg: BxSegregs,
+        offset: impl Into<u64>,
+        val: &super::xmm::BxPackedZmmRegister,
+    ) -> Result<()> {
+        let offset = offset.into();
+        self.write_virtual_zmmword_64(seg, offset, val)
     }
 
     // ===== Mode-dispatching wrappers for ymmword =====

@@ -167,6 +167,8 @@ pub struct DeviceManager {
     pub(crate) dma: BxDmaC,
     /// 8042 Keyboard Controller
     pub(crate) keyboard: BxKeyboardC,
+    /// High Precision Event Timer (Bochs iodev/hpet.cc)
+    pub(crate) hpet: super::hpet::BxHpetC,
     /// ATA/IDE Hard Drive Controller
     pub(crate) harddrv: BxHardDriveC,
     /// VGA Display Controller
@@ -215,6 +217,23 @@ pub struct DeviceManager {
     /// Deferred: a VGA PCI BAR (LFB or MMIO) changed, needs memory-handler
     /// (re)registration at the new base.
     pub(crate) vga_bar_needs_reregister: bool,
+    /// Deferred: the PIIX3 0x4F (APIC enable) or 0x80 (APIC base) config
+    /// register was written; the I/O APIC enable state + MMIO base must be
+    /// re-synced (Bochs pci2isa.cc pci_write_handler cases 0x4f/0x80's
+    /// DEV_ioapic_set_enabled() calls). Live-only transient: Bochs applies this
+    /// synchronously and its ioapic.cc reset() does not re-sync the IOAPIC, so
+    /// it is cleared (not re-derived) on reset and never snapshotted.
+    pub(crate) ioapic_enable_needs_update: bool,
+    /// Deferred: the PIIX3 0x4F "1-meg extended BIOS enable" bit changed;
+    /// carries the new BIOS_ROM_1MEG access value (Bochs pci2isa.cc case 0x4f's
+    /// DEV_mem_set_bios_rom_access(BIOS_ROM_1MEG, ...)). Not derivable from
+    /// pci_conf (only bit 0 is stored, matching Bochs), so carried as a transient.
+    pub(crate) bios_1meg_access_pending: Option<bool>,
+    /// Deferred: the CMOS timer-owner delta produced by `cmos.reset()` on a
+    /// hardware reset. `BxCmosC::reset` can't reach the machine timers, so the
+    /// emulator drains this in `rearm_device_timers_after_hardware_reset`
+    /// (transient — set and consumed within a single reset, never snapshotted).
+    pub(crate) cmos_reset_timer_sync: Option<super::cmos::CmosTimerSync>,
     /// Diagnostic: PIT IRQ0 rising edges applied to the PIC
     pub diag_pit_fires: u64,
     /// Diagnostic: raise_irq(0) latched (irq_in was 0)
@@ -272,11 +291,22 @@ impl DeviceManager {
             || self.smram_needs_update
             || self.bios_write_needs_update
             || self.vga_bar_needs_reregister
+            || self.ioapic_enable_needs_update
+            || self.bios_1meg_access_pending.is_some()
             || self.port92.a20_change_pending
             || self.keyboard.a20_change_pending
             || self.port92.reset_request.is_some()
             || self.keyboard.reset_requested.is_some()
             || self.pci2isa.reset_request.is_some()
+            // Bochs acpi.cc PM1_CNT: S3 resets the machine, S5 terminates it.
+            // Both must end the CPU slice so the boundary can act on them.
+            || self.acpi.reset_request.is_some()
+            || self.acpi.soft_off_pending
+            // Bochs acpi.cc apic_bus_deliver_smi is synchronous with the OUT
+            // to SMI_CMD; ending the slice here delivers the SMI to CPU 0
+            // before the guest's next instruction. Drained by the emulator's
+            // service_scheduler_boundary BEFORE the apply/quiesce loop.
+            || self.acpi.smi_request_pending
     }
 
     /// Drain all reset producers, with hardware reset taking precedence over
@@ -285,12 +315,15 @@ impl DeviceManager {
         let port92 = self.port92.reset_request.take();
         let keyboard = self.keyboard.reset_requested.take();
         let pci = self.pci2isa.reset_request.take();
+        // Bochs acpi.cc S3 (suspend to ram) -> bx_pc_system.Reset(BX_RESET_HARDWARE).
+        let acpi = self.acpi.reset_request.take();
         if matches!(port92, Some(ResetReason::Hardware))
             || matches!(keyboard, Some(ResetReason::Hardware))
             || matches!(pci, Some(ResetReason::Hardware))
+            || matches!(acpi, Some(ResetReason::Hardware))
         {
             Some(ResetReason::Hardware)
-        } else if port92.is_some() || keyboard.is_some() || pci.is_some() {
+        } else if port92.is_some() || keyboard.is_some() || pci.is_some() || acpi.is_some() {
             Some(ResetReason::Software)
         } else {
             None
@@ -305,6 +338,7 @@ impl DeviceManager {
             cmos: BxCmosC::new(),
             dma: BxDmaC::new(),
             keyboard: BxKeyboardC::new(),
+            hpet: super::hpet::BxHpetC::new(),
             harddrv: BxHardDriveC::new(),
             vga: BxVgaC::new(),
             ioapic: BxIoApic::new(),
@@ -322,6 +356,9 @@ impl DeviceManager {
             smram_needs_update: false,
             bios_write_needs_update: false,
             vga_bar_needs_reregister: false,
+            ioapic_enable_needs_update: false,
+            bios_1meg_access_pending: None,
+            cmos_reset_timer_sync: None,
             diag_pit_fires: 0,
             diag_irq0_latched: 0,
             diag_irq0_already_high: 0,
@@ -368,6 +405,14 @@ impl DeviceManager {
         self.harddrv.init();
         // 8. I/O APIC (Bochs: pluginIOAPIC->init() in devices.cc)
         self.ioapic.init(mem)?;
+        // 8b. HPET (Bochs: PLUGTYPE_STANDARD hpet plugin — hpet.cc init()
+        // registers the fixed MMIO window; the rombios32 ACPI builder then
+        // probes 0xFED00000 for the 0x8086 vendor id).
+        {
+            use super::hpet::{HPET_BASE, HPET_LEN};
+            let device_id = crate::memory::MemoryDeviceId::Hpet(&mut self.hpet as *mut _);
+            mem.register_memory_handlers(device_id, HPET_BASE, HPET_BASE + HPET_LEN - 1)?;
+        }
         // 9. ACPI Power Management (Bochs: pluginACPIController->init() in devices.cc)
         self.acpi.reset();
         // 10. PCI bus devices (Bochs: pluginPciBridge->init(), pluginPci2IsaBridge->init(), etc.)
@@ -405,13 +450,19 @@ impl DeviceManager {
         // Deliberate no-op: Bochs pit82c54.cc reset(type) is empty — the
         // PIT counters keep their programming across a guest reset.
         self.pit.reset();
-        self.cmos.reset();
+        // Bochs cmos.cc reset returns the periodic/one-second/UIP timer-owner
+        // delta. This code path can't reach the machine timers, so stash it for
+        // rearm_device_timers_after_hardware_reset to apply once reset finishes.
+        self.cmos_reset_timer_sync = Some(self.cmos.reset());
         self.dma.reset();
         self.keyboard.reset();
         self.harddrv.reset();
         self.vga.reset();
         self.serial.reset();
         self.ioapic.reset();
+        // Bochs hpet.cc reset(): comparators stop, state clears, and the
+        // PIT/RTC pins re-enable (queued; the emulator drains after reset).
+        self.hpet.reset();
         self.acpi.reset();
         self.fw_cfg.reset();
         {
@@ -427,6 +478,14 @@ impl DeviceManager {
                 self.sm_ports_base != self.acpi.sm_base as u16;
             self.vga_bar_needs_reregister = self.vga.peek_pending_lfb_relocate().is_some()
                 || self.vga.peek_pending_mmio_relocate().is_some();
+            // Bochs ioapic.cc reset() does NOT re-sync the IOAPIC enable state
+            // (unlike PAM/SMRAM/XBCS, which pci.cc/pci2isa.cc re-apply below):
+            // the IOAPIC keeps its last-applied enable/base across a guest
+            // reset. Drop any pending 0x4f/0x80 enable write rather than
+            // re-deriving from the reset pci_conf[0x4f]=0 (which would
+            // spuriously disable the IOAPIC).
+            self.ioapic_enable_needs_update = false;
+            self.bios_1meg_access_pending = None;
             // Re-apply the reset SMRAM/XBCS state synchronously before the
             // guest resumes. Hardware reset may already have disabled SMRAM;
             // the operation is idempotent.
@@ -479,27 +538,32 @@ impl DeviceManager {
     fn register_cmos_handlers(&mut self, io: &mut BxDevicesC) {
         io.register_io_handler(DeviceId::Cmos, CMOS_ADDR, "CMOS Address", 0x1);
         io.register_io_handler(DeviceId::Cmos, CMOS_DATA, "CMOS Data", 0x1);
-        // Bochs cmos.cc — extended CMOS RAM ports (addresses 0x80-0xFF)
-        io.register_io_handler(DeviceId::Cmos, 0x0072, "Ext CMOS RAM", 0x1);
-        io.register_io_handler(DeviceId::Cmos, 0x0073, "Ext CMOS RAM", 0x1);
+        // Bochs cmos.cc init() registers the extended-bank ports 0x72/0x73
+        // ONLY when a 256-byte `cmosimage` is configured (s.max_reg == 255).
+        // With the default 128-byte CMOS (no image) those ports are left
+        // unmapped and fall to the default handler (0xFF byte reads / ignored
+        // writes). rusty_box has no `cmosimage` config, so — matching Bochs's
+        // default — 0x72/0x73 stay unregistered. The cmos.rs read()/write()
+        // arms for them remain: they are the correct behavior once cmosimage
+        // support is added, and they anchor the snapshot's cmos_ext_mem_addr.
     }
 
     /// Register DMA I/O handlers (Bochs dma.cc)
     fn register_dma_handlers(&mut self, io: &mut BxDevicesC) {
         // DMA1 ports 0x0000-0x000F (Bochs dma.cc)
         for port in 0x0000..=0x000F_u16 {
-            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
+            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x7);
         }
 
         // Page registers 0x0080-0x008F (Bochs dma.cc)
         for port in 0x0080..=0x008F_u16 {
-            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
+            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x7);
         }
 
         // DMA2 ports 0x00C0-0x00DE, step 2 (Bochs dma.cc)
         let mut port = 0x00C0_u16;
         while port <= 0x00DE {
-            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
+            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x7);
             port += 2;
         }
     }
@@ -549,14 +613,17 @@ impl DeviceManager {
     }
 
     /// Register ACPI I/O handlers.
-    /// Static ports: SMI command (0xB2), ACPI debug (0xB044).
+    /// Static port: ACPI debug (0xB044).
     /// Dynamic ports (PM/SM base) are re-registered when PCI config changes.
     fn register_acpi_handlers(&mut self, io: &mut BxDevicesC) {
-        // SMI command port (0xB2) — Bochs acpi.cc
-        io.register_io_write_handler(DeviceId::Acpi, 0x00B2, "ACPI SMI Command", 0x1);
-
-        // ACPI debug port (0xB044) — Bochs acpi.cc
-        io.register_io_handler(DeviceId::Acpi, 0xB044, "ACPI Debug", 0x7);
+        // ACPI debug port (0xB044) — Bochs acpi.cc init():
+        //   DEV_register_iowrite_handler(..., ACPI_DBG_IO_ADDR, "ACPI", 4)
+        // WRITE only, and only 4-byte accesses. Reads and 1/2-byte writes are
+        // unmapped in Bochs (default handler: 0xFFFFFFFF / ignored).
+        io.register_io_write_handler(DeviceId::Acpi, 0xB044, "ACPI Debug", 0x4);
+        // NOTE: the SMI command port (0xB2) is NOT registered by Bochs acpi.cc —
+        // it belongs to the PIIX3 bridge (pci2isa.cc), which forwards writes to
+        // DEV_acpi_generate_smi. rusty registers it in register_pci_handlers.
     }
 
     /// Register ACPI PM I/O port range (called when PM base changes via PCI config).
@@ -611,10 +678,14 @@ impl DeviceManager {
             io.register_io_handler(DeviceId::Pci, port, "PCI Config Data", 0x7);
         }
 
-        // PIIX3 I/O ports: APM (0xB2-0xB3), ELCR (0x4D0-0x4D1), CPU reset (0xCF9)
-        // Bochs pci2isa.cc init(): all five registered as 1-byte ports.
+        // PIIX3 I/O ports: APM (0xB2-0xB3), ELCR (0x4D0-0x4D1), CPU reset
+        // (0xCF9). Bochs pci2isa.cc init(): the APM command port (0xB2) WRITE
+        // handler is registered with mask 3 so the 16-bit `outw 0xB2, ax`
+        // idiom reaches the handler (apms loads from the high byte); all
+        // other ports and the 0xB2 read side are 1-byte.
+        io.register_io_read_handler(DeviceId::Pci, super::pci2isa::APM_CMD_PORT, "PIIX3", 0x1);
+        io.register_io_write_handler(DeviceId::Pci, super::pci2isa::APM_CMD_PORT, "PIIX3", 0x3);
         for port in [
-            super::pci2isa::APM_CMD_PORT,
             super::pci2isa::APM_STS_PORT,
             super::pci2isa::ELCR1_PORT,
             super::pci2isa::ELCR2_PORT,
@@ -807,6 +878,22 @@ impl DeviceManager {
             self.pci2isa.apply_bios_write_to_memory(mem);
             self.bios_write_needs_update = false;
             effects.memory_mapping_changed = true;
+        }
+        if self.ioapic_enable_needs_update {
+            // Bochs pci2isa.cc pci_write_handler cases 0x4f/0x80:
+            // DEV_ioapic_set_enabled(pci_conf[0x4f] & 0x01,
+            //   (pci_conf[0x80] & 0x3f) << 10). Only flag a memory-map change
+            // when the IOAPIC MMIO window was actually (un)registered/moved.
+            if self.pci2isa.apply_ioapic_enable(&mut self.ioapic, mem)? {
+                effects.memory_mapping_changed = true;
+            }
+            self.ioapic_enable_needs_update = false;
+        }
+        if let Some(enabled) = self.bios_1meg_access_pending.take() {
+            // Bochs pci2isa.cc case 0x4f:
+            // DEV_mem_set_bios_rom_access(BIOS_ROM_1MEG, ...). Tracked-but-inert
+            // bitmask (Bochs logs "not supported"), so no memory_mapping_changed.
+            mem.set_bios_rom_access(crate::memory::BIOS_ROM_1MEG, enabled);
         }
         if self.vga_bar_needs_reregister {
             effects.memory_mapping_changed |= self.reregister_vga_bars(mem)?;
@@ -1076,6 +1163,11 @@ impl DeviceManager {
 
     pub(crate) fn service_pit_irq0(pit: &mut BxPitC, pic: &mut BxPicC) -> u32 {
         let (transitions, level) = pit.drain_irq0_events();
+        // Bochs pit.cc irq_handler: with irq_enabled clear (HPET legacy
+        // mode), OUT transitions are consumed but never reach the PIC.
+        if !pit.irq_enabled {
+            return 0;
+        }
         Self::replay_pit_irq0_events(transitions, level, pic)
     }
 
@@ -1253,6 +1345,12 @@ impl DeviceManager {
                             if effects.bios_write_changed {
                                 self.bios_write_needs_update = true;
                             }
+                            if effects.ioapic_enable_changed {
+                                self.ioapic_enable_needs_update = true;
+                            }
+                            if let Some(v) = effects.bios_1meg_access {
+                                self.bios_1meg_access_pending = Some(v);
+                            }
                         }
                     }
                     0x09 => {
@@ -1293,12 +1391,12 @@ impl DeviceManager {
             0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 | 0x0CF9 => {
                 self.pci2isa.write(address, value, io_len);
                 if address == 0x00B2 {
+                    // Bochs pci2isa.cc case 0x00b2: apmc/apms are stored by
+                    // pci2isa.write above; DEV_acpi_generate_smi delivers the
+                    // SMI (when APMC_EN is set) and the GUEST's SMM handler is
+                    // what acknowledges the command — e.g. the BIOS relocation
+                    // handler's `out 0xb3, 0`. apms is never cleared here.
                     self.acpi.generate_smi(value as u8);
-                    self.pci2isa.apms = 0;
-                    tracing::trace!(
-                        "APM command {:#04x}: forwarded to ACPI, apms cleared (no SMM)",
-                        value
-                    );
                 }
                 // Bochs pci2isa.cc write case 0x04d0/0x04d1:
                 // DEV_pic_set_mode(is_master, elcr) — forward the new
@@ -1326,12 +1424,21 @@ impl DeviceManager {
         self.acpi.read(address, io_len, icount)
     }
 
-    /// ACPI I/O write dispatch
+    /// ACPI I/O write dispatch.
+    ///
+    /// Port 0xB2 is deliberately absent: Bochs routes the SMI command port
+    /// through the PIIX3 bridge (pci2isa.cc write case 0x00b2 ->
+    /// DEV_acpi_generate_smi), which the PCI dispatch already does. An arm here
+    /// was dead code — `register_pci_handlers` runs after
+    /// `register_acpi_handlers` and last registration wins for a port.
     pub(crate) fn acpi_write(&mut self, address: u16, value: u32, io_len: u8, icount: u64) {
-        if address == 0x00B2 {
-            self.acpi.generate_smi(value as u8);
-        } else {
-            self.acpi.write(address, value, io_len, icount);
+        self.acpi.write(address, value, io_len, icount);
+        // Bochs acpi.cc PM1_CNT suspend-to-ram (S3) calls DEV_cmos_set_reg(0xF,
+        // 0xFE) — a plain store of the shutdown-status byte the BIOS reads on
+        // the resume path — before requesting the hardware reset. Applied here
+        // because only the DeviceManager can reach the CMOS from the ACPI write.
+        if core::mem::take(&mut self.acpi.suspend_to_ram_pending) {
+            self.cmos.ram[0x0F] = 0xFE;
         }
     }
 
@@ -2250,9 +2357,25 @@ mod tests {
                 harddrv.write(0x1F6, 0xE0, 1, pic, pci_ide); // LBA mode, drive 0
                 harddrv.write(0x1F7, 0xC8, 1, pic, pci_ide); // READ DMA
             }
+            // Bochs harddrv.cc: READ DMA arms the seek timer; only its
+            // deadline (seek_timer) signals bmdma_start_transfer.
+            assert!(
+                !dm.pci_ide.bmdma[0].data_ready,
+                "READ DMA must not start BM-DMA before the seek deadline"
+            );
+            assert!(dm.harddrv.take_pending_seek_arm(0, 0).is_some());
+            {
+                let DeviceManager {
+                    ref mut harddrv,
+                    ref mut pic,
+                    ref mut pci_ide,
+                    ..
+                } = dm;
+                harddrv.seek_timer(0b00, pic, pci_ide);
+            }
             assert!(
                 dm.pci_ide.bmdma[0].data_ready,
-                "READ DMA must signal bmdma_start_transfer"
+                "seek_timer must signal bmdma_start_transfer"
             );
 
             dm.pci_ide.bmdma_write(0xC004, 0x0020_0000, 4);

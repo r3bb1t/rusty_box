@@ -11,322 +11,123 @@
 //!   CVTTPS2DQ, CVTDQ2PD, CVTPD2DQ, CVTTPD2DQ
 //! - Shuffle: SHUFPS/PD, UNPCKLPS/PD, UNPCKHPS/PD
 //!
-//! Uses native Rust f32/f64 operations for floating-point math. While Bochs
-//! uses SoftFloat3e, native FP is sufficient since we run on x86 host with
-//! the same FP behavior. SoftFloat integration can be added later if needed.
+//! Every floating-point result is computed by SoftFloat 3e against a status
+//! word seeded from MXCSR, exactly as Bochs does. That is what makes
+//! MXCSR.RC, the MXCSR sticky exception flags, #XM and DAZ/FTZ observable.
+//! Bochs runs `check_exceptionsSSE` *before* writing the destination, so an
+//! unmasked exception leaves the destination untouched; the `?` on
+//! [`Self::check_exceptions_sse`] reproduces that.
 
-// Load-bearing in pure no-std builds (core f32/f64 lack these inherent
-// methods there); redundant in unit graphs where std is linked, so the
-// unused-import lint is allowed rather than losing the no-std resolution.
-#[cfg(not(feature = "std"))]
-#[allow(unused_imports)]
-use crate::cpu::float::FloatExt;
-
-/// Round-to-nearest-ties-even for f64 (no_std compatible).
-/// IEEE 754 default rounding: if exactly halfway, round to even.
-/// (The f32 conversions go through the exact f64 intermediate, so a
-/// dedicated f32 variant is not needed.)
-#[cfg(not(feature = "std"))]
-#[inline]
-pub(super) fn round_ties_even_f64(val: f64) -> f64 {
-    let trunc = val as i64;
-    let frac = val - trunc as f64;
-    let abs_frac = if frac >= 0.0 { frac } else { -frac };
-    if abs_frac == 0.5 {
-        if trunc % 2 == 0 {
-            trunc as f64
-        } else if val > 0.0 {
-            (trunc + 1) as f64
-        } else {
-            (trunc - 1) as f64
-        }
-    } else if abs_frac > 0.5 {
-        if val > 0.0 {
-            (trunc + 1) as f64
-        } else {
-            (trunc - 1) as f64
-        }
-    } else {
-        trunc as f64
-    }
-}
-
-/// Round-to-nearest-ties-even, dispatching on the `std` feature.
-#[inline]
-fn round_ties_even(val: f64) -> f64 {
-    #[cfg(feature = "std")]
-    {
-        val.round_ties_even()
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        round_ties_even_f64(val)
-    }
-}
-
-/// f64 → i32 with x86 semantics (Bochs softfloat f64_to_i32 /
-/// f64_to_i32_round_to_zero): round or truncate FIRST, then range-check the
-/// resulting INTEGER; NaN or out-of-range yields the integer indefinite
-/// value 0x8000_0000. Checking the unrounded float against `i32::MAX as f64`
-/// misclassifies the boundary band (e.g. 2147483647.4 truncates to a valid
-/// 2147483647).
-#[inline]
-pub(super) fn cvt_f64_to_i32(val: f64, truncate: bool) -> i32 {
-    // NaN (comparisons are false), ±inf and everything far outside i32 range
-    // is invalid regardless of rounding; only the boundary band needs the
-    // integer-domain check below.
-    if !(val > -2_147_483_650.0 && val < 2_147_483_650.0) {
-        return i32::MIN;
-    }
-    let rounded = if truncate { val } else { round_ties_even(val) };
-    // `as` truncates toward zero — exact for every in-band value.
-    let int = rounded as i64;
-    if int < i32::MIN as i64 || int > i32::MAX as i64 {
-        i32::MIN
-    } else {
-        int as i32
-    }
-}
-
-/// f32 → i32 with x86 semantics; the f64 intermediate is exact for every
-/// f32, so the boundary analysis of [`cvt_f64_to_i32`] carries over
-/// (Bochs softfloat f32_to_i32 / f32_to_i32_round_to_zero).
-#[inline]
-pub(super) fn cvt_f32_to_i32(val: f32, truncate: bool) -> i32 {
-    cvt_f64_to_i32(val as f64, truncate)
-}
-
-/// f64 → i64 with x86 semantics (Bochs softfloat f64_to_i64 /
-/// f64_to_i64_round_to_zero). f64 values at or beyond ±2^63 are invalid;
-/// inside that band the spacing near the edges is ≥ 1024 (integral), so no
-/// rounded value can leave the band.
-#[inline]
-pub(super) fn cvt_f64_to_i64(val: f64, truncate: bool) -> i64 {
-    if !(val >= -9_223_372_036_854_775_808.0 && val < 9_223_372_036_854_775_808.0) {
-        return i64::MIN;
-    }
-    let rounded = if truncate { val } else { round_ties_even(val) };
-    rounded as i64
-}
-
-/// f32 → i64 with x86 semantics via the exact f64 intermediate
-/// (Bochs softfloat f32_to_i64 / f32_to_i64_round_to_zero).
-#[inline]
-pub(super) fn cvt_f32_to_i64(val: f32, truncate: bool) -> i64 {
-    cvt_f64_to_i64(val as f64, truncate)
-}
-
+use super::simd_pfp::{
+    xmm_addps, xmm_addps_mask, xmm_addpd, xmm_addpd_mask, xmm_addsubpd, xmm_addsubps, xmm_cmppd,
+    xmm_cmpps, xmm_divpd, xmm_divps, xmm_haddpd, xmm_haddps, xmm_hsubpd, xmm_hsubps, xmm_maxpd,
+    xmm_maxps, xmm_minpd, xmm_minps, xmm_mulpd, xmm_mulpd_mask, xmm_mulps, xmm_mulps_mask,
+    xmm_shufpd, xmm_shufps, xmm_sqrtpd, xmm_sqrtps, xmm_subpd, xmm_subps,
+};
+use super::softfloat3e::f32_addsub::f32_add;
+use super::softfloat3e::f32_compare::{f32_compare, f32_compare_quiet, f32_max, f32_min};
+use super::softfloat3e::f32_div::f32_div;
+use super::softfloat3e::f32_mul::f32_mul;
+use super::softfloat3e::f32_round_to_int::f32_round_to_int;
+use super::softfloat3e::f32_sqrt::f32_sqrt;
+use super::softfloat3e::f32_to_f64::f32_to_f64;
+use super::softfloat3e::f32_to_int::{f32_to_i32, f32_to_i32_r_min_mag, f32_to_i64, f32_to_i64_r_min_mag};
+use super::softfloat3e::f64_addsub::f64_add;
+use super::softfloat3e::f64_compare::{f64_compare, f64_compare_quiet, f64_max, f64_min};
+use super::softfloat3e::f64_div::f64_div;
+use super::softfloat3e::f64_mul::f64_mul;
+use super::softfloat3e::f64_round_to_int::f64_round_to_int;
+use super::softfloat3e::f64_sqrt::f64_sqrt;
+use super::softfloat3e::f64_to_f32::f64_to_f32;
+use super::softfloat3e::f64_to_int::{f64_to_i32, f64_to_i32_r_min_mag, f64_to_i64, f64_to_i64_r_min_mag};
+use super::softfloat3e::int_to_float::{i32_to_f32, i32_to_f64, i64_to_f32, i64_to_f64};
+use super::softfloat3e::softfloat::{
+    softfloat_get_exception_flags, softfloat_get_rounding_mode, SoftFloatStatus, FLAG_INEXACT,
+};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
-    avx_pfp::{sse_max_f32, sse_max_f64, sse_min_f32, sse_min_f64},
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
+    sse_fp::mxcsr_to_softfloat_status_word,
     xmm::BxPackedXmmRegister,
 };
 
-// ============================================================================
-// Compare predicate helper
-// ============================================================================
-
-/// Evaluate SSE compare predicate (imm8 bits[2:0]) for f32 operands.
-/// Returns true if the comparison is satisfied.
-#[allow(clippy::neg_cmp_op_on_partial_ord)]
+/// Bochs sse_pfp.cc `mxcsr_to_softfloat_status_word_imm_override` — the
+/// SSE4.1 ROUNDxx imm8 overrides the MXCSR rounding mode unless imm8[2] is
+/// set, and imm8[3] suppresses the precision exception.
 #[inline]
-fn sse_compare_f32(op1: f32, op2: f32, predicate: u8) -> bool {
-    match predicate & 7 {
-        0 => op1 == op2,                                 // EQ
-        1 => op1 < op2,                                  // LT
-        2 => op1 <= op2,                                 // LE
-        3 => op1.is_nan() || op2.is_nan(),               // UNORD
-        4 => op1 != op2 || op1.is_nan() || op2.is_nan(), // NEQ (unordered or not equal)
-        5 => !(op1 < op2),                               // NLT (not less than)
-        6 => !(op1 <= op2),                              // NLE (not less than or equal)
-        7 => !op1.is_nan() && !op2.is_nan(),             // ORD
-        _ => unreachable!("SSE compare predicate & 7 cannot exceed 7"),
+pub(super) fn mxcsr_to_softfloat_status_word_imm_override(
+    status: &mut SoftFloatStatus,
+    control: u8,
+) {
+    if (control & 0x4) == 0 {
+        status.softfloat_rounding_mode = control & 0x3;
+    }
+    if (control & 0x8) != 0 {
+        status.softfloat_suppress_exception |= FLAG_INEXACT;
     }
 }
 
-/// Evaluate SSE compare predicate (imm8 bits[2:0]) for f64 operands.
-/// Returns true if the comparison is satisfied.
-#[allow(clippy::neg_cmp_op_on_partial_ord)]
-#[inline]
-fn sse_compare_f64(op1: f64, op2: f64, predicate: u8) -> bool {
-    match predicate & 7 {
-        0 => op1 == op2,                                 // EQ
-        1 => op1 < op2,                                  // LT
-        2 => op1 <= op2,                                 // LE
-        3 => op1.is_nan() || op2.is_nan(),               // UNORD
-        4 => op1 != op2 || op1.is_nan() || op2.is_nan(), // NEQ
-        5 => !(op1 < op2),                               // NLT
-        6 => !(op1 <= op2),                              // NLE
-        7 => !op1.is_nan() && !op2.is_nan(),             // ORD
-        _ => unreachable!("SSE compare predicate & 7 cannot exceed 7"),
-    }
-}
-
-#[inline]
-fn sse_round_mode(imm8: u8, mxcsr_rc: u8) -> u8 {
-    if (imm8 & 0x04) == 0 {
-        imm8 & 0x03
-    } else {
-        mxcsr_rc & 0x03
-    }
-}
-
-#[inline]
-pub(super) fn sse_round_f32(val: f32, imm8: u8, mxcsr_rc: u8) -> f32 {
-    if val.is_nan() || val.is_infinite() {
-        return val;
-    }
-    match sse_round_mode(imm8, mxcsr_rc) {
-        0 => val.round_ties_even(),
-        1 => val.floor(),
-        2 => val.ceil(),
-        _ => val.trunc(),
-    }
-}
-
-#[inline]
-pub(super) fn sse_round_f64(val: f64, imm8: u8, mxcsr_rc: u8) -> f64 {
-    if val.is_nan() || val.is_infinite() {
-        return val;
-    }
-    match sse_round_mode(imm8, mxcsr_rc) {
-        0 => val.round_ties_even(),
-        1 => val.floor(),
-        2 => val.ceil(),
-        _ => val.trunc(),
-    }
-}
-
-// ============================================================================
-// SSE3 horizontal add/sub lane helpers (Bochs simd_pfp.h xmm_haddps,
-// xmm_haddpd, xmm_hsubps, xmm_hsubpd). Shared by the legacy handlers below
-// and the per-128-bit-lane VEX handlers in avx_pfp.rs.
-// ============================================================================
-
-/// Bochs simd_pfp.h xmm_haddps
-#[inline]
-pub(super) fn haddps_lane(
-    op1: &BxPackedXmmRegister,
-    op2: &BxPackedXmmRegister,
-) -> BxPackedXmmRegister {
-    let mut r = BxPackedXmmRegister::default();
-    r.set_xmm32f(0, op1.xmm32f(0) + op1.xmm32f(1));
-    r.set_xmm32f(1, op1.xmm32f(2) + op1.xmm32f(3));
-    r.set_xmm32f(2, op2.xmm32f(0) + op2.xmm32f(1));
-    r.set_xmm32f(3, op2.xmm32f(2) + op2.xmm32f(3));
-    r
-}
-
-/// Bochs simd_pfp.h xmm_haddpd
-#[inline]
-pub(super) fn haddpd_lane(
-    op1: &BxPackedXmmRegister,
-    op2: &BxPackedXmmRegister,
-) -> BxPackedXmmRegister {
-    let mut r = BxPackedXmmRegister::default();
-    r.set_xmm64f(0, op1.xmm64f(0) + op1.xmm64f(1));
-    r.set_xmm64f(1, op2.xmm64f(0) + op2.xmm64f(1));
-    r
-}
-
-/// Bochs simd_pfp.h xmm_hsubps
-#[inline]
-pub(super) fn hsubps_lane(
-    op1: &BxPackedXmmRegister,
-    op2: &BxPackedXmmRegister,
-) -> BxPackedXmmRegister {
-    let mut r = BxPackedXmmRegister::default();
-    r.set_xmm32f(0, op1.xmm32f(0) - op1.xmm32f(1));
-    r.set_xmm32f(1, op1.xmm32f(2) - op1.xmm32f(3));
-    r.set_xmm32f(2, op2.xmm32f(0) - op2.xmm32f(1));
-    r.set_xmm32f(3, op2.xmm32f(2) - op2.xmm32f(3));
-    r
-}
-
-/// Bochs simd_pfp.h xmm_hsubpd
-#[inline]
-pub(super) fn hsubpd_lane(
-    op1: &BxPackedXmmRegister,
-    op2: &BxPackedXmmRegister,
-) -> BxPackedXmmRegister {
-    let mut r = BxPackedXmmRegister::default();
-    r.set_xmm64f(0, op1.xmm64f(0) - op1.xmm64f(1));
-    r.set_xmm64f(1, op2.xmm64f(0) - op2.xmm64f(1));
-    r
-}
-
-// ============================================================================
-// SSE4.1 dot-product lane helpers. One 128-bit lane of DPPS/DPPD following
-// Bochs' exact operation order (Bochs sse_pfp.cc DPPS_VpsWpsIbR and
-// DPPD_VpdHpdWpdIbR): masked multiply under imm8[7:4] (unselected products
-// are 0.0), shuffle+add reduction, then store the sum only to the result
-// lanes selected by imm8[3:0] (0.0 elsewhere).
-// ============================================================================
-
-/// Bochs sse_pfp.cc DPPS_VpsWpsIbR / avx_pfp.cc VDPPS_VpsHpsWpsIbR (one lane)
+/// One 128-bit lane of DPPS, without the intermediate exception checks that
+/// the legacy SSE handler performs. Bochs avx_pfp.cc VDPPS_VpsHpsWpsIbR
+/// runs exactly this sequence per lane and checks once at the end.
 #[inline]
 pub(super) fn dpps_lane(
     op1: &BxPackedXmmRegister,
     op2: &BxPackedXmmRegister,
     mask: u8,
+    status: &mut SoftFloatStatus,
 ) -> BxPackedXmmRegister {
-    // xmm_mulps_mask: prod[n] = op1[n]*op2[n] under imm8[7:4], else 0.0
-    let mut prod = [0.0f32; 4];
-    for (n, p) in prod.iter_mut().enumerate() {
-        if (mask >> 4) & (1 << n) != 0 {
-            *p = op1.xmm32f(n) * op2.xmm32f(n);
-        }
-    }
-    // xmm_shufps(.., prod, prod, 0xB1) then xmm_addps: pairwise sums
-    let sum = [
-        prod[1] + prod[0],
-        prod[0] + prod[1],
-        prod[3] + prod[2],
-        prod[2] + prod[3],
-    ];
-    // xmm_shufpd(.., sum, sum, 0x1) then xmm_addps_mask under imm8[3:0]
-    let swapped = [sum[2], sum[3], sum[0], sum[1]];
-    let mut r = BxPackedXmmRegister::default();
-    for n in 0..4usize {
-        if mask & (1 << n) != 0 {
-            r.set_xmm32f(n, sum[n] + swapped[n]);
-        }
-    }
-    r
+    // op1: [A, B, C, D]   op2: [E, F, G, H]
+    let mut a = *op1;
+    let mut b = *op2;
+    // after multiplication: a = [AE, BF, CG, DH]
+    xmm_mulps_mask(&mut a, &b, status, (mask >> 4) as u32);
+    // shuffle b = [BF, AE, DH, CG]
+    let a_copy = a;
+    xmm_shufps(&mut b, &a_copy, &a_copy, 0xb1);
+    // b = [(BF+AE), (AE+BF), (DH+CG), (CG+DH)]
+    xmm_addps(&mut b, &a, status);
+    // shuffle a = [(DH+CG), (CG+DH), (BF+AE), (AE+BF)]
+    let b_copy = b;
+    xmm_shufpd(&mut a, &b_copy, &b_copy, 0x1);
+    xmm_addps_mask(&mut b, &a, status, mask as u32);
+    b
 }
 
-/// Bochs sse_pfp.cc DPPD_VpdHpdWpdIbR (one lane; also VDPPD which is
-/// VL128-only)
+/// One 128-bit lane of DPPD. Bochs sse_pfp.cc DPPD_VpdHpdWpdIbR.
 #[inline]
 pub(super) fn dppd_lane(
     op1: &BxPackedXmmRegister,
     op2: &BxPackedXmmRegister,
     mask: u8,
+    status: &mut SoftFloatStatus,
 ) -> BxPackedXmmRegister {
-    // xmm_mulpd_mask: prod[n] = op1[n]*op2[n] under imm8[5:4], else 0.0
-    let mut prod = [0.0f64; 2];
-    for (n, p) in prod.iter_mut().enumerate() {
-        if (mask >> 4) & (1 << n) != 0 {
-            *p = op1.xmm64f(n) * op2.xmm64f(n);
-        }
-    }
-    // xmm_shufpd(.., prod, prod, 0x1) then xmm_addpd_mask under imm8[1:0]
-    let swapped = [prod[1], prod[0]];
-    let mut r = BxPackedXmmRegister::default();
-    for n in 0..2usize {
-        if mask & (1 << n) != 0 {
-            r.set_xmm64f(n, prod[n] + swapped[n]);
-        }
-    }
-    r
+    // op1: [A, B]   op2: [C, D]
+    let mut a = *op1;
+    let mut b = *op2;
+    // after multiplication: a = [AC, BD]
+    xmm_mulpd_mask(&mut a, &b, status, (mask >> 4) as u32);
+    // shuffle b = [BD, AC]
+    let a_copy = a;
+    xmm_shufpd(&mut b, &a_copy, &a_copy, 0x1);
+    // a = [AC+BD, BD+AC]
+    xmm_addpd_mask(&mut a, &b, status, mask as u32);
+    a
 }
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
-    // SSE FP helpers: read source operand (register or memory)
+    // SSE FP helpers: status word and source-operand reads
     // ========================================================================
+
+    /// Seed a SoftFloat status word from the live MXCSR.
+    /// Bochs `mxcsr_to_softfloat_status_word(MXCSR)`.
+    #[inline]
+    pub(super) fn sse_status(&self) -> SoftFloatStatus {
+        mxcsr_to_softfloat_status_word(self.mxcsr)
+    }
 
     /// Read source operand as packed 128-bit XMM (for PS/PD packed ops).
     #[inline]
@@ -340,65 +141,121 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
-    /// Read source operand as scalar f32 (for SS scalar single ops).
-    /// Register form: read lowest f32 from XMM src1.
-    /// Memory form: read dword from memory, reinterpret as f32.
+    /// Read source operand as a raw Float32 (for SS scalar single ops).
+    /// Register form: lowest dword of XMM src1. Memory form: a dword.
     #[inline]
-    pub(super) fn sse_pfp_read_op2_ss(&mut self, instr: &Instruction) -> super::Result<f32> {
+    pub(super) fn sse_pfp_read_op2_ss(&mut self, instr: &Instruction) -> super::Result<Float32> {
         if instr.mod_c0() {
-            let src = self.read_xmm_reg(instr.src1());
-            Ok(src.xmm32f(0))
+            Ok(self.read_xmm_reg(instr.src1()).xmm32u(0))
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            let val = self.v_read_dword(seg, eaddr)?;
-            Ok(f32::from_bits(val))
+            self.v_read_dword(seg, eaddr)
         }
     }
 
-    /// Read source operand as scalar f64 (for SD scalar double ops).
-    /// Register form: read lowest f64 from XMM src1.
-    /// Memory form: read qword from memory, reinterpret as f64.
+    /// Read source operand as a raw Float64 (for SD scalar double ops).
+    /// Register form: lowest qword of XMM src1. Memory form: a qword.
     #[inline]
-    pub(super) fn sse_pfp_read_op2_sd(&mut self, instr: &Instruction) -> super::Result<f64> {
+    pub(super) fn sse_pfp_read_op2_sd(&mut self, instr: &Instruction) -> super::Result<Float64> {
         if instr.mod_c0() {
-            let src = self.read_xmm_reg(instr.src1());
-            Ok(src.xmm64f(0))
+            Ok(self.read_xmm_reg(instr.src1()).xmm64u(0))
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            let val = self.v_read_qword(seg, eaddr)?;
-            Ok(f64::from_bits(val))
+            self.v_read_qword(seg, eaddr)
         }
     }
 
-    /// Mirrors Bochs fpu/fpu_compare.cc `write_eflags_fpu_compare(int float_relation)`.
-    /// - unordered (NaN): setEFlagsOSZAPC(ZF|PF|CF)
-    /// - greater:         clearEFlagsOSZAPC()
-    /// - less:            clearEFlagsOSZAPC(); assert_CF()
-    /// - equal:           clearEFlagsOSZAPC(); assert_ZF()
+    /// Run one packed 128-bit two-operand SSE FP op.
+    /// Bochs cpu_templates_pfp.h `HANDLE_SSE_PFP_2OP`.
     #[inline]
-    fn sse_set_eflags_compare(&mut self, unordered: bool, less: bool, equal: bool) {
-        if unordered {
-            // Bochs: setEFlagsOSZAPC(ZFMask | PFMask | CFMask)
-            // = set_oszapc with CF=1, PF=1, ZF=1, others=0
-            self.set_eflags_oszapc(
-                super::eflags::EFlags::ZF.bits()
-                    | super::eflags::EFlags::PF.bits()
-                    | super::eflags::EFlags::CF.bits(),
-            );
-        } else if less {
-            // Bochs: clearEFlagsOSZAPC(); assert_CF()
-            self.oszapc.set_oszapc_logic_32(1);
-            self.oszapc.set_cf(true);
-        } else if equal {
-            // Bochs: clearEFlagsOSZAPC(); assert_ZF()
-            self.oszapc.set_oszapc_logic_32(1);
-            self.oszapc.set_zf(true);
-        } else {
-            // greater: clearEFlagsOSZAPC()
-            self.oszapc.set_oszapc_logic_32(1);
-        }
+    fn sse_pfp_2op(
+        &mut self,
+        instr: &Instruction,
+        func: fn(&mut BxPackedXmmRegister, &BxPackedXmmRegister, &mut SoftFloatStatus),
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
+        let mut status = self.sse_status();
+        func(&mut op1, &op2, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_reg_lo128(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// Run one packed 128-bit single-operand SSE FP op (SQRTPS/SQRTPD).
+    /// Bochs cpu_templates_pfp.h `HANDLE_SSE_PFP_1OP`.
+    #[inline]
+    fn sse_pfp_1op(
+        &mut self,
+        instr: &Instruction,
+        func: fn(&mut BxPackedXmmRegister, &mut SoftFloatStatus),
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op = self.sse_pfp_read_op2_xmm(instr)?;
+        let mut status = self.sse_status();
+        func(&mut op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_reg_lo128(instr.dst(), op);
+        Ok(())
+    }
+
+    /// Run one scalar single-precision SSE FP op.
+    /// Bochs sse_pfp.cc `SSE_SCALAR_SINGLE_FP_CPU_LEVEL6`.
+    #[inline]
+    fn sse_scalar_ss(
+        &mut self,
+        instr: &Instruction,
+        func: fn(Float32, Float32, &mut SoftFloatStatus) -> Float32,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op2 = self.sse_pfp_read_op2_ss(instr)?;
+        let mut result = self.read_xmm_reg(instr.dst());
+        let mut status = self.sse_status();
+        let value = func(result.xmm32u(0), op2, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm32u(0, value);
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    /// Run one scalar double-precision SSE FP op.
+    /// Bochs sse_pfp.cc `SSE_SCALAR_DOUBLE_FP_CPU_LEVEL6`.
+    #[inline]
+    fn sse_scalar_sd(
+        &mut self,
+        instr: &Instruction,
+        func: fn(Float64, Float64, &mut SoftFloatStatus) -> Float64,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op2 = self.sse_pfp_read_op2_sd(instr)?;
+        let mut result = self.read_xmm_reg(instr.dst());
+        let mut status = self.sse_status();
+        let value = func(result.xmm64u(0), op2, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm64u(0, value);
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    /// One 128-bit bitwise-logical SSE op (ANDPS/ANDNPD/ORPS/XORPD …).
+    /// These touch no FP status.
+    #[inline]
+    fn sse_pfp_logic(
+        &mut self,
+        instr: &Instruction,
+        func: fn(u64, u64) -> u64,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
+        let mut result = BxPackedXmmRegister::default();
+        result.set_xmm64u(0, func(op1.xmm64u(0), op2.xmm64u(0)));
+        result.set_xmm64u(1, func(op1.xmm64u(1), op2.xmm64u(1)));
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
     }
 
     // ========================================================================
@@ -408,48 +265,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// ADDPS — Add Packed Single-Precision (4 x f32)
     pub(super) fn addps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..4 {
-            result.set_xmm32f(i, op1.xmm32f(i) + op2.xmm32f(i));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_addps)
     }
 
     /// ADDPD — Add Packed Double-Precision (2 x f64)
     pub(super) fn addpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..2 {
-            result.set_xmm64f(i, op1.xmm64f(i) + op2.xmm64f(i));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_addpd)
     }
 
     /// ADDSS — Add Scalar Single-Precision (lowest f32 only)
     pub(super) fn addss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_ss(instr)?;
-        let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm32f(0, result.xmm32f(0) + op2);
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_scalar_ss(instr, f32_add)
     }
 
     /// ADDSD — Add Scalar Double-Precision (lowest f64 only)
     pub(super) fn addsd_vsd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_sd(instr)?;
-        let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm64f(0, result.xmm64f(0) + op2);
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_scalar_sd(instr, f64_add)
     }
 
     // ========================================================================
@@ -459,48 +290,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// SUBPS — Subtract Packed Single-Precision (4 x f32)
     pub(super) fn subps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..4 {
-            result.set_xmm32f(i, op1.xmm32f(i) - op2.xmm32f(i));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_subps)
     }
 
     /// SUBPD — Subtract Packed Double-Precision (2 x f64)
     pub(super) fn subpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..2 {
-            result.set_xmm64f(i, op1.xmm64f(i) - op2.xmm64f(i));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_subpd)
     }
 
     /// SUBSS — Subtract Scalar Single-Precision (lowest f32 only)
     pub(super) fn subss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_ss(instr)?;
-        let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm32f(0, result.xmm32f(0) - op2);
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_scalar_ss(instr, super::softfloat3e::f32_addsub::f32_sub)
     }
 
     /// SUBSD — Subtract Scalar Double-Precision (lowest f64 only)
     pub(super) fn subsd_vsd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_sd(instr)?;
-        let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm64f(0, result.xmm64f(0) - op2);
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_scalar_sd(instr, super::softfloat3e::f64_addsub::f64_sub)
     }
 
     // ========================================================================
@@ -510,48 +315,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// MULPS — Multiply Packed Single-Precision (4 x f32)
     pub(super) fn mulps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..4 {
-            result.set_xmm32f(i, op1.xmm32f(i) * op2.xmm32f(i));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_mulps)
     }
 
     /// MULPD — Multiply Packed Double-Precision (2 x f64)
     pub(super) fn mulpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..2 {
-            result.set_xmm64f(i, op1.xmm64f(i) * op2.xmm64f(i));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_mulpd)
     }
 
     /// MULSS — Multiply Scalar Single-Precision (lowest f32 only)
     pub(super) fn mulss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_ss(instr)?;
-        let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm32f(0, result.xmm32f(0) * op2);
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_scalar_ss(instr, f32_mul)
     }
 
     /// MULSD — Multiply Scalar Double-Precision (lowest f64 only)
     pub(super) fn mulsd_vsd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_sd(instr)?;
-        let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm64f(0, result.xmm64f(0) * op2);
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_scalar_sd(instr, f64_mul)
     }
 
     // ========================================================================
@@ -561,48 +340,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// DIVPS — Divide Packed Single-Precision (4 x f32)
     pub(super) fn divps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..4 {
-            result.set_xmm32f(i, op1.xmm32f(i) / op2.xmm32f(i));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_divps)
     }
 
     /// DIVPD — Divide Packed Double-Precision (2 x f64)
     pub(super) fn divpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..2 {
-            result.set_xmm64f(i, op1.xmm64f(i) / op2.xmm64f(i));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_divpd)
     }
 
     /// DIVSS — Divide Scalar Single-Precision (lowest f32 only)
     pub(super) fn divss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_ss(instr)?;
-        let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm32f(0, result.xmm32f(0) / op2);
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_scalar_ss(instr, f32_div)
     }
 
     /// DIVSD — Divide Scalar Double-Precision (lowest f64 only)
     pub(super) fn divsd_vsd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_sd(instr)?;
-        let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm64f(0, result.xmm64f(0) / op2);
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_scalar_sd(instr, f64_div)
     }
 
     // ========================================================================
@@ -612,34 +365,23 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// SQRTPS — Square Root of Packed Single-Precision (4 x f32)
     pub(super) fn sqrtps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..4 {
-            result.set_xmm32f(i, op.xmm32f(i).sqrt());
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_1op(instr, xmm_sqrtps)
     }
 
     /// SQRTPD — Square Root of Packed Double-Precision (2 x f64)
     pub(super) fn sqrtpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..2 {
-            result.set_xmm64f(i, op.xmm64f(i).sqrt());
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_1op(instr, xmm_sqrtpd)
     }
 
     /// SQRTSS — Square Root of Scalar Single-Precision (lowest f32 only)
     pub(super) fn sqrtss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_ss(instr)?;
+        let op = self.sse_pfp_read_op2_ss(instr)?;
+        let mut status = self.sse_status();
+        let value = f32_sqrt(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm32f(0, op2.sqrt());
+        result.set_xmm32u(0, value);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -647,9 +389,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// SQRTSD — Square Root of Scalar Double-Precision (lowest f64 only)
     pub(super) fn sqrtsd_vsd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_sd(instr)?;
+        let op = self.sse_pfp_read_op2_sd(instr)?;
+        let mut status = self.sse_status();
+        let value = f64_sqrt(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm64f(0, op2.sqrt());
+        result.set_xmm64u(0, value);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -658,44 +403,45 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Rounding: ROUNDPS/PD/SS/SD (SSE4.1)
     // Bochs: ROUNDPS_VpsWpsIb, ROUNDPD_VpdWpdIb, ROUNDSS_VssWssIb,
     //        ROUNDSD_VsdWsdIb
-    // imm8[1:0] = rounding mode when imm8[2] is clear; imm8[2] = use MXCSR.RC.
-    // imm8[3] suppresses precision exceptions in Bochs; existing SSE FP handlers
-    // do not model MXCSR sticky exception updates, so this has no extra state here.
+    // imm8[1:0] = rounding mode when imm8[2] is clear; imm8[2] = use MXCSR.RC;
+    // imm8[3] suppresses the precision exception.
     // ========================================================================
 
     pub(super) fn roundps_vps_wps_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op = self.sse_pfp_read_op2_xmm(instr)?;
-        let imm8 = instr.ib();
-        let mxcsr_rc = self.mxcsr.rounding_mode();
-        let mut result = BxPackedXmmRegister::default();
+        let mut op = self.sse_pfp_read_op2_xmm(instr)?;
+        let mut status = self.sse_status();
+        mxcsr_to_softfloat_status_word_imm_override(&mut status, instr.ib());
         for i in 0..4 {
-            result.set_xmm32f(i, sse_round_f32(op.xmm32f(i), imm8, mxcsr_rc));
+            op.set_xmm32u(i, f32_round_to_int(op.xmm32u(i), &mut status));
         }
-        self.write_xmm_reg_lo128(instr.dst(), result);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_reg_lo128(instr.dst(), op);
         Ok(())
     }
 
     pub(super) fn roundpd_vpd_wpd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op = self.sse_pfp_read_op2_xmm(instr)?;
-        let imm8 = instr.ib();
-        let mxcsr_rc = self.mxcsr.rounding_mode();
-        let mut result = BxPackedXmmRegister::default();
+        let mut op = self.sse_pfp_read_op2_xmm(instr)?;
+        let mut status = self.sse_status();
+        mxcsr_to_softfloat_status_word_imm_override(&mut status, instr.ib());
         for i in 0..2 {
-            result.set_xmm64f(i, sse_round_f64(op.xmm64f(i), imm8, mxcsr_rc));
+            op.set_xmm64u(i, f64_round_to_int(op.xmm64u(i), &mut status));
         }
-        self.write_xmm_reg_lo128(instr.dst(), result);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_reg_lo128(instr.dst(), op);
         Ok(())
     }
 
     pub(super) fn roundss_vss_wss_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
-        let imm8 = instr.ib();
-        let mxcsr_rc = self.mxcsr.rounding_mode();
+        let mut status = self.sse_status();
+        mxcsr_to_softfloat_status_word_imm_override(&mut status, instr.ib());
+        let value = f32_round_to_int(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm32f(0, sse_round_f32(op, imm8, mxcsr_rc));
+        result.set_xmm32u(0, value);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -703,283 +449,136 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn roundsd_vsd_wsd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
-        let imm8 = instr.ib();
-        let mxcsr_rc = self.mxcsr.rounding_mode();
+        let mut status = self.sse_status();
+        mxcsr_to_softfloat_status_word_imm_override(&mut status, instr.ib());
+        let value = f64_round_to_int(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm64f(0, sse_round_f64(op, imm8, mxcsr_rc));
+        result.set_xmm64u(0, value);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
     // ========================================================================
-    // Arithmetic: MINPS/PD/SS/SD
-    // Bochs: MINPS_VpsWps, MINPD_VpdWpd, MINSS_VssWss, MINSD_VsdWsd
-    // Note: SSE MIN semantics: if either operand is NaN, return op2 (source).
-    // If op2 < op1, return op2; else return op1.
+    // Arithmetic: MINPS/PD/SS/SD and MAXPS/PD/SS/SD
+    // Bochs: MINPS_VpsWps … MAXSD_VsdWsd
+    // SSE MIN/MAX return the second operand whenever the comparison is not
+    // strictly less/greater, which is how NaN and ±0.0 ties resolve.
     // ========================================================================
 
     /// MINPS — Minimum of Packed Single-Precision (4 x f32)
     pub(super) fn minps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..4 {
-            result.set_xmm32f(i, sse_min_f32(op1.xmm32f(i), op2.xmm32f(i)));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_minps)
     }
 
     /// MINPD — Minimum of Packed Double-Precision (2 x f64)
     pub(super) fn minpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..2 {
-            result.set_xmm64f(i, sse_min_f64(op1.xmm64f(i), op2.xmm64f(i)));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_minpd)
     }
 
     /// MINSS — Minimum of Scalar Single-Precision (lowest f32 only)
     pub(super) fn minss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_ss(instr)?;
-        let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm32f(0, sse_min_f32(result.xmm32f(0), op2));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_scalar_ss(instr, f32_min)
     }
 
     /// MINSD — Minimum of Scalar Double-Precision (lowest f64 only)
     pub(super) fn minsd_vsd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_sd(instr)?;
-        let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm64f(0, sse_min_f64(result.xmm64f(0), op2));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_scalar_sd(instr, f64_min)
     }
-
-    // ========================================================================
-    // Arithmetic: MAXPS/PD/SS/SD
-    // Bochs: MAXPS_VpsWps, MAXPD_VpdWpd, MAXSS_VssWss, MAXSD_VsdWsd
-    // Note: SSE MAX semantics: if either operand is NaN, return op2 (source).
-    // If op2 > op1, return op2; else return op1.
-    // ========================================================================
 
     /// MAXPS — Maximum of Packed Single-Precision (4 x f32)
     pub(super) fn maxps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..4 {
-            result.set_xmm32f(i, sse_max_f32(op1.xmm32f(i), op2.xmm32f(i)));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_maxps)
     }
 
     /// MAXPD — Maximum of Packed Double-Precision (2 x f64)
     pub(super) fn maxpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..2 {
-            result.set_xmm64f(i, sse_max_f64(op1.xmm64f(i), op2.xmm64f(i)));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_maxpd)
     }
 
     /// MAXSS — Maximum of Scalar Single-Precision (lowest f32 only)
     pub(super) fn maxss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_ss(instr)?;
-        let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm32f(0, sse_max_f32(result.xmm32f(0), op2));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_scalar_ss(instr, f32_max)
     }
 
     /// MAXSD — Maximum of Scalar Double-Precision (lowest f64 only)
     pub(super) fn maxsd_vsd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_sd(instr)?;
-        let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm64f(0, sse_max_f64(result.xmm64f(0), op2));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_scalar_sd(instr, f64_max)
     }
 
     // ========================================================================
-    // Bitwise Logical: ANDPS/ANDPD
-    // Bochs: ANDPS_VpsWps, ANDPD_VpdWpd
+    // Bitwise Logical: ANDPS/ANDPD, ANDNPS/ANDNPD, ORPS/ORPD, XORPS/XORPD
+    // Bochs: ANDPS_VpsWps … XORPD_VpdWpd
     // ========================================================================
 
     /// ANDPS — Bitwise AND of Packed Single-Precision (128-bit)
     pub(super) fn andps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, op1.xmm64u(0) & op2.xmm64u(0));
-        result.set_xmm64u(1, op1.xmm64u(1) & op2.xmm64u(1));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_logic(instr, |a, b| a & b)
     }
 
     /// ANDPD — Bitwise AND of Packed Double-Precision (128-bit)
     pub(super) fn andpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, op1.xmm64u(0) & op2.xmm64u(0));
-        result.set_xmm64u(1, op1.xmm64u(1) & op2.xmm64u(1));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_logic(instr, |a, b| a & b)
     }
 
-    // ========================================================================
-    // Bitwise Logical: ANDNPS/ANDNPD
-    // Bochs: ANDNPS_VpsWps, ANDNPD_VpdWpd
-    // ========================================================================
-
-    /// ANDNPS — Bitwise AND NOT of Packed Single-Precision (128-bit)
-    /// Result = NOT(op1) AND op2
+    /// ANDNPS — Bitwise AND NOT of Packed Single-Precision: NOT(op1) AND op2
     pub(super) fn andnps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, (!op1.xmm64u(0)) & op2.xmm64u(0));
-        result.set_xmm64u(1, (!op1.xmm64u(1)) & op2.xmm64u(1));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_logic(instr, |a, b| !a & b)
     }
 
-    /// ANDNPD — Bitwise AND NOT of Packed Double-Precision (128-bit)
-    /// Result = NOT(op1) AND op2
+    /// ANDNPD — Bitwise AND NOT of Packed Double-Precision: NOT(op1) AND op2
     pub(super) fn andnpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, (!op1.xmm64u(0)) & op2.xmm64u(0));
-        result.set_xmm64u(1, (!op1.xmm64u(1)) & op2.xmm64u(1));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_logic(instr, |a, b| !a & b)
     }
-
-    // ========================================================================
-    // Bitwise Logical: ORPS/ORPD
-    // Bochs: ORPS_VpsWps, ORPD_VpdWpd
-    // ========================================================================
 
     /// ORPS — Bitwise OR of Packed Single-Precision (128-bit)
     pub(super) fn orps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, op1.xmm64u(0) | op2.xmm64u(0));
-        result.set_xmm64u(1, op1.xmm64u(1) | op2.xmm64u(1));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_logic(instr, |a, b| a | b)
     }
 
     /// ORPD — Bitwise OR of Packed Double-Precision (128-bit)
     pub(super) fn orpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, op1.xmm64u(0) | op2.xmm64u(0));
-        result.set_xmm64u(1, op1.xmm64u(1) | op2.xmm64u(1));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_logic(instr, |a, b| a | b)
     }
-
-    // ========================================================================
-    // Bitwise Logical: XORPS/XORPD
-    // Bochs: XORPS_VpsWps, XORPD_VpdWpd
-    // ========================================================================
 
     /// XORPS — Bitwise XOR of Packed Single-Precision (128-bit)
     pub(super) fn xorps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, op1.xmm64u(0) ^ op2.xmm64u(0));
-        result.set_xmm64u(1, op1.xmm64u(1) ^ op2.xmm64u(1));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_logic(instr, |a, b| a ^ b)
     }
 
     /// XORPD — Bitwise XOR of Packed Double-Precision (128-bit)
     pub(super) fn xorpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, op1.xmm64u(0) ^ op2.xmm64u(0));
-        result.set_xmm64u(1, op1.xmm64u(1) ^ op2.xmm64u(1));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_pfp_logic(instr, |a, b| a ^ b)
     }
 
     // ========================================================================
     // Compare: CMPPS/CMPPD/CMPSS/CMPSD (8 predicates via imm8)
     // Bochs: CMPPS_VpsWpsIb, CMPPD_VpdWpdIb, CMPSS_VssWssIb, CMPSD_VsdWsdIb
-    // Result: all-ones mask if true, all-zeros if false
+    // Result: all-ones mask if true, all-zeros if false. Legacy SSE encodes
+    // only predicates 0..7, hence the `& 7` Bochs applies to Ib().
     // ========================================================================
 
     /// CMPPS — Compare Packed Single-Precision (4 x f32) with imm8 predicate
     pub(super) fn cmpps_vps_wps_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
+        let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let predicate = instr.ib();
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..4 {
-            result.set_xmm32u(
-                i,
-                if sse_compare_f32(op1.xmm32f(i), op2.xmm32f(i), predicate) {
-                    0xFFFF_FFFF
-                } else {
-                    0
-                },
-            );
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
+        let mut status = self.sse_status();
+        xmm_cmpps(&mut op1, &op2, instr.ib() & 7, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
 
     /// CMPPD — Compare Packed Double-Precision (2 x f64) with imm8 predicate
     pub(super) fn cmppd_vpd_wpd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
+        let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let predicate = instr.ib();
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..2 {
-            result.set_xmm64u(
-                i,
-                if sse_compare_f64(op1.xmm64f(i), op2.xmm64f(i), predicate) {
-                    0xFFFF_FFFF_FFFF_FFFF
-                } else {
-                    0
-                },
-            );
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
+        let mut status = self.sse_status();
+        xmm_cmppd(&mut op1, &op2, instr.ib() & 7, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
 
@@ -988,16 +587,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        let op1 = result.xmm32f(0);
-        let predicate = instr.ib();
-        result.set_xmm32u(
-            0,
-            if sse_compare_f32(op1, op2, predicate) {
-                0xFFFF_FFFF
-            } else {
-                0
-            },
+        let mut status = self.sse_status();
+        let hit = super::softfloat3e::softfloat_compare::f32_compare_predicate(
+            instr.ib() & 7,
+            result.xmm32u(0),
+            op2,
+            &mut status,
         );
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm32u(0, if hit { 0xFFFF_FFFF } else { 0 });
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1007,84 +605,77 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        let op1 = result.xmm64f(0);
-        let predicate = instr.ib();
-        result.set_xmm64u(
-            0,
-            if sse_compare_f64(op1, op2, predicate) {
-                0xFFFF_FFFF_FFFF_FFFF
-            } else {
-                0
-            },
+        let mut status = self.sse_status();
+        let hit = super::softfloat3e::softfloat_compare::f64_compare_predicate(
+            instr.ib() & 7,
+            result.xmm64u(0),
+            op2,
+            &mut status,
         );
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm64u(0, if hit { 0xFFFF_FFFF_FFFF_FFFF } else { 0 });
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
     // ========================================================================
-    // Compare: COMISS/COMISD — Ordered Compare Scalar to EFLAGS
-    // Bochs: COMISS_VssWss, COMISD_VsdWsd
-    // Sets ZF, PF, CF; clears OF, SF, AF
-    // Raises #IA for any NaN (SNaN or QNaN)
+    // Compare: COMISS/COMISD (signalling) and UCOMISS/UCOMISD (quiet)
+    // Bochs: COMISS_VssWss, COMISD_VsdWsd, UCOMISS_VssWss, UCOMISD_VsdWsd
+    // Sets ZF, PF, CF; clears OF, SF, AF. COMISx raises #I for *any* NaN,
+    // UCOMISx only for a signalling NaN.
     // ========================================================================
 
     /// COMISS — Ordered Compare Scalar Single-Precision to EFLAGS
     pub(super) fn comiss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst()).xmm32f(0);
-        let op2 = self.sse_pfp_read_op2_ss(instr)?;
-
-        let unordered = op1.is_nan() || op2.is_nan();
-        let less = !unordered && op1 < op2;
-        let equal = !unordered && op1 == op2;
-        self.sse_set_eflags_compare(unordered, less, equal);
-        Ok(())
+        self.sse_comis_ss(instr, f32_compare)
     }
 
     /// COMISD — Ordered Compare Scalar Double-Precision to EFLAGS
     pub(super) fn comisd_vsd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst()).xmm64f(0);
-        let op2 = self.sse_pfp_read_op2_sd(instr)?;
-
-        let unordered = op1.is_nan() || op2.is_nan();
-        let less = !unordered && op1 < op2;
-        let equal = !unordered && op1 == op2;
-        self.sse_set_eflags_compare(unordered, less, equal);
-        Ok(())
+        self.sse_comis_sd(instr, f64_compare)
     }
-
-    // ========================================================================
-    // Compare: UCOMISS/UCOMISD — Unordered Compare Scalar to EFLAGS
-    // Bochs: UCOMISS_VssWss, UCOMISD_VsdWsd
-    // Sets ZF, PF, CF; clears OF, SF, AF
-    // Same behavior as COMISS/COMISD but does not raise #IA for QNaN
-    // (For our emulator, we don't raise #IA exceptions anyway)
-    // ========================================================================
 
     /// UCOMISS — Unordered Compare Scalar Single-Precision to EFLAGS
     pub(super) fn ucomiss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst()).xmm32f(0);
-        let op2 = self.sse_pfp_read_op2_ss(instr)?;
-
-        let unordered = op1.is_nan() || op2.is_nan();
-        let less = !unordered && op1 < op2;
-        let equal = !unordered && op1 == op2;
-        self.sse_set_eflags_compare(unordered, less, equal);
-        Ok(())
+        self.sse_comis_ss(instr, f32_compare_quiet)
     }
 
     /// UCOMISD — Unordered Compare Scalar Double-Precision to EFLAGS
     pub(super) fn ucomisd_vsd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst()).xmm64f(0);
-        let op2 = self.sse_pfp_read_op2_sd(instr)?;
+        self.sse_comis_sd(instr, f64_compare_quiet)
+    }
 
-        let unordered = op1.is_nan() || op2.is_nan();
-        let less = !unordered && op1 < op2;
-        let equal = !unordered && op1 == op2;
-        self.sse_set_eflags_compare(unordered, less, equal);
+    #[inline]
+    fn sse_comis_ss(
+        &mut self,
+        instr: &Instruction,
+        compare: fn(Float32, Float32, &mut SoftFloatStatus) -> i32,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst()).xmm32u(0);
+        let op2 = self.sse_pfp_read_op2_ss(instr)?;
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let rc = compare(op1, op2, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_eflags_fpu_compare(rc);
+        Ok(())
+    }
+
+    #[inline]
+    fn sse_comis_sd(
+        &mut self,
+        instr: &Instruction,
+        compare: fn(Float64, Float64, &mut SoftFloatStatus) -> i32,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst()).xmm64u(0);
+        let op2 = self.sse_pfp_read_op2_sd(instr)?;
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let rc = compare(op1, op2, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_eflags_fpu_compare(rc);
         Ok(())
     }
 
@@ -1093,101 +684,63 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs: CVTSI2SS_VssEd, CVTSI2SD_VsdEd
     // ========================================================================
 
+    /// Read the 32-bit integer source of a CVTSI2xx.
+    #[inline]
+    pub(super) fn cvtsi_read_src32(&mut self, instr: &Instruction) -> super::Result<i32> {
+        if instr.mod_c0() {
+            Ok(self.get_gpr32(instr.src1().into()) as i32)
+        } else {
+            let eaddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            Ok(self.v_read_dword(seg, eaddr)? as i32)
+        }
+    }
+
+    /// Read the 64-bit integer source of a CVTSI2xx (long mode).
+    #[inline]
+    pub(super) fn cvtsi_read_src64(&mut self, instr: &Instruction) -> super::Result<i64> {
+        if instr.mod_c0() {
+            Ok(self.get_gpr64(instr.src1() as usize) as i64)
+        } else {
+            let eaddr = self.resolve_addr64(instr);
+            let seg = BxSegregs::from(instr.seg());
+            Ok(self.read_virtual_qword_64(seg, eaddr)? as i64)
+        }
+    }
+
     /// CVTSI2SS — Convert Int32 to Scalar Single-Precision
     pub(super) fn cvtsi2ss_vss_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = if instr.mod_c0() {
-            self.get_gpr32(instr.src1().into()) as i32
-        } else {
-            let eaddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            self.v_read_dword(seg, eaddr)? as i32
-        };
+        let op = self.cvtsi_read_src32(instr)?;
+        let mut status = self.sse_status();
+        let value = i32_to_f32(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm32f(0, op2 as f32);
+        result.set_xmm32u(0, value);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
-    /// CVTSI2SD — Convert Int32 to Scalar Double-Precision
+    /// CVTSI2SD — Convert Int32 to Scalar Double-Precision.
+    /// Exact for every i32, so Bochs performs no exception check here.
     pub(super) fn cvtsi2sd_vsd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = if instr.mod_c0() {
-            self.get_gpr32(instr.src1().into()) as i32
-        } else {
-            let eaddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            self.v_read_dword(seg, eaddr)? as i32
-        };
+        let op = self.cvtsi_read_src32(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm64f(0, op2 as f64);
+        result.set_xmm64u(0, i32_to_f64(op));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
-
-    // ========================================================================
-    // Conversions: Float to Int32
-    // Bochs: CVTSS2SI_GdWss, CVTSD2SI_GdWsd, CVTTSS2SI_GdWss, CVTTSD2SI_GdWsd
-    // Note: CVTSS2SI/CVTSD2SI use MXCSR rounding mode. We use native Rust
-    // rounding (round-half-to-even) which matches the default MXCSR mode.
-    // CVTTSS2SI/CVTTSD2SI always truncate toward zero.
-    // ========================================================================
-
-    /// CVTSS2SI — Convert Scalar Single-Precision to Int32 (MXCSR rounding)
-    pub(super) fn cvtss2si_gd_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op = self.sse_pfp_read_op2_ss(instr)?;
-        // Round-half-to-even (default MXCSR rounding mode), then integer
-        // range check — Bochs softfloat f32_to_i32.
-        let result = cvt_f32_to_i32(op, false) as u32;
-        self.set_gpr32(instr.dst().into(), result);
-        Ok(())
-    }
-
-    /// CVTSD2SI — Convert Scalar Double-Precision to Int32 (MXCSR rounding)
-    pub(super) fn cvtsd2si_gd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op = self.sse_pfp_read_op2_sd(instr)?;
-        let result = cvt_f64_to_i32(op, false) as u32;
-        self.set_gpr32(instr.dst().into(), result);
-        Ok(())
-    }
-
-    /// CVTTSS2SI — Convert Scalar Single-Precision to Int32 (truncate)
-    pub(super) fn cvttss2si_gd_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op = self.sse_pfp_read_op2_ss(instr)?;
-        let result = cvt_f32_to_i32(op, true) as u32;
-        self.set_gpr32(instr.dst().into(), result);
-        Ok(())
-    }
-
-    /// CVTTSD2SI — Convert Scalar Double-Precision to Int32 (truncate)
-    pub(super) fn cvttsd2si_gd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op = self.sse_pfp_read_op2_sd(instr)?;
-        let result = cvt_f64_to_i32(op, true) as u32;
-        self.set_gpr32(instr.dst().into(), result);
-        Ok(())
-    }
-
-    // ========================================================================
-    // Conversions: Int64 to Float (64-bit mode)
-    // Bochs: CVTSI2SS_VssEq, CVTSI2SD_VsdEq
-    // ========================================================================
 
     /// CVTSI2SS — Convert Int64 to Scalar Single-Precision (64-bit mode)
     pub(super) fn cvtsi2ss_vss_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = if instr.mod_c0() {
-            self.get_gpr64(instr.src1() as usize) as i64
-        } else {
-            let eaddr = self.resolve_addr64(instr);
-            let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_qword_64(seg, eaddr)? as i64
-        };
+        let op = self.cvtsi_read_src64(instr)?;
+        let mut status = self.sse_status();
+        let value = i64_to_f32(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm32f(0, op2 as f32);
+        result.set_xmm32u(0, value);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1195,30 +748,83 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// CVTSI2SD — Convert Int64 to Scalar Double-Precision (64-bit mode)
     pub(super) fn cvtsi2sd_vsd_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = if instr.mod_c0() {
-            self.get_gpr64(instr.src1() as usize) as i64
-        } else {
-            let eaddr = self.resolve_addr64(instr);
-            let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_qword_64(seg, eaddr)? as i64
-        };
+        let op = self.cvtsi_read_src64(instr)?;
+        let mut status = self.sse_status();
+        let value = i64_to_f64(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm64f(0, op2 as f64);
+        result.set_xmm64u(0, value);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
     // ========================================================================
-    // Conversions: Float to Int64 (64-bit mode)
-    // Bochs: CVTTSS2SI_GqWss, CVTTSD2SI_GqWsd, CVTSS2SI_GqWss, CVTSD2SI_GqWsd
+    // Conversions: Float to integer
+    // Bochs: CVTSS2SI_GdWss, CVTSD2SI_GdWsd, CVTTSS2SI_GdWss, CVTTSD2SI_GdWsd
+    //        and their 64-bit-mode Gq counterparts.
+    // CVTxx2SI round with MXCSR.RC (or the EVEX embedded RC); CVTTxx2SI
+    // always truncate toward zero.
     // ========================================================================
+
+    /// CVTSS2SI — Convert Scalar Single-Precision to Int32 (MXCSR rounding)
+    pub(super) fn cvtss2si_gd_wss(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_ss(instr)?;
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let rc = softfloat_get_rounding_mode(&status);
+        let result = f32_to_i32(op, rc, true, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.set_gpr32(instr.dst().into(), result as u32);
+        Ok(())
+    }
+
+    /// CVTSD2SI — Convert Scalar Double-Precision to Int32 (MXCSR rounding)
+    pub(super) fn cvtsd2si_gd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_sd(instr)?;
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let rc = softfloat_get_rounding_mode(&status);
+        let result = f64_to_i32(op, rc, true, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.set_gpr32(instr.dst().into(), result as u32);
+        Ok(())
+    }
+
+    /// CVTTSS2SI — Convert Scalar Single-Precision to Int32 (truncate)
+    pub(super) fn cvttss2si_gd_wss(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_ss(instr)?;
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let result = f32_to_i32_r_min_mag(op, true, false, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.set_gpr32(instr.dst().into(), result as u32);
+        Ok(())
+    }
+
+    /// CVTTSD2SI — Convert Scalar Double-Precision to Int32 (truncate)
+    pub(super) fn cvttsd2si_gd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_sd(instr)?;
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let result = f64_to_i32_r_min_mag(op, true, false, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.set_gpr32(instr.dst().into(), result as u32);
+        Ok(())
+    }
 
     /// CVTTSS2SI — Convert Scalar Single-Precision to Int64 (truncate, 64-bit mode)
     pub(super) fn cvttss2si_gq_wss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
-        let result = cvt_f32_to_i64(op, true) as u64;
-        self.set_gpr64(instr.dst() as usize, result);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let result = f32_to_i64_r_min_mag(op, true, false, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.set_gpr64(instr.dst() as usize, result as u64);
         Ok(())
     }
 
@@ -1226,8 +832,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn cvttsd2si_gq_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
-        let result = cvt_f64_to_i64(op, true) as u64;
-        self.set_gpr64(instr.dst() as usize, result);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let result = f64_to_i64_r_min_mag(op, true, false, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.set_gpr64(instr.dst() as usize, result as u64);
         Ok(())
     }
 
@@ -1235,8 +844,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn cvtss2si_gq_wss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
-        let result = cvt_f32_to_i64(op, false) as u64;
-        self.set_gpr64(instr.dst() as usize, result);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let rc = softfloat_get_rounding_mode(&status);
+        let result = f32_to_i64(op, rc, true, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.set_gpr64(instr.dst() as usize, result as u64);
         Ok(())
     }
 
@@ -1244,8 +857,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn cvtsd2si_gq_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
-        let result = cvt_f64_to_i64(op, false) as u64;
-        self.set_gpr64(instr.dst() as usize, result);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let rc = softfloat_get_rounding_mode(&status);
+        let result = f64_to_i64(op, rc, true, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.set_gpr64(instr.dst() as usize, result as u64);
         Ok(())
     }
 
@@ -1254,48 +871,62 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs: CVTPS2PD, CVTPD2PS, CVTSS2SD, CVTSD2SS
     // ========================================================================
 
-    /// CVTPS2PD — Convert 2 Packed Singles to 2 Packed Doubles
-    /// Reads low 2 floats from src, converts to 2 doubles in dst
-    pub(super) fn cvtps2pd_vpd_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        // Only need low 64 bits (2 x f32) from source
-        let op2 = if instr.mod_c0() {
-            self.read_xmm_reg(instr.src1())
+    /// Read the low 64 bits of the source as a zero-extended XMM value —
+    /// the half-width source form of CVTPS2PD and CVTDQ2PD.
+    #[inline]
+    fn sse_pfp_read_op2_lo_qword(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedXmmRegister> {
+        if instr.mod_c0() {
+            Ok(self.read_xmm_reg(instr.src1()))
         } else {
-            // Read 64 bits from memory, zero-extend to 128
             let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             let lo = self.v_read_qword(seg, eaddr)?;
             let mut tmp = BxPackedXmmRegister::default();
             tmp.set_xmm64u(0, lo);
-            tmp
-        };
+            Ok(tmp)
+        }
+    }
+
+    /// CVTPS2PD — Convert 2 Packed Singles to 2 Packed Doubles
+    pub(super) fn cvtps2pd_vpd_wps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_lo_qword(instr)?;
+        let mut status = self.sse_status();
         let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64f(0, op2.xmm32f(0) as f64);
-        result.set_xmm64f(1, op2.xmm32f(1) as f64);
+        result.set_xmm64u(0, f32_to_f64(op.xmm32u(0), &mut status));
+        result.set_xmm64u(1, f32_to_f64(op.xmm32u(1), &mut status));
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
     /// CVTPD2PS — Convert 2 Packed Doubles to 2 Packed Singles
-    /// Reads 2 doubles from src, converts to 2 singles in low part of dst
     pub(super) fn cvtpd2ps_vps_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm32f(0, op2.xmm64f(0) as f32);
-        result.set_xmm32f(1, op2.xmm64f(1) as f32);
-        // High 64 bits zeroed (from default())
-        self.write_xmm_reg_lo128(instr.dst(), result);
+        let mut op = self.sse_pfp_read_op2_xmm(instr)?;
+        let mut status = self.sse_status();
+        let lo = f64_to_f32(op.xmm64u(0), &mut status);
+        let hi = f64_to_f32(op.xmm64u(1), &mut status);
+        op.set_xmm32u(0, lo);
+        op.set_xmm32u(1, hi);
+        op.set_xmm64u(1, 0);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_reg_lo128(instr.dst(), op);
         Ok(())
     }
 
     /// CVTSS2SD — Convert Scalar Single to Scalar Double
     pub(super) fn cvtss2sd_vsd_wss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_ss(instr)?;
+        let op = self.sse_pfp_read_op2_ss(instr)?;
+        let mut status = self.sse_status();
+        let value = f32_to_f64(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm64f(0, op2 as f64);
+        result.set_xmm64u(0, value);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1303,9 +934,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// CVTSD2SS — Convert Scalar Double to Scalar Single
     pub(super) fn cvtsd2ss_vss_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_sd(instr)?;
+        let op = self.sse_pfp_read_op2_sd(instr)?;
+        let mut status = self.sse_status();
+        let value = f64_to_f32(op, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let mut result = self.read_xmm_reg(instr.dst());
-        result.set_xmm32f(0, op2 as f32);
+        result.set_xmm32u(0, value);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1318,121 +952,111 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// CVTDQ2PS — Convert 4 Packed Int32 to 4 Packed Singles
     pub(super) fn cvtdq2ps_vps_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
+        let mut op = self.sse_pfp_read_op2_xmm(instr)?;
+        let mut status = self.sse_status();
         for i in 0..4 {
-            result.set_xmm32f(i, op2.xmm32s(i) as f32);
+            op.set_xmm32u(i, i32_to_f32(op.xmm32s(i), &mut status));
         }
-        self.write_xmm_reg_lo128(instr.dst(), result);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_reg_lo128(instr.dst(), op);
         Ok(())
     }
 
     /// CVTPS2DQ — Convert 4 Packed Singles to 4 Packed Int32 (MXCSR rounding)
     pub(super) fn cvtps2dq_vdq_wps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
+        let mut op = self.sse_pfp_read_op2_xmm(instr)?;
+        let mut status = self.sse_status();
+        let rc = softfloat_get_rounding_mode(&status);
         for i in 0..4 {
-            result.set_xmm32s(i, cvt_f32_to_i32(op2.xmm32f(i), false));
+            op.set_xmm32s(i, f32_to_i32(op.xmm32u(i), rc, true, &mut status));
         }
-        self.write_xmm_reg_lo128(instr.dst(), result);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_reg_lo128(instr.dst(), op);
         Ok(())
     }
 
     /// CVTTPS2DQ — Convert 4 Packed Singles to 4 Packed Int32 (truncate)
     pub(super) fn cvttps2dq_vdq_wps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
+        let mut op = self.sse_pfp_read_op2_xmm(instr)?;
+        let mut status = self.sse_status();
         for i in 0..4 {
-            result.set_xmm32s(i, cvt_f32_to_i32(op2.xmm32f(i), true));
+            op.set_xmm32s(i, f32_to_i32_r_min_mag(op.xmm32u(i), true, false, &mut status));
         }
-        self.write_xmm_reg_lo128(instr.dst(), result);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_reg_lo128(instr.dst(), op);
         Ok(())
     }
 
-    /// CVTDQ2PD — Convert 2 Packed Int32 to 2 Packed Doubles
-    /// Reads low 2 dwords (64 bits) from src, converts to 2 doubles in dst
+    /// CVTDQ2PD — Convert 2 Packed Int32 to 2 Packed Doubles.
+    /// Exact for every i32, so Bochs performs no exception check here.
     pub(super) fn cvtdq2pd_vpd_wq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = if instr.mod_c0() {
-            self.read_xmm_reg(instr.src1())
-        } else {
-            // Read 64 bits from memory
-            let eaddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let lo = self.v_read_qword(seg, eaddr)?;
-            let mut tmp = BxPackedXmmRegister::default();
-            tmp.set_xmm64u(0, lo);
-            tmp
-        };
+        let op = self.sse_pfp_read_op2_lo_qword(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64f(0, op2.xmm32s(0) as f64);
-        result.set_xmm64f(1, op2.xmm32s(1) as f64);
+        result.set_xmm64u(0, i32_to_f64(op.xmm32s(0)));
+        result.set_xmm64u(1, i32_to_f64(op.xmm32s(1)));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
-    /// CVTPD2DQ — Convert 2 Packed Doubles to 2 Packed Int32 (MXCSR rounding)
-    /// Result goes to low 64 bits of dst; high 64 bits zeroed
+    /// CVTPD2DQ — Convert 2 Packed Doubles to 2 Packed Int32 (MXCSR rounding).
+    /// Result occupies the low 64 bits; the high 64 bits are zeroed.
     pub(super) fn cvtpd2dq_vq_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..2 {
-            result.set_xmm32s(i, cvt_f64_to_i32(op2.xmm64f(i), false));
-        }
-        // High 64 bits zeroed (from default())
-        self.write_xmm_reg_lo128(instr.dst(), result);
+        let mut op = self.sse_pfp_read_op2_xmm(instr)?;
+        let mut status = self.sse_status();
+        let rc = softfloat_get_rounding_mode(&status);
+        let lo = f64_to_i32(op.xmm64u(0), rc, true, &mut status);
+        let hi = f64_to_i32(op.xmm64u(1), rc, true, &mut status);
+        op.set_xmm32s(0, lo);
+        op.set_xmm32s(1, hi);
+        op.set_xmm64u(1, 0);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_reg_lo128(instr.dst(), op);
         Ok(())
     }
 
-    /// CVTTPD2DQ — Convert 2 Packed Doubles to 2 Packed Int32 (truncate)
-    /// Result goes to low 64 bits of dst; high 64 bits zeroed
+    /// CVTTPD2DQ — Convert 2 Packed Doubles to 2 Packed Int32 (truncate).
+    /// Result occupies the low 64 bits; the high 64 bits are zeroed.
     pub(super) fn cvttpd2dq_vq_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..2 {
-            result.set_xmm32s(i, cvt_f64_to_i32(op2.xmm64f(i), true));
-        }
-        // High 64 bits zeroed (from default())
-        self.write_xmm_reg_lo128(instr.dst(), result);
+        let mut op = self.sse_pfp_read_op2_xmm(instr)?;
+        let mut status = self.sse_status();
+        let lo = f64_to_i32_r_min_mag(op.xmm64u(0), true, false, &mut status);
+        let hi = f64_to_i32_r_min_mag(op.xmm64u(1), true, false, &mut status);
+        op.set_xmm32s(0, lo);
+        op.set_xmm32s(1, hi);
+        op.set_xmm64u(1, 0);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_reg_lo128(instr.dst(), op);
         Ok(())
     }
 
     // ========================================================================
-    // Shuffle: SHUFPS/SHUFPD
+    // Shuffle: SHUFPS/SHUFPD — pure data movement, no FP status
     // Bochs: SHUFPS_VpsWpsIb, SHUFPD_VpdWpdIb
     // ========================================================================
 
     /// SHUFPS — Shuffle Packed Single-Precision (imm8 selects lanes)
-    /// Result[0] = op1[imm8[1:0]], Result[1] = op1[imm8[3:2]],
-    /// Result[2] = op2[imm8[5:4]], Result[3] = op2[imm8[7:6]]
     pub(super) fn shufps_vps_wps_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let order = instr.ib();
         let mut result = BxPackedXmmRegister::default();
-        result.set_xmm32u(0, op1.xmm32u((order & 3) as usize));
-        result.set_xmm32u(1, op1.xmm32u(((order >> 2) & 3) as usize));
-        result.set_xmm32u(2, op2.xmm32u(((order >> 4) & 3) as usize));
-        result.set_xmm32u(3, op2.xmm32u(((order >> 6) & 3) as usize));
+        xmm_shufps(&mut result, &op1, &op2, instr.ib());
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
     /// SHUFPD — Shuffle Packed Double-Precision (imm8 selects lanes)
-    /// Result[0] = op1[imm8[0]], Result[1] = op2[imm8[1]]
     pub(super) fn shufpd_vpd_wpd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let order = instr.ib();
         let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, op1.xmm64u((order & 1) as usize));
-        result.set_xmm64u(1, op2.xmm64u(((order >> 1) & 1) as usize));
+        xmm_shufpd(&mut result, &op1, &op2, instr.ib());
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1442,8 +1066,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs: UNPCKLPS_VpsWps, UNPCKHPS_VpsWps, UNPCKLPD_VpdWpd, UNPCKHPD_VpdWpd
     // ========================================================================
 
-    /// UNPCKLPS — Interleave Low Single-Precision
-    /// Result = { op1[0], op2[0], op1[1], op2[1] }
+    /// UNPCKLPS — Interleave Low Single-Precision: { op1[0], op2[0], op1[1], op2[1] }
     pub(super) fn unpcklps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
@@ -1457,8 +1080,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// UNPCKHPS — Interleave High Single-Precision
-    /// Result = { op1[2], op2[2], op1[3], op2[3] }
+    /// UNPCKHPS — Interleave High Single-Precision: { op1[2], op2[2], op1[3], op2[3] }
     pub(super) fn unpckhps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
@@ -1472,8 +1094,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// UNPCKLPD — Interleave Low Double-Precision
-    /// Result = { op1[0], op2[0] }
+    /// UNPCKLPD — Interleave Low Double-Precision: { op1[0], op2[0] }
     pub(super) fn unpcklpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
@@ -1485,8 +1106,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// UNPCKHPD — Interleave High Double-Precision
-    /// Result = { op1[1], op2[1] }
+    /// UNPCKHPD — Interleave High Double-Precision: { op1[1], op2[1] }
     pub(super) fn unpckhpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
@@ -1499,69 +1119,101 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // ========================================================================
-    // SSE3 horizontal add/sub: HADDPS/HADDPD/HSUBPS/HSUBPD
-    // Bochs: HANDLE_SSE_PFP_2OP<xmm_haddps> etc. (ia_opcodes.def) via
-    // simd_pfp.h xmm_haddps/xmm_haddpd/xmm_hsubps/xmm_hsubpd
+    // SSE3 horizontal add/sub and ADDSUBPS/PD
+    // Bochs: HANDLE_SSE_PFP_2OP<xmm_haddps> etc. (ia_opcodes.def)
     // ========================================================================
 
     /// HADDPS — Packed Single-FP Horizontal Add (F2 0F 7C)
     pub(super) fn haddps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        self.write_xmm_reg_lo128(instr.dst(), haddps_lane(&op1, &op2));
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_haddps)
     }
 
     /// HADDPD — Packed Double-FP Horizontal Add (66 0F 7C)
     pub(super) fn haddpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        self.write_xmm_reg_lo128(instr.dst(), haddpd_lane(&op1, &op2));
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_haddpd)
     }
 
     /// HSUBPS — Packed Single-FP Horizontal Subtract (F2 0F 7D)
     pub(super) fn hsubps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        self.write_xmm_reg_lo128(instr.dst(), hsubps_lane(&op1, &op2));
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_hsubps)
     }
 
     /// HSUBPD — Packed Double-FP Horizontal Subtract (66 0F 7D)
     pub(super) fn hsubpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        self.write_xmm_reg_lo128(instr.dst(), hsubpd_lane(&op1, &op2));
-        Ok(())
+        self.sse_pfp_2op(instr, xmm_hsubpd)
+    }
+
+    /// ADDSUBPS — Packed Single-FP Add/Subtract (F2 0F D0)
+    pub(super) fn addsubps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_pfp_2op(instr, xmm_addsubps)
+    }
+
+    /// ADDSUBPD — Packed Double-FP Add/Subtract (66 0F D0)
+    pub(super) fn addsubpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_pfp_2op(instr, xmm_addsubpd)
     }
 
     // ========================================================================
     // SSE4.1 dot products: DPPS/DPPD
     // Bochs: DPPS_VpsWpsIbR / DPPD_VpdHpdWpdIbR (sse_pfp.cc)
+    // Unlike the VEX forms, the legacy handlers check for exceptions after
+    // *each* arithmetic step, so an unmasked exception in the multiply
+    // aborts before the reduction runs.
     // ========================================================================
 
     /// DPPS — Dot Product of Packed Single-FP (66 0F 3A 40)
     pub(super) fn dpps_vps_wps_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let result = dpps_lane(&op1, &op2, instr.ib());
-        self.write_xmm_reg_lo128(instr.dst(), result);
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let mut op2 = self.sse_pfp_read_op2_xmm(instr)?;
+        let mask = instr.ib();
+        let mut status = self.sse_status();
+
+        // op1: [A, B, C, D]   op2: [E, F, G, H]
+        // after multiplication: op1 = [AE, BF, CG, DH]
+        xmm_mulps_mask(&mut op1, &op2, &mut status, (mask >> 4) as u32);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+
+        // shuffle op2 = [BF, AE, DH, CG]
+        let op1_copy = op1;
+        xmm_shufps(&mut op2, &op1_copy, &op1_copy, 0xb1);
+
+        // op2 = [(BF+AE), (AE+BF), (DH+CG), (CG+DH)]
+        xmm_addps(&mut op2, &op1, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+
+        // shuffle op1 = [(DH+CG), (CG+DH), (BF+AE), (AE+BF)]
+        let op2_copy = op2;
+        xmm_shufpd(&mut op1, &op2_copy, &op2_copy, 0x1);
+
+        xmm_addps_mask(&mut op2, &op1, &mut status, mask as u32);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+
+        self.write_xmm_reg_lo128(instr.dst(), op2);
         Ok(())
     }
 
     /// DPPD — Dot Product of Packed Double-FP (66 0F 3A 41)
     pub(super) fn dppd_vpd_wpd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_pfp_read_op2_xmm(instr)?;
-        let result = dppd_lane(&op1, &op2, instr.ib());
-        self.write_xmm_reg_lo128(instr.dst(), result);
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let mut op2 = self.sse_pfp_read_op2_xmm(instr)?;
+        let mask = instr.ib();
+        let mut status = self.sse_status();
+
+        // op1: [A, B]   op2: [C, D]   after multiplication: op1 = [AC, BD]
+        xmm_mulpd_mask(&mut op1, &op2, &mut status, (mask >> 4) as u32);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+
+        // shuffle op2 = [BD, AC]
+        let op1_copy = op1;
+        xmm_shufpd(&mut op2, &op1_copy, &op1_copy, 0x1);
+
+        // op1 = [AC+BD, BD+AC]
+        xmm_addpd_mask(&mut op1, &op2, &mut status, mask as u32);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
 }

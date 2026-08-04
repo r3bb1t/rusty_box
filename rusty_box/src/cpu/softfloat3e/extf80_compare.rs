@@ -1,4 +1,3 @@
-#![allow(non_camel_case_types, dead_code, non_snake_case)]
 //! ExtFloat80 comparison.
 //! Ported from Berkeley SoftFloat 3e: extF80_compare.c
 
@@ -11,27 +10,27 @@ use super::softfloat_types::*;
 /// Returns RELATION_EQUAL, RELATION_LESS, RELATION_GREATER, or RELATION_UNORDERED.
 /// If `quiet` is false, signaling NaN and quiet NaN both raise invalid.
 /// If `quiet` is true, only signaling NaN raises invalid.
-pub fn extf80_compare(a: floatx80, b: floatx80, quiet: bool, status: &mut SoftFloatStatus) -> i32 {
+pub(in crate::cpu) fn extf80_compare(a: ExtFloat80, b: ExtFloat80, quiet: bool, status: &mut SoftFloatStatus) -> i32 {
     let a_class = extf80_class(a);
     let b_class = extf80_class(b);
 
     // SNaN always raises invalid
     if a_class == SoftFloatClass::SNaN || b_class == SoftFloatClass::SNaN {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return RELATION_UNORDERED;
     }
 
     // QNaN: raise invalid only for signaling comparison
     if a_class == SoftFloatClass::QNaN || b_class == SoftFloatClass::QNaN {
         if !quiet {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
         }
         return RELATION_UNORDERED;
     }
 
     // Denormal flag
     if a_class == SoftFloatClass::Denormal || b_class == SoftFloatClass::Denormal {
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
     }
 
     let sign_a = sign_extf80(a.sign_exp);

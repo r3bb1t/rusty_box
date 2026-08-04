@@ -1,4 +1,3 @@
-#![allow(non_camel_case_types, dead_code, non_snake_case)]
 //! ExtFloat80 division.
 //! Ported from Berkeley SoftFloat 3e: extF80_div.c
 
@@ -8,10 +7,10 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub fn extf80_div(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn extf80_div(a: ExtFloat80, b: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
     }
 
@@ -37,11 +36,11 @@ pub fn extf80_div(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> flo
                 );
             }
             // Inf / Inf = invalid
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOATX80_DEFAULT_NAN;
         }
         if exp_b == 0 && sig_b != 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return pack_floatx80(sign_z, 0x7FFF, 0x8000000000000000);
     }
@@ -52,7 +51,7 @@ pub fn extf80_div(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> flo
             );
         }
         if exp_a == 0 && sig_a != 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return pack_floatx80(sign_z, 0, 0);
     }
@@ -61,21 +60,21 @@ pub fn extf80_div(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> flo
     if exp_b == 0 {
         exp_b = 1;
         if sig_b != 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
     }
     if (sig_b & 0x8000000000000000) == 0 {
         if sig_b == 0 {
             if sig_a == 0 {
                 // 0/0 = invalid
-                softfloat_raiseFlags(status, FLAG_INVALID);
+                softfloat_raise_flags(status, FLAG_INVALID);
                 return FLOATX80_DEFAULT_NAN;
             }
             // x/0 = divide by zero
-            softfloat_raiseFlags(status, FLAG_DIVBYZERO);
+            softfloat_raise_flags(status, FLAG_DIVBYZERO);
             return pack_floatx80(sign_z, 0x7FFF, 0x8000000000000000);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(sig_b);
         exp_b += norm.exp;
         sig_b = norm.sig;
@@ -85,14 +84,14 @@ pub fn extf80_div(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> flo
     if exp_a == 0 {
         exp_a = 1;
         if sig_a != 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
     }
     if (sig_a & 0x8000000000000000) == 0 {
         if sig_a == 0 {
             return pack_floatx80(sign_z, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(sig_a);
         exp_a += norm.exp;
         sig_a = norm.sig;
@@ -156,7 +155,7 @@ pub fn extf80_div(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> flo
         exp_z,
         sig_z,
         sig_z_extra,
-        softfloat_extF80_roundingPrecision(status),
+        softfloat_extf80_rounding_precision(status),
         status,
     )
 }

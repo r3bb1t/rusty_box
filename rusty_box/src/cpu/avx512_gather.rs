@@ -58,10 +58,26 @@ fn qword_elements(vl: u8) -> usize {
     }
 }
 
+/// Shape of a VEX (AVX2) gather: the index element width and the loaded
+/// element width. Bochs spells the four combinations out as separate
+/// handlers in `cpu/avx/gather.cc`; they differ only in these two widths
+/// and the resulting register-clear boundary.
+#[derive(Clone, Copy)]
+pub(super) enum VexGatherForm {
+    /// dword indices, dword elements — VPGATHERDD / VGATHERDPS.
+    DIndexDword,
+    /// qword indices, dword elements — VPGATHERQD / VGATHERQPS.
+    QIndexDword,
+    /// dword indices, qword elements — VPGATHERDQ / VGATHERDPD.
+    DIndexQword,
+    /// qword indices, qword elements — VPGATHERQQ / VGATHERQPD.
+    QIndexQword,
+}
+
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
     // VSIB resolver helpers — mirror Bochs `BxResolveGatherD` /
-    // `BxResolveGatherQ` (cpu/avx/gather.cc:31-49).
+    // `BxResolveGatherQ` (cpu/avx/gather.cc).
     // ========================================================================
 
     /// Read the VSIB base GPR per `as64L` addressing mode. Returns 0 when
@@ -124,8 +140,122 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // EVEX.66.0F38.W0 90 /r  (vm32{x,y,z})
     // ========================================================================
 
+    // ========================================================================
+    // AVX2 (VEX-encoded) gather family — VEX.66.0F38 90-93
+    // ========================================================================
+
+    /// VPGATHERDD/DQ/QD/QQ and VGATHERDPS/DPD/QPS/QPD — Bochs
+    /// `VGATHERDPS_VpsHps` and its three siblings in cpu/avx/gather.cc.
+    ///
+    /// Unlike the EVEX forms, the mask is a *vector* register named by
+    /// VEX.vvvv, not an opmask. Bochs first normalises each mask element to
+    /// all-ones or all-zeros from its sign bit, then walks the elements
+    /// loading the armed ones and clearing each mask element as it goes. The
+    /// writes go straight to the architectural registers so that a fault
+    /// partway through leaves the mask reflecting exactly the elements that
+    /// completed — that is what makes the instruction restartable.
+    pub(super) fn vex_vgather(
+        &mut self,
+        instr: &Instruction,
+        form: VexGatherForm,
+    ) -> super::Result<()> {
+        self.prepare_avx()?;
+        let dst = instr.dst() as usize;
+        let mask_reg = instr.src2() as usize; // VEX.vvvv
+        // VEX has no V' extension, so the SIB index field is the whole
+        // vector-register number.
+        let sib_idx = instr.sib_index();
+
+        // Bochs: #UD unless destination, mask and VSIB index are all distinct.
+        if sib_idx as usize == mask_reg || sib_idx as usize == dst || mask_reg == dst {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        let vl = instr.get_vl();
+        let seg = BxSegregs::from(instr.seg());
+        let qword_index = matches!(form, VexGatherForm::QIndexDword | VexGatherForm::QIndexQword);
+        let qword_element =
+            matches!(form, VexGatherForm::DIndexQword | VexGatherForm::QIndexQword);
+
+        // Element count and the padding bound Bochs walks to. VGATHERQPS is
+        // the odd one out: qword indices but dword results, so it produces at
+        // most four dwords and clears everything above 128 bits.
+        let (num_elements, pad) = match form {
+            VexGatherForm::DIndexDword => (dword_elements(vl), 8),
+            _ => (qword_elements(vl), 4),
+        };
+
+        // Normalise the mask: sign bit set → all ones, otherwise all zeros.
+        for n in 0..num_elements {
+            if qword_element {
+                let v = self.vmm[mask_reg].zmm64s(n);
+                self.vmm[mask_reg].set_zmm64u(n, if v < 0 { u64::MAX } else { 0 });
+            } else {
+                let v = self.vmm[mask_reg].zmm32s(n);
+                self.vmm[mask_reg].set_zmm32u(n, if v < 0 { u32::MAX } else { 0 });
+            }
+        }
+
+        for n in 0..pad {
+            if n >= num_elements {
+                // Above the vector length: both mask and destination read zero.
+                if qword_element {
+                    self.vmm[mask_reg].set_zmm64u(n, 0);
+                    self.vmm[dst].set_zmm64u(n, 0);
+                } else {
+                    self.vmm[mask_reg].set_zmm32u(n, 0);
+                    self.vmm[dst].set_zmm32u(n, 0);
+                }
+                continue;
+            }
+
+            let armed = if qword_element {
+                self.vmm[mask_reg].zmm64u(n) != 0
+            } else {
+                self.vmm[mask_reg].zmm32u(n) != 0
+            };
+
+            if armed {
+                let addr = if qword_index {
+                    self.resolve_gather_q(instr, sib_idx, n)
+                } else {
+                    self.resolve_gather_d(instr, sib_idx, n)
+                };
+                // A fault here leaves this element's mask bit still set and
+                // every lower-numbered element already retired.
+                if qword_element {
+                    let data = self.v_read_qword(seg, addr)?;
+                    self.vmm[dst].set_zmm64u(n, data);
+                } else {
+                    let data = self.v_read_dword(seg, addr)?;
+                    self.vmm[dst].set_zmm32u(n, data);
+                }
+            }
+
+            if qword_element {
+                self.vmm[mask_reg].set_zmm64u(n, 0);
+            } else {
+                self.vmm[mask_reg].set_zmm32u(n, 0);
+            }
+        }
+
+        // Bochs clears the register bits above the result width in both the
+        // destination and the mask (BX_CLEAR_AVX_HIGH256, or HIGH128 for the
+        // qword-index/dword-element form).
+        let first_clear_qword = if matches!(form, VexGatherForm::QIndexDword) {
+            2
+        } else {
+            4
+        };
+        for n in first_clear_qword..8 {
+            self.vmm[dst].set_zmm64u(n, 0);
+            self.vmm[mask_reg].set_zmm64u(n, 0);
+        }
+        Ok(())
+    }
+
     /// VPGATHERDD Vdq{k1}, vm32x — Bochs `VGATHERDPS_MASK_VpsVSib`
-    /// (cpu/avx/gather.cc:258-297). Loads `nelements = dword_elements(VL)`
+    /// (cpu/avx/gather.cc). Loads `nelements = dword_elements(VL)`
     /// dwords from memory at addresses computed from `[base + index*scale + disp]`
     /// where `index` is the corresponding 32-bit lane of the VSIB index
     /// register. Masked-off elements are unchanged; after the loop the
@@ -133,7 +263,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpgatherdd(&mut self, instr: &Instruction) -> super::Result<()> {
         let dst = instr.dst();
         let sib_idx = Self::vsib_index_reg(instr);
-        // Bochs cpu/avx/gather.cc:260-263: #UD if dst register collides with
+        // Bochs cpu/avx/gather.cc: #UD if dst register collides with
         // the VSIB index register (would corrupt indices mid-gather).
         if sib_idx == dst {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -168,7 +298,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     /// VPGATHERDQ Vdq{k1}, vm32x — Bochs `VGATHERDPD_MASK_VpdVSib`
-    /// (cpu/avx/gather.cc:344-383). Half as many indices as VPGATHERDD
+    /// (cpu/avx/gather.cc). Half as many indices as VPGATHERDD
     /// because each output qword consumes one dword index.
     pub fn evex_vpgatherdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let dst = instr.dst();
@@ -205,7 +335,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     /// VPGATHERQD Vdq{k1}, vm64z — Bochs `VGATHERQPS_MASK_VpsVSib`
-    /// (cpu/avx/gather.cc:299-342). 64-bit indices, 32-bit data — gathered
+    /// (cpu/avx/gather.cc). 64-bit indices, 32-bit data — gathered
     /// dwords pack into the LOWER half of the destination; the upper half
     /// is zeroed.
     pub fn evex_vpgatherqd(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -244,7 +374,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     /// VPGATHERQQ Vdq{k1}, vm64z — Bochs `VGATHERQPD_MASK_VpdVSib`
-    /// (cpu/avx/gather.cc:385-424).
+    /// (cpu/avx/gather.cc).
     pub fn evex_vpgatherqq(&mut self, instr: &Instruction) -> super::Result<()> {
         let dst = instr.dst();
         let sib_idx = Self::vsib_index_reg(instr);
@@ -271,6 +401,133 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         for i in nelements..8 {
             self.vmm[dst as usize].set_zmm64u(i, 0);
         }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Scatter — EVEX.66.0F38 A0-A3, the write counterpart of the gathers above.
+    //
+    // Bochs cpu/avx/gather.cc VSCATTER{D,Q}P{S,D}_MASK_VSibVp{s,d}. The shape
+    // is the gather loop inverted, with three differences worth stating:
+    //
+    //   * there is no destination register, so none of the dst/index aliasing
+    //     #UD or the above-VL zeroing applies — the only written state is
+    //     memory and the opmask;
+    //   * alignment checking is suppressed for the duration of the loop, so a
+    //     misaligned element does not raise #AC mid-scatter;
+    //   * the opmask bit is cleared as each element completes and the whole
+    //     mask is zeroed at the end. That is what makes the instruction
+    //     restartable: a fault leaves exactly the not-yet-written elements
+    //     still set, so re-executing completes the rest without repeating a
+    //     store.
+    //
+    // The element count follows the *narrower* of index and element width, so
+    // the mixed forms (dword index / qword element, and qword index / dword
+    // element) both use the qword element count.
+    // ========================================================================
+
+    /// VSCATTERDPS / VPSCATTERDD — dword indices, dword elements.
+    pub fn evex_vscatter_d_dword(&mut self, instr: &Instruction) -> super::Result<()> {
+        let src = instr.src() as usize;
+        let sib_idx = Self::vsib_index_reg(instr);
+        let k = instr.opmask();
+        let nelements = dword_elements(instr.get_vl());
+        let seg = BxSegregs::from(instr.seg());
+
+        let saved_ac = self.alignment_check_mask;
+        self.alignment_check_mask = 0;
+        let mut opmask = self.opmask[k as usize].rrx();
+        for n in 0..nelements {
+            let mask_bit = 1u64 << n;
+            if opmask & mask_bit != 0 {
+                let addr = self.resolve_gather_d(instr, sib_idx, n);
+                let data = self.vmm[src].zmm32u(n);
+                self.v_write_dword(seg, addr, data)?;
+                opmask &= !mask_bit;
+                self.bx_write_opmask(k as usize, opmask);
+            }
+        }
+        self.alignment_check_mask = saved_ac;
+        self.bx_write_opmask(k as usize, 0);
+        Ok(())
+    }
+
+    /// VSCATTERDPD / VPSCATTERDQ — dword indices, qword elements.
+    pub fn evex_vscatter_d_qword(&mut self, instr: &Instruction) -> super::Result<()> {
+        let src = instr.src() as usize;
+        let sib_idx = Self::vsib_index_reg(instr);
+        let k = instr.opmask();
+        let nelements = qword_elements(instr.get_vl());
+        let seg = BxSegregs::from(instr.seg());
+
+        let saved_ac = self.alignment_check_mask;
+        self.alignment_check_mask = 0;
+        let mut opmask = self.opmask[k as usize].rrx();
+        for n in 0..nelements {
+            let mask_bit = 1u64 << n;
+            if opmask & mask_bit != 0 {
+                let addr = self.resolve_gather_d(instr, sib_idx, n);
+                let data = self.vmm[src].zmm64u(n);
+                self.v_write_qword(seg, addr, data)?;
+                opmask &= !mask_bit;
+                self.bx_write_opmask(k as usize, opmask);
+            }
+        }
+        self.alignment_check_mask = saved_ac;
+        self.bx_write_opmask(k as usize, 0);
+        Ok(())
+    }
+
+    /// VSCATTERQPS / VPSCATTERQD — qword indices, dword elements. The index
+    /// register supplies only `qword_elements` lanes, so that is the count.
+    pub fn evex_vscatter_q_dword(&mut self, instr: &Instruction) -> super::Result<()> {
+        let src = instr.src() as usize;
+        let sib_idx = Self::vsib_index_reg(instr);
+        let k = instr.opmask();
+        let nelements = qword_elements(instr.get_vl());
+        let seg = BxSegregs::from(instr.seg());
+
+        let saved_ac = self.alignment_check_mask;
+        self.alignment_check_mask = 0;
+        let mut opmask = self.opmask[k as usize].rrx();
+        for n in 0..nelements {
+            let mask_bit = 1u64 << n;
+            if opmask & mask_bit != 0 {
+                let addr = self.resolve_gather_q(instr, sib_idx, n);
+                let data = self.vmm[src].zmm32u(n);
+                self.v_write_dword(seg, addr, data)?;
+                opmask &= !mask_bit;
+                self.bx_write_opmask(k as usize, opmask);
+            }
+        }
+        self.alignment_check_mask = saved_ac;
+        self.bx_write_opmask(k as usize, 0);
+        Ok(())
+    }
+
+    /// VSCATTERQPD / VPSCATTERQQ — qword indices, qword elements.
+    pub fn evex_vscatter_q_qword(&mut self, instr: &Instruction) -> super::Result<()> {
+        let src = instr.src() as usize;
+        let sib_idx = Self::vsib_index_reg(instr);
+        let k = instr.opmask();
+        let nelements = qword_elements(instr.get_vl());
+        let seg = BxSegregs::from(instr.seg());
+
+        let saved_ac = self.alignment_check_mask;
+        self.alignment_check_mask = 0;
+        let mut opmask = self.opmask[k as usize].rrx();
+        for n in 0..nelements {
+            let mask_bit = 1u64 << n;
+            if opmask & mask_bit != 0 {
+                let addr = self.resolve_gather_q(instr, sib_idx, n);
+                let data = self.vmm[src].zmm64u(n);
+                self.v_write_qword(seg, addr, data)?;
+                opmask &= !mask_bit;
+                self.bx_write_opmask(k as usize, opmask);
+            }
+        }
+        self.alignment_check_mask = saved_ac;
+        self.bx_write_opmask(k as usize, 0);
         Ok(())
     }
 }
@@ -471,5 +728,91 @@ mod tests {
             21,
             "combined V' || sib.idx must address zmm21"
         );
+    }
+
+    #[test]
+    fn fetch_decode64_scatter_family_maps_a0_through_a3() {
+        // Same VSIB encoding as the gather tests, opcode A0-A3. The reg field
+        // names the *source* here; the memory operand is the destination.
+        for (op, w, expected) in [
+            (0xA0u8, 0u8, Opcode::EvexVscatterddVsibVdq),
+            (0xA0, 1, Opcode::EvexVscatterdqVsibVdq),
+            (0xA1, 0, Opcode::EvexVscatterqdVsibVdq),
+            (0xA1, 1, Opcode::EvexVscatterqqVsibVdq),
+            (0xA2, 0, Opcode::EvexVscatterdpsVsibVps),
+            (0xA2, 1, Opcode::EvexVscatterdpdVsibVpd),
+            (0xA3, 0, Opcode::EvexVscatterqpsVsibVps),
+            (0xA3, 1, Opcode::EvexVscatterqpdVsibVpd),
+        ] {
+            // P1 bit 7 carries EVEX.W: 0x7D for W0, 0xFD for W1.
+            let p1 = if w == 1 { 0xFD } else { 0x7D };
+            let bytes = [
+                0x62, 0x72, p1, 0x49, op, 0x94, 0xAB, 0x40, 0x00, 0x00, 0x00,
+            ];
+            let i = fetch_decode64(&bytes).expect("scatter should decode");
+            assert_eq!(i.get_ia_opcode(), expected, "opcode {op:#04x} W{w}");
+            assert_eq!(i.sib_index(), 5);
+            assert_eq!(i.sib_base(), 3);
+            assert_eq!(i.opmask(), 1);
+        }
+    }
+
+    #[test]
+    fn scatter_and_gather_require_a_memory_operand_and_a_real_opmask() {
+        // Bochs marks the whole VSIB family ATTR_MOD_MEM | ATTR_MASK_REQUIRED:
+        // there is no register form, and k0 cannot select elements.
+        // Register form (mod=11) must #UD.
+        assert!(
+            fetch_decode64(&[0x62, 0x72, 0x7D, 0x49, 0xA0, 0xC1]).is_err(),
+            "register-form VPSCATTERDD must #UD"
+        );
+        assert!(
+            fetch_decode64(&[0x62, 0x72, 0x7D, 0x49, 0x90, 0xC1]).is_err(),
+            "register-form VPGATHERDD must #UD"
+        );
+        // aaa=000 selects k0, which is not a legal mask here (P2 0x48).
+        assert!(
+            fetch_decode64(&[
+                0x62, 0x72, 0x7D, 0x48, 0xA0, 0x94, 0xAB, 0x40, 0x00, 0x00, 0x00
+            ])
+            .is_err(),
+            "VPSCATTERDD with k0 must #UD"
+        );
+        assert!(
+            fetch_decode64(&[
+                0x62, 0x72, 0x7D, 0x48, 0x90, 0x94, 0xAB, 0x40, 0x00, 0x00, 0x00
+            ])
+            .is_err(),
+            "VPGATHERDD with k0 must #UD"
+        );
+    }
+
+    #[test]
+    fn scatter_with_zero_opmask_writes_nothing() {
+        // No opmask bit set means no store and no address computation, so this
+        // runs to completion on a CPU with no memory bus wired up at all.
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for n in 0..16 {
+            cpu.vmm[10].set_zmm32u(n, 0xDEAD_BEEF);
+        }
+        cpu.opmask[1].set_rrx(0);
+        let i = make_vsib_instr(
+            Opcode::EvexVscatterddVsibVdq,
+            10,
+            5,
+            rusty_box_decoder::instruction::GprIndex::Rbx as usize as u8,
+            2,
+            0,
+            1,
+        );
+        cpu.evex_vscatter_d_dword(&i).unwrap();
+        assert_eq!(cpu.opmask[1].rrx(), 0, "opmask stays cleared");
+        for n in 0..16 {
+            assert_eq!(
+                cpu.vmm[10].zmm32u(n),
+                0xDEAD_BEEF,
+                "scatter must not modify its source register"
+            );
+        }
     }
 }

@@ -8,17 +8,17 @@ use super::super::decoder::{BxSegregs, Instruction};
 use super::super::softfloat3e::extf80_addsub::{extf80_add, extf80_sub};
 use super::super::softfloat3e::extf80_div::extf80_div;
 use super::super::softfloat3e::extf80_mul::extf80_mul;
-use super::super::softfloat3e::extf80_roundToInt::extf80_round_to_int;
+use super::super::softfloat3e::extf80_round_to_int::extf80_round_to_int;
 use super::super::softfloat3e::extf80_sqrt::extf80_sqrt;
 use super::super::softfloat3e::f32_to_extf80::f32_to_extf80;
 use super::super::softfloat3e::f64_to_extf80::f64_to_extf80;
 use super::super::softfloat3e::i32_to_extf80::i32_to_extf80;
 use super::super::softfloat3e::softfloat::{
     extf80_is_nan, extf80_is_signaling_nan, extf80_is_unsupported, f32_is_nan,
-    f32_is_signaling_nan, f64_is_nan, f64_is_signaling_nan, softfloat_raiseFlags, SoftFloatStatus,
+    f32_is_signaling_nan, f64_is_nan, f64_is_signaling_nan, softfloat_raise_flags, SoftFloatStatus,
     FLAG_INVALID,
 };
-use super::super::softfloat3e::softfloat_types::floatx80;
+use super::super::softfloat3e::softfloat_types::ExtFloat80;
 use super::super::softfloat3e::specialize::{softfloat_propagate_nan_extf80, FLOATX80_DEFAULT_NAN};
 use super::ferr::i387cw_to_softfloat_status_word;
 
@@ -28,19 +28,19 @@ use super::ferr::i387cw_to_softfloat_status_word;
 // ================================================================
 
 /// Inner NaN propagation for extf80 vs f32.
-/// Matches Bochs `FPU_handle_NaN(floatx80 a, int aIsNaN, float32 b32, int bIsNaN, status)`.
+/// Matches Bochs `FPU_handle_NaN(ExtFloat80 a, int aIsNaN, Float32 b32, int bIsNaN, status)`.
 fn fpu_handle_nan_inner_f32(
-    a: floatx80,
+    a: ExtFloat80,
     a_is_nan: bool,
     b32: u32,
     b_is_nan: bool,
     status: &mut SoftFloatStatus,
-) -> floatx80 {
+) -> ExtFloat80 {
     let a_is_signaling_nan = extf80_is_signaling_nan(a);
     let b_is_signaling_nan = f32_is_signaling_nan(b32);
 
     if a_is_signaling_nan | b_is_signaling_nan {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
     }
 
     // Propagate QNaN from SNaN for a
@@ -50,7 +50,7 @@ fn fpu_handle_nan_inner_f32(
         return a_q;
     }
 
-    // float32 is NaN so conversion will propagate SNaN to QNaN and raise
+    // Float32 is NaN so conversion will propagate SNaN to QNaN and raise
     // appropriate exception flags
     let b = f32_to_extf80(b32, status);
 
@@ -93,11 +93,11 @@ fn fpu_handle_nan_inner_f32(
 }
 
 /// Check and handle NaN for extf80 vs f32 memory operand.
-/// Matches Bochs `bool FPU_handle_NaN(floatx80 a, float32 b, floatx80 &r, status)`.
+/// Matches Bochs `bool FPU_handle_NaN(ExtFloat80 a, Float32 b, ExtFloat80 &r, status)`.
 /// Returns `Some(result)` if NaN was handled, `None` if normal arithmetic should proceed.
-fn fpu_handle_nan_f32(a: floatx80, b: u32, status: &mut SoftFloatStatus) -> Option<floatx80> {
+fn fpu_handle_nan_f32(a: ExtFloat80, b: u32, status: &mut SoftFloatStatus) -> Option<ExtFloat80> {
     if extf80_is_unsupported(a) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return Some(FLOATX80_DEFAULT_NAN);
     }
 
@@ -110,19 +110,19 @@ fn fpu_handle_nan_f32(a: floatx80, b: u32, status: &mut SoftFloatStatus) -> Opti
 }
 
 /// Inner NaN propagation for extf80 vs f64.
-/// Matches Bochs `FPU_handle_NaN(floatx80 a, int aIsNaN, float64 b64, int bIsNaN, status)`.
+/// Matches Bochs `FPU_handle_NaN(ExtFloat80 a, int aIsNaN, Float64 b64, int bIsNaN, status)`.
 fn fpu_handle_nan_inner_f64(
-    a: floatx80,
+    a: ExtFloat80,
     a_is_nan: bool,
     b64: u64,
     b_is_nan: bool,
     status: &mut SoftFloatStatus,
-) -> floatx80 {
+) -> ExtFloat80 {
     let a_is_signaling_nan = extf80_is_signaling_nan(a);
     let b_is_signaling_nan = f64_is_signaling_nan(b64);
 
     if a_is_signaling_nan | b_is_signaling_nan {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
     }
 
     // Propagate QNaN from SNaN for a
@@ -132,7 +132,7 @@ fn fpu_handle_nan_inner_f64(
         return a_q;
     }
 
-    // float64 is NaN so conversion will propagate SNaN to QNaN and raise
+    // Float64 is NaN so conversion will propagate SNaN to QNaN and raise
     // appropriate exception flags
     let b = f64_to_extf80(b64, status);
 
@@ -175,11 +175,11 @@ fn fpu_handle_nan_inner_f64(
 }
 
 /// Check and handle NaN for extf80 vs f64 memory operand.
-/// Matches Bochs `bool FPU_handle_NaN(floatx80 a, float64 b, floatx80 &r, status)`.
+/// Matches Bochs `bool FPU_handle_NaN(ExtFloat80 a, Float64 b, ExtFloat80 &r, status)`.
 /// Returns `Some(result)` if NaN was handled, `None` if normal arithmetic should proceed.
-fn fpu_handle_nan_f64(a: floatx80, b: u64, status: &mut SoftFloatStatus) -> Option<floatx80> {
+fn fpu_handle_nan_f64(a: ExtFloat80, b: u64, status: &mut SoftFloatStatus) -> Option<ExtFloat80> {
     if extf80_is_unsupported(a) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return Some(FLOATX80_DEFAULT_NAN);
     }
 
@@ -215,7 +215,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_add(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -243,7 +243,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_add(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, instr.dst() as i32);
             if pop_stack {
                 self.the_i387.fpu_pop();
@@ -284,7 +284,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             extf80_add(a, f32_to_extf80(load_reg, &mut status), &mut status)
         };
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -317,7 +317,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             extf80_add(a, f64_to_extf80(load_reg, &mut status), &mut status)
         };
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -348,7 +348,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_add(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -379,7 +379,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_add(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -409,7 +409,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_mul(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -437,7 +437,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_mul(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, instr.dst() as i32);
             if pop_stack {
                 self.the_i387.fpu_pop();
@@ -478,7 +478,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             extf80_mul(a, f32_to_extf80(load_reg, &mut status), &mut status)
         };
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -511,7 +511,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             extf80_mul(a, f64_to_extf80(load_reg, &mut status), &mut status)
         };
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -542,7 +542,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_mul(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -573,7 +573,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_mul(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -603,7 +603,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_sub(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -630,7 +630,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_sub(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -658,7 +658,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_sub(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, instr.dst() as i32);
             if pop_stack {
                 self.the_i387.fpu_pop();
@@ -695,7 +695,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_sub(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, instr.dst() as i32);
             if pop_stack {
                 self.the_i387.fpu_pop();
@@ -736,7 +736,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             extf80_sub(a, f32_to_extf80(load_reg, &mut status), &mut status)
         };
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -770,7 +770,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             extf80_sub(f32_to_extf80(load_reg, &mut status), b, &mut status)
         };
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -803,7 +803,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             extf80_sub(a, f64_to_extf80(load_reg, &mut status), &mut status)
         };
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -837,7 +837,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             extf80_sub(f64_to_extf80(load_reg, &mut status), b, &mut status)
         };
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -868,7 +868,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_sub(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -900,7 +900,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_sub(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -928,7 +928,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_sub(self.read_fpu_reg(0), i32_to_extf80(load_reg), &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -960,7 +960,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_sub(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -990,7 +990,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_div(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -1017,7 +1017,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_div(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -1045,7 +1045,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_div(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, instr.dst() as i32);
             if pop_stack {
                 self.the_i387.fpu_pop();
@@ -1082,7 +1082,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_div(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, instr.dst() as i32);
             if pop_stack {
                 self.the_i387.fpu_pop();
@@ -1123,7 +1123,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             extf80_div(a, f32_to_extf80(load_reg, &mut status), &mut status)
         };
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -1157,7 +1157,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             extf80_div(f32_to_extf80(load_reg, &mut status), b, &mut status)
         };
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -1190,7 +1190,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             extf80_div(a, f64_to_extf80(load_reg, &mut status), &mut status)
         };
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -1224,7 +1224,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             extf80_div(f64_to_extf80(load_reg, &mut status), b, &mut status)
         };
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -1255,7 +1255,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_div(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -1287,7 +1287,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_div(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -1318,7 +1318,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_div(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -1350,7 +1350,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_div(a, b, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -1377,7 +1377,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let result = extf80_sqrt(self.read_fpu_reg(0), &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 
@@ -1398,10 +1398,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
-        let rounding_mode = status.softfloat_roundingMode;
+        let rounding_mode = status.softfloat_rounding_mode;
         let result = extf80_round_to_int(self.read_fpu_reg(0), rounding_mode, true, &mut status);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.write_fpu_reg(result, 0);
         }
 

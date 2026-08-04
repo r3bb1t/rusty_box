@@ -40,7 +40,9 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
         // Cannot construct on the stack. Allocate zeroed heap memory and
         // initialize field-by-field via raw pointer.
         let layout = alloc::alloc::Layout::new::<BxCpuC<'static, I, T>>();
-        tracing::info!(
+        // Host allocator internals — no Bochs counterpart, and the address
+        // below is a HOST pointer, so neither belongs in a guest boot log.
+        tracing::debug!(
             "CPU alloc: {} bytes (align={})",
             layout.size(),
             layout.align()
@@ -51,12 +53,11 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
                 crate::memory::MemoryError::UnableToAllocateGuestMemory(layout.size()).into(),
             );
         }
-        tracing::info!("CPU alloc OK at {:p}", ptr);
+        tracing::debug!("CPU alloc OK at {:p}", ptr);
 
         unsafe {
             Self::init_cpu_fields(ptr, cpuid, tracer);
             let mut boxed = alloc::boxed::Box::from_raw(ptr);
-            boxed.initialize_opcode_handlers();
             let config = Default::default();
             boxed.initialize(config)?;
             Ok(boxed)
@@ -76,7 +77,6 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
         let cpuid = I::new();
         Self::init_cpu_fields(ptr, cpuid, tracer);
         let cpu = &mut *ptr;
-        cpu.initialize_opcode_handlers();
         cpu.initialize(Default::default())?;
         Ok(cpu)
     }

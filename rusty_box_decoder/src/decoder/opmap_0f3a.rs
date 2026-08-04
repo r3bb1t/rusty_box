@@ -59,6 +59,34 @@ pub(super) const BxOpcodeTable0F3A22: [u64; 2] = [
     form_opcode(attrs!(SSE_PREFIX_66), Opcode::PinsrdVdqEdIb),
 ];
 
+// VPERMPD — VEX.256.66.0F3A.W1 01 /r ib (AVX2, 256-bit only). Bochs routes
+// it to the VPERMQ handler — the qword permute is identical for double lanes.
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A01
+pub(super) const BxOpcodeTable0F3A01: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W1 | VL256),
+    Opcode::V256VpermpdVpdWpdIb,
+)];
+
+// VPERMILPS / VPERMILPD, immediate-control forms — VEX.66.0F3A.W0 04/05 /r ib.
+// VEX-only, no vvvv source.
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A04 / _0F3A05
+pub(super) const BxOpcodeTable0F3A04: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+    Opcode::VpermilpsVpsWpsIb,
+)];
+pub(super) const BxOpcodeTable0F3A05: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+    Opcode::VpermilpdVpdWpdIb,
+)];
+
+// VCVTPS2PH — VEX.66.0F3A.W0 1D /r ib (F16C). VEX-only, no vvvv source; the
+// destination is ModRM.rm (register or memory) and nnn is the source.
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A1D
+pub(super) const BxOpcodeTable0F3A1D: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+    Opcode::Vcvtps2phWpsVpsIb,
+)];
+
 // VINSERTF128 — VEX.256.66.0F3A.W0 18 /r ib
 pub(super) const BxOpcodeTable0F3A18: [u64; 1] = [form_opcode(
     attrs!(SSE_PREFIX_66 | VL256 | VEX_W0),
@@ -241,11 +269,11 @@ pub(super) const BxOpcodeTable0F3A33: [u64; 2] = [
 pub(super) const BxOpcodeTable0F3A: [&[u64]; 256] = [
     // 3-byte opcode 0x0F 0x3A
     /* 0F 3A 00 */ &BxOpcodeTable0F3A00,
-    /* 0F 3A 01 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 3A 01 */ &BxOpcodeTable0F3A01,
     /* 0F 3A 02 */ &BxOpcodeTable0F3A02,
     /* 0F 3A 03 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 04 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 05 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 3A 04 */ &BxOpcodeTable0F3A04,
+    /* 0F 3A 05 */ &BxOpcodeTable0F3A05,
     /* 0F 3A 06 */ &BxOpcodeTable0F3A06,
     /* 0F 3A 07 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 08 */ &BxOpcodeTable0F3A08,
@@ -269,7 +297,7 @@ pub(super) const BxOpcodeTable0F3A: [&[u64]; 256] = [
     /* 0F 3A 1A */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 1B */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 1C */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 1D */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 3A 1D */ &BxOpcodeTable0F3A1D,
     /* 0F 3A 1E */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 1F */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 20 */ &BxOpcodeTable0F3A20,
@@ -339,7 +367,7 @@ pub(super) const BxOpcodeTable0F3A: [&[u64]; 256] = [
     /* 0F 3A 60 */ &BxOpcodeTable0F3A60,
     /* 0F 3A 61 */ &BxOpcodeTable0F3A61,
     /* 0F 3A 62 */ &BxOpcodeTable0F3A62,
-    /* 0F 3A 64 */ &BxOpcodeTable0F3A63,
+    /* 0F 3A 63 */ &BxOpcodeTable0F3A63,
     /* 0F 3A 64 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 65 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 66 */ &BX_OPCODE_GROUP_ERR,

@@ -81,17 +81,22 @@ jobs:
       - name: Test GUI native default
         run: cargo test -p rusty_box_gui
 
+      # The ROM paths must match the include_bytes! in rusty_box_gui/src/app.rs,
+      # which resolves to cpp_orig/bochs/bochs/bios/. The doubled directory is
+      # real: cpp_orig/bochs is the Bochs *clone*, whose source tree lives in a
+      # nested bochs/. Downloading one level short leaves the wasm build unable
+      # to find the ROMs, which is what had been failing this job.
       - name: Download Bochs BIOS ROMs for wasm GUI
         run: |
-          mkdir -p cpp_orig/bochs/bios/VGABIOS-lgpl
+          mkdir -p cpp_orig/bochs/bochs/bios/VGABIOS-lgpl
           python3 - <<'PY'
           from pathlib import Path
           from urllib.request import urlretrieve
 
           downloads = {
-              "cpp_orig/bochs/bios/BIOS-bochs-latest":
+              "cpp_orig/bochs/bochs/bios/BIOS-bochs-latest":
                   "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/BIOS-bochs-latest?format=raw",
-              "cpp_orig/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
+              "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin":
                   "https://sourceforge.net/p/bochs/code/HEAD/tree/trunk/bochs/bios/VGABIOS-lgpl-latest?format=raw",
           }
 

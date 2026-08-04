@@ -75,6 +75,17 @@ pub struct Piix3WriteEffects {
     /// The XBCS register (0x4E) changed a bit that affects BIOS-ROM
     /// write-enable state; must be re-applied to memory.
     pub bios_write_changed: bool,
+    /// The XBCS/APIC register (0x4F) or APIC-base register (0x80) was written;
+    /// the I/O APIC enable state and MMIO base must be re-synced. Bochs applies
+    /// this synchronously via `DEV_ioapic_set_enabled` inside `pci_write_handler`
+    /// (pci2isa.cc cases 0x4f/0x80); the IOAPIC + memory live outside the bridge
+    /// here, so the drain calls [`BxPiix3::apply_ioapic_enable`] at the boundary.
+    pub ioapic_enable_changed: bool,
+    /// The 0x4F "1-meg extended BIOS enable" bit (bit 1) changed. Carries the
+    /// new enable value; Bochs `DEV_mem_set_bios_rom_access(BIOS_ROM_1MEG, ...)`
+    /// (pci2isa.cc case 0x4f). The value is not idempotently derivable from
+    /// `pci_conf` (only bit 0 is stored, matching Bochs), so it is carried here.
+    pub bios_1meg_access: Option<bool>,
 }
 
 /// PIIX3 PCI-to-ISA bridge state.
@@ -335,11 +346,20 @@ impl BxPiix3 {
                     }
                     self.pci_conf[addr] = value8;
                 }
-                // APIC enable / BIOS extended access (pci2isa.cc)
+                // APIC enable / BIOS extended access (pci2isa.cc case 0x4f)
                 0x4F => {
+                    // Bochs stores only bit 0; bits 1+ are transient.
                     self.pci_conf[addr] = value8 & 0x01;
-                    // bit 0: I/O APIC enable
-                    // In Bochs, this calls DEV_ioapic_set_enabled()
+                    // bit 0: I/O APIC enable — Bochs calls DEV_ioapic_set_enabled(
+                    //   value8 & 0x01, (pci_conf[0x80] & 0x3f) << 10). Deferred so
+                    //   the drain can reach the IOAPIC + memory subsystem.
+                    effects.ioapic_enable_changed = true;
+                    // bit 1: "1-meg extended BIOS enable" — Bochs updates BIOS_ROM_1MEG
+                    //   access only when the bit changes. Since only bit 0 is stored,
+                    //   `oldval & 0x02` is always 0, so this fires on any bit-1 write.
+                    if (value8 & 0x02) != (oldval & 0x02) {
+                        effects.bios_1meg_access = Some((value8 & 0x02) != 0);
+                    }
                     tracing::trace!("PIIX3: APIC enable = {}", value8 & 0x01);
                 }
                 // PIRQ routing registers (pci2isa.cc)
@@ -358,9 +378,12 @@ impl BxPiix3 {
                 0x6A => {
                     self.pci_conf[addr] = value8 & 0xD7;
                 }
-                // APIC base address (pci2isa.cc)
+                // APIC base address (pci2isa.cc case 0x80)
                 0x80 => {
                     self.pci_conf[addr] = value8 & 0x7F;
+                    // Bochs calls DEV_ioapic_set_enabled(pci_conf[0x4f] & 0x01,
+                    //   (value8 & 0x3f) << 10) — relocate the IOAPIC MMIO window.
+                    effects.ioapic_enable_changed = true;
                 }
                 // Default
                 _ => {
@@ -382,6 +405,23 @@ impl BxPiix3 {
         mem.set_bios_write_enabled((v & 0x04) != 0);
         mem.set_bios_rom_access(crate::memory::BIOS_ROM_LOWER, (v & 0x40) != 0);
         mem.set_bios_rom_access(crate::memory::BIOS_ROM_EXTENDED, (v & 0x80) != 0);
+    }
+
+    /// Re-sync the I/O APIC enable state and MMIO base from the committed PIIX3
+    /// configuration. Bochs: bx_piix3_c::pci_write_handler() (pci2isa.cc) cases
+    /// 0x4f/0x80 call `DEV_ioapic_set_enabled(pci_conf[0x4f] & 0x01,
+    /// (pci_conf[0x80] & 0x3f) << 10)`. Derived entirely from `pci_conf`, so this
+    /// is idempotent and safe to call any number of times from the shared
+    /// machine-boundary drain. Returns whether the IOAPIC MMIO mapping actually
+    /// changed (so the caller can invalidate CPU caches over the affected pages).
+    pub fn apply_ioapic_enable<'c>(
+        &self,
+        ioapic: &mut super::ioapic::BxIoApic,
+        mem: &mut crate::memory::BxMemC<'c>,
+    ) -> crate::Result<bool> {
+        let enabled = (self.pci_conf[0x4F] & 0x01) != 0;
+        let base_offset = ((self.pci_conf[0x80] as u16) & 0x3F) << 10;
+        ioapic.set_enabled_with_mem(enabled, base_offset, mem)
     }
 
     /// Read from PCI configuration space.
@@ -740,5 +780,79 @@ mod tests {
         bridge.pci_write(0x4E, 0x07, 1); // enable BIOS write
         bridge.reset();
         assert_eq!(bridge.pci_conf[0x4E], 0x03, "register value resets");
+    }
+
+    // ─── 0x4F / 0x80 I/O APIC enable wiring ──────────────────────────────────
+    //
+    // Bochs pci2isa.cc pci_write_handler (chipset != I430FX):
+    //   case 0x4f: pci_conf[0x4f] = value8 & 0x01;
+    //             DEV_ioapic_set_enabled(value8 & 0x01, (pci_conf[0x80]&0x3f)<<10);
+    //             if ((value8 & 0x02) != (oldval & 0x02))
+    //                 DEV_mem_set_bios_rom_access(BIOS_ROM_1MEG, (value8>>1)&1);
+    //   case 0x80: pci_conf[0x80] = value8 & 0x7f;
+    //             DEV_ioapic_set_enabled(pci_conf[0x4f]&0x01, (value8&0x3f)<<10);
+
+    #[test]
+    fn test_pci4f_signals_ioapic_enable_and_1meg_bit() {
+        let mut bridge = BxPiix3::new();
+        bridge.reset(); // pci_conf[0x4f] = 0
+
+        // Writing 0x4F stores only bit 0 and always signals an IOAPIC re-sync.
+        let effects = bridge.pci_write(0x4F, 0x01, 1);
+        assert!(effects.ioapic_enable_changed);
+        assert_eq!(bridge.pci_conf[0x4F], 0x01);
+        assert_eq!(effects.bios_1meg_access, None);
+
+        // Writing bit 1 high signals the 1-meg BIOS access change (only bit 0
+        // is stored, so `oldval & 0x02` is always 0 -> fires on any bit-1 write).
+        let effects = bridge.pci_write(0x4F, 0x03, 1);
+        assert!(effects.ioapic_enable_changed);
+        assert_eq!(bridge.pci_conf[0x4F], 0x01, "only bit 0 is stored");
+        assert_eq!(effects.bios_1meg_access, Some(true));
+
+        // Clearing bit 0 still signals a re-sync (to disable the IOAPIC).
+        let effects = bridge.pci_write(0x4F, 0x00, 1);
+        assert!(effects.ioapic_enable_changed);
+        assert_eq!(bridge.pci_conf[0x4F], 0x00);
+    }
+
+    #[test]
+    fn test_pci80_signals_ioapic_relocate_and_masks_to_7f() {
+        let mut bridge = BxPiix3::new();
+        bridge.reset();
+        let effects = bridge.pci_write(0x80, 0xFF, 1);
+        assert!(effects.ioapic_enable_changed);
+        assert_eq!(bridge.pci_conf[0x80], 0x7F, "value8 & 0x7f");
+    }
+
+    #[test]
+    fn test_apply_ioapic_enable_drives_ioapic_from_pci_conf() {
+        use crate::iodev::ioapic::BxIoApic;
+        use crate::memory::{BxMemC, BxMemoryStubC};
+        let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(stub, false);
+        let mut ioapic = BxIoApic::new();
+        ioapic.init(&mut mem).unwrap(); // enabled at 0xFEC00000, like devices.cc
+
+        let mut bridge = BxPiix3::new();
+        bridge.reset();
+
+        // pci_conf[0x4f]=1, [0x80]=0 -> enabled at default base. Idempotent
+        // no-op because init already enabled at 0xFEC00000.
+        bridge.pci_conf[0x4F] = 0x01;
+        bridge.pci_conf[0x80] = 0x00;
+        assert!(!bridge.apply_ioapic_enable(&mut ioapic, &mut mem).unwrap());
+        assert!(ioapic.is_enabled());
+        assert_eq!(ioapic.base_address(), 0xFEC0_0000);
+
+        // Relocate via 0x80: base offset (0x04 & 0x3f) << 10 = 0x1000.
+        bridge.pci_conf[0x80] = 0x04;
+        assert!(bridge.apply_ioapic_enable(&mut ioapic, &mut mem).unwrap());
+        assert_eq!(ioapic.base_address(), 0xFEC0_1000);
+
+        // Disable via 0x4f bit 0 = 0.
+        bridge.pci_conf[0x4F] = 0x00;
+        assert!(bridge.apply_ioapic_enable(&mut ioapic, &mut mem).unwrap());
+        assert!(!ioapic.is_enabled());
     }
 }

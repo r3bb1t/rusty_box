@@ -112,17 +112,52 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
-    // Bochs proc_ctrl.cc — update AVX permission
+    /// Bochs proc_ctrl.cc `handleAvxModeChange` — recompute AVX, opmask and
+    /// EVEX decode permission, plus the maximum architecturally-visible
+    /// vector length, from CR0.TS / CR4.OSXSAVE / XCR0.
+    ///
+    /// EVEX needs three XCR0 bits beyond AVX's: OPMASK, ZMM_HI256 and HI_ZMM.
+    /// Upstream keeps opmask and EVEX on a single fetch-mode bit — its
+    /// `BX_PREPARE_OPMASK` is literally `#define`d to `BX_PREPARE_EVEX` — so
+    /// the two move together here even though this decoder tracks them
+    /// separately.
     pub(super) fn handle_avx_mode_change(&mut self) {
-        use super::opcodes_table::FetchModeMask;
-        if self.cr0.ts()
-            || !self.protected_mode()
-            || !self.cr4.osxsave()
-            || (self.xcr0.get32() & 0x6) != 0x6
+        use super::opcodes_table::{BxAvxVectorLength, FetchModeMask};
+        const XCR0_SSE: u32 = 1 << 1;
+        const XCR0_YMM: u32 = 1 << 2;
+        const XCR0_OPMASK: u32 = 1 << 5;
+        const XCR0_ZMM_HI256: u32 = 1 << 6;
+        const XCR0_HI_ZMM: u32 = 1 << 7;
+        const XCR0_AVX: u32 = XCR0_SSE | XCR0_YMM;
+        const XCR0_EVEX: u32 = XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI_ZMM;
+
+        let xcr0 = self.xcr0.get32();
+        let evex_state = (!xcr0 & XCR0_EVEX) == 0;
+
+        if self.cr0.ts() || !self.protected_mode() || !self.cr4.osxsave() || (!xcr0 & XCR0_AVX) != 0
         {
-            self.fetch_mode_mask.remove(FetchModeMask::AVX_OK);
+            // Upstream's clear_avx_ok() drops EVEX along with AVX.
+            self.fetch_mode_mask
+                .remove(FetchModeMask::AVX_OK | FetchModeMask::OPMASK_OK | FetchModeMask::EVEX_OK);
         } else {
             self.fetch_mode_mask.insert(FetchModeMask::AVX_OK);
+            self.fetch_mode_mask.set(
+                FetchModeMask::OPMASK_OK | FetchModeMask::EVEX_OK,
+                evex_state,
+            );
+        }
+
+        // maxvl is *not* gated on CR0.TS — a task switch does not shrink the
+        // register file, it only makes it unavailable until the state is
+        // restored.
+        if self.cr4.osxsave() {
+            self.maxvl = if (xcr0 & XCR0_EVEX) != 0 {
+                BxAvxVectorLength::Vl512
+            } else if (xcr0 & XCR0_YMM) != 0 {
+                BxAvxVectorLength::Vl256
+            } else {
+                BxAvxVectorLength::Vl128
+            };
         }
     }
 
@@ -194,21 +229,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Get current system ticks from pc_system (Bochs: bx_pc_system.time_ticks()).
-    /// Falls back to icount when pc_system is not wired (unit tests).
+    /// Falls back to `cpu_ticks()` when pc_system is not wired (unit tests).
     ///
-    /// UP observes the live pc-system clock plus instructions retired in the
-    /// wired batch. SMP freezes every CPU's view at the round-start epoch and
-    /// advances global time only when the emulator completes that full round.
+    /// UP observes the live pc-system clock plus the ticks this CPU generated
+    /// in the wired batch — `cpu_ticks()`, so fast-REP bulk transfers advance
+    /// time exactly like Bochs BX_TICKN. SMP freezes every CPU's view at the
+    /// round-start epoch and advances global time only when the emulator
+    /// completes that full round.
     #[inline]
     pub(crate) fn system_ticks(&self) -> u64 {
         let Some(pc_system) = self.pc_system_ptr else {
-            return self.icount;
+            return self.cpu_ticks();
         };
         if self.pc_system_tick_denominator == 1 {
             // SAFETY: pc_system_ptr is wired only for the active execution
             // scope and cleared before the emulator regains this borrow.
             let live_ticks = unsafe { pc_system.as_ref().time_ticks() };
-            live_ticks.wrapping_add(self.icount.wrapping_sub(self.pc_system_icount_at_sync))
+            live_ticks
+                .wrapping_add(self.cpu_ticks().wrapping_sub(self.pc_system_cpu_ticks_at_sync))
         } else {
             self.pc_system_ticks_at_sync
         }
@@ -311,14 +349,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if self.in_vmx_guest && self.vmexit_check_invlpg(laddr)? {
             return Ok(());
         }
-        // Bochs paging.cc TLB_invlpg: invalidate prefetch, stack cache, TLB entries, icache links
-        self.invalidate_prefetch_q();
-        self.invalidate_stack_cache();
-        self.dtlb.invlpg(laddr);
-        self.itlb.invlpg(laddr);
-        self.sync_active_tlb_pin();
-        // Bochs paging.cc — iCache.breakLinks()
-        self.i_cache.break_links();
+        // Bochs paging.cc TLB_invlpg — prefetch/stack/TLB invalidation + link
+        // break, with fused Track-B pin publication.
+        self.tlb_invlpg(laddr);
 
         // BOCHS BX_INSTR_TLB_CNTRL with INVLPG kind.
         #[cfg(feature = "instrumentation")]
@@ -934,12 +967,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 return Ok(0);
             }
             let index = (msr - 0x800) << 4;
-            // LAPIC reads convert through `live_ticks(icount)` (apic.cc
-            // get_current_timer_count), which subtracts `icount_at_sync` —
-            // raw icount domain, like the MMIO read paths. `system_ticks()`
-            // would double-add the ticks-icount divergence accumulated by
-            // HLT fast-forwards and understate TMCCT (MSR 0x839) to ~0.
-            if let Some(val) = self.lapic.read_x2apic(index, self.icount) {
+            // LAPIC reads convert through `live_ticks(cpu_ticks)` (apic.cc
+            // get_current_timer_count), which subtracts `cpu_ticks_at_sync` —
+            // the CPU tick clock, like the MMIO read paths. `system_ticks()`
+            // would double-add the ticks divergence accumulated by HLT
+            // fast-forwards and understate TMCCT (MSR 0x839) to ~0.
+            if let Some(val) = self.lapic.read_x2apic(index, self.cpu_ticks()) {
                 return Ok(val);
             }
             self.exception(super::cpu::Exception::Gp, 0)?;
@@ -1280,7 +1313,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     tracing::trace!("WRMSR EFER: attempt to change LME when CR0.PG=1, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
-                // Bochs SetEFER (cpu/crregs.cc:1490-1494): if SVME is being set
+                // Bochs SetEFER (cpu/crregs.cc): if SVME is being set
                 // and VM_CR.SVMDIS is locked, the write must #GP(0). The
                 // architecturally-required protection is what BX_VM_CR_MSR_LOCK
                 // exists for: once SVMDIS is locked, EFER.SVME cannot be enabled
@@ -1458,10 +1491,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         match dr_idx {
             0..=3 => {
                 self.dr[dr_idx] = val as u64;
-                // Bochs: TLB_invlpg at breakpoint address
-                self.dtlb.invlpg(val as u64);
-                self.itlb.invlpg(val as u64);
-                self.sync_active_tlb_pin();
+                // Bochs crregs.cc MOV_DdRd — TLB_invlpg at the breakpoint
+                // address (full paging.cc TLB_invlpg: prior code skipped the
+                // stack-cache invalidation and icache link break).
+                self.tlb_invlpg(val as u64);
             }
             4 | 6 => {
                 // DR6: preserve reserved bits, only allow bits 0-3 (B0-B3) and bits 13-15 (BD,BS,BT)
@@ -3225,28 +3258,32 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
-    /// PKRU state — Bochs xsave.cc xsave_pkru_state. Single qword: low 32
-    /// bits hold the PKRU register; upper 32 are reserved.
+    /// PKRU state — Bochs xsave.cc xsave_pkru_state. The PKRU component is 8
+    /// bytes wide but only the low dword is architecturally defined, and Bochs
+    /// writes just those 4 bytes, leaving the upper 4 untouched.
     fn xsave_pkru_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
-        self.v_write_qword(seg, base, self.pkru as u64)?;
+        self.v_write_dword(seg, base, self.pkru)?;
         Ok(())
     }
 
-    /// PKRU restore — Bochs xsave.cc xrstor_pkru_state. Bochs reads into TMP32
-    /// and defers the set_PKeys side-effect to the end of XRSTOR; we have no
-    /// equivalent staging register, so apply via set_pkeys immediately.
+    /// PKRU restore — Bochs xsave.cc xrstor_pkru_state. Bochs stages the value
+    /// in TMP32 instead of calling set_PKeys here, because taking effect
+    /// immediately would apply the new access rights to the loads of every
+    /// XRSTOR component that follows. `pkru_tmp` is our equivalent staging
+    /// slot; `xrstor_unified` applies it once all components are restored.
     fn xrstor_pkru_state(
         &mut self,
         seg: super::decoder::BxSegregs,
         base: u64,
+        pkru_tmp: &mut u32,
     ) -> super::Result<()> {
-        let val = self.v_read_qword(seg, base)?;
-        self.set_pkeys(val as u32, self.pkrs);
+        *pkru_tmp = self.v_read_dword(seg, base)?;
         Ok(())
     }
 
-    fn xrstor_init_pkru_state(&mut self) {
-        self.set_pkeys(0, self.pkrs);
+    /// Bochs xsave.cc xrstor_init_pkru_state — also staged, not applied.
+    fn xrstor_init_pkru_state(pkru_tmp: &mut u32) {
+        *pkru_tmp = 0;
     }
 
     // =========================================================================
@@ -3502,6 +3539,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         seg: super::decoder::BxSegregs,
         base: u64,
         feature: u32,
+        pkru_tmp: &mut u32,
     ) -> super::Result<()> {
         use super::crregs::Xcr0Component;
         match Xcr0Component::from_bit(feature) {
@@ -3509,7 +3547,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Some(Xcr0Component::Opmask) => self.xrstor_opmask_state(seg, base),
             Some(Xcr0Component::ZmmHi256) => self.xrstor_zmm_hi256_state(seg, base),
             Some(Xcr0Component::HiZmm) => self.xrstor_hi_zmm_state(seg, base),
-            Some(Xcr0Component::Pkru) => self.xrstor_pkru_state(seg, base),
+            Some(Xcr0Component::Pkru) => self.xrstor_pkru_state(seg, base, pkru_tmp),
             Some(Xcr0Component::CetU) => self.xrstor_cet_u_state(seg, base),
             Some(Xcr0Component::CetS) => self.xrstor_cet_s_state(seg, base),
             Some(Xcr0Component::Uintr) => self.xrstor_uintr_state(seg, base),
@@ -3520,14 +3558,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Init an extended component to reset values
-    fn xrstor_init_extended_component(&mut self, feature: u32) {
+    fn xrstor_init_extended_component(&mut self, feature: u32, pkru_tmp: &mut u32) {
         use super::crregs::Xcr0Component;
         match Xcr0Component::from_bit(feature) {
             Some(Xcr0Component::Ymm) => self.xrstor_init_ymm_state(),
             Some(Xcr0Component::Opmask) => self.xrstor_init_opmask_state(),
             Some(Xcr0Component::ZmmHi256) => self.xrstor_init_zmm_hi256_state(),
             Some(Xcr0Component::HiZmm) => self.xrstor_init_hi_zmm_state(),
-            Some(Xcr0Component::Pkru) => self.xrstor_init_pkru_state(),
+            Some(Xcr0Component::Pkru) => Self::xrstor_init_pkru_state(pkru_tmp),
             Some(Xcr0Component::CetU) => self.xrstor_init_cet_u_state(),
             Some(Xcr0Component::CetS) => self.xrstor_init_cet_s_state(),
             Some(Xcr0Component::Uintr) => self.xrstor_init_uintr_state(),
@@ -4046,6 +4084,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
+        // Staging slot for the PKRU component — Bochs xsave.cc keeps it in
+        // TMP32 so a restored PKRU cannot change the access rights applied to
+        // the remaining component loads.
+        let mut pkru_tmp: u32 = 0;
+
         // --- Extended features (YMM and beyond) ---
         if compaction {
             // Compacted format: offset starts at 576, advances per component in xcomp_bv.
@@ -4055,9 +4098,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 let mask = 1u64 << feature;
                 if (requested & mask) != 0 {
                     if (restore_mask & mask) != 0 {
-                        self.xrstor_extended_component(seg, eaddr.wrapping_add(offset), feature)?;
+                        self.xrstor_extended_component(
+                            seg,
+                            eaddr.wrapping_add(offset),
+                            feature,
+                            &mut pkru_tmp,
+                        )?;
                     } else {
-                        self.xrstor_init_extended_component(feature);
+                        self.xrstor_init_extended_component(feature, &mut pkru_tmp);
                     }
                 }
                 // Offset advances for ALL components in format (xcomp_bv),
@@ -4077,12 +4125,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                             seg,
                             eaddr.wrapping_add(comp_offset),
                             feature,
+                            &mut pkru_tmp,
                         )?;
                     } else {
-                        self.xrstor_init_extended_component(feature);
+                        self.xrstor_init_extended_component(feature, &mut pkru_tmp);
                     }
                 }
             }
+        }
+
+        // Take effect of changing the PKRU state — Bochs xsave.cc xrstor(),
+        // keyed on the requested bitmap rather than on which branch above ran.
+        if (requested & (1u64 << super::crregs::Xcr0Component::Pkru as u32)) != 0 {
+            self.set_pkeys(pkru_tmp, self.pkrs);
         }
 
         Ok(())
@@ -4107,7 +4162,7 @@ mod tests {
     use crate::pc_system::BxPcSystemC;
     use core::ptr::NonNull;
 
-    /// Bochs `SetEFER` (cpu/crregs.cc:1490-1494): a write that tries to set
+    /// Bochs `SetEFER` (cpu/crregs.cc): a write that tries to set
     /// `EFER.SVME` while `VM_CR.SVMDIS` is locked must #GP(0) and leave the
     /// EFER MSR unchanged. The Err return is sufficient evidence \u2014 we don't
     /// inspect the IDT delivery side-effects, only that the gate fired.
@@ -4345,5 +4400,106 @@ mod tests {
             .expect("x2APIC ICR write must queue the destination from the high dword");
         assert_eq!(pending.dest, TARGET_APIC_ID);
         assert_eq!(pending.lo_cmd as u64 & 0xff, FIXED_VECTOR);
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod avx_mode_tests {
+    //! `handle_avx_mode_change` is the only thing that opens the EVEX decode
+    //! gate. Before this was wired, OPMASK_OK and EVEX_OK were never set by
+    //! anything, so every EVEX opcode carrying PREPARE_EVEX became #UD at
+    //! decode no matter what the guest had enabled in XCR0.
+
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::crregs::{BxCr0, BxCr4};
+    use crate::cpu::opcodes_table::{BxAvxVectorLength, FetchModeMask};
+
+    const XCR0_X87: u32 = 1 << 0;
+    const XCR0_SSE: u32 = 1 << 1;
+    const XCR0_YMM: u32 = 1 << 2;
+    const XCR0_AVX512: u32 = (1 << 5) | (1 << 6) | (1 << 7);
+
+    fn cpu_with(xcr0: u32) -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC<'static, AmdRyzen>> {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.cr0.insert(BxCr0::PE);
+        // protected_mode() reads cpu_mode, which CR0.PE alone does not update.
+        c.cpu_mode = crate::cpu::cpu::CpuMode::Ia32Protected;
+        c.cr4.insert(BxCr4::OSXSAVE);
+        c.xcr0.set32(xcr0);
+        c.handle_avx_mode_change();
+        c
+    }
+
+    #[test]
+    fn evex_decode_gate_needs_opmask_and_both_zmm_halves() {
+        // AVX state alone opens AVX but not EVEX.
+        let c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM);
+        assert!(c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
+        assert!(!c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+        assert!(!c.fetch_mode_mask.contains(FetchModeMask::OPMASK_OK));
+        assert_eq!(c.maxvl, BxAvxVectorLength::Vl256);
+
+        // All three AVX-512 bits open it.
+        let c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        assert!(c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
+        assert!(c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+        assert!(c.fetch_mode_mask.contains(FetchModeMask::OPMASK_OK));
+        assert_eq!(c.maxvl, BxAvxVectorLength::Vl512);
+
+        // Any one of them missing closes it again.
+        for missing in [1u32 << 5, 1 << 6, 1 << 7] {
+            let c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | (XCR0_AVX512 & !missing));
+            assert!(
+                !c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK),
+                "XCR0 without bit {missing:#x} must not enable EVEX"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pending_task_switch_closes_avx_and_evex_together() {
+        let mut c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        assert!(c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+
+        c.cr0.insert(BxCr0::TS);
+        c.handle_avx_mode_change();
+        assert!(!c.fetch_mode_mask.contains(FetchModeMask::AVX_OK));
+        assert!(!c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+        // CR0.TS does not shrink the register file, only make it unavailable.
+        assert_eq!(c.maxvl, BxAvxVectorLength::Vl512);
+
+        c.cr0.remove(BxCr0::TS);
+        c.handle_avx_mode_change();
+        assert!(c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK));
+    }
+
+    #[test]
+    fn a_vex_write_clears_only_what_xcr0_makes_visible() {
+        use crate::cpu::xmm::BxPackedXmmRegister;
+
+        // An AVX guest with no ZMM state: bits 256..511 are not architecturally
+        // visible, so a VEX write does not touch them.
+        let mut c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM);
+        for q in 0..8 {
+            c.vmm[1].set_zmm64u(q, 0xA5A5_A5A5_A5A5_A5A5);
+        }
+        c.write_xmm_reg(1, BxPackedXmmRegister::default());
+        assert_eq!(c.vmm[1].zmm64u(2), 0, "bits 128..255 are cleared");
+        assert_eq!(
+            c.vmm[1].zmm64u(4),
+            0xA5A5_A5A5_A5A5_A5A5,
+            "bits 256..511 are invisible to this guest and stay put"
+        );
+
+        // With ZMM state enabled the same write clears the whole register.
+        let mut c = cpu_with(XCR0_X87 | XCR0_SSE | XCR0_YMM | XCR0_AVX512);
+        for q in 0..8 {
+            c.vmm[1].set_zmm64u(q, 0xA5A5_A5A5_A5A5_A5A5);
+        }
+        c.write_xmm_reg(1, BxPackedXmmRegister::default());
+        for q in 2..8 {
+            assert_eq!(c.vmm[1].zmm64u(q), 0, "qword {q}");
+        }
     }
 }

@@ -2555,7 +2555,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             };
 
             // Interruptibility state — synthesise from inhibit_mask
-            // and NMI-blocked event bits, mirroring Bochs vmx.cc:2781-
+            // and NMI-blocked event bits, mirroring Bochs vmx.cc-
             // 2803.
             let mut interruptibility = 0u32;
             if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
@@ -2574,7 +2574,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             }
             self.vmcs.guest_interruptibility_state = interruptibility;
 
-            // Pending #DB exceptions — Bochs vmx.cc:2747-2772.
+            // Pending #DB exceptions — Bochs vmx.cc.
             let trap_like = reason.is_trap_like();
             let clear_dbg = !self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG)
                 && !trap_like
@@ -2655,6 +2655,12 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if reason == VmxVmexitReason::ExceptionNmi && vector == 2 {
             self.mask_event(Self::BX_EVENT_NMI);
         }
+        // The host always resumes running; `vmexit_load_host_state` above has
+        // already done this, but Bochs vmx.cc VMexit re-states it here so the
+        // guarantee does not depend on that helper. Both come after the
+        // guest-state save, which must record the sleeping state the guest
+        // exited from.
+        self.activity_state = super::cpu::CpuActivityState::Active;
         self.ext = false;
         self.last_exception_type = -1; // BX_ET_NONE
 
@@ -2774,7 +2780,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     ///   - VPID_ENABLE requires non-zero VPID (VMCS_16BIT_CONTROL_VPID).
     ///   - VM-entry interruption info: when valid bit set, vector + type
     ///     fields must be sane (Bochs vmenter_inject_events preconditions).
-    /// Bochs MSR-list address check (vmx.cc:929-955). Used for the
+    /// Bochs MSR-list address check (vmx.cc). Used for the
     /// VMEXIT-store / VMEXIT-load / VMENTRY-load lists. When `count`
     /// is non-zero the base address must be 16-byte aligned and
     /// `[addr, addr + count*16 - 1]` must lie inside the host physical
@@ -2816,7 +2822,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     fn vmenter_load_check_vm_controls(&mut self) -> Option<VmxErr> {
-        // Bochs vmx.cc:580-621 — every control field must respect its
+        // Bochs vmx.cc — every control field must respect its
         // IA32_VMX_*_CTLS allowed-0 / allowed-1 mask: bits cleared in
         // the value that are required by allowed-0 fail; bits set in
         // the value that aren't permitted by allowed-1 fail.
@@ -2838,7 +2844,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             tracing::warn!("VMENTRY check_vm_controls: primary proc-based controls out of bounds");
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
-        // Bochs vmx.cc:599-602: secondary controls only consulted when
+        // Bochs vmx.cc: secondary controls only consulted when
         // ACTIVATE_SECONDARY_CONTROLS is set.
         if proc1 & VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS != 0 {
             let proc2 = self.vmcs.secondary_proc_based_ctls;
@@ -2916,7 +2922,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
 
-        // Bochs vmx.cc:789-805: when EPT_ENABLE is set the EPTPTR must
+        // Bochs vmx.cc: when EPT_ENABLE is set the EPTPTR must
         // pass is_eptptr_valid; when it's clear, UNRESTRICTED_GUEST and
         // MBE_CTRL are illegal (each requires EPT).
         if ept_enabled {
@@ -2932,7 +2938,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
 
-        // Bochs vmx.cc:923-926: STORE_VMX_PREEMPTION_TIMER VMEXIT control
+        // Bochs vmx.cc: STORE_VMX_PREEMPTION_TIMER VMEXIT control
         // requires the pin-based VMX_PREEMPTION_TIMER_VMEXIT.
         if exit_ctls & VMX_VMEXIT_CTRL1_STORE_VMX_PREEMPTION_TIMER != 0
             && self.vmcs.pin_based_ctls & VMX_PIN_BASED_VMEXEC_CTRL_VMX_PREEMPTION_TIMER_VMEXIT == 0
@@ -2943,7 +2949,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
 
-        // Bochs vmx.cc:929-955: VMEXIT MSR-store / -load areas — when
+        // Bochs vmx.cc: VMEXIT MSR-store / -load areas — when
         // count > 0 the address must be 16-byte aligned, in physical
         // range, and `addr + count*16 - 1` must also be in range.
         // ? on Option propagates None, but here the success value IS
@@ -2970,7 +2976,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(err);
         }
 
-        // Bochs vmx.cc:982-987: DEACTIVATE_DUAL_MONITOR_TREATMENT VM-entry
+        // Bochs vmx.cc: DEACTIVATE_DUAL_MONITOR_TREATMENT VM-entry
         // control requires the CPU to be in SMM.
         const VMX_VMENTRY_CTRL_DEACTIVATE_DUAL_MONITOR: u32 = 1 << 10;
         if entry_ctls & VMX_VMENTRY_CTRL_DEACTIVATE_DUAL_MONITOR != 0 && !self.in_smm {
@@ -2980,7 +2986,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
 
-        // Bochs vmx.cc:665-673 NMI/VIRTUAL_NMI consistency:
+        // Bochs vmx.cc NMI/VIRTUAL_NMI consistency:
         //   - VIRTUAL_NMI requires NMI_EXITING.
         //   - NMI_WINDOW_EXITING requires VIRTUAL_NMI.
         let pin = self.vmcs.pin_based_ctls;
@@ -2997,7 +3003,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmControlField);
         }
 
-        // Bochs vmx.cc:699-761 TPR-shadow checks. The threshold's high-4-bit
+        // Bochs vmx.cc TPR-shadow checks. The threshold's high-4-bit
         // bound (0..=15) is enforced here; the TPR-threshold VMEXIT itself is
         // raised by vmx_tpr_threshold_vmexit() from the CR8 write path.
         if ctls1 & VMX_VM_EXEC_CTRL1_TPR_SHADOW != 0 && self.vmcs.tpr_threshold > 15 {
@@ -3073,7 +3079,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     /// Validate host-state fields — Bochs vmx.cc VMenterLoadCheckHostState
-    /// (vmx.cc:1143-1435). Each failure surfaces with
+    /// (vmx.cc). Each failure surfaces with
     /// VMXERR_VMENTRY_INVALID_VM_HOST_STATE_FIELD.
     fn vmenter_load_check_host_state(&mut self) -> Option<VmxErr> {
         let exit_ctls = self.vmcs.vm_exit_ctls;
@@ -3081,7 +3087,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         let x86_64_host = exit_ctls & VMX_VMEXIT_CTRL1_HOST_ADDR_SPACE_SIZE != 0;
         let x86_64_guest = entry_ctls & VMX_VMENTRY_CTRL_X86_64_GUEST != 0;
 
-        // Bochs vmx.cc:1156-1169 address-space-size consistency.
+        // Bochs vmx.cc address-space-size consistency.
         if self.long_mode() {
             if !x86_64_host {
                 tracing::warn!("VMENTRY check_host_state: long-mode host without X86_64_HOST");
@@ -3094,7 +3100,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
-        // CR0 / CR4 VMX-mandatory bits (Bochs vmx.cc:1175-1202).
+        // CR0 / CR4 VMX-mandatory bits (Bochs vmx.cc).
         if !self.check_cr0_vmx(self.vmcs.host_cr0, false) {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
@@ -3102,7 +3108,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
-        // CR3 must be a valid physical address (Bochs vmx.cc:1188).
+        // CR3 must be a valid physical address (Bochs vmx.cc).
         if !is_valid_phy_addr(self.vmcs.host_cr3) {
             tracing::warn!(
                 "VMENTRY check_host_state: bad host CR3={:#018x}",
@@ -3112,7 +3118,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         }
 
         // Segment selectors: TI must be clear and RPL must be 0 for all
-        // six host segment registers (Bochs vmx.cc:1204-1210).
+        // six host segment registers (Bochs vmx.cc).
         let segs = [
             ("ES", self.vmcs.host_es_selector),
             ("CS", self.vmcs.host_cs_selector),
@@ -3147,7 +3153,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         }
 
         // Canonical checks for the natural-width host fields
-        // (Bochs vmx.cc:1230-1276 — only meaningful in long mode).
+        // (Bochs vmx.cc — only meaningful in long mode).
         let canonical_fields = [
             ("TR base", self.vmcs.host_tr_base),
             ("FS base", self.vmcs.host_fs_base),
@@ -3167,7 +3173,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             }
         }
 
-        // PAT validity (Bochs vmx.cc:1279-1284): each of the eight 8-bit
+        // PAT validity (Bochs vmx.cc): each of the eight 8-bit
         // entries must encode a supported memory type (UC/WC/WT/WP/WB/UC-).
         if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_PAT_MSR != 0
             && !is_valid_pat_msr(self.vmcs.host_ia32_pat)
@@ -3178,7 +3184,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             );
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
-        // SPEC_CTRL validity (Bochs vmx.cc:1287-1291): only documented
+        // SPEC_CTRL validity (Bochs vmx.cc): only documented
         // bits may be set. We accept the same masks Bochs documents.
         if self.vmcs.vm_exit_ctls2 & VMX_VMEXIT_CTRL2_LOAD_HOST_IA32_SPEC_CTRL != 0
             && !is_valid_spec_ctrl(self.vmcs.host_ia32_spec_ctrl)
@@ -3190,7 +3196,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
         // EFER bits, when LOAD_EFER_MSR is set, must match the
-        // x86_64_host control (Bochs vmx.cc:1295-1308).
+        // x86_64_host control (Bochs vmx.cc).
         if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_EFER_MSR != 0 {
             use super::crregs::BxEfer;
             let efer = self.vmcs.host_ia32_efer;
@@ -3221,14 +3227,14 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     /// Validate guest-state fields — Bochs vmx.cc
-    /// `vmenter_load_check_guest_state` (vmx.cc:1436-2310).
+    /// `vmenter_load_check_guest_state` (vmx.cc).
     fn vmenter_load_check_guest_state(&mut self) -> Option<VmxErr> {
         let entry_ctls = self.vmcs.vm_entry_ctls;
         let ctls2 = self.vmcs.secondary_proc_based_ctls;
         let x86_64_guest = entry_ctls & VMX_VMENTRY_CTRL_X86_64_GUEST != 0;
         let unrestricted = ctls2 & VMX_VM_EXEC_CTRL2_UNRESTRICTED_GUEST != 0;
 
-        // RFLAGS validation (Bochs vmx.cc:1449-1473).
+        // RFLAGS validation (Bochs vmx.cc).
         // Reserved bits [63:22], bit 15, bit 5, bit 3 must be zero;
         // bit 1 must be 1; VM=1 incompatible with x86_64_guest.
         const RFLAGS_RESERVED: u64 = 0xFFFF_FFFF_FFC0_8028;
@@ -3251,7 +3257,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
-        // CR0 (Bochs vmx.cc:1475-1503). Under UNRESTRICTED_GUEST the
+        // CR0 (Bochs vmx.cc). Under UNRESTRICTED_GUEST the
         // CR0_FIXED0 mask is relaxed to drop PE+PG (the VMM may run a
         // real-mode guest); otherwise the standard fixed-0 mask applies.
         // We delegate the NE / PE / PG bit logic to check_cr0_vmx with
@@ -3271,7 +3277,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             }
         }
 
-        // CR3 must fit in physical address width (Bochs vmx.cc:1513).
+        // CR3 must fit in physical address width (Bochs vmx.cc).
         if !is_valid_phy_addr(self.vmcs.guest_cr3) {
             tracing::warn!(
                 "VMENTRY check_guest_state: bad guest CR3={:#018x}",
@@ -3280,7 +3286,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
-        // CR4 — VMX-mandatory + long-mode consistency (Bochs vmx.cc:1519-1548).
+        // CR4 — VMX-mandatory + long-mode consistency (Bochs vmx.cc).
         if !self.check_cr4_vmx(self.vmcs.guest_cr4) {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
@@ -3297,7 +3303,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         }
 
         // DR7 — when LOAD_DBG_CTRLS is set the upper 32 bits must be zero
-        // (Bochs vmx.cc:1550-1556).
+        // (Bochs vmx.cc).
         const VMX_VMENTRY_CTRL_LOAD_DBG_CTRLS: u32 = 1 << 2;
         if entry_ctls & VMX_VMENTRY_CTRL_LOAD_DBG_CTRLS != 0 && (self.vmcs.guest_dr7 >> 32) != 0 {
             tracing::warn!(
@@ -3307,7 +3313,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
-        // CET interlock — CR4.CET requires CR0.WP (Bochs vmx.cc:1560-1563).
+        // CET interlock — CR4.CET requires CR0.WP (Bochs vmx.cc).
         use super::crregs::BxCr0;
         let cr0_bits = BxCr0::from_bits_truncate(self.vmcs.guest_cr0 as u32);
         if cr4.contains(BxCr4::CET) && !cr0_bits.contains(BxCr0::WP) {
@@ -3315,7 +3321,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
-        // Long-mode-only canonical checks (Bochs vmx.cc:1670-1691). RSP
+        // Long-mode-only canonical checks (Bochs vmx.cc). RSP
         // is naturally signed, RIP for x86-64 must be canonical too.
         if x86_64_guest {
             if !self.is_canonical(self.vmcs.guest_rip) {
@@ -3355,7 +3361,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
         // Guest EFER under LOAD_GUEST_EFER must agree with X86_64_GUEST
         // in the LME/LMA bits and have only documented bits (Bochs
-        // vmx.cc:1738-1771).
+        // vmx.cc).
         if entry_ctls & VMX_VMENTRY_CTRL_LOAD_GUEST_EFER_MSR != 0 {
             use super::crregs::BxEfer;
             let efer = self.vmcs.guest_ia32_efer;
@@ -3421,11 +3427,11 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
-        // Per-segment validation (Bochs vmx.cc:1632-1837). The order
+        // Per-segment validation (Bochs vmx.cc). The order
         // matters because CS/SS DPL/RPL relations consult both.
         self.check_guest_segments(v8086_guest, x86_64_guest, unrestricted)?;
 
-        // GDTR/IDTR — Bochs vmx.cc:1840-1857. Limit ≤ 0xFFFF and base
+        // GDTR/IDTR — Bochs vmx.cc. Limit ≤ 0xFFFF and base
         // canonical (in long mode).
         if self.vmcs.guest_gdtr_limit > 0xFFFF {
             tracing::warn!(
@@ -3448,7 +3454,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             return Some(VmxErr::VmentryInvalidVmHostStateField);
         }
 
-        // LDTR — Bochs vmx.cc:1860-1899. Only checked when not unusable.
+        // LDTR — Bochs vmx.cc. Only checked when not unusable.
         let ldtr_ar = SegAr::from_bits_truncate(self.vmcs.guest_ldtr_ar);
         if !ldtr_ar.contains(SegAr::UNUSABLE) {
             // TI bit (bit 2 of selector) must be clear (must be in GDT).
@@ -3482,7 +3488,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             }
         }
 
-        // TR — Bochs vmx.cc:1905-1952. Always required (must be valid).
+        // TR — Bochs vmx.cc. Always required (must be valid).
         let tr_ar = SegAr::from_bits_truncate(self.vmcs.guest_tr_ar);
         if !self.is_canonical(self.vmcs.guest_tr_base) {
             tracing::warn!("VMENTRY check_guest_state: TR base non-canonical");
@@ -3522,7 +3528,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             }
         }
 
-        // VMCS link pointer — Bochs vmx.cc:2028-2049. When != BX_INVALID
+        // VMCS link pointer — Bochs vmx.cc. When != BX_INVALID
         // _VMCSPTR (~0u64), must be page-aligned and have the matching
         // VMCS revision ID. Reading the revision ID requires a physical
         // memory access; mirror Bochs. We don't yet model VMCS_SHADOWING
@@ -3559,7 +3565,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         None
     }
 
-    /// Per-segment guest validation — Bochs vmx.cc:1632-1837. Order:
+    /// Per-segment guest validation — Bochs vmx.cc. Order:
     /// validate ES, CS, SS, DS, FS, GS individually, then enforce
     /// CS/SS DPL+RPL relations and unrestricted-guest exceptions.
     fn check_guest_segments(
@@ -3629,7 +3635,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             let ar = SegAr::from_bits_truncate(ar_raw);
             let invalid = ar.contains(SegAr::UNUSABLE);
 
-            // v8086 mode (Bochs vmx.cc:1647-1664): all six segments must
+            // v8086 mode (Bochs vmx.cc): all six segments must
             // have base = (selector << 4), limit = 0xFFFF, AR = 0xF3.
             if v8086_guest {
                 if base != (u64::from(selector) << 4) {
@@ -3671,7 +3677,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
                 continue;
             }
 
-            // ES/CS/SS/DS bases must fit in 32 bits (Bochs vmx.cc:1685-1690).
+            // ES/CS/SS/DS bases must fit in 32 bits (Bochs vmx.cc).
             if matches!(
                 seg,
                 BxSegregs::Es | BxSegregs::Cs | BxSegregs::Ss | BxSegregs::Ds
@@ -3766,7 +3772,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             }
         }
 
-        // Cross-segment CS/SS DPL relations (Bochs vmx.cc:1799-1814).
+        // Cross-segment CS/SS DPL relations (Bochs vmx.cc).
         let cs_ty = cs_ar.type_field();
         let ss_dpl = ss_ar.dpl();
         let cs_dpl = cs_ar.dpl();
@@ -3792,7 +3798,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             _ => {}
         }
 
-        // RPL relations between CS and SS (Bochs vmx.cc:1816-1836).
+        // RPL relations between CS and SS (Bochs vmx.cc).
         if !v8086_guest {
             let cs_rpl = (self.vmcs.guest_cs_selector & 3) as u8;
             let ss_rpl = (self.vmcs.guest_ss_selector & 3) as u8;
@@ -3898,7 +3904,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         if exit_ctls & VMX_VMEXIT_CTRL1_LOAD_EFER_MSR != 0 {
             self.efer.set32(self.vmcs.host_ia32_efer as u32);
         } else {
-            // Bochs vmx.cc:2858-2861 fallback: when LOAD_EFER_MSR is clear,
+            // Bochs vmx.cc fallback: when LOAD_EFER_MSR is clear,
             // EFER.LME and EFER.LMA track x86_64_host directly.
             use super::crregs::BxEfer;
             let mut efer = self.efer.bits();
@@ -3916,7 +3922,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.set_rsp(self.vmcs.host_rsp);
         self.set_rip(self.vmcs.host_rip);
 
-        // Bochs vmx.cc:2879-2883: 32-bit PAE host requires PDPTR
+        // Bochs vmx.cc: 32-bit PAE host requires PDPTR
         // validation. A failure aborts the VMEXIT (Bochs VMABORT_HOST_
         // PDPTR_CORRUPTED). We surface #UD into the host so the failure
         // is visible.
@@ -4112,7 +4118,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
 
         // DR7 + IA32_DEBUGCTL only when LOAD_DBG_CTRLS is set.
         if entry_ctls & VMX_VMENTRY_CTRL_LOAD_DBG_CTRLS != 0 {
-            // Bochs vmx.cc:2272 forces bits 15:14 clear, bit 10 set.
+            // Bochs vmx.cc forces bits 15:14 clear, bit 10 set.
             self.dr7 = super::crregs::BxDr7::from_bits_retain(
                 ((self.vmcs.guest_dr7 & !0xC000) | 0x400) as u32,
             );
@@ -4237,7 +4243,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         self.tr.cache.u.set_segment_l((tr_ar >> 13) & 1 != 0);
         self.tr.cache.u.set_segment_avl((tr_ar >> 12) & 1 != 0);
 
-        // CPL recompute — Bochs vmx.cc:2320 sets CPL = guest SS DPL.
+        // CPL recompute — Bochs vmx.cc sets CPL = guest SS DPL.
         // rusty_box surfaces CPL via CS.selector.rpl (cs_rpl()), so
         // override it here AFTER the segment loads.
         let new_cpl = ((self.vmcs.guest_ss_ar >> 5) & 0x3) as u8;
@@ -4592,7 +4598,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
     }
 
     /// VM-entry event injection — Bochs vmx.cc VMenterInjectEvents
-    /// (~vmx.cc:2421-2511). When the high bit (valid) of
+    /// (~vmx.cc). When the high bit (valid) of
     /// `VMCS_32BIT_CONTROL_VMENTRY_INTERRUPTION_INFO` is set, the host has
     /// requested an immediate interrupt/exception in the guest. Vector,
     /// type, and push-error flag are decoded from the field; error code is
@@ -4687,7 +4693,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
             self.set_rip(new_rip);
         }
 
-        // Bochs vmx.cc:2484-2488 records the exception classification
+        // Bochs vmx.cc records the exception classification
         // for HARDWARE_EXCEPTION injections so a fault during delivery
         // can be classified for double-fault detection.
         if bochs_type == 3 && (vector as usize) < super::cpu::BX_CPU_HANDLED_EXCEPTIONS as usize {
@@ -4702,7 +4708,7 @@ impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
         let err16 = (error_code & 0xFFFF) as u16;
         let res = self.interrupt(vector, intr_type, push_error, push_error, err16);
         self.ext = false;
-        // Bochs vmx.cc:2510: clear last_exception_type after delivery so
+        // Bochs vmx.cc: clear last_exception_type after delivery so
         // subsequent unrelated faults aren't classified as double-fault
         // continuations.
         self.last_exception_type = -1; // BX_ET_NONE

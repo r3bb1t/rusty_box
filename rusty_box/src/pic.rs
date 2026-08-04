@@ -428,25 +428,56 @@ impl BxPicC {
         self.reset();
     }
 
-    /// Reset the PIC to initial state (Bochs `bx_pic_c::reset`)
+    /// Reset the PIC to initial state (Bochs `bx_pic_c::reset`).
+    ///
+    /// Restores every field Bochs restores — not just imr/isr/irr — so a
+    /// guest-triggered reset (0xCF9, triple fault) reverts the reprogrammed
+    /// `interrupt_offset`, `lowest_priority`, `auto_eoi`, `special_mask`,
+    /// `read_reg_select`, `polled`, and `rotate_on_autoeoi` to their power-on
+    /// values. Leaving them stale gave wrong first reads of 0x20/0xA0 and a
+    /// misplaced IRQ vector base after reboot.
     pub fn reset(&mut self) {
+        // Master (Bochs pic.cc reset(): master_pic.*)
+        self.master.master = true;
+        self.master.interrupt_offset = 0x08; // IRQ0 = INT 0x08
+        self.master.sfnm = false;
+        self.master.buffered_mode = false;
+        self.master.master_slave = true;
+        self.master.auto_eoi = false;
         self.master.imr = 0xFF;
         self.master.isr = 0;
         self.master.irr = 0;
+        self.master.read_reg_select = false;
+        self.master.irq = 0;
         self.master.int_pin = false;
         self.master.init = PicInitState::default();
-        self.master.irq_in = [0; 8];
-        // Bochs pic.cc reset(): master_pic.edge_level = 0
+        self.master.special_mask = false;
+        self.master.lowest_priority = 7;
+        self.master.polled = false;
+        self.master.rotate_on_autoeoi = false;
         self.master.edge_level = 0;
+        self.master.irq_in = [0; 8];
 
+        // Slave (Bochs pic.cc reset(): slave_pic.*)
+        self.slave.master = false;
+        self.slave.interrupt_offset = 0x70; // IRQ8 = INT 0x70
+        self.slave.sfnm = false;
+        self.slave.buffered_mode = false;
+        self.slave.master_slave = false;
+        self.slave.auto_eoi = false;
         self.slave.imr = 0xFF;
         self.slave.isr = 0;
         self.slave.irr = 0;
+        self.slave.read_reg_select = false;
+        self.slave.irq = 0;
         self.slave.int_pin = false;
         self.slave.init = PicInitState::default();
-        self.slave.irq_in = [0; 8];
-        // Bochs pic.cc reset(): slave_pic.edge_level = 0
+        self.slave.special_mask = false;
+        self.slave.lowest_priority = 7;
+        self.slave.polled = false;
+        self.slave.rotate_on_autoeoi = false;
         self.slave.edge_level = 0;
+        self.slave.irq_in = [0; 8];
     }
 
     /// Dispatch `Pic8259State::service()` result, handling cascade side effects.
@@ -587,8 +618,12 @@ impl BxPicC {
                 pic.rotate_on_autoeoi = false;
                 pic.int_pin = false; // Reprogramming clears previous INTR
             }
-            // Deassert: slave clears cascade line on master (Bochs pic.cc)
-            if !is_master {
+            // Bochs pic.cc ICW1: the master signals BX_CLEAR_INTR because
+            // reprogramming clears any INTR already asserted to the CPU; the
+            // slave instead deasserts its cascade line on the master.
+            if is_master {
+                self.clear_intr();
+            } else {
                 self.master.irq_in[2] = 0;
             }
         } else if (value & 0x18) == 0x08 {
@@ -992,6 +1027,9 @@ impl BxPicC {
         // Re-service master after acknowledge (Bochs pic.cc)
         self.service_pic_dispatch(true);
 
+        // BENCHMARK-ONLY (temporary): delivered-vector histogram (PIC bank)
+        crate::vec_diag::count(256 + usize::from(vector));
+
         vector
     }
 }
@@ -1256,6 +1294,57 @@ mod tests {
         assert!(!pic.master.rotate_on_autoeoi);
         assert_eq!(pic.master.lowest_priority, 7);
         assert_eq!(pic.master.imr, 0x00);
+    }
+
+    #[test]
+    fn test_pic_master_icw1_signals_clear_intr() {
+        // Bochs pic.cc ICW1: the master calls BX_CLEAR_INTR so any INTR already
+        // asserted to the CPU is withdrawn when the PIC is reprogrammed.
+        let mut pic = BxPicC::new();
+        pic.irq_cleared = false;
+        pic.write(PIC_MASTER_CMD, 0x11, 1);
+        assert!(pic.irq_cleared, "master ICW1 must signal BX_CLEAR_INTR");
+
+        // The slave side must NOT signal the CPU — it deasserts its cascade
+        // line on the master instead.
+        let mut pic = BxPicC::new();
+        pic.master.irq_in[2] = 1;
+        pic.irq_cleared = false;
+        pic.write(PIC_SLAVE_CMD, 0x11, 1);
+        assert!(!pic.irq_cleared, "slave ICW1 must not signal BX_CLEAR_INTR");
+        assert_eq!(pic.master.irq_in[2], 0, "slave ICW1 deasserts cascade IRQ2");
+    }
+
+    #[test]
+    fn test_pic_reset_restores_bochs_defaults() {
+        // A guest reset (0xCF9, triple fault) must revert every reprogrammed
+        // field to its power-on value, not just imr/isr/irr.
+        let mut pic = BxPicC::new();
+        pic.master.interrupt_offset = 0x50;
+        pic.master.lowest_priority = 2;
+        pic.master.auto_eoi = true;
+        pic.master.special_mask = true;
+        pic.master.read_reg_select = true;
+        pic.master.polled = true;
+        pic.master.rotate_on_autoeoi = true;
+        pic.slave.interrupt_offset = 0x90;
+        pic.slave.lowest_priority = 4;
+
+        pic.reset();
+
+        assert_eq!(pic.master.interrupt_offset, 0x08);
+        assert_eq!(pic.master.lowest_priority, 7);
+        assert!(!pic.master.auto_eoi);
+        assert!(!pic.master.special_mask);
+        assert!(!pic.master.read_reg_select);
+        assert!(!pic.master.polled);
+        assert!(!pic.master.rotate_on_autoeoi);
+        assert!(pic.master.master);
+        assert!(pic.master.master_slave);
+        assert_eq!(pic.slave.interrupt_offset, 0x70);
+        assert_eq!(pic.slave.lowest_priority, 7);
+        assert!(!pic.slave.master);
+        assert!(!pic.slave.master_slave);
     }
 
     #[test]

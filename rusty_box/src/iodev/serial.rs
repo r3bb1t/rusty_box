@@ -202,8 +202,8 @@ struct SerialPort {
     /// Default: 87 usec at 115200 baud, 8-bit word (Bochs serial.cc).
     databyte_usec: u32,
 
-    // Each configured UART owns one FIFO-timeout timer. TX/RX stay immediate.
-    // The handle survives reset because the pc-system registration does too.
+    // Each configured UART owns one FIFO-timeout timer and one TX-shift timer.
+    // The handles survive reset because the pc-system registration does too.
     fifo_timer_handle: Option<usize>,
 
     // `Some` means the scheduler must arm/rearm the one-shot after this I/O
@@ -213,6 +213,17 @@ struct SerialPort {
     /// True when the scheduler must consume the current activate/deactivate
     /// state. Unrelated UART I/O must not restart an existing deadline.
     fifo_timer_request_pending: bool,
+
+    // TX shift-register timer (Bochs serial.cc tx_timer): paces transmission at
+    // one byte per `databyte_usec` so THRE interrupts match the baud rate
+    // instead of firing immediately on every THR write. Same deferred-arm shape
+    // as the FIFO timer above.
+    tx_timer_handle: Option<usize>,
+    /// `Some(delay)` arms/rearms the TX one-shot; `None` deactivates it. Set
+    /// when a byte moves into the shift register at the transmission instant.
+    tx_timer_delay_usec: Option<u64>,
+    /// True when the scheduler must consume the TX activate/deactivate state.
+    tx_timer_request_pending: bool,
 
     // TX output buffer — bytes written by guest, drained by host
     tx_output: RingBuffer<u8, TX_OUTPUT_CAPACITY>,
@@ -260,6 +271,10 @@ impl SerialPort {
             fifo_timeout_delay_usec: None,
             fifo_timer_request_pending: false,
 
+            tx_timer_handle: None,
+            tx_timer_delay_usec: None,
+            tx_timer_request_pending: false,
+
             tx_output: RingBuffer::new(),
         };
         // Simulate connected device
@@ -301,6 +316,8 @@ impl SerialPort {
         // Timer handles persist across soft resets; timeout scheduling does not.
         self.fifo_timeout_delay_usec = None;
         self.fifo_timer_request_pending = true;
+        self.tx_timer_delay_usec = None;
+        self.tx_timer_request_pending = true;
 
         // Simulate connected device
         self.modem_status.cts = true;
@@ -340,8 +357,10 @@ const SERIAL_SNAPSHOT_HEADER_LEN: u64 = 8;
 
 /// Per-port bytes excluding logical FIFO/output contents and present optional
 /// `u64` timer values. FIFO and output counts are included in this fixed part.
+/// Covers the FIFO-timeout and TX-shift timer bool flags (each optional u64
+/// payload is added separately in `serial_port_snapshot_v3_len`).
 #[cfg(feature = "std")]
-const SERIAL_SNAPSHOT_PORT_FIXED_LEN: u64 = 71;
+const SERIAL_SNAPSHOT_PORT_FIXED_LEN: u64 = 74;
 
 #[cfg(feature = "std")]
 fn invalid_serial_snapshot(message: &'static str) -> io::Error {
@@ -538,6 +557,12 @@ fn serial_port_snapshot_v3_len(port: &SerialPort) -> io::Result<u64> {
     if port.fifo_timeout_delay_usec.is_some() {
         len = checked_snapshot_len_add(len, 8)?;
     }
+    if port.tx_timer_handle.is_some() {
+        len = checked_snapshot_len_add(len, 8)?;
+    }
+    if port.tx_timer_delay_usec.is_some() {
+        len = checked_snapshot_len_add(len, 8)?;
+    }
     Ok(len)
 }
 
@@ -619,6 +644,9 @@ fn save_serial_port_snapshot_v3<W: Write>(
     write_optional_handle(writer, port.fifo_timer_handle)?;
     write_optional_u64(writer, port.fifo_timeout_delay_usec)?;
     writer.write_bool(port.fifo_timer_request_pending)?;
+    write_optional_handle(writer, port.tx_timer_handle)?;
+    write_optional_u64(writer, port.tx_timer_delay_usec)?;
+    writer.write_bool(port.tx_timer_request_pending)?;
     write_serial_ring(writer, &port.tx_output)?;
     writer.write_bool(pending_irq_raise)?;
     writer.write_bool(pending_irq_lower)
@@ -653,6 +681,9 @@ struct SerialPortSnapshot {
     fifo_timer_handle: Option<usize>,
     fifo_timeout_delay_usec: Option<u64>,
     fifo_timer_request_pending: bool,
+    tx_timer_handle: Option<usize>,
+    tx_timer_delay_usec: Option<u64>,
+    tx_timer_request_pending: bool,
     tx_output: RingBuffer<u8, TX_OUTPUT_CAPACITY>,
     pending_irq_raise: bool,
     pending_irq_lower: bool,
@@ -779,6 +810,9 @@ impl SerialPortSnapshot {
         let fifo_timeout_delay_usec = read_optional_u64(reader)?;
         validate_fifo_timeout_state(fifo_cntl, &rx_fifo, fifo_timeout_delay_usec)?;
         let fifo_timer_request_pending = reader.read_bool()?;
+        let tx_timer_handle = read_optional_handle(reader)?;
+        let tx_timer_delay_usec = read_optional_u64(reader)?;
+        let tx_timer_request_pending = reader.read_bool()?;
         let tx_output = read_serial_ring(reader)?;
         let pending_irq_raise = reader.read_bool()?;
         let pending_irq_lower = reader.read_bool()?;
@@ -811,6 +845,9 @@ impl SerialPortSnapshot {
             fifo_timer_handle,
             fifo_timeout_delay_usec,
             fifo_timer_request_pending,
+            tx_timer_handle,
+            tx_timer_delay_usec,
+            tx_timer_request_pending,
             tx_output,
             pending_irq_raise,
             pending_irq_lower,
@@ -845,6 +882,9 @@ impl SerialPortSnapshot {
         port.fifo_timer_handle = self.fifo_timer_handle;
         port.fifo_timeout_delay_usec = self.fifo_timeout_delay_usec;
         port.fifo_timer_request_pending = self.fifo_timer_request_pending;
+        port.tx_timer_handle = self.tx_timer_handle;
+        port.tx_timer_delay_usec = self.tx_timer_delay_usec;
+        port.tx_timer_request_pending = self.tx_timer_request_pending;
         port.tx_output = self.tx_output;
     }
 }
@@ -1044,6 +1084,86 @@ impl BxSerialC {
         should_assert
     }
 
+    /// Attach or clear this port's fixed `TimerOwner::SerialTx` handle.
+    #[inline]
+    pub(crate) fn set_tx_timer_handle(&mut self, port_index: usize, handle: Option<usize>) {
+        if port_index < self.num_ports {
+            self.ports[port_index].tx_timer_handle = handle;
+        }
+    }
+
+    /// Return the registered fixed TX-shift handle for one configured port.
+    #[inline]
+    pub(crate) fn tx_timer_handle(&self, port_index: usize) -> Option<usize> {
+        self.ports
+            .get(port_index)
+            .filter(|_| port_index < self.num_ports)
+            .and_then(|port| port.tx_timer_handle)
+    }
+
+    /// Drain one TX-timer scheduler update. `Some(Some(delay))` arms/rearms the
+    /// one-shot; `Some(None)` deactivates; `None` leaves the deadline untouched.
+    #[inline]
+    pub(crate) fn take_tx_timer_update(&mut self, port_index: usize) -> Option<Option<u64>> {
+        let port = self
+            .ports
+            .get_mut(port_index)
+            .filter(|_| port_index < self.num_ports)?;
+        if !core::mem::take(&mut port.tx_timer_request_pending) {
+            return None;
+        }
+        Some(port.tx_timer_delay_usec)
+    }
+
+    /// Service a fixed `TimerOwner::SerialTx(port_index)` callback — Bochs
+    /// serial.cc `tx_timer()`. Emit the shift-register byte, load the next
+    /// queued byte, raise THRE when the hold register drains, and leave a
+    /// re-arm request whenever transmission continues.
+    pub(crate) fn tx_timer_fired(&mut self, port_index: usize) {
+        if port_index >= self.num_ports {
+            return;
+        }
+        {
+            let port = &mut self.ports[port_index];
+            // The armed one-shot has fired; consume its request.
+            port.tx_timer_delay_usec = None;
+            port.tx_timer_request_pending = false;
+            if port.line_status.tsr_empty {
+                // Shift register already idle — a cancelled/stale fire.
+                return;
+            }
+            // Emit the shift-register byte (Bochs serial.cc tx_timer output).
+            port.tx_output.push_back(port.tsrbuffer);
+            port.line_status.tsr_empty = true;
+        }
+        let mut gen_int = false;
+        {
+            let port = &mut self.ports[port_index];
+            if port.fifo_cntl.enable && !port.tx_fifo.is_empty() {
+                if let Some(byte) = port.tx_fifo.pop_front() {
+                    port.tsrbuffer = byte;
+                    port.line_status.tsr_empty = false;
+                    gen_int = port.tx_fifo.is_empty();
+                }
+            } else if !port.line_status.thr_empty {
+                port.tsrbuffer = port.thrbuffer;
+                port.line_status.tsr_empty = false;
+                gen_int = true;
+            }
+        }
+        if !self.ports[port_index].line_status.tsr_empty {
+            if gen_int {
+                self.ports[port_index].line_status.thr_empty = true;
+                self.raise_interrupt(port_index, IntSource::TxHold);
+            }
+            // Arm for the next byte's transmission time.
+            let delay = self.ports[port_index].databyte_usec as u64;
+            let port = &mut self.ports[port_index];
+            port.tx_timer_delay_usec = Some(delay);
+            port.tx_timer_request_pending = true;
+        }
+    }
+
     /// Check if any IRQ actions are pending, and return them.
     /// Returns (irq_number, raise) pairs to process.
     /// Uses a fixed-size buffer to avoid heap allocation on every tick.
@@ -1132,8 +1252,15 @@ impl BxSerialC {
             }
         }
 
+        // Bochs raise_interrupt calls DEV_pic_raise_irq synchronously. The
+        // deferred model coalesces to the LAST edge per drain window: a raise
+        // supersedes a pending lower so a lower→raise sequence (e.g. an RBR read
+        // then a freshly received byte before the next drain) nets HIGH, as in
+        // Bochs — not the reverse. The PIC's raise/lower are already idempotent
+        // (edge-latched on IRR), so emitting only the final edge is exact.
         if gen_int && s.modem_cntl.out2 {
             self.pending_irq_raise[port_idx] = true;
+            self.pending_irq_lower[port_idx] = false;
         }
     }
 
@@ -1145,7 +1272,10 @@ impl BxSerialC {
             && !s.tx_interrupt
             && !s.fifo_interrupt
         {
+            // A pending lower supersedes a pending raise (last edge wins),
+            // matching Bochs's synchronous DEV_pic_lower_irq ordering.
             self.pending_irq_lower[port_idx] = true;
+            self.pending_irq_raise[port_idx] = false;
         }
     }
 
@@ -1164,8 +1294,17 @@ impl BxSerialC {
             let reached_trigger = {
                 let port = &mut self.ports[port_idx];
                 port.rx_fifo.push_back(data);
-                let trigger = RX_FIFO_TRIGGERS[port.fifo_cntl.rxtrigger as usize] as usize;
-                let reached_trigger = port.rx_fifo.len() >= trigger;
+                // Bochs serial.cc rx_fifo_enq: RXDATA fires only when the level
+                // reaches EXACTLY the trigger (== 4/8/14). Trigger level 1
+                // (rxtrigger 0, the switch default) fires on every byte. Using
+                // `>=` would re-raise above the trigger and skip arming the
+                // character-timeout one-shot.
+                let reached_trigger = match port.fifo_cntl.rxtrigger {
+                    1 => port.rx_fifo.len() == 4,
+                    2 => port.rx_fifo.len() == 8,
+                    3 => port.rx_fifo.len() == 14,
+                    _ => true,
+                };
 
                 if reached_trigger {
                     // A receive-data interrupt supersedes a pending timeout.
@@ -1187,10 +1326,12 @@ impl BxSerialC {
             return;
         }
 
+        // Bochs serial.cc rx_fifo_enq (non-FIFO): an overrun raises RXLSTAT but
+        // still falls through to overwrite RBR and raise RXDATA — the new byte
+        // is delivered, not dropped.
         if self.ports[port_idx].line_status.rxdata_ready {
             self.ports[port_idx].line_status.overrun_error = true;
             self.raise_interrupt(port_idx, IntSource::RxLstat);
-            return;
         }
         self.ports[port_idx].rxbuffer = data;
         self.ports[port_idx].line_status.rxdata_ready = true;
@@ -1366,12 +1507,12 @@ impl BxSerialC {
                     val |= 0x80;
                 }
 
+                // Bochs serial.cc read() LSR clears only overrun/framing/break_int
+                // (+ ls_interrupt/ls_ipending); parity_error and fifo_error persist.
                 let s = &mut self.ports[port_idx];
                 s.line_status.overrun_error = false;
-                s.line_status.parity_error = false;
                 s.line_status.framing_error = false;
                 s.line_status.break_int = false;
-                s.line_status.fifo_error = false;
                 s.ls_interrupt = false;
                 s.ls_ipending = false;
 
@@ -1476,16 +1617,20 @@ impl BxSerialC {
                             s.line_status.tsr_empty = false;
 
                             if s.modem_cntl.local_loopback {
-                                // Loopback: immediately enqueue into RX
+                                // Loopback bypasses shift-register timing —
+                                // Bochs serial.cc feeds the byte straight to RX.
                                 let byte = s.tsrbuffer;
                                 s.line_status.tsr_empty = true;
                                 self.rx_fifo_enq(port_idx, byte);
                             } else {
-                                // "Transmit" immediately — we're an emulator
+                                // Bochs serial.cc: the shift-register byte is
+                                // emitted by the TX timer after databyte_usec,
+                                // not immediately — pacing THRE to the baud rate
+                                // (activate_timer(tx_timer_index)).
                                 let s = &mut self.ports[port_idx];
-                                let ch = s.tsrbuffer;
-                                s.tx_output.push_back(ch);
-                                s.line_status.tsr_empty = true;
+                                let delay = s.databyte_usec as u64;
+                                s.tx_timer_delay_usec = Some(delay);
+                                s.tx_timer_request_pending = true;
                             }
                         } else {
                             // TSR busy — clear TX interrupt, data queued
@@ -1494,18 +1639,11 @@ impl BxSerialC {
                             self.lower_interrupt(port_idx);
                         }
                     } else if s.fifo_cntl.enable {
-                        // THR already has data, FIFO mode — queue the byte
+                        // THR already busy, FIFO mode — queue the byte; the TX
+                        // timer drains it. Bochs serial.cc drops on overflow.
                         if s.tx_fifo.len() < FIFO_SIZE {
                             s.tx_fifo.push_back(data);
                         }
-                        // Drain FIFO immediately — we're an emulator, no real baud timing
-                        let s = &mut self.ports[port_idx];
-                        while let Some(byte) = s.tx_fifo.pop_front() {
-                            s.tx_output.push_back(byte);
-                        }
-                        s.line_status.thr_empty = true;
-                        s.line_status.tsr_empty = true;
-                        self.raise_interrupt(port_idx, IntSource::TxHold);
                     }
                 }
             }
@@ -1522,24 +1660,36 @@ impl BxSerialC {
                     let new_rxlstat = (val & 0x04) != 0;
                     let new_modstat = (val & 0x08) != 0;
 
+                    // Bochs serial.cc IER write: each changed enable bit either
+                    // promotes a pending source (→ gen_int, a single trailing
+                    // raise) or demotes an active one (→ inline lower). Track both
+                    // so the final raise/lower is conditional, not an
+                    // unconditional pulse.
+                    let mut gen_int = false;
+                    let mut needs_lower = false;
+
                     // Modem status enable transition
                     if new_modstat && !s.int_enable.modstat_enable {
                         if s.ms_ipending {
                             s.ms_interrupt = true;
                             s.ms_ipending = false;
+                            gen_int = true;
                         }
                     } else if !new_modstat && s.int_enable.modstat_enable && s.ms_interrupt {
                         s.ms_ipending = true;
                         s.ms_interrupt = false;
+                        needs_lower = true;
                     }
 
                     // TX hold enable transition
                     if new_txhold && !s.int_enable.txhold_enable {
                         if s.line_status.thr_empty {
                             s.tx_interrupt = true;
+                            gen_int = true;
                         }
                     } else if !new_txhold && s.int_enable.txhold_enable {
                         s.tx_interrupt = false;
+                        needs_lower = true;
                     }
 
                     // RX data enable transition
@@ -1547,19 +1697,23 @@ impl BxSerialC {
                         if s.fifo_ipending {
                             s.fifo_interrupt = true;
                             s.fifo_ipending = false;
+                            gen_int = true;
                         }
                         if s.rx_ipending {
                             s.rx_interrupt = true;
                             s.rx_ipending = false;
+                            gen_int = true;
                         }
                     } else if !new_rxdata && s.int_enable.rxdata_enable {
                         if s.rx_interrupt {
                             s.rx_ipending = true;
                             s.rx_interrupt = false;
+                            needs_lower = true;
                         }
                         if s.fifo_interrupt {
                             s.fifo_ipending = true;
                             s.fifo_interrupt = false;
+                            needs_lower = true;
                         }
                     }
 
@@ -1568,10 +1722,12 @@ impl BxSerialC {
                         if s.ls_ipending {
                             s.ls_interrupt = true;
                             s.ls_ipending = false;
+                            gen_int = true;
                         }
                     } else if !new_rxlstat && s.int_enable.rxlstat_enable && s.ls_interrupt {
                         s.ls_ipending = true;
                         s.ls_interrupt = false;
+                        needs_lower = true;
                     }
 
                     s.int_enable.rxdata_enable = new_rxdata;
@@ -1579,8 +1735,15 @@ impl BxSerialC {
                     s.int_enable.rxlstat_enable = new_rxlstat;
                     s.int_enable.modstat_enable = new_modstat;
 
-                    self.raise_interrupt(port_idx, IntSource::Ier);
-                    self.lower_interrupt(port_idx);
+                    // Order matches Bochs: demotions lower inline first, then a
+                    // single raise if any promotion occurred, so a write that both
+                    // promotes and demotes nets HIGH (the trailing raise wins).
+                    if needs_lower {
+                        self.lower_interrupt(port_idx);
+                    }
+                    if gen_int {
+                        self.raise_interrupt(port_idx, IntSource::Ier);
+                    }
                 }
             }
 
@@ -1835,14 +1998,17 @@ impl BxSerialC {
         reader.finish_exact()
     }
 
-    /// Validates decoded FIFO-timeout handles after PC_SYSTEM owns have been
-    /// restored. The closure must reject non-SerialFifo(port) owners.
-    pub(crate) fn validate_snapshot_v3_timer_handles<F>(
+    /// Validates decoded FIFO-timeout and TX-shift handles after PC_SYSTEM
+    /// owners have been restored. `validate_fifo` must reject non-SerialFifo(port)
+    /// owners and `validate_tx` must reject non-SerialTx(port) owners.
+    pub(crate) fn validate_snapshot_v3_timer_handles<F, G>(
         &self,
-        mut validate_owner: F,
+        mut validate_fifo: F,
+        mut validate_tx: G,
     ) -> io::Result<()>
     where
         F: FnMut(usize, usize) -> io::Result<()>,
+        G: FnMut(usize, usize) -> io::Result<()>,
     {
         if self.num_ports > self.ports.len() {
             return Err(invalid_serial_snapshot(
@@ -1851,7 +2017,10 @@ impl BxSerialC {
         }
         for (port_index, port) in self.ports.iter().take(self.num_ports).enumerate() {
             if let Some(handle) = port.fifo_timer_handle {
-                validate_owner(port_index, handle)?;
+                validate_fifo(port_index, handle)?;
+            }
+            if let Some(handle) = port.tx_timer_handle {
+                validate_tx(port_index, handle)?;
             }
         }
         Ok(())
@@ -2008,6 +2177,13 @@ mod tests {
         serial.write(0x03F8, b'H' as u32, 1);
         serial.write(0x03F8, b'i' as u32, 1);
 
+        // Bochs serial.cc paces transmission: the shift register emits one byte
+        // per TX-timer fire (databyte_usec), not immediately on the THR write.
+        // Two queued bytes therefore need two fires before both reach output.
+        assert!(serial.drain_tx_output(0).next().is_none());
+        serial.tx_timer_fired(0);
+        serial.tx_timer_fired(0);
+
         // Check TX output buffer
         let mut output = [0u8; 2];
         let mut i = 0;
@@ -2017,6 +2193,29 @@ mod tests {
         }
         assert_eq!(i, 2);
         assert_eq!(&output, b"Hi");
+    }
+
+    #[test]
+    fn thr_write_arms_tx_timer_and_defers_transmission() {
+        let mut serial = BxSerialC::new(1);
+        // 8-bit word (the reset default) at the default divisor=1 → 115200 baud.
+        // Writing the already-default word length does not recompute the timing,
+        // so databyte_usec stays at Bochs's reset default of 87 (serial.cc).
+        serial.write(0x03FB, 0x03, 1);
+        serial.write(0x03F8, b'X' as u32, 1);
+
+        // The byte sits in the shift register — nothing transmitted yet — and
+        // the TX timer is armed for one databyte_usec (Bochs activate_timer).
+        assert!(serial.drain_tx_output(0).next().is_none());
+        assert_eq!(serial.take_tx_timer_update(0), Some(Some(87)));
+        // The pending request is one-shot; nothing new until the next arm.
+        assert_eq!(serial.take_tx_timer_update(0), None);
+
+        // The timer fire performs the actual transmission.
+        serial.tx_timer_fired(0);
+        assert_eq!(serial.drain_tx_output(0).collect::<Vec<_>>(), vec![b'X']);
+        // Nothing more queued ⇒ no re-arm.
+        assert_eq!(serial.take_tx_timer_update(0), None);
     }
 
     #[test]
@@ -2114,6 +2313,88 @@ mod tests {
         assert_eq!(serial.read(COM_BASES[0] + REG_IIR_FCR, 1) & 0x01, 0x01);
     }
 
+    #[test]
+    fn serial_rx_trigger_raises_only_at_exact_level() {
+        // Bochs serial.cc rx_fifo_enq raises RXDATA when the FIFO level reaches
+        // EXACTLY the trigger (4 here), then arms the character-timeout one-shot
+        // for every byte above it — it does not re-raise. The old `>=` compare
+        // re-raised on every byte at/above the trigger and never re-armed.
+        let mut serial = fifo_serial_with_four_byte_trigger();
+
+        // Three bytes: below the trigger — no RXDATA, timeout armed.
+        for b in 0..3u8 {
+            serial.receive_byte(0, b);
+        }
+        assert_eq!(serial.take_pending_irqs().count(), 0, "below trigger: no IRQ");
+        assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
+
+        // Fourth byte hits the trigger exactly — one RXDATA raise, timeout gone.
+        serial.receive_byte(0, 3);
+        let mut irqs = serial.take_pending_irqs();
+        assert_eq!(irqs.next(), Some((COM_IRQS[0], true)));
+        assert_eq!(irqs.next(), None);
+        drop(irqs);
+        assert_eq!(serial.fifo_timeout_delay_usec(0), None);
+
+        // Fifth byte is above the trigger — no re-raise, timeout re-armed.
+        serial.receive_byte(0, 4);
+        assert_eq!(
+            serial.take_pending_irqs().count(),
+            0,
+            "above trigger: no re-raise"
+        );
+        assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3 * 87));
+    }
+
+    #[test]
+    fn serial_non_fifo_overrun_overwrites_rbr_and_raises_rxdata() {
+        // Bochs serial.cc rx_fifo_enq (non-FIFO): a byte arriving while RBR is
+        // still full sets overrun_error AND falls through to overwrite RBR and
+        // raise RXDATA — the new byte is delivered, not dropped.
+        let mut serial = BxSerialC::new(1);
+        let base = COM_BASES[0];
+        serial.write(base + REG_LCR, 0x03, 1); // 8-bit word
+        serial.write(base + REG_MCR, 0x08, 1); // OUT2 gates the IRQ line
+        serial.write(base + REG_IER_DLM, 0x01, 1); // enable RXDATA interrupt
+        let _ = serial.take_pending_irqs().count();
+
+        serial.receive_byte(0, b'A');
+        let mut irqs = serial.take_pending_irqs();
+        assert_eq!(irqs.next(), Some((COM_IRQS[0], true)));
+        drop(irqs);
+
+        // Second byte without draining RBR: overrun.
+        serial.receive_byte(0, b'B');
+        // A fresh RXDATA raise fired for the overwriting byte.
+        assert_eq!(serial.take_pending_irqs().next(), Some((COM_IRQS[0], true)));
+        // overrun_error is reported (LSR bit 1) before the read clears it.
+        assert_ne!(serial.read(base + REG_LSR, 1) & 0x02, 0, "overrun_error set");
+        // RBR now holds the NEW byte, not the stale 'A'.
+        assert_eq!(serial.read(base + REG_RBR_THR, 1), u32::from(b'B'));
+    }
+
+    #[test]
+    fn serial_lsr_read_keeps_parity_and_fifo_error() {
+        // Bochs serial.cc read() LSR clears overrun/framing/break_int but leaves
+        // parity_error and fifo_error latched.
+        let mut serial = BxSerialC::new(1);
+        serial.ports[0].line_status.parity_error = true;
+        serial.ports[0].line_status.fifo_error = true;
+        serial.ports[0].line_status.overrun_error = true;
+
+        let lsr = serial.read(COM_BASES[0] + REG_LSR, 1);
+        assert_ne!(lsr & 0x02, 0, "OE reported");
+        assert_ne!(lsr & 0x04, 0, "PE reported");
+        assert_ne!(lsr & 0x80, 0, "FIFO error reported");
+
+        assert!(
+            !serial.ports[0].line_status.overrun_error,
+            "overrun cleared on read"
+        );
+        assert!(serial.ports[0].line_status.parity_error, "PE persists");
+        assert!(serial.ports[0].line_status.fifo_error, "fifo_error persists");
+    }
+
     #[cfg(feature = "std")]
     #[test]
     fn serial_snapshot_resumes_partial_fifo_and_irq_state() {
@@ -2136,21 +2417,32 @@ mod tests {
         assert_eq!(serial.read(base + REG_RBR_THR, 1), 0x10);
         serial.receive_byte(0, 0x13);
 
+        // THR writes still drive the TX-hold interrupt raise (first byte frees
+        // the hold register) and lower (second byte finds the shift register
+        // busy) that this test snapshots. Under Bochs timing the shift register
+        // drains on the TX timer, not immediately, so stage the exact TX buffer
+        // contents the snapshot should capture rather than relying on an
+        // instant transmit.
         serial.write(base + REG_RBR_THR, b'a' as u32, 1);
         serial.write(base + REG_RBR_THR, b'b' as u32, 1);
         serial.write(base + REG_RBR_THR, b'c' as u32, 1);
-        assert_eq!(serial.ports[0].tx_output.pop_front(), Some(b'a'));
         serial.write(base + REG_RBR_THR, b'd' as u32, 1);
 
         let port = &mut serial.ports[0];
-        port.tx_fifo.push_back(0x20);
-        port.tx_fifo.push_back(0x21);
-        port.tx_fifo.push_back(0x22);
-        assert_eq!(port.tx_fifo.pop_front(), Some(0x20));
-        port.tx_fifo.push_back(0x23);
+        port.tx_output.clear();
+        for b in [b'b', b'c', b'd'] {
+            port.tx_output.push_back(b);
+        }
+        port.tx_fifo.clear();
+        for b in [0x21u8, 0x22, 0x23] {
+            port.tx_fifo.push_back(b);
+        }
 
         assert_eq!(serial.fifo_timeout_delay_usec(0), Some(3_123));
-        assert!(serial.pending_irq_raise[0]);
+        // The last TX-hold edge here was a lower (writing 'b' found the shift
+        // register busy and cleared tx_interrupt with no other source active);
+        // it supersedes the earlier raise, so only a lower stays pending.
+        assert!(!serial.pending_irq_raise[0]);
         assert!(serial.pending_irq_lower[0]);
 
         let mut saved = Vec::new();
@@ -2189,7 +2481,56 @@ mod tests {
         );
         assert_eq!(
             serial.take_pending_irqs().collect::<Vec<_>>(),
-            vec![(COM_IRQS[0], true), (COM_IRQS[0], false)]
+            vec![(COM_IRQS[0], false)]
+        );
+    }
+
+    #[test]
+    fn serial_lower_then_raise_in_one_window_nets_raise() {
+        // Regression for the batched-IRQ chronology bug: an RBR read (lower)
+        // followed by a freshly received byte (raise) before the next drain must
+        // net the line HIGH, matching Bochs's synchronous DEV_pic_* ordering.
+        // The old two-boolean drain emitted raise-before-lower and stalled the
+        // guest on the last byte.
+        let mut serial = BxSerialC::new(1);
+        let base = COM_BASES[0];
+        serial.write(base + REG_LCR, 0x03, 1); // 8-bit word
+        serial.write(base + REG_MCR, 0x08, 1); // OUT2 gates the IRQ line
+        serial.write(base + REG_IER_DLM, 0x01, 1); // enable RXDATA interrupt (non-FIFO)
+        let _ = serial.take_pending_irqs().count();
+
+        // A byte arrives and raises RXDATA.
+        serial.receive_byte(0, 0xaa);
+        assert_eq!(serial.take_pending_irqs().next(), Some((COM_IRQS[0], true)));
+
+        // Guest reads it (lowers), then a new byte arrives (raises) — both before
+        // the next drain. Net must be a single raise, not a raise+lower pulse.
+        assert_eq!(serial.read(base + REG_RBR_THR, 1), 0xaa);
+        serial.receive_byte(0, 0xbb);
+        assert_eq!(
+            serial.take_pending_irqs().collect::<Vec<_>>(),
+            vec![(COM_IRQS[0], true)]
+        );
+    }
+
+    #[test]
+    fn serial_ier_enable_without_pending_source_raises_nothing() {
+        // Bochs serial.cc IER write raises only on an actual promotion. Enabling
+        // RXDATA with nothing pending must not queue a spurious raise (the old
+        // code pulsed raise+lower unconditionally).
+        let mut serial = BxSerialC::new(1);
+        let base = COM_BASES[0];
+        serial.write(base + REG_LCR, 0x03, 1);
+        serial.write(base + REG_MCR, 0x08, 1); // OUT2
+        let _ = serial.take_pending_irqs().count();
+
+        // Enable RXDATA with no rx_ipending/fifo_ipending pending — no promotion,
+        // so no raise should be queued.
+        serial.write(base + REG_IER_DLM, 0x01, 1);
+        assert_eq!(
+            serial.take_pending_irqs().count(),
+            0,
+            "IER enable with no pending source raises nothing"
         );
     }
 }

@@ -9,12 +9,40 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_cmp.cc`, `avx512_pfp.cc`.
 
+use super::softfloat3e::f32_class::f32_class;
+use super::softfloat3e::f64_class::f64_class;
+use super::softfloat3e::internals::{sign_f32, sign_f64};
+use super::softfloat3e::softfloat::{
+    f32_denormal_to_zero, f64_denormal_to_zero, softfloat_get_exception_flags, SoftFloatClass,
+};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
+use super::softfloat3e::softfloat_compare::{f32_compare_predicate, f64_compare_predicate};
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxSegregs, Instruction},
+    decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
+
+/// Number of byte elements per vector length: VL0=16, VL1=32, VL2=64
+#[inline]
+fn byte_elements(vl: u8) -> usize {
+    match vl {
+        0 => 16,
+        1 => 32,
+        _ => 64,
+    }
+}
+
+/// Number of 16-bit elements per vector length: VL0=8, VL1=16, VL2=32
+#[inline]
+fn word_elements(vl: u8) -> usize {
+    match vl {
+        0 => 8,
+        1 => 16,
+        _ => 32,
+    }
+}
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
@@ -118,42 +146,28 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 }
 
 /// Read src2 dword elements from register or memory
-fn read_src2_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+fn read_rm_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    nelements: usize,
+    _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
-        Ok(read_zmm(cpu, instr.src2()))
+        Ok(read_zmm(cpu, instr.src1()))
     } else {
-        let mut tmp = BxPackedZmmRegister::default();
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        for i in 0..nelements {
-            tmp.set_zmm32u(i, cpu.v_read_dword(seg, laddr + (i * 4) as u64)?);
-        }
-        Ok(tmp)
+        cpu.evex_load_broadcast_mask_vector_d(instr)
     }
 }
 
 /// Read src2 qword elements from register or memory
-fn read_src2_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+fn read_rm_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut BxCpuC<'_, I, T>,
     instr: &Instruction,
-    nelements: usize,
+    _nelements: usize,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
-        Ok(read_zmm(cpu, instr.src2()))
+        Ok(read_zmm(cpu, instr.src1()))
     } else {
-        let mut tmp = BxPackedZmmRegister::default();
-        let laddr = cpu.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        for i in 0..nelements {
-            let lo = cpu.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-            let hi = cpu.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-            tmp.set_zmm64u(i, lo | (hi << 32));
-        }
-        Ok(tmp)
+        cpu.evex_load_broadcast_mask_vector_q(instr)
     }
 }
 
@@ -161,159 +175,80 @@ fn read_src2_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 // Floating-point comparison predicates (32 predicates, imm8[4:0])
 // ============================================================================
 
-/// Compare two f32 values per the VCMPPS/VCMPSS predicate encoding.
-///
-/// The 32 predicates (imm8 & 0x1F) group into 8 base operations that repeat
-/// with signaling/quiet variants (same logic for emulation purposes):
-///   0=EQ, 1=LT, 2=LE, 3=UNORD, 4=NEQ, 5=NLT, 6=NLE, 7=ORD
-#[inline]
-/// Intel VCMPPS/VCMPSD predicate encoding (32 predicates, two groups).
-/// Group A (0-7, 16-23): ordered base comparisons.
-/// Group B (8-15, 24-31): swapped ordered/unordered sense.
-/// Signaling vs quiet (0-7 vs 16-23, 8-15 vs 24-31) only affects exception
-/// flags which we don't implement — same logical result within each pair.
-fn fp_compare_f32(a: f32, b: f32, imm: u8) -> bool {
-    let unordered = a.is_nan() || b.is_nan();
-    match imm & 0x1F {
-        // Group A: ordered (0-7, 16-23)
-        0 | 16 => !unordered && a == b, // EQ_OQ / EQ_OS
-        1 | 17 => !unordered && a < b,  // LT_OS / LT_OQ
-        2 | 18 => !unordered && a <= b, // LE_OS / LE_OQ
-        3 | 19 => unordered,            // UNORD_Q / UNORD_S
-        4 | 20 => unordered || a != b,  // NEQ_UQ / NEQ_US
-        5 | 21 => unordered || a >= b,  // NLT_US / NLT_UQ
-        6 | 22 => unordered || a > b,   // NLE_US / NLE_UQ
-        7 | 23 => !unordered,           // ORD_Q / ORD_S
-        // Group B: swapped (8-15, 24-31)
-        8 | 24 => unordered || a == b,   // EQ_UQ / EQ_US
-        9 | 25 => unordered || a < b,    // NGE_US / NGE_UQ
-        10 | 26 => unordered || a <= b,  // NGT_US / NGT_UQ
-        11 | 27 => false,                // FALSE_OQ / FALSE_OS
-        12 | 28 => !unordered && a != b, // NEQ_OQ / NEQ_OS
-        13 | 29 => !unordered && a >= b, // GE_OS / GE_OQ
-        14 | 30 => !unordered && a > b,  // GT_OS / GT_OQ
-        15 | 31 => true,                 // TRUE_UQ / TRUE_US
-        _ => unreachable!("AVX compare predicate imm & 0x1F cannot exceed 31"),
-    }
-}
-
-#[inline]
-fn fp_compare_f64(a: f64, b: f64, imm: u8) -> bool {
-    let unordered = a.is_nan() || b.is_nan();
-    match imm & 0x1F {
-        0 | 16 => !unordered && a == b,
-        1 | 17 => !unordered && a < b,
-        2 | 18 => !unordered && a <= b,
-        3 | 19 => unordered,
-        4 | 20 => unordered || a != b,
-        5 | 21 => unordered || a >= b,
-        6 | 22 => unordered || a > b,
-        7 | 23 => !unordered,
-        8 | 24 => unordered || a == b,
-        9 | 25 => unordered || a < b,
-        10 | 26 => unordered || a <= b,
-        11 | 27 => false,
-        12 | 28 => !unordered && a != b,
-        13 | 29 => !unordered && a >= b,
-        14 | 30 => !unordered && a > b,
-        15 | 31 => true,
-        _ => unreachable!("AVX compare predicate imm & 0x1F cannot exceed 31"),
-    }
-}
-
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
     // ========================================================================
-    // VCMPPS — Compare packed single-precision FP, producing opmask
-    // EVEX.NDS.W0.0F C2 /r ib
+    // VCMPPS / VCMPPD — Compare packed FP, producing an opmask
+    // EVEX.NDS.W0.0F C2 /r ib and EVEX.NDS.W1.0F C2 /r ib
+    //
+    // Bochs avx512_pfp.cc VCMPPS_MASK_KGwHpsWpsIbR: an element masked off by
+    // the writemask is not compared at all, so it raises no exception and
+    // its result bit stays clear. The accumulated flags then go through
+    // check_exceptionsSSE before the opmask is written.
     // ========================================================================
 
-    /// VCMPPS Kk{k}, Hps, Wps, Ib — register form
-    pub fn evex_vcmpps_r(&mut self, instr: &Instruction) -> super::Result<()> {
+    /// The shared body of the four VCMPPS/VCMPPD forms.
+    fn evex_cmp_pfp(
+        &mut self,
+        instr: &Instruction,
+        src2: BxPackedZmmRegister,
+        qword: bool,
+    ) -> super::Result<()> {
         let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
-        let imm = instr.ib();
+        let nelements = if qword {
+            qword_elements(vl)
+        } else {
+            dword_elements(vl)
+        };
+        // Bochs avx512_pfp.cc VCMPPS_MASK_KGwHpsWpsIbR compares
+        // `op1 = src1()` (Hps = EVEX.vvvv) against `op2 = src2()` (Wps = rm).
+        // rusty_box's accessors are the other way round — `src2()` is vvvv —
+        // so vvvv is read here and the rm/memory operand arrives as `src2`.
+        let src1 = read_zmm(self, instr.src2());
+        let predicate = instr.ib() & 0x1F;
         let write_mask = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
-            if fp_compare_f32(src1.zmm32f(i), src2.zmm32f(i), imm) && ((write_mask >> i) & 1 != 0) {
+            if (write_mask >> i) & 1 == 0 {
+                continue;
+            }
+            let hit = if qword {
+                f64_compare_predicate(predicate, src1.zmm64u(i), src2.zmm64u(i), &mut status)
+            } else {
+                f32_compare_predicate(predicate, src1.zmm32u(i), src2.zmm32u(i), &mut status)
+            };
+            if hit {
                 result |= 1 << i;
             }
         }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.bx_write_opmask(instr.dst() as usize, result);
         Ok(())
+    }
+
+    /// VCMPPS Kk{k}, Hps, Wps, Ib — register form
+    pub fn evex_vcmpps_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        let src2 = read_zmm(self, instr.src1());
+        self.evex_cmp_pfp(instr, src2, false)
     }
 
     /// VCMPPS Kk{k}, Hps, Mps, Ib — memory form
     pub fn evex_vcmpps_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let mut src2 = BxPackedZmmRegister::default();
-        let laddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        for i in 0..nelements {
-            src2.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-        }
-        let imm = instr.ib();
-        let write_mask = read_opmask_for_write(self, instr);
-        let mut result: u64 = 0;
-        for i in 0..nelements {
-            if fp_compare_f32(src1.zmm32f(i), src2.zmm32f(i), imm) && ((write_mask >> i) & 1 != 0) {
-                result |= 1 << i;
-            }
-        }
-        self.bx_write_opmask(instr.dst() as usize, result);
-        Ok(())
+        let src2 = self.evex_load_broadcast_mask_vector_d(instr)?;
+        self.evex_cmp_pfp(instr, src2, false)
     }
-
-    // ========================================================================
-    // VCMPPD — Compare packed double-precision FP, producing opmask
-    // EVEX.NDS.W1.0F C2 /r ib
-    // ========================================================================
 
     /// VCMPPD Kk{k}, Hpd, Wpd, Ib — register form
     pub fn evex_vcmppd_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
-        let imm = instr.ib();
-        let write_mask = read_opmask_for_write(self, instr);
-        let mut result: u64 = 0;
-        for i in 0..nelements {
-            if fp_compare_f64(src1.zmm64f(i), src2.zmm64f(i), imm) && ((write_mask >> i) & 1 != 0) {
-                result |= 1 << i;
-            }
-        }
-        self.bx_write_opmask(instr.dst() as usize, result);
-        Ok(())
+        let src2 = read_zmm(self, instr.src1());
+        self.evex_cmp_pfp(instr, src2, true)
     }
 
     /// VCMPPD Kk{k}, Hpd, Mpd, Ib — memory form
     pub fn evex_vcmppd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let mut src2 = BxPackedZmmRegister::default();
-        let laddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        for i in 0..nelements {
-            let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-            let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-            src2.set_zmm64u(i, lo | (hi << 32));
-        }
-        let imm = instr.ib();
-        let write_mask = read_opmask_for_write(self, instr);
-        let mut result: u64 = 0;
-        for i in 0..nelements {
-            if fp_compare_f64(src1.zmm64f(i), src2.zmm64f(i), imm) && ((write_mask >> i) & 1 != 0) {
-                result |= 1 << i;
-            }
-        }
-        self.bx_write_opmask(instr.dst() as usize, result);
-        Ok(())
+        let src2 = self.evex_load_broadcast_mask_vector_q(instr)?;
+        self.evex_cmp_pfp(instr, src2, true)
     }
 
     // ========================================================================
@@ -325,8 +260,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vptestmd_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
@@ -342,8 +277,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vptestmd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_dwords(self, instr, nelements)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_dwords(self, instr, nelements)?;
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
@@ -364,8 +299,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vptestmq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
@@ -381,8 +316,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vptestmq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_qwords(self, instr, nelements)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_qwords(self, instr, nelements)?;
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
@@ -403,8 +338,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vptestnmd_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
@@ -420,8 +355,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vptestnmd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_dwords(self, instr, nelements)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_dwords(self, instr, nelements)?;
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
@@ -442,8 +377,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vptestnmq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_zmm(self, instr.src2());
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_zmm(self, instr.src1());
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
@@ -459,8 +394,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vptestnmq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_qwords(self, instr, nelements)?;
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = read_rm_qwords(self, instr, nelements)?;
         let write_mask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
         for i in 0..nelements {
@@ -552,4 +487,782 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.bx_write_opmask(instr.dst() as usize, result);
         Ok(())
     }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Byte and word compares that produce an opmask (AVX512_BW), plus the
+    // qword VPCMP forms. Each has a single def entry — the destination is
+    // the opmask, so there is no `_Kmask` twin — and every one names a
+    // masked loader, so a masked-off element performs no memory access.
+    //
+    // At VL512 a byte compare fills all 64 bits of the result, which is why
+    // nothing here applies Bochs's CUT_OPMASK: the cut would shift by 64.
+    // ════════════════════════════════════════════════════════════════════
+
+    /// The shared body of the byte-granular compares.
+    /// `LOAD_MASK_VectorB` per ia_opcodes_evex.def.
+    fn evex_cmp_to_opmask_b(
+        &mut self,
+        instr: &Instruction,
+        pred: impl Fn(u8, u8) -> bool,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = byte_elements(vl);
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_load_mask_vector_b(instr)?
+        };
+        let write_mask = read_opmask_for_write(self, instr);
+        let mut result: u64 = 0;
+        for i in 0..nelements {
+            if (write_mask >> i) & 1 != 0 && pred(src1.zmmubyte(i), src2.zmmubyte(i)) {
+                result |= 1 << i;
+            }
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// The shared body of the word-granular compares.
+    /// `LOAD_MASK_VectorW` per ia_opcodes_evex.def.
+    fn evex_cmp_to_opmask_w(
+        &mut self,
+        instr: &Instruction,
+        pred: impl Fn(u16, u16) -> bool,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = word_elements(vl);
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_load_mask_vector_w(instr)?
+        };
+        let write_mask = read_opmask_for_write(self, instr);
+        let mut result: u64 = 0;
+        for i in 0..nelements {
+            if (write_mask >> i) & 1 != 0 && pred(src1.zmm16u(i), src2.zmm16u(i)) {
+                result |= 1 << i;
+            }
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// VPCMPEQB Kk{k}, Hdq, Wdq — EVEX.66.0F.WIG 74
+    pub fn evex_vpcmpeqb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cmp_to_opmask_b(instr, |a, b| a == b)
+    }
+
+    /// VPCMPGTB Kk{k}, Hdq, Wdq — EVEX.66.0F.WIG 64 (signed)
+    pub fn evex_vpcmpgtb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cmp_to_opmask_b(instr, |a, b| (a as i8) > (b as i8))
+    }
+
+    /// VPTESTMB Kk{k}, Hdq, Wdq — EVEX.66.0F38.W0 26
+    pub fn evex_vptestmb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cmp_to_opmask_b(instr, |a, b| (a & b) != 0)
+    }
+
+    /// VPTESTNMB Kk{k}, Hdq, Wdq — EVEX.F3.0F38.W0 26
+    pub fn evex_vptestnmb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cmp_to_opmask_b(instr, |a, b| (a & b) == 0)
+    }
+
+    /// VPCMPEQW Kk{k}, Hdq, Wdq — EVEX.66.0F.WIG 75
+    pub fn evex_vpcmpeqw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cmp_to_opmask_w(instr, |a, b| a == b)
+    }
+
+    /// VPCMPGTW Kk{k}, Hdq, Wdq — EVEX.66.0F.WIG 65 (signed)
+    pub fn evex_vpcmpgtw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cmp_to_opmask_w(instr, |a, b| (a as i16) > (b as i16))
+    }
+
+    /// VPTESTMW Kk{k}, Hdq, Wdq — EVEX.66.0F38.W1 26
+    pub fn evex_vptestmw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cmp_to_opmask_w(instr, |a, b| (a & b) != 0)
+    }
+
+    /// VPTESTNMW Kk{k}, Hdq, Wdq — EVEX.F3.0F38.W1 26
+    pub fn evex_vptestnmw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.evex_cmp_to_opmask_w(instr, |a, b| (a & b) == 0)
+    }
+
+    /// VPCMPB Kk{k}, Hdq, Wdq, Ib — EVEX.66.0F3A.W0 3F (signed)
+    pub fn evex_vpcmpb(&mut self, instr: &Instruction) -> super::Result<()> {
+        let imm3 = instr.ib() & 0x07;
+        self.evex_cmp_to_opmask_b(instr, move |a, b| {
+            cmp_predicate(imm3, (a as i8).cmp(&(b as i8)))
+        })
+    }
+
+    /// VPCMPUB Kk{k}, Hdq, Wdq, Ib — EVEX.66.0F3A.W0 3E (unsigned)
+    pub fn evex_vpcmpub(&mut self, instr: &Instruction) -> super::Result<()> {
+        let imm3 = instr.ib() & 0x07;
+        self.evex_cmp_to_opmask_b(instr, move |a, b| cmp_predicate(imm3, a.cmp(&b)))
+    }
+
+    /// VPCMPW Kk{k}, Hdq, Wdq, Ib — EVEX.66.0F3A.W1 3F (signed)
+    pub fn evex_vpcmpw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let imm3 = instr.ib() & 0x07;
+        self.evex_cmp_to_opmask_w(instr, move |a, b| {
+            cmp_predicate(imm3, (a as i16).cmp(&(b as i16)))
+        })
+    }
+
+    /// VPCMPUW Kk{k}, Hdq, Wdq, Ib — EVEX.66.0F3A.W1 3E (unsigned)
+    pub fn evex_vpcmpuw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let imm3 = instr.ib() & 0x07;
+        self.evex_cmp_to_opmask_w(instr, move |a, b| cmp_predicate(imm3, a.cmp(&b)))
+    }
+
+    /// The shared body of VPCMPQ and VPCMPUQ. Unlike the byte and word
+    /// forms these support embedded broadcast, so they name
+    /// `LOAD_BROADCAST_MASK_VectorQ`.
+    fn evex_cmp_to_opmask_q(
+        &mut self,
+        instr: &Instruction,
+        pred: impl Fn(u64, u64) -> bool,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_load_broadcast_mask_vector_q(instr)?
+        };
+        let write_mask = read_opmask_for_write(self, instr);
+        let mut result: u64 = 0;
+        for i in 0..nelements {
+            if (write_mask >> i) & 1 != 0 && pred(src1.zmm64u(i), src2.zmm64u(i)) {
+                result |= 1 << i;
+            }
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// VPCMPQ Kk{k}, Hdq, Wdq, Ib — EVEX.66.0F3A.W1 1F (signed)
+    pub fn evex_vpcmpq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let imm3 = instr.ib() & 0x07;
+        self.evex_cmp_to_opmask_q(instr, move |a, b| {
+            cmp_predicate(imm3, (a as i64).cmp(&(b as i64)))
+        })
+    }
+
+    /// VPCMPUQ Kk{k}, Hdq, Wdq, Ib — EVEX.66.0F3A.W1 1E (unsigned)
+    pub fn evex_vpcmpuq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let imm3 = instr.ib() & 0x07;
+        self.evex_cmp_to_opmask_q(instr, move |a, b| cmp_predicate(imm3, a.cmp(&b)))
+    }
+
+
+    // ════════════════════════════════════════════════════════════════════
+    // Byte and word opmask <-> vector conversions (AVX512_BW). All four are
+    // register-only — their def entries name BxError as the load function —
+    // and none of them takes a writemask.
+    // ════════════════════════════════════════════════════════════════════
+
+    /// VPMOVM2B Vdq, Kk — EVEX.F3.0F38.W0 28
+    pub fn evex_vpmovm2b(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = byte_elements(vl);
+        let mask = self.opmask_rrx(instr.src() as usize);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmmubyte(i, if (mask >> i) & 1 != 0 { 0xFF } else { 0 });
+        }
+        write_zmm_masked_b_all(self, instr.dst(), &result, vl);
+        Ok(())
+    }
+
+    /// VPMOVM2W Vdq, Kk — EVEX.F3.0F38.W1 28
+    pub fn evex_vpmovm2w(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = word_elements(vl);
+        let mask = self.opmask_rrx(instr.src() as usize);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16u(i, if (mask >> i) & 1 != 0 { 0xFFFF } else { 0 });
+        }
+        write_zmm_masked_w_all(self, instr.dst(), &result, vl);
+        Ok(())
+    }
+
+    /// VPMOVB2M Kk, Vdq — EVEX.F3.0F38.W0 29
+    pub fn evex_vpmovb2m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = byte_elements(vl);
+        let src = read_zmm(self, instr.src());
+        let mut result: u64 = 0;
+        for i in 0..nelements {
+            if (src.zmmubyte(i) >> 7) != 0 {
+                result |= 1 << i;
+            }
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// VPMOVW2M Kk, Vdq — EVEX.F3.0F38.W1 29
+    pub fn evex_vpmovw2m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = word_elements(vl);
+        let src = read_zmm(self, instr.src());
+        let mut result: u64 = 0;
+        for i in 0..nelements {
+            if (src.zmm16u(i) >> 15) != 0 {
+                result |= 1 << i;
+            }
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // VPBLENDMB/W — select per element between the two sources under the
+    // opmask. Unlike ordinary writemasking, an unselected element takes
+    // src1 rather than being merged or zeroed, so the write is unmasked.
+    // ════════════════════════════════════════════════════════════════════
+
+    /// VPBLENDMB Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 66
+    pub fn evex_vpblendmb(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = byte_elements(vl);
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_load_mask_vector_b(instr)?
+        };
+        let mask = read_opmask_for_write(self, instr);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmmubyte(
+                i,
+                if (mask >> i) & 1 != 0 {
+                    src2.zmmubyte(i)
+                } else {
+                    src1.zmmubyte(i)
+                },
+            );
+        }
+        write_zmm_masked_b_all(self, instr.dst(), &result, vl);
+        Ok(())
+    }
+
+    /// VPBLENDMW Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 66
+    pub fn evex_vpblendmw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = word_elements(vl);
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_load_mask_vector_w(instr)?
+        };
+        let mask = read_opmask_for_write(self, instr);
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16u(
+                i,
+                if (mask >> i) & 1 != 0 {
+                    src2.zmm16u(i)
+                } else {
+                    src1.zmm16u(i)
+                },
+            );
+        }
+        write_zmm_masked_w_all(self, instr.dst(), &result, vl);
+        Ok(())
+    }
+
+    // ========================================================================
+    // VFPCLASS — classify each element against the imm8 selector, result to an
+    // opmask. Bochs avx512_pfp.cc VFPCLASSPS/PD/SS/SD_MASK_*. No softfloat
+    // status is involved: classification raises no exception at all.
+    // ========================================================================
+
+    /// VFPCLASSPS Kk{k}, Wps, Ib — EVEX.66.0F3A.W0 66
+    pub fn evex_vfpclassps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let nelements = dword_elements(instr.get_vl());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_broadcast_mask_vector_d(instr)?
+        };
+        let selector = instr.ib();
+        let daz = self.mxcsr.daz();
+        let write_mask = read_opmask_for_write(self, instr);
+        let mut result: u64 = 0;
+        for i in 0..nelements {
+            if (write_mask >> i) & 1 != 0 && f32_fpclass(src.zmm32u(i), selector, daz) {
+                result |= 1 << i;
+            }
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// VFPCLASSPD Kk{k}, Wpd, Ib — EVEX.66.0F3A.W1 66
+    pub fn evex_vfpclasspd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let nelements = qword_elements(instr.get_vl());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_broadcast_mask_vector_q(instr)?
+        };
+        let selector = instr.ib();
+        let daz = self.mxcsr.daz();
+        let write_mask = read_opmask_for_write(self, instr);
+        let mut result: u64 = 0;
+        for i in 0..nelements {
+            if (write_mask >> i) & 1 != 0 && f64_fpclass(src.zmm64u(i), selector, daz) {
+                result |= 1 << i;
+            }
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// VFPCLASSSS Kk{k}, Wss, Ib — EVEX.66.0F3A.W0 67
+    pub fn evex_vfpclassss(&mut self, instr: &Instruction) -> super::Result<()> {
+        // Single-operand form: src() is src1(), the rm operand.
+        let src = if instr.mod_c0() {
+            self.vmm[instr.src() as usize].zmm32u(0)
+        } else {
+            self.evex_load_wss_pair(instr)?.zmm32u(0)
+        };
+        let active = read_opmask_for_write(self, instr) & 1 != 0;
+        let r = active && f32_fpclass(src, instr.ib(), self.mxcsr.daz());
+        self.bx_write_opmask(instr.dst() as usize, r as u64);
+        Ok(())
+    }
+
+    /// VFPCLASSSD Kk{k}, Wsd, Ib — EVEX.66.0F3A.W1 67
+    pub fn evex_vfpclasssd(&mut self, instr: &Instruction) -> super::Result<()> {
+        // Single-operand form: src() is src1(), the rm operand.
+        let src = if instr.mod_c0() {
+            self.vmm[instr.src() as usize].zmm64u(0)
+        } else {
+            self.evex_load_wsd_pair(instr)?.zmm64u(0)
+        };
+        let active = read_opmask_for_write(self, instr) & 1 != 0;
+        let r = active && f64_fpclass(src, instr.ib(), self.mxcsr.daz());
+        self.bx_write_opmask(instr.dst() as usize, r as u64);
+        Ok(())
+    }
+    // ========================================================================
+    // VCMPSS / VCMPSD — scalar compare whose result is a single opmask bit.
+    // Bochs avx512_pfp.cc VCMPSS/VCMPSD_MASK_KGbH..W..IbR.
+    // ========================================================================
+
+    /// VCMPSS Kk{k}, Hss, Wss, Ib — EVEX.F3.0F.W0 C2
+    pub fn evex_vcmpss(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut result = 0u64;
+        if read_opmask_for_write(self, instr) & 1 != 0 {
+            let op1 = read_zmm(self, instr.src2()).zmm32u(0); // vvvv
+            let op2 = if instr.mod_c0() {
+                read_zmm(self, instr.src1()).zmm32u(0)
+            } else {
+                self.evex_load_wss_pair(instr)?.zmm32u(0)
+            };
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            if f32_compare_predicate(instr.ib() & 0x1F, op1, op2, &mut status) {
+                result = 1;
+            }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// VCMPSD Kk{k}, Hsd, Wsd, Ib — EVEX.F2.0F.W1 C2
+    pub fn evex_vcmpsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut result = 0u64;
+        if read_opmask_for_write(self, instr) & 1 != 0 {
+            let op1 = read_zmm(self, instr.src2()).zmm64u(0);
+            let op2 = if instr.mod_c0() {
+                read_zmm(self, instr.src1()).zmm64u(0)
+            } else {
+                self.evex_load_wsd_pair(instr)?.zmm64u(0)
+            };
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            if f64_compare_predicate(instr.ib() & 0x1F, op1, op2, &mut status) {
+                result = 1;
+            }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        }
+        self.bx_write_opmask(instr.dst() as usize, result);
+        Ok(())
+    }
+
+}
+
+/// Bochs avx512_pfp.cc `fpclass` — imm8 selects which floating-point
+/// categories the element is tested against.
+fn fpclass(op_class: SoftFloatClass, sign: bool, selector: u8) -> bool {
+    (op_class == SoftFloatClass::QNaN && selector & 0x01 != 0)
+        || (op_class == SoftFloatClass::Zero && !sign && selector & 0x02 != 0)
+        || (op_class == SoftFloatClass::Zero && sign && selector & 0x04 != 0)
+        || (op_class == SoftFloatClass::PositiveInf && selector & 0x08 != 0)
+        || (op_class == SoftFloatClass::NegativeInf && selector & 0x10 != 0)
+        || (op_class == SoftFloatClass::Denormal && selector & 0x20 != 0)
+        || ((op_class == SoftFloatClass::Denormal || op_class == SoftFloatClass::Normalized)
+            && sign
+            && selector & 0x40 != 0)
+        || (op_class == SoftFloatClass::SNaN && selector & 0x80 != 0)
+}
+
+/// Bochs avx512_pfp.cc `f32_fpclass`. DAZ is applied to the operand first;
+/// classification itself raises nothing, not even on a signalling NaN.
+fn f32_fpclass(op: Float32, selector: u8, daz: bool) -> bool {
+    let op = if daz { f32_denormal_to_zero(op) } else { op };
+    fpclass(f32_class(op), sign_f32(op), selector)
+}
+
+/// Bochs avx512_pfp.cc `f64_fpclass`.
+fn f64_fpclass(op: Float64, selector: u8, daz: bool) -> bool {
+    let op = if daz { f64_denormal_to_zero(op) } else { op };
+    fpclass(f64_class(op), sign_f64(op), selector)
+}
+
+
+/// The eight VPCMP integer predicates selected by imm8[2:0], applied to an
+/// already-computed ordering. Bochs avx512_cmp.cc uses the same table for
+/// every width and signedness; only the comparison feeding it changes.
+#[inline]
+fn cmp_predicate(imm3: u8, ord: core::cmp::Ordering) -> bool {
+    use core::cmp::Ordering::*;
+    match imm3 {
+        0 => ord == Equal,               // EQ
+        1 => ord == Less,                // LT
+        2 => ord != Greater,             // LE
+        3 => false,                      // FALSE
+        4 => ord != Equal,               // NEQ
+        5 => ord != Less,                // NLT (GE)
+        6 => ord == Greater,             // NLE (GT)
+        _ => true,                       // TRUE
+    }
+}
+
+
+/// Write every byte element up to VL and zero the rest. Used by the
+/// instructions that produce a full vector regardless of the opmask
+/// (VPMOVM2B, VPBLENDMB) — the mask has already been consumed as data.
+fn write_zmm_masked_b_all<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
+    reg: u8,
+    result: &BxPackedZmmRegister,
+    vl: u8,
+) {
+    let nbytes = byte_elements(vl);
+    let dst = &mut cpu.vmm[reg as usize];
+    for i in 0..nbytes {
+        dst.set_zmmubyte(i, result.zmmubyte(i));
+    }
+    for i in nbytes..64 {
+        dst.set_zmmubyte(i, 0);
+    }
+}
+
+/// Word-granular counterpart of [`write_zmm_masked_b_all`].
+fn write_zmm_masked_w_all<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, I, T>,
+    reg: u8,
+    result: &BxPackedZmmRegister,
+    vl: u8,
+) {
+    let nwords = word_elements(vl);
+    let dst = &mut cpu.vmm[reg as usize];
+    for i in 0..nwords {
+        dst.set_zmm16u(i, result.zmm16u(i));
+    }
+    for i in nwords..32 {
+        dst.set_zmm16u(i, 0);
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    //! Three things about the byte/word opmask family are worth pinning:
+    //!
+    //!   * at VL512 a byte compare fills all 64 bits of the destination
+    //!     opmask, which is exactly the width where Bochs's CUT_OPMASK would
+    //!     shift by 64 and which it therefore skips;
+    //!   * the writemask gates which elements may set a result bit, so a
+    //!     compare that is true everywhere still yields only the masked bits;
+    //!   * VPBLENDM is *not* ordinary writemasking — an unselected element
+    //!     takes src1 rather than being merged or zeroed, so it must write
+    //!     the full vector.
+
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::decoder::{BxSegregs, Instruction};
+    use rusty_box_decoder::opcode::Opcode;
+
+    fn evex_reg(opcode: Opcode, vl: u8) -> Instruction {
+        let mut i = Instruction::default();
+        i.set_ia_opcode(opcode);
+        i.set_src_reg(0, 0); // dst (opmask or vector)
+        i.set_src_reg(1, 1); // src1
+        i.set_src_reg(2, 2); // src2
+        i.set_opmask(0);
+        i.set_vex(true);
+        i.set_vl(vl);
+        i.set_seg(BxSegregs::Ds);
+        i.init(0, 0, 1, 1);
+        i.assert_mod_c0();
+        i
+    }
+
+    #[test]
+    fn byte_compare_fills_all_64_opmask_bits_at_vl512() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        // Equal everywhere: every one of the 64 byte lanes must set its bit.
+        for i in 0..64 {
+            cpu.vmm[1].set_zmmubyte(i, 0x5A);
+            cpu.vmm[2].set_zmmubyte(i, 0x5A);
+        }
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpcmpeqbKgqHdqWdq, 2))
+            .unwrap();
+        assert_eq!(cpu.opmask_rrx(0), u64::MAX, "all 64 lanes equal");
+
+        // One lane differs -> exactly that bit clears.
+        cpu.vmm[2].set_zmmubyte(63, 0x00);
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVpcmpeqbKgqHdqWdq, 2))
+            .unwrap();
+        assert_eq!(cpu.opmask_rrx(0), u64::MAX >> 1);
+    }
+
+    #[test]
+    fn the_writemask_gates_which_bits_a_compare_may_set() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for i in 0..16 {
+            cpu.vmm[1].set_zmmubyte(i, 1);
+            cpu.vmm[2].set_zmmubyte(i, 1);
+        }
+        cpu.bx_write_opmask(1, 0b1010);
+        let mut i = evex_reg(Opcode::EvexVpcmpeqbKgqHdqWdq, 0);
+        i.set_opmask(1);
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(
+            cpu.opmask_rrx(0),
+            0b1010,
+            "equal everywhere, but only the writemasked lanes may report it"
+        );
+    }
+
+    #[test]
+    fn vptestm_and_vptestnm_are_complementary() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.vmm[1].set_zmmubyte(0, 0b1100);
+        cpu.vmm[2].set_zmmubyte(0, 0b0011); // AND == 0
+        cpu.vmm[1].set_zmmubyte(1, 0b1100);
+        cpu.vmm[2].set_zmmubyte(1, 0b0100); // AND != 0
+
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVptestmbKgqHdqWdq, 0))
+            .unwrap();
+        assert_eq!(cpu.opmask_rrx(0) & 0b11, 0b10);
+
+        cpu.execute_instruction(&evex_reg(Opcode::EvexVptestnmbKgqHdqWdq, 0))
+            .unwrap();
+        assert_eq!(cpu.opmask_rrx(0) & 0b11, 0b01);
+    }
+
+    #[test]
+    fn vpcmpb_predicates_cover_signed_and_unsigned_orderings() {
+        // 0xFF is -1 signed but 255 unsigned, so the signed and unsigned
+        // forms of the same predicate must disagree on it.
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.vmm[2].set_zmmubyte(0, 0xFF);
+        cpu.vmm[1].set_zmmubyte(0, 0x01);
+
+        let mut i = evex_reg(Opcode::EvexVpcmpbKgqHdqWdqIb, 0);
+        i.set_iq(1); // LT
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.opmask_rrx(0) & 1, 1, "signed: -1 < 1");
+
+        let mut i = evex_reg(Opcode::EvexVpcmpubKgqHdqWdqIb, 0);
+        i.set_iq(1); // LT
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.opmask_rrx(0) & 1, 0, "unsigned: 255 is not < 1");
+
+        // FALSE and TRUE ignore the operands entirely.
+        let mut i = evex_reg(Opcode::EvexVpcmpbKgqHdqWdqIb, 0);
+        i.set_iq(3);
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.opmask_rrx(0), 0);
+        let mut i = evex_reg(Opcode::EvexVpcmpbKgqHdqWdqIb, 0);
+        i.set_iq(7);
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.opmask_rrx(0), 0xFFFF, "VL128 has 16 byte lanes");
+    }
+
+    #[test]
+    fn vpmovb2m_and_vpmovm2b_round_trip_through_the_sign_bits() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.vmm[1].set_zmmubyte(0, 0x80); // sign set
+        cpu.vmm[1].set_zmmubyte(1, 0x7F); // sign clear
+        cpu.vmm[1].set_zmmubyte(2, 0xFF); // sign set
+
+        let mut i = evex_reg(Opcode::EvexVpmovb2mKgqWdq, 0);
+        i.set_src_reg(1, 1); // single-source form reads src()
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.opmask_rrx(0) & 0b111, 0b101);
+
+        cpu.bx_write_opmask(2, 0b101);
+        let mut i = evex_reg(Opcode::EvexVpmovm2bVdqKeq, 0);
+        i.set_src_reg(1, 2);
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.vmm[0].zmmubyte(0), 0xFF);
+        assert_eq!(cpu.vmm[0].zmmubyte(1), 0x00);
+        assert_eq!(cpu.vmm[0].zmmubyte(2), 0xFF);
+    }
+
+    #[test]
+    fn vpblendmb_takes_src1_where_the_mask_is_clear_rather_than_merging() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for i in 0..16 {
+            cpu.vmm[0].set_zmmubyte(i, 0xAA); // poison: must not survive
+            cpu.vmm[2].set_zmmubyte(i, 0x11); // src1
+            cpu.vmm[1].set_zmmubyte(i, 0x22); // src2
+        }
+        cpu.bx_write_opmask(1, 0b0101);
+        let mut i = evex_reg(Opcode::EvexVpblendmbVdqHdqWdq, 0);
+        i.set_opmask(1);
+        cpu.execute_instruction(&i).unwrap();
+
+        assert_eq!(cpu.vmm[0].zmmubyte(0), 0x22, "mask set -> src2");
+        assert_eq!(cpu.vmm[0].zmmubyte(1), 0x11, "mask clear -> src1, not merge");
+        assert_eq!(cpu.vmm[0].zmmubyte(2), 0x22);
+        assert_eq!(cpu.vmm[0].zmmubyte(3), 0x11);
+        assert_eq!(cpu.vmm[0].zmmubyte(15), 0x11);
+    }
+
+    // ---- VFPCLASS -----------------------------------------------------
+
+    /// Every category VFPCLASS can select, with the imm8 bit that picks it.
+    /// Bochs `fpclass` treats "negative finite" (bit 6) as covering both
+    /// denormals and normals, so a negative denormal answers to two bits.
+    const CLASS_CASES: [(u32, u8, &str); 8] = [
+        (0x7FC0_0000, 0x01, "QNaN"),
+        (0x0000_0000, 0x02, "+0"),
+        (0x8000_0000, 0x04, "-0"),
+        (0x7F80_0000, 0x08, "+inf"),
+        (0xFF80_0000, 0x10, "-inf"),
+        (0x0000_0001, 0x20, "+denormal"),
+        (0xBF80_0000, 0x40, "negative finite (-1.0)"),
+        (0x7F80_0001, 0x80, "SNaN"),
+    ];
+
+    #[test]
+    fn vfpclassps_matches_exactly_the_selected_category() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for (bits, sel, name) in CLASS_CASES {
+            for i in 0..4 {
+                c.vmm[1].set_zmm32u(i, bits);
+            }
+            // Its own selector matches every element.
+            let mut ins = evex_reg(Opcode::EvexVfpclasspsKgwWpsIbKmask, 0);
+            ins.set_iq(sel as u64);
+            ins.set_opmask(0);
+            c.execute_instruction(&ins).unwrap();
+            assert_eq!(c.opmask[0].rrx(), 0b1111, "{name} should match imm8={sel:#04x}");
+
+            // Every other selector rejects it, except that a negative
+            // denormal is also "negative finite".
+            let others = 0xFFu8 & !sel;
+            let mut ins = evex_reg(Opcode::EvexVfpclasspsKgwWpsIbKmask, 0);
+            ins.set_opmask(0);
+            ins.set_iq((others & !0x40) as u64);
+            c.execute_instruction(&ins).unwrap();
+            assert_eq!(c.opmask[0].rrx(), 0, "{name} should reject the other classes");
+        }
+    }
+
+    #[test]
+    fn vfpclass_classification_raises_nothing_and_respects_the_writemask() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET;
+        // A signalling NaN is classified, not signalled: with every SSE
+        // exception unmasked this must still complete.
+        c.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET & !0x1F80;
+        for i in 0..4 {
+            c.vmm[1].set_zmm32u(i, 0x7F80_0001);
+        }
+        let mut ins = evex_reg(Opcode::EvexVfpclasspsKgwWpsIbKmask, 0);
+        ins.set_iq(0x80);
+        ins.set_opmask(0);
+        c.execute_instruction(&ins).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 0b1111);
+
+        // The writemask gates which elements may set a result bit.
+        c.opmask[2].set_rrx(0b0101);
+        let mut ins = evex_reg(Opcode::EvexVfpclasspsKgwWpsIbKmask, 0);
+        ins.set_iq(0x80);
+        ins.set_opmask(2);
+        c.execute_instruction(&ins).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 0b0101);
+    }
+
+    #[test]
+    fn vfpclassss_writes_a_single_bit_gated_on_opmask_bit_zero() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.vmm[1].set_zmm32u(0, 0x7F80_0000); // +inf
+        c.opmask[0].set_rrx(0xFFFF); // must be overwritten, not merged
+
+        let mut ins = evex_reg(Opcode::EvexVfpclassssKgbWssIbKmask, 0);
+        ins.set_iq(0x08);
+        ins.set_opmask(0); // +inf
+        c.execute_instruction(&ins).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 1);
+
+        // Wrong category -> zero.
+        let mut ins = evex_reg(Opcode::EvexVfpclassssKgbWssIbKmask, 0);
+        ins.set_iq(0x10);
+        ins.set_opmask(0); // -inf
+        c.execute_instruction(&ins).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 0);
+
+        // Opmask bit 0 clear suppresses the test entirely.
+        c.opmask[2].set_rrx(0b10);
+        let mut ins = evex_reg(Opcode::EvexVfpclassssKgbWssIbKmask, 0);
+        ins.set_iq(0x08);
+        ins.set_opmask(2);
+        c.execute_instruction(&ins).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 0);
+    }
+
+
+    #[test]
+    fn vcmpss_writes_one_opmask_bit_and_honours_the_predicate() {
+        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        c.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET;
+        c.vmm[2].set_zmm32u(0, 1.5f32.to_bits()); // vvvv
+        c.vmm[1].set_zmm32u(0, 1.5f32.to_bits()); // rm
+        c.opmask[0].set_rrx(0xFFFF); // must be overwritten wholesale
+
+        let mut i = evex_reg(Opcode::EvexVcmpssKgbHssWssIb, 0);
+        i.set_iq(0); // EQ_OQ
+        c.execute_instruction(&i).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 1);
+
+        let mut i = evex_reg(Opcode::EvexVcmpssKgbHssWssIb, 0);
+        i.set_iq(1); // LT_OS
+        c.execute_instruction(&i).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 0, "1.5 is not less than 1.5");
+
+        c.vmm[2].set_zmm32u(0, 1.0f32.to_bits());
+        let mut i = evex_reg(Opcode::EvexVcmpssKgbHssWssIb, 0);
+        i.set_iq(1);
+        c.execute_instruction(&i).unwrap();
+        assert_eq!(c.opmask[0].rrx(), 1, "vvvv < rm, not the reverse");
+    }
+
 }

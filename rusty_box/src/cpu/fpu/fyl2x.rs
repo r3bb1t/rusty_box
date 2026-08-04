@@ -7,12 +7,12 @@ use super::super::softfloat3e::f128::*;
 use super::super::softfloat3e::internals::*;
 use super::super::softfloat3e::primitives::*;
 use super::super::softfloat3e::softfloat::*;
-use super::super::softfloat3e::softfloat_types::floatx80;
+use super::super::softfloat3e::softfloat_types::ExtFloat80;
 use super::super::softfloat3e::specialize::*;
 use super::poly::*;
 
-/// 1.0 in floatx80 format
-const FLOATX80_ONE: floatx80 = floatx80 {
+/// 1.0 in ExtFloat80 format
+const FLOATX80_ONE: ExtFloat80 = ExtFloat80 {
     signif: 0x8000000000000000,
     sign_exp: 0x3FFF,
 };
@@ -56,10 +56,10 @@ fn poly_l2p1(x: Float128, status: &mut SoftFloatStatus) -> Float128 {
 
 /// Compute y * log2(x) where x=a (ST(0)) and y=b (ST(1)).
 /// Ported from Bochs fyl2x.cc using Float128 polynomial evaluation.
-pub(crate) fn fyl2x_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn fyl2x_impl(a: ExtFloat80, b: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
     }
 
@@ -78,15 +78,15 @@ pub(crate) fn fyl2x_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus)
             return softfloat_propagate_nan_extf80(a.sign_exp, a_sig, b.sign_exp, b_sig, status);
         }
         if a_sign {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOATX80_DEFAULT_NAN;
         } else {
             if b_exp == 0 {
                 if b_sig == 0 {
-                    softfloat_raiseFlags(status, FLAG_INVALID);
+                    softfloat_raise_flags(status, FLAG_INVALID);
                     return FLOATX80_DEFAULT_NAN;
                 }
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             return pack_floatx80(b_sign, 0x7FFF, 0x8000000000000000);
         }
@@ -98,17 +98,17 @@ pub(crate) fn fyl2x_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus)
             return softfloat_propagate_nan_extf80(a.sign_exp, a_sig, b.sign_exp, b_sig, status);
         }
         if a_sign && ((a_exp as u64) | a_sig) != 0 {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOATX80_DEFAULT_NAN;
         }
         if a_sig != 0 && a_exp == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         if a_exp < 0x3FFF {
             return pack_floatx80(z_sign, 0x7FFF, 0x8000000000000000);
         }
         if a_exp == 0x3FFF && (a_sig << 1) == 0 {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOATX80_DEFAULT_NAN;
         }
         return pack_floatx80(b_sign, 0x7FFF, 0x8000000000000000);
@@ -118,24 +118,24 @@ pub(crate) fn fyl2x_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus)
     if a_exp == 0 {
         if a_sig == 0 {
             if (b_exp as u64 | b_sig) == 0 {
-                softfloat_raiseFlags(status, FLAG_INVALID);
+                softfloat_raise_flags(status, FLAG_INVALID);
                 return FLOATX80_DEFAULT_NAN;
             }
-            softfloat_raiseFlags(status, FLAG_DIVBYZERO);
+            softfloat_raise_flags(status, FLAG_DIVBYZERO);
             return pack_floatx80(z_sign, 0x7FFF, 0x8000000000000000);
         }
         if a_sign {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOATX80_DEFAULT_NAN;
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(a_sig);
         a_exp = norm.exp + 1;
         // a_sig shadowed below
     }
 
     if a_sign {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
     }
 
@@ -147,7 +147,7 @@ pub(crate) fn fyl2x_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus)
             }
             return pack_floatx80(b_sign, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(b_sig);
         b_exp = norm.exp + 1;
         // b_sig shadowed below
@@ -158,7 +158,7 @@ pub(crate) fn fyl2x_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus)
         return pack_floatx80(b_sign, 0, 0);
     }
 
-    softfloat_raiseFlags(status, FLAG_INEXACT);
+    softfloat_raise_flags(status, FLAG_INEXACT);
 
     // Re-read a_sig in case it was normalized above
     let a_sig = if extf80_exp(a) == 0 && extf80_fraction(a) != 0 {
@@ -188,10 +188,10 @@ pub(crate) fn fyl2x_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus)
 
 /// Compute y * log2(x + 1) where x=a (ST(0)) and y=b (ST(1)).
 /// Ported from Bochs fyl2x.cc fyl2xp1() using Float128 polynomial evaluation.
-pub(crate) fn fyl2xp1_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
+pub(in crate::cpu) fn fyl2xp1_impl(a: ExtFloat80, b: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
     }
 
@@ -209,15 +209,15 @@ pub(crate) fn fyl2xp1_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatu
             return softfloat_propagate_nan_extf80(a.sign_exp, a_sig, b.sign_exp, b_sig, status);
         }
         if a_sign {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOATX80_DEFAULT_NAN;
         } else {
             if b_exp == 0 {
                 if b_sig == 0 {
-                    softfloat_raiseFlags(status, FLAG_INVALID);
+                    softfloat_raise_flags(status, FLAG_INVALID);
                     return FLOATX80_DEFAULT_NAN;
                 }
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             return pack_floatx80(b_sign, 0x7FFF, 0x8000000000000000);
         }
@@ -230,10 +230,10 @@ pub(crate) fn fyl2xp1_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatu
         }
         if a_exp == 0 {
             if a_sig == 0 {
-                softfloat_raiseFlags(status, FLAG_INVALID);
+                softfloat_raise_flags(status, FLAG_INVALID);
                 return FLOATX80_DEFAULT_NAN;
             }
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return pack_floatx80(z_sign, 0x7FFF, 0x8000000000000000);
     }
@@ -242,11 +242,11 @@ pub(crate) fn fyl2xp1_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatu
     if a_exp == 0 {
         if a_sig == 0 {
             if b_sig != 0 && b_exp == 0 {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             return pack_floatx80(z_sign, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(a_sig);
         a_exp = norm.exp + 1;
         // a_sig normalized below
@@ -257,13 +257,13 @@ pub(crate) fn fyl2xp1_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatu
         if b_sig == 0 {
             return pack_floatx80(z_sign, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_extf80_sig(b_sig);
         b_exp = norm.exp + 1;
         // b_sig normalized below
     }
 
-    softfloat_raiseFlags(status, FLAG_INEXACT);
+    softfloat_raise_flags(status, FLAG_INEXACT);
 
     // If a is negative and |a| >= 1, Bochs just returns a
     if a_sign && a_exp >= 0x3FFF {

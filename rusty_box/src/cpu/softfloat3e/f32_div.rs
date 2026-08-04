@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! Float32 division. Ported from Berkeley SoftFloat 3e f32_div.c
 //! (SOFTFLOAT_FAST_DIV64TO32 path, as configured by Bochs).
 
@@ -7,7 +6,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub(crate) fn f32_div(a: float32, b: float32, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn f32_div(a: Float32, b: Float32, status: &mut SoftFloatStatus) -> Float32 {
     let sign_a = sign_f32(a);
     let mut exp_a = exp_f32(a);
     let mut sig_a = frac_f32(a);
@@ -16,7 +15,7 @@ pub(crate) fn f32_div(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
     let mut sig_b = frac_f32(b);
     let sign_z = sign_a ^ sign_b;
 
-    if softfloat_denormalsAreZeros(status) {
+    if softfloat_denormals_are_zeros(status) {
         if exp_a == 0 {
             sig_a = 0;
         }
@@ -34,11 +33,11 @@ pub(crate) fn f32_div(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
                 return softfloat_propagate_nan_f32(a, b, status);
             }
             // invalid: inf/inf
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOAT32_DEFAULT_NAN;
         }
         if sig_b != 0 && exp_b == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return pack_to_f32(sign_z, 0xFF, 0); // infinity
     }
@@ -47,7 +46,7 @@ pub(crate) fn f32_div(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
             return softfloat_propagate_nan_f32(a, b, status);
         }
         if sig_a != 0 && exp_a == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return pack_to_f32(sign_z, 0, 0); // zero (finite / inf)
     }
@@ -56,13 +55,13 @@ pub(crate) fn f32_div(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
         if sig_b == 0 {
             if exp_a == 0 && sig_a == 0 {
                 // 0/0 invalid
-                softfloat_raiseFlags(status, FLAG_INVALID);
+                softfloat_raise_flags(status, FLAG_INVALID);
                 return FLOAT32_DEFAULT_NAN;
             }
-            softfloat_raiseFlags(status, FLAG_INFINITE); // divide-by-zero
+            softfloat_raise_flags(status, FLAG_INFINITE); // divide-by-zero
             return pack_to_f32(sign_z, 0xFF, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let ns = norm_subnormal_f32_sig(sig_b);
         exp_b = ns.exp;
         sig_b = ns.sig;
@@ -71,7 +70,7 @@ pub(crate) fn f32_div(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
         if sig_a == 0 {
             return pack_to_f32(sign_z, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let ns = norm_subnormal_f32_sig(sig_a);
         exp_a = ns.exp;
         sig_a = ns.sig;

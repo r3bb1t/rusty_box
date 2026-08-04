@@ -486,7 +486,12 @@ impl BxDmaC {
         // Compute maxlen and TC (Bochs dma.cc)
         let mut maxlen: u16;
         if !self.s[ma_sl].chan[channel].mode.address_decrement {
-            maxlen = (self.s[ma_sl].chan[channel].current_count + 1) << (ma_sl as u16);
+            // Bochs dma.cc: maxlen is Bit16u = (count+1) << ma_sl. The C
+            // arithmetic promotes to int, so count=0xFFFF doesn't overflow and
+            // the assignment truncates back to 16 bits. Compute in u32 then
+            // truncate to match — and to avoid a debug overflow panic.
+            maxlen =
+                (((self.s[ma_sl].chan[channel].current_count as u32) + 1) << (ma_sl as u32)) as u16;
             self.tc = (maxlen as usize) <= BX_DMA_BUFFER_SIZE;
             if (maxlen as usize) > BX_DMA_BUFFER_SIZE {
                 maxlen = BX_DMA_BUFFER_SIZE as u16;
@@ -734,15 +739,21 @@ impl BxDmaC {
 
     /// Write to DMA I/O port (Bochs dma.cc)
     pub fn write(&mut self, address: u16, value: u32, io_len: u8) {
-        // Handle word write to mode register (Bochs dma.cc)
+        // Handle multi-byte writes (Bochs dma.cc write). The 0x0B word write
+        // (master mode/mask via a 16-bit OUT) splits into two byte writes;
+        // every other wide write falls through and is processed using the LSB
+        // (Bochs: `value &= 0xff`), NOT dropped.
         if io_len > 1 {
             if io_len == 2 && address == 0x0B {
                 self.write(address, value & 0xFF, 1);
                 self.write(address + 1, value >> 8, 1);
                 return;
             }
-            tracing::trace!("DMA: io write to address {:#010x}, len={}", address, io_len);
-            return;
+            tracing::trace!(
+                "DMA: io write to address {:#010x}, len={} (using LSB)",
+                address,
+                io_len
+            );
         }
 
         let value = value as u8;
@@ -1225,6 +1236,26 @@ mod tests {
     fn test_dma_get_tc() {
         let dma = BxDmaC::new();
         assert!(!dma.get_tc());
+    }
+
+    #[test]
+    fn dma_wide_write_uses_lsb_and_0x0b_word_splits() {
+        // Bochs dma.cc write: a multi-byte write to a non-0x0B register is
+        // processed using its LSB, not dropped (the ports register with mask 7).
+        let mut dma = BxDmaC::new();
+        // 16-bit OUT to the single-mask register: LSB 0x06 => channel 2, mask set.
+        dma.write(0x0A, 0xFF06, 2);
+        assert!(
+            dma.s[0].mask[2],
+            "wide write must apply the LSB (channel 2 masked), not drop it"
+        );
+
+        // The 0x0B word write still splits into two byte writes: low byte to the
+        // mode register, high byte to the flip/flop-clear (0x0C).
+        let mut dma = BxDmaC::new();
+        dma.write(0x0B, 0x0058, 2);
+        // low byte 0x58 => channel 0, mode_type=(0x58>>6)&3=1.
+        assert_eq!(dma.s[0].chan[0].mode.mode_type, 1);
     }
 
     #[test]

@@ -5,6 +5,20 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512.cc`, `avx512_move.cc`, `avx512_pfp.cc`.
 
+use super::avx512_load::cut_opmask_to;
+use super::avx512_bw::write_zmm_masked_w;
+use super::softfloat3e::f32_addsub::{f32_add, f32_sub};
+use super::softfloat3e::f32_compare::{f32_max, f32_min};
+use super::softfloat3e::f32_div::f32_div;
+use super::softfloat3e::f32_mul::f32_mul;
+use super::softfloat3e::f32_sqrt::f32_sqrt;
+use super::softfloat3e::f64_addsub::{f64_add, f64_sub};
+use super::softfloat3e::f64_compare::{f64_max, f64_min};
+use super::softfloat3e::f64_div::f64_div;
+use super::softfloat3e::f64_mul::f64_mul;
+use super::softfloat3e::f64_sqrt::f64_sqrt;
+use super::softfloat3e::softfloat::{softfloat_get_exception_flags, SoftFloatStatus};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -17,6 +31,38 @@ use super::{
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use crate::cpu::float::FloatExt;
+
+/// Width pairing of a VPMOV widening conversion, named after the mnemonic
+/// suffix: `Bw` is byte-to-word, `Dq` dword-to-qword, and so on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PmovWiden {
+    Bw,
+    Bd,
+    Bq,
+    Wd,
+    Wq,
+    Dq,
+}
+
+/// Number of byte elements per vector length: VL0=16, VL1=32, VL2=64
+#[inline]
+fn byte_elements_bcast(vl: u8) -> usize {
+    match vl {
+        0 => 16,
+        1 => 32,
+        _ => 64,
+    }
+}
+
+/// Number of 16-bit elements per vector length: VL0=8, VL1=16, VL2=32
+#[inline]
+fn word_elements_bcast(vl: u8) -> usize {
+    match vl {
+        0 => 8,
+        1 => 16,
+        _ => 32,
+    }
+}
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
@@ -127,6 +173,39 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     /// VMOVDQU32 Vdq{k}, Wdq — EVEX.0F.W0 6F (load, register form)
+    /// The aligned vector moves (VMOVAPS/APD, VMOVDQA32/64, VMOVNT*) require
+    /// the effective address to be aligned to the full vector width and raise
+    /// #GP(0) otherwise. The unaligned forms (VMOVUPS/UPD, VMOVDQU*) do not.
+    /// Bochs avx512_move.cc VMOVAPS_MASK_VpsWpsM.
+    fn evex_check_vector_alignment(&mut self, instr: &Instruction, eaddr: u64) -> super::Result<()> {
+        let len_in_bytes = match instr.get_vl() {
+            0 => 16u64,
+            1 => 32,
+            _ => 64,
+        };
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = self.get_laddr64(seg as usize, eaddr);
+        if laddr & (len_in_bytes - 1) != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        Ok(())
+    }
+
+    /// VMOVAPS/APD, VMOVDQA32/64 — memory load. Identical to the unaligned
+    /// form except for the alignment requirement.
+    pub fn evex_vmovaps_load_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let eaddr = self.resolve_addr(instr);
+        self.evex_check_vector_alignment(instr, eaddr)?;
+        self.evex_vmovdqu32_load_m(instr)
+    }
+
+    /// VMOVAPS/APD, VMOVDQA32/64 — memory store.
+    pub fn evex_vmovaps_store_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let eaddr = self.resolve_addr(instr);
+        self.evex_check_vector_alignment(instr, eaddr)?;
+        self.evex_vmovdqu32_store_m(instr)
+    }
+
     pub fn evex_vmovdqu32_load_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let src = read_zmm(self, instr.src());
@@ -136,19 +215,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// VMOVDQU32 Vdq{k}, Mdq — EVEX.0F.W0 6F (load, memory form)
+    /// VMOVDQU32 Vdq{k}, Mdq — EVEX.0F.W0 6F (load, memory form).
+    /// Bochs avx512_move.cc VMOVUPS_MASK_VpsWpsM: only the elements the opmask
+    /// selects are read, so a masked-off element on an unmapped page must not
+    /// fault.
     pub fn evex_vmovdqu32_load_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let bytes = vl_bytes(vl);
-        let laddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let mut src = BxPackedZmmRegister::default();
-        // Read bytes from memory
-        for i in 0..(bytes / 4) {
-            let val = self.v_read_dword(seg, laddr + (i * 4) as u64)?;
-            src.set_zmm32u(i, val);
-        }
+        let eaddr = self.resolve_addr(instr);
         let mask = read_opmask_for_write(self, instr);
+        let mut src = BxPackedZmmRegister::default();
+        self.avx_masked_load32(instr, eaddr, &mut src, mask)?;
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &src, mask, zmask, vl);
         Ok(())
@@ -164,21 +240,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
-    /// VMOVDQU32 Mdq{k}, Vdq — EVEX.0F.W0 7F (store, memory form)
+    /// VMOVDQU32 Mdq{k}, Vdq — EVEX.0F.W0 7F (store, memory form).
+    /// Bochs avx512_move.cc VMOVUPS_MASK_WpsVpsM -> avx_masked_store32, which
+    /// probes every active element before committing any, so a fault part way
+    /// through cannot leave a partial store behind.
     pub fn evex_vmovdqu32_store_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let bytes = vl_bytes(vl);
-        let laddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
         let src = read_zmm(self, instr.src());
         let mask = read_opmask_for_write(self, instr);
-        for i in 0..(bytes / 4) {
-            if (mask >> i) & 1 != 0 {
-                let val = src.zmm32u(i);
-                self.v_write_dword(seg, laddr + (i * 4) as u64, val)?;
-            }
-        }
-        Ok(())
+        self.avx_masked_store32(instr, eaddr, &src, mask)
     }
 
     /// VMOVDQU64 — same as VMOVDQU32 but with qword masking granularity
@@ -192,50 +262,41 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// Bochs avx512_move.cc VMOVUPD_MASK_VpdWpdM — masked qword load with
+    /// fault suppression on the inactive lanes.
     pub fn evex_vmovdqu64_load_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let bytes = vl_bytes(vl);
-        let laddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
+        let mask = read_opmask_for_write(self, instr);
         let mut src = BxPackedZmmRegister::default();
-        for i in 0..(bytes / 8) {
-            let val = if self.long64_mode() {
-                self.read_virtual_qword_64(seg, laddr + (i * 8) as u64)?
-            } else {
-                self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64
-                    | ((self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64) << 32)
-            };
-            src.set_zmm64u(i, val);
-        }
+        self.avx_masked_load64(instr, eaddr, &mut src, mask)?;
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &src, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VMOVDQU64 Wdq{k}{z}, Vdq — EVEX.0F.W1 7F, register form.
+    ///
+    /// Bochs avx512_move.cc routes the masked W1 register move through
+    /// `avx512_write_regq_masked` — one mask bit per QWORD. This is NOT the
+    /// same as the W0 form: sharing the dword handler makes each mask bit gate
+    /// only 32 bits, so a qword whose two halves disagree in the mask ends up
+    /// half-written.
+    pub fn evex_vmovdqu64_store_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let src = read_zmm(self, instr.src());
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &src, mask, zmask, vl);
         Ok(())
     }
 
-    pub fn evex_vmovdqu64_store_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.evex_vmovdqu32_store_r(instr) // register form is identical
-    }
-
+    /// Bochs avx512_move.cc VMOVUPD_MASK_WpdVpdM -> avx_masked_store64.
     pub fn evex_vmovdqu64_store_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let bytes = vl_bytes(vl);
-        let laddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
         let src = read_zmm(self, instr.src());
         let mask = read_opmask_for_write(self, instr);
-        for i in 0..(bytes / 8) {
-            if (mask >> i) & 1 != 0 {
-                let val = src.zmm64u(i);
-                if self.long64_mode() {
-                    self.write_virtual_qword_64(seg, laddr + (i * 8) as u64, val)?;
-                } else {
-                    self.v_write_dword(seg, laddr + (i * 8) as u64, val as u32)?;
-                    self.v_write_dword(seg, laddr + (i * 8 + 4) as u64, (val >> 32) as u32)?;
-                }
-            }
-        }
-        Ok(())
+        self.avx_masked_store64(instr, eaddr, &src, mask)
     }
 
     // ========================================================================
@@ -246,18 +307,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpaddd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let val = self.v_read_dword(seg, laddr + (i * 4) as u64)?;
-                tmp.set_zmm32u(i, val);
-            }
-            tmp
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -273,19 +327,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpaddq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            tmp
+            self.evex_load_bcst_q_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -305,18 +351,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsubd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let val = self.v_read_dword(seg, laddr + (i * 4) as u64)?;
-                tmp.set_zmm32u(i, val);
-            }
-            tmp
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -332,19 +371,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsubq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            tmp
+            self.evex_load_bcst_q_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -364,17 +395,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpxord(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -390,19 +415,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpxorq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            tmp
+            self.evex_load_bcst_q_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -418,17 +435,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpord(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -444,17 +455,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpandd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -470,17 +475,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpandnd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -493,6 +492,76 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // ========================================================================
+    // Qword-granularity bitwise ops.
+    //
+    // The bit pattern these produce is identical to their dword twins, but the
+    // element width is what opmask bits and embedded broadcast are counted in:
+    // VPORQ applies mask bit i to qword i and broadcasts a qword, where VPORD
+    // applies it to dword i and broadcasts a dword. They therefore need their
+    // own handlers rather than sharing the dword ones.
+    // ========================================================================
+
+    /// VPORQ Vdq{k}, Hdq, Wdq — EVEX.66.0F.W1 EB (also serves VORPD).
+    pub(super) fn evex_vporq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm64u(i, src1.zmm64u(i) | src2.zmm64u(i));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPANDQ Vdq{k}, Hdq, Wdq — EVEX.66.0F.W1 DB (also serves VANDPD).
+    pub(super) fn evex_vpandq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm64u(i, src1.zmm64u(i) & src2.zmm64u(i));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPANDNQ Vdq{k}, Hdq, Wdq — EVEX.66.0F.W1 DF (also serves VANDNPD).
+    pub(super) fn evex_vpandnq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src1 = read_zmm(self, instr.src2());
+        let src2 = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm64u(i, (!src1.zmm64u(i)) & src2.zmm64u(i));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    // ========================================================================
     // VPBROADCASTD/Q — Broadcast scalar to all elements
     // ========================================================================
 
@@ -500,11 +569,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpbroadcastd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
+        let mask = read_opmask_for_write(self, instr);
         let scalar = if instr.mod_c0() {
             read_zmm(self, instr.src()).zmm32u(0)
-        } else {
+        } else if (mask & cut_opmask_to(nelements)) != 0 {
             let laddr = self.resolve_addr(instr);
             self.v_read_dword(BxSegregs::from(instr.seg()), laddr)?
+        } else {
+            // Bochs avx512_broadcast.cc VPBROADCASTD_MASK_VdqWdM guards the
+            // read on a non-empty opmask, so a fully masked-off broadcast
+            // performs no memory access and cannot fault.
+            0
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -520,18 +595,16 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpbroadcastq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
+        let mask = read_opmask_for_write(self, instr);
         let scalar = if instr.mod_c0() {
             read_zmm(self, instr.src()).zmm64u(0)
-        } else {
+        } else if (mask & cut_opmask_to(nelements)) != 0 {
             let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            if self.long64_mode() {
-                self.read_virtual_qword_64(seg, laddr)?
-            } else {
-                let lo = self.v_read_dword(seg, laddr)? as u64;
-                let hi = self.v_read_dword(seg, laddr + 4)? as u64;
-                lo | (hi << 32)
-            }
+            self.v_read_qword(BxSegregs::from(instr.seg()), laddr)?
+        } else {
+            // Bochs avx512_broadcast.cc VPBROADCASTQ_MASK_VdqWqM: no read at
+            // all when the opmask selects nothing.
+            0
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -540,6 +613,37 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPBROADCASTB Vdq{k}, Gb — EVEX.66.0F38.W0 7A (broadcast from GPR).
+    /// Register-only: the def entry names BxError as its load function.
+    pub fn evex_vpbroadcastb_gpr(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = byte_elements_bcast(vl);
+        let scalar = self.get_gpr32(instr.src() as usize) as u8;
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmmubyte(i, scalar);
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        super::avx512_bw::write_zmm_masked_b(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPBROADCASTW Vdq{k}, Gw — EVEX.66.0F38.W0 7B (broadcast from GPR).
+    pub fn evex_vpbroadcastw_gpr(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = word_elements_bcast(vl);
+        let scalar = self.get_gpr32(instr.src() as usize) as u16;
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16u(i, scalar);
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
 
@@ -583,17 +687,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let dst_reg = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            self.evex_load_bcst_d_pair(instr)?
         };
         let imm8 = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
@@ -625,19 +723,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
         let dst_reg = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            tmp
+            self.evex_load_bcst_q_pair(instr)?
         };
         let imm8 = instr.ib() as u64;
         let mut result = BxPackedZmmRegister::default();
@@ -669,7 +759,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpslld_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_d_pair(instr)?
+        };
         let count = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -692,7 +786,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsrld_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_d_pair(instr)?
+        };
         let count = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -715,7 +813,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsrad_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_d_pair(instr)?
+        };
         let count = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -738,7 +840,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsllq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
         let count = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -761,7 +867,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsrlq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
         let count = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -784,7 +894,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsraq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
         let count = instr.ib() as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -845,18 +959,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let num_lanes = vl_bytes(vl) / 16;
         let imm = (instr.ib() as usize) & (num_lanes - 1);
         // Start with src1 (the full vector)
-        let mut result = read_zmm(self, instr.src1());
+        let mut result = read_zmm(self, instr.src2());
         // Read 128-bit insert value
         let insert = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..4 {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            // Both def entries use LOADU_Wdq.
+            self.evex_loadu_wdq(instr)?
         };
         // Insert 128-bit lane
         result.set_zmm32u(imm * 4, insert.zmm32u(0));
@@ -877,17 +986,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpshufb(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let bytes = vl_bytes(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..bytes {
-                tmp.set_zmmubyte(i, self.v_read_byte(seg, laddr + i as u64)?);
-            }
-            tmp
+            // Both def entries use LOAD_Vector.
+            self.evex_load_vector(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         // Per-lane shuffle: each 128-bit lane independently
@@ -933,13 +1037,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = if instr.mod_c0() {
             read_zmm(self, instr.src())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            // Both def entries use LOAD_BROADCAST_VectorD.
+            self.evex_load_broadcast_vector_d(instr)?
         };
         let imm8 = instr.ib();
         let mut result = BxPackedZmmRegister::default();
@@ -965,8 +1064,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpslld_reg(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src1());
-        let count_reg = read_zmm(self, instr.src2());
+        let src = read_zmm(self, instr.src2());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
         let count64 = count_reg.zmm64u(0);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -989,8 +1092,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsrld_reg(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src1());
-        let count_reg = read_zmm(self, instr.src2());
+        let src = read_zmm(self, instr.src2());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
         let count64 = count_reg.zmm64u(0);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1013,8 +1120,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsrad_reg(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src1());
-        let count_reg = read_zmm(self, instr.src2());
+        let src = read_zmm(self, instr.src2());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
         let count64 = count_reg.zmm64u(0);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1037,8 +1148,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsllq_reg(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src1());
-        let count_reg = read_zmm(self, instr.src2());
+        let src = read_zmm(self, instr.src2());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
         let count64 = count_reg.zmm64u(0);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1061,8 +1176,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsrlq_reg(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src1());
-        let count_reg = read_zmm(self, instr.src2());
+        let src = read_zmm(self, instr.src2());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
         let count64 = count_reg.zmm64u(0);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1085,8 +1204,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsraq_reg(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src1());
-        let count_reg = read_zmm(self, instr.src2());
+        let src = read_zmm(self, instr.src2());
+        let count_reg = if instr.mod_c0() {
+            read_zmm(self, instr.src1())
+        } else {
+            self.evex_loadu_wdq(instr)?
+        };
         let count64 = count_reg.zmm64u(0);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1113,17 +1236,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpcmpd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            // Single def entry: LOAD_BROADCAST_MASK_VectorD.
+            self.evex_load_broadcast_mask_vector_d(instr)?
         };
         let imm3 = instr.ib() & 0x07;
         let write_mask = read_opmask_for_write(self, instr);
@@ -1153,17 +1271,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpcmpud(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            // Single def entry: LOAD_BROADCAST_MASK_VectorD.
+            self.evex_load_broadcast_mask_vector_d(instr)?
         };
         let imm3 = instr.ib() & 0x07;
         let write_mask = read_opmask_for_write(self, instr);
@@ -1197,17 +1310,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpmulld(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1227,17 +1334,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpminsd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1255,17 +1356,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpmaxsd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1288,7 +1383,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vprold_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_d_pair(instr)?
+        };
         let count = (instr.ib() & 0x1F) as u32; // modulo 32
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1304,7 +1403,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vprord_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_d_pair(instr)?
+        };
         let count = (instr.ib() & 0x1F) as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1320,7 +1423,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vprolq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
         let count = (instr.ib() & 0x3F) as u32; // modulo 64
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1336,7 +1443,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vprorq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src = read_zmm(self, instr.src());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            self.evex_load_bcst_q_pair(instr)?
+        };
         let count = (instr.ib() & 0x3F) as u32;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1356,17 +1467,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpermd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let idx = read_zmm(self, instr.src1());
+        let idx = read_zmm(self, instr.src2());
         let src = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            // Both def entries use LOAD_BROADCAST_VectorD.
+            self.evex_load_broadcast_vector_d(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1383,19 +1489,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpermq_reg(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let idx = read_zmm(self, instr.src1());
+        let idx = read_zmm(self, instr.src2());
         let src = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            tmp
+            // Both def entries use LOAD_BROADCAST_VectorQ — the masked form is
+            // not fault-suppressing for this opcode.
+            self.evex_load_broadcast_vector_q(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1415,15 +1515,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = if instr.mod_c0() {
             read_zmm(self, instr.src())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            tmp
+            // Both def entries use LOAD_BROADCAST_VectorQ.
+            self.evex_load_broadcast_vector_q(instr)?
         };
         let imm8 = instr.ib();
         let mut result = BxPackedZmmRegister::default();
@@ -1449,18 +1542,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPUNPCKLDQ Vdq{k}, Hdq, Wdq — EVEX.66.0F.W0 62
     pub fn evex_vpunpckldq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let nelements = dword_elements(vl);
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            // Both def entries use LOAD_BROADCAST_VectorD.
+            self.evex_load_broadcast_vector_d(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         let lanes = vl_bytes(vl) / 16;
@@ -1481,20 +1568,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPUNPCKLQDQ Vdq{k}, Hdq, Wdq — EVEX.66.0F.W1 6C
     pub fn evex_vpunpcklqdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let ne = qword_elements(vl);
-            for i in 0..ne {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            tmp
+            // Both def entries use LOAD_BROADCAST_VectorQ.
+            self.evex_load_broadcast_vector_q(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         let lanes = vl_bytes(vl) / 16;
@@ -1512,20 +1591,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPUNPCKHQDQ Vdq{k}, Hdq, Wdq — EVEX.66.0F.W1 6D
     pub fn evex_vpunpckhqdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let ne = qword_elements(vl);
-            for i in 0..ne {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            tmp
+            // Both def entries use LOAD_BROADCAST_VectorQ.
+            self.evex_load_broadcast_vector_q(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         let lanes = vl_bytes(vl) / 16;
@@ -1548,17 +1619,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpblendmd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            // Single def entry: LOAD_BROADCAST_MASK_VectorD.
+            self.evex_load_broadcast_mask_vector_d(instr)?
         };
         let mask = read_opmask_for_write(self, instr);
         let mut result = BxPackedZmmRegister::default();
@@ -1583,19 +1649,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpblendmq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            tmp
+            // VPBLENDMQ has a single def entry, LOAD_BROADCAST_MASK_VectorQ.
+            self.evex_load_broadcast_mask_vector_q(instr)?
         };
         let mask = read_opmask_for_write(self, instr);
         let mut result = BxPackedZmmRegister::default();
@@ -1627,13 +1686,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = if instr.mod_c0() {
             read_zmm(self, instr.src())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1652,15 +1705,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = if instr.mod_c0() {
             read_zmm(self, instr.src())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..nelements {
-                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                tmp.set_zmm64u(i, lo | (hi << 32));
-            }
-            tmp
+            self.evex_load_bcst_q_pair(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -1733,18 +1778,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPUNPCKHDQ Vdq{k}, Hdq, Wdq — EVEX.66.0F.W0 6A
     pub fn evex_vpunpckhdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let src1 = read_zmm(self, instr.src1());
+        let src1 = read_zmm(self, instr.src2());
         let src2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            let nelements = dword_elements(vl);
-            for i in 0..nelements {
-                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
-            }
-            tmp
+            // Both def entries use LOAD_BROADCAST_VectorD.
+            self.evex_load_broadcast_vector_d(instr)?
         };
         let mut result = BxPackedZmmRegister::default();
         let lanes = vl_bytes(vl) / 16;
@@ -1771,17 +1810,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsllvd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                t.set_zmm32u(i, self.v_read_dword(seg, la + (i * 4) as u64)?);
-            }
-            t
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
@@ -1798,19 +1831,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsllvq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                let lo = self.v_read_dword(seg, la + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, la + (i * 8 + 4) as u64)? as u64;
-                t.set_zmm64u(i, lo | (hi << 32));
-            }
-            t
+            self.evex_load_bcst_q_pair(instr)?
         };
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
@@ -1827,17 +1852,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsrlvd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                t.set_zmm32u(i, self.v_read_dword(seg, la + (i * 4) as u64)?);
-            }
-            t
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
@@ -1854,19 +1873,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsrlvq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                let lo = self.v_read_dword(seg, la + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, la + (i * 8 + 4) as u64)? as u64;
-                t.set_zmm64u(i, lo | (hi << 32));
-            }
-            t
+            self.evex_load_bcst_q_pair(instr)?
         };
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
@@ -1883,17 +1894,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsravd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                t.set_zmm32u(i, self.v_read_dword(seg, la + (i * 4) as u64)?);
-            }
-            t
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
@@ -1917,19 +1922,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpsravq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                let lo = self.v_read_dword(seg, la + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, la + (i * 8 + 4) as u64)? as u64;
-                t.set_zmm64u(i, lo | (hi << 32));
-            }
-            t
+            self.evex_load_bcst_q_pair(instr)?
         };
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
@@ -1957,17 +1954,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vprolvd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                t.set_zmm32u(i, self.v_read_dword(seg, la + (i * 4) as u64)?);
-            }
-            t
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
@@ -1983,19 +1974,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vprolvq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                let lo = self.v_read_dword(seg, la + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, la + (i * 8 + 4) as u64)? as u64;
-                t.set_zmm64u(i, lo | (hi << 32));
-            }
-            t
+            self.evex_load_bcst_q_pair(instr)?
         };
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
@@ -2011,17 +1994,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vprorvd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                t.set_zmm32u(i, self.v_read_dword(seg, la + (i * 4) as u64)?);
-            }
-            t
+            self.evex_load_bcst_d_pair(instr)?
         };
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
@@ -2037,19 +2014,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vprorvq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                let lo = self.v_read_dword(seg, la + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, la + (i * 8 + 4) as u64)? as u64;
-                t.set_zmm64u(i, lo | (hi << 32));
-            }
-            t
+            self.evex_load_bcst_q_pair(instr)?
         };
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
@@ -2069,19 +2038,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpmuludq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                let lo = self.v_read_dword(seg, la + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, la + (i * 8 + 4) as u64)? as u64;
-                t.set_zmm64u(i, lo | (hi << 32));
-            }
-            t
+            self.evex_load_bcst_q_pair(instr)?
         };
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
@@ -2104,17 +2065,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpalignr(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let bytes = vl_bytes(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..bytes {
-                t.set_zmmubyte(i, self.v_read_byte(seg, la + i as u64)?);
-            }
-            t
+            // Both def entries use LOAD_Vector.
+            self.evex_load_vector(instr)?
         };
         let shift = instr.ib() as usize;
         let mut r = BxPackedZmmRegister::default();
@@ -2152,56 +2108,94 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     // ========================================================================
-    // VPMOVZXDQ/VPMOVSXDQ — Zero/Sign extend dwords to qwords
+    // VPMOVSX / VPMOVZX — sign- or zero-extend to a wider element
+    //
+    // Bochs avx512_move.cc VPMOV{S,Z}X{BW,BD,BQ,WD,WQ,DQ}_MASK_VdqWdqR. All
+    // twelve are the same loop differing only in the two widths and whether
+    // the source element is sign- or zero-extended, so they share one
+    // implementation. The source occupies a fraction of the destination width,
+    // which is why each pair names a Half / Quarter / Eighth loader.
     // ========================================================================
 
-    /// VPMOVZXDQ Vdq{k}, Wdq — EVEX.66.0F38.W0 35
-    pub fn evex_vpmovzxdq(&mut self, instr: &Instruction) -> super::Result<()> {
+    /// Source-to-destination width pairing of a VPMOV widening conversion,
+    /// named after the mnemonic suffix.
+    pub(super) fn evex_vpmov_widen(
+        &mut self,
+        instr: &Instruction,
+        widen: PmovWiden,
+        signed: bool,
+    ) -> super::Result<()> {
         let vl = instr.get_vl();
-        let ne = qword_elements(vl); // output qword count
         let src = if instr.mod_c0() {
             read_zmm(self, instr.src())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                t.set_zmm32u(i, self.v_read_dword(seg, la + (i * 4) as u64)?);
+            // Loader per the def entry for this width pairing.
+            match widen {
+                PmovWiden::Bw => self.evex_load_half_vec_mask_b_pair(instr)?,
+                PmovWiden::Bd => self.evex_load_quarter_vec_mask_b_pair(instr)?,
+                PmovWiden::Bq => self.evex_load_eighth_vec_mask_b_pair(instr)?,
+                PmovWiden::Wd => self.evex_load_half_vec_mask_w_pair(instr)?,
+                PmovWiden::Wq => self.evex_load_quarter_vec_mask_w_pair(instr)?,
+                PmovWiden::Dq => self.evex_load_half_vec_mask_d_pair(instr)?,
             }
-            t
         };
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm64u(i, src.zmm32u(i) as u64);
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
-        Ok(())
-    }
 
-    /// VPMOVSXDQ Vdq{k}, Wdq — EVEX.66.0F38.W0 25
-    pub fn evex_vpmovsxdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = qword_elements(vl);
-        let src = if instr.mod_c0() {
-            read_zmm(self, instr.src())
-        } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                t.set_zmm32u(i, self.v_read_dword(seg, la + (i * 4) as u64)?);
-            }
-            t
-        };
         let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm64u(i, (src.zmm32u(i) as i32) as i64 as u64);
-        }
         let m = read_opmask_for_write(self, instr);
         let z = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
+
+        // Read the narrow element, widen it, and write at the destination
+        // width. The element count follows the destination.
+        match widen {
+            PmovWiden::Bw => {
+                let ne = vl_bytes(vl) / 2; // word elements
+                for i in 0..ne {
+                    let v = src.zmmubyte(i);
+                    r.set_zmm16u(i, if signed { v as i8 as i16 as u16 } else { v as u16 });
+                }
+                write_zmm_masked_w(self, instr.dst(), &r, m, z, vl);
+            }
+            PmovWiden::Bd => {
+                let ne = dword_elements(vl);
+                for i in 0..ne {
+                    let v = src.zmmubyte(i);
+                    r.set_zmm32u(i, if signed { v as i8 as i32 as u32 } else { v as u32 });
+                }
+                write_zmm_masked(self, instr.dst(), &r, m, z, vl);
+            }
+            PmovWiden::Bq => {
+                let ne = qword_elements(vl);
+                for i in 0..ne {
+                    let v = src.zmmubyte(i);
+                    r.set_zmm64u(i, if signed { v as i8 as i64 as u64 } else { v as u64 });
+                }
+                write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
+            }
+            PmovWiden::Wd => {
+                let ne = dword_elements(vl);
+                for i in 0..ne {
+                    let v = src.zmm16u(i);
+                    r.set_zmm32u(i, if signed { v as i16 as i32 as u32 } else { v as u32 });
+                }
+                write_zmm_masked(self, instr.dst(), &r, m, z, vl);
+            }
+            PmovWiden::Wq => {
+                let ne = qword_elements(vl);
+                for i in 0..ne {
+                    let v = src.zmm16u(i);
+                    r.set_zmm64u(i, if signed { v as i16 as i64 as u64 } else { v as u64 });
+                }
+                write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
+            }
+            PmovWiden::Dq => {
+                let ne = qword_elements(vl);
+                for i in 0..ne {
+                    let v = src.zmm32u(i);
+                    r.set_zmm64u(i, if signed { v as i32 as i64 as u64 } else { v as u64 });
+                }
+                write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
+            }
+        }
         Ok(())
     }
 
@@ -2213,17 +2207,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpcmpeqd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                t.set_zmm32u(i, self.v_read_dword(seg, la + (i * 4) as u64)?);
-            }
-            t
+            // Single def entry: LOAD_BROADCAST_MASK_VectorD.
+            self.evex_load_broadcast_mask_vector_d(instr)?
         };
         let wmask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
@@ -2240,17 +2229,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpcmpgtd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                t.set_zmm32u(i, self.v_read_dword(seg, la + (i * 4) as u64)?);
-            }
-            t
+            // Single def entry: LOAD_BROADCAST_MASK_VectorD.
+            self.evex_load_broadcast_mask_vector_d(instr)?
         };
         let wmask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
@@ -2267,19 +2251,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpcmpeqq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                let lo = self.v_read_dword(seg, la + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, la + (i * 8 + 4) as u64)? as u64;
-                t.set_zmm64u(i, lo | (hi << 32));
-            }
-            t
+            // Single def entry: LOAD_BROADCAST_MASK_VectorQ.
+            self.evex_load_broadcast_mask_vector_q(instr)?
         };
         let wmask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
@@ -2296,19 +2273,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub fn evex_vpcmpgtq(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src1());
+        let s1 = read_zmm(self, instr.src2());
         let s2 = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                let lo = self.v_read_dword(seg, la + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, la + (i * 8 + 4) as u64)? as u64;
-                t.set_zmm64u(i, lo | (hi << 32));
-            }
-            t
+            // Single def entry: LOAD_BROADCAST_MASK_VectorQ.
+            self.evex_load_broadcast_mask_vector_q(instr)?
         };
         let wmask = read_opmask_for_write(self, instr);
         let mut result: u64 = 0;
@@ -2329,265 +2299,136 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn read_evex_rm_ps(
         &mut self,
         instr: &Instruction,
-        ne: usize,
+        _ne: usize,
     ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src1()))
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                t.set_zmm32u(i, self.v_read_dword(seg, la + (i * 4) as u64)?);
-            }
-            Ok(t)
+            self.evex_load_bcst_d_pair(instr)
         }
     }
     fn read_evex_rm_pd(
         &mut self,
         instr: &Instruction,
-        ne: usize,
+        _ne: usize,
     ) -> super::Result<BxPackedZmmRegister> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src1()))
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                let lo = self.v_read_dword(seg, la + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, la + (i * 8 + 4) as u64)? as u64;
-                t.set_zmm64u(i, lo | (hi << 32));
-            }
-            Ok(t)
+            self.evex_load_bcst_q_pair(instr)
         }
+    }
+
+    /// Two-operand packed EVEX FP over VL, single-precision.
+    /// Bochs cpu_templates_pfp.h `HANDLE_AVX512_PFP_2OP`: the `_mask`
+    /// primitives skip masked-off elements entirely, so those raise no
+    /// exception; `check_exceptionsSSE` then runs before the destination
+    /// write, and the embedded rounding control (EVEX.b on a register
+    /// operand at VL512) overrides MXCSR.RC.
+    fn evex_pfp_2op_ps(
+        &mut self,
+        instr: &Instruction,
+        func: fn(Float32, Float32, &mut SoftFloatStatus) -> Float32,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src2()); // vvvv
+        let s2 = self.read_evex_rm_ps(instr, ne)?; // rm
+        let m = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let mut r = BxPackedZmmRegister::default();
+        for i in 0..ne {
+            if (m >> i) & 1 != 0 {
+                r.set_zmm32u(i, func(s1.zmm32u(i), s2.zmm32u(i), &mut status));
+            }
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl);
+        Ok(())
+    }
+
+    /// Two-operand packed EVEX FP over VL, double-precision.
+    fn evex_pfp_2op_pd(
+        &mut self,
+        instr: &Instruction,
+        func: fn(Float64, Float64, &mut SoftFloatStatus) -> Float64,
+    ) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src2()); // vvvv
+        let s2 = self.read_evex_rm_pd(instr, ne)?; // rm
+        let m = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let mut r = BxPackedZmmRegister::default();
+        for i in 0..ne {
+            if (m >> i) & 1 != 0 {
+                r.set_zmm64u(i, func(s1.zmm64u(i), s2.zmm64u(i), &mut status));
+            }
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
+        Ok(())
     }
 
     pub fn evex_vaddps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src2());
-        let s2 = self.read_evex_rm_ps(instr, ne)?; // s1=vvvv, s2=rm
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm32f(i, s1.zmm32f(i) + s2.zmm32f(i));
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &r, m, z, vl);
-        Ok(())
+        self.evex_pfp_2op_ps(instr, f32_add)
     }
     pub fn evex_vaddpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src2());
-        let s2 = self.read_evex_rm_pd(instr, ne)?; // s1=vvvv, s2=rm
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm64f(i, s1.zmm64f(i) + s2.zmm64f(i));
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
-        Ok(())
+        self.evex_pfp_2op_pd(instr, f64_add)
     }
     pub fn evex_vsubps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src2());
-        let s2 = self.read_evex_rm_ps(instr, ne)?; // s1=vvvv, s2=rm
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm32f(i, s1.zmm32f(i) - s2.zmm32f(i));
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &r, m, z, vl);
-        Ok(())
+        self.evex_pfp_2op_ps(instr, f32_sub)
     }
     pub fn evex_vsubpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src2());
-        let s2 = self.read_evex_rm_pd(instr, ne)?; // s1=vvvv, s2=rm
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm64f(i, s1.zmm64f(i) - s2.zmm64f(i));
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
-        Ok(())
+        self.evex_pfp_2op_pd(instr, f64_sub)
     }
     pub fn evex_vmulps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src2());
-        let s2 = self.read_evex_rm_ps(instr, ne)?; // s1=vvvv, s2=rm
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm32f(i, s1.zmm32f(i) * s2.zmm32f(i));
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &r, m, z, vl);
-        Ok(())
+        self.evex_pfp_2op_ps(instr, f32_mul)
     }
     pub fn evex_vmulpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src2());
-        let s2 = self.read_evex_rm_pd(instr, ne)?; // s1=vvvv, s2=rm
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm64f(i, s1.zmm64f(i) * s2.zmm64f(i));
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
-        Ok(())
+        self.evex_pfp_2op_pd(instr, f64_mul)
     }
     pub fn evex_vdivps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src2());
-        let s2 = self.read_evex_rm_ps(instr, ne)?; // s1=vvvv, s2=rm
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm32f(i, s1.zmm32f(i) / s2.zmm32f(i));
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &r, m, z, vl);
-        Ok(())
+        self.evex_pfp_2op_ps(instr, f32_div)
     }
     pub fn evex_vdivpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src2());
-        let s2 = self.read_evex_rm_pd(instr, ne)?; // s1=vvvv, s2=rm
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm64f(i, s1.zmm64f(i) / s2.zmm64f(i));
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
-        Ok(())
+        self.evex_pfp_2op_pd(instr, f64_div)
     }
-    // x86 MAX: if either NaN, return src2
-    fn x86_maxf32(a: f32, b: f32) -> f32 {
-        if a.is_nan() || b.is_nan() {
-            b
-        } else if a > b {
-            a
-        } else {
-            b
-        }
-    }
-    fn x86_maxf64(a: f64, b: f64) -> f64 {
-        if a.is_nan() || b.is_nan() {
-            b
-        } else if a > b {
-            a
-        } else {
-            b
-        }
-    }
-    fn x86_minf32(a: f32, b: f32) -> f32 {
-        if a.is_nan() || b.is_nan() {
-            b
-        } else if a < b {
-            a
-        } else {
-            b
-        }
-    }
-    fn x86_minf64(a: f64, b: f64) -> f64 {
-        if a.is_nan() || b.is_nan() {
-            b
-        } else if a < b {
-            a
-        } else {
-            b
-        }
-    }
-
     pub fn evex_vmaxps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src2());
-        let s2 = self.read_evex_rm_ps(instr, ne)?; // s1=vvvv, s2=rm
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm32f(i, Self::x86_maxf32(s1.zmm32f(i), s2.zmm32f(i)));
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &r, m, z, vl);
-        Ok(())
+        self.evex_pfp_2op_ps(instr, f32_max)
     }
     pub fn evex_vmaxpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src2());
-        let s2 = self.read_evex_rm_pd(instr, ne)?; // s1=vvvv, s2=rm
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm64f(i, Self::x86_maxf64(s1.zmm64f(i), s2.zmm64f(i)));
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
-        Ok(())
+        self.evex_pfp_2op_pd(instr, f64_max)
     }
     pub fn evex_vminps(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = dword_elements(vl);
-        let s1 = read_zmm(self, instr.src2());
-        let s2 = self.read_evex_rm_ps(instr, ne)?; // s1=vvvv, s2=rm
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm32f(i, Self::x86_minf32(s1.zmm32f(i), s2.zmm32f(i)));
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked(self, instr.dst(), &r, m, z, vl);
-        Ok(())
+        self.evex_pfp_2op_ps(instr, f32_min)
     }
     pub fn evex_vminpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let vl = instr.get_vl();
-        let ne = qword_elements(vl);
-        let s1 = read_zmm(self, instr.src2());
-        let s2 = self.read_evex_rm_pd(instr, ne)?; // s1=vvvv, s2=rm
-        let mut r = BxPackedZmmRegister::default();
-        for i in 0..ne {
-            r.set_zmm64f(i, Self::x86_minf64(s1.zmm64f(i), s2.zmm64f(i)));
-        }
-        let m = read_opmask_for_write(self, instr);
-        let z = instr.is_zero_masking() != 0;
-        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
-        Ok(())
+        self.evex_pfp_2op_pd(instr, f64_min)
     }
+
     pub fn evex_vsqrtps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = dword_elements(vl);
         let src = if instr.mod_c0() {
             read_zmm(self, instr.src())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                t.set_zmm32u(i, self.v_read_dword(seg, la + (i * 4) as u64)?);
-            }
-            t
+            self.evex_load_bcst_d_pair(instr)?
         };
+        let m = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
-            r.set_zmm32f(i, src.zmm32f(i).sqrt());
+            if (m >> i) & 1 != 0 {
+                r.set_zmm32u(i, f32_sqrt(src.zmm32u(i), &mut status));
+            }
         }
-        let m = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let z = instr.is_zero_masking() != 0;
         write_zmm_masked(self, instr.dst(), &r, m, z, vl);
         Ok(())
@@ -2598,23 +2439,432 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let src = if instr.mod_c0() {
             read_zmm(self, instr.src())
         } else {
-            let mut t = BxPackedZmmRegister::default();
-            let la = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..ne {
-                let lo = self.v_read_dword(seg, la + (i * 8) as u64)? as u64;
-                let hi = self.v_read_dword(seg, la + (i * 8 + 4) as u64)? as u64;
-                t.set_zmm64u(i, lo | (hi << 32));
-            }
-            t
+            self.evex_load_bcst_q_pair(instr)?
         };
+        let m = read_opmask_for_write(self, instr);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
         let mut r = BxPackedZmmRegister::default();
         for i in 0..ne {
-            r.set_zmm64f(i, src.zmm64f(i).sqrt());
+            if (m >> i) & 1 != 0 {
+                r.set_zmm64u(i, f64_sqrt(src.zmm64u(i), &mut status));
+            }
         }
-        let m = read_opmask_for_write(self, instr);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let z = instr.is_zero_masking() != 0;
         write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
         Ok(())
     }
+    // ========================================================================
+    // Element duplication, dword/qword rotate-align, and the FP blends.
+    // Bochs avx512.cc VMOVSLDUP/VMOVSHDUP/VMOVDDUP, VALIGND/Q, VBLENDMPS/PD.
+    // ========================================================================
+
+    /// Read a whole vector from the r/m operand. All the callers below pair
+    /// `LOAD_Vector` with itself, so there is no masked variant to choose.
+    fn read_rm_vector(&mut self, instr: &Instruction) -> super::Result<BxPackedZmmRegister> {
+        if instr.mod_c0() {
+            Ok(read_zmm(self, instr.src()))
+        } else {
+            self.evex_load_vector(instr)
+        }
+    }
+
+    /// VMOVSLDUP Vps{k}{z}, Wps — EVEX.F3.0F.W0 12. Each even dword is copied
+    /// over the odd one above it.
+    pub fn evex_vmovsldup(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let mut op = self.read_rm_vector(instr)?;
+        for n in (0..dword_elements(vl)).step_by(2) {
+            op.set_zmm32u(n + 1, op.zmm32u(n));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &op, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VMOVSHDUP Vps{k}{z}, Wps — EVEX.F3.0F.W0 16. The odd dword is copied
+    /// down over the even one below it.
+    pub fn evex_vmovshdup(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let mut op = self.read_rm_vector(instr)?;
+        for n in (0..dword_elements(vl)).step_by(2) {
+            op.set_zmm32u(n, op.zmm32u(n + 1));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &op, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VMOVDDUP Vpd{k}{z}, Wpd — EVEX.F2.0F.W1 12. Qword granularity.
+    pub fn evex_vmovddup(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let mut op = self.read_rm_vector(instr)?;
+        for n in (0..qword_elements(vl)).step_by(2) {
+            op.set_zmm64u(n + 1, op.zmm64u(n));
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &op, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VALIGND Vdq{k}{z}, Hdq, Wdq, Ib — EVEX.66.0F3A.W0 03. Concatenates
+    /// vvvv:rm and extracts a dword-granular window starting at imm8.
+    pub fn evex_valignd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let elements_mask = dword_elements(vl) - 1;
+        let op1 = read_zmm(self, instr.src2()); // vvvv — the high half
+        let op2 = self.read_evex_rm_ps(instr, dword_elements(vl))?; // rm — the low half
+        let shift = (instr.ib() as usize) & elements_mask;
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..=elements_mask {
+            let index = (shift + n) & elements_mask;
+            let v = if (n + shift) <= elements_mask {
+                op2.zmm32u(index)
+            } else {
+                op1.zmm32u(index)
+            };
+            result.set_zmm32u(n, v);
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VALIGNQ Vdq{k}{z}, Hdq, Wdq, Ib — EVEX.66.0F3A.W1 03.
+    pub fn evex_valignq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let elements_mask = qword_elements(vl) - 1;
+        let op1 = read_zmm(self, instr.src2());
+        let op2 = self.read_evex_rm_pd(instr, qword_elements(vl))?;
+        let shift = (instr.ib() as usize) & elements_mask;
+        let mut result = BxPackedZmmRegister::default();
+        for n in 0..=elements_mask {
+            let index = (shift + n) & elements_mask;
+            let v = if (n + shift) <= elements_mask {
+                op2.zmm64u(index)
+            } else {
+                op1.zmm64u(index)
+            };
+            result.set_zmm64u(n, v);
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    //! The bitwise EVEX ops come in dword and qword flavours that produce the
+    //! same bit pattern, which makes it tempting to serve both from one
+    //! handler. The element width is still observable: opmask bits and
+    //! embedded broadcast are counted in elements, so VPORQ must apply mask
+    //! bit i to qword i where VPORD applies it to dword i. These tests pin
+    //! that, because a wrong-width handler produces a correct-looking result
+    //! everywhere except the masked lanes.
+
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+    use crate::cpu::decoder::{BxSegregs, Instruction};
+    use rusty_box_decoder::opcode::Opcode;
+
+    /// Register-form EVEX.128 instruction: dst=0, src1=1, src2=2, mask k1,
+    /// zero-masking on.
+    fn evex_reg_form(opcode: Opcode) -> Instruction {
+        let mut i = Instruction::default();
+        i.set_ia_opcode(opcode);
+        i.set_src_reg(0, 0); // dst
+        i.set_src_reg(1, 1); // src1
+        i.set_src_reg(2, 2); // src2
+        i.set_opmask(1);
+        i.set_zero_masking(1);
+        i.set_vex(true);
+        i.set_vl(0); // 128-bit: 2 qwords / 4 dwords
+        i.set_seg(BxSegregs::Ds);
+        // `init` assigns `flags` wholesale, so the register-form bit has to be
+        // asserted after it or it is silently wiped and the handler takes the
+        // memory path instead.
+        i.init(0, 0, 1, 1);
+        i.assert_mod_c0();
+        i
+    }
+
+    #[test]
+    fn qword_bitwise_ops_mask_per_qword_not_per_dword() {
+        // k1 = 0b01 leaves only element 0 active. Under qword granularity that
+        // is the whole low 64 bits; under dword granularity it would be only
+        // the low 32, zeroing the second dword and truncating the result.
+        // The VxxxPD packed-FP aliases are qword-granular for the same reason
+        // and were misrouted to the dword handlers alongside the integer forms.
+        for (opcode, expect_lo) in [
+            (Opcode::EvexVporqVdqHdqWdq, 0x1111_1111_2222_22FFu64),
+            (Opcode::EvexVpandqVdqHdqWdq, 0x0000_0000_0000_0022u64),
+            (Opcode::EvexVpxorqVdqHdqWdq, 0x1111_1111_2222_22DDu64),
+            (Opcode::EvexVorpdVpdHpdWpd, 0x1111_1111_2222_22FFu64),
+            (Opcode::EvexVandpdVpdHpdWpd, 0x0000_0000_0000_0022u64),
+            (Opcode::EvexVxorpdVpdHpdWpd, 0x1111_1111_2222_22DDu64),
+        ] {
+            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            cpu.vmm[1].set_zmm64u(0, 0x1111_1111_2222_2222);
+            cpu.vmm[1].set_zmm64u(1, 0x3333_3333_4444_4444);
+            cpu.vmm[2].set_zmm64u(0, 0x0000_0000_0000_00FF);
+            cpu.vmm[2].set_zmm64u(1, 0xFF00_0000_0000_0000);
+            cpu.vmm[0].set_zmm64u(0, 0xDEAD_BEEF_DEAD_BEEF);
+            cpu.vmm[0].set_zmm64u(1, 0xDEAD_BEEF_DEAD_BEEF);
+            cpu.opmask[1].set_rrx(0b01);
+
+            // Driven through `execute_instruction` rather than by calling the
+            // handler directly: the defect this pins was a dispatcher arm
+            // sending the qword opcode to the dword handler, which a direct
+            // call would not have caught.
+            let i = evex_reg_form(opcode);
+            cpu.execute_instruction(&i).unwrap();
+
+            assert_eq!(
+                cpu.vmm[0].zmm64u(0),
+                expect_lo,
+                "{opcode:?}: active qword must be written whole; a dword-granular \
+                 handler would zero the upper half"
+            );
+            assert_eq!(
+                cpu.vmm[0].zmm64u(1),
+                0,
+                "{opcode:?}: masked-off qword must be zeroed under zero-masking"
+            );
+        }
+    }
+
+    #[test]
+    fn vpandnq_negates_src1_at_qword_granularity() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.vmm[2].set_zmm64u(0, 0x0000_0000_0000_00F0);
+        cpu.vmm[1].set_zmm64u(0, 0xFFFF_FFFF_FFFF_FFFF);
+        cpu.vmm[0].set_zmm64u(0, 0xDEAD_BEEF_DEAD_BEEF);
+        cpu.vmm[0].set_zmm64u(1, 0xDEAD_BEEF_DEAD_BEEF);
+        cpu.opmask[1].set_rrx(0b01);
+
+        let i = evex_reg_form(Opcode::EvexVpandnqVdqHdqWdq);
+        cpu.execute_instruction(&i).unwrap();
+
+        assert_eq!(
+            cpu.vmm[0].zmm64u(0),
+            0xFFFF_FFFF_FFFF_FF0F,
+            "VPANDNQ is (!src1) & src2 across the full qword"
+        );
+        assert_eq!(cpu.vmm[0].zmm64u(1), 0, "masked-off qword zeroed");
+    }
+
+    // ---- operand order -------------------------------------------------
+    //
+    // Bochs numbers a 3-operand vector op as i->src1() = EVEX.vvvv and
+    // i->src2() = ModRM.rm. This decoder is the other way round, so a handler
+    // translated positionally from upstream reads its sources reversed. Every
+    // case below is asymmetric, so it fails if the two are exchanged.
+    //
+    // vmm[2] is EVEX.vvvv (Bochs op1); vmm[1] is ModRM.rm (Bochs op2).
+
+    /// Same shape as `evex_reg_form` but unmasked, so the assertions are about
+    /// operand order alone rather than about masking.
+    fn evex_unmasked(opcode: Opcode) -> Instruction {
+        let mut i = Instruction::default();
+        i.set_ia_opcode(opcode);
+        i.set_src_reg(0, 0);
+        i.set_src_reg(1, 1); // ModRM.rm
+        i.set_src_reg(2, 2); // EVEX.vvvv
+        i.set_opmask(0);
+        i.set_vex(true);
+        i.set_vl(0);
+        i.set_seg(BxSegregs::Ds);
+        i.init(0, 0, 1, 1);
+        i.assert_mod_c0();
+        i
+    }
+
+    #[test]
+    fn operand_order_vpsub_subtracts_rm_from_vvvv() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.vmm[2].set_zmm32u(0, 10); // vvvv
+        cpu.vmm[1].set_zmm32u(0, 3); // rm
+        cpu.execute_instruction(&evex_unmasked(Opcode::EvexVpsubdVdqHdqWdq))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), 7, "vvvv - rm, not rm - vvvv");
+
+        cpu.vmm[2].set_zmm64u(0, 10);
+        cpu.vmm[1].set_zmm64u(0, 3);
+        cpu.execute_instruction(&evex_unmasked(Opcode::EvexVpsubqVdqHdqWdq))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm64u(0), 7);
+    }
+
+    #[test]
+    fn operand_order_vpandn_negates_vvvv() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.vmm[2].set_zmm32u(0, 0x0000_00F0); // vvvv — the negated side
+        cpu.vmm[1].set_zmm32u(0, 0xFFFF_FFFF); // rm
+        cpu.execute_instruction(&evex_unmasked(Opcode::EvexVpandndVdqHdqWdq))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), 0xFFFF_FF0F, "(!vvvv) & rm");
+    }
+
+    #[test]
+    fn operand_order_vpcmpgtd_compares_vvvv_against_rm() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.vmm[2].set_zmm32u(0, 5); // vvvv
+        cpu.vmm[1].set_zmm32u(0, 3); // rm
+        cpu.vmm[2].set_zmm32u(1, 3);
+        cpu.vmm[1].set_zmm32u(1, 5);
+        cpu.execute_instruction(&evex_unmasked(Opcode::EvexVpcmpgtdKgwHdqWdq))
+            .unwrap();
+        assert_eq!(
+            cpu.opmask[0].rrx() & 0b11,
+            0b01,
+            "element 0 has vvvv > rm, element 1 does not"
+        );
+    }
+
+    #[test]
+    fn operand_order_vpshufb_takes_its_control_bytes_from_rm() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        // vvvv is the data, rm is the shuffle control.
+        for i in 0..16 {
+            cpu.vmm[2].set_zmmubyte(i, (0xA0 + i) as u8);
+            cpu.vmm[1].set_zmmubyte(i, 0); // every lane selects data byte 0
+        }
+        cpu.execute_instruction(&evex_unmasked(Opcode::EvexVpshufbVdqHdqWdq))
+            .unwrap();
+        for i in 0..16 {
+            assert_eq!(
+                cpu.vmm[0].zmmubyte(i),
+                0xA0,
+                "control from rm selecting data[0] from vvvv"
+            );
+        }
+    }
+
+    #[test]
+    fn operand_order_vpblendm_takes_vvvv_where_the_mask_is_clear() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for i in 0..4 {
+            cpu.vmm[2].set_zmm32u(i, 0x1111_1111); // vvvv
+            cpu.vmm[1].set_zmm32u(i, 0x2222_2222); // rm
+        }
+        cpu.bx_write_opmask(1, 0b0101);
+        let mut i = evex_unmasked(Opcode::EvexVpblendmdVdqHdqWdq);
+        i.set_opmask(1);
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), 0x2222_2222, "set -> rm");
+        assert_eq!(cpu.vmm[0].zmm32u(1), 0x1111_1111, "clear -> vvvv");
+        assert_eq!(cpu.vmm[0].zmm32u(2), 0x2222_2222);
+        assert_eq!(cpu.vmm[0].zmm32u(3), 0x1111_1111);
+    }
+
+    #[test]
+    fn operand_order_variable_shift_counts_come_from_rm() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.vmm[2].set_zmm32u(0, 0x0000_0100); // vvvv: the value
+        cpu.vmm[2].set_zmm32u(1, 0x0000_0100);
+        cpu.vmm[1].set_zmm32u(0, 4); // rm: per-element counts
+        cpu.vmm[1].set_zmm32u(1, 8);
+        cpu.execute_instruction(&evex_unmasked(Opcode::EvexVpsrlvdVdqHdqWdq))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), 0x10);
+        assert_eq!(cpu.vmm[0].zmm32u(1), 0x1);
+    }
+
+    #[test]
+    fn operand_order_vinserti32x4_inserts_rm_into_vvvv() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for i in 0..8 {
+            cpu.vmm[2].set_zmm32u(i, 0x1111_1111); // vvvv: the base vector
+        }
+        for i in 0..4 {
+            cpu.vmm[1].set_zmm32u(i, 0x2222_2222); // rm: the inserted lane
+        }
+        let mut i = evex_unmasked(Opcode::EvexVinserti32x4VdqHdqWdqIb);
+        // The immediate, VL and the opmask index share one u32 — imm8 is byte
+        // 0, VL is byte 1, the opmask is byte 3 — so `set_iq` wipes the other
+        // two and has to come first.
+        i.set_iq(1); // insert into the upper lane
+        i.set_vl(1); // 256-bit: two 128-bit lanes
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.vmm[0].zmm32u(0), 0x1111_1111, "lane 0 keeps vvvv");
+        assert_eq!(cpu.vmm[0].zmm32u(4), 0x2222_2222, "lane 1 takes rm");
+    }
+
+    #[test]
+    fn operand_order_kandnw_negates_vvvv() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        cpu.bx_write_opmask(2, 0x00F0); // vvvv
+        cpu.bx_write_opmask(1, 0xFFFF); // rm
+        let mut i = evex_unmasked(Opcode::KandnwKgwKhwKew);
+        i.set_opmask(0);
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(cpu.opmask[0].rrx(), 0xFF0F, "(!vvvv) & rm");
+    }
+
+
+    // ---- duplication and align ------------------------------------------
+
+    #[test]
+    fn duplication_moves_copy_in_the_direction_the_opcode_names() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for (n, v) in [10u32, 11, 12, 13].into_iter().enumerate() {
+            cpu.vmm[1].set_zmm32u(n, v); // one-operand form reads src() = src1()
+        }
+        cpu.execute_instruction(&evex_unmasked(Opcode::EvexVmovsldupVpsWps))
+            .unwrap();
+        assert_eq!(
+            [0, 1, 2, 3].map(|n| cpu.vmm[0].zmm32u(n)),
+            [10, 10, 12, 12],
+            "SLDUP copies each even dword up"
+        );
+
+        cpu.execute_instruction(&evex_unmasked(Opcode::EvexVmovshdupVpsWps))
+            .unwrap();
+        assert_eq!(
+            [0, 1, 2, 3].map(|n| cpu.vmm[0].zmm32u(n)),
+            [11, 11, 13, 13],
+            "SHDUP copies each odd dword down"
+        );
+
+        cpu.vmm[1].set_zmm64u(0, 0xAAAA);
+        cpu.vmm[1].set_zmm64u(1, 0xBBBB);
+        cpu.execute_instruction(&evex_unmasked(Opcode::EvexVmovddupVpdWpd))
+            .unwrap();
+        assert_eq!(cpu.vmm[0].zmm64u(0), 0xAAAA);
+        assert_eq!(cpu.vmm[0].zmm64u(1), 0xAAAA, "DDUP duplicates the even qword");
+    }
+
+    #[test]
+    fn valignd_concatenates_vvvv_above_rm_and_windows_from_the_bottom() {
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        for (n, v) in [20u32, 21, 22, 23].into_iter().enumerate() {
+            cpu.vmm[2].set_zmm32u(n, v); // vvvv — the high half
+        }
+        for (n, v) in [10u32, 11, 12, 13].into_iter().enumerate() {
+            cpu.vmm[1].set_zmm32u(n, v); // rm — the low half
+        }
+        let mut i = evex_unmasked(Opcode::EvexValigndVdqHdqWdqIbKmask);
+        i.set_iq(1); // must precede set_vl/set_opmask: they share one u32
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!(
+            [0, 1, 2, 3].map(|n| cpu.vmm[0].zmm32u(n)),
+            [11, 12, 13, 20],
+            "a shift of one dword pulls the lowest element of vvvv in at the top"
+        );
+
+        // A shift of zero is the r/m operand unchanged.
+        let mut i = evex_unmasked(Opcode::EvexValigndVdqHdqWdqIbKmask);
+        i.set_iq(0);
+        cpu.execute_instruction(&i).unwrap();
+        assert_eq!([0, 1, 2, 3].map(|n| cpu.vmm[0].zmm32u(n)), [10, 11, 12, 13]);
+    }
+
 }

@@ -1,4 +1,8 @@
-#![allow(non_camel_case_types, dead_code)]
+// Ported wholesale from Berkeley SoftFloat 3e / Bochs softfloat3e: these
+// modules carry the complete primitive surface, part of which no x86
+// instruction reaches yet. Kept for parity with upstream rather than
+// trimmed to current callers.
+#![allow(dead_code)]
 //! Specialization constants and NaN propagation for x86 FPU.
 //! Ported from Bochs softfloat-specialize.h and softfloat3e/include/specialize.h.
 
@@ -6,62 +10,69 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 
 // --- Indefinite values for integer conversions ---
-pub const INT16_INDEFINITE: i16 = -0x7FFFi16 - 1; // 0x8000
-pub const INT32_INDEFINITE: i32 = -0x7FFFFFFFi32 - 1; // 0x80000000
-pub const INT64_INDEFINITE: i64 = -0x7FFFFFFFFFFFFFFFi64 - 1; // 0x8000000000000000
+pub(in crate::cpu) const INT16_INDEFINITE: i16 = -0x7FFFi16 - 1; // 0x8000
+pub(in crate::cpu) const INT32_INDEFINITE: i32 = -0x7FFFFFFFi32 - 1; // 0x80000000
+pub(in crate::cpu) const INT64_INDEFINITE: i64 = -0x7FFFFFFFFFFFFFFFi64 - 1; // 0x8000000000000000
 
-pub const UINT16_INDEFINITE: u16 = 0xFFFF;
-pub const UINT32_INDEFINITE: u32 = 0xFFFFFFFF;
-pub const UINT64_INDEFINITE: u64 = 0xFFFFFFFFFFFFFFFF;
+pub(in crate::cpu) const UINT16_INDEFINITE: u16 = 0xFFFF;
+pub(in crate::cpu) const UINT32_INDEFINITE: u32 = 0xFFFFFFFF;
+pub(in crate::cpu) const UINT64_INDEFINITE: u64 = 0xFFFFFFFFFFFFFFFF;
 
 // --- Integer overflow/NaN conversion values ---
-pub const I32_FROM_POS_OVERFLOW: i32 = i32::MIN;
-pub const I32_FROM_NEG_OVERFLOW: i32 = i32::MIN;
-pub const I32_FROM_NAN: i32 = i32::MIN;
-pub const I64_FROM_POS_OVERFLOW: i64 = i64::MIN;
-pub const I64_FROM_NEG_OVERFLOW: i64 = i64::MIN;
-pub const I64_FROM_NAN: i64 = i64::MIN;
-pub const UI32_FROM_POS_OVERFLOW: u32 = 0xFFFFFFFF;
-pub const UI32_FROM_NEG_OVERFLOW: u32 = 0xFFFFFFFF;
-pub const UI32_FROM_NAN: u32 = 0xFFFFFFFF;
-pub const UI64_FROM_POS_OVERFLOW: u64 = 0xFFFFFFFFFFFFFFFF;
-pub const UI64_FROM_NEG_OVERFLOW: u64 = 0xFFFFFFFFFFFFFFFF;
-pub const UI64_FROM_NAN: u64 = 0xFFFFFFFFFFFFFFFF;
+pub(in crate::cpu) const I32_FROM_POS_OVERFLOW: i32 = i32::MIN;
+pub(in crate::cpu) const I32_FROM_NEG_OVERFLOW: i32 = i32::MIN;
+pub(in crate::cpu) const I32_FROM_NAN: i32 = i32::MIN;
+pub(in crate::cpu) const I64_FROM_POS_OVERFLOW: i64 = i64::MIN;
+pub(in crate::cpu) const I64_FROM_NEG_OVERFLOW: i64 = i64::MIN;
+pub(in crate::cpu) const I64_FROM_NAN: i64 = i64::MIN;
+pub(in crate::cpu) const UI32_FROM_POS_OVERFLOW: u32 = 0xFFFFFFFF;
+pub(in crate::cpu) const UI32_FROM_NEG_OVERFLOW: u32 = 0xFFFFFFFF;
+pub(in crate::cpu) const UI32_FROM_NAN: u32 = 0xFFFFFFFF;
+// Saturating responses, used only by the `saturate` forms of the
+// float→int conversions (AVX-512 VCVTT*S2*SI with EVEX saturation).
+pub(in crate::cpu) const I32_MIN_NEGATIVE_VALUE: i32 = i32::MIN; // 0x80000000
+pub(in crate::cpu) const I32_MAX_POSITIVE_VALUE: i32 = 0x7FFFFFFF;
+pub(in crate::cpu) const I64_MIN_NEGATIVE_VALUE: i64 = i64::MIN; // 0x8000000000000000
+pub(in crate::cpu) const I64_MAX_POSITIVE_VALUE: i64 = 0x7FFFFFFFFFFFFFFF;
+
+pub(in crate::cpu) const UI64_FROM_POS_OVERFLOW: u64 = 0xFFFFFFFFFFFFFFFF;
+pub(in crate::cpu) const UI64_FROM_NEG_OVERFLOW: u64 = 0xFFFFFFFFFFFFFFFF;
+pub(in crate::cpu) const UI64_FROM_NAN: u64 = 0xFFFFFFFFFFFFFFFF;
 
 // --- Float16 constants ---
-pub const FLOAT16_DEFAULT_NAN: float16 = 0xFE00;
-pub const FLOAT16_EXP_BIAS: i32 = 0xF;
+pub(in crate::cpu) const FLOAT16_DEFAULT_NAN: Float16 = 0xFE00;
+pub(in crate::cpu) const FLOAT16_EXP_BIAS: i32 = 0xF;
 
 // --- Float32 constants ---
-pub const FLOAT32_NEGATIVE_INF: float32 = 0xFF800000;
-pub const FLOAT32_POSITIVE_INF: float32 = 0x7F800000;
-pub const FLOAT32_NEGATIVE_ZERO: float32 = 0x80000000;
-pub const FLOAT32_POSITIVE_ZERO: float32 = 0x00000000;
-pub const FLOAT32_NEGATIVE_ONE: float32 = 0xBF800000;
-pub const FLOAT32_POSITIVE_ONE: float32 = 0x3F800000;
-pub const FLOAT32_MAX_FLOAT: float32 = 0x7F7FFFFF;
-pub const FLOAT32_MIN_FLOAT: float32 = 0xFF7FFFFF;
-pub const FLOAT32_DEFAULT_NAN: float32 = 0xFFC00000;
-pub const FLOAT32_EXP_BIAS: i32 = 0x7F;
+pub(in crate::cpu) const FLOAT32_NEGATIVE_INF: Float32 = 0xFF800000;
+pub(in crate::cpu) const FLOAT32_POSITIVE_INF: Float32 = 0x7F800000;
+pub(in crate::cpu) const FLOAT32_NEGATIVE_ZERO: Float32 = 0x80000000;
+pub(in crate::cpu) const FLOAT32_POSITIVE_ZERO: Float32 = 0x00000000;
+pub(in crate::cpu) const FLOAT32_NEGATIVE_ONE: Float32 = 0xBF800000;
+pub(in crate::cpu) const FLOAT32_POSITIVE_ONE: Float32 = 0x3F800000;
+pub(in crate::cpu) const FLOAT32_MAX_FLOAT: Float32 = 0x7F7FFFFF;
+pub(in crate::cpu) const FLOAT32_MIN_FLOAT: Float32 = 0xFF7FFFFF;
+pub(in crate::cpu) const FLOAT32_DEFAULT_NAN: Float32 = 0xFFC00000;
+pub(in crate::cpu) const FLOAT32_EXP_BIAS: i32 = 0x7F;
 
 // --- Float64 constants ---
-pub const FLOAT64_NEGATIVE_INF: float64 = 0xFFF0000000000000;
-pub const FLOAT64_POSITIVE_INF: float64 = 0x7FF0000000000000;
-pub const FLOAT64_NEGATIVE_ZERO: float64 = 0x8000000000000000;
-pub const FLOAT64_POSITIVE_ZERO: float64 = 0x0000000000000000;
-pub const FLOAT64_NEGATIVE_ONE: float64 = 0xBFF0000000000000;
-pub const FLOAT64_POSITIVE_ONE: float64 = 0x3FF0000000000000;
-pub const FLOAT64_MAX_FLOAT: float64 = 0x7FEFFFFFFFFFFFFF;
-pub const FLOAT64_MIN_FLOAT: float64 = 0xFFEFFFFFFFFFFFFF;
-pub const FLOAT64_DEFAULT_NAN: float64 = 0xFFF8000000000000;
-pub const FLOAT64_EXP_BIAS: i32 = 0x3FF;
+pub(in crate::cpu) const FLOAT64_NEGATIVE_INF: Float64 = 0xFFF0000000000000;
+pub(in crate::cpu) const FLOAT64_POSITIVE_INF: Float64 = 0x7FF0000000000000;
+pub(in crate::cpu) const FLOAT64_NEGATIVE_ZERO: Float64 = 0x8000000000000000;
+pub(in crate::cpu) const FLOAT64_POSITIVE_ZERO: Float64 = 0x0000000000000000;
+pub(in crate::cpu) const FLOAT64_NEGATIVE_ONE: Float64 = 0xBFF0000000000000;
+pub(in crate::cpu) const FLOAT64_POSITIVE_ONE: Float64 = 0x3FF0000000000000;
+pub(in crate::cpu) const FLOAT64_MAX_FLOAT: Float64 = 0x7FEFFFFFFFFFFFFF;
+pub(in crate::cpu) const FLOAT64_MIN_FLOAT: Float64 = 0xFFEFFFFFFFFFFFFF;
+pub(in crate::cpu) const FLOAT64_DEFAULT_NAN: Float64 = 0xFFF8000000000000;
+pub(in crate::cpu) const FLOAT64_EXP_BIAS: i32 = 0x3FF;
 
 // --- ExtFloat80 constants ---
-pub const FLOATX80_DEFAULT_NAN_EXP: u16 = 0xFFFF;
-pub const FLOATX80_DEFAULT_NAN_FRACTION: u64 = 0xC000000000000000;
-pub const FLOATX80_EXP_BIAS: i32 = 0x3FFF;
+pub(in crate::cpu) const FLOATX80_DEFAULT_NAN_EXP: u16 = 0xFFFF;
+pub(in crate::cpu) const FLOATX80_DEFAULT_NAN_FRACTION: u64 = 0xC000000000000000;
+pub(in crate::cpu) const FLOATX80_EXP_BIAS: i32 = 0x3FFF;
 
-pub const FLOATX80_DEFAULT_NAN: floatx80 = floatx80 {
+pub(in crate::cpu) const FLOATX80_DEFAULT_NAN: ExtFloat80 = ExtFloat80 {
     signif: FLOATX80_DEFAULT_NAN_FRACTION,
     sign_exp: FLOATX80_DEFAULT_NAN_EXP,
 };
@@ -69,41 +80,41 @@ pub const FLOATX80_DEFAULT_NAN: floatx80 = floatx80 {
 // --- Pack helpers ---
 
 #[inline]
-pub fn pack_float16(sign: bool, exp: i16, sig: u16) -> float16 {
+pub(in crate::cpu) fn pack_float16(sign: bool, exp: i16, sig: u16) -> Float16 {
     ((sign as u16) << 15) + ((exp as u16) << 10) + sig
 }
 
 #[inline]
-pub fn pack_float32(sign: bool, exp: i16, sig: u32) -> float32 {
+pub(in crate::cpu) fn pack_float32(sign: bool, exp: i16, sig: u32) -> Float32 {
     ((sign as u32) << 31) + ((exp as u32) << 23) + sig
 }
 
 #[inline]
-pub fn pack_float64(sign: bool, exp: i16, sig: u64) -> float64 {
+pub(in crate::cpu) fn pack_float64(sign: bool, exp: i16, sig: u64) -> Float64 {
     ((sign as u64) << 63) + ((exp as u64) << 52) + sig
 }
 
 #[inline]
-pub fn pack_floatx80(sign: bool, exp: i32, sig: u64) -> floatx80 {
-    floatx80 {
+pub(in crate::cpu) fn pack_floatx80(sign: bool, exp: i32, sig: u64) -> ExtFloat80 {
+    ExtFloat80 {
         signif: sig,
         sign_exp: ((sign as u16) << 15) | (exp as u16),
     }
 }
 
 #[inline]
-pub fn pack_to_extf80(sign_exp: u16, signif: u64) -> floatx80 {
-    floatx80 { signif, sign_exp }
+pub(in crate::cpu) fn pack_to_extf80(sign_exp: u16, signif: u64) -> ExtFloat80 {
+    ExtFloat80 { signif, sign_exp }
 }
 
 // --- NaN propagation for extFloat80 ---
-pub fn softfloat_propagate_nan_extf80(
+pub(in crate::cpu) fn softfloat_propagate_nan_extf80(
     a_sign_exp: u16,
     a_signif: u64,
     b_sign_exp: u16,
     b_signif: u64,
     status: &mut SoftFloatStatus,
-) -> floatx80 {
+) -> ExtFloat80 {
     let a_is_snan = is_sig_nan_extf80(a_sign_exp, a_signif);
     let b_is_snan = is_sig_nan_extf80(b_sign_exp, b_signif);
     let a_is_nan = is_nan_extf80(a_sign_exp, a_signif);
@@ -111,7 +122,7 @@ pub fn softfloat_propagate_nan_extf80(
 
     // Raise invalid if either is signaling NaN
     if a_is_snan | b_is_snan {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
     }
 
     // Quieten signaling NaN by setting the quiet bit
@@ -122,13 +133,13 @@ pub fn softfloat_propagate_nan_extf80(
         if b_is_snan {
             // Both signaling: return the one with larger significand
             if a_signif_q < b_signif_q {
-                return floatx80 {
+                return ExtFloat80 {
                     signif: b_signif_q,
                     sign_exp: b_sign_exp,
                 };
             }
         }
-        return floatx80 {
+        return ExtFloat80 {
             signif: a_signif_q,
             sign_exp: a_sign_exp,
         };
@@ -136,7 +147,7 @@ pub fn softfloat_propagate_nan_extf80(
 
     if a_is_nan {
         if b_is_snan {
-            return floatx80 {
+            return ExtFloat80 {
                 signif: a_signif_q,
                 sign_exp: a_sign_exp,
             };
@@ -144,44 +155,44 @@ pub fn softfloat_propagate_nan_extf80(
         if b_is_nan {
             // Both quiet NaN: return the one with larger significand
             if a_signif_q < b_signif_q {
-                return floatx80 {
+                return ExtFloat80 {
                     signif: b_signif_q,
                     sign_exp: b_sign_exp,
                 };
             }
             if b_signif_q < a_signif_q {
-                return floatx80 {
+                return ExtFloat80 {
                     signif: a_signif_q,
                     sign_exp: a_sign_exp,
                 };
             }
             // Equal significands: return smaller sign_exp
             if a_sign_exp < b_sign_exp {
-                return floatx80 {
+                return ExtFloat80 {
                     signif: a_signif_q,
                     sign_exp: a_sign_exp,
                 };
             }
         }
-        return floatx80 {
+        return ExtFloat80 {
             signif: a_signif_q,
             sign_exp: a_sign_exp,
         };
     }
 
     // Only b is NaN
-    floatx80 {
+    ExtFloat80 {
         signif: b_signif_q,
         sign_exp: b_sign_exp,
     }
 }
 
 /// Propagate NaN for f16
-pub fn softfloat_propagate_nan_f16(
-    a: float16,
-    b: float16,
+pub(in crate::cpu) fn softfloat_propagate_nan_f16(
+    a: Float16,
+    b: Float16,
     status: &mut SoftFloatStatus,
-) -> float16 {
+) -> Float16 {
     let a_is_snan = f16_is_signaling_nan(a);
     let b_is_snan = f16_is_signaling_nan(b);
 
@@ -190,7 +201,7 @@ pub fn softfloat_propagate_nan_f16(
     let b_q = b | 0x0200;
 
     if a_is_snan | b_is_snan {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
     }
 
     if a_is_snan {
@@ -212,11 +223,11 @@ pub fn softfloat_propagate_nan_f16(
 }
 
 /// Propagate NaN for f32
-pub fn softfloat_propagate_nan_f32(
-    a: float32,
-    b: float32,
+pub(in crate::cpu) fn softfloat_propagate_nan_f32(
+    a: Float32,
+    b: Float32,
     status: &mut SoftFloatStatus,
-) -> float32 {
+) -> Float32 {
     let a_is_snan = f32_is_signaling_nan(a);
     let b_is_snan = f32_is_signaling_nan(b);
 
@@ -225,7 +236,7 @@ pub fn softfloat_propagate_nan_f32(
     let b_q = b | 0x00400000;
 
     if a_is_snan | b_is_snan {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
     }
 
     if a_is_snan {
@@ -247,11 +258,11 @@ pub fn softfloat_propagate_nan_f32(
 }
 
 /// Propagate NaN for f64
-pub fn softfloat_propagate_nan_f64(
-    a: float64,
-    b: float64,
+pub(in crate::cpu) fn softfloat_propagate_nan_f64(
+    a: Float64,
+    b: Float64,
     status: &mut SoftFloatStatus,
-) -> float64 {
+) -> Float64 {
     let a_is_snan = f64_is_signaling_nan(a);
     let b_is_snan = f64_is_signaling_nan(b);
 
@@ -259,7 +270,7 @@ pub fn softfloat_propagate_nan_f64(
     let b_q = b | 0x0008000000000000;
 
     if a_is_snan | b_is_snan {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
     }
 
     if a_is_snan {

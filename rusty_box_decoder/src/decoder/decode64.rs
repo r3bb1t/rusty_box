@@ -499,8 +499,19 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     }
 
     // === Phase 2.5: Check for UD64 opcodes (invalid in 64-bit mode) ===
-    // Matching Bochs decoder_ud64 entries in decode64_descriptor table
-    if opcode_map == 0 {
+    // Matching Bochs decoder_ud64 entries in decode64_descriptor table.
+    //
+    // Legacy encodings only. These lists say which *legacy* opcode bytes are
+    // undefined in 64-bit mode, and Bochs applies them from the legacy
+    // decode path alone — a VEX- or EVEX-encoded instruction is resolved
+    // against BxOpcodeTableVEX/EVEX and never consults them. The byte after
+    // an EVEX prefix means something entirely different: 0F 7A and 0F 7B are
+    // undefined legacy, but under EVEX they are VCVTTPS2QQ, VCVTUDQ2PD,
+    // VCVTPS2QQ and friends. Applying the legacy list to them made every
+    // such encoding #UD before the EVEX lookup could run.
+    if is_vex || is_evex {
+        // resolved by the VEX/EVEX maps below
+    } else if opcode_map == 0 {
         let is_ud64 = matches!(
             b1 as u8,
             0x06 | 0x07       // PUSH/POP ES
@@ -750,6 +761,21 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // MOV Sw,Ew: nnn is destination (segment), rm is source (gpr)
             instr.operands.dst = nnn as u8;
             instr.operands.src1 = rm as u8;
+        } else if let Some(rule) = super::vex_shared::vex_modrm_dst(b1, is_vex) {
+            // Opcode bytes whose VEX/EVEX meaning puts the destination in a
+            // different field than their legacy meaning does — see
+            // vex_shared::vex_modrm_dst for the two ranges and why each one is
+            // wrong under the byte rules below.
+            match rule {
+                super::vex_shared::VexModrmDst::Vvvv => {
+                    instr.operands.dst = vex_vvv;
+                    instr.operands.src1 = rm as u8;
+                }
+                super::vex_shared::VexModrmDst::Nnn => {
+                    instr.operands.dst = nnn as u8;
+                    instr.operands.src1 = rm as u8;
+                }
+            }
         } else if (b1 < 0x100 && ((b1 & 0x0F) == 0x01 || (b1 & 0x0F) == 0x09) && b1 != 0x69)
             || b1 == 0x89
             // Two-byte Ed,Gd opcodes (DST=rm): Group 7, store-form SSE, MOV Rd/DRn, Groups 12-14
@@ -824,27 +850,51 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         // `sib_index()` plus `get_evex_v_prime()`, never `src2()`, so the
         // unconditional 5-bit extension here is harmless for them.
         instr.operands.src2 = vex_vvv | (evex_v_prime << 4);
-        instr.set_vl(vex_l);
         instr.set_vex_w(vex_w);
         instr.set_vex(true);
-        instr.flags = crate::instruction::InstructionFlags::from_bits_truncate(
-            instr.flags.bits() | crate::instruction::InstructionFlags::VexPresent.bits(),
-        );
+    }
+    // Vector length after EVEX.b's register-form override; for plain VEX this
+    // is `vex_l` unchanged. Everything downstream — the instruction field, the
+    // decoding mask and the reserved-L'L check — reads this, matching the order
+    // Bochs uses in decoder_evex64 (`setVL`, then the modC0 override, then
+    // `getVL()` for all three).
+    let effective_vl = if is_evex {
+        super::vex_shared::evex_effective_vl(
+            vex_l,
+            evex_b_flag != 0,
+            (metainfo1_bits & InstructionFlags::ModC0.bits()) != 0,
+        )
+    } else {
+        vex_l
+    };
+    if is_vex {
+        instr.set_vl(effective_vl);
     }
     if is_evex {
         instr.set_opmask(evex_aaa);
         instr.set_evex_b(evex_b_flag);
         instr.set_evex_v_prime(evex_v_prime);
         instr.set_zero_masking(evex_z);
-        // EVEX.b in register form implies 512-bit vector length
-        if evex_b_flag != 0 && (metainfo1_bits & InstructionFlags::ModC0.bits()) != 0 {
-            instr.set_vl(2); // VL512
+        // L'L is overloaded: normally the vector length, but on a register
+        // operand with EVEX.b it is the embedded rounding mode instead. Bochs
+        // fetchdecode64.cc keeps both — `setRC(evex_vl_rc)` unconditionally,
+        // then `setVL` — so the rounding mode survives for
+        // `softfloat_status_word_rc_override` to apply. Capturing it here as
+        // well means the bits are not lost before a handler can consult them.
+        instr.set_rc(vex_l);
+        // `L'L = 11b` is reserved unless the override above replaced it.
+        if !super::vex_shared::evex_vector_length_ok(effective_vl) {
+            return Err(DecodeError::Decoder(BxDecodeError::BxVexXopBadVectorLength));
         }
     }
 
     // === Phase 3.5: Read 3DNow! suffix byte (comes after ModRM/displacement) ===
+    // `opcode_map == 4` means 3DNow! only on the legacy `0F 0F` path; an EVEX
+    // prefix reuses the same slot for its map 5 (the AVX512-FP16 block), whose
+    // instructions have no trailing suffix byte. Reading one there consumed a
+    // byte that belonged to the next instruction.
     let mut dnow_suffix: u8 = 0;
-    if opcode_map == 4 {
+    if opcode_map == 4 && !is_evex {
         // 3DNow! instructions: suffix byte is read AFTER ModRM and displacement
         if pos >= max_len {
             return Err(DecodeError::ImmediateBufferUnderflow);
@@ -855,7 +905,11 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // === Phase 4: Parse immediate ===
     // Pass nnn to distinguish Group 3a/3b variants (TEST vs NOT/NEG/etc)
-    let imm_size = get_immediate_size_64(b1, opcode_map, sse_prefix, metainfo1_bits, nnn);
+    let imm_size = if is_vex {
+        super::vex_shared::vex_immediate_size(opcode_map, (b1 & 0xFF) as u8)
+    } else {
+        get_immediate_size_64(b1, opcode_map, sse_prefix, metainfo1_bits, nnn)
+    };
 
     if imm_size > 0 {
         if pos + (imm_size as usize) > max_len {
@@ -941,7 +995,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         | ((nnn & 0x7) << NNN_OFFSET)
         | ((rm & 0x7) << RRR_OFFSET)
         | ((vex_w as u32) << VEX_W_OFFSET)
-        | ((vex_l as u32) << VEX_VL_128_256_OFFSET)
+        // Thermometer-coded vector length, taken from the *effective* VL so an
+        // embedded-rounding register form selects the VL512 entries the way
+        // Bochs's `i->getVL()-1` does after its modC0 override.
+        | (super::vex_shared::vl_thermometer(effective_vl) << VEX_VL_128_256_OFFSET)
         | (if is_evex && evex_aaa == 0 { 1u32 << MASK_K0_OFFSET } else { 0 });
     // SRC_EQ_DST: Bochs sets this for zero-idiom detection (XOR reg,reg; SUB reg,reg)
     // Bochs uses full nnn == rm comparison (not masked to 3 bits) — prevents false positives
@@ -975,7 +1032,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         // Store foo: (modrm | (escape_byte << 8)) & 0x7FF — for x87 FPU handler context
         let foo_val = ((modrm_byte as u16) | ((b1 as u16) << 8)) & 0x7FF;
         instr.immediate = foo_val as u32;
-    } else if opcode_map == 4 {
+    } else if opcode_map == 4 && !is_evex {
         // 3DNow! instruction: use suffix to look up opcode directly
         instr.opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
     } else if opcode_map == 0 && b1 == 0x90 {
@@ -994,16 +1051,63 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         instr.opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
     }
 
-    // EVEX opcode remapping: When EVEX prefix is present, try a direct EVEX
-    // opcode lookup before falling back to the SSE/VEX tables. EVEX instructions
-    // use distinct opcodes (e.g. VPXORD vs VPXOR) with per-element masking
-    // granularity determined by EVEX.W. If the EVEX lookup succeeds, use it
-    // directly — no SSE→VEX remapping needed.
+    // EVEX resolves against its own map, exactly as Bochs does: an EVEX-encoded
+    // byte is looked up in BxOpcodeTableEVEX and nowhere else. There is no
+    // fallback to the SSE/VEX tables — those describe different instructions
+    // (VPXOR vs VPXORD differ in masking granularity, not just encoding), so
+    // borrowing an entry from them would decode to the wrong handler.
     if is_evex {
-        let w_bit = vex_w;
-        if let Some(evex_op) = lookup_evex_opcode(opcode_map, (b1 & 0xFF) as u8, sse_prefix, w_bit)
-        {
-            instr.opcode = evex_op;
+        instr.opcode = super::vex_shared::lookup_evex_opcode(opcode_map, (b1 & 0xFF) as u8, decmask);
+
+        // Which field holds the destination is a property of the opcode, not
+        // of the encoding, so the byte-based rules above cannot express it:
+        // most EVEX opcodes write the reg field, the store forms (VEXTRACT*,
+        // the truncating VPMOV* stores, VCOMPRESS*, VPEXTR*, VSCATTER*) write
+        // rm, and the shift/rotate groups write vvvv. Upstream takes it from
+        // the first operand in ia_opcodes_evex.def and the generated table
+        // carries the same information, so this replaces the byte rules
+        // wholesale for EVEX rather than patching them one opcode at a time.
+        //
+        // For a memory form the rm field is an address rather than a register
+        // and the handlers branch on mod, exactly as Bochs does; assigning it
+        // here is harmless and keeps the register forms right.
+        match super::evex_operands::evex_dst(instr.opcode) {
+            super::evex_operands::EvexDst::Nnn => {
+                instr.operands.dst = nnn as u8;
+                instr.operands.src1 = rm as u8;
+            }
+            super::evex_operands::EvexDst::Rm => {
+                instr.operands.dst = rm as u8;
+                instr.operands.src1 = nnn as u8;
+            }
+            super::evex_operands::EvexDst::Vvvv => {
+                instr.operands.dst = vex_vvv;
+                instr.operands.src1 = rm as u8;
+            }
+        }
+
+        // EVEX compressed displacement — see vex_shared::evex_scale_displ8.
+        if needs_modrm && ((modrm_byte >> 6) & 0x3) == 1 {
+            instr.displacement = super::vex_shared::evex_scale_displ8(
+                instr.opcode,
+                instr.displacement,
+                vex_l,
+                evex_b_flag != 0,
+                vex_w != 0,
+            );
+        }
+
+        // Gather/scatter have no register form and no meaning for k0.
+        if super::vex_shared::evex_vsib_form_illegal(instr.opcode, mod_c0, evex_aaa) {
+            return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+        }
+
+        // EVEX.b must name a broadcast or a rounding mode the opcode supports.
+        if evex_b_flag != 0 {
+            match super::vex_shared::validate_evex_b(instr.opcode, mod_c0) {
+                Ok(()) => {}
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -1014,23 +1118,29 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     // (dst, vvv, rm). Remap to the proper VEX opcode so the 3-operand VEX handler
     // is dispatched. EVEX has its own tables and doesn't need this.
     if is_vex && !is_evex {
-        instr.opcode = remap_sse_to_vex(instr.opcode, vex_l);
+        // Bochs looks a VEX encoding up in BxOpcodeTableVEX and nowhere else;
+        // a slot with no group there is #UD no matter what the shared legacy
+        // table would have said for the same byte.
+        if !super::vex_shared::vex_slot_populated(opcode_map, (b1 & 0xFF) as u8) {
+            return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+        }
+        instr.opcode = super::vex_shared::remap_sse_to_vex(instr.opcode, vex_l);
+        // Legacy table entries carry no VEX attributes, so the vector-length
+        // and ModRM-form limits Bochs states in its VEX groups are applied
+        // here rather than by the table match.
+        match super::vex_shared::validate_vex_legacy_form(instr.opcode, vex_l, mod_c0) {
+            Ok(()) => {}
+            Err(error) => return Err(error),
+        }
     }
 
     // VEX is4 operand: VBLENDVPS/VBLENDVPD/VPBLENDVB encode a fourth (mask)
     // register in imm8[7:4]; in 64-bit mode all four bits select xmm0-15.
-    // Bochs fetchdecode32.cc BX_SRC_VIB (is_64 branch).
-    if matches!(
-        instr.opcode,
-        Opcode::VblendvpsVpsHpsWpsIb
-            | Opcode::VblendvpdVpdHpdWpdIb
-            | Opcode::V128VpblendvbVdqHdqWdqIb
-            | Opcode::V256VpblendvbVdqHdqWdqIb
-    ) {
-        instr.operands.src3 = ((instr.immediate >> 4) & 0xF) as u8;
+    if let Some(src3) = super::vex_shared::vex_is4_src3(instr.opcode, instr.immediate, true) {
+        instr.operands.src3 = src3;
     }
 
-    match validate_reserved_vex_vvvv(instr.opcode, vex_vvv) {
+    match super::vex_shared::validate_reserved_vex_vvvv(instr.opcode, vex_vvv) {
         Ok(()) => {}
         Err(error) => return Err(error),
     }
@@ -1048,20 +1158,6 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     }
 
     Ok(instr)
-}
-
-/// VEXTRACTF128 and VEXTRACTI128 have no `vvvv` source operand; Intel reserves
-/// every encoding except VEX.vvvv = 1111b (decoded here as zero).
-const fn validate_reserved_vex_vvvv(opcode: Opcode, vex_vvv: u8) -> DecodeResult<()> {
-    if vex_vvv != 0
-        && matches!(
-            opcode,
-            Opcode::V256Vextractf128WdqVdqIb | Opcode::V256Vextracti128WdqVdqIb
-        )
-    {
-        return Err(DecodeError::Decoder(BxDecodeError::BxIllegalVexXopVvv));
-    }
-    Ok(())
 }
 
 /// Get opcode table and look up opcode for 64-bit mode
@@ -1108,1693 +1204,6 @@ const fn lookup_opcode_64(b1: u32, opcode_map: u8, decmask: u32, _nnn: u32) -> O
         }
     } else {
         Opcode::IaError
-    }
-}
-
-/// Look up EVEX-specific opcode from the opcode map, opcode byte, SSE prefix, and W bit.
-///
-/// EVEX instructions have distinct opcodes from SSE/VEX (e.g. VPXORD/VPXORQ vs VPXOR)
-/// because they support per-element masking with dword/qword granularity selected by EVEX.W.
-/// This lookup is called before the normal SSE/VEX table so that EVEX-encoded instructions
-/// get routed to the correct EVEX handlers in avx512.rs.
-///
-/// Returns `Some(opcode)` if a matching EVEX instruction is found, `None` otherwise.
-///
-/// `opcode_map`: 1=0F, 2=0F38, 3=0F3A
-/// `opcode`: the opcode byte within the map
-/// `sse_prefix`: 0=none, 1=66, 2=F3, 3=F2
-/// `w`: EVEX.W bit (0 or 1)
-const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -> Option<Opcode> {
-    match opcode_map {
-        1 => {
-            // Map 1 (0F xx)
-            match (opcode, sse_prefix, w) {
-                // VMOVDQU32/64 load — EVEX.F3.0F 6F
-                (0x6F, 2, 0) => Some(Opcode::EvexVmovdqu32VdqWdq),
-                (0x6F, 2, 1) => Some(Opcode::EvexVmovdqu64VdqWdq),
-                // VMOVDQU32/64 store — EVEX.F3.0F 7F
-                (0x7F, 2, 0) => Some(Opcode::EvexVmovdqu32WdqVdq),
-                (0x7F, 2, 1) => Some(Opcode::EvexVmovdqu64WdqVdq),
-                // VMOVDQA32/64 load — EVEX.66.0F 6F
-                (0x6F, 1, 0) => Some(Opcode::EvexVmovdqa32VdqWdq),
-                (0x6F, 1, 1) => Some(Opcode::EvexVmovdqa64VdqWdq),
-                // VMOVDQA32/64 store — EVEX.66.0F 7F
-                (0x7F, 1, 0) => Some(Opcode::EvexVmovdqa32WdqVdq),
-                (0x7F, 1, 1) => Some(Opcode::EvexVmovdqa64WdqVdq),
-                // VPADDD — EVEX.66.0F.W0 FE
-                (0xFE, 1, 0) => Some(Opcode::EvexVpadddVdqHdqWdq),
-                // VPADDQ — EVEX.66.0F.W1 D4
-                (0xD4, 1, 1) => Some(Opcode::EvexVpaddqVdqHdqWdq),
-                // VPSUBD — EVEX.66.0F.W0 FA
-                (0xFA, 1, 0) => Some(Opcode::EvexVpsubdVdqHdqWdq),
-                // VPSUBQ — EVEX.66.0F.W1 FB
-                (0xFB, 1, 1) => Some(Opcode::EvexVpsubqVdqHdqWdq),
-                // VPXORD — EVEX.66.0F.W0 EF
-                (0xEF, 1, 0) => Some(Opcode::EvexVpxordVdqHdqWdq),
-                // VPXORQ — EVEX.66.0F.W1 EF
-                (0xEF, 1, 1) => Some(Opcode::EvexVpxorqVdqHdqWdq),
-                // VPORD — EVEX.66.0F.W0 EB
-                (0xEB, 1, 0) => Some(Opcode::EvexVpordVdqHdqWdq),
-                // VPORQ — EVEX.66.0F.W1 EB
-                (0xEB, 1, 1) => Some(Opcode::EvexVporqVdqHdqWdq),
-                // VPANDD — EVEX.66.0F.W0 DB
-                (0xDB, 1, 0) => Some(Opcode::EvexVpanddVdqHdqWdq),
-                // VPANDQ — EVEX.66.0F.W1 DB
-                (0xDB, 1, 1) => Some(Opcode::EvexVpandqVdqHdqWdq),
-                // VPANDND — EVEX.66.0F.W0 DF
-                (0xDF, 1, 0) => Some(Opcode::EvexVpandndVdqHdqWdq),
-                // VPANDNQ — EVEX.66.0F.W1 DF
-                (0xDF, 1, 1) => Some(Opcode::EvexVpandnqVdqHdqWdq),
-                // VPSHUFD — EVEX.66.0F.W0 70
-                (0x70, 1, 0) => Some(Opcode::EvexVpshufdVdqWdqIb),
-                // VPCMPEQD → opmask — EVEX.66.0F.W0 76
-                (0x76, 1, 0) => Some(Opcode::EvexVpcmpeqdKgwHdqWdq),
-                // VPCMPGTD → opmask — EVEX.66.0F.W0 66
-                (0x66, 1, 0) => Some(Opcode::EvexVpcmpgtdKgwHdqWdq),
-                // VPMULUDQ — EVEX.66.0F.W1 F4
-                (0xF4, 1, 1) => Some(Opcode::EvexVpmuludqVdqHdqWdq),
-                // VMOVUPS load — EVEX.0F.W0 10 (no prefix)
-                (0x10, 0, 0) => Some(Opcode::EvexVmovupsVpsWps),
-                // VMOVUPD load — EVEX.66.0F.W1 10
-                (0x10, 1, 1) => Some(Opcode::EvexVmovupdVpdWpd),
-                // VMOVSS load — EVEX.F3.0F.W0 10
-                (0x10, 2, 0) => Some(Opcode::EvexVmovssVssWss),
-                // VMOVSD load — EVEX.F2.0F.W1 10
-                (0x10, 3, 1) => Some(Opcode::EvexVmovsdVsdWsd),
-                // VMOVUPS store — EVEX.0F.W0 11
-                (0x11, 0, 0) => Some(Opcode::EvexVmovupsWpsVps),
-                // VMOVUPD store — EVEX.66.0F.W1 11
-                (0x11, 1, 1) => Some(Opcode::EvexVmovupdWpdVpd),
-                // VMOVSS store — EVEX.F3.0F.W0 11
-                (0x11, 2, 0) => Some(Opcode::EvexVmovssWssVss),
-                // VMOVSD store — EVEX.F2.0F.W1 11
-                (0x11, 3, 1) => Some(Opcode::EvexVmovsdWsdVsd),
-                // VMOVAPS load — EVEX.0F.W0 28 (no prefix)
-                (0x28, 0, 0) => Some(Opcode::EvexVmovapsVpsWps),
-                // VMOVAPD load — EVEX.66.0F.W1 28
-                (0x28, 1, 1) => Some(Opcode::EvexVmovapdVpdWpd),
-                // VMOVAPS store — EVEX.0F.W0 29
-                (0x29, 0, 0) => Some(Opcode::EvexVmovapsWpsVps),
-                // VMOVAPD store — EVEX.66.0F.W1 29
-                (0x29, 1, 1) => Some(Opcode::EvexVmovapdWpdVpd),
-                // VPUNPCKLDQ — EVEX.66.0F.W0 62
-                (0x62, 1, 0) => Some(Opcode::EvexVpunpckldqVdqHdqWdq),
-                // VPUNPCKHDQ — EVEX.66.0F.W0 6A
-                (0x6A, 1, 0) => Some(Opcode::EvexVpunpckhdqVdqHdqWdq),
-                // VPUNPCKLQDQ — EVEX.66.0F.W1 6C
-                (0x6C, 1, 1) => Some(Opcode::EvexVpunpcklqdqVdqHdqWdq),
-                // VPUNPCKHQDQ — EVEX.66.0F.W1 6D
-                (0x6D, 1, 1) => Some(Opcode::EvexVpunpckhqdqVdqHdqWdq),
-                // Shift by XMM register
-                (0xF2, 1, 0) => Some(Opcode::EvexVpslldVdqHdqWdq), // VPSLLD
-                (0xF3, 1, 1) => Some(Opcode::EvexVpsllqVdqHdqWdq), // VPSLLQ
-                (0xD2, 1, 0) => Some(Opcode::EvexVpsrldVdqHdqWdq), // VPSRLD
-                (0xD3, 1, 1) => Some(Opcode::EvexVpsrlqVdqHdqWdq), // VPSRLQ
-                (0xE2, 1, 0) => Some(Opcode::EvexVpsradVdqHdqWdq), // VPSRAD
-                (0xE2, 1, 1) => Some(Opcode::EvexVpsraqVdqHdqWdq), // VPSRAQ
-
-                // --- FP scalar arithmetic (avx512_scalar.rs) ---
-                // VADDSS/SD — EVEX.0F 58
-                // Packed FP arithmetic — EVEX.0F no-prefix/W0 (PS) and EVEX.66.0F/W1 (PD)
-                (0x51, 0, 0) => Some(Opcode::EvexVsqrtpsVpsWps),
-                (0x51, 1, 1) => Some(Opcode::EvexVsqrtpdVpdWpd),
-                (0x58, 0, 0) => Some(Opcode::EvexVaddpsVpsHpsWps),
-                (0x58, 1, 1) => Some(Opcode::EvexVaddpdVpdHpdWpd),
-                (0x59, 0, 0) => Some(Opcode::EvexVmulpsVpsHpsWps),
-                (0x59, 1, 1) => Some(Opcode::EvexVmulpdVpdHpdWpd),
-                (0x5C, 0, 0) => Some(Opcode::EvexVsubpsVpsHpsWps),
-                (0x5C, 1, 1) => Some(Opcode::EvexVsubpdVpdHpdWpd),
-                (0x5D, 0, 0) => Some(Opcode::EvexVminpsVpsHpsWps),
-                (0x5D, 1, 1) => Some(Opcode::EvexVminpdVpdHpdWpd),
-                (0x5E, 0, 0) => Some(Opcode::EvexVdivpsVpsHpsWps),
-                (0x5E, 1, 1) => Some(Opcode::EvexVdivpdVpdHpdWpd),
-                (0x5F, 0, 0) => Some(Opcode::EvexVmaxpsVpsHpsWps),
-                (0x5F, 1, 1) => Some(Opcode::EvexVmaxpdVpdHpdWpd),
-                // Scalar FP arithmetic — EVEX.F3.0F/W0 (SS) and EVEX.F2.0F/W1 (SD)
-                (0x58, 2, 0) => Some(Opcode::EvexVaddssVssHpsWss),
-                (0x58, 3, 1) => Some(Opcode::EvexVaddsdVsdHpdWsd),
-                // VSUBSS/SD — EVEX.0F 5C
-                (0x5C, 2, 0) => Some(Opcode::EvexVsubssVssHpsWss),
-                (0x5C, 3, 1) => Some(Opcode::EvexVsubsdVsdHpdWsd),
-                // VMULSS/SD — EVEX.0F 59
-                (0x59, 2, 0) => Some(Opcode::EvexVmulssVssHpsWss),
-                (0x59, 3, 1) => Some(Opcode::EvexVmulsdVsdHpdWsd),
-                // VDIVSS/SD — EVEX.0F 5E
-                (0x5E, 2, 0) => Some(Opcode::EvexVdivssVssHpsWss),
-                (0x5E, 3, 1) => Some(Opcode::EvexVdivsdVsdHpdWsd),
-                // VMINSS/SD — EVEX.0F 5D
-                (0x5D, 2, 0) => Some(Opcode::EvexVminssVssHpsWss),
-                (0x5D, 3, 1) => Some(Opcode::EvexVminsdVsdHpdWsd),
-                // VMAXSS/SD — EVEX.0F 5F
-                (0x5F, 2, 0) => Some(Opcode::EvexVmaxssVssHpsWss),
-                (0x5F, 3, 1) => Some(Opcode::EvexVmaxsdVsdHpdWsd),
-                // VSQRTSS/SD — EVEX.0F 51
-                (0x51, 2, 0) => Some(Opcode::EvexVsqrtssVssHpsWss),
-                (0x51, 3, 1) => Some(Opcode::EvexVsqrtsdVsdHpdWsd),
-
-                // --- FP conversions (avx512_cvt.rs) ---
-                // VCVTDQ2PS — EVEX.0F.W0 5B (no prefix)
-                (0x5B, 0, 0) => Some(Opcode::EvexVcvtdq2psVpsWdq),
-                // VCVTPS2DQ — EVEX.66.0F.W0 5B
-                (0x5B, 1, 0) => Some(Opcode::EvexVcvtps2dqVdqWps),
-                // VCVTTPS2DQ — EVEX.F3.0F.W0 5B
-                (0x5B, 2, 0) => Some(Opcode::EvexVcvttps2dqVdqWps),
-                // VCVTPS2PD — EVEX.0F.W0 5A (no prefix)
-                (0x5A, 0, 0) => Some(Opcode::EvexVcvtps2pdVpdWps),
-                // VCVTPD2PS — EVEX.66.0F.W1 5A
-                (0x5A, 1, 1) => Some(Opcode::EvexVcvtpd2psVpsWpd),
-                // VCVTDQ2PD — EVEX.F3.0F.W0 E6
-                (0xE6, 2, 0) => Some(Opcode::EvexVcvtdq2pdVpdWdq),
-                // VCVTPD2DQ — EVEX.F2.0F.W1 E6
-                (0xE6, 3, 1) => Some(Opcode::EvexVcvtpd2dqVdqWpd),
-                // VCVTTPD2DQ — EVEX.66.0F.W1 E6
-                (0xE6, 1, 1) => Some(Opcode::EvexVcvttpd2dqVdqWpd),
-                // VCVTUDQ2PS — EVEX.F2.0F.W0 7A
-                (0x7A, 3, 0) => Some(Opcode::EvexVcvtudq2psVpsWdq),
-                // VCVTPS2UDQ — EVEX.0F.W0 79
-                (0x79, 0, 0) => Some(Opcode::EvexVcvtps2udqVdqWps),
-                // VCVTTPS2UDQ — EVEX.0F.W0 78
-                (0x78, 0, 0) => Some(Opcode::EvexVcvttps2udqVdqWps),
-
-                // --- FP compare (avx512_cmp.rs) ---
-                // VCMPPS — EVEX.0F.W0 C2 (no prefix)
-                (0xC2, 0, 0) => Some(Opcode::EvexVcmppsKgwHpsWpsIb),
-                // VCMPPD — EVEX.66.0F.W1 C2
-                (0xC2, 1, 1) => Some(Opcode::EvexVcmppdKgbHpdWpdIb),
-
-                // --- FP shuffle/unpack (avx512_perm.rs) ---
-                // VUNPCKLPS — EVEX.0F.W0 14
-                (0x14, 0, 0) => Some(Opcode::EvexVunpcklpsVpsHpsWps),
-                // VUNPCKHPS — EVEX.0F.W0 15
-                (0x15, 0, 0) => Some(Opcode::EvexVunpckhpsVpsHpsWps),
-                // VUNPCKLPD — EVEX.66.0F.W1 14
-                (0x14, 1, 1) => Some(Opcode::EvexVunpcklpdVpdHpdWpd),
-                // VUNPCKHPD — EVEX.66.0F.W1 15
-                (0x15, 1, 1) => Some(Opcode::EvexVunpckhpdVpdHpdWpd),
-                // VSHUFPS — EVEX.0F.W0 C6 (no prefix)
-                (0xC6, 0, 0) => Some(Opcode::EvexVshufpsVpsHpsWpsIb),
-                // VSHUFPD — EVEX.66.0F.W1 C6
-                (0xC6, 1, 1) => Some(Opcode::EvexVshufpdVpdHpdWpdIb),
-
-                // --- BW byte/word ops (avx512_bw.rs) ---
-                // VPADDB — EVEX.66.0F.W0 FC
-                (0xFC, 1, 0) => Some(Opcode::EvexVpaddbVdqHdqWdq),
-                // VPADDW — EVEX.66.0F.W0 FD
-                (0xFD, 1, 0) => Some(Opcode::EvexVpaddwVdqHdqWdq),
-                // VPSUBB — EVEX.66.0F.W0 F8
-                (0xF8, 1, 0) => Some(Opcode::EvexVpsubbVdqHdqWdq),
-                // VPSUBW — EVEX.66.0F.W0 F9
-                (0xF9, 1, 0) => Some(Opcode::EvexVpsubwVdqHdqWdq),
-                // VPMULLW — EVEX.66.0F.W0 D5
-                (0xD5, 1, 0) => Some(Opcode::EvexVpmullwVdqHdqWdq),
-                // VPAVGB — EVEX.66.0F.W0 E0
-                (0xE0, 1, 0) => Some(Opcode::EvexVpavgbVdqHdqWdq),
-                // VPAVGW — EVEX.66.0F.W0 E3
-                (0xE3, 1, 0) => Some(Opcode::EvexVpavgwVdqHdqWdq),
-                // VPMAXUB — EVEX.66.0F.W0 DE
-                (0xDE, 1, 0) => Some(Opcode::EvexVpmaxubVdqHdqWdq),
-                // VPMINUB — EVEX.66.0F.W0 DA
-                (0xDA, 1, 0) => Some(Opcode::EvexVpminubVdqHdqWdq),
-                // VPMAXSW — EVEX.66.0F.W0 EE
-                (0xEE, 1, 0) => Some(Opcode::EvexVpmaxswVdqHdqWdq),
-                // VPMINSW — EVEX.66.0F.W0 EA
-                (0xEA, 1, 0) => Some(Opcode::EvexVpminswVdqHdqWdq),
-                // VPACKSSDW — EVEX.66.0F.W0 6B
-                (0x6B, 1, 0) => Some(Opcode::EvexVpackssdwVdqHdqWdq),
-                // VPUNPCKLBW — EVEX.66.0F.W0 60
-                (0x60, 1, 0) => Some(Opcode::EvexVpunpcklbwVdqHdqWdq),
-                // VPUNPCKHBW — EVEX.66.0F.W0 68
-                (0x68, 1, 0) => Some(Opcode::EvexVpunpckhbwVdqHdqWdq),
-                // VPUNPCKLWD — EVEX.66.0F.W0 61
-                (0x61, 1, 0) => Some(Opcode::EvexVpunpcklwdVdqHdqWdq),
-                // VPUNPCKHWD — EVEX.66.0F.W0 69
-                (0x69, 1, 0) => Some(Opcode::EvexVpunpckhwdVdqHdqWdq),
-
-                // --- Integer (avx512_int.rs) in Map 1 ---
-                // VPMULHUW — EVEX.66.0F.W0 E4
-                (0xE4, 1, 0) => Some(Opcode::EvexVpmulhuwVdqHdqWdq),
-                // VPMULHW — EVEX.66.0F.W0 E5
-                (0xE5, 1, 0) => Some(Opcode::EvexVpmulhwVdqHdqWdq),
-                // VPMADDWD — EVEX.66.0F.W0 F5
-                (0xF5, 1, 0) => Some(Opcode::EvexVpmaddwdVdqHdqWdq),
-                // VPSADBW — EVEX.66.0F.W0 F6
-                (0xF6, 1, 0) => Some(Opcode::EvexVpsadbwVdqHdqWdq),
-
-                // --- FP logical (Map 1) ---
-                // VANDPS — EVEX.0F.W0 54
-                (0x54, 0, 0) => Some(Opcode::EvexVandpsVpsHpsWps),
-                // VANDPD — EVEX.66.0F.W1 54
-                (0x54, 1, 1) => Some(Opcode::EvexVandpdVpdHpdWpd),
-                // VANDNPS — EVEX.0F.W0 55
-                (0x55, 0, 0) => Some(Opcode::EvexVandnpsVpsHpsWps),
-                // VANDNPD — EVEX.66.0F.W1 55
-                (0x55, 1, 1) => Some(Opcode::EvexVandnpdVpdHpdWpd),
-                // VORPS — EVEX.0F.W0 56
-                (0x56, 0, 0) => Some(Opcode::EvexVorpsVpsHpsWps),
-                // VORPD — EVEX.66.0F.W1 56
-                (0x56, 1, 1) => Some(Opcode::EvexVorpdVpdHpdWpd),
-                // VXORPS — EVEX.0F.W0 57
-                (0x57, 0, 0) => Some(Opcode::EvexVxorpsVpsHpsWps),
-                // VXORPD — EVEX.66.0F.W1 57
-                (0x57, 1, 1) => Some(Opcode::EvexVxorpdVpdHpdWpd),
-
-                _ => None,
-            }
-        }
-        2 => {
-            // Map 2 (0F 38 xx)
-            match (opcode, sse_prefix, w) {
-                // VPBROADCASTD — EVEX.66.0F38.W0 58
-                (0x58, 1, 0) => Some(Opcode::EvexVpbroadcastdVdqWd),
-                // VPBROADCASTQ — EVEX.66.0F38.W1 59
-                (0x59, 1, 1) => Some(Opcode::EvexVpbroadcastqVdqWq),
-                // VPBROADCASTD from GPR — EVEX.66.0F38.W0 7C
-                (0x7C, 1, 0) => Some(Opcode::EvexVpbroadcastdVdqEd),
-                // VPBROADCASTQ from GPR — EVEX.66.0F38.W1 7C
-                (0x7C, 1, 1) => Some(Opcode::EvexVpbroadcastqVdqEq),
-                // VPSHUFB — EVEX.66.0F38.W0 00
-                (0x00, 1, 0) => Some(Opcode::EvexVpshufbVdqHdqWdq),
-                // VPMULLD — EVEX.66.0F38.W0 40
-                (0x40, 1, 0) => Some(Opcode::EvexVpmulldVdqHdqWdq),
-                // VPMINSD — EVEX.66.0F38.W0 39
-                (0x39, 1, 0) => Some(Opcode::EvexVpminsdVdqHdqWdq),
-                // VPABSD — EVEX.66.0F38.W0 1E
-                (0x1E, 1, 0) => Some(Opcode::EvexVpabsdVdqWdq),
-                // VPABSQ — EVEX.66.0F38.W1 1F
-                (0x1F, 1, 1) => Some(Opcode::EvexVpabsqVdqWdq),
-                // VPMAXSD — EVEX.66.0F38.W0 3D
-                (0x3D, 1, 0) => Some(Opcode::EvexVpmaxsdVdqHdqWdq),
-                // VPMAXSQ — EVEX.66.0F38.W1 3D
-                (0x3D, 1, 1) => Some(Opcode::EvexVpmaxsqVdqHdqWdq),
-                // VPMINSQ — EVEX.66.0F38.W1 39
-                (0x39, 1, 1) => Some(Opcode::EvexVpminsqVdqHdqWdq),
-                // Variable rotates
-                (0x14, 1, 0) => Some(Opcode::EvexVprorvdVdqHdqWdq),
-                (0x14, 1, 1) => Some(Opcode::EvexVprorvqVdqHdqWdq),
-                (0x15, 1, 0) => Some(Opcode::EvexVprolvdVdqHdqWdq),
-                (0x15, 1, 1) => Some(Opcode::EvexVprolvqVdqHdqWdq),
-                // Sign/zero extend dword→qword
-                (0x25, 1, 0) => Some(Opcode::EvexVpmovsxdqVdqWdq),
-                (0x35, 1, 0) => Some(Opcode::EvexVpmovzxdqVdqWdq),
-                // VPCMPEQQ — EVEX.66.0F38.W1 29
-                (0x29, 1, 1) => Some(Opcode::EvexVpcmpeqqKgbHdqWdq),
-                // VPCMPGTQ — EVEX.66.0F38.W1 37
-                (0x37, 1, 1) => Some(Opcode::EvexVpcmpgtqKgbHdqWdq),
-                // Variable shifts
-                (0x45, 1, 0) => Some(Opcode::EvexVpsrlvdVdqHdqWdq),
-                (0x45, 1, 1) => Some(Opcode::EvexVpsrlvqVdqHdqWdq),
-                (0x46, 1, 0) => Some(Opcode::EvexVpsravdVdqHdqWdq),
-                (0x46, 1, 1) => Some(Opcode::EvexVpsravqVdqHdqWdq),
-                (0x47, 1, 0) => Some(Opcode::EvexVpsllvdVdqHdqWdq),
-                (0x47, 1, 1) => Some(Opcode::EvexVpsllvqVdqHdqWdq),
-                // VPBLENDMD — EVEX.66.0F38.W0 64
-                (0x64, 1, 0) => Some(Opcode::EvexVpblendmdVdqHdqWdq),
-                // VPBLENDMQ — EVEX.66.0F38.W1 64
-                (0x64, 1, 1) => Some(Opcode::EvexVpblendmqVdqHdqWdq),
-                // VPERMD — EVEX.66.0F38.W0 36
-                (0x36, 1, 0) => Some(Opcode::EvexVpermdVdqHdqWdqKmask),
-                // VPERMQ — EVEX.66.0F38.W1 36
-                (0x36, 1, 1) => Some(Opcode::EvexVpermqVdqHdqWdqKmask),
-
-                // --- FMA (avx512_fma.rs) ---
-                // VFMADD132PS/PD
-                (0x98, 1, 0) => Some(Opcode::EvexVfmadd132psVpsHpsWps),
-                (0x98, 1, 1) => Some(Opcode::EvexVfmadd132pdVpdHpdWpd),
-                // VFMADD213PS/PD
-                (0xA8, 1, 0) => Some(Opcode::EvexVfmadd213psVpsHpsWps),
-                (0xA8, 1, 1) => Some(Opcode::EvexVfmadd213pdVpdHpdWpd),
-                // VFMADD231PS/PD
-                (0xB8, 1, 0) => Some(Opcode::EvexVfmadd231psVpsHpsWps),
-                (0xB8, 1, 1) => Some(Opcode::EvexVfmadd231pdVpdHpdWpd),
-                // VFMSUB132PS/PD
-                (0x9A, 1, 0) => Some(Opcode::EvexVfmsub132psVpsHpsWps),
-                (0x9A, 1, 1) => Some(Opcode::EvexVfmsub132pdVpdHpdWpd),
-                // VFMSUB213PS/PD
-                (0xAA, 1, 0) => Some(Opcode::EvexVfmsub213psVpsHpsWps),
-                (0xAA, 1, 1) => Some(Opcode::EvexVfmsub213pdVpdHpdWpd),
-                // VFMSUB231PS/PD
-                (0xBA, 1, 0) => Some(Opcode::EvexVfmsub231psVpsHpsWps),
-                (0xBA, 1, 1) => Some(Opcode::EvexVfmsub231pdVpdHpdWpd),
-                // VFNMADD132PS/PD
-                (0x9C, 1, 0) => Some(Opcode::EvexVfnmadd132psVpsHpsWps),
-                (0x9C, 1, 1) => Some(Opcode::EvexVfnmadd132pdVpdHpdWpd),
-                // VFNMADD213PS/PD
-                (0xAC, 1, 0) => Some(Opcode::EvexVfnmadd213psVpsHpsWps),
-                (0xAC, 1, 1) => Some(Opcode::EvexVfnmadd213pdVpdHpdWpd),
-                // VFNMADD231PS/PD
-                (0xBC, 1, 0) => Some(Opcode::EvexVfnmadd231psVpsHpsWps),
-                (0xBC, 1, 1) => Some(Opcode::EvexVfnmadd231pdVpdHpdWpd),
-                // VFNMSUB132PS/PD
-                (0x9E, 1, 0) => Some(Opcode::EvexVfnmsub132psVpsHpsWps),
-                (0x9E, 1, 1) => Some(Opcode::EvexVfnmsub132pdVpdHpdWpd),
-                // VFNMSUB213PS/PD
-                (0xAE, 1, 0) => Some(Opcode::EvexVfnmsub213psVpsHpsWps),
-                (0xAE, 1, 1) => Some(Opcode::EvexVfnmsub213pdVpdHpdWpd),
-                // VFNMSUB231PS/PD
-                (0xBE, 1, 0) => Some(Opcode::EvexVfnmsub231psVpsHpsWps),
-                (0xBE, 1, 1) => Some(Opcode::EvexVfnmsub231pdVpdHpdWpd),
-
-                // --- Compare (avx512_cmp.rs) ---
-                // VPTESTMD — EVEX.66.0F38.W0 27
-                (0x27, 1, 0) => Some(Opcode::EvexVptestmdKgwHdqWdq),
-                // VPTESTMQ — EVEX.66.0F38.W1 27
-                (0x27, 1, 1) => Some(Opcode::EvexVptestmqKgbHdqWdq),
-                // VPTESTNMD — EVEX.F3.0F38.W0 27
-                (0x27, 2, 0) => Some(Opcode::EvexVptestnmdKgwHdqWdq),
-                // VPTESTNMQ — EVEX.F3.0F38.W1 27
-                (0x27, 2, 1) => Some(Opcode::EvexVptestnmqKgbHdqWdq),
-                // VPMOVM2D — EVEX.F3.0F38.W0 38
-                (0x38, 2, 0) => Some(Opcode::EvexVpmovm2dVdqKew),
-                // VPMOVM2Q — EVEX.F3.0F38.W1 38
-                (0x38, 2, 1) => Some(Opcode::EvexVpmovm2qVdqKeb),
-                // VPMOVD2M — EVEX.F3.0F38.W0 39
-                (0x39, 2, 0) => Some(Opcode::EvexVpmovd2mKgwWdq),
-                // VPMOVQ2M — EVEX.F3.0F38.W1 39
-                (0x39, 2, 1) => Some(Opcode::EvexVpmovq2mKgbWdq),
-
-                // --- Broadcast (avx512_bcast.rs) ---
-                // VBROADCASTSS — EVEX.66.0F38.W0 18
-                (0x18, 1, 0) => Some(Opcode::EvexVbroadcastssVpsWss),
-                // VBROADCASTSD — EVEX.66.0F38.W1 19
-                (0x19, 1, 1) => Some(Opcode::EvexVbroadcastsdVpdWsd),
-                // VBROADCASTI32x4 — EVEX.66.0F38.W0 5A
-                (0x5A, 1, 0) => Some(Opcode::EvexVbroadcasti32x4VdqWdq),
-                // VBROADCASTF32x4 — EVEX.66.0F38.W0 1A
-                (0x1A, 1, 0) => Some(Opcode::EvexVbroadcastf32x4VpsWps),
-                // VBROADCASTI64x2 — EVEX.66.0F38.W1 5A
-                (0x5A, 1, 1) => Some(Opcode::EvexVbroadcasti64x2VdqWdq),
-                // VBROADCASTF64x2 — EVEX.66.0F38.W1 1A
-                (0x1A, 1, 1) => Some(Opcode::EvexVbroadcastf64x2VpdWpd),
-                // VBROADCASTI32x8 — EVEX.66.0F38.W0 5B
-                (0x5B, 1, 0) => Some(Opcode::EvexVbroadcasti32x8VdqWdq),
-                // VBROADCASTF32x8 — EVEX.66.0F38.W0 1B
-                (0x1B, 1, 0) => Some(Opcode::EvexVbroadcastf32x8VpsWps),
-                // VBROADCASTI64x4 — EVEX.66.0F38.W1 5B
-                (0x5B, 1, 1) => Some(Opcode::EvexVbroadcasti64x4VdqWdq),
-                // VBROADCASTF64x4 — EVEX.66.0F38.W1 1B
-                (0x1B, 1, 1) => Some(Opcode::EvexVbroadcastf64x4VpdWpd),
-                // VPBROADCASTB — EVEX.66.0F38.W0 78
-                (0x78, 1, 0) => Some(Opcode::EvexVpbroadcastbVdqWb),
-                // VPBROADCASTW — EVEX.66.0F38.W0 79
-                (0x79, 1, 0) => Some(Opcode::EvexVpbroadcastwVdqWw),
-
-                // --- Integer (avx512_int.rs) in Map 2 ---
-                // VPMULDQ — EVEX.66.0F38.W1 28
-                (0x28, 1, 1) => Some(Opcode::EvexVpmuldqVdqHdqWdq),
-                // VPMADDUBSW — EVEX.66.0F38.W0 04
-                (0x04, 1, 0) => Some(Opcode::EvexVpmaddubswVdqHdqWdq),
-                // VPMINUD — EVEX.66.0F38.W0 3B
-                (0x3B, 1, 0) => Some(Opcode::EvexVpminudVdqHdqWdq),
-                // VPMAXUD — EVEX.66.0F38.W0 3F
-                (0x3F, 1, 0) => Some(Opcode::EvexVpmaxudVdqHdqWdq),
-                // VPMINUQ — EVEX.66.0F38.W1 3B
-                (0x3B, 1, 1) => Some(Opcode::EvexVpminuqVdqHdqWdq),
-                // VPMAXUQ — EVEX.66.0F38.W1 3F
-                (0x3F, 1, 1) => Some(Opcode::EvexVpmaxuqVdqHdqWdq),
-                // VPACKUSDW — EVEX.66.0F38.W0 2B
-                (0x2B, 1, 0) => Some(Opcode::EvexVpackusdwVdqHdqWdq),
-
-                // --- Permute (avx512_perm.rs) in Map 2 ---
-                // VPERMILPS reg — EVEX.66.0F38.W0 0C
-                (0x0C, 1, 0) => Some(Opcode::EvexVpermilpsVpsHpsWps),
-                // VPERMPS — EVEX.66.0F38.W0 16
-                (0x16, 1, 0) => Some(Opcode::EvexVpermpsVpsHpsWpsKmask),
-
-                // --- Rounding/scale (avx512_round.rs) in Map 2 ---
-                // VSCALEFPS — EVEX.66.0F38.W0 2C
-                (0x2C, 1, 0) => Some(Opcode::EvexVscalefpsVpsHpsWps),
-                // VSCALEFPD — EVEX.66.0F38.W1 2C
-                (0x2C, 1, 1) => Some(Opcode::EvexVscalefpdVpdHpdWpd),
-                // VGETEXPPS — EVEX.66.0F38.W0 42
-                (0x42, 1, 0) => Some(Opcode::EvexVgetexppsVpsWps),
-                // VGETEXPPD — EVEX.66.0F38.W1 42
-                (0x42, 1, 1) => Some(Opcode::EvexVgetexppdVpdWpd),
-
-                // --- Misc (avx512_misc.rs) in Map 2 ---
-                // VPCOMPRESSD — EVEX.66.0F38.W0 8B
-                (0x8B, 1, 0) => Some(Opcode::EvexVpcompressdWdqVdq),
-                // VPCOMPRESSQ — EVEX.66.0F38.W1 8B
-                (0x8B, 1, 1) => Some(Opcode::EvexVpcompressqWdqVdq),
-                // VPEXPANDD — EVEX.66.0F38.W0 89
-                (0x89, 1, 0) => Some(Opcode::EvexVpexpanddVdqWdq),
-                // VPEXPANDQ — EVEX.66.0F38.W1 89
-                (0x89, 1, 1) => Some(Opcode::EvexVpexpandqVdqWdq),
-                // VPCONFLICTD — EVEX.66.0F38.W0 C4
-                (0xC4, 1, 0) => Some(Opcode::EvexVpconflictdVdqWdqKmask),
-                // VPLZCNTD — EVEX.66.0F38.W0 44
-                (0x44, 1, 0) => Some(Opcode::EvexVplzcntdVdqWdqKmask),
-                // VPLZCNTQ — EVEX.66.0F38.W1 44
-                (0x44, 1, 1) => Some(Opcode::EvexVplzcntqVdqWdqKmask),
-                // VPMOVDB — EVEX.F3.0F38.W0 31
-                (0x31, 2, 0) => Some(Opcode::EvexVpmovdbWdqVdq),
-                // VPMOVDW — EVEX.F3.0F38.W0 33
-                (0x33, 2, 0) => Some(Opcode::EvexVpmovdwWdqVdq),
-                // VPMOVQD — EVEX.F3.0F38.W0 35
-                (0x35, 2, 0) => Some(Opcode::EvexVpmovqdWdqVdq),
-
-                // --- VPERMI2D — EVEX.66.0F38.W0 76
-                (0x76, 1, 0) => Some(Opcode::EvexVpermi2dVdqHdqWdqKmask),
-
-                // --- Gather (avx512_gather.rs) ---
-                // VPGATHERDD — EVEX.66.0F38.W0 90
-                (0x90, 1, 0) => Some(Opcode::EvexVgatherddVdqVsib),
-                // VPGATHERDQ — EVEX.66.0F38.W1 90
-                (0x90, 1, 1) => Some(Opcode::EvexVgatherdqVdqVsib),
-                // VPGATHERQD — EVEX.66.0F38.W0 91
-                (0x91, 1, 0) => Some(Opcode::EvexVgatherqdVdqVsib),
-                // VPGATHERQQ — EVEX.66.0F38.W1 91
-                (0x91, 1, 1) => Some(Opcode::EvexVgatherqqVdqVsib),
-
-                _ => None,
-            }
-        }
-        3 => {
-            // Map 3 (0F 3A xx)
-            match (opcode, sse_prefix, w) {
-                // VPALIGNR — EVEX.66.0F3A.W0 0F
-                (0x0F, 1, 0) => Some(Opcode::EvexVpalignrVdqHdqWdqIb),
-                // VPTERNLOGD — EVEX.66.0F3A.W0 25
-                (0x25, 1, 0) => Some(Opcode::EvexVpternlogdVdqHdqWdqIb),
-                // VPTERNLOGQ — EVEX.66.0F3A.W1 25
-                (0x25, 1, 1) => Some(Opcode::EvexVpternlogqVdqHdqWdqIb),
-                // VINSERTI32x4 — EVEX.66.0F3A.W0 38
-                (0x38, 1, 0) => Some(Opcode::EvexVinserti32x4VdqHdqWdqIb),
-                // VINSERTI64x2 — EVEX.66.0F3A.W1 38
-                (0x38, 1, 1) => Some(Opcode::EvexVinserti64x2VdqHdqWdqIb),
-                // VINSERTF32x4 — EVEX.66.0F3A.W0 18
-                (0x18, 1, 0) => Some(Opcode::EvexVinsertf32x4VpsHpsWpsIb),
-                // VINSERTF64x2 — EVEX.66.0F3A.W1 18
-                (0x18, 1, 1) => Some(Opcode::EvexVinsertf64x2VpdHpdWpdIb),
-                // VEXTRACTI32x4 — EVEX.66.0F3A.W0 39
-                (0x39, 1, 0) => Some(Opcode::EvexVextracti32x4WdqVdqIb),
-                // VEXTRACTI64x2 — EVEX.66.0F3A.W1 39
-                (0x39, 1, 1) => Some(Opcode::EvexVextracti64x2WdqVdqIb),
-                // VINSERTI32x8 — EVEX.66.0F3A.W0 3A
-                (0x3A, 1, 0) => Some(Opcode::EvexVinserti32x8VdqHdqWdqIb),
-                // VINSERTI64x4 — EVEX.66.0F3A.W1 3A
-                (0x3A, 1, 1) => Some(Opcode::EvexVinserti64x4VdqHdqWdqIb),
-                // VINSERTF32x8 — EVEX.66.0F3A.W0 1A
-                (0x1A, 1, 0) => Some(Opcode::EvexVinsertf32x8VpsHpsWpsIb),
-                // VINSERTF64x4 — EVEX.66.0F3A.W1 1A
-                (0x1A, 1, 1) => Some(Opcode::EvexVinsertf64x4VpdHpdWpdIb),
-                // VEXTRACTI32x8 — EVEX.66.0F3A.W0 3B
-                (0x3B, 1, 0) => Some(Opcode::EvexVextracti32x8WdqVdqIb),
-                // VEXTRACTI64x4 — EVEX.66.0F3A.W1 3B
-                (0x3B, 1, 1) => Some(Opcode::EvexVextracti64x4WdqVdqIb),
-                // VEXTRACTF32x4 — EVEX.66.0F3A.W0 19
-                (0x19, 1, 0) => Some(Opcode::EvexVextractf32x4WpsVpsIb),
-                // VEXTRACTF64x2 — EVEX.66.0F3A.W1 19
-                (0x19, 1, 1) => Some(Opcode::EvexVextractf64x2WpdVpdIb),
-                // VEXTRACTF32x8 — EVEX.66.0F3A.W0 1B
-                (0x1B, 1, 0) => Some(Opcode::EvexVextractf32x8WpsVpsIb),
-                // VEXTRACTF64x4 — EVEX.66.0F3A.W1 1B
-                (0x1B, 1, 1) => Some(Opcode::EvexVextractf64x4WpdVpdIb),
-                // VPERMQ imm — EVEX.66.0F3A.W1 00
-                (0x00, 1, 1) => Some(Opcode::EvexVpermqVdqWdqIbKmask),
-                // VPERMPD imm — EVEX.66.0F3A.W1 01
-                (0x01, 1, 1) => Some(Opcode::EvexVpermpdVpdWpdIbKmask),
-                // VPCMPD — EVEX.66.0F3A.W0 1F
-                (0x1F, 1, 0) => Some(Opcode::EvexVpcmpdKgwHdqWdqIb),
-                // VPCMPUD — EVEX.66.0F3A.W0 1E
-                (0x1E, 1, 0) => Some(Opcode::EvexVpcmpudKgwHdqWdqIb),
-                // VCMPPS — EVEX.0F3A C2 already in Map 1 above
-                // VRNDSCALEPS — EVEX.66.0F3A.W0 08
-                (0x08, 1, 0) => Some(Opcode::EvexVrndscalepsVpsWpsIbKmask),
-                // VRNDSCALEPD — EVEX.66.0F3A.W1 09
-                (0x09, 1, 1) => Some(Opcode::EvexVrndscalepdVpdWpdIbKmask),
-                // VRNDSCALESS — EVEX.66.0F3A.W0 0A
-                (0x0A, 1, 0) => Some(Opcode::EvexVrndscalessVssHpsWssIbKmask),
-                // VRNDSCALESD — EVEX.66.0F3A.W1 0B
-                (0x0B, 1, 1) => Some(Opcode::EvexVrndscalesdVsdHpdWsdIbKmask),
-                // VGETMANTPS — EVEX.66.0F3A.W0 26
-                (0x26, 1, 0) => Some(Opcode::EvexVgetmantpsVpsWpsIbKmask),
-                // VGETMANTPD — EVEX.66.0F3A.W1 26
-                (0x26, 1, 1) => Some(Opcode::EvexVgetmantpdVpdWpdIbKmask),
-                // VPERMILPS imm — EVEX.66.0F3A.W0 04
-                (0x04, 1, 0) => Some(Opcode::EvexVpermilpsVpsWpsIb),
-                // VPERMILPD imm — EVEX.66.0F3A.W1 05
-                (0x05, 1, 1) => Some(Opcode::EvexVpermilpdVpdWpdIb),
-                // VSHUFPS — already in Map 1
-                // VSHUFF32x4 — EVEX.66.0F3A.W0 23
-                (0x23, 1, 0) => Some(Opcode::EvexVshuff32x4VpsHpsWpsIbKmask),
-                // VSHUFF64x2 — EVEX.66.0F3A.W1 23
-                (0x23, 1, 1) => Some(Opcode::EvexVshuff64x2VpdHpdWpdIbKmask),
-                // VSHUFI32x4 — EVEX.66.0F3A.W0 43
-                (0x43, 1, 0) => Some(Opcode::EvexVshufi32x4VdqHdqWdqIbKmask),
-                // VSHUFI64x2 — EVEX.66.0F3A.W1 43
-                (0x43, 1, 1) => Some(Opcode::EvexVshufi64x2VdqHdqWdqIbKmask),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Remap SSE opcodes to VEX opcodes when VEX prefix is active.
-///
-/// The opcode tables are shared between SSE and VEX instructions. When a VEX
-/// prefix is present, the table lookup may return an SSE opcode (2-operand form
-/// that ignores VEX.vvvv). This function remaps to the proper VEX opcode so the
-/// 3-operand VEX handler is dispatched.
-///
-/// `vl`: VEX.L field — 0 = 128-bit (XMM), 1 = 256-bit (YMM)
-const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
-    use Opcode::*;
-    match op {
-        // ===== Integer arithmetic =====
-        PadddVdqWdq => {
-            if vl == 0 {
-                V128VpadddVdqHdqWdq
-            } else {
-                V256VpadddVdqHdqWdq
-            }
-        }
-        PaddqVdqWdq => {
-            if vl == 0 {
-                V128VpaddqVdqHdqWdq
-            } else {
-                V256VpaddqVdqHdqWdq
-            }
-        }
-        PaddwVdqWdq => {
-            if vl == 0 {
-                V128VpaddwVdqHdqWdq
-            } else {
-                V256VpaddwVdqHdqWdq
-            }
-        }
-        PaddbVdqWdq => {
-            if vl == 0 {
-                V128VpaddbVdqHdqWdq
-            } else {
-                V256VpaddbVdqHdqWdq
-            }
-        }
-        PsubdVdqWdq => {
-            if vl == 0 {
-                V128VpsubdVdqHdqWdq
-            } else {
-                V256VpsubdVdqHdqWdq
-            }
-        }
-        PsubqVdqWdq => {
-            if vl == 0 {
-                V128VpsubqVdqHdqWdq
-            } else {
-                V256VpsubqVdqHdqWdq
-            }
-        }
-        PsubwVdqWdq => {
-            if vl == 0 {
-                V128VpsubwVdqHdqWdq
-            } else {
-                V256VpsubwVdqHdqWdq
-            }
-        }
-        PsubbVdqWdq => {
-            if vl == 0 {
-                V128VpsubbVdqHdqWdq
-            } else {
-                V256VpsubbVdqHdqWdq
-            }
-        }
-        // Saturating
-        PaddsbVdqWdq => {
-            if vl == 0 {
-                V128VpaddsbVdqHdqWdq
-            } else {
-                V256VpaddsbVdqHdqWdq
-            }
-        }
-        PaddswVdqWdq => {
-            if vl == 0 {
-                V128VpaddswVdqHdqWdq
-            } else {
-                V256VpaddswVdqHdqWdq
-            }
-        }
-        PsubsbVdqWdq => {
-            if vl == 0 {
-                V128VpsubsbVdqHdqWdq
-            } else {
-                V256VpsubsbVdqHdqWdq
-            }
-        }
-        PsubswVdqWdq => {
-            if vl == 0 {
-                V128VpsubswVdqHdqWdq
-            } else {
-                V256VpsubswVdqHdqWdq
-            }
-        }
-        PsubusbVdqWdq => {
-            if vl == 0 {
-                V128VpsubusbVdqHdqWdq
-            } else {
-                V256VpsubusbVdqHdqWdq
-            }
-        }
-        PsubuswVdqWdq => {
-            if vl == 0 {
-                V128VpsubuswVdqHdqWdq
-            } else {
-                V256VpsubuswVdqHdqWdq
-            }
-        }
-        PaddusbVdqWdq => {
-            if vl == 0 {
-                V128VpaddusbVdqHdqWdq
-            } else {
-                V256VpaddusbVdqHdqWdq
-            }
-        }
-        PadduswVdqWdq => {
-            if vl == 0 {
-                V128VpadduswVdqHdqWdq
-            } else {
-                V256VpadduswVdqHdqWdq
-            }
-        }
-
-        // ===== Logical =====
-        PxorVdqWdq => {
-            if vl == 0 {
-                V128VpxorVdqHdqWdq
-            } else {
-                V256VpxorVdqHdqWdq
-            }
-        }
-        PandVdqWdq => {
-            if vl == 0 {
-                V128VpandVdqHdqWdq
-            } else {
-                V256VpandVdqHdqWdq
-            }
-        }
-        PorVdqWdq => {
-            if vl == 0 {
-                V128VporVdqHdqWdq
-            } else {
-                V256VporVdqHdqWdq
-            }
-        }
-        PandnVdqWdq => {
-            if vl == 0 {
-                V128VpandnVdqHdqWdq
-            } else {
-                V256VpandnVdqHdqWdq
-            }
-        }
-
-        // ===== Multiply =====
-        PmuludqVdqWdq => {
-            if vl == 0 {
-                V128VpmuludqVdqHdqWdq
-            } else {
-                V256VpmuludqVdqHdqWdq
-            }
-        }
-        PmuldqVdqWdq => {
-            if vl == 0 {
-                V128VpmuldqVdqHdqWdq
-            } else {
-                V256VpmuldqVdqHdqWdq
-            }
-        }
-        PmulldVdqWdq => {
-            if vl == 0 {
-                V128VpmulldVdqHdqWdq
-            } else {
-                V256VpmulldVdqHdqWdq
-            }
-        }
-        PmullwVdqWdq => {
-            if vl == 0 {
-                V128VpmullwVdqHdqWdq
-            } else {
-                V256VpmullwVdqHdqWdq
-            }
-        }
-        PmulhwVdqWdq => {
-            if vl == 0 {
-                V128VpmulhwVdqHdqWdq
-            } else {
-                V256VpmulhwVdqHdqWdq
-            }
-        }
-        PmulhuwVdqWdq => {
-            if vl == 0 {
-                V128VpmulhuwVdqHdqWdq
-            } else {
-                V256VpmulhuwVdqHdqWdq
-            }
-        }
-        PmulhrswVdqWdq => {
-            if vl == 0 {
-                V128VpmulhrswVdqHdqWdq
-            } else {
-                V256VpmulhrswVdqHdqWdq
-            }
-        }
-
-        // ===== Compare =====
-        PcmpeqbVdqWdq => {
-            if vl == 0 {
-                V128VpcmpeqbVdqHdqWdq
-            } else {
-                V256VpcmpeqbVdqHdqWdq
-            }
-        }
-        PcmpeqwVdqWdq => {
-            if vl == 0 {
-                V128VpcmpeqwVdqHdqWdq
-            } else {
-                V256VpcmpeqwVdqHdqWdq
-            }
-        }
-        PcmpeqdVdqWdq => {
-            if vl == 0 {
-                V128VpcmpeqdVdqHdqWdq
-            } else {
-                V256VpcmpeqdVdqHdqWdq
-            }
-        }
-        PcmpeqqVdqWdq => {
-            if vl == 0 {
-                V128VpcmpeqqVdqHdqWdq
-            } else {
-                V256VpcmpeqqVdqHdqWdq
-            }
-        }
-        PcmpgtbVdqWdq => {
-            if vl == 0 {
-                V128VpcmpgtbVdqHdqWdq
-            } else {
-                V256VpcmpgtbVdqHdqWdq
-            }
-        }
-        PcmpgtwVdqWdq => {
-            if vl == 0 {
-                V128VpcmpgtwVdqHdqWdq
-            } else {
-                V256VpcmpgtwVdqHdqWdq
-            }
-        }
-        PcmpgtdVdqWdq => {
-            if vl == 0 {
-                V128VpcmpgtdVdqHdqWdq
-            } else {
-                V256VpcmpgtdVdqHdqWdq
-            }
-        }
-        PcmpgtqVdqWdq => {
-            if vl == 0 {
-                V128VpcmpgtqVdqHdqWdq
-            } else {
-                V256VpcmpgtqVdqHdqWdq
-            }
-        }
-
-        // ===== Shift by register =====
-        PsrlwVdqWdq => {
-            if vl == 0 {
-                V128VpsrlwVdqHdqWdq
-            } else {
-                V256VpsrlwVdqHdqWdq
-            }
-        }
-        PsrldVdqWdq => {
-            if vl == 0 {
-                V128VpsrldVdqHdqWdq
-            } else {
-                V256VpsrldVdqHdqWdq
-            }
-        }
-        PsrlqVdqWdq => {
-            if vl == 0 {
-                V128VpsrlqVdqHdqWdq
-            } else {
-                V256VpsrlqVdqHdqWdq
-            }
-        }
-        PsrawVdqWdq => {
-            if vl == 0 {
-                V128VpsrawVdqHdqWdq
-            } else {
-                V256VpsrawVdqHdqWdq
-            }
-        }
-        PsradVdqWdq => {
-            if vl == 0 {
-                V128VpsradVdqHdqWdq
-            } else {
-                V256VpsradVdqHdqWdq
-            }
-        }
-        PsllwVdqWdq => {
-            if vl == 0 {
-                V128VpsllwVdqHdqWdq
-            } else {
-                V256VpsllwVdqHdqWdq
-            }
-        }
-        PslldVdqWdq => {
-            if vl == 0 {
-                V128VpslldVdqHdqWdq
-            } else {
-                V256VpslldVdqHdqWdq
-            }
-        }
-        PsllqVdqWdq => {
-            if vl == 0 {
-                V128VpsllqVdqHdqWdq
-            } else {
-                V256VpsllqVdqHdqWdq
-            }
-        }
-
-        // ===== Shift by immediate (Group 12/13/14) =====
-        PsrlwUdqIb => {
-            if vl == 0 {
-                V128VpsrlwUdqIb
-            } else {
-                V256VpsrlwUdqIb
-            }
-        }
-        PsrldUdqIb => {
-            if vl == 0 {
-                V128VpsrldUdqIb
-            } else {
-                V256VpsrldUdqIb
-            }
-        }
-        PsrlqUdqIb => {
-            if vl == 0 {
-                V128VpsrlqUdqIb
-            } else {
-                V256VpsrlqUdqIb
-            }
-        }
-        PsrawUdqIb => {
-            if vl == 0 {
-                V128VpsrawUdqIb
-            } else {
-                V256VpsrawUdqIb
-            }
-        }
-        PsradUdqIb => {
-            if vl == 0 {
-                V128VpsradUdqIb
-            } else {
-                V256VpsradUdqIb
-            }
-        }
-        PsllwUdqIb => {
-            if vl == 0 {
-                V128VpsllwUdqIb
-            } else {
-                V256VpsllwUdqIb
-            }
-        }
-        PslldUdqIb => {
-            if vl == 0 {
-                V128VpslldUdqIb
-            } else {
-                V256VpslldUdqIb
-            }
-        }
-        PsllqUdqIb => {
-            if vl == 0 {
-                V128VpsllqUdqIb
-            } else {
-                V256VpsllqUdqIb
-            }
-        }
-        PsrldqUdqIb => {
-            if vl == 0 {
-                V128VpsrldqUdqIb
-            } else {
-                V256VpsrldqUdqIb
-            }
-        }
-        PslldqUdqIb => {
-            if vl == 0 {
-                V128VpslldqUdqIb
-            } else {
-                V256VpslldqUdqIb
-            }
-        }
-
-        // ===== Shuffle / Unpack =====
-        PshufbVdqWdq => {
-            if vl == 0 {
-                V128VpshufbVdqHdqWdq
-            } else {
-                V256VpshufbVdqHdqWdq
-            }
-        }
-        PshufdVdqWdqIb => {
-            if vl == 0 {
-                V128VpshufdVdqWdqIb
-            } else {
-                V256VpshufdVdqWdqIb
-            }
-        }
-        PshufhwVdqWdqIb => {
-            if vl == 0 {
-                V128VpshufhwVdqWdqIb
-            } else {
-                V256VpshufhwVdqWdqIb
-            }
-        }
-        PshuflwVdqWdqIb => {
-            if vl == 0 {
-                V128VpshuflwVdqWdqIb
-            } else {
-                V256VpshuflwVdqWdqIb
-            }
-        }
-        PunpckldqVdqWdq => {
-            if vl == 0 {
-                V128VpunpckldqVdqHdqWdq
-            } else {
-                V256VpunpckldqVdqHdqWdq
-            }
-        }
-        PunpckhdqVdqWdq => {
-            if vl == 0 {
-                V128VpunpckhdqVdqHdqWdq
-            } else {
-                V256VpunpckhdqVdqHdqWdq
-            }
-        }
-        PunpcklbwVdqWdq => {
-            if vl == 0 {
-                V128VpunpcklbwVdqHdqWdq
-            } else {
-                V256VpunpcklbwVdqHdqWdq
-            }
-        }
-        PunpckhbwVdqWdq => {
-            if vl == 0 {
-                V128VpunpckhbwVdqHdqWdq
-            } else {
-                V256VpunpckhbwVdqHdqWdq
-            }
-        }
-        PunpcklwdVdqWdq => {
-            if vl == 0 {
-                V128VpunpcklwdVdqHdqWdq
-            } else {
-                V256VpunpcklwdVdqHdqWdq
-            }
-        }
-        PunpckhwdVdqWdq => {
-            if vl == 0 {
-                V128VpunpckhwdVdqHdqWdq
-            } else {
-                V256VpunpckhwdVdqHdqWdq
-            }
-        }
-        PunpcklqdqVdqWdq => {
-            if vl == 0 {
-                V128VpunpcklqdqVdqHdqWdq
-            } else {
-                V256VpunpcklqdqVdqHdqWdq
-            }
-        }
-        PunpckhqdqVdqWdq => {
-            if vl == 0 {
-                V128VpunpckhqdqVdqHdqWdq
-            } else {
-                V256VpunpckhqdqVdqHdqWdq
-            }
-        }
-
-        // ===== PALIGNR =====
-        PalignrVdqWdqIb => {
-            if vl == 0 {
-                V128VpalignrVdqHdqWdqIb
-            } else {
-                V256VpalignrVdqHdqWdqIb
-            }
-        }
-
-        // ===== Pack =====
-        PacksswbVdqWdq => {
-            if vl == 0 {
-                V128VpacksswbVdqHdqWdq
-            } else {
-                V256VpacksswbVdqHdqWdq
-            }
-        }
-        PackuswbVdqWdq => {
-            if vl == 0 {
-                V128VpackuswbVdqHdqWdq
-            } else {
-                V256VpackuswbVdqHdqWdq
-            }
-        }
-        PackssdwVdqWdq => {
-            if vl == 0 {
-                V128VpackssdwVdqHdqWdq
-            } else {
-                V256VpackssdwVdqHdqWdq
-            }
-        }
-        PackusdwVdqWdq => {
-            if vl == 0 {
-                V128VpackusdwVdqHdqWdq
-            } else {
-                V256VpackusdwVdqHdqWdq
-            }
-        }
-
-        // ===== Min/Max (SSE2 + SSE4.1) =====
-        PminubVdqWdq => {
-            if vl == 0 {
-                V128VpminubVdqHdqWdq
-            } else {
-                V256VpminubVdqHdqWdq
-            }
-        }
-        PminswVdqWdq => {
-            if vl == 0 {
-                V128VpminswVdqHdqWdq
-            } else {
-                V256VpminswVdqHdqWdq
-            }
-        }
-        PmaxubVdqWdq => {
-            if vl == 0 {
-                V128VpmaxubVdqHdqWdq
-            } else {
-                V256VpmaxubVdqHdqWdq
-            }
-        }
-        PmaxswVdqWdq => {
-            if vl == 0 {
-                V128VpmaxswVdqHdqWdq
-            } else {
-                V256VpmaxswVdqHdqWdq
-            }
-        }
-        PminsbVdqWdq => {
-            if vl == 0 {
-                V128VpminsbVdqHdqWdq
-            } else {
-                V256VpminsbVdqHdqWdq
-            }
-        }
-        PminsdVdqWdq => {
-            if vl == 0 {
-                V128VpminsdVdqHdqWdq
-            } else {
-                V256VpminsdVdqHdqWdq
-            }
-        }
-        PminuwVdqWdq => {
-            if vl == 0 {
-                V128VpminuwVdqHdqWdq
-            } else {
-                V256VpminuwVdqHdqWdq
-            }
-        }
-        PminudVdqWdq => {
-            if vl == 0 {
-                V128VpminudVdqHdqWdq
-            } else {
-                V256VpminudVdqHdqWdq
-            }
-        }
-        PmaxsbVdqWdq => {
-            if vl == 0 {
-                V128VpmaxsbVdqHdqWdq
-            } else {
-                V256VpmaxsbVdqHdqWdq
-            }
-        }
-        PmaxsdVdqWdq => {
-            if vl == 0 {
-                V128VpmaxsdVdqHdqWdq
-            } else {
-                V256VpmaxsdVdqHdqWdq
-            }
-        }
-        PmaxuwVdqWdq => {
-            if vl == 0 {
-                V128VpmaxuwVdqHdqWdq
-            } else {
-                V256VpmaxuwVdqHdqWdq
-            }
-        }
-        PmaxudVdqWdq => {
-            if vl == 0 {
-                V128VpmaxudVdqHdqWdq
-            } else {
-                V256VpmaxudVdqHdqWdq
-            }
-        }
-
-        // ===== Average / SAD =====
-        PavgbVdqWdq => {
-            if vl == 0 {
-                V128VpavgbVdqWdq
-            } else {
-                V256VpavgbVdqWdq
-            }
-        }
-        PavgwVdqWdq => {
-            if vl == 0 {
-                V128VpavgwVdqWdq
-            } else {
-                V256VpavgwVdqWdq
-            }
-        }
-        PsadbwVdqWdq => {
-            if vl == 0 {
-                V128VpsadbwVdqHdqWdq
-            } else {
-                V256VpsadbwVdqHdqWdq
-            }
-        }
-
-        // ===== PMADDWD / PMADDUBSW =====
-        PmaddwdVdqWdq => {
-            if vl == 0 {
-                V128VpmaddwdVdqHdqWdq
-            } else {
-                V256VpmaddwdVdqHdqWdq
-            }
-        }
-        PmaddubswVdqWdq => {
-            if vl == 0 {
-                V128VpmaddubswVdqHdqWdq
-            } else {
-                V256VpmaddubswVdqHdqWdq
-            }
-        }
-
-        // ===== SSSE3: PHADD/PHSUB/PSIGN =====
-        PhaddwVdqWdq => {
-            if vl == 0 {
-                V128VphaddwVdqHdqWdq
-            } else {
-                V256VphaddwVdqHdqWdq
-            }
-        }
-        PhadddVdqWdq => {
-            if vl == 0 {
-                V128VphadddVdqHdqWdq
-            } else {
-                V256VphadddVdqHdqWdq
-            }
-        }
-        PhaddswVdqWdq => {
-            if vl == 0 {
-                V128VphaddswVdqHdqWdq
-            } else {
-                V256VphaddswVdqHdqWdq
-            }
-        }
-        PhsubwVdqWdq => {
-            if vl == 0 {
-                V128VphsubwVdqHdqWdq
-            } else {
-                V256VphsubwVdqHdqWdq
-            }
-        }
-        PhsubdVdqWdq => {
-            if vl == 0 {
-                V128VphsubdVdqHdqWdq
-            } else {
-                V256VphsubdVdqHdqWdq
-            }
-        }
-        PhsubswVdqWdq => {
-            if vl == 0 {
-                V128VphsubswVdqHdqWdq
-            } else {
-                V256VphsubswVdqHdqWdq
-            }
-        }
-        PsignbVdqWdq => {
-            if vl == 0 {
-                V128VpsignbVdqHdqWdq
-            } else {
-                V256VpsignbVdqHdqWdq
-            }
-        }
-        PsignwVdqWdq => {
-            if vl == 0 {
-                V128VpsignwVdqHdqWdq
-            } else {
-                V256VpsignwVdqHdqWdq
-            }
-        }
-        PsigndVdqWdq => {
-            if vl == 0 {
-                V128VpsigndVdqHdqWdq
-            } else {
-                V256VpsigndVdqHdqWdq
-            }
-        }
-
-        // ===== Floating-point bitwise (VEX handler checks get_vl()) =====
-        AndpsVpsWps => VandpsVpsHpsWps,
-        AndnpsVpsWps => VandnpsVpsHpsWps,
-        OrpsVpsWps => VorpsVpsHpsWps,
-        XorpsVpsWps => VxorpsVpsHpsWps,
-        AddpsVpsWps => VaddpsVpsHpsWps,
-        MulpsVpsWps => VmulpsVpsHpsWps,
-        SubpsVpsWps => VsubpsVpsHpsWps,
-        DivpsVpsWps => VdivpsVpsHpsWps,
-        AndpdVpdWpd => VandpdVpdHpdWpd,
-        AndnpdVpdWpd => VandnpdVpdHpdWpd,
-        OrpdVpdWpd => VorpdVpdHpdWpd,
-        XorpdVpdWpd => VxorpdVpdHpdWpd,
-        AddpdVpdWpd => VaddpdVpdHpdWpd,
-        MulpdVpdWpd => VmulpdVpdHpdWpd,
-        SubpdVpdWpd => VsubpdVpdHpdWpd,
-        DivpdVpdWpd => VdivpdVpdHpdWpd,
-        MinpsVpsWps => VminpsVpsHpsWps,
-        MinpdVpdWpd => VminpdVpdHpdWpd,
-        MaxpsVpsWps => VmaxpsVpsHpsWps,
-        MaxpdVpdWpd => VmaxpdVpdHpdWpd,
-        AddsubpsVpsWps => VaddsubpsVpsHpsWps,
-        AddsubpdVpdWpd => VaddsubpdVpdHpdWpd,
-        HaddpsVpsWps => VhaddpsVpsHpsWps,
-        HaddpdVpdWpd => VhaddpdVpdHpdWpd,
-        HsubpsVpsWps => VhsubpsVpsHpsWps,
-        HsubpdVpdWpd => VhsubpdVpdHpdWpd,
-
-        // ===== SSE4.1 blend / dot-product (vvvv is first source) =====
-        BlendpsVpsWpsIb => VblendpsVpsHpsWpsIb,
-        BlendpdVpdWpdIb => VblendpdVpdHpdWpdIb,
-        DppsVpsWpsIb => VdppsVpsHpsWpsIb,
-        // VDPPD is VL128-only; VEX.256 encodings #UD
-        // (Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A41 ATTR_VL128)
-        DppdVpdWpdIb => {
-            if vl == 0 {
-                VdppdVpdHpdWpdIb
-            } else {
-                IaError
-            }
-        }
-        // VEX-encoded 66 0F 38 10/14/15 do not exist in AVX: the variable
-        // blends moved to VEX.0F3A 4A-4C with an is4 mask register (Bochs
-        // fetchdecode_opmap_avx.cc marks these VEX slots BxOpcodeGroup_ERR).
-        PblendvbVdqWdq => IaError,
-        BlendvpsVpsWps => IaError,
-        BlendvpdVpdWpd => IaError,
-
-        // ===== Floating-point scalar arithmetic (VEX.vvvv is first source;
-        // the legacy 2-operand SSE handler would destructively use dst) =====
-        AddssVssWss => VaddssVssHpsWss,
-        AddsdVsdWsd => VaddsdVsdHpdWsd,
-        SubssVssWss => VsubssVssHpsWss,
-        SubsdVsdWsd => VsubsdVsdHpdWsd,
-        MulssVssWss => VmulssVssHpsWss,
-        MulsdVsdWsd => VmulsdVsdHpdWsd,
-        DivssVssWss => VdivssVssHpsWss,
-        DivsdVsdWsd => VdivsdVsdHpdWsd,
-        MinssVssWss => VminssVssHpsWss,
-        MinsdVsdWsd => VminsdVsdHpdWsd,
-        MaxssVssWss => VmaxssVssHpsWss,
-        MaxsdVsdWsd => VmaxsdVsdHpdWsd,
-
-        // ===== Square root (scalar forms merge upper elements from vvvv) =====
-        SqrtpsVpsWps => VsqrtpsVpsWps,
-        SqrtpdVpdWpd => VsqrtpdVpdWpd,
-        SqrtssVssWss => VsqrtssVssHpsWss,
-        SqrtsdVsdWsd => VsqrtsdVsdHpdWsd,
-
-        // ===== FP compare (32 AVX predicates; vvvv is first source) =====
-        CmppsVpsWpsIb => VcmppsVpsHpsWpsIb,
-        CmppdVpdWpdIb => VcmppdVpdHpdWpdIb,
-        CmpssVssWssIb => VcmpssVssHpsWssIb,
-        CmpsdVsdWsdIb => VcmpsdVsdHpdWsdIb,
-
-        // ===== FP shuffle / unpack (vvvv is first source) =====
-        ShufpsVpsWpsIb => VshufpsVpsHpsWpsIb,
-        ShufpdVpdWpdIb => VshufpdVpdHpdWpdIb,
-        UnpcklpsVpsWdq => VunpcklpsVpsHpsWps,
-        UnpckhpsVpsWdq => VunpckhpsVpsHpsWps,
-        UnpcklpdVpdWdq => VunpcklpdVpdHpdWpd,
-        UnpckhpdVpdWdq => VunpckhpdVpdHpdWpd,
-
-        // ===== Scalar moves (register forms merge low element into vvvv's
-        // upper elements; the VEX handler splits mod internally) =====
-        MovssVssWss => V128VmovssVssHpsWss,
-        MovsdVsdWsd => V128VmovsdVsdHpdWsd,
-        MovssWssVss => V128VmovssWssHpsVss,
-        MovsdWsdVsd => V128VmovsdWsdHpdVsd,
-        MovlpsVpsMq => V128VmovlpsVpsHpsMq,
-        MovlpdVsdMq => V128VmovlpdVpdHpdMq,
-        MovhpsVpsMq => V128VmovhpsVpsHpsMq,
-        MovhpdVsdMq => V128VmovhpdVpdHpdMq,
-        MovhlpsVpsWps => V128VmovhlpsVpsHpsWps,
-        MovlhpsVpsWps => V128VmovlhpsVpsHpsWps,
-        MovsldupVpsWps => VmovsldupVpsWps,
-        MovshdupVpsWps => VmovshdupVpsWps,
-        MovddupVpdWq => {
-            if vl == 0 {
-                V128VmovddupVpdWpd
-            } else {
-                V256VmovddupVpdWpd
-            }
-        }
-
-        // ===== Scalar conversions (vvvv provides the upper elements) =====
-        Cvtss2sdVsdWss => Vcvtss2sdVsdWss,
-        Cvtsd2ssVssWsd => Vcvtsd2ssVssWsd,
-        Cvtsi2sdVsdEd => Vcvtsi2sdVsdEd,
-        Cvtsi2sdVsdEq => Vcvtsi2sdVsdEq,
-        Cvtsi2ssVssEd => Vcvtsi2ssVssEd,
-        Cvtsi2ssVssEq => Vcvtsi2ssVssEq,
-
-        // ===== Packed conversions (single-source; VL selects lane count) =====
-        Cvtdq2psVpsWdq => Vcvtdq2psVpsWdq,
-        Cvtps2dqVdqWps => Vcvtps2dqVdqWps,
-        Cvttps2dqVdqWps => Vcvttps2dqVdqWps,
-        Cvtdq2pdVpdWq => Vcvtdq2pdVpdWdq,
-        Cvtps2pdVpdWps => Vcvtps2pdVpdWps,
-        Cvtpd2psVpsWpd => Vcvtpd2psVpsWpd,
-        Cvtpd2dqVqWpd => Vcvtpd2dqVdqWpd,
-        Cvttpd2dqVqWpd => Vcvttpd2dqVdqWpd,
-
-        // ===== Round / reciprocal approximations =====
-        RoundpsVpsWpsIb => VroundpsVpsWpsIb,
-        RoundpdVpdWpdIb => VroundpdVpdWpdIb,
-        RoundssVssWssIb => VroundssVssHpsWssIb,
-        RoundsdVsdWsdIb => VroundsdVsdHpdWsdIb,
-        RcppsVpsWps => VrcppsVpsWps,
-        RcpssVssWss => VrcpssVssHpsWss,
-        RsqrtpsVpsWps => VrsqrtpsVpsWps,
-        RsqrtssVssWss => VrsqrtssVssHpsWss,
-
-        // ===== Store-form moves (VEX handler does VL-aware stores + register form) =====
-        MovdquWdqVdq => {
-            if vl == 0 {
-                V128VmovdquWdqVdq
-            } else {
-                V256VmovdquWdqVdq
-            }
-        }
-        MovdqaWdqVdq => {
-            if vl == 0 {
-                V128VmovdqaWdqVdq
-            } else {
-                V256VmovdqaWdqVdq
-            }
-        }
-        MovupsWpsVps => {
-            if vl == 0 {
-                V128VmovupsWpsVps
-            } else {
-                V256VmovupsWpsVps
-            }
-        }
-        MovapsWpsVps => {
-            if vl == 0 {
-                V128VmovapsWpsVps
-            } else {
-                V256VmovapsWpsVps
-            }
-        }
-        MovupdWpdVpd => {
-            if vl == 0 {
-                V128VmovupdWpdVpd
-            } else {
-                V256VmovupdWpdVpd
-            }
-        }
-        MovapdWpdVpd => {
-            if vl == 0 {
-                V128VmovapdWpdVpd
-            } else {
-                V256VmovapdWpdVpd
-            }
-        }
-        MovntdqMdqVdq => {
-            if vl == 0 {
-                V128VmovntdqMdqVdq
-            } else {
-                V256VmovntdqMdqVdq
-            }
-        }
-        MovntpsMpsVps => {
-            if vl == 0 {
-                V128VmovntpsMpsVps
-            } else {
-                V256VmovntpsMpsVps
-            }
-        }
-        MovntpdMpdVpd => {
-            if vl == 0 {
-                V128VmovntpdMpdVpd
-            } else {
-                V256VmovntpdMpdVpd
-            }
-        }
-
-        // ===== Load-form moves (SSE handler only reads 128-bit; VEX handler is VL-aware) =====
-        // These use a single VEX opcode (no V128/V256 prefix) — handler checks get_vl()
-        MovdquVdqWdq => VmovdquVdqWdq,
-        MovdqaVdqWdq => VmovdqaVdqWdq,
-        MovupsVpsWps => VmovupsVpsWps,
-        MovapsVpsWps => VmovapsVpsWps,
-        MovupdVpdWpd => VmovupdVpdWpd,
-        MovapdVpdWpd => VmovapdVpdWpd,
-
-        // ===== Misc =====
-        PmovmskbGdUdq => {
-            if vl == 0 {
-                V128VpmovmskbGdUdq
-            } else {
-                V256VpmovmskbGdUdq
-            }
-        }
-
-        // ===== VPTEST (flags-only; must AND/ANDN the full VL, Bochs avx.cc
-        // VPTEST_VdqWdqR) — single VEX opcode, handler checks get_vl() =====
-        PtestVdqWdq => VptestVdqWdq,
-
-        // ===== VMOVMSKPS/VMOVMSKPD (VL256 → 8/4-bit masks, Bochs avx.cc
-        // VMOVMSKPS_GdUps / VMOVMSKPD_GdUpd) =====
-        MovmskpsGdUps => VmovmskpsGdUps,
-        MovmskpdGdUpd => VmovmskpdGdUpd,
-
-        // ===== VPMOVSX/VPMOVZX (Bochs avx2.cc VPMOVSXBW_VdqWdqR et al.;
-        // VL256 forms read a doubled source width — Bochs
-        // fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3820..25 / 30..35) =====
-        PmovsxbwVdqWq => {
-            if vl == 0 {
-                V128VpmovsxbwVdqWq
-            } else {
-                V256VpmovsxbwVdqWdq
-            }
-        }
-        PmovsxbdVdqWd => {
-            if vl == 0 {
-                V128VpmovsxbdVdqWd
-            } else {
-                V256VpmovsxbdVdqWq
-            }
-        }
-        PmovsxbqVdqWw => {
-            if vl == 0 {
-                V128VpmovsxbqVdqWw
-            } else {
-                V256VpmovsxbqVdqWd
-            }
-        }
-        PmovsxwdVdqWq => {
-            if vl == 0 {
-                V128VpmovsxwdVdqWq
-            } else {
-                V256VpmovsxwdVdqWdq
-            }
-        }
-        PmovsxwqVdqWd => {
-            if vl == 0 {
-                V128VpmovsxwqVdqWd
-            } else {
-                V256VpmovsxwqVdqWq
-            }
-        }
-        PmovsxdqVdqWq => {
-            if vl == 0 {
-                V128VpmovsxdqVdqWq
-            } else {
-                V256VpmovsxdqVdqWdq
-            }
-        }
-        PmovzxbwVdqWq => {
-            if vl == 0 {
-                V128VpmovzxbwVdqWq
-            } else {
-                V256VpmovzxbwVdqWdq
-            }
-        }
-        PmovzxbdVdqWd => {
-            if vl == 0 {
-                V128VpmovzxbdVdqWd
-            } else {
-                V256VpmovzxbdVdqWq
-            }
-        }
-        PmovzxbqVdqWw => {
-            if vl == 0 {
-                V128VpmovzxbqVdqWw
-            } else {
-                V256VpmovzxbqVdqWd
-            }
-        }
-        PmovzxwdVdqWq => {
-            if vl == 0 {
-                V128VpmovzxwdVdqWq
-            } else {
-                V256VpmovzxwdVdqWdq
-            }
-        }
-        PmovzxwqVdqWd => {
-            if vl == 0 {
-                V128VpmovzxwqVdqWd
-            } else {
-                V256VpmovzxwqVdqWq
-            }
-        }
-        PmovzxdqVdqWq => {
-            if vl == 0 {
-                V128VpmovzxdqVdqWq
-            } else {
-                V256VpmovzxdqVdqWdq
-            }
-        }
-
-        // ===== VPABSB/W/D (Bochs HANDLE_AVX_1OP<xmm_pabsb> et al.) =====
-        PabsbVdqWdq => {
-            if vl == 0 {
-                V128VpabsbVdqWdq
-            } else {
-                V256VpabsbVdqWdq
-            }
-        }
-        PabswVdqWdq => {
-            if vl == 0 {
-                V128VpabswVdqWdq
-            } else {
-                V256VpabswVdqWdq
-            }
-        }
-        PabsdVdqWdq => {
-            if vl == 0 {
-                V128VpabsdVdqWdq
-            } else {
-                V256VpabsdVdqWdq
-            }
-        }
-
-        // ===== VLDDQU — identical to the VL-aware vmovdqu/vmovups load
-        // (Bochs ia_opcodes.def BX_IA_VLDDQU_VdqMdq → VMOVUPS_VpsWpsM) =====
-        LddquVdqMdq => VlddquVdqMdq,
-
-        // ===== VINSERTPS (vvvv is first source; VL128-only, VEX.256 #UD —
-        // Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A21) =====
-        InsertpsVpsWssIb => {
-            if vl == 0 {
-                V128VinsertpsVpsWssIb
-            } else {
-                IaError
-            }
-        }
-
-        // ===== VPINSRB/W/D/Q (vvvv is first source; VL128-only, VEX.256 #UD —
-        // Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3A20/22 and the
-        // 0F C4 VPINSRW group). The legacy SSE forms are 2-operand (dst==base);
-        // remap so the 3-operand VEX handler that sources vvvv is dispatched.
-        // W-bit split for D/Q is already resolved by the table's OS64 match
-        // (VEX.W1 implies OS64 → PinsrqVdqEqIb; W0 → PinsrdVdqEdIb). =====
-        PinsrwVdqEwIb => {
-            if vl == 0 {
-                V128VpinsrwVdqEwIb
-            } else {
-                IaError
-            }
-        }
-        PinsrbVdqEbIb => {
-            if vl == 0 {
-                V128VpinsrbVdqEbIb
-            } else {
-                IaError
-            }
-        }
-        PinsrdVdqEdIb => {
-            if vl == 0 {
-                V128VpinsrdVdqEdIb
-            } else {
-                IaError
-            }
-        }
-        PinsrqVdqEqIb => {
-            if vl == 0 {
-                V128VpinsrqVdqEqIb
-            } else {
-                IaError
-            }
-        }
-
-        // ===== VMPSADBW (vvvv is first source; per-128-bit-lane control —
-        // Bochs avx2.cc VMPSADBW_VdqHdqWdqIbR) =====
-        MpsadbwVdqWdqIb => {
-            if vl == 0 {
-                V128VmpsadbwVdqHdqWdqIb
-            } else {
-                V256VmpsadbwVdqHdqWdqIb
-            }
-        }
-
-        // ===== VPHMINPOSUW (VL128-only, VEX.256 #UD — Bochs
-        // fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3841) =====
-        PhminposuwVdqWdq => {
-            if vl == 0 {
-                V128VphminposuwVdqWdq
-            } else {
-                IaError
-            }
-        }
-
-        // ===== VMOVQ (F3 0F 7E load / 66 0F D6 store; register forms must
-        // zero above VL — Bochs fetchdecode_opmap_avx.cc
-        // BxOpcodeGroup_VEX_0F7E / BxOpcodeGroup_VEX_0FD6, both ATTR_VL128) =====
-        MovqVqWq => {
-            if vl == 0 {
-                VmovqVqWq
-            } else {
-                IaError
-            }
-        }
-        MovqWqVq => {
-            if vl == 0 {
-                VmovqWqVq
-            } else {
-                IaError
-            }
-        }
-
-        // ===== EMMS → VZEROUPPER/VZEROALL (VEX.0F 77) =====
-        Emms => {
-            if vl == 0 {
-                Vzeroupper
-            } else {
-                Vzeroall
-            }
-        }
-
-        // No remap — instruction either has no VEX form, is already VEX, or
-        // works correctly as-is (e.g. 2-operand loads where VEX.vvvv must be 1111b)
-        _ => op,
     }
 }
 

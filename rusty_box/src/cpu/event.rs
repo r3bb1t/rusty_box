@@ -144,13 +144,20 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // Bochs event.cc — check inhibition FIRST, then debug_trap
         if !self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG) {
             // Bochs event.cc: OR code breakpoint matches into debug_trap
-            self.debug_trap |= self.code_breakpoint_match(self.prev_rip);
+            self.debug_trap |= self.pending_code_breakpoint_trap();
             if self.debug_trap & 0xF000 != 0 {
                 // BX_DEBUG_SINGLE_STEP_BIT or BX_DEBUG_DR_ACCESS_BIT set
                 // Bochs: exception() longjmps — propagate restart
                 if let Err(super::error::CpuError::CpuLoopRestart) =
                     self.exception(super::cpu::Exception::Db, 0)
                 {
+                    // Bochs's longjmp lands in cpu_loop's setjmp handler,
+                    // which commits `prev_rip = RIP` before resuming (cpu.cc).
+                    // Every other delivery arm here does the same; without it
+                    // the #DB handler runs with prev_rip still pointing at the
+                    // interrupted instruction, so the next fault inside the
+                    // handler reports the wrong address.
+                    self.prev_rip = self.rip();
                     return false;
                 }
             } else {
@@ -258,7 +265,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
                 }
             }
             self.mask_event(Self::BX_EVENT_NMI); // Block further NMIs until IRET
-            self.activity_state = CpuActivityState::Active;
             let result = self.interrupt(2, super::exception::InterruptType::Nmi, false, false, 0); // NMI vector = 2
             self.ext = false;
             match result {
@@ -500,6 +506,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             self.async_event = 0;
         }
 
+        // Leaving a HLT/MWAIT sleep becomes visible only here, not in the
+        // wake branches of handle_wait_for_event: a VM exit or SMM entry
+        // taken on the way out has to report the activity state the CPU was
+        // still sleeping in. Paths that leave this function early instead of
+        // falling through set it themselves — see `interrupt`, `vmexit` and
+        // `svm_vmexit`. Bochs event.cc handleAsyncEvent.
+        self.activity_state = CpuActivityState::Active;
+
         false // Continue execution
     }
 
@@ -608,7 +622,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             if in_mwait {
                 self.monitor.reset_monitor();
             }
-            self.activity_state = CpuActivityState::Active;
             self.inhibit_mask = 0;
             return false; // Continue to SMI/INIT delivery
         }
@@ -619,7 +632,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             if in_mwait {
                 self.monitor.reset_monitor();
             }
-            self.activity_state = CpuActivityState::Active;
             self.inhibit_mask = 0;
             return false; // Continue to NMI delivery
         }
@@ -632,7 +644,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             if in_mwait {
                 self.monitor.reset_monitor();
             }
-            self.activity_state = CpuActivityState::Active;
             self.inhibit_mask = 0;
             return false; // Continue to interrupt delivery
         }
@@ -645,7 +656,6 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             if in_mwait {
                 self.monitor.reset_monitor();
             }
-            self.activity_state = CpuActivityState::Active;
             self.inhibit_mask = 0;
             return false; // Continue to LAPIC interrupt delivery
         }
@@ -662,6 +672,38 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         // emulator scheduler) get a chance, leaving inhibit_mask untouched
         // exactly like Bochs event.cc handleWaitForEvent's return-1 path.
         true
+    }
+
+    /// Whether this CPU would deliver a Priority-4 debug trap at its next
+    /// async-event boundary.
+    ///
+    /// Bochs event.cc `handleAsyncEvent` orders "traps on the previous
+    /// instruction" (TF single-step, data/IO breakpoints, code breakpoints)
+    /// at Priority 4, strictly BEFORE external interrupts at Priority 5. The
+    /// emulator's PIC-injection path implements only Priority 5, and
+    /// `interrupt()` unconditionally clears `debug_trap` (matching Bochs), so
+    /// injecting an interrupt while a #DB is pending would destroy it. That
+    /// path consults this to defer the interrupt by one boundary.
+    #[inline]
+    pub(crate) fn debug_trap_pending(&self) -> bool {
+        if self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG) {
+            return false;
+        }
+        (self.debug_trap | self.pending_code_breakpoint_trap()) & 0xF000 != 0
+    }
+
+    /// Priority-4 code-breakpoint probe for the previous instruction.
+    /// Bochs event.cc: `debug_trap |= code_breakpoint_match(get_laddr(
+    /// BX_SEG_REG_CS, prev_rip))` — DR0-3 hold LINEAR addresses, so the CS
+    /// base must be applied (nonzero in real mode and non-flat protected
+    /// segments; zero in 64-bit).
+    fn pending_code_breakpoint_trap(&self) -> u32 {
+        let laddr = if self.long64_mode() {
+            self.get_laddr64(BxSegregs::Cs as usize, self.prev_rip)
+        } else {
+            u64::from(self.get_laddr32(BxSegregs::Cs as usize, self.prev_rip as u32))
+        };
+        self.code_breakpoint_match(laddr)
     }
 
     /// Check code (instruction-execution) breakpoints at `laddr`.
@@ -937,6 +979,40 @@ mod tests {
         // RF suppresses instruction breakpoints for one instruction.
         cpu.eflags.insert(crate::cpu::eflags::EFlags::RF);
         assert_eq!(cpu.code_breakpoint_match(0x1234), 0);
+    }
+
+    /// Bochs event.cc Priority 4 compares DR0-3 against
+    /// `get_laddr(BX_SEG_REG_CS, prev_rip)` — the LINEAR address. With a
+    /// nonzero CS base (real mode, non-flat protected), matching the raw
+    /// EIP misses breakpoints armed on the linear address.
+    #[test]
+    fn code_breakpoint_check_applies_cs_base() {
+        use crate::cpu::crregs::BxDr7;
+
+        let mut cpu = make_cpu(0);
+        cpu.reset(ResetReason::Hardware);
+        // The reset state already has a nonzero CS base (0xFFFF0000).
+        let cs_base = cpu.get_cs_base();
+        assert_ne!(cs_base, 0, "reset CS base must be nonzero for this test");
+
+        const EIP: u64 = 0x0123;
+        cpu.prev_rip = EIP;
+        cpu.dr[0] = cs_base + EIP; // linear breakpoint address
+        cpu.dr7 = BxDr7::from_bits_retain(0x1); // L0=1, R/W0=insn, LEN0=1
+        cpu.eflags.remove(crate::cpu::eflags::EFlags::RF);
+
+        let bits = cpu.pending_code_breakpoint_trap();
+        assert_ne!(
+            bits & BxCpuC::<Corei7SkylakeX>::BX_DEBUG_TRAP_HIT,
+            0,
+            "a DR0 armed on CS.base + EIP must hit (Bochs event.cc \
+             code_breakpoint_match(get_laddr(CS, prev_rip)))"
+        );
+
+        // The raw EIP itself must NOT match — DR registers hold linear
+        // addresses.
+        cpu.dr[0] = EIP;
+        assert_eq!(cpu.pending_code_breakpoint_trap(), 0);
     }
 
     #[test]

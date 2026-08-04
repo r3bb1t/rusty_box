@@ -69,8 +69,10 @@ pub enum PcSystemError {
 const BX_MAX_TIMER_ID_LEN: usize = 32;
 
 /// Fixed-capacity owner slots: null, PIT, keyboard, three CMOS timers,
-/// ACPI overflow, four UART FIFO timers, two PCI-IDE channels, and slowdown.
-pub const BX_FIXED_TIMER_OWNER_COUNT: usize = 14;
+/// ACPI overflow, four UART FIFO timers, two PCI-IDE channels, slowdown, and
+/// four ATA/ATAPI seek timers (one per drive slot — Bochs harddrv.cc
+/// registers "HD/CD seek" per configured drive).
+pub const BX_FIXED_TIMER_OWNER_COUNT: usize = 21;
 /// One LAPIC timer per supported CPU plus every fixed device owner.
 pub const BX_MAX_TIMERS: usize =
     crate::params::BX_MAX_SMP_THREADS_SUPPORTED as usize + BX_FIXED_TIMER_OWNER_COUNT;
@@ -108,11 +110,23 @@ pub enum TimerOwner {
     AcpiPmOverflow,
     /// Receive FIFO timeout for the UART index.
     SerialFifo(usize),
+    /// TX shift-register pacing timer for the UART index — Bochs serial.cc
+    /// `tx_timer`, one byte emitted per `databyte_usec`.
+    SerialTx(usize),
     /// Local APIC timer for the CPU index.
     Lapic(usize),
     /// Bochs host/virtual-time slowdown pacing timer.
     #[cfg(feature = "std")]
     Slowdown,
+    /// ATA/ATAPI head-seek timer — Bochs harddrv.cc "HD/CD seek".
+    /// The argument is Bochs's `setTimerParam` value `(channel << 1) | device`.
+    HdSeek(usize),
+    /// HPET comparator one-shot — Bochs hpet.cc "hpet". The argument is the
+    /// comparator index (Bochs `setTimerParam(timer_id, i)`).
+    Hpet(usize),
+    /// VGA vertical retrace — Bochs vgacore.cc "vga vertical timer". Latches the
+    /// CRTC start address for the frame and re-anchors the 0x3DA retrace phase.
+    VgaVertical,
 }
 
 /// Individual timer structure
@@ -166,6 +180,15 @@ const TIMER_OWNER_SERIAL_FIFO: u8 = 9;
 const TIMER_OWNER_LAPIC: u8 = 10;
 #[cfg(feature = "std")]
 const TIMER_OWNER_SLOWDOWN: u8 = 11;
+#[cfg(feature = "std")]
+const TIMER_OWNER_HD_SEEK: u8 = 12;
+#[cfg(feature = "std")]
+const TIMER_OWNER_HPET: u8 = 13;
+#[cfg(feature = "std")]
+const TIMER_OWNER_SERIAL_TX: u8 = 14;
+/// VGA vertical retrace timer (Bochs vgacore.cc `vga_vtimer_id`).
+#[cfg(feature = "std")]
+const TIMER_OWNER_VGA_VERTICAL: u8 = 15;
 
 #[cfg(feature = "std")]
 const TIMER_OWNER_WIRE_LEN: u64 = 5;
@@ -209,11 +232,18 @@ fn timer_owner_wire_parts(owner: TimerOwner) -> io::Result<(u8, u32)> {
         TimerOwner::CmosOneSecond => fixed(TIMER_OWNER_CMOS_ONE_SECOND),
         TimerOwner::CmosUip => fixed(TIMER_OWNER_CMOS_UIP),
         TimerOwner::AcpiPmOverflow => fixed(TIMER_OWNER_ACPI_PM_OVERFLOW),
+        TimerOwner::VgaVertical => fixed(TIMER_OWNER_VGA_VERTICAL),
         TimerOwner::SerialFifo(port) => {
             if port >= crate::iodev::BX_FIXED_SERIAL_TIMER_OWNERS {
                 return Err(snapshot_invalid_data("serial timer owner is out of range"));
             }
             Ok((TIMER_OWNER_SERIAL_FIFO, snapshot_usize_to_u32(port)?))
+        }
+        TimerOwner::SerialTx(port) => {
+            if port >= crate::iodev::BX_FIXED_SERIAL_TIMER_OWNERS {
+                return Err(snapshot_invalid_data("serial timer owner is out of range"));
+            }
+            Ok((TIMER_OWNER_SERIAL_TX, snapshot_usize_to_u32(port)?))
         }
         TimerOwner::Lapic(cpu) => {
             if cpu >= max_lapic_timer_owners()? {
@@ -222,6 +252,18 @@ fn timer_owner_wire_parts(owner: TimerOwner) -> io::Result<(u8, u32)> {
             Ok((TIMER_OWNER_LAPIC, snapshot_usize_to_u32(cpu)?))
         }
         TimerOwner::Slowdown => fixed(TIMER_OWNER_SLOWDOWN),
+        TimerOwner::HdSeek(param) => {
+            if param >= 4 {
+                return Err(snapshot_invalid_data("HD seek timer owner is out of range"));
+            }
+            Ok((TIMER_OWNER_HD_SEEK, snapshot_usize_to_u32(param)?))
+        }
+        TimerOwner::Hpet(index) => {
+            if index >= crate::iodev::hpet::HPET_NUM_TIMERS {
+                return Err(snapshot_invalid_data("HPET timer owner is out of range"));
+            }
+            Ok((TIMER_OWNER_HPET, snapshot_usize_to_u32(index)?))
+        }
     }
 }
 
@@ -255,6 +297,7 @@ fn read_timer_owner<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Timer
         TIMER_OWNER_CMOS_ONE_SECOND => fixed(TimerOwner::CmosOneSecond),
         TIMER_OWNER_CMOS_UIP => fixed(TimerOwner::CmosUip),
         TIMER_OWNER_ACPI_PM_OVERFLOW => fixed(TimerOwner::AcpiPmOverflow),
+        TIMER_OWNER_VGA_VERTICAL => fixed(TimerOwner::VgaVertical),
         TIMER_OWNER_SERIAL_FIFO => {
             let port = usize::try_from(argument)
                 .map_err(|_| snapshot_invalid_data("serial timer owner argument is too large"))?;
@@ -262,6 +305,14 @@ fn read_timer_owner<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Timer
                 return Err(snapshot_invalid_data("serial timer owner is out of range"));
             }
             Ok(TimerOwner::SerialFifo(port))
+        }
+        TIMER_OWNER_SERIAL_TX => {
+            let port = usize::try_from(argument)
+                .map_err(|_| snapshot_invalid_data("serial timer owner argument is too large"))?;
+            if port >= crate::iodev::BX_FIXED_SERIAL_TIMER_OWNERS {
+                return Err(snapshot_invalid_data("serial timer owner is out of range"));
+            }
+            Ok(TimerOwner::SerialTx(port))
         }
         TIMER_OWNER_LAPIC => {
             let cpu = usize::try_from(argument)
@@ -272,6 +323,22 @@ fn read_timer_owner<R: Read>(reader: &mut SnapshotReader<R>) -> io::Result<Timer
             Ok(TimerOwner::Lapic(cpu))
         }
         TIMER_OWNER_SLOWDOWN => fixed(TimerOwner::Slowdown),
+        TIMER_OWNER_HD_SEEK => {
+            let param = usize::try_from(argument)
+                .map_err(|_| snapshot_invalid_data("HD seek timer owner argument is too large"))?;
+            if param >= 4 {
+                return Err(snapshot_invalid_data("HD seek timer owner is out of range"));
+            }
+            Ok(TimerOwner::HdSeek(param))
+        }
+        TIMER_OWNER_HPET => {
+            let index = usize::try_from(argument)
+                .map_err(|_| snapshot_invalid_data("HPET timer owner argument is too large"))?;
+            if index >= crate::iodev::hpet::HPET_NUM_TIMERS {
+                return Err(snapshot_invalid_data("HPET timer owner is out of range"));
+            }
+            Ok(TimerOwner::Hpet(index))
+        }
         _ => Err(snapshot_invalid_data("unknown timer owner tag")),
     }
 }
@@ -582,6 +649,12 @@ impl BxPcSystemC {
         self.ips = u64::from(ips.max(1));
 
         tracing::trace!("PC system initialized with ips = {}", ips);
+    }
+
+    /// Configured instructions-per-second rate (ticks per emulated second).
+    #[inline]
+    pub fn ips(&self) -> u64 {
+        self.ips
     }
 
     // ========================================================================

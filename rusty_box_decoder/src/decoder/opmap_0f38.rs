@@ -724,6 +724,163 @@ pub const BxOpcodeTable0F38FC: [u64; 8] = [
     form_opcode(attrs!(MOD_MEM | SSE_PREFIX_F3), Opcode::AxorEdGd),
 ];
 
+// 0F38 0C — VPERMILPS; 0F38 0D — VPERMILPD (variable-control forms).
+// VEX-only, VEX.W0. VEX.vvvv supplies the data vector, ModRM.rm the
+// per-element control. Bochs fetchdecode_opmap_avx.cc
+// BxOpcodeGroup_VEX_0F380C / _0F380D
+pub(super) const BxOpcodeTable0F380C_AVX: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+    Opcode::VpermilpsVpsHpsWps,
+)];
+pub(super) const BxOpcodeTable0F380D_AVX: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+    Opcode::VpermilpdVpdHpdWpd,
+)];
+
+// 0F38 0E — VTESTPS; 0F38 0F — VTESTPD. VEX-only (no legacy encoding at
+// these opcodes), VEX.W0, VEX.vvvv reserved.
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F380E / _0F380F
+pub(super) const BxOpcodeTable0F380E_AVX: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+    Opcode::VtestpsVpsWps,
+)];
+pub(super) const BxOpcodeTable0F380F_AVX: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+    Opcode::VtestpdVpdWpd,
+)];
+
+// 0F38 13 — VCVTPH2PS (F16C). VEX-only, VEX.W0, no vvvv source.
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3813
+pub(super) const BxOpcodeTable0F3813_AVX: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+    Opcode::Vcvtph2psVpsWps,
+)];
+
+// 0F38 16 — VPERMPS (AVX2, 256-bit only). Bochs routes it to the VPERMD
+// handler — the dword permute is identical for float lanes.
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3816
+pub(super) const BxOpcodeTable0F3816_AVX: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0 | VL256),
+    Opcode::V256VpermpsVpsHpsWps,
+)];
+
+// 0F38 45/46/47 — AVX2 per-element variable shifts. VEX.vvvv holds the
+// values, ModRM.rm the shift counts. 45 and 47 split on VEX.W; 46 has no
+// W1 form (VPSRAVQ is AVX-512 only).
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3845/_0F3846/_0F3847
+pub(super) const BxOpcodeTable0F3845_AVX: [u64; 2] = [
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+        Opcode::VpsrlvdVdqHdqWdq,
+    ),
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W1),
+        Opcode::VpsrlvqVdqHdqWdq,
+    ),
+];
+pub(super) const BxOpcodeTable0F3846_AVX: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+    Opcode::VpsravdVdqHdqWdq,
+)];
+pub(super) const BxOpcodeTable0F3847_AVX: [u64; 2] = [
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W0),
+        Opcode::VpsllvdVdqHdqWdq,
+    ),
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W1),
+        Opcode::VpsllvqVdqHdqWdq,
+    ),
+];
+
+// 0F38 2C-2F — VMASKMOVPS / VMASKMOVPD (AVX); 0F38 8C/8E — VPMASKMOVD /
+// VPMASKMOVQ (AVX2). VEX.vvvv holds the per-element mask. All six are
+// memory-only: Bochs marks every group ATTR_MOD_MEM, so the register form
+// is #UD. 2C/2D load, 2E/2F store; 8C loads and 8E stores, both W-split.
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F382C..2F / _0F388C / _0F388E
+pub(super) const BxOpcodeTable0F382C_AVX: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0 | MOD_MEM),
+    Opcode::VmaskmovpsVpsHpsMps,
+)];
+pub(super) const BxOpcodeTable0F382D_AVX: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0 | MOD_MEM),
+    Opcode::VmaskmovpdVpdHpdMpd,
+)];
+pub(super) const BxOpcodeTable0F382E_AVX: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0 | MOD_MEM),
+    Opcode::VmaskmovpsMpsHpsVps,
+)];
+pub(super) const BxOpcodeTable0F382F_AVX: [u64; 1] = [form_opcode(
+    attrs!(VEX | SSE_PREFIX_66 | VEX_W0 | MOD_MEM),
+    Opcode::VmaskmovpdMpdHpdVpd,
+)];
+pub(super) const BxOpcodeTable0F388C_AVX: [u64; 2] = [
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W0 | MOD_MEM),
+        Opcode::VmaskmovdVdqHdqMdq,
+    ),
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W1 | MOD_MEM),
+        Opcode::VmaskmovqVdqHdqMdq,
+    ),
+];
+pub(super) const BxOpcodeTable0F388E_AVX: [u64; 2] = [
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W0 | MOD_MEM),
+        Opcode::VmaskmovdMdqHdqVdq,
+    ),
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W1 | MOD_MEM),
+        Opcode::VmaskmovqMdqHdqVdq,
+    ),
+];
+
+// 0F38 90-93 — AVX2 VSIB gather family. VEX.vvvv is the mask vector, the
+// SIB index field names a vector register. Memory-only; W selects the
+// element width. 90/91 are the integer names, 92/93 the FP names, but each
+// pair shares a handler because the loaded bits are identical.
+// Bochs fetchdecode_opmap_avx.cc BxOpcodeGroup_VEX_0F3890..93
+pub(super) const BxOpcodeTable0F3890_AVX: [u64; 2] = [
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W0 | MOD_MEM),
+        Opcode::VgatherddVdqHdq,
+    ),
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W1 | MOD_MEM),
+        Opcode::VgatherdqVdqHdq,
+    ),
+];
+pub(super) const BxOpcodeTable0F3891_AVX: [u64; 2] = [
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W0 | MOD_MEM),
+        Opcode::VgatherqdVdqHdq,
+    ),
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W1 | MOD_MEM),
+        Opcode::VgatherqqVdqHdq,
+    ),
+];
+pub(super) const BxOpcodeTable0F3892_AVX: [u64; 2] = [
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W0 | MOD_MEM),
+        Opcode::VgatherdpsVpsHps,
+    ),
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W1 | MOD_MEM),
+        Opcode::VgatherdpdVpdHpd,
+    ),
+];
+pub(super) const BxOpcodeTable0F3893_AVX: [u64; 2] = [
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W0 | MOD_MEM),
+        Opcode::VgatherqpsVpsHps,
+    ),
+    form_opcode(
+        attrs!(VEX | SSE_PREFIX_66 | VEX_W1 | MOD_MEM),
+        Opcode::VgatherqpdVpdHpd,
+    ),
+];
+
 // 0F38 18 — VBROADCASTSS (AVX1 mem, AVX2 reg)
 // Bochs fetchdecode_opmap_avx.cc
 pub(super) const BxOpcodeTable0F3818_AVX: [u64; 2] = [
@@ -800,17 +957,17 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 09 */ &BxOpcodeTable0F3809,
     /* 0F 38 0A */ &BxOpcodeTable0F380A,
     /* 0F 38 0B */ &BxOpcodeTable0F380B,
-    /* 0F 38 0C */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 0D */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 0E */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 0F */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 0C */ &BxOpcodeTable0F380C_AVX,
+    /* 0F 38 0D */ &BxOpcodeTable0F380D_AVX,
+    /* 0F 38 0E */ &BxOpcodeTable0F380E_AVX,
+    /* 0F 38 0F */ &BxOpcodeTable0F380F_AVX,
     /* 0F 38 10 */ &BxOpcodeTable0F3810,
     /* 0F 38 11 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 12 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 13 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 13 */ &BxOpcodeTable0F3813_AVX,
     /* 0F 38 14 */ &BxOpcodeTable0F3814,
     /* 0F 38 15 */ &BxOpcodeTable0F3815,
-    /* 0F 38 16 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 16 */ &BxOpcodeTable0F3816_AVX,
     /* 0F 38 17 */ &BxOpcodeTable0F3817,
     /* 0F 38 18 */ &BxOpcodeTable0F3818_AVX,
     /* 0F 38 19 */ &BxOpcodeTable0F3819_AVX,
@@ -832,10 +989,10 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 29 */ &BxOpcodeTable0F3829,
     /* 0F 38 2A */ &BxOpcodeTable0F382A,
     /* 0F 38 2B */ &BxOpcodeTable0F382B,
-    /* 0F 38 2C */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 2D */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 2E */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 2F */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 2C */ &BxOpcodeTable0F382C_AVX,
+    /* 0F 38 2D */ &BxOpcodeTable0F382D_AVX,
+    /* 0F 38 2E */ &BxOpcodeTable0F382E_AVX,
+    /* 0F 38 2F */ &BxOpcodeTable0F382F_AVX,
     /* 0F 38 30 */ &BxOpcodeTable0F3830,
     /* 0F 38 31 */ &BxOpcodeTable0F3831,
     /* 0F 38 32 */ &BxOpcodeTable0F3832,
@@ -857,9 +1014,9 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 42 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 43 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 44 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 45 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 46 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 47 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 45 */ &BxOpcodeTable0F3845_AVX,
+    /* 0F 38 46 */ &BxOpcodeTable0F3846_AVX,
+    /* 0F 38 47 */ &BxOpcodeTable0F3847_AVX,
     /* 0F 38 48 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 49 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 4A */ &BX_OPCODE_GROUP_ERR,
@@ -928,14 +1085,14 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 89 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 8A */ &BxOpcodeTable0F388A,
     /* 0F 38 8B */ &BxOpcodeTable0F388B,
-    /* 0F 38 8C */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 8C */ &BxOpcodeTable0F388C_AVX,
     /* 0F 38 8D */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 8E */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 8E */ &BxOpcodeTable0F388E_AVX,
     /* 0F 38 8F */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 90 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 91 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 92 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 93 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 90 */ &BxOpcodeTable0F3890_AVX,
+    /* 0F 38 91 */ &BxOpcodeTable0F3891_AVX,
+    /* 0F 38 92 */ &BxOpcodeTable0F3892_AVX,
+    /* 0F 38 93 */ &BxOpcodeTable0F3893_AVX,
     /* 0F 38 94 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 95 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 96 */ &BxOpcodeTable0F3896,

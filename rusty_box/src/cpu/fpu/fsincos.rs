@@ -6,12 +6,12 @@ use super::super::softfloat3e::f128::*;
 use super::super::softfloat3e::internals::*;
 use super::super::softfloat3e::primitives::*;
 use super::super::softfloat3e::softfloat::*;
-use super::super::softfloat3e::softfloat_types::floatx80;
+use super::super::softfloat3e::softfloat_types::ExtFloat80;
 use super::super::softfloat3e::specialize::*;
 use super::poly::*;
 
-/// 1.0 in floatx80 format
-const FLOATX80_ONE: floatx80 = floatx80 {
+/// 1.0 in ExtFloat80 format
+const FLOATX80_ONE: ExtFloat80 = ExtFloat80 {
     signif: 0x8000000000000000,
     sign_exp: 0x3FFF,
 };
@@ -140,7 +140,7 @@ fn sincos_approximation(
     r: Float128,
     quotient: u64,
     status: &mut SoftFloatStatus,
-) -> floatx80 {
+) -> ExtFloat80 {
     let mut neg = neg;
     let result;
 
@@ -167,45 +167,45 @@ fn sincos_approximation(
 // ---------------------------------------------------------------------------
 
 /// Result type for single sin or cos computation.
-pub(crate) enum SinCosResult {
+pub(in crate::cpu) enum SinCosResult {
     /// Argument out of range (|x| >= 2^63)
     OutOfRange,
     /// Computed value
-    Value(floatx80),
+    Value(ExtFloat80),
 }
 
 /// Result type for simultaneous sin+cos computation.
-pub(crate) enum SinCosBothResult {
+pub(in crate::cpu) enum SinCosBothResult {
     /// Argument out of range
     OutOfRange,
     /// sin and cos values
-    Values(floatx80, floatx80),
+    Values(ExtFloat80, ExtFloat80),
 }
 
 /// Result type for tangent computation.
-pub(crate) enum FtanResult {
+pub(in crate::cpu) enum FtanResult {
     /// Argument out of range
     OutOfRange,
     /// Result is NaN (both sin and cos slots get the same NaN)
-    Nan(floatx80),
+    Nan(ExtFloat80),
     /// Computed tangent value
-    Value(floatx80),
+    Value(ExtFloat80),
 }
 
 // ---------------------------------------------------------------------------
 // Implementation functions
 // ---------------------------------------------------------------------------
 
-/// Compute sin or cos of a floatx80 value using Float128 polynomial evaluation.
+/// Compute sin or cos of a ExtFloat80 value using Float128 polynomial evaluation.
 /// Ported from Bochs fsincos.cc fsincos().
-pub(crate) fn fsincos_single(
-    a: floatx80,
+pub(in crate::cpu) fn fsincos_single(
+    a: ExtFloat80,
     want_sin: bool,
     status: &mut SoftFloatStatus,
 ) -> SinCosResult {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return SinCosResult::Value(FLOATX80_DEFAULT_NAN);
     }
 
@@ -219,7 +219,7 @@ pub(crate) fn fsincos_single(
             let nan = softfloat_propagate_nan_extf80(a.sign_exp, a_sig0, 0, 0, status);
             return SinCosResult::Value(nan);
         }
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return SinCosResult::Value(FLOATX80_DEFAULT_NAN);
     }
 
@@ -232,13 +232,13 @@ pub(crate) fn fsincos_single(
                 return SinCosResult::Value(FLOATX80_ONE); // cos(0) = 1
             }
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
 
         // Pseudo-denormal (no integer bit set)
         if (a_sig0 & 0x8000000000000000) == 0 {
-            softfloat_raiseFlags(status, FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_INEXACT);
             if want_sin {
-                softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                softfloat_raise_flags(status, FLAG_UNDERFLOW);
                 return SinCosResult::Value(a);
             } else {
                 return SinCosResult::Value(FLOATX80_ONE);
@@ -271,7 +271,7 @@ pub(crate) fn fsincos_single(
         return SinCosResult::OutOfRange;
     }
 
-    softfloat_raiseFlags(status, FLAG_INEXACT);
+    softfloat_raise_flags(status, FLAG_INEXACT);
 
     let mut a_sig1: u64 = 0;
     let mut q: i32 = 0;
@@ -312,12 +312,12 @@ pub(crate) fn fsincos_single(
     }
 }
 
-/// Compute both sin and cos of a floatx80 value using Float128 polynomial evaluation.
+/// Compute both sin and cos of a ExtFloat80 value using Float128 polynomial evaluation.
 /// Ported from Bochs fsincos.cc fsincos().
-pub(crate) fn fsincos_both(a: floatx80, status: &mut SoftFloatStatus) -> SinCosBothResult {
+pub(in crate::cpu) fn fsincos_both(a: ExtFloat80, status: &mut SoftFloatStatus) -> SinCosBothResult {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         let nan = FLOATX80_DEFAULT_NAN;
         return SinCosBothResult::Values(nan, nan);
     }
@@ -332,7 +332,7 @@ pub(crate) fn fsincos_both(a: floatx80, status: &mut SoftFloatStatus) -> SinCosB
             let nan = softfloat_propagate_nan_extf80(a.sign_exp, a_sig0, 0, 0, status);
             return SinCosBothResult::Values(nan, nan);
         }
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         let nan = FLOATX80_DEFAULT_NAN;
         return SinCosBothResult::Values(nan, nan);
     }
@@ -342,11 +342,11 @@ pub(crate) fn fsincos_both(a: floatx80, status: &mut SoftFloatStatus) -> SinCosB
         if a_sig0 == 0 {
             return SinCosBothResult::Values(a, FLOATX80_ONE);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
 
         // Pseudo-denormal
         if (a_sig0 & 0x8000000000000000) == 0 {
-            softfloat_raiseFlags(status, FLAG_INEXACT | FLAG_UNDERFLOW);
+            softfloat_raise_flags(status, FLAG_INEXACT | FLAG_UNDERFLOW);
             return SinCosBothResult::Values(a, FLOATX80_ONE);
         }
 
@@ -371,7 +371,7 @@ pub(crate) fn fsincos_both(a: floatx80, status: &mut SoftFloatStatus) -> SinCosB
         return SinCosBothResult::OutOfRange;
     }
 
-    softfloat_raiseFlags(status, FLAG_INEXACT);
+    softfloat_raise_flags(status, FLAG_INEXACT);
 
     let mut a_sig1: u64 = 0;
     let mut q: i32 = 0;
@@ -402,12 +402,12 @@ pub(crate) fn fsincos_both(a: floatx80, status: &mut SoftFloatStatus) -> SinCosB
     SinCosBothResult::Values(sin_result, cos_result)
 }
 
-/// Compute tangent of a floatx80 value using Float128 polynomial evaluation.
+/// Compute tangent of a ExtFloat80 value using Float128 polynomial evaluation.
 /// Ported from Bochs fsincos.cc ftan().
-pub(crate) fn ftan_impl(a: floatx80, status: &mut SoftFloatStatus) -> FtanResult {
+pub(in crate::cpu) fn ftan_impl(a: ExtFloat80, status: &mut SoftFloatStatus) -> FtanResult {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FtanResult::Nan(FLOATX80_DEFAULT_NAN);
     }
 
@@ -421,7 +421,7 @@ pub(crate) fn ftan_impl(a: floatx80, status: &mut SoftFloatStatus) -> FtanResult
             let nan = softfloat_propagate_nan_extf80(a.sign_exp, a_sig0, 0, 0, status);
             return FtanResult::Nan(nan);
         }
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FtanResult::Nan(FLOATX80_DEFAULT_NAN);
     }
 
@@ -430,10 +430,10 @@ pub(crate) fn ftan_impl(a: floatx80, status: &mut SoftFloatStatus) -> FtanResult
         if a_sig0 == 0 {
             return FtanResult::Value(a); // tan(0) = 0
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         // Pseudo-denormal
         if (a_sig0 & 0x8000000000000000) == 0 {
-            softfloat_raiseFlags(status, FLAG_INEXACT | FLAG_UNDERFLOW);
+            softfloat_raise_flags(status, FLAG_INEXACT | FLAG_UNDERFLOW);
             return FtanResult::Value(a);
         }
 
@@ -451,7 +451,7 @@ pub(crate) fn ftan_impl(a: floatx80, status: &mut SoftFloatStatus) -> FtanResult
         return FtanResult::OutOfRange;
     }
 
-    softfloat_raiseFlags(status, FLAG_INEXACT);
+    softfloat_raise_flags(status, FLAG_INEXACT);
 
     let mut a_sig1: u64 = 0;
     let mut q: i32 = 0;

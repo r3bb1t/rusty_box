@@ -12,155 +12,146 @@
 //! (`write_xmm_reg` / `write_ymm_reg` — Bochs `BX_WRITE_XMM_REG_CLEAR_HIGH`
 //! / `BX_WRITE_YMM_REGZ`).
 //!
-//! Element arithmetic uses host IEEE-754 floats like the rest of this
-//! port's SSE/AVX FP handlers (`sse_pfp.rs`, `avx512_scalar.rs`): correct
-//! for round-to-nearest, but MXCSR rounding-mode/DAZ/FTZ and exception
-//! flags are not modeled — a known, codebase-wide divergence from Bochs'
-//! softfloat, called out in `sse_pfp.rs` as well.
+//! Element arithmetic goes through SoftFloat 3e against a status word
+//! seeded from MXCSR, exactly as Bochs does, so MXCSR.RC, the MXCSR sticky
+//! exception flags, #XM and DAZ/FTZ are all observable. Bochs applies the
+//! per-128-bit-lane `xmm_*` primitives from `simd_pfp.h` through the
+//! templates in `cpu_templates_pfp.h`; [`Self::avx_pfp_2op`] and its
+//! siblings are the same shape.
 
+use super::simd_pfp::{
+    xmm_addpd, xmm_addps, xmm_addsubpd, xmm_addsubps, xmm_cmppd, xmm_cmpps, xmm_divpd, xmm_divps,
+    xmm_haddpd, xmm_haddps, xmm_hsubpd, xmm_hsubps, xmm_maxpd, xmm_maxps, xmm_minpd, xmm_minps,
+    xmm_mulpd, xmm_mulps, xmm_sqrtpd, xmm_sqrtps, xmm_subpd, xmm_subps,
+};
+use super::softfloat3e::f32_round_to_int::f32_round_to_int;
+use super::softfloat3e::f32_sqrt::f32_sqrt;
+use super::softfloat3e::f32_to_f64::f32_to_f64;
+use super::softfloat3e::f32_to_int::{f32_to_i32, f32_to_i32_r_min_mag};
+use super::softfloat3e::f64_round_to_int::f64_round_to_int;
+use super::softfloat3e::f64_sqrt::f64_sqrt;
+use super::softfloat3e::f64_to_f32::f64_to_f32;
+use super::softfloat3e::f64_to_int::{f64_to_i32, f64_to_i32_r_min_mag};
+use super::softfloat3e::int_to_float::{i32_to_f32, i32_to_f64, i64_to_f32, i64_to_f64};
+use super::softfloat3e::softfloat::{
+    softfloat_get_exception_flags, softfloat_get_rounding_mode, SoftFloatStatus,
+};
+use super::softfloat3e::softfloat_compare::{f32_compare_predicate, f64_compare_predicate};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
+use super::sse_pfp::{dppd_lane, dpps_lane, mxcsr_to_softfloat_status_word_imm_override};
+use super::sse_rcp::{approximate_rcp, approximate_rsqrt};
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     xmm::{BxPackedXmmRegister, BxPackedYmmRegister},
 };
-// Load-bearing in pure no-std builds (core f32/f64 lack these inherent
-// methods there); redundant in unit graphs where std is linked, so the
-// unused-import lint is allowed rather than losing the no-std resolution.
-#[cfg(not(feature = "std"))]
-#[allow(unused_imports)]
-use crate::cpu::float::FloatExt;
-
-/// Element operation selector for the packed/scalar FP families.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum VexPfpOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Min,
-    Max,
-}
-
-/// x86 MINSS/MINSD semantics (Bochs softfloat f32_min/f64_min): if either
-/// operand is NaN, or the operands compare equal (covers -0.0 vs +0.0),
-/// return the second (source) operand.
-#[inline]
-pub(super) fn sse_min_f32(a: f32, b: f32) -> f32 {
-    if a.is_nan() || b.is_nan() {
-        b
-    } else if a < b {
-        a
-    } else {
-        b
-    }
-}
-
-#[inline]
-pub(super) fn sse_min_f64(a: f64, b: f64) -> f64 {
-    if a.is_nan() || b.is_nan() {
-        b
-    } else if a < b {
-        a
-    } else {
-        b
-    }
-}
-
-/// x86 MAXSS/MAXSD semantics (Bochs softfloat f32_max/f64_max): NaN or
-/// equal operands (including ±0.0) return the second operand.
-#[inline]
-pub(super) fn sse_max_f32(a: f32, b: f32) -> f32 {
-    if a.is_nan() || b.is_nan() {
-        b
-    } else if a > b {
-        a
-    } else {
-        b
-    }
-}
-
-#[inline]
-pub(super) fn sse_max_f64(a: f64, b: f64) -> f64 {
-    if a.is_nan() || b.is_nan() {
-        b
-    } else if a > b {
-        a
-    } else {
-        b
-    }
-}
-
-#[inline]
-fn pfp_op_f32(op: VexPfpOp, a: f32, b: f32) -> f32 {
-    match op {
-        VexPfpOp::Add => a + b,
-        VexPfpOp::Sub => a - b,
-        VexPfpOp::Mul => a * b,
-        VexPfpOp::Div => a / b,
-        VexPfpOp::Min => sse_min_f32(a, b),
-        VexPfpOp::Max => sse_max_f32(a, b),
-    }
-}
-
-#[inline]
-fn pfp_op_f64(op: VexPfpOp, a: f64, b: f64) -> f64 {
-    match op {
-        VexPfpOp::Add => a + b,
-        VexPfpOp::Sub => a - b,
-        VexPfpOp::Mul => a * b,
-        VexPfpOp::Div => a / b,
-        VexPfpOp::Min => sse_min_f64(a, b),
-        VexPfpOp::Max => sse_max_f64(a, b),
-    }
-}
-
-/// AVX compare predicate (imm8[4:0], Bochs avx cmp handler tables).
-/// Predicates 0x10..0x1F repeat the relations of 0x00..0x0F; the "S"/"Q"
-/// suffix only changes QNaN signaling behavior, which affects exception
-/// flags this port does not model.
-#[inline]
-fn avx_cmp_relation(predicate: u8, lt: bool, eq: bool, unord: bool) -> bool {
-    let gt = !unord && !lt && !eq;
-    match predicate & 0x0F {
-        0x0 => eq,            // EQ_OQ / EQ_OS
-        0x1 => lt,            // LT_OS / LT_OQ
-        0x2 => lt || eq,      // LE_OS / LE_OQ
-        0x3 => unord,         // UNORD_Q / UNORD_S
-        0x4 => !eq,           // NEQ_UQ / NEQ_US (unordered => true)
-        0x5 => !lt,           // NLT_US / NLT_UQ (unordered => true)
-        0x6 => !(lt || eq),   // NLE_US / NLE_UQ (unordered => true)
-        0x7 => !unord,        // ORD_Q / ORD_S
-        0x8 => eq || unord,   // EQ_UQ / EQ_US
-        0x9 => lt || unord,   // NGE_US / NGE_UQ
-        0xA => !gt,           // NGT_US / NGT_UQ (unordered => true)
-        0xB => false,         // FALSE_OQ / FALSE_OS
-        0xC => !eq && !unord, // NEQ_OQ / NEQ_OS
-        0xD => gt || eq,      // GE_OS / GE_OQ
-        0xE => gt,            // GT_OS / GT_OQ
-        0xF => true,          // TRUE_UQ / TRUE_US
-        _ => unreachable!("predicate & 0x0F cannot exceed 0xF"),
-    }
-}
-
-#[inline]
-fn avx_compare_f32(a: f32, b: f32, predicate: u8) -> bool {
-    let unord = a.is_nan() || b.is_nan();
-    avx_cmp_relation(predicate, !unord && a < b, !unord && a == b, unord)
-}
-
-#[inline]
-fn avx_compare_f64(a: f64, b: f64, predicate: u8) -> bool {
-    let unord = a.is_nan() || b.is_nan();
-    avx_cmp_relation(predicate, !unord && a < b, !unord && a == b, unord)
-}
-
-// f32/f64 → i32 with x86 integer-indefinite (0x8000_0000) on NaN/overflow —
-// shared with the legacy SSE cvt handlers (Bochs softfloat f32_to_i32 /
-// f64_to_i32): round/truncate first, then range-check the resulting integer.
-use super::sse_pfp::{cvt_f32_to_i32 as cvt_f32_i32, cvt_f64_to_i32 as cvt_f64_i32};
 
 impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+    // ════════════════════════════════════════════════════════════════════
+    // VEX FP templates — Bochs cpu_templates_pfp.h HANDLE_AVX_PFP_2OP /
+    // HANDLE_AVX_PFP_1OP and avx_pfp.cc AVX_SCALAR_SINGLE_FP /
+    // AVX_SCALAR_DOUBLE_FP. Each applies a `simd_pfp` primitive per
+    // 128-bit lane over VL, checks for exceptions once, then writes.
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Two-operand packed VEX FP: op1 = vvvv, op2 = rm.
+    fn avx_pfp_2op(
+        &mut self,
+        instr: &Instruction,
+        func: impl Fn(&mut BxPackedXmmRegister, &BxPackedXmmRegister, &mut SoftFloatStatus),
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let mut op1 = self.read_ymm_reg(instr.src2());
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            for lane in 0..2 {
+                let mut a = op1.ymm128(lane);
+                func(&mut a, &op2.ymm128(lane), &mut status);
+                op1.set_ymm128(lane, a);
+            }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_ymm_reg(instr.dst(), op1);
+        } else {
+            let mut op1 = self.read_xmm_reg(instr.src2());
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            func(&mut op1, &op2, &mut status);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_xmm_reg(instr.dst(), op1);
+        }
+        Ok(())
+    }
+
+    /// Single-operand packed VEX FP (VSQRTPS/VSQRTPD): no vvvv source.
+    fn avx_pfp_1op(
+        &mut self,
+        instr: &Instruction,
+        func: fn(&mut BxPackedXmmRegister, &mut SoftFloatStatus),
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let mut op = self.vex_read_src2_ymm(instr)?;
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            for lane in 0..2 {
+                let mut a = op.ymm128(lane);
+                func(&mut a, &mut status);
+                op.set_ymm128(lane, a);
+            }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_ymm_reg(instr.dst(), op);
+        } else {
+            let mut op = self.vex_read_src2_xmm(instr)?;
+            let mut status = self.sse_status();
+            self.softfloat_rc_override(&mut status, instr);
+            func(&mut op, &mut status);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_xmm_reg(instr.dst(), op);
+        }
+        Ok(())
+    }
+
+    /// Scalar single-precision VEX FP: low element = op(vvvv.low, rm.low),
+    /// remaining elements pass through from vvvv.
+    fn avx_scalar_ss(
+        &mut self,
+        instr: &Instruction,
+        func: fn(Float32, Float32, &mut SoftFloatStatus) -> Float32,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let w = self.sse_pfp_read_op2_ss(instr)?;
+        let mut result = self.read_xmm_reg(instr.src2());
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = func(result.xmm32u(0), w, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm32u(0, value);
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// Scalar double-precision VEX FP.
+    fn avx_scalar_sd(
+        &mut self,
+        instr: &Instruction,
+        func: fn(Float64, Float64, &mut SoftFloatStatus) -> Float64,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let w = self.sse_pfp_read_op2_sd(instr)?;
+        let mut result = self.read_xmm_reg(instr.src2());
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = func(result.xmm64u(0), w, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm64u(0, value);
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
     // ════════════════════════════════════════════════════════════════════
     // Packed conversions — Bochs avx_cvt.cc. All are single-source (no
     // vvvv); VL selects lane count and the destination is zeroed above
@@ -171,40 +162,58 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn vcvtdq2ps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         if instr.get_vl() >= 1 {
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
+            let mut op = self.vex_read_src2_ymm(instr)?;
+            let mut status = self.sse_status();
             for i in 0..8 {
-                result.set_ymm32f(i, op2.ymm32s(i) as f32);
+                op.set_ymm32u(i, i32_to_f32(op.ymm32s(i), &mut status));
             }
-            self.write_ymm_reg(instr.dst(), result);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_ymm_reg(instr.dst(), op);
         } else {
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
+            let mut op = self.vex_read_src2_xmm(instr)?;
+            let mut status = self.sse_status();
             for i in 0..4 {
-                result.set_xmm32f(i, op2.xmm32s(i) as f32);
+                op.set_xmm32u(i, i32_to_f32(op.xmm32s(i), &mut status));
             }
-            self.write_xmm_reg(instr.dst(), result);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_xmm_reg(instr.dst(), op);
         }
         Ok(())
     }
 
-    /// VCVTPS2DQ / VCVTTPS2DQ — packed f32 → i32 over VL.
+    /// VCVTPS2DQ / VCVTTPS2DQ — packed f32 → i32 over VL. The rounding form
+    /// takes its mode from MXCSR.RC; the truncating form always rounds
+    /// toward zero.
     fn vex_cvt_ps2dq(&mut self, instr: &Instruction, truncate: bool) -> super::Result<()> {
         self.prepare_sse()?;
         if instr.get_vl() >= 1 {
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
+            let mut op = self.vex_read_src2_ymm(instr)?;
+            let mut status = self.sse_status();
+            let rc = softfloat_get_rounding_mode(&status);
             for i in 0..8 {
-                result.set_ymm32s(i, cvt_f32_i32(op2.ymm32f(i), truncate));
+                let v = if truncate {
+                    f32_to_i32_r_min_mag(op.ymm32u(i), true, false, &mut status)
+                } else {
+                    f32_to_i32(op.ymm32u(i), rc, true, &mut status)
+                };
+                op.set_ymm32s(i, v);
             }
-            self.write_ymm_reg(instr.dst(), result);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_ymm_reg(instr.dst(), op);
         } else {
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
+            let mut op = self.vex_read_src2_xmm(instr)?;
+            let mut status = self.sse_status();
+            let rc = softfloat_get_rounding_mode(&status);
             for i in 0..4 {
-                result.set_xmm32s(i, cvt_f32_i32(op2.xmm32f(i), truncate));
+                let v = if truncate {
+                    f32_to_i32_r_min_mag(op.xmm32u(i), true, false, &mut status)
+                } else {
+                    f32_to_i32(op.xmm32u(i), rc, true, &mut status)
+                };
+                op.set_xmm32s(i, v);
             }
-            self.write_xmm_reg(instr.dst(), result);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_xmm_reg(instr.dst(), op);
         }
         Ok(())
     }
@@ -235,20 +244,21 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
     }
 
-    /// VCVTDQ2PD — 2 (VL=128) or 4 (VL=256) i32 → f64.
+    /// VCVTDQ2PD — 2 (VL=128) or 4 (VL=256) i32 → f64. Exact for every i32,
+    /// so Bochs performs no exception check.
     pub(super) fn vcvtdq2pd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op2 = self.vex_read_widening_src(instr)?;
         if instr.get_vl() >= 1 {
             let mut result = BxPackedYmmRegister::default();
             for i in 0..4 {
-                result.set_ymm64f(i, op2.xmm32s(i) as f64);
+                result.set_ymm64u(i, i32_to_f64(op2.xmm32s(i)));
             }
             self.write_ymm_reg(instr.dst(), result);
         } else {
             let mut result = BxPackedXmmRegister::default();
-            result.set_xmm64f(0, op2.xmm32s(0) as f64);
-            result.set_xmm64f(1, op2.xmm32s(1) as f64);
+            result.set_xmm64u(0, i32_to_f64(op2.xmm32s(0)));
+            result.set_xmm64u(1, i32_to_f64(op2.xmm32s(1)));
             self.write_xmm_reg(instr.dst(), result);
         }
         Ok(())
@@ -258,16 +268,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn vcvtps2pd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op2 = self.vex_read_widening_src(instr)?;
+        let mut status = self.sse_status();
         if instr.get_vl() >= 1 {
             let mut result = BxPackedYmmRegister::default();
             for i in 0..4 {
-                result.set_ymm64f(i, op2.xmm32f(i) as f64);
+                result.set_ymm64u(i, f32_to_f64(op2.xmm32u(i), &mut status));
             }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_ymm_reg(instr.dst(), result);
         } else {
             let mut result = BxPackedXmmRegister::default();
-            result.set_xmm64f(0, op2.xmm32f(0) as f64);
-            result.set_xmm64f(1, op2.xmm32f(1) as f64);
+            result.set_xmm64u(0, f32_to_f64(op2.xmm32u(0), &mut status));
+            result.set_xmm64u(1, f32_to_f64(op2.xmm32u(1), &mut status));
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_xmm_reg(instr.dst(), result);
         }
         Ok(())
@@ -280,13 +293,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = BxPackedXmmRegister::default();
         if instr.get_vl() >= 1 {
             let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut status = self.sse_status();
             for i in 0..4 {
-                result.set_xmm32f(i, op2.ymm64f(i) as f32);
+                result.set_xmm32u(i, f64_to_f32(op2.ymm64u(i), &mut status));
             }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         } else {
             let op2 = self.vex_read_src2_xmm(instr)?;
-            result.set_xmm32f(0, op2.xmm64f(0) as f32);
-            result.set_xmm32f(1, op2.xmm64f(1) as f32);
+            let mut status = self.sse_status();
+            result.set_xmm32u(0, f64_to_f32(op2.xmm64u(0), &mut status));
+            result.set_xmm32u(1, f64_to_f32(op2.xmm64u(1), &mut status));
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         }
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -299,13 +316,30 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut result = BxPackedXmmRegister::default();
         if instr.get_vl() >= 1 {
             let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut status = self.sse_status();
+            let rc = softfloat_get_rounding_mode(&status);
             for i in 0..4 {
-                result.set_xmm32s(i, cvt_f64_i32(op2.ymm64f(i), truncate));
+                let v = if truncate {
+                    f64_to_i32_r_min_mag(op2.ymm64u(i), true, false, &mut status)
+                } else {
+                    f64_to_i32(op2.ymm64u(i), rc, true, &mut status)
+                };
+                result.set_xmm32s(i, v);
             }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         } else {
             let op2 = self.vex_read_src2_xmm(instr)?;
-            result.set_xmm32s(0, cvt_f64_i32(op2.xmm64f(0), truncate));
-            result.set_xmm32s(1, cvt_f64_i32(op2.xmm64f(1), truncate));
+            let mut status = self.sse_status();
+            let rc = softfloat_get_rounding_mode(&status);
+            for i in 0..2 {
+                let v = if truncate {
+                    f64_to_i32_r_min_mag(op2.xmm64u(i), true, false, &mut status)
+                } else {
+                    f64_to_i32(op2.xmm64u(i), rc, true, &mut status)
+                };
+                result.set_xmm32s(i, v);
+            }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         }
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
@@ -325,59 +359,41 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // xmm elements pass through from vvvv, upper bits cleared.
     // ════════════════════════════════════════════════════════════════════
 
-    fn vex_scalar_pfp_ss(&mut self, instr: &Instruction, op: VexPfpOp) -> super::Result<()> {
-        self.prepare_sse()?;
-        let w = self.sse_pfp_read_op2_ss(instr)?;
-        let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm32f(0, pfp_op_f32(op, result.xmm32f(0), w));
-        self.write_xmm_reg(instr.dst(), result);
-        Ok(())
-    }
-
-    fn vex_scalar_pfp_sd(&mut self, instr: &Instruction, op: VexPfpOp) -> super::Result<()> {
-        self.prepare_sse()?;
-        let w = self.sse_pfp_read_op2_sd(instr)?;
-        let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm64f(0, pfp_op_f64(op, result.xmm64f(0), w));
-        self.write_xmm_reg(instr.dst(), result);
-        Ok(())
-    }
-
     pub(super) fn vaddss(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_scalar_pfp_ss(i, VexPfpOp::Add)
+        self.avx_scalar_ss(i, super::softfloat3e::f32_addsub::f32_add)
     }
     pub(super) fn vaddsd(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_scalar_pfp_sd(i, VexPfpOp::Add)
+        self.avx_scalar_sd(i, super::softfloat3e::f64_addsub::f64_add)
     }
     pub(super) fn vsubss(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_scalar_pfp_ss(i, VexPfpOp::Sub)
+        self.avx_scalar_ss(i, super::softfloat3e::f32_addsub::f32_sub)
     }
     pub(super) fn vsubsd(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_scalar_pfp_sd(i, VexPfpOp::Sub)
+        self.avx_scalar_sd(i, super::softfloat3e::f64_addsub::f64_sub)
     }
     pub(super) fn vmulss(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_scalar_pfp_ss(i, VexPfpOp::Mul)
+        self.avx_scalar_ss(i, super::softfloat3e::f32_mul::f32_mul)
     }
     pub(super) fn vmulsd(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_scalar_pfp_sd(i, VexPfpOp::Mul)
+        self.avx_scalar_sd(i, super::softfloat3e::f64_mul::f64_mul)
     }
     pub(super) fn vdivss(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_scalar_pfp_ss(i, VexPfpOp::Div)
+        self.avx_scalar_ss(i, super::softfloat3e::f32_div::f32_div)
     }
     pub(super) fn vdivsd(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_scalar_pfp_sd(i, VexPfpOp::Div)
+        self.avx_scalar_sd(i, super::softfloat3e::f64_div::f64_div)
     }
     pub(super) fn vminss(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_scalar_pfp_ss(i, VexPfpOp::Min)
+        self.avx_scalar_ss(i, super::softfloat3e::f32_compare::f32_min)
     }
     pub(super) fn vminsd(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_scalar_pfp_sd(i, VexPfpOp::Min)
+        self.avx_scalar_sd(i, super::softfloat3e::f64_compare::f64_min)
     }
     pub(super) fn vmaxss(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_scalar_pfp_ss(i, VexPfpOp::Max)
+        self.avx_scalar_ss(i, super::softfloat3e::f32_compare::f32_max)
     }
     pub(super) fn vmaxsd(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_scalar_pfp_sd(i, VexPfpOp::Max)
+        self.avx_scalar_sd(i, super::softfloat3e::f64_compare::f64_max)
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -386,85 +402,41 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // op(vvvv[i], rm[i]) over VL, upper bits cleared.
     // ════════════════════════════════════════════════════════════════════
 
-    fn vex_packed_pfp_ps(&mut self, instr: &Instruction, op: VexPfpOp) -> super::Result<()> {
-        self.prepare_sse()?;
-        if instr.get_vl() >= 1 {
-            let op1 = self.read_ymm_reg(instr.src2());
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for i in 0..8 {
-                result.set_ymm32f(i, pfp_op_f32(op, op1.ymm32f(i), op2.ymm32f(i)));
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op1 = self.read_xmm_reg(instr.src2());
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
-            for i in 0..4 {
-                result.set_xmm32f(i, pfp_op_f32(op, op1.xmm32f(i), op2.xmm32f(i)));
-            }
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
-    }
-
-    fn vex_packed_pfp_pd(&mut self, instr: &Instruction, op: VexPfpOp) -> super::Result<()> {
-        self.prepare_sse()?;
-        if instr.get_vl() >= 1 {
-            let op1 = self.read_ymm_reg(instr.src2());
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for i in 0..4 {
-                result.set_ymm64f(i, pfp_op_f64(op, op1.ymm64f(i), op2.ymm64f(i)));
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op1 = self.read_xmm_reg(instr.src2());
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
-            for i in 0..2 {
-                result.set_xmm64f(i, pfp_op_f64(op, op1.xmm64f(i), op2.xmm64f(i)));
-            }
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
-    }
-
     pub(super) fn vaddps(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_packed_pfp_ps(i, VexPfpOp::Add)
+        self.avx_pfp_2op(i, xmm_addps)
     }
     pub(super) fn vaddpd(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_packed_pfp_pd(i, VexPfpOp::Add)
+        self.avx_pfp_2op(i, xmm_addpd)
     }
     pub(super) fn vsubps(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_packed_pfp_ps(i, VexPfpOp::Sub)
+        self.avx_pfp_2op(i, xmm_subps)
     }
     pub(super) fn vsubpd(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_packed_pfp_pd(i, VexPfpOp::Sub)
+        self.avx_pfp_2op(i, xmm_subpd)
     }
     pub(super) fn vmulps(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_packed_pfp_ps(i, VexPfpOp::Mul)
+        self.avx_pfp_2op(i, xmm_mulps)
     }
     pub(super) fn vmulpd(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_packed_pfp_pd(i, VexPfpOp::Mul)
+        self.avx_pfp_2op(i, xmm_mulpd)
     }
     pub(super) fn vdivps(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_packed_pfp_ps(i, VexPfpOp::Div)
+        self.avx_pfp_2op(i, xmm_divps)
     }
     pub(super) fn vdivpd(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_packed_pfp_pd(i, VexPfpOp::Div)
+        self.avx_pfp_2op(i, xmm_divpd)
     }
     pub(super) fn vminps(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_packed_pfp_ps(i, VexPfpOp::Min)
+        self.avx_pfp_2op(i, xmm_minps)
     }
     pub(super) fn vminpd(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_packed_pfp_pd(i, VexPfpOp::Min)
+        self.avx_pfp_2op(i, xmm_minpd)
     }
     pub(super) fn vmaxps(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_packed_pfp_ps(i, VexPfpOp::Max)
+        self.avx_pfp_2op(i, xmm_maxps)
     }
     pub(super) fn vmaxpd(&mut self, i: &Instruction) -> super::Result<()> {
-        self.vex_packed_pfp_pd(i, VexPfpOp::Max)
+        self.avx_pfp_2op(i, xmm_maxpd)
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -474,50 +446,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ════════════════════════════════════════════════════════════════════
 
     pub(super) fn vsqrtps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        if instr.get_vl() >= 1 {
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for i in 0..8 {
-                result.set_ymm32f(i, op2.ymm32f(i).sqrt());
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
-            for i in 0..4 {
-                result.set_xmm32f(i, op2.xmm32f(i).sqrt());
-            }
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
+        self.avx_pfp_1op(instr, xmm_sqrtps)
     }
 
     pub(super) fn vsqrtpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        if instr.get_vl() >= 1 {
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for i in 0..4 {
-                result.set_ymm64f(i, op2.ymm64f(i).sqrt());
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
-            for i in 0..2 {
-                result.set_xmm64f(i, op2.xmm64f(i).sqrt());
-            }
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
+        self.avx_pfp_1op(instr, xmm_sqrtpd)
     }
 
     pub(super) fn vsqrtss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm32f(0, w.sqrt());
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = f32_sqrt(w, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm32u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
@@ -526,7 +470,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm64f(0, w.sqrt());
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = f64_sqrt(w, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm64u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
@@ -537,73 +485,42 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ════════════════════════════════════════════════════════════════════
 
     pub(super) fn vcmpps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let predicate = instr.ib();
-        if instr.get_vl() >= 1 {
-            let op1 = self.read_ymm_reg(instr.src2());
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for i in 0..8 {
-                let m = avx_compare_f32(op1.ymm32f(i), op2.ymm32f(i), predicate);
-                result.set_ymm32u(i, if m { 0xFFFF_FFFF } else { 0 });
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op1 = self.read_xmm_reg(instr.src2());
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
-            for i in 0..4 {
-                let m = avx_compare_f32(op1.xmm32f(i), op2.xmm32f(i), predicate);
-                result.set_xmm32u(i, if m { 0xFFFF_FFFF } else { 0 });
-            }
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
+        // VEX encodes the full 32-predicate set: Bochs masks Ib() with 0x1F.
+        let predicate = instr.ib() & 0x1F;
+        self.avx_pfp_2op(instr, move |op1, op2, status| {
+            xmm_cmpps(op1, op2, predicate, status)
+        })
     }
 
     pub(super) fn vcmppd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let predicate = instr.ib();
-        if instr.get_vl() >= 1 {
-            let op1 = self.read_ymm_reg(instr.src2());
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for i in 0..4 {
-                let m = avx_compare_f64(op1.ymm64f(i), op2.ymm64f(i), predicate);
-                result.set_ymm64u(i, if m { u64::MAX } else { 0 });
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op1 = self.read_xmm_reg(instr.src2());
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
-            for i in 0..2 {
-                let m = avx_compare_f64(op1.xmm64f(i), op2.xmm64f(i), predicate);
-                result.set_xmm64u(i, if m { u64::MAX } else { 0 });
-            }
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
+        let predicate = instr.ib() & 0x1F;
+        self.avx_pfp_2op(instr, move |op1, op2, status| {
+            xmm_cmppd(op1, op2, predicate, status)
+        })
     }
 
     pub(super) fn vcmpss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let predicate = instr.ib();
+        let predicate = instr.ib() & 0x1F;
         let w = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
-        let m = avx_compare_f32(result.xmm32f(0), w, predicate);
-        result.set_xmm32u(0, if m { 0xFFFF_FFFF } else { 0 });
+        let mut status = self.sse_status();
+        let hit = f32_compare_predicate(predicate, result.xmm32u(0), w, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm32u(0, if hit { 0xFFFF_FFFF } else { 0 });
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
 
     pub(super) fn vcmpsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let predicate = instr.ib();
+        let predicate = instr.ib() & 0x1F;
         let w = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
-        let m = avx_compare_f64(result.xmm64f(0), w, predicate);
-        result.set_xmm64u(0, if m { u64::MAX } else { 0 });
+        let mut status = self.sse_status();
+        let hit = f64_compare_predicate(predicate, result.xmm64u(0), w, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm64u(0, if hit { u64::MAX } else { 0 });
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
@@ -672,61 +589,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ════════════════════════════════════════════════════════════════════
 
     pub(super) fn vaddsubps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        if instr.get_vl() >= 1 {
-            let op1 = self.read_ymm_reg(instr.src2());
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for i in 0..8 {
-                let v = if i & 1 == 0 {
-                    op1.ymm32f(i) - op2.ymm32f(i)
-                } else {
-                    op1.ymm32f(i) + op2.ymm32f(i)
-                };
-                result.set_ymm32f(i, v);
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op1 = self.read_xmm_reg(instr.src2());
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
-            for i in 0..4 {
-                let v = if i & 1 == 0 {
-                    op1.xmm32f(i) - op2.xmm32f(i)
-                } else {
-                    op1.xmm32f(i) + op2.xmm32f(i)
-                };
-                result.set_xmm32f(i, v);
-            }
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
+        self.avx_pfp_2op(instr, xmm_addsubps)
     }
 
     pub(super) fn vaddsubpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        if instr.get_vl() >= 1 {
-            let op1 = self.read_ymm_reg(instr.src2());
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for i in 0..4 {
-                let v = if i & 1 == 0 {
-                    op1.ymm64f(i) - op2.ymm64f(i)
-                } else {
-                    op1.ymm64f(i) + op2.ymm64f(i)
-                };
-                result.set_ymm64f(i, v);
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op1 = self.read_xmm_reg(instr.src2());
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
-            result.set_xmm64f(0, op1.xmm64f(0) - op2.xmm64f(0));
-            result.set_xmm64f(1, op1.xmm64f(1) + op2.xmm64f(1));
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
+        self.avx_pfp_2op(instr, xmm_addsubpd)
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -736,91 +603,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ════════════════════════════════════════════════════════════════════
 
     pub(super) fn vhaddps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        if instr.get_vl() >= 1 {
-            let op1 = self.read_ymm_reg(instr.src2());
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for lane in 0..2 {
-                result.set_ymm128(
-                    lane,
-                    super::sse_pfp::haddps_lane(&op1.ymm128(lane), &op2.ymm128(lane)),
-                );
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op1 = self.read_xmm_reg(instr.src2());
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let result = super::sse_pfp::haddps_lane(&op1, &op2);
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
+        self.avx_pfp_2op(instr, xmm_haddps)
     }
 
     pub(super) fn vhaddpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        if instr.get_vl() >= 1 {
-            let op1 = self.read_ymm_reg(instr.src2());
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for lane in 0..2 {
-                result.set_ymm128(
-                    lane,
-                    super::sse_pfp::haddpd_lane(&op1.ymm128(lane), &op2.ymm128(lane)),
-                );
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op1 = self.read_xmm_reg(instr.src2());
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let result = super::sse_pfp::haddpd_lane(&op1, &op2);
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
+        self.avx_pfp_2op(instr, xmm_haddpd)
     }
 
     pub(super) fn vhsubps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        if instr.get_vl() >= 1 {
-            let op1 = self.read_ymm_reg(instr.src2());
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for lane in 0..2 {
-                result.set_ymm128(
-                    lane,
-                    super::sse_pfp::hsubps_lane(&op1.ymm128(lane), &op2.ymm128(lane)),
-                );
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op1 = self.read_xmm_reg(instr.src2());
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let result = super::sse_pfp::hsubps_lane(&op1, &op2);
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
+        self.avx_pfp_2op(instr, xmm_hsubps)
     }
 
     pub(super) fn vhsubpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        if instr.get_vl() >= 1 {
-            let op1 = self.read_ymm_reg(instr.src2());
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for lane in 0..2 {
-                result.set_ymm128(
-                    lane,
-                    super::sse_pfp::hsubpd_lane(&op1.ymm128(lane), &op2.ymm128(lane)),
-                );
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op1 = self.read_xmm_reg(instr.src2());
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let result = super::sse_pfp::hsubpd_lane(&op1, &op2);
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
+        self.avx_pfp_2op(instr, xmm_hsubpd)
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -940,18 +735,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
             let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut status = self.sse_status();
             let mut result = BxPackedYmmRegister::default();
             for lane in 0..2 {
                 result.set_ymm128(
                     lane,
-                    super::sse_pfp::dpps_lane(&op1.ymm128(lane), &op2.ymm128(lane), mask),
+                    dpps_lane(&op1.ymm128(lane), &op2.ymm128(lane), mask, &mut status),
                 );
             }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_ymm_reg(instr.dst(), result);
         } else {
             let op1 = self.read_xmm_reg(instr.src2());
             let op2 = self.vex_read_src2_xmm(instr)?;
-            let result = super::sse_pfp::dpps_lane(&op1, &op2, mask);
+            let mut status = self.sse_status();
+            let result = dpps_lane(&op1, &op2, mask, &mut status);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_xmm_reg(instr.dst(), result);
         }
         Ok(())
@@ -961,7 +760,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.src2());
         let op2 = self.vex_read_src2_xmm(instr)?;
-        let result = super::sse_pfp::dppd_lane(&op1, &op2, instr.ib());
+        let mut status = self.sse_status();
+        let result = dppd_lane(&op1, &op2, instr.ib(), &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
@@ -1064,7 +865,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             let w = self.sse_pfp_read_op2_ss(instr)?;
             let mut result = BxPackedXmmRegister::default();
-            result.set_xmm32f(0, w);
+            result.set_xmm32u(0, w);
             self.write_xmm_reg(instr.dst(), result);
         }
         Ok(())
@@ -1080,7 +881,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         } else {
             let w = self.sse_pfp_read_op2_sd(instr)?;
             let mut result = BxPackedXmmRegister::default();
-            result.set_xmm64f(0, w);
+            result.set_xmm64u(0, w);
             self.write_xmm_reg(instr.dst(), result);
         }
         Ok(())
@@ -1257,7 +1058,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm64f(0, w as f64);
+        let mut status = self.sse_status();
+        let value = f32_to_f64(w, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm64u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
@@ -1266,67 +1070,84 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm32f(0, w as f32);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = f64_to_f32(w, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm32u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
 
-    pub(super) fn vcvtsi2sd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op2 = if instr.mod_c0() {
-            self.get_gpr32(instr.src1().into()) as i32
+    /// Read the 32-bit integer source of a VCVTSI2xx.
+    #[inline]
+    fn vcvtsi_read_src32(&mut self, instr: &Instruction) -> super::Result<i32> {
+        if instr.mod_c0() {
+            Ok(self.get_gpr32(instr.src1().into()) as i32)
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.v_read_dword(seg, eaddr)? as i32
-        };
+            Ok(self.v_read_dword(seg, eaddr)? as i32)
+        }
+    }
+
+    /// Read the 64-bit integer source of a VCVTSI2xx (long mode).
+    #[inline]
+    fn vcvtsi_read_src64(&mut self, instr: &Instruction) -> super::Result<i64> {
+        if instr.mod_c0() {
+            Ok(self.get_gpr64(instr.src1() as usize) as i64)
+        } else {
+            let eaddr = self.resolve_addr64(instr);
+            let seg = BxSegregs::from(instr.seg());
+            Ok(self.read_virtual_qword_64(seg, eaddr)? as i64)
+        }
+    }
+
+    /// VCVTSI2SD (dword source) — exact for every i32, so no status check.
+    pub(super) fn vcvtsi2sd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op2 = self.vcvtsi_read_src32(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm64f(0, op2 as f64);
+        result.set_xmm64u(0, i32_to_f64(op2));
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
 
     pub(super) fn vcvtsi2sd_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = if instr.mod_c0() {
-            self.get_gpr64(instr.src1() as usize) as i64
-        } else {
-            let eaddr = self.resolve_addr64(instr);
-            let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_qword_64(seg, eaddr)? as i64
-        };
+        let op2 = self.vcvtsi_read_src64(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm64f(0, op2 as f64);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = i64_to_f64(op2, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm64u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
 
     pub(super) fn vcvtsi2ss_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = if instr.mod_c0() {
-            self.get_gpr32(instr.src1().into()) as i32
-        } else {
-            let eaddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            self.v_read_dword(seg, eaddr)? as i32
-        };
+        let op2 = self.vcvtsi_read_src32(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm32f(0, op2 as f32);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = i32_to_f32(op2, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm32u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
 
     pub(super) fn vcvtsi2ss_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op2 = if instr.mod_c0() {
-            self.get_gpr64(instr.src1() as usize) as i64
-        } else {
-            let eaddr = self.resolve_addr64(instr);
-            let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_qword_64(seg, eaddr)? as i64
-        };
+        let op2 = self.vcvtsi_read_src64(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm32f(0, op2 as f32);
+        let mut status = self.sse_status();
+        self.softfloat_rc_override(&mut status, instr);
+        let value = i64_to_f32(op2, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm32u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
@@ -1339,21 +1160,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn vroundps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let imm8 = instr.ib();
-        let rc = self.mxcsr.rounding_mode();
         if instr.get_vl() >= 1 {
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
+            let mut op = self.vex_read_src2_ymm(instr)?;
+            let mut status = self.sse_status();
+            mxcsr_to_softfloat_status_word_imm_override(&mut status, imm8);
             for i in 0..8 {
-                result.set_ymm32f(i, super::sse_pfp::sse_round_f32(op2.ymm32f(i), imm8, rc));
+                op.set_ymm32u(i, f32_round_to_int(op.ymm32u(i), &mut status));
             }
-            self.write_ymm_reg(instr.dst(), result);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_ymm_reg(instr.dst(), op);
         } else {
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
+            let mut op = self.vex_read_src2_xmm(instr)?;
+            let mut status = self.sse_status();
+            mxcsr_to_softfloat_status_word_imm_override(&mut status, imm8);
             for i in 0..4 {
-                result.set_xmm32f(i, super::sse_pfp::sse_round_f32(op2.xmm32f(i), imm8, rc));
+                op.set_xmm32u(i, f32_round_to_int(op.xmm32u(i), &mut status));
             }
-            self.write_xmm_reg(instr.dst(), result);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_xmm_reg(instr.dst(), op);
         }
         Ok(())
     }
@@ -1361,21 +1185,24 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn vroundpd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let imm8 = instr.ib();
-        let rc = self.mxcsr.rounding_mode();
         if instr.get_vl() >= 1 {
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
+            let mut op = self.vex_read_src2_ymm(instr)?;
+            let mut status = self.sse_status();
+            mxcsr_to_softfloat_status_word_imm_override(&mut status, imm8);
             for i in 0..4 {
-                result.set_ymm64f(i, super::sse_pfp::sse_round_f64(op2.ymm64f(i), imm8, rc));
+                op.set_ymm64u(i, f64_round_to_int(op.ymm64u(i), &mut status));
             }
-            self.write_ymm_reg(instr.dst(), result);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_ymm_reg(instr.dst(), op);
         } else {
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
+            let mut op = self.vex_read_src2_xmm(instr)?;
+            let mut status = self.sse_status();
+            mxcsr_to_softfloat_status_word_imm_override(&mut status, imm8);
             for i in 0..2 {
-                result.set_xmm64f(i, super::sse_pfp::sse_round_f64(op2.xmm64f(i), imm8, rc));
+                op.set_xmm64u(i, f64_round_to_int(op.xmm64u(i), &mut status));
             }
-            self.write_xmm_reg(instr.dst(), result);
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_xmm_reg(instr.dst(), op);
         }
         Ok(())
     }
@@ -1383,10 +1210,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn vroundss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let imm8 = instr.ib();
-        let rc = self.mxcsr.rounding_mode();
         let w = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm32f(0, super::sse_pfp::sse_round_f32(w, imm8, rc));
+        let mut status = self.sse_status();
+        mxcsr_to_softfloat_status_word_imm_override(&mut status, imm8);
+        let value = f32_round_to_int(w, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm32u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
@@ -1394,10 +1224,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     pub(super) fn vroundsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let imm8 = instr.ib();
-        let rc = self.mxcsr.rounding_mode();
         let w = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm64f(0, super::sse_pfp::sse_round_f64(w, imm8, rc));
+        let mut status = self.sse_status();
+        mxcsr_to_softfloat_status_word_imm_override(&mut status, imm8);
+        let value = f64_round_to_int(w, &mut status);
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        result.set_xmm64u(0, value);
         self.write_xmm_reg(instr.dst(), result);
         Ok(())
     }
@@ -1409,62 +1242,58 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ~12-bit approximate).
     // ════════════════════════════════════════════════════════════════════
 
-    pub(super) fn vrcpps(&mut self, instr: &Instruction) -> super::Result<()> {
+    /// VRCPPS / VRSQRTPS share the same shape: single source, no vvvv, and
+    /// no MXCSR interaction at all (Bochs avx_pfp.cc VRCPPS_VpsWpsR).
+    fn avx_approx_ps(
+        &mut self,
+        instr: &Instruction,
+        func: fn(Float32) -> Float32,
+    ) -> super::Result<()> {
         self.prepare_sse()?;
         if instr.get_vl() >= 1 {
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
+            let mut op = self.vex_read_src2_ymm(instr)?;
             for i in 0..8 {
-                result.set_ymm32f(i, 1.0f32 / op2.ymm32f(i));
+                op.set_ymm32u(i, func(op.ymm32u(i)));
             }
-            self.write_ymm_reg(instr.dst(), result);
+            self.write_ymm_reg(instr.dst(), op);
         } else {
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
+            let mut op = self.vex_read_src2_xmm(instr)?;
             for i in 0..4 {
-                result.set_xmm32f(i, 1.0f32 / op2.xmm32f(i));
+                op.set_xmm32u(i, func(op.xmm32u(i)));
             }
-            self.write_xmm_reg(instr.dst(), result);
+            self.write_xmm_reg(instr.dst(), op);
         }
         Ok(())
+    }
+
+    /// VRCPSS / VRSQRTSS — low element approximated, upper elements from vvvv.
+    fn avx_approx_ss(
+        &mut self,
+        instr: &Instruction,
+        func: fn(Float32) -> Float32,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let w = self.sse_pfp_read_op2_ss(instr)?;
+        let mut result = self.read_xmm_reg(instr.src2());
+        result.set_xmm32u(0, func(w));
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    pub(super) fn vrcpps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.avx_approx_ps(instr, approximate_rcp)
     }
 
     pub(super) fn vrsqrtps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        if instr.get_vl() >= 1 {
-            let op2 = self.vex_read_src2_ymm(instr)?;
-            let mut result = BxPackedYmmRegister::default();
-            for i in 0..8 {
-                result.set_ymm32f(i, 1.0f32 / op2.ymm32f(i).sqrt());
-            }
-            self.write_ymm_reg(instr.dst(), result);
-        } else {
-            let op2 = self.vex_read_src2_xmm(instr)?;
-            let mut result = BxPackedXmmRegister::default();
-            for i in 0..4 {
-                result.set_xmm32f(i, 1.0f32 / op2.xmm32f(i).sqrt());
-            }
-            self.write_xmm_reg(instr.dst(), result);
-        }
-        Ok(())
+        self.avx_approx_ps(instr, approximate_rsqrt)
     }
 
     pub(super) fn vrcpss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let w = self.sse_pfp_read_op2_ss(instr)?;
-        let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm32f(0, 1.0f32 / w);
-        self.write_xmm_reg(instr.dst(), result);
-        Ok(())
+        self.avx_approx_ss(instr, approximate_rcp)
     }
 
     pub(super) fn vrsqrtss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let w = self.sse_pfp_read_op2_ss(instr)?;
-        let mut result = self.read_xmm_reg(instr.src2());
-        result.set_xmm32f(0, 1.0f32 / w.sqrt());
-        self.write_xmm_reg(instr.dst(), result);
-        Ok(())
+        self.avx_approx_ss(instr, approximate_rsqrt)
     }
 
     pub(super) fn vunpckhpd(&mut self, instr: &Instruction) -> super::Result<()> {

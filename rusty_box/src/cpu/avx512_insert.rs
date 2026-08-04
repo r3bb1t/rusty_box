@@ -255,19 +255,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let num_lanes = vl_bytes(vl) / 16;
         let imm = (instr.ib() as usize) & (num_lanes - 1);
         // Start with src1 (the full vector from VEX.vvvv)
-        let mut result = read_zmm(self, instr.src1());
+        let mut result = read_zmm(self, instr.src2());
         // Read 128-bit insert value (2 qwords)
         let insert = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..2 {
-                let val = self.v_read_qword(seg, laddr + (i * 8) as u64)?;
-                tmp.set_zmm64u(i, val);
-            }
-            tmp
+            self.evex_loadu_wdq(instr)?
         };
         // Insert 128-bit lane (2 qwords)
         result.set_zmm64u(imm * 2, insert.zmm64u(0));
@@ -295,19 +288,13 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let half = (instr.ib() & 0x01) as usize;
         // Start with src1 (the full vector)
-        let mut result = read_zmm(self, instr.src1());
+        let mut result = read_zmm(self, instr.src2());
         // Read 256-bit insert value (8 dwords)
         let insert = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..8 {
-                let val = self.v_read_dword(seg, laddr + (i * 4) as u64)?;
-                tmp.set_zmm32u(i, val);
-            }
-            tmp
+            // Both def entries name LOAD_Half_Vector.
+            self.evex_load_half_vector(instr)?
         };
         // Insert 256-bit half (8 dwords)
         for i in 0..8 {
@@ -336,19 +323,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let vl = instr.get_vl();
         let half = (instr.ib() & 0x01) as usize;
         // Start with src1 (the full vector)
-        let mut result = read_zmm(self, instr.src1());
+        let mut result = read_zmm(self, instr.src2());
         // Read 256-bit insert value (4 qwords)
         let insert = if instr.mod_c0() {
-            read_zmm(self, instr.src2())
+            read_zmm(self, instr.src1())
         } else {
-            let mut tmp = BxPackedZmmRegister::default();
-            let laddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            for i in 0..4 {
-                let val = self.v_read_qword(seg, laddr + (i * 8) as u64)?;
-                tmp.set_zmm64u(i, val);
-            }
-            tmp
+            self.evex_load_half_vector(instr)?
         };
         // Insert 256-bit half (4 qwords)
         for i in 0..4 {

@@ -99,7 +99,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         writer.write_u32(self.eflags_materialized())?;
         writer.write_u64(self.icount)?;
-        writer.write_u64(self.icount_last_sync)?;
+        writer.write_u64(self.tick_surplus)?;
+        writer.write_u64(self.ticks_last_sync)?;
         writer.write_u64(self.prev_rip)?;
         writer.write_u64(self.prev_rsp)?;
         writer.write_u64(self.prev_ssp)?;
@@ -286,7 +287,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         }
         self.eflags = eflags;
         self.icount = reader.read_u64()?;
-        self.icount_last_sync = reader.read_u64()?;
+        self.tick_surplus = reader.read_u64()?;
+        self.ticks_last_sync = reader.read_u64()?;
         self.prev_rip = reader.read_u64()?;
         self.prev_rsp = reader.read_u64()?;
         self.prev_ssp = reader.read_u64()?;

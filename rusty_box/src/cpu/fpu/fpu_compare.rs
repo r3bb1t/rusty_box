@@ -88,7 +88,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         );
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0
             && pop_stack
         {
             self.the_i387.fpu_pop();
@@ -138,7 +138,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         );
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0
             && pop_stack
         {
             self.the_i387.fpu_pop();
@@ -188,14 +188,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Bochs manually checks for NaN before comparing for memory operands
         let rc = if extf80_is_nan(a) || extf80_is_unsupported(a) || f32_is_nan(load_reg) {
-            softfloat_raiseFlags(&mut status, FLAG_INVALID);
+            softfloat_raise_flags(&mut status, FLAG_INVALID);
             RELATION_UNORDERED
         } else {
             extf80_compare(a, f32_to_extf80(load_reg, &mut status), false, &mut status)
         };
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0
             && pop_stack
         {
             self.the_i387.fpu_pop();
@@ -248,14 +248,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
         // Bochs manually checks for NaN before comparing for memory operands
         let rc = if extf80_is_nan(a) || extf80_is_unsupported(a) || f64_is_nan(load_reg) {
-            softfloat_raiseFlags(&mut status, FLAG_INVALID);
+            softfloat_raise_flags(&mut status, FLAG_INVALID);
             RELATION_UNORDERED
         } else {
             extf80_compare(a, f64_to_extf80(load_reg, &mut status), false, &mut status)
         };
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0
             && pop_stack
         {
             self.the_i387.fpu_pop();
@@ -309,7 +309,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         );
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0
             && pop_stack
         {
             self.the_i387.fpu_pop();
@@ -363,7 +363,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         );
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0
             && pop_stack
         {
             self.the_i387.fpu_pop();
@@ -413,7 +413,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         );
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0 {
             self.the_i387.fpu_pop();
             self.the_i387.fpu_pop();
         }
@@ -457,7 +457,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         );
         self.write_eflags_fpu_compare(rc);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0
             && pop_stack
         {
             self.the_i387.fpu_pop();
@@ -508,7 +508,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         );
         self.write_eflags_fpu_compare(rc);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+        if self.fpu_exception(instr, status.softfloat_exception_flags as u32, false) == 0
             && pop_stack
         {
             self.the_i387.fpu_pop();
@@ -544,7 +544,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
             let rc = extf80_compare(self.read_fpu_reg(0), const_z, false, &mut status);
             self.setcc(status_word_flags_fpu_compare(rc));
-            self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false);
+            self.fpu_exception(instr, status.softfloat_exception_flags as u32, false);
         }
 
         Ok(())

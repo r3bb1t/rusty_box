@@ -824,6 +824,10 @@ impl PitCounter {
 pub struct BxPitC {
     /// Three counters
     pub(crate) counters: [PitCounter; 3],
+    /// Bochs pit.cc s.irq_enabled — counter 0's OUT pin drives IRQ0 only
+    /// while set; the HPET clears it in legacy-replacement mode
+    /// (hpet.cc DEV_pit_enable_irq).
+    pub(crate) irq_enabled: bool,
     /// Total ticks elapsed
     pub(crate) total_ticks: u64,
     /// One-shot PC-system owner timer handle for all PIT counter events.
@@ -872,6 +876,7 @@ impl BxPitC {
     pub fn new() -> Self {
         let mut pit = Self {
             counters: [PitCounter::new(0), PitCounter::new(1), PitCounter::new(2)],
+            irq_enabled: true,
             total_ticks: 0,
             timer_handle: None,
             speaker_data_on: false,
@@ -898,6 +903,8 @@ impl BxPitC {
         self.speaker_data_on = false;
         self.speaker_active = false;
         self.speaker_level = false;
+        // Bochs pit.cc init: s.irq_enabled = 1.
+        self.irq_enabled = true;
         // Bochs pit.cc init → s.timer.init() (pit82c54.cc init)
         self.counters = [PitCounter::new(0), PitCounter::new(1), PitCounter::new(2)];
         // Bochs pit.cc init: s.timer.set_OUT_handler(0, irq_handler).
@@ -930,6 +937,12 @@ impl BxPitC {
     /// Return the scheduler's PIT owner timer handle, if registered.
     pub(crate) fn timer_handle(&self) -> Option<usize> {
         self.timer_handle
+    }
+
+    /// Gate counter 0's OUT pin off the IRQ0 line — Bochs pit.h enable_irq,
+    /// driven by the HPET's legacy-replacement mode (hpet.cc).
+    pub(crate) fn enable_irq(&mut self, enabled: bool) {
+        self.irq_enabled = enabled;
     }
 
     /// Initialize icount synchronization for fine-grained PIT timing.
@@ -1388,6 +1401,7 @@ impl BxPitC {
             len
         };
         let len = checked_snapshot_len_add(len, 3)?; // speaker state
+        let len = checked_snapshot_len_add(len, 1)?; // irq_enabled (HPET legacy gate)
         let len = checked_snapshot_len_add(len, 8)?; // icount phase
         let len = checked_snapshot_len_add(len, 8)?; // usec phase
         let len = checked_snapshot_len_add(len, 16)?; // icount remainder
@@ -1413,6 +1427,7 @@ impl BxPitC {
         writer.write_bool(self.speaker_data_on)?;
         writer.write_bool(self.speaker_active)?;
         writer.write_bool(self.speaker_level)?;
+        writer.write_bool(self.irq_enabled)?;
         writer.write_u64(self.icount_at_last_sync)?;
         writer.write_u64(self.total_usec)?;
         writer.write_bytes(&self.usec_remainder.to_le_bytes())?;
@@ -1441,6 +1456,7 @@ impl BxPitC {
         let speaker_data_on = reader.read_bool()?;
         let speaker_active = reader.read_bool()?;
         let speaker_level = reader.read_bool()?;
+        let irq_enabled = reader.read_bool()?;
         let icount_at_last_sync = reader.read_u64()?;
         let total_usec = reader.read_u64()?;
         let mut usec_remainder = [0u8; 16];
@@ -1462,6 +1478,7 @@ impl BxPitC {
         self.speaker_data_on = speaker_data_on;
         self.speaker_active = speaker_active;
         self.speaker_level = speaker_level;
+        self.irq_enabled = irq_enabled;
         self.icount_at_last_sync = icount_at_last_sync;
         self.total_usec = total_usec;
         self.usec_remainder = usec_remainder;

@@ -157,8 +157,9 @@ bitflags! {
         const ModC0 = 1 << 4;
         /// REX prefix present — enables SPL/BPL/SIL/DIL register mapping
         const Extend8bit = 1 << 5;
-        /// VEX prefix present (reliable flag, unlike is_vex() which shares immediate field)
-        const VexPresent = 1 << 6;
+        // Bits 6-7 are the LOCK/REP field (see LOCK_REP_SHIFT below) and are
+        // not available as flags. Whether a VEX or EVEX prefix was present is
+        // recorded by `set_vex` / `is_vex` in the immediate word instead.
     }
 }
 
@@ -863,6 +864,22 @@ impl Instruction {
             0 => OperandSize::Size16,
             1 => OperandSize::Size32,
             _ => OperandSize::Size64,
+        }
+    }
+
+    /// Effective-address wraparound mask for this instruction's address size.
+    ///
+    /// Bochs decoder/instr.h `bxInstruction_c::asize_mask()` indexing
+    /// access.cc `bx_asize_mask[]`: 0xffff for as16, 0xffffffff for as32,
+    /// all-ones for as64. Operand components computed by adding to an
+    /// effective address (e.g. the selector half of a far pointer) must wrap
+    /// within this mask before the segment base is applied.
+    #[inline]
+    pub const fn asize_mask(&self) -> u64 {
+        match self.asize() {
+            0 => 0xFFFF,
+            1 => 0xFFFF_FFFF,
+            _ => u64::MAX,
         }
     }
 

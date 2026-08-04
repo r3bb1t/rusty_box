@@ -165,7 +165,10 @@ pub const KBD_STATUS_PORT: u16 = 0x0064;
 pub const KBD_COMMAND_PORT: u16 = 0x0064;
 
 // Buffer sizes (matching Bochs)
-const BX_KBD_ELEMENTS: usize = 256;
+// Bochs iodev/iodev.h: `#define BX_KBD_ELEMENTS 16`. The keyboard ring overflows
+// (drops the incoming scancode) at 16 queued bytes; a larger ring silently
+// accepts more before dropping, so it must match for overflow parity.
+const BX_KBD_ELEMENTS: usize = 16;
 const BX_MOUSE_BUFF_SIZE: usize = 48;
 const BX_KBD_CONTROLLER_QSIZE: usize = 5;
 
@@ -263,13 +266,11 @@ const OUT_PORT_CPU_RESET: u8 = 0x01;
 const KBD_IRQ_BIT_KBD: u8 = 0x01;
 const KBD_IRQ_BIT_MOUSE: u8 = 0x02;
 
-/// Data returned after servicing the keyboard's one-shot owner timer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct KeyboardTimerCallback {
-    pub(crate) irq_mask: u8,
-    pub(crate) next_delay_usec: Option<u64>,
-    pub(crate) rearm: bool,
-}
+/// Bochs config.cc keyboard `serial_delay` default (microseconds): the period
+/// of the CONTINUOUS 8042 timer keyboard.cc init() registers
+/// (`DEV_register_timer(..., serial_delay, 1, 1, ...)`). The timer never
+/// stops; every fire runs `periodic(1)`.
+pub(crate) const KBD_SERIAL_DELAY_USEC: u32 = 150;
 
 /// Result of consuming port 0x60 through the DeviceManager-owned PIC path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -550,12 +551,9 @@ pub struct BxKeyboardC {
     /// Source of bytes in controller_q (0=keyboard, 1=mouse).
     /// All entries in the queue must be from the same source.
     pub(crate) controller_q_source: u8,
-    /// One-shot PC-system owner timer handle for keyboard serial transfers.
+    /// PC-system handle of the continuous 8042 serial-delay timer
+    /// (Bochs keyboard.cc `timer_handle`).
     pub(crate) timer_handle: Option<usize>,
-    /// Latched when `timer_pending` transitions from idle to armed. I/O
-    /// consumers drain this once so unrelated status polling cannot postpone
-    /// an already-established one-shot deadline.
-    timer_update_pending: bool,
     /// A20 gate state. Controlled via output port (command 0xD1) bit 1 or
     /// dedicated commands 0xDD (disable) / 0xDF (enable).
     pub(crate) a20_enabled: bool,
@@ -653,7 +651,6 @@ impl BxKeyboardC {
             controller_q_size: 0,
             controller_q_source: 0,
             timer_handle: None,
-            timer_update_pending: false,
             a20_enabled: true,
             a20_change_pending: false,
             diag_port60_read_count: 0,
@@ -1381,9 +1378,10 @@ impl BxKeyboardC {
 
     /// Set timer_pending flag (keyboard.cc)
     fn activate_timer(&mut self) {
+        // Bochs keyboard.cc activate_timer(): latch one pending count for the
+        // continuous serial-delay timer to consume on its next fire.
         if self.kbd_controller.timer_pending == 0 {
             self.kbd_controller.timer_pending = 1;
-            self.timer_update_pending = true;
         }
     }
 
@@ -1397,36 +1395,14 @@ impl BxKeyboardC {
         self.timer_handle
     }
 
-    /// Relative delay for a keyboard owner timer request.
-    ///
-    /// Bochs `activate_timer()` sets `timer_pending` to one microsecond; a
-    /// zero countdown means the owner must be deactivated rather than polled.
-    pub(crate) fn arm_keyboard_timer(&self) -> Option<u64> {
-        (self.kbd_controller.timer_pending != 0)
-            .then_some(u64::from(self.kbd_controller.timer_pending))
-    }
-
-    /// Drain the timer transition caused by keyboard I/O or host input.
-    ///
-    /// Returning no update for an already-armed timer preserves its original
-    /// absolute deadline across status-register polling.
-    pub(crate) fn take_keyboard_timer_update(&mut self) -> Option<Option<u64>> {
-        core::mem::take(&mut self.timer_update_pending).then(|| self.arm_keyboard_timer())
-    }
-
-    /// Service a keyboard owner callback and return PIC work plus the next
-    /// one-shot delay. Registered delays originate from `timer_pending` and
-    /// therefore fit the exact `u32` periodic interface; a larger defensive
-    /// input is necessarily already sufficient to expire that countdown.
-    pub(crate) fn timer_callback(&mut self, elapsed_usec: u64) -> KeyboardTimerCallback {
-        self.timer_update_pending = false;
-        let irq_mask = self.periodic(elapsed_usec.min(u64::from(u32::MAX)) as u32);
-        let next_delay_usec = self.arm_keyboard_timer();
-        KeyboardTimerCallback {
-            irq_mask,
-            next_delay_usec,
-            rearm: next_delay_usec.is_some(),
-        }
+    /// One continuous serial-delay tick — Bochs keyboard.cc timer_handler:
+    /// `periodic(1)`, returning the IRQ mask (bit 0 = IRQ1, bit 1 = IRQ12)
+    /// for the caller to raise. The 8042 timer never stops, so latched
+    /// `irqN_requested` flags (CCB rewrites, controller_enQ responses,
+    /// kbd_enQ_imm ACKs) are collected within one serial-delay period even
+    /// when no byte transfer armed anything.
+    pub(crate) fn timer_callback(&mut self) -> u8 {
+        self.periodic(1)
     }
 
     // =========================================================================
@@ -1672,9 +1648,12 @@ impl BxKeyboardC {
 
         match value {
             MOUSE_CMD_SET_SCALING_1_1 => {
-                // Scaling 1:1
+                // Scaling 1:1. Bochs keyboard.cc case 0xe6 sets scaling = 2 —
+                // an upstream copy/paste quirk (identical to the 0xe7 2:1 case)
+                // that leaves the 0xE9 Get-Info status bit 4 set after a 1:1
+                // command. Matched bug-for-bug for strict parity.
                 self.controller_enq(KBD_RESP_ACK, 1);
-                self.mouse.scaling = 1;
+                self.mouse.scaling = 2;
             }
             MOUSE_CMD_SET_SCALING_2_1 => {
                 // Scaling 2:1
@@ -1779,20 +1758,18 @@ impl BxKeyboardC {
                 self.controller_enq(MOUSE_ID_STANDARD, 1);
             }
             0xBB => {
-                // OS/2 Warp 3 compatibility — Bochs logs and ignores this command
+                // OS/2 Warp 3 compatibility — Bochs keyboard.cc case 0xbb only
+                // logs and breaks, enqueueing NOTHING (no ACK, OBF/AUXB/IRQ12
+                // untouched). Match exactly: no controller_enq.
                 tracing::trace!("Keyboard: mouse command 0xBB (OS/2 Warp 3 compat), ignoring");
-                self.controller_enq(KBD_RESP_ACK, 1);
             }
             MOUSE_CMD_READ_DATA => {
-                // Read data (remote mode)
+                // Bochs keyboard.cc case 0xeb: ACK, then the movement packet is
+                // sent via mouse_enq_packet (mouse internal buffer + aux-clock
+                // gating, IntelliMouse 4th byte handled there), not straight to
+                // the controller output buffer.
                 self.controller_enq(KBD_RESP_ACK, 1);
-                // Send empty packet (3 bytes standard, 4 bytes in IntelliMouse mode)
-                self.controller_enq(0x08 | (self.mouse.button_status & 0x0F), 1);
-                self.controller_enq(0x00, 1);
-                self.controller_enq(0x00, 1);
-                if self.mouse.im_mode {
-                    self.controller_enq(0x00, 1); // 4th byte: scroll wheel Z delta
-                }
+                self.mouse_enq_packet(0x08 | (self.mouse.button_status & 0x0F), 0x00, 0x00, 0x00);
             }
             _ => {
                 if is_ps2 {
@@ -1925,10 +1902,18 @@ impl BxKeyboardC {
             self.kbd_internal_buffer.head = (self.kbd_internal_buffer.head + 1) % BX_KBD_ELEMENTS;
             self.kbd_internal_buffer.num_elements -= 1;
             if self.kbd_controller.allow_irq1 {
+                // Bochs keyboard.cc periodic(): the transfer path only LATCHES
+                // irq1_requested; the freshly latched IRQ is delivered on the
+                // NEXT continuous fire's top-of-function collection (one
+                // serial-delay period later), not this tick.
                 self.kbd_controller.irq1_requested = true;
-                retval |= KBD_IRQ_BIT_KBD;
             }
         } else {
+            // Bochs keyboard.cc periodic(): flush any residual delayed mouse
+            // motion into a packet before servicing the mouse buffer, so clamped
+            // or deferred motion doesn't stick until the next host event. A no-op
+            // when there is no pending motion.
+            self.create_mouse_packet(false);
             // Try mouse internal buffer
             if self.kbd_controller.aux_clock_enabled && self.mouse_internal_buffer.num_elements > 0
             {
@@ -1940,8 +1925,9 @@ impl BxKeyboardC {
                     (self.mouse_internal_buffer.head + 1) % BX_MOUSE_BUFF_SIZE;
                 self.mouse_internal_buffer.num_elements -= 1;
                 if self.kbd_controller.allow_irq12 {
+                    // Bochs keyboard.cc periodic(): latch only; the next
+                    // continuous fire's top collection raises IRQ12.
                     self.kbd_controller.irq12_requested = true;
-                    retval |= KBD_IRQ_BIT_MOUSE;
                 }
             }
         }
@@ -1962,6 +1948,45 @@ impl BxKeyboardC {
     /// 0x80 onto the next translated byte.
     ///
     /// Matches Bochs gen_scancode() translation logic (keyboard.cc).
+    /// Emit the scancode sequence for a guest key press or release.
+    ///
+    /// Word-for-word port of Bochs `bx_keyb_c::gen_scancode` (keyboard.cc): the
+    /// bytes come from `scancodes[key][current_scancodes_set]`, so selecting set
+    /// 1 or 3 with the 0xF0 command actually changes what the guest sees. When
+    /// the 8042 is translating (CCB bit 6) each byte goes through
+    /// `translation8042`, with a 0xF0 break prefix folded into bit 7 of the
+    /// following byte instead of being emitted.
+    pub fn gen_scancode(&mut self, key: super::scancodes::BxKey, pressed: bool) {
+        // Ignore scancode if the keyboard clock is driven low.
+        if !self.kbd_controller.kbd_clock_enabled {
+            return;
+        }
+        // Ignore scancode if scanning is disabled.
+        if !self.kbd_internal_buffer.scanning_enabled {
+            return;
+        }
+
+        let set = (self.kbd_controller.current_scancodes_set as usize).min(2);
+        let entry = &super::scancodes::SCANCODES[key.index()][set];
+        let bytes: &'static [u8] = if pressed { entry.make } else { entry.brek };
+
+        if self.kbd_controller.scancodes_translate {
+            let mut escaped = 0x00u8;
+            for &byte in bytes {
+                if byte == 0xF0 {
+                    escaped = 0x80;
+                } else {
+                    self.kbd_enq(TRANSLATION_8042[byte as usize] | escaped);
+                    escaped = 0x00;
+                }
+            }
+        } else {
+            for &byte in bytes {
+                self.kbd_enq(byte);
+            }
+        }
+    }
+
     pub fn send_scancode(&mut self, scancode: u8) {
         if !self.kbd_controller.kbd_clock_enabled || !self.kbd_internal_buffer.scanning_enabled {
             return;
@@ -2778,6 +2803,33 @@ mod tests {
     }
 
     #[test]
+    fn periodic_flushes_residual_mouse_motion() {
+        // Bochs keyboard.cc periodic() calls create_mouse_packet(0) when the kbd
+        // buffer is idle, flushing residual delayed motion into a packet so it
+        // does not stick until the next host event.
+        let mut kbd = stream_mouse();
+        kbd.kbd_controller.aux_clock_enabled = true;
+        kbd.kbd_controller.allow_irq12 = true;
+
+        // Residual motion accumulated (e.g. it arrived while the mouse buffer was
+        // busy); the kbd buffer is idle and the service timer is due.
+        kbd.mouse.delayed_dx = 5;
+        kbd.mouse.delayed_dy = -3;
+        kbd.kbd_controller.timer_pending = 1;
+
+        let _ = kbd.periodic(1);
+
+        // The residual delta was drained into a packet and its first byte
+        // delivered to the AUX output buffer with IRQ12 latched. Without the
+        // flush the buffer stays empty and delayed_dx sticks at 5.
+        assert_eq!(kbd.mouse.delayed_dx, 0);
+        assert_eq!(kbd.mouse.delayed_dy, 0);
+        assert!(kbd.kbd_controller.outb);
+        assert!(kbd.kbd_controller.auxb);
+        assert!(kbd.kbd_controller.irq12_requested);
+    }
+
+    #[test]
     fn intellimouse_packet_carries_wheel_byte() {
         let mut kbd = stream_mouse();
         kbd.mouse.im_mode = true;
@@ -2808,19 +2860,27 @@ mod tests {
         assert_eq!(kbd.mouse.button_status, 0);
     }
     #[test]
-    fn owner_timer_arms_and_delivers_a_keyboard_byte_after_one_usec() {
+    fn continuous_timer_fire_delivers_a_queued_keyboard_byte() {
         let mut kbd = BxKeyboardC::new();
         kbd.set_timer_handle(11);
         assert_eq!(kbd.timer_handle(), Some(11));
 
-        kbd.kbd_enq(0x1E);
-        assert_eq!(kbd.arm_keyboard_timer(), Some(1));
+        // An idle fire moves nothing and raises nothing (Bochs periodic(1)
+        // with timer_pending == 0).
+        assert_eq!(kbd.timer_callback(), 0);
 
-        let callback = kbd.timer_callback(1);
-        assert_eq!(callback.irq_mask, KBD_IRQ_BIT_KBD);
-        assert_eq!(callback.next_delay_usec, None);
-        assert!(!callback.rearm);
+        kbd.kbd_enq(0x1E);
+        assert_eq!(kbd.kbd_controller.timer_pending, 1);
+
+        // Bochs keyboard.cc periodic(): the transfer fire makes the byte
+        // readable (OBF) and LATCHES irq1_requested, but returns the
+        // top-collected mask (0) — the IRQ is delivered on the NEXT fire.
+        assert_eq!(kbd.timer_callback(), 0);
         assert!(kbd.kbd_controller.outb);
+        assert!(kbd.kbd_controller.irq1_requested);
+
+        // The following continuous fire's top collection raises IRQ1 once.
+        assert_eq!(kbd.timer_callback(), KBD_IRQ_BIT_KBD);
 
         let read = kbd.read_data_port_for_device_manager();
         assert_eq!(read.value, 0x1E);
@@ -2828,4 +2888,155 @@ mod tests {
         assert_eq!(read.irq_to_lower, Some(1));
     }
 
+    // Bochs keyboard.cc gen_scancode() renders a key through
+    // scancodes[key][current_scancodes_set], so the 0xF0 "select scancode set"
+    // command actually changes the bytes the guest receives. Previously the
+    // selected set was tracked but never consulted.
+    #[test]
+    fn gen_scancode_honors_the_selected_scancode_set() {
+        use super::super::scancodes::BxKey;
+
+        // gen_scancode enqueues into the internal keyboard ring; the controller
+        // output buffer is only filled later by the serial-delay timer, so read
+        // the ring directly and reset it between cases.
+        let drain = |kbd: &mut BxKeyboardC| -> alloc::vec::Vec<u8> {
+            let n = kbd.kbd_internal_buffer.num_elements;
+            let head = kbd.kbd_internal_buffer.head;
+            let mut out = alloc::vec::Vec::new();
+            for i in 0..n {
+                out.push(kbd.kbd_internal_buffer.buffer[(head + i) % BX_KBD_ELEMENTS]);
+            }
+            kbd.kbd_internal_buffer.num_elements = 0;
+            kbd.kbd_internal_buffer.head = 0;
+            out
+        };
+
+        let mut kbd = BxKeyboardC::new();
+        // Raw mode so the bytes are the table's, not 8042-translated.
+        kbd.kbd_controller.scancodes_translate = false;
+
+        // Set 2 (the power-on default): 'A' makes 0x1C, breaks 0xF0 0x1C.
+        kbd.kbd_controller.current_scancodes_set = 1;
+        kbd.gen_scancode(BxKey::A, true);
+        assert_eq!(drain(&mut kbd), alloc::vec![0x1C]);
+        kbd.gen_scancode(BxKey::A, false);
+        assert_eq!(drain(&mut kbd), alloc::vec![0xF0, 0x1C]);
+
+        // Set 1: 'A' makes 0x1E and breaks with the high bit set.
+        kbd.kbd_controller.current_scancodes_set = 0;
+        kbd.gen_scancode(BxKey::A, true);
+        assert_eq!(drain(&mut kbd), alloc::vec![0x1E]);
+        kbd.gen_scancode(BxKey::A, false);
+        assert_eq!(drain(&mut kbd), alloc::vec![0x9E]);
+
+        // Set 3 differs again from set 2 for keys like Enter.
+        kbd.kbd_controller.current_scancodes_set = 2;
+        kbd.gen_scancode(BxKey::A, true);
+        let set3 = drain(&mut kbd);
+        assert_eq!(set3, alloc::vec![0x1C]);
+
+        // With 8042 translation on, set-2 bytes come out as set 1 and the 0xF0
+        // break prefix folds into bit 7 rather than being emitted.
+        kbd.kbd_controller.scancodes_translate = true;
+        kbd.kbd_controller.current_scancodes_set = 1;
+        kbd.gen_scancode(BxKey::A, true);
+        assert_eq!(drain(&mut kbd), alloc::vec![0x1E]);
+        kbd.gen_scancode(BxKey::A, false);
+        assert_eq!(drain(&mut kbd), alloc::vec![0x9E]);
+    }
+
+    #[test]
+    fn kbd_internal_ring_overflows_at_16_like_bochs() {
+        // Bochs iodev.h BX_KBD_ELEMENTS = 16: the internal keyboard ring accepts
+        // 16 queued scancodes, then drops further ones (num_elements caps at 16).
+        let mut kbd = BxKeyboardC::new();
+        for i in 0..16u8 {
+            kbd.kbd_enq(0x10 + i);
+        }
+        assert_eq!(kbd.kbd_internal_buffer.num_elements, 16, "ring holds 16 entries");
+        // The 17th scancode is dropped, not queued.
+        kbd.kbd_enq(0xFF);
+        assert_eq!(
+            kbd.kbd_internal_buffer.num_elements, 16,
+            "the 17th scancode is dropped at the Bochs 16-entry limit"
+        );
+    }
+
+    /// Poll status until OBF, then read the data port — Linux i8042_wait_read
+    /// + data-port read in polled mode. Each poll iteration fires one tick of
+    /// the continuous serial-delay timer (Bochs keyboard.cc timer_handler).
+    fn wait_read(kbd: &mut BxKeyboardC) -> (u8, bool) {
+        for _ in 0..100 {
+            let _irq_mask = kbd.timer_callback();
+            let status = kbd.read(KBD_STATUS_PORT, 1) as u8;
+            if status & 0x01 != 0 {
+                let aux = status & 0x20 != 0;
+                return (kbd.read(KBD_DATA_PORT, 1) as u8, aux);
+            }
+        }
+        panic!("i8042 output buffer never became full");
+    }
+
+    /// Linux i8042_check_aux probe sequence followed by the atkbd 0xF4
+    /// enable — the exact flow that fails on Alpine ("i8042 AUX port"
+    /// missing from dmesg + "atkbd: Failed to enable keyboard").
+    #[test]
+    fn linux_i8042_aux_probe_and_atkbd_enable_succeed() {
+        let mut kbd = BxKeyboardC::new();
+        kbd.init();
+
+        // i8042_controller_init: read CCB, then write it back with both
+        // interrupts disabled and both ports disabled (polled probing).
+        kbd.write(KBD_COMMAND_PORT, 0x20, 1);
+        let (ccb, _) = wait_read(&mut kbd);
+        let probe_ccb = (ccb | 0x30) & !0x03;
+        kbd.write(KBD_COMMAND_PORT, 0x60, 1);
+        kbd.write(KBD_DATA_PORT, u32::from(probe_ccb), 1);
+
+        // 1. AUX loopback (I8042_CMD_AUX_LOOP 0xD3): the byte must come back
+        //    from the AUX buffer (status bit 5 set).
+        kbd.write(KBD_COMMAND_PORT, 0xD3, 1);
+        kbd.write(KBD_DATA_PORT, 0x5A, 1);
+        let (loopback, from_aux) = wait_read(&mut kbd);
+        assert_eq!(loopback, 0x5A, "aux loopback must echo the byte");
+        assert!(from_aux, "loopback byte must carry the AUXB status bit");
+
+        // 2. AUX interface test (I8042_CMD_AUX_TEST 0xA9) -> 0x00.
+        kbd.write(KBD_COMMAND_PORT, 0xA9, 1);
+        let (aux_test, _) = wait_read(&mut kbd);
+        assert_eq!(aux_test, 0x00, "aux interface test must pass");
+
+        // 3. i8042_toggle_aux: disable (0xA7) then enable (0xA8), reading the
+        //    CCB each time to verify bit 5 tracks the state.
+        kbd.write(KBD_COMMAND_PORT, 0xA7, 1);
+        kbd.write(KBD_COMMAND_PORT, 0x20, 1);
+        let (ccb_off, _) = wait_read(&mut kbd);
+        assert_ne!(ccb_off & 0x20, 0, "CCB bit 5 must show aux disabled");
+        kbd.write(KBD_COMMAND_PORT, 0xA8, 1);
+        kbd.write(KBD_COMMAND_PORT, 0x20, 1);
+        let (ccb_on, _) = wait_read(&mut kbd);
+        assert_eq!(ccb_on & 0x20, 0, "CCB bit 5 must show aux enabled");
+
+        // 4. Mouse reset through the controller (0xD4-prefixed 0xFF):
+        //    ACK + BAT + mouse id, all from the AUX buffer.
+        kbd.write(KBD_COMMAND_PORT, 0xD4, 1);
+        kbd.write(KBD_DATA_PORT, 0xFF, 1);
+        let (ack, ack_aux) = wait_read(&mut kbd);
+        assert_eq!((ack, ack_aux), (0xFA, true), "mouse reset must ACK via AUX");
+        let (bat, _) = wait_read(&mut kbd);
+        assert_eq!(bat, 0xAA, "mouse BAT");
+        let (id, _) = wait_read(&mut kbd);
+        assert_eq!(id, 0x00, "standard PS/2 mouse id");
+
+        // 5. atkbd enable: re-enable the keyboard port, then send 0xF4 to the
+        //    keyboard device and expect an ACK.
+        kbd.write(KBD_COMMAND_PORT, 0xAE, 1);
+        kbd.write(KBD_DATA_PORT, 0xF4, 1);
+        let (kbd_ack, kbd_aux) = wait_read(&mut kbd);
+        assert_eq!(
+            (kbd_ack, kbd_aux),
+            (0xFA, false),
+            "keyboard enable must ACK from the keyboard buffer"
+        );
+    }
 }

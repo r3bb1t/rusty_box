@@ -4,7 +4,8 @@
 //! from `SharedDisplay` as an egui texture. Keyboard events are converted
 //! to PS/2 scancodes and pushed into the shared scancode queue.
 
-use super::keymap::char_to_scancode_sequence;
+use super::keymap::char_to_bx_key_sequence;
+use crate::iodev::scancodes::BxKey;
 use super::shared_display::SharedDisplay;
 
 use std::sync::{
@@ -120,7 +121,7 @@ impl RustyBoxApp {
     /// OS-level shift/layout handling). The Key handler covers non-printable keys
     /// and also serves as a fallback for letters when Text events aren't produced.
     fn process_input(&mut self, ctx: &egui::Context) {
-        let mut scancodes = Vec::new();
+        let mut keys: Vec<(BxKey, bool)> = Vec::new();
 
         ctx.input_mut(|i| {
             // Pass 1: check if any Text or Ime::Commit events exist in this frame.
@@ -140,26 +141,22 @@ impl RustyBoxApp {
                 match event {
                     egui::Event::Text(text) => {
                         for ch in text.chars() {
-                            let seq = char_to_scancode_sequence(ch);
-                            scancodes.extend_from_slice(&seq);
+                            keys.extend(char_to_bx_key_sequence(ch));
                         }
                         false
                     }
                     egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
                         for ch in text.chars() {
-                            let seq = char_to_scancode_sequence(ch);
-                            scancodes.extend_from_slice(&seq);
+                            keys.extend(char_to_bx_key_sequence(ch));
                         }
                         false
                     }
                     egui::Event::Key { key, pressed, .. } => {
-                        let seq = egui_key_to_scancodes(*key, *pressed);
-                        if !seq.is_empty() {
-                            scancodes.extend_from_slice(&seq);
+                        if let Some(bx_key) = egui_key_to_bx_key(*key) {
+                            keys.push((bx_key, *pressed));
                         } else if *pressed && !has_text_events {
                             if let Some(ch) = egui_key_to_char(*key) {
-                                let seq = char_to_scancode_sequence(ch);
-                                scancodes.extend_from_slice(&seq);
+                                keys.extend(char_to_bx_key_sequence(ch));
                             }
                         }
                         false
@@ -175,15 +172,15 @@ impl RustyBoxApp {
         // forwarded here: printable characters already carry their own shift in
         // `char_to_scancode_sequence`, and adding it again would double-shift.
         let mods = ctx.input(|i| i.modifiers);
-        push_modifier_scancode(&mut scancodes, self.prev_ctrl, mods.ctrl, 0x14);
-        push_modifier_scancode(&mut scancodes, self.prev_alt, mods.alt, 0x11);
+        push_modifier_key(&mut keys, self.prev_ctrl, mods.ctrl, BxKey::CtrlL);
+        push_modifier_key(&mut keys, self.prev_alt, mods.alt, BxKey::AltL);
         self.prev_ctrl = mods.ctrl;
         self.prev_alt = mods.alt;
         self.prev_shift = mods.shift;
 
-        if !scancodes.is_empty() {
+        if !keys.is_empty() {
             if let Ok(mut display) = self.shared.lock() {
-                display.pending_scancodes.extend_from_slice(&scancodes);
+                display.pending_keys.extend_from_slice(&keys);
             }
         }
     }
@@ -191,18 +188,16 @@ impl RustyBoxApp {
     /// Queue the PS/2 Set-2 sequence for Ctrl+Alt+Del. Needed because the host OS
     /// usually intercepts the real chord before egui sees it.
     pub fn send_ctrl_alt_del(&mut self) {
-        const CTRL_ALT_DEL: [u8; 11] = [
-            0x14, // Ctrl make
-            0x11, // Alt make
-            0xE0, 0x71, // Del make (extended)
-            0xE0, 0xF0, 0x71, // Del break (extended)
-            0xF0, 0x11, // Alt break
-            0xF0, 0x14, // Ctrl break
+        const CTRL_ALT_DEL: [(BxKey, bool); 6] = [
+            (BxKey::CtrlL, true),
+            (BxKey::AltL, true),
+            (BxKey::Delete, true),
+            (BxKey::Delete, false),
+            (BxKey::AltL, false),
+            (BxKey::CtrlL, false),
         ];
         if let Ok(mut display) = self.shared.lock() {
-            display
-                .pending_scancodes
-                .extend_from_slice(&CTRL_ALT_DEL);
+            display.pending_keys.extend_from_slice(&CTRL_ALT_DEL);
         }
     }
 
@@ -650,70 +645,53 @@ impl eframe::App for RustyBoxApp {
 ///
 /// Returns make codes for pressed=true, break codes (0xF0 + make) for pressed=false.
 /// Extended keys use 0xE0 prefix.
-fn egui_key_to_scancodes(key: egui::Key, pressed: bool) -> Vec<u8> {
-    // Map egui keys to PS/2 scancode set 2
-    let (extended, make_code) = match key {
-        egui::Key::Escape => (false, 0x76u8),
-        egui::Key::F1 => (false, 0x05),
-        egui::Key::F2 => (false, 0x06),
-        egui::Key::F3 => (false, 0x04),
-        egui::Key::F4 => (false, 0x0C),
-        egui::Key::F5 => (false, 0x03),
-        egui::Key::F6 => (false, 0x0B),
-        egui::Key::F7 => (false, 0x83),
-        egui::Key::F8 => (false, 0x0A),
-        egui::Key::F9 => (false, 0x01),
-        egui::Key::F10 => (false, 0x09),
-        egui::Key::F11 => (false, 0x78),
-        egui::Key::F12 => (false, 0x07),
-
-        egui::Key::Enter => (false, 0x5A),
-        egui::Key::Tab => (false, 0x0D),
-        egui::Key::Backspace => (false, 0x66),
-        egui::Key::Space => (false, 0x29),
-        egui::Key::Delete => (true, 0x71),
-        egui::Key::Insert => (true, 0x70),
-        egui::Key::Home => (true, 0x6C),
-        egui::Key::End => (true, 0x69),
-        egui::Key::PageUp => (true, 0x7D),
-        egui::Key::PageDown => (true, 0x7A),
-
-        egui::Key::ArrowUp => (true, 0x75),
-        egui::Key::ArrowDown => (true, 0x72),
-        egui::Key::ArrowLeft => (true, 0x6B),
-        egui::Key::ArrowRight => (true, 0x74),
-
-        // These keys are already handled by Text events for printable chars,
-        // so only handle them as special keys for key-down/up tracking.
-        // Don't generate scancodes here to avoid double-sending.
-        _ => return Vec::new(),
-    };
-
-    let mut seq = Vec::with_capacity(4);
-    if pressed {
-        if extended {
-            seq.push(0xE0);
-        }
-        seq.push(make_code);
-    } else {
-        if extended {
-            seq.push(0xE0);
-        }
-        seq.push(0xF0);
-        seq.push(make_code);
-    }
-    seq
+/// Map an egui key to the guest key it represents, so the keyboard controller
+/// can render it through the guest's active scancode set.
+fn egui_key_to_bx_key(key: egui::Key) -> Option<BxKey> {
+    Some(match key {
+        egui::Key::Escape => BxKey::Esc,
+        egui::Key::F1 => BxKey::F1,
+        egui::Key::F2 => BxKey::F2,
+        egui::Key::F3 => BxKey::F3,
+        egui::Key::F4 => BxKey::F4,
+        egui::Key::F5 => BxKey::F5,
+        egui::Key::F6 => BxKey::F6,
+        egui::Key::F7 => BxKey::F7,
+        egui::Key::F8 => BxKey::F8,
+        egui::Key::F9 => BxKey::F9,
+        egui::Key::F10 => BxKey::F10,
+        egui::Key::F11 => BxKey::F11,
+        egui::Key::F12 => BxKey::F12,
+        egui::Key::Enter => BxKey::Enter,
+        egui::Key::Tab => BxKey::Tab,
+        egui::Key::Backspace => BxKey::Backspace,
+        egui::Key::ArrowUp => BxKey::Up,
+        egui::Key::ArrowDown => BxKey::Down,
+        egui::Key::ArrowLeft => BxKey::Left,
+        egui::Key::ArrowRight => BxKey::Right,
+        egui::Key::Home => BxKey::Home,
+        egui::Key::End => BxKey::End,
+        egui::Key::PageUp => BxKey::PageUp,
+        egui::Key::PageDown => BxKey::PageDown,
+        egui::Key::Delete => BxKey::Delete,
+        egui::Key::Insert => BxKey::Insert,
+        egui::Key::Space => BxKey::Space,
+        _ => return None,
+    })
 }
+
 
 /// Append a PS/2 Set-2 make (key down) or break (key up) code for a modifier key
 /// when its state changed this frame. `make` is the Set-2 make byte
 /// (e.g. `0x14` = left Ctrl, `0x11` = left Alt, `0x12` = left Shift).
-fn push_modifier_scancode(scancodes: &mut Vec<u8>, was_down: bool, now_down: bool, make: u8) {
+/// Emit a press or release for a modifier whose state changed. egui reports
+/// Ctrl/Alt through `Modifiers` rather than `Key` events, so their edges are
+/// synthesized here.
+fn push_modifier_key(keys: &mut Vec<(BxKey, bool)>, was_down: bool, now_down: bool, key: BxKey) {
     if now_down && !was_down {
-        scancodes.push(make);
+        keys.push((key, true));
     } else if !now_down && was_down {
-        scancodes.push(0xF0);
-        scancodes.push(make);
+        keys.push((key, false));
     }
 }
 

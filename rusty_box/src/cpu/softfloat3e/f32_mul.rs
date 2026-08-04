@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case)]
 //! Float32 multiplication. Ported from Berkeley SoftFloat 3e f32_mul.c.
 
 use super::internals::*;
@@ -7,7 +6,7 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub(crate) fn f32_mul(a: float32, b: float32, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn f32_mul(a: Float32, b: Float32, status: &mut SoftFloatStatus) -> Float32 {
     let sign_a = sign_f32(a);
     let mut exp_a = exp_f32(a);
     let mut sig_a = frac_f32(a);
@@ -16,7 +15,7 @@ pub(crate) fn f32_mul(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
     let mut sig_b = frac_f32(b);
     let sign_z = sign_a ^ sign_b;
 
-    if softfloat_denormalsAreZeros(status) {
+    if softfloat_denormals_are_zeros(status) {
         if exp_a == 0 {
             sig_a = 0;
         }
@@ -26,9 +25,9 @@ pub(crate) fn f32_mul(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
     }
 
     // inf/NaN argument handling (goto infArg / propagateNaN).
-    let inf_arg = |sign_z: bool, mag_bits: u32, status: &mut SoftFloatStatus| -> float32 {
+    let inf_arg = |sign_z: bool, mag_bits: u32, status: &mut SoftFloatStatus| -> Float32 {
         if mag_bits == 0 {
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             FLOAT32_DEFAULT_NAN
         } else {
             pack_to_f32(sign_z, 0xFF, 0)
@@ -41,7 +40,7 @@ pub(crate) fn f32_mul(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
         }
         let mag_bits = (exp_b as u32) | sig_b;
         if sig_b != 0 && exp_b == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return inf_arg(sign_z, mag_bits, status);
     }
@@ -51,7 +50,7 @@ pub(crate) fn f32_mul(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
         }
         let mag_bits = (exp_a as u32) | sig_a;
         if sig_a != 0 && exp_a == 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return inf_arg(sign_z, mag_bits, status);
     }
@@ -59,11 +58,11 @@ pub(crate) fn f32_mul(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
     if exp_a == 0 {
         if sig_a == 0 {
             if sig_b != 0 && exp_b == 0 {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             return pack_to_f32(sign_z, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let ns = norm_subnormal_f32_sig(sig_a);
         exp_a = ns.exp;
         sig_a = ns.sig;
@@ -71,11 +70,11 @@ pub(crate) fn f32_mul(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
     if exp_b == 0 {
         if sig_b == 0 {
             if sig_a != 0 && exp_a == 0 {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             return pack_to_f32(sign_z, 0, 0);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let ns = norm_subnormal_f32_sig(sig_b);
         exp_b = ns.exp;
         sig_b = ns.sig;

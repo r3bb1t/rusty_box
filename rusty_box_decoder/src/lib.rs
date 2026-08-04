@@ -24,6 +24,9 @@ pub mod instruction;
 /// x86 opcode enumeration — one variant per distinct instruction form.
 pub mod opcode;
 
+/// Per-opcode CPUID/ISA feature gate, generated from Bochs `ia_opcodes.def`.
+pub mod opcode_isa;
+
 /// Type-safe instruction enum — each opcode variant carries exactly its operands.
 pub mod typed;
 

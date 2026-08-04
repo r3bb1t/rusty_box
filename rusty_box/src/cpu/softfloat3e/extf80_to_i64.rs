@@ -1,4 +1,3 @@
-#![allow(non_camel_case_types, dead_code, non_snake_case)]
 //! ExtFloat80 to i64 conversions.
 //! Ported from Berkeley SoftFloat 3e: extF80_to_i64.c, extF80_to_i64_r_minMag.c
 
@@ -8,15 +7,15 @@ use super::softfloat_types::*;
 use super::specialize::*;
 
 /// Convert extFloat80 to i64 using given rounding mode.
-pub fn extf80_to_i64(
-    a: floatx80,
+pub(in crate::cpu) fn extf80_to_i64(
+    a: ExtFloat80,
     rounding_mode: u8,
     exact: bool,
     status: &mut SoftFloatStatus,
 ) -> i64 {
     // Handle unsupported
     if extf80_is_unsupported(a) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return I64_FROM_NAN;
     }
 
@@ -28,7 +27,7 @@ pub fn extf80_to_i64(
     if shift_dist <= 0 {
         if shift_dist != 0 {
             // Too large
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return if (exp == 0x7FFF) && (sig & 0x7FFFFFFFFFFFFFFF) != 0 {
                 I64_FROM_NAN
             } else if sign {
@@ -46,10 +45,10 @@ pub fn extf80_to_i64(
 }
 
 /// Convert extFloat80 to i64 truncating toward zero.
-pub fn extf80_to_i64_round_to_zero(a: floatx80, exact: bool, status: &mut SoftFloatStatus) -> i64 {
+pub(in crate::cpu) fn extf80_to_i64_round_to_zero(a: ExtFloat80, exact: bool, status: &mut SoftFloatStatus) -> i64 {
     // Handle unsupported
     if extf80_is_unsupported(a) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return I64_FROM_NAN;
     }
 
@@ -59,7 +58,7 @@ pub fn extf80_to_i64_round_to_zero(a: floatx80, exact: bool, status: &mut SoftFl
 
     if shift_dist >= 64 {
         if exact && (exp as u64 | sig) != 0 {
-            softfloat_raiseFlags(status, FLAG_INEXACT);
+            softfloat_raise_flags(status, FLAG_INEXACT);
         }
         return 0;
     }
@@ -70,7 +69,7 @@ pub fn extf80_to_i64_round_to_zero(a: floatx80, exact: bool, status: &mut SoftFl
         if a.sign_exp == pack_to_extf80_sign_exp(true, 0x403E) && sig == 0x8000000000000000 {
             return i64::MIN;
         }
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return if (exp == 0x7FFF) && (sig & 0x7FFFFFFFFFFFFFFF) != 0 {
             I64_FROM_NAN
         } else if sign {
@@ -82,7 +81,7 @@ pub fn extf80_to_i64_round_to_zero(a: floatx80, exact: bool, status: &mut SoftFl
 
     let abs_z = (sig >> shift_dist) as i64;
     if exact && ((sig << ((-shift_dist) & 63)) != 0) {
-        softfloat_raiseFlags(status, FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_INEXACT);
     }
     if sign {
         -abs_z

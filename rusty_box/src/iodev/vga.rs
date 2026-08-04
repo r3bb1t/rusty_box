@@ -63,6 +63,27 @@ const VGA_TEXT_MEM_BASE_MONO: BxPhyAddress = 0xB0000;
 /// Layout: memory[offset * 4 + plane], where plane = 0..3
 const VGA_MEM_SIZE: usize = 0x40000;
 
+/// Number of DAC (PEL) colour registers.
+const PEL_COLOR_COUNT: usize = 256;
+
+/// Shift applied to 6-bit DAC components to reach 8-bit host colour.
+/// Bochs: `s.dac_shift = 2` (vgacore.cc init_standard_vga).
+const DAC_SHIFT: u8 = 2;
+
+/// Size of one character generator: 256 glyphs x 32 bytes.
+/// Bochs: the `Bit8u charmap[0x2000]` in `update_charmap` (vgacore.cc).
+const CHARMAP_SIZE: usize = 0x2000;
+
+/// Plane-2 offsets selected by sequencer register 3 (character map select).
+/// Bochs: `static const Bit16u charmap_offset[8]` (vgacore.cc).
+const CHARMAP_OFFSET: [u16; 8] = [
+    0x0000, 0x4000, 0x8000, 0xC000, 0x2000, 0x6000, 0xA000, 0xE000,
+];
+
+/// `vga_mem_updated` bit meaning "the character generator changed".
+/// Bochs: `s.vga_mem_updated |= 4` / `if ((s.vga_mem_updated & 4) > 0) update_charmap()`.
+const VGA_MEM_UPDATED_CHARMAP: u8 = 4;
+
 /// VGA clock frequencies in Hz (matching Bochs vgacore.cc)
 const VGA_VCLK: [u32; 4] = [25_175_000, 28_322_000, 25_175_000, 25_175_000];
 
@@ -355,6 +376,10 @@ pub(crate) struct VgaUpdateResult {
     pub(crate) fheight: u32,
     /// Font/char width in pixels (for dimension_update)
     pub(crate) fwidth: u32,
+    /// The character generator changed this frame; the GUI must re-copy both
+    /// charmaps. Bochs signals this to its GUI through `set_text_charmap`,
+    /// which sets `bx_gui_c::charmap_updated` and forces a full text redraw.
+    pub(crate) charmap_updated: bool,
 }
 
 #[cfg(feature = "alloc")]
@@ -591,6 +616,61 @@ pub(crate) struct BxVgaC {
     /// VGA enable (port 0x3C3) - bit 0 enables VGA display
     vga_enabled: bool,
 
+    /// Feature Control register: written via port 0x3BA/0x3DA (mono/color
+    /// emulation), read back at 0x3CA. Only bit 3 is retained.
+    /// Bochs: `s.feature_control` (vgacore.h); write `feature_control = value & 0x08`
+    /// and read `RETURN(s.feature_control)` (vgacore.cc).
+    feature_control: u8,
+
+    /// CRTC start address latched for the current frame.
+    /// Bochs: `s.CRTC.start_addr`, refreshed in `vertical_timer()` from CRTC
+    /// registers 0x0C/0x0D — the write handlers deliberately do nothing, so a
+    /// mid-frame change cannot tear the picture.
+    crtc_start_addr: u16,
+
+    /// Host microsecond stamp of the last vertical retrace, used as the phase
+    /// anchor for the 0x3DA status register.
+    /// Bochs: `s.display_start_usec`, re-anchored in `vertical_timer()`.
+    display_start_usec: u64,
+
+    /// DAC entries whose colour changed and have not yet been published to the
+    /// GUI. Bochs calls `bx_gui->palette_change_common(index, r << dac_shift,
+    /// ...)` synchronously from the PEL data write (vgacore.cc); the GUI is not
+    /// reachable from here, so the indices are queued and drained at the frame
+    /// boundary. A full-table republish is requested with `dac_all_dirty`.
+    dac_dirty: [bool; PEL_COLOR_COUNT],
+    dac_any_dirty: bool,
+
+    /// Sequencer "screen off / clear screen" request (register 1 bit 5).
+    /// Bochs: `s.sequencer.clear_screen` (vgacore.h), raised in the register-1
+    /// write and consumed by `skip_update()`.
+    seq_clear_screen: bool,
+
+    /// A `clear_screen()` owed to the GUI. `skip_update` returns early, so this
+    /// carries Bochs's `bx_gui->clear_screen()` call out to the frontend even on
+    /// frames that produce no update result.
+    pending_clear_screen: bool,
+
+    /// Plane-2 offsets of the two selectable character generators, derived from
+    /// sequencer register 3 through `CHARMAP_OFFSET`.
+    /// Bochs: `s.charmap_address1` / `s.charmap_address2` (vgacore.h).
+    charmap_address1: u16,
+    charmap_address2: u16,
+
+    /// The two extracted character generators (8KB each = 256 glyphs x 32
+    /// bytes). Bochs keeps these on the GUI side (`bx_gui_c::vga_charmap[2]`,
+    /// filled by `update_charmap()` -> `set_text_charmap`); here the device owns
+    /// the extraction and the GUI copies them when `charmap_updated` is set.
+    /// Derived entirely from planar memory + the two addresses, so they are not
+    /// snapshotted — a restore re-extracts them.
+    charmap: [[u8; CHARMAP_SIZE]; 2],
+
+    /// Doubled scanlines in classic graphics modes, derived from CRTC register
+    /// 0x09 (Maximum Scan Line). Bochs: `s.y_doublescan = ((value & 0x9f) > 0)`
+    /// (vgacore.cc CRTC write case 0x09); consumed when rendering rows and when
+    /// halving the line-compare (split screen).
+    y_doublescan: bool,
+
     /// PEL mask register (port 0x3C6)
     pel_mask: u8,
 
@@ -764,7 +844,10 @@ impl BxVgaC {
             attr_flip_flop: false,
             attr_regs: [0; 21],
             seq_index: 0,
-            seq_regs: [0; 5],
+            // Bochs init_standard_vga(): s.sequencer.reset1 = reset2 = 1, which
+            // reads back from sequencer register 0 as 0x03. skip_update() gates
+            // on both, so they must start released.
+            seq_regs: [0x03, 0, 0, 0, 0],
             graphics_index: 0,
             graphics_regs: [0; 9],
             status_reg: 0x00,
@@ -789,7 +872,19 @@ impl BxVgaC {
 
             // VGA Enable and PEL/DAC registers
             vga_enabled: true, // VGA enabled by default
-            pel_mask: 0xFF,    // All palette entries visible
+            // Bochs init_standard_vga(): s.feature_control = 0
+            feature_control: 0,
+            crtc_start_addr: 0,
+            display_start_usec: 0,
+            dac_dirty: [false; PEL_COLOR_COUNT],
+            dac_any_dirty: false,
+            seq_clear_screen: false,
+            pending_clear_screen: false,
+            charmap_address1: 0,
+            charmap_address2: 0,
+            charmap: [[0u8; CHARMAP_SIZE]; 2],
+            y_doublescan: false,
+            pel_mask: 0xFF, // All palette entries visible
             dac_state: 0x01,   // Initial state
             pel_write_addr: 0,
             pel_read_addr: 0,
@@ -826,7 +921,10 @@ impl BxVgaC {
             has_icount_sync: false,
             ips: 15_000_000, // Default 15 MIPS
 
-            video_enabled: false, // PAS bit, set by 0x3C0 address writes
+            // Bochs init_standard_vga(): s.attribute_ctrl.video_enabled = 1.
+            // skip_update() gates on this, so a `false` default would blank the
+            // console until the guest first wrote 0x3C0.
+            video_enabled: true,
 
             // VBE state (defaults via VbeState::default())
             vbe,
@@ -1068,7 +1166,10 @@ impl BxVgaC {
         let vbe_len = snapshot_v3_usize_len(self.vbe_memory.len())?;
 
         // Section version plus the scalar state written before every array.
-        let mut len = checked_snapshot_len_add(4, 84)?;
+        // 90 = 84 + feature_control (u8) + y_doublescan (bool)
+        //         + charmap_address1/2 (2 x u16). The extracted charmap buffers
+        //         are derived from planar memory and re-extracted on restore.
+        let mut len = checked_snapshot_len_add(4, 90)?;
         for array_len in [
             pci_len,
             snapshot_v3_usize_len(self.crtc_regs.len())?,
@@ -1148,6 +1249,12 @@ impl BxVgaC {
 
         writer.write_u32(self.ext_start_addr)?;
         let mapping_target = self.snapshot_v3_mapping_target();
+        // Bochs registers both in its VGA state list (vgacore.cc register_state:
+        // "feature_control" and BXRS_PARAM_BOOL y_doublescan).
+        writer.write_u8(self.feature_control as u8)?;
+        writer.write_bool(self.y_doublescan)?;
+        writer.write_u16(self.charmap_address1)?;
+        writer.write_u16(self.charmap_address2)?;
         writer.write_bool(self.ext_y_dblsize)?;
         writer.write_bool(self.pci_enabled)?;
         writer.write_u32(mapping_target.lfb_base)?;
@@ -1250,6 +1357,10 @@ impl BxVgaC {
             ddc_enabled: reader.read_bool()?,
         };
         let ext_start_addr = reader.read_u32()?;
+        let feature_control = reader.read_u8()?;
+        let y_doublescan = reader.read_bool()?;
+        let charmap_address1 = reader.read_u16()?;
+        let charmap_address2 = reader.read_u16()?;
         let ext_y_dblsize = reader.read_bool()?;
         let pci_enabled = reader.read_bool()?;
         let target = VgaSnapshotRestoreTarget {
@@ -1348,6 +1459,13 @@ impl BxVgaC {
         self.vbe.dac_8bit = saved_vbe.dac_8bit;
         self.vbe.ddc_enabled = saved_vbe.ddc_enabled;
         self.ext_start_addr = ext_start_addr;
+        self.feature_control = feature_control;
+        self.y_doublescan = y_doublescan;
+        self.charmap_address1 = charmap_address1;
+        self.charmap_address2 = charmap_address2;
+        // Re-derive the character generators from the restored planar memory
+        // (Bochs likewise rebuilds them from state rather than storing glyphs).
+        self.update_charmap();
         self.ext_y_dblsize = ext_y_dblsize;
         self.pending_lfb_relocate = None;
         self.pending_mmio_base = None;
@@ -1868,13 +1986,21 @@ impl BxVgaC {
     }
 
     /// Read from I/O port
-    pub(crate) fn read_port(&mut self, port: u16, _io_len: u8, icount: u64) -> u32 {
+    pub(crate) fn read_port(&mut self, port: u16, io_len: u8, icount: u64) -> u32 {
         // Bochs vgacore.cc: port gating based on color_emulation
         if (0x3B0..=0x3BF).contains(&port) && self.misc_color_emulation {
             return 0xFF; // mono ports disabled in color mode
         }
         if (0x3D0..=0x3DF).contains(&port) && !self.misc_color_emulation {
             return 0xFF; // color ports disabled in mono mode
+        }
+        // Bochs vgacore.cc read: a 16-bit access is two byte reads combined
+        // (low | high<<8) — e.g. inw(0x3D4) returns index | data<<8. The VBE
+        // dispi ports return their full 16-bit value and must not be split.
+        if io_len == 2 && port != VBE_DISPI_IOPORT_INDEX && port != VBE_DISPI_IOPORT_DATA {
+            let lo = self.read_port(port, 1, icount);
+            let hi = self.read_port(port.wrapping_add(1), 1, icount);
+            return lo | (hi << 8);
         }
         match port {
             VBE_DISPI_IOPORT_INDEX => self.vbe.curindex as u32,
@@ -1898,9 +2024,14 @@ impl BxVgaC {
                 // bit 0: Display Enable (1 = in blanking period)
                 // bit 3: Vertical Retrace (1 = in vertical retrace)
                 let retval = if self.has_icount_sync && self.vtotal_usec > 0 {
-                    // Timing-based retrace matching Bochs vgacore.cc
+                    // Timing-based retrace matching Bochs vgacore.cc:
+                    //   display_usec = time_usec() - s.display_start_usec;
+                    //   display_usec %= s.vtotal_usec;
+                    // The anchor is re-set at each vertical retrace by
+                    // vertical_timer(), phase-locking the waveform to the frame.
                     let time_usec = self.current_usec(icount);
-                    let display_usec = time_usec % self.vtotal_usec as u64;
+                    let display_usec = time_usec.wrapping_sub(self.display_start_usec)
+                        % self.vtotal_usec as u64;
                     let mut r = 0u8;
                     // Vertical retrace (bit 3)
                     if display_usec >= self.vrstart_usec as u64
@@ -1966,8 +2097,9 @@ impl BxVgaC {
             }
             VGA_MISC_OUTPUT => self.misc_output as u32,
 
-            // Misc Output Write port - write-only, return 0xFF on read
-            VGA_MISC_OUTPUT_WRITE => 0xFF,
+            // 0x3C2 is Input Status 0 on read (the Misc Output *write* port).
+            // Bochs vgacore.cc read: RETURN(0).
+            VGA_MISC_OUTPUT_WRITE => 0x00,
 
             // VGA Enable
             VGA_ENABLE => self.vga_enabled as u32,
@@ -1997,8 +2129,16 @@ impl BxVgaC {
                 }
             }
 
+            // Feature Control read-back. Bochs vgacore.cc read case 0x03ca:
+            // RETURN(s.feature_control).
+            0x3CA => self.feature_control as u32,
+
             // EGA compatibility ports - return 0
-            0x3CA | 0x3CB | 0x3CD => 0x00,
+            0x3CB | 0x3CD => 0x00,
+
+            // Bochs vgacore.cc read case 0x03db: RETURN(0) — the high byte of a
+            // 16-bit read from 0x03DA lands here and must read 0, not 0xFF.
+            0x3DB => 0x00,
 
             _ => 0xFF,
         }
@@ -2073,15 +2213,20 @@ impl BxVgaC {
                             (cursor_addr as usize % BYTES_PER_ROW) / BYTES_PER_CHAR,
                         );
                         self.vga_mem_updated |= 1;
-                    } else if index == CRTC_START_ADDR_HIGH || index == CRTC_START_ADDR_LOW {
-                        self.text_buffer_update = true;
                     }
+                    // CRTC 0x0C/0x0D deliberately have no immediate effect:
+                    // Bochs vgacore.cc notes "Start address change handled in
+                    // vertical_timer()", which latches it once per frame.
 
                     // Recalculate retrace timing and force redraws for register-only
                     // display shape changes. Bochs vgacore.cc write_handler marks
                     // needs_update for these CRTC writes and redraws the visible area.
                     match index {
-                        CRTC_END_HORIZ_BLANK
+                        // Bochs vgacore.cc recalcs on CR0 (htotal) and CR2 (hbstart)
+                        // too — get_crtc_params/calculate_retrace_timing read them.
+                        CRTC_HORIZ_TOTAL
+                        | CRTC_START_HORIZ_BLANK
+                        | CRTC_END_HORIZ_BLANK
                         | CRTC_END_HORIZ_RETRACE
                         | CRTC_VERT_TOTAL
                         | CRTC_OVERFLOW
@@ -2091,6 +2236,15 @@ impl BxVgaC {
                             self.calculate_retrace_timing();
                         }
                         _ => {}
+                    }
+
+                    // Bochs vgacore.cc CRTC write case 0x09:
+                    //   s.y_doublescan = ((value & 0x9f) > 0);
+                    // (bit 7 = line-compare bit 9 and bit 5 = start-address bit
+                    // are excluded; any of the max-scan-line bits or bit 7's
+                    // 0x80 companion doubles the rows).
+                    if index == CRTC_MAX_SCAN_LINE {
+                        self.y_doublescan = (value & 0x9F) > 0;
                     }
 
                     match index {
@@ -2129,17 +2283,44 @@ impl BxVgaC {
                 } else {
                     // Data mode (flip_flop=true): Bochs flip_flop==1
                     // Write to the attribute register selected by attr_index
-                    if self.attr_index < 21 {
-                        self.attr_regs[self.attr_index as usize] = value;
+                    // Bochs vgacore.cc write case 0x03c0 data-write mode: each
+                    // register keeps only its defined bits, and a change to the
+                    // palette / plane-enable / pel-panning / color-select
+                    // registers sets needs_update, which ends in a full
+                    // vga_redraw_area(0, 0, last_xres, last_yres).
+                    let index = self.attr_index as usize;
+                    if index < 21 {
+                        let old_value = self.attr_regs[index];
+                        let (stored, redraw) = match index {
+                            // Internal palette registers 0x00-0x0F.
+                            0x00..=0x0F => (value, value != old_value),
+                            // 0x10 mode control: bit 7 (internal palette size)
+                            // change forces a redraw; bit 2 (line graphics) marks
+                            // the charmap dirty, which rusty folds into the same
+                            // redraw since it has no separate charmap channel.
+                            0x10 => (value, (value ^ old_value) & 0x84 != 0),
+                            // 0x11 overscan color: 6 bits, no redraw in Bochs.
+                            0x11 => (value & 0x3F, false),
+                            // 0x12 color plane enable, 0x13 horizontal pel
+                            // panning, 0x14 color select: 4 bits, always redraw.
+                            0x12 | 0x13 | 0x14 => (value & 0x0F, true),
+                            _ => (value, false),
+                        };
+                        self.attr_regs[index] = stored;
+                        if redraw {
+                            self.vga_mem_updated = 1;
+                            self.text_buffer_update = true;
+                            #[cfg(feature = "alloc")]
+                            self.redraw_current_legacy_area();
+                        }
                     }
                 }
                 self.attr_flip_flop = !self.attr_flip_flop;
             }
-            VGA_ATTRIB_DATA
-                // Writing to 0x3C1 is not standard, but some code may try
-                if self.attr_index < 21 => {
-                    self.attr_regs[self.attr_index as usize] = value;
-                }
+            // Bochs vgacore.cc write: 0x3C1 (Attribute Data READ port) is not a
+            // write target — writes fall through to the ignore path. Attribute
+            // registers are written only via the 0x3C0 flip-flop data phase above.
+            VGA_ATTRIB_DATA => {}
             VGA_SEQ_INDEX => {
                 // Bochs vgacore.cc write: sequencer index is stored unmasked
                 // (`s.sequencer.index = value;`). Out-of-range DATA writes are
@@ -2148,20 +2329,73 @@ impl BxVgaC {
             }
             VGA_SEQ_DATA
                 if self.seq_index < 5 => {
-                    self.seq_regs[self.seq_index as usize] = value;
+                    // Bochs vgacore.cc write case 0x03c5 keeps each sequencer
+                    // register as decomposed fields, so a read-back only exposes
+                    // the bits it retained. Reproduce that by masking on store.
+                    let old_value = self.seq_regs[self.seq_index as usize];
                     match self.seq_index {
+                        0 => {
+                            // Reset register. Bochs: on the reset1 falling edge
+                            // (bit 0 going 1 -> 0) the character-map selection is
+                            // reset and the charmap is marked dirty.
+                            if (old_value & 0x01) != 0 && (value & 0x01) == 0 {
+                                self.seq_regs[SEQ_REG_CHAR_MAP_SELECT] = 0;
+                                self.charmap_address1 = 0;
+                                self.charmap_address2 = 0;
+                                self.vga_mem_updated |= VGA_MEM_UPDATED_CHARMAP;
+                            }
+                            // Read-back is reset1 | reset2<<1.
+                            self.seq_regs[0] = value & 0x03;
+                        }
                         1 => {
-                            // Clocking mode: recalculate retrace if dot clock or char width changed
-                            // Bochs vgacore.cc
-                            self.calculate_retrace_timing();
+                            // Clocking mode. Bochs recalculates the retrace timing
+                            // and forces a redraw only when one of the bits in
+                            // 0x29 changes (dot-clock/2, screen-off, 8/9 dot).
+                            if (value ^ old_value) & 0x29 != 0 {
+                                self.seq_regs[1] = value & 0x3D;
+                                // Bochs: s.sequencer.clear_screen = ((value & 0x20) > 0)
+                                self.seq_clear_screen = (value & 0x20) != 0;
+                                self.calculate_retrace_timing();
+                                self.vga_mem_updated = 1;
+                                #[cfg(feature = "alloc")]
+                                self.redraw_current_legacy_area();
+                            } else {
+                                self.seq_regs[1] = value & 0x3D;
+                            }
+                        }
+                        // Map mask: only the 4 plane-enable bits are kept.
+                        2 => self.seq_regs[2] = value & 0x0F,
+                        3 => {
+                            // Character map select. Bochs derives two 3-bit map
+                            // indices from the interleaved bit layout and looks
+                            // their plane-2 offsets up in charmap_offset[].
+                            self.seq_regs[3] = value & 0x3F;
+                            let mut charmap1 = value & 0x13;
+                            if charmap1 > 3 {
+                                charmap1 = (charmap1 & 3) + 4;
+                            }
+                            let mut charmap2 = (value & 0x2C) >> 2;
+                            if charmap2 > 3 {
+                                charmap2 = (charmap2 & 3) + 4;
+                            }
+                            // Bochs only applies the selection when the CRTC
+                            // maximum-scan-line register is non-zero (i.e. a text
+                            // mode with a real character height).
+                            if self.crtc_regs[CRTC_MAX_SCAN_LINE] > 0 {
+                                self.charmap_address1 = CHARMAP_OFFSET[charmap1 as usize];
+                                self.charmap_address2 = CHARMAP_OFFSET[charmap2 as usize];
+                                self.vga_mem_updated |= VGA_MEM_UPDATED_CHARMAP;
+                            }
                         }
                         4 => {
-                            // Track chain_four and odd_even_dis from memory mode register
-                            // (Bochs vgacore.cc seq register 4 write handler)
+                            // Memory mode. Bochs keeps only extended_mem (bit 1),
+                            // odd_even_dis (bit 2) and chain_four (bit 3), and its
+                            // read-back recomposes exactly those.
+                            self.seq_regs[4] = value & 0x0E;
                             self.seq_chain_four = (value & 0x08) != 0;
                             self.seq_odd_even_dis = (value & 0x04) != 0;
                         }
-                        _ => {}
+                        _ => self.seq_regs[self.seq_index as usize] = value,
                     }
                 }
             VGA_GRAPHICS_INDEX => {
@@ -2267,10 +2501,22 @@ impl BxVgaC {
                 self.pel_write_cycle += 1;
                 if self.pel_write_cycle >= PEL_CYCLES_PER_COLOR {
                     self.pel_write_cycle = 0;
+                    // Bochs vgacore.cc publishes the completed DAC entry to the
+                    // GUI here: palette_change_common(write_data_register,
+                    // red << dac_shift, green << dac_shift, blue << dac_shift).
+                    self.dac_dirty[color_index as usize] = true;
+                    self.dac_any_dirty = true;
                     self.pel_write_addr = self.pel_write_addr.wrapping_add(1);
                     #[cfg(feature = "alloc")]
                     self.redraw_area(0, 0, self.last_xres, self.last_yres);
                 }
+            }
+
+            // Feature Control (mono/color emulation). Bochs vgacore.cc write
+            // cases 0x03ba/0x03da: `s.feature_control = value & 0x08` — the
+            // register is otherwise inert ("ignoring: feature ctrl & vert sync").
+            VGA_STATUS | VGA_STATUS_MONO => {
+                self.feature_control = value & 0x08;
             }
 
             // EGA compatibility ports - ignore writes
@@ -2317,8 +2563,9 @@ impl BxVgaC {
         // Our text_memory is flat: [char0, attr0, char1, attr1, ...] at offsets
         // (physical_addr & 0x7FFF). For 80x25 mode, each row is 160 bytes.
         // CRTC start address is in character cells (words).
-        let start_addr_words = ((self.crtc_regs[CRTC_START_ADDR_HIGH] as u16) << 8)
-            | (self.crtc_regs[CRTC_START_ADDR_LOW] as u16);
+        // Bochs renderers read the per-frame latch (s.CRTC.start_addr), not the
+        // live registers, so a mid-frame write cannot tear the picture.
+        let start_addr_words = self.crtc_start_addr;
         let start_address = (start_addr_words as usize) * BYTES_PER_CHAR;
 
         let mem_mask = VGA_TEXT_MEM_SIZE - 1; // 0x7fff
@@ -2571,9 +2818,8 @@ impl BxVgaC {
         if !graphics_alpha {
             return;
         }
-        let start_addr = (((self.crtc_regs[CRTC_START_ADDR_HIGH] as u32) << 8)
-            | self.crtc_regs[CRTC_START_ADDR_LOW] as u32)
-            .wrapping_add(self.ext_start_addr);
+        // Bochs uses the per-frame latch here too (s.CRTC.start_addr).
+        let start_addr = (self.crtc_start_addr as u32).wrapping_add(self.ext_start_addr);
         let shift = (self.graphics_regs[GFX_REG_GRAPHICS_MODE] >> 5) & 0x03;
         let mut line_offset = self.legacy_line_offset();
         if shift >= 2 && (self.crtc_regs[0x17] & 0x40) != 0 {
@@ -2599,6 +2845,11 @@ impl BxVgaC {
         if width == 0 || height == 0 {
             return None;
         }
+        // Bochs vgacore.cc update(): the graphics branch also bails out through
+        // skip_update() once the dimensions are known.
+        if self.skip_update() {
+            return None;
+        }
         let dimension_changed =
             width != self.last_xres || height != self.last_yres || self.last_bpp > 8;
         if dimension_changed {
@@ -2610,9 +2861,8 @@ impl BxVgaC {
             self.redraw_area(0, 0, width, height);
         }
 
-        let start_addr = (((self.crtc_regs[CRTC_START_ADDR_HIGH] as u32) << 8)
-            | self.crtc_regs[CRTC_START_ADDR_LOW] as u32)
-            .wrapping_add(self.ext_start_addr);
+        // Bochs uses the per-frame latch here too (s.CRTC.start_addr).
+        let start_addr = (self.crtc_start_addr as u32).wrapping_add(self.ext_start_addr);
         let line_offset = self.legacy_line_offset().max(1);
         let line_compare = {
             let lc = self.crtc_regs[CRTC_LINE_COMPARE] as u16
@@ -2626,7 +2876,9 @@ impl BxVgaC {
                 } else {
                     0
                 };
-            if self.ext_y_dblsize {
+            // Bochs vgacore.cc update(): `if (s.y_doublescan) line_compare >>= 1;`
+            // — the split-screen line compare is in doubled rows.
+            if self.y_doublescan {
                 lc >> 1
             } else {
                 lc
@@ -2654,7 +2906,9 @@ impl BxVgaC {
                 let mut rgba = vec![0u8; (tile_width * tile_height * 4) as usize];
                 for r in 0..tile_height {
                     let mut y = yc + r;
-                    if self.ext_y_dblsize {
+                    // Bochs vgacore.cc update(): `if (s.y_doublescan) y >>= 1;`
+                    // — two consecutive screen rows share one memory row.
+                    if self.y_doublescan {
                         y >>= 1;
                     }
                     for c in 0..tile_width {
@@ -2885,6 +3139,128 @@ impl BxVgaC {
         })
     }
 
+    /// Vertical retrace: latch the frame's start address and re-anchor the
+    /// 0x3DA phase.
+    ///
+    /// Bochs `bx_vgacore_c::vertical_timer()` (vgacore.cc):
+    ///   prev = s.CRTC.start_addr;
+    ///   s.CRTC.start_addr = (CRTC.reg[0x0c] << 8) | CRTC.reg[0x0d];
+    ///   if changed -> redraw (graphics: vga_redraw_area, text: vga_mem_updated |= 1)
+    ///   s.display_start_usec = current time
+    ///
+    /// Returns whether the start address moved, so the caller can force the
+    /// redraw Bochs performs for the graphics path.
+    pub(crate) fn vertical_timer(&mut self, now_usec: u64) -> bool {
+        let previous = self.crtc_start_addr;
+        self.crtc_start_addr = ((self.crtc_regs[CRTC_START_ADDR_HIGH] as u16) << 8)
+            | self.crtc_regs[CRTC_START_ADDR_LOW] as u16;
+        let changed = self.crtc_start_addr != previous;
+        if changed {
+            self.vga_mem_updated |= 1;
+            self.text_buffer_update = true;
+        }
+        self.display_start_usec = now_usec;
+        changed
+    }
+
+    /// Period of the vertical retrace in microseconds, for arming the vertical
+    /// timer (Bochs `s.vtotal_usec`). Zero before the retrace timing is known.
+    pub(crate) fn vertical_period_usec(&self) -> u32 {
+        self.vtotal_usec
+    }
+
+    /// Whether this frame's screen update must be skipped.
+    ///
+    /// Bochs `bx_vgacore_c::skip_update()` (vgacore.cc): services a pending
+    /// sequencer clear-screen request, then skips while the VGA or the video
+    /// output is disabled, while the attribute controller and graphics
+    /// controller disagree about graphics-vs-alpha (a mode set in progress),
+    /// while either sequencer reset line is asserted, or while the screen-off
+    /// bit (register 1 bit 5) is set.
+    ///
+    /// Bochs's additional "skip during the vertical retrace window" test is
+    /// guarded by `if (!update_mode_vsync)`, and `update_mode_vsync` is true in
+    /// its default configuration (`vga_update_freq` = 0), where the update is
+    /// driven by the vertical timer instead. rusty_box drives `update()` from
+    /// the GUI frame loop, i.e. the same vsync-driven shape, so that branch is
+    /// bypassed here exactly as it is upstream.
+    fn skip_update(&mut self) -> bool {
+        // Bochs: handle clear screen request from the sequencer.
+        if self.seq_clear_screen {
+            self.pending_clear_screen = true;
+            self.seq_clear_screen = false;
+        }
+
+        let reset1 = (self.seq_regs[SEQ_REG_RESET] & 0x01) != 0;
+        let reset2 = (self.seq_regs[SEQ_REG_RESET] & 0x02) != 0;
+        let screen_off = (self.seq_regs[SEQ_REG_CLOCKING_MODE] & 0x20) != 0;
+        // attribute_ctrl.mode_ctrl.graphics_alpha is bit 0 of attribute reg 0x10.
+        let actl_graphics_alpha = (self.attr_regs[0x10] & 0x01) != 0;
+        let gfx_graphics_alpha = (self.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
+
+        !self.vga_enabled
+            || !self.video_enabled
+            || actl_graphics_alpha != gfx_graphics_alpha
+            || !reset2
+            || !reset1
+            || screen_off
+    }
+
+    /// Drain the DAC entries whose colour changed, as `(index, r, g, b)` with
+    /// the values already shifted from the 6-bit DAC to 8-bit like Bochs's
+    /// `dac_shift` of 2.
+    pub(crate) fn take_dac_palette_changes(&mut self) -> impl Iterator<Item = (u8, u8, u8, u8)> + '_ {
+        let any = core::mem::take(&mut self.dac_any_dirty);
+        (0..PEL_COLOR_COUNT).filter_map(move |i| {
+            if !any || !core::mem::take(&mut self.dac_dirty[i]) {
+                return None;
+            }
+            let entry = self.pel_data[i];
+            Some((
+                i as u8,
+                entry[0] << DAC_SHIFT,
+                entry[1] << DAC_SHIFT,
+                entry[2] << DAC_SHIFT,
+            ))
+        })
+    }
+
+    /// Take a pending `clear_screen()` owed to the GUI (Bochs calls
+    /// `bx_gui->clear_screen()` directly from `skip_update`).
+    pub(crate) fn take_pending_clear_screen(&mut self) -> bool {
+        core::mem::take(&mut self.pending_clear_screen)
+    }
+
+    /// Re-extract both character generators from plane 2 of planar memory.
+    ///
+    /// Bochs `bx_vgacore_c::update_charmap()` (vgacore.cc): glyph bytes live in
+    /// plane 2, so byte `i` of a map is `memory[(address << 2) + i * 4 + 2]`.
+    /// When both maps select the same address Bochs publishes the SAME buffer as
+    /// map 1 — which is what makes the attribute bit-3 font select harmless in
+    /// the usual single-font case.
+    fn update_charmap(&mut self) {
+        let mut addr = (self.charmap_address1 as usize) << 2;
+        for i in 0..CHARMAP_SIZE {
+            self.charmap[0][i] = vga_storage_get(self, (addr + 2) & (VGA_MEM_SIZE - 1));
+            addr += 4;
+        }
+        if self.charmap_address2 != self.charmap_address1 {
+            let mut addr = ((self.charmap_address2 as usize) << 2) + 2;
+            for i in 0..CHARMAP_SIZE {
+                self.charmap[1][i] = vga_storage_get(self, addr & (VGA_MEM_SIZE - 1));
+                addr += 4;
+            }
+        } else {
+            self.charmap[1] = self.charmap[0];
+        }
+    }
+
+    /// One of the two extracted character generators (0 or 1), as raw VGA glyph
+    /// bitmaps: 32 bytes per glyph, each byte MSB-first (bit 7 = leftmost pixel).
+    pub(crate) fn charmap(&self, map: usize) -> &[u8; CHARMAP_SIZE] {
+        &self.charmap[map & 1]
+    }
+
     #[cfg(feature = "alloc")]
     pub(crate) fn update(&mut self) -> Option<VgaDisplayUpdate> {
         if self.vbe.enabled != 0 {
@@ -2940,13 +3316,28 @@ impl BxVgaC {
             return None;
         }
 
+        // Bochs vgacore.cc update(): `if ((s.vga_mem_updated & 4) > 0) update_charmap();`
+        // — re-extract the character generators before drawing the frame.
+        let charmap_updated = (self.vga_mem_updated & VGA_MEM_UPDATED_CHARMAP) != 0;
+        if charmap_updated {
+            self.vga_mem_updated &= !VGA_MEM_UPDATED_CHARMAP;
+            self.update_charmap();
+        }
+
+        // Bochs vgacore.cc update(): `if (skip_update()) return;` — no frame is
+        // drawn while the display is disabled or a mode set is in progress.
+        if self.skip_update() {
+            return None;
+        }
+
         // Keep a copy of the previous snapshot for the GUI diff.
         // We'll update `self.text_snapshot` to the new state at the end of this call.
         let old_snapshot = self.text_snapshot.clone();
 
-        // Calculate text mode parameters (matching vgacore.cc)
-        let start_addr = ((self.crtc_regs[CRTC_START_ADDR_HIGH] as u16) << 8)
-            | (self.crtc_regs[CRTC_START_ADDR_LOW] as u16);
+        // Calculate text mode parameters (matching vgacore.cc). The start
+        // address comes from the per-frame latch, as in Bochs's renderers
+        // (`tm_info.start_address = (s.CRTC.start_addr << 1)`).
+        let start_addr = self.crtc_start_addr;
         let start_address = start_addr << 1;
 
         let cs_start = self.crtc_regs[CRTC_CURSOR_START] & CRTC_CURSOR_START_MASK;
@@ -2992,7 +3383,8 @@ impl BxVgaC {
         // Build palette (matching vgacore.cc)
         let mut actl_palette = [0u8; 16];
         for (i, palette) in actl_palette.iter_mut().enumerate() {
-            *palette = self.attr_regs[i] & 0x0f; // Simplified - no pel.mask for now
+            // Bochs vgacore.cc update(): actl_palette[i] = palette_reg[i] & pel.mask
+            *palette = self.attr_regs[i] & self.pel_mask;
         }
 
         // Calculate rows and cols (matching vgacore.cc)
@@ -3115,6 +3507,7 @@ impl BxVgaC {
             iheight: i_height,
             fheight: fh,
             fwidth: c_width,
+            charmap_updated,
         })
     }
 }
@@ -3190,8 +3583,13 @@ impl BxVgaC {
                     if current_addr >= self.vbe.base_address as BxPhyAddress {
                         let offset = current_addr - self.vbe.base_address as BxPhyAddress;
                         if self.seq_chain_four && offset < 0x40000 {
-                            let wrapped = VGA_WINDOW_GRAPHICS_BASE + (offset & 0x1ffff);
-                            *byte = vga_mem_read_byte(self, wrapped);
+                            // Bochs vga.cc mem_read: chain-4 LFB accesses go
+                            // straight to bx_vgacore_c::mem_read(offset) with the
+                            // raw offset — the full 256KB is addressable. Wrapping
+                            // to 128KB and re-entering at the legacy window base
+                            // re-applied window gating (mapping 1 returns 0xFF past
+                            // 64KB and 128-256KB aliased downward).
+                            *byte = vga_mem_read_byte(self, offset);
                         } else {
                             *byte = 0xff;
                         }
@@ -3223,8 +3621,11 @@ impl BxVgaC {
                     if current_addr >= self.vbe.base_address as BxPhyAddress {
                         let offset = current_addr - self.vbe.base_address as BxPhyAddress;
                         if self.seq_chain_four && offset < 0x40000 {
-                            let wrapped = VGA_WINDOW_GRAPHICS_BASE + (offset & 0x1ffff);
-                            vga_mem_write_byte(self, wrapped, value);
+                            // Bochs vga.cc mem_write: chain-4 LFB writes go
+                            // straight to bx_vgacore_c::mem_write(offset, value)
+                            // with the raw offset (full 256KB), not wrapped to
+                            // 128KB through the legacy window.
+                            vga_mem_write_byte(self, offset, value);
                         }
                         continue;
                     }
@@ -4859,6 +5260,9 @@ mod tests {
         vga.seq_odd_even_dis = true;
         vga.graphics_regs[GFX_REG_MISC] =
             GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
+        // Attribute controller mode control bit 0 must agree with the graphics
+        // controller, or Bochs skip_update() treats it as a mode set in flight.
+        vga.attr_regs[0x10] |= 0x01;
 
         write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
@@ -4877,6 +5281,9 @@ mod tests {
         vga.seq_odd_even_dis = true;
         vga.graphics_regs[GFX_REG_MISC] =
             GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
+        // Attribute controller mode control bit 0 must agree with the graphics
+        // controller, or Bochs skip_update() treats it as a mode set in flight.
+        vga.attr_regs[0x10] |= 0x01;
 
         write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
@@ -4894,6 +5301,9 @@ mod tests {
         vga.seq_regs[SEQ_REG_MAP_MASK] = 0x01;
         vga.graphics_regs[GFX_REG_MISC] =
             GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
+        // Attribute controller mode control bit 0 must agree with the graphics
+        // controller, or Bochs skip_update() treats it as a mode set in flight.
+        vga.attr_regs[0x10] |= 0x01;
         vga.graphics_regs[GFX_REG_BIT_MASK] = 0xff;
         vga.graphics_regs[GFX_REG_READ_MAP_SELECT] = 0;
 
@@ -4915,6 +5325,9 @@ mod tests {
         vga.seq_odd_even_dis = true;
         vga.graphics_regs[GFX_REG_MISC] =
             GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
+        // Attribute controller mode control bit 0 must agree with the graphics
+        // controller, or Bochs skip_update() treats it as a mode set in flight.
+        vga.attr_regs[0x10] |= 0x01;
 
         write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
@@ -4937,6 +5350,9 @@ mod tests {
         vga.seq_odd_even_dis = true;
         vga.graphics_regs[GFX_REG_MISC] =
             GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
+        // Attribute controller mode control bit 0 must agree with the graphics
+        // controller, or Bochs skip_update() treats it as a mode set in flight.
+        vga.attr_regs[0x10] |= 0x01;
 
         write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
@@ -4986,6 +5402,9 @@ mod tests {
         vga.seq_odd_even_dis = true;
         vga.graphics_regs[GFX_REG_MISC] =
             GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
+        // Attribute controller mode control bit 0 must agree with the graphics
+        // controller, or Bochs skip_update() treats it as a mode set in flight.
+        vga.attr_regs[0x10] |= 0x01;
         vga.graphics_regs[GFX_REG_GRAPHICS_MODE] = 2 << 5;
         vga.crtc_regs[CRTC_HORIZ_DISPLAY_END] = 0;
         vga.crtc_regs[CRTC_VERT_DISPLAY_END] = 0;
@@ -5016,6 +5435,9 @@ mod tests {
         vga.seq_odd_even_dis = true;
         vga.graphics_regs[GFX_REG_MISC] =
             GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
+        // Attribute controller mode control bit 0 must agree with the graphics
+        // controller, or Bochs skip_update() treats it as a mode set in flight.
+        vga.attr_regs[0x10] |= 0x01;
         vga.graphics_regs[GFX_REG_GRAPHICS_MODE] = 2 << 5;
         vga.crtc_regs[CRTC_HORIZ_DISPLAY_END] = 0;
         vga.crtc_regs[CRTC_VERT_DISPLAY_END] = 0;
@@ -5147,6 +5569,199 @@ mod tests {
         vga.write_port(VGA_GRAPHICS_DATA, 0xFF, 1);
 
         assert_eq!(vga.graphics_regs, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn word_read_of_crtc_returns_index_and_data() {
+        // Bochs vgacore.cc read: a 16-bit access combines two byte reads,
+        // low | high<<8 — inw(0x3D4) → index | data<<8.
+        let mut vga = BxVgaC::new();
+        vga.write_port(VGA_CRTC_INDEX, CRTC_OVERFLOW as u32, 1);
+        vga.crtc_regs[CRTC_OVERFLOW] = 0x5A;
+        let word = vga.read_port(VGA_CRTC_INDEX, 2, 0);
+        assert_eq!(word & 0xFF, CRTC_OVERFLOW as u32, "low byte = index reg");
+        assert_eq!((word >> 8) & 0xFF, 0x5A, "high byte = data reg");
+    }
+
+    // Bochs vgacore.cc write cases 0x03ba/0x03da: `feature_control = value & 0x08`;
+    // read case 0x03ca returns it; read case 0x03db returns 0.
+    #[test]
+    fn feature_control_round_trips_via_3da_and_3ca() {
+        let mut vga = BxVgaC::new();
+        assert_eq!(vga.read_port(0x3CA, 1, 0), 0x00, "reset value is 0");
+
+        vga.write_port(VGA_STATUS, 0xFF, 1);
+        assert_eq!(
+            vga.read_port(0x3CA, 1, 0),
+            0x08,
+            "only bit 3 of a 0x3DA write is retained"
+        );
+
+        // The 0x3BA alias is gated off while in color emulation — Bochs
+        // vgacore.cc write_handler returns early for 0x3b0-0x3bf when
+        // misc_output.color_emulation is set — so it must NOT clear the value.
+        vga.write_port(VGA_STATUS_MONO, 0x00, 1);
+        assert_eq!(
+            vga.read_port(0x3CA, 1, 0),
+            0x08,
+            "mono-port write must be ignored in color emulation mode"
+        );
+
+        // Writing 0 through the active (color) port does clear it.
+        vga.write_port(VGA_STATUS, 0x00, 1);
+        assert_eq!(vga.read_port(0x3CA, 1, 0), 0x00);
+
+        // 0x3DB is the high byte of a 16-bit read from 0x3DA: Bochs returns 0.
+        assert_eq!(vga.read_port(0x3DB, 1, 0), 0x00);
+    }
+
+    // Bochs vgacore.cc keeps sequencer registers as decomposed fields, so a
+    // read-back only exposes the retained bits (write case 0x03c5 / read case
+    // 0x03c5). Reset register 0's falling edge also clears char-map select.
+    #[test]
+    fn sequencer_registers_mask_on_store_like_bochs() {
+        let mut vga = BxVgaC::new();
+        let write_seq = |vga: &mut BxVgaC, index: u32, value: u32| {
+            vga.write_port(VGA_SEQ_INDEX, index, 1);
+            vga.write_port(VGA_SEQ_DATA, value, 1);
+        };
+
+        // Reg 0 (reset): only reset1|reset2 survive.
+        write_seq(&mut vga, 0, 0xFF);
+        assert_eq!(vga.seq_regs[SEQ_REG_RESET], 0x03);
+        // Reg 1 (clocking mode): value & 0x3D.
+        write_seq(&mut vga, 1, 0xFF);
+        assert_eq!(vga.seq_regs[SEQ_REG_CLOCKING_MODE], 0x3D);
+        // Reg 2 (map mask): 4 plane bits.
+        write_seq(&mut vga, 2, 0xFF);
+        assert_eq!(vga.seq_regs[SEQ_REG_MAP_MASK], 0x0F);
+        // Reg 3 (char map select): 6 bits.
+        write_seq(&mut vga, 3, 0xFF);
+        assert_eq!(vga.seq_regs[SEQ_REG_CHAR_MAP_SELECT], 0x3F);
+        // Reg 4 (memory mode): only extended_mem/odd_even_dis/chain_four.
+        write_seq(&mut vga, 4, 0xFF);
+        assert_eq!(vga.seq_regs[SEQ_REG_MEMORY_MODE], 0x0E);
+        assert!(vga.seq_chain_four);
+
+        // Reset1 falling edge (bit 0: 1 -> 0) clears char-map select.
+        assert_ne!(vga.seq_regs[SEQ_REG_CHAR_MAP_SELECT], 0);
+        write_seq(&mut vga, 0, 0x00);
+        assert_eq!(
+            vga.seq_regs[SEQ_REG_CHAR_MAP_SELECT], 0,
+            "reset1 falling edge resets the character map selection"
+        );
+    }
+
+    // Bochs vgacore.cc update_charmap(): glyph bytes live in plane 2, so byte i
+    // of a map is memory[(address << 2) + i*4 + 2]. Sequencer register 3 picks
+    // the two map offsets through charmap_offset[], gated on CRTC 9 being > 0.
+    #[test]
+    fn guest_charmap_extracts_plane_two_like_bochs() {
+        let mut vga = BxVgaC::new();
+
+        // Two distinct glyph patterns at the plane-2 bytes for offsets
+        // 0x0000 (map index 0) and 0x4000 (map index 1).
+        vga.vga_memory[2] = 0xA5; // byte 0 of the map at address 0x0000
+        vga.vga_memory[6] = 0x3C; // byte 1 of the same map
+        vga.vga_memory[(0x4000usize << 2) + 2] = 0x5A; // byte 0 of the map at 0x4000
+
+        // A non-zero maximum-scan-line is required before Bochs applies the
+        // selection, so program CRTC 9 first.
+        vga.write_port(VGA_CRTC_INDEX, CRTC_MAX_SCAN_LINE as u32, 1);
+        vga.write_port(VGA_CRTC_DATA, 0x0F, 1);
+
+        // Sequencer register 3 = 0 selects charmap A = B = offset 0x0000.
+        vga.write_port(VGA_SEQ_INDEX, 3, 1);
+        vga.write_port(VGA_SEQ_DATA, 0x00, 1);
+        assert_eq!(vga.charmap_address1, 0x0000);
+        assert_eq!(vga.charmap_address2, 0x0000);
+        assert_ne!(vga.vga_mem_updated & VGA_MEM_UPDATED_CHARMAP, 0);
+
+        vga.update_charmap();
+        assert_eq!(vga.charmap(0)[0], 0xA5, "plane-2 byte 0");
+        assert_eq!(vga.charmap(0)[1], 0x3C, "plane-2 byte 1 (stride 4)");
+        assert_eq!(
+            vga.charmap(1)[0],
+            0xA5,
+            "equal addresses must publish the same glyphs to both maps"
+        );
+
+        // Register 3 = 0x04 selects map B = index 1 -> offset 0x4000.
+        vga.write_port(VGA_SEQ_INDEX, 3, 1);
+        vga.write_port(VGA_SEQ_DATA, 0x04, 1);
+        assert_eq!(vga.charmap_address1, 0x0000);
+        assert_eq!(vga.charmap_address2, 0x4000);
+        vga.update_charmap();
+        assert_eq!(vga.charmap(0)[0], 0xA5, "map 0 unchanged");
+        assert_eq!(vga.charmap(1)[0], 0x5A, "map 1 now reads the 0x4000 glyphs");
+
+        // A sequencer reset (reset1 falling edge) clears the selection.
+        vga.write_port(VGA_SEQ_INDEX, 0, 1);
+        vga.write_port(VGA_SEQ_DATA, 0x03, 1);
+        vga.write_port(VGA_SEQ_DATA, 0x00, 1);
+        assert_eq!(vga.charmap_address1, 0);
+        assert_eq!(vga.charmap_address2, 0);
+    }
+
+    // Bochs vgacore.cc write case 0x03c0 data-write mode: per-register bit masks.
+    #[test]
+    fn attribute_registers_mask_on_store_like_bochs() {
+        let mut vga = BxVgaC::new();
+        let write_attr = |vga: &mut BxVgaC, index: u32, value: u32| {
+            // Address phase (flip-flop clear), then data phase.
+            vga.attr_flip_flop = false;
+            vga.write_port(VGA_ATTRIB_ADDR, index, 1);
+            vga.write_port(VGA_ATTRIB_ADDR, value, 1);
+        };
+
+        // 0x11 overscan color: 6 bits.
+        write_attr(&mut vga, 0x11, 0xFF);
+        assert_eq!(vga.attr_regs[0x11], 0x3F);
+        // 0x12 color plane enable / 0x13 pel panning / 0x14 color select: 4 bits.
+        write_attr(&mut vga, 0x12, 0xFF);
+        assert_eq!(vga.attr_regs[0x12], 0x0F);
+        write_attr(&mut vga, 0x13, 0xFF);
+        assert_eq!(vga.attr_regs[0x13], 0x0F);
+        write_attr(&mut vga, 0x14, 0xFF);
+        assert_eq!(vga.attr_regs[0x14], 0x0F);
+        // Palette registers keep all 8 bits (Bochs stores value unmasked).
+        write_attr(&mut vga, 0x05, 0xFF);
+        assert_eq!(vga.attr_regs[0x05], 0xFF);
+    }
+
+    // Bochs vgacore.cc CRTC write case 0x09: y_doublescan = ((value & 0x9f) > 0).
+    #[test]
+    fn crtc_max_scan_line_derives_y_doublescan() {
+        let mut vga = BxVgaC::new();
+        vga.write_port(VGA_CRTC_INDEX, CRTC_MAX_SCAN_LINE as u32, 1);
+
+        // 0x00 -> no doubling.
+        vga.write_port(VGA_CRTC_DATA, 0x00, 1);
+        assert!(!vga.y_doublescan);
+
+        // Mode 13h programs 0x41 (max scan line 1 + line-compare bit 9): doubled.
+        vga.write_port(VGA_CRTC_DATA, 0x41, 1);
+        assert!(vga.y_doublescan);
+
+        // Only bits in 0x9F count — 0x40 alone (line compare bit 9) does not.
+        vga.write_port(VGA_CRTC_DATA, 0x40, 1);
+        assert!(!vga.y_doublescan);
+
+        // Bit 7 (0x80) is inside the mask.
+        vga.write_port(VGA_CRTC_DATA, 0x80, 1);
+        assert!(vga.y_doublescan);
+    }
+
+    #[test]
+    fn write_to_0x3c1_ignored_and_0x3c2_reads_zero() {
+        // Bochs vgacore.cc: 0x3C1 (Attribute Data READ port) ignores writes;
+        // 0x3C2 read (Input Status 0) returns 0, not 0xFF.
+        let mut vga = BxVgaC::new();
+        vga.attr_index = 5;
+        vga.attr_regs[5] = 0x11;
+        vga.write_port(VGA_ATTRIB_DATA, 0xFF, 1);
+        assert_eq!(vga.attr_regs[5], 0x11, "0x3C1 write must not modify attr regs");
+        assert_eq!(vga.read_port(VGA_MISC_OUTPUT_WRITE, 1, 0), 0x00, "0x3C2 read = 0");
     }
 
     // ---- Finding #7: CR11 bit 7 write-protects CRTC registers 0-7 ----

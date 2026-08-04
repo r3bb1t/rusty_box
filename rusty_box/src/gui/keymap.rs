@@ -3,6 +3,7 @@
 //! Maps ASCII characters and special keys to PS/2 scancode set 2.
 //! Based on standard PC/AT keyboard scancode set 2.
 
+use crate::iodev::scancodes::BxKey;
 use alloc::vec::Vec;
 
 /// PS/2 Scancode Set 2 mapping for ASCII characters
@@ -135,6 +136,91 @@ pub fn char_to_scancode_sequence(ch: char) -> Vec<u8> {
     } else {
         Vec::new()
     }
+}
+
+
+/// Map an ASCII character to the guest key that produces it on a US layout,
+/// and whether Shift must be held.
+///
+/// This is the Bochs-shaped path: front ends report *keys*, and the keyboard
+/// controller renders them through the guest's active scancode set
+/// (keyboard.cc `gen_scancode`). The byte-oriented `ascii_to_scancode` above is
+/// kept for callers that genuinely need set-2 bytes.
+pub fn ascii_to_bx_key(ch: char) -> Option<(BxKey, bool)> {
+    let unshifted = |k: BxKey| Some((k, false));
+    let shifted = |k: BxKey| Some((k, true));
+    match ch {
+        'a'..='z' => unshifted(LETTERS[(ch as u8 - b'a') as usize]),
+        'A'..='Z' => shifted(LETTERS[(ch as u8 - b'A') as usize]),
+        '0'..='9' => unshifted(DIGITS[(ch as u8 - b'0') as usize]),
+        ')' => shifted(BxKey::K0),
+        '!' => shifted(BxKey::K1),
+        '@' => shifted(BxKey::K2),
+        '#' => shifted(BxKey::K3),
+        '$' => shifted(BxKey::K4),
+        '%' => shifted(BxKey::K5),
+        '^' => shifted(BxKey::K6),
+        '&' => shifted(BxKey::K7),
+        '*' => shifted(BxKey::K8),
+        '(' => shifted(BxKey::K9),
+        ' ' => unshifted(BxKey::Space),
+        '\n' | '\r' => unshifted(BxKey::Enter),
+        '\t' => unshifted(BxKey::Tab),
+        '\u{8}' => unshifted(BxKey::Backspace),
+        '-' => unshifted(BxKey::Minus),
+        '_' => shifted(BxKey::Minus),
+        '=' => unshifted(BxKey::Equals),
+        '+' => shifted(BxKey::Equals),
+        '[' => unshifted(BxKey::LeftBracket),
+        '{' => shifted(BxKey::LeftBracket),
+        ']' => unshifted(BxKey::RightBracket),
+        '}' => shifted(BxKey::RightBracket),
+        '\\' => unshifted(BxKey::Backslash),
+        '|' => shifted(BxKey::Backslash),
+        ';' => unshifted(BxKey::Semicolon),
+        ':' => shifted(BxKey::Semicolon),
+        '\'' => unshifted(BxKey::SingleQuote),
+        '"' => shifted(BxKey::SingleQuote),
+        ',' => unshifted(BxKey::Comma),
+        '<' => shifted(BxKey::Comma),
+        '.' => unshifted(BxKey::Period),
+        '>' => shifted(BxKey::Period),
+        '/' => unshifted(BxKey::Slash),
+        '?' => shifted(BxKey::Slash),
+        '`' => unshifted(BxKey::Grave),
+        '~' => shifted(BxKey::Grave),
+        _ => None,
+    }
+}
+
+const LETTERS: [BxKey; 26] = [
+    BxKey::A, BxKey::B, BxKey::C, BxKey::D, BxKey::E, BxKey::F, BxKey::G,
+    BxKey::H, BxKey::I, BxKey::J, BxKey::K, BxKey::L, BxKey::M, BxKey::N,
+    BxKey::O, BxKey::P, BxKey::Q, BxKey::R, BxKey::S, BxKey::T, BxKey::U,
+    BxKey::V, BxKey::W, BxKey::X, BxKey::Y, BxKey::Z,
+];
+
+const DIGITS: [BxKey; 10] = [
+    BxKey::K0, BxKey::K1, BxKey::K2, BxKey::K3, BxKey::K4,
+    BxKey::K5, BxKey::K6, BxKey::K7, BxKey::K8, BxKey::K9,
+];
+
+/// Full press/release sequence for typing a character, shift included.
+/// Mirrors [`char_to_scancode_sequence`] but in guest keys.
+pub fn char_to_bx_key_sequence(ch: char) -> Vec<(BxKey, bool)> {
+    let Some((key, shift)) = ascii_to_bx_key(ch) else {
+        return Vec::new();
+    };
+    let mut sequence = Vec::new();
+    if shift {
+        sequence.push((BxKey::ShiftL, true));
+    }
+    sequence.push((key, true));
+    sequence.push((key, false));
+    if shift {
+        sequence.push((BxKey::ShiftL, false));
+    }
+    sequence
 }
 
 #[cfg(test)]

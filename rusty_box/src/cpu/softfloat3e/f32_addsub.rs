@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case, unused_assignments)]
 //! Float32 addition and subtraction.
 //! Ported from Berkeley SoftFloat 3e f32_addsub.c + s_addMagsF32.c + s_subMagsF32.c.
 
@@ -9,14 +8,14 @@ use super::softfloat_types::*;
 use super::specialize::*;
 
 /// Berkeley SoftFloat `softfloat_addMagsF32`.
-fn add_mags_f32(mut ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> float32 {
+fn add_mags_f32(mut ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> Float32 {
     let exp_a = exp_f32(ui_a);
     let mut sig_a = frac_f32(ui_a);
     let exp_b = exp_f32(ui_b);
     let mut sig_b = frac_f32(ui_b);
     let sign_z = sign_f32(ui_a);
 
-    if softfloat_denormalsAreZeros(status) {
+    if softfloat_denormals_are_zeros(status) {
         if exp_a == 0 {
             sig_a = 0;
             ui_a = pack_to_f32(sign_z, 0, 0);
@@ -33,15 +32,15 @@ fn add_mags_f32(mut ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> float
         if exp_a == 0 {
             let ui_z = ui_a.wrapping_add(sig_b);
             if (sig_a | sig_b) != 0 {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
                 let is_tiny = exp_f32(ui_z) == 0;
                 if is_tiny {
-                    if softfloat_flushUnderflowToZero(status) {
-                        softfloat_raiseFlags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
+                    if softfloat_flush_underflow_to_zero(status) {
+                        softfloat_raise_flags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
                         return pack_to_f32(sign_z, 0, 0);
                     }
-                    if !softfloat_isMaskedException(status, FLAG_UNDERFLOW) {
-                        softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                    if !softfloat_is_masked_exception(status, FLAG_UNDERFLOW) {
+                        softfloat_raise_flags(status, FLAG_UNDERFLOW);
                     }
                 }
             }
@@ -68,12 +67,12 @@ fn add_mags_f32(mut ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> float
                     return softfloat_propagate_nan_f32(ui_a, ui_b, status);
                 }
                 if sig_a != 0 && exp_a == 0 {
-                    softfloat_raiseFlags(status, FLAG_DENORMAL);
+                    softfloat_raise_flags(status, FLAG_DENORMAL);
                 }
                 return pack_to_f32(sign_z, 0xFF, 0);
             }
             if (exp_a == 0 && sig_a != 0) || (exp_b == 0 && sig_b != 0) {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             exp_z = exp_b;
             sig_a += if exp_a != 0 { 0x2000_0000 } else { sig_a };
@@ -84,12 +83,12 @@ fn add_mags_f32(mut ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> float
                     return softfloat_propagate_nan_f32(ui_a, ui_b, status);
                 }
                 if sig_b != 0 && exp_b == 0 {
-                    softfloat_raiseFlags(status, FLAG_DENORMAL);
+                    softfloat_raise_flags(status, FLAG_DENORMAL);
                 }
                 return ui_a;
             }
             if (exp_a == 0 && sig_a != 0) || (exp_b == 0 && sig_b != 0) {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             exp_z = exp_a;
             sig_b += if exp_b != 0 { 0x2000_0000 } else { sig_b };
@@ -105,13 +104,13 @@ fn add_mags_f32(mut ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> float
 }
 
 /// Berkeley SoftFloat `softfloat_subMagsF32`.
-fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> float32 {
+fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> Float32 {
     let mut exp_a = exp_f32(ui_a);
     let mut sig_a = frac_f32(ui_a);
     let exp_b = exp_f32(ui_b);
     let mut sig_b = frac_f32(ui_b);
 
-    if softfloat_denormalsAreZeros(status) {
+    if softfloat_denormals_are_zeros(status) {
         if exp_a == 0 {
             sig_a = 0;
         }
@@ -126,15 +125,15 @@ fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> float32 {
             if (sig_a | sig_b) != 0 {
                 return softfloat_propagate_nan_f32(ui_a, ui_b, status);
             }
-            softfloat_raiseFlags(status, FLAG_INVALID);
+            softfloat_raise_flags(status, FLAG_INVALID);
             return FLOAT32_DEFAULT_NAN;
         }
         if exp_a == 0 && (sig_a | sig_b) != 0 {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         let mut sig_diff = sig_a as i32 - sig_b as i32;
         if sig_diff == 0 {
-            return pack_to_f32(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0);
+            return pack_to_f32(softfloat_get_rounding_mode(status) == ROUND_MIN, 0, 0);
         }
         if exp_a != 0 {
             exp_a -= 1;
@@ -151,12 +150,12 @@ fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> float32 {
             exp_z = 0;
         }
         if exp_z == 0 && sig_diff != 0 {
-            if softfloat_flushUnderflowToZero(status) {
-                softfloat_raiseFlags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
+            if softfloat_flush_underflow_to_zero(status) {
+                softfloat_raise_flags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
                 return pack_to_f32(sign_z, 0, 0);
             }
-            if !softfloat_isMaskedException(status, FLAG_UNDERFLOW) {
-                softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+            if !softfloat_is_masked_exception(status, FLAG_UNDERFLOW) {
+                softfloat_raise_flags(status, FLAG_UNDERFLOW);
             }
         }
         pack_to_f32(sign_z, exp_z, (sig_diff << shift_dist) as u32)
@@ -175,12 +174,12 @@ fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> float32 {
                     return softfloat_propagate_nan_f32(ui_a, ui_b, status);
                 }
                 if sig_a != 0 && exp_a == 0 {
-                    softfloat_raiseFlags(status, FLAG_DENORMAL);
+                    softfloat_raise_flags(status, FLAG_DENORMAL);
                 }
                 return pack_to_f32(sign_z, 0xFF, 0);
             }
             if (sig_a != 0 && exp_a == 0) || (sig_b != 0 && exp_b == 0) {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             exp_z = exp_b - 1;
             sig_x = sig_b | 0x4000_0000;
@@ -192,12 +191,12 @@ fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> float32 {
                     return softfloat_propagate_nan_f32(ui_a, ui_b, status);
                 }
                 if sig_b != 0 && exp_b == 0 {
-                    softfloat_raiseFlags(status, FLAG_DENORMAL);
+                    softfloat_raise_flags(status, FLAG_DENORMAL);
                 }
                 return ui_a;
             }
             if (sig_a != 0 && exp_a == 0) || (sig_b != 0 && exp_b == 0) {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             exp_z = exp_a - 1;
             sig_x = sig_a | 0x4000_0000;
@@ -214,7 +213,7 @@ fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> float32 {
 }
 
 /// Berkeley SoftFloat `f32_add`.
-pub(crate) fn f32_add(a: float32, b: float32, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn f32_add(a: Float32, b: Float32, status: &mut SoftFloatStatus) -> Float32 {
     if sign_f32(a ^ b) {
         sub_mags_f32(a, b, status)
     } else {
@@ -223,7 +222,7 @@ pub(crate) fn f32_add(a: float32, b: float32, status: &mut SoftFloatStatus) -> f
 }
 
 /// Berkeley SoftFloat `f32_sub`.
-pub(crate) fn f32_sub(a: float32, b: float32, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn f32_sub(a: Float32, b: Float32, status: &mut SoftFloatStatus) -> Float32 {
     if sign_f32(a ^ b) {
         add_mags_f32(a, b, status)
     } else {

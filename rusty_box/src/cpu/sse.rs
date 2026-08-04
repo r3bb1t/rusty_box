@@ -28,7 +28,7 @@ use super::{
 
 /// Saturate a signed 16-bit value to signed 8-bit range [-128, 127]
 #[inline]
-fn saturate_word_s_to_byte_s(val: i16) -> i8 {
+pub(super) fn saturate_word_s_to_byte_s(val: i16) -> i8 {
     if val > 127 {
         127
     } else if val < -128 {
@@ -40,7 +40,7 @@ fn saturate_word_s_to_byte_s(val: i16) -> i8 {
 
 /// Saturate a signed 16-bit value to unsigned 8-bit range [0, 255]
 #[inline]
-fn saturate_word_s_to_byte_u(val: i16) -> u8 {
+pub(super) fn saturate_word_s_to_byte_u(val: i16) -> u8 {
     if val > 255 {
         255
     } else if val < 0 {
@@ -1442,6 +1442,29 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         self.v_write_byte(seg, eaddr, result)?;
+        Ok(())
+    }
+
+    /// PEXTRW EdVdqIbR — extract word from XMM at imm8 & 7 to a GPR
+    /// (66 0F 3A 15 /r ib, register destination). Bochs `PEXTRW_EdVdqIbR`
+    /// zero-extends the word into the full 32-bit register.
+    pub(super) fn pextrw_ed_vdq_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
+        let result = u32::from(op.xmm16u((instr.ib() & 0x7) as usize));
+        self.set_gpr32(instr.src1().into(), result); // rm = GPR destination
+        Ok(())
+    }
+
+    /// PEXTRW MwVdqIbM — extract word from XMM at imm8 & 7 to memory
+    /// (66 0F 3A 15 /r ib, memory destination). Bochs `PEXTRW_MwVdqIbM`.
+    pub(super) fn pextrw_mw_vdq_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
+        let result = op.xmm16u((instr.ib() & 0x7) as usize);
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
+        self.v_write_word(seg, eaddr, result)?;
         Ok(())
     }
 

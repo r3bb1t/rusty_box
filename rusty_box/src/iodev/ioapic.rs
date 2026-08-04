@@ -406,7 +406,10 @@ impl BxIoApic {
     pub fn init(&mut self, mem: &mut BxMemC) -> crate::Result<()> {
         tracing::debug!("initializing I/O APIC");
         // Bochs: set_enabled(1, 0x0000) (ioapic.cc)
-        self.set_enabled_with_mem(true, 0x0000, mem)?;
+        // Initial registration always maps the window; there is no CPU cache to
+        // invalidate at device-init time, so the "mapping changed" result is
+        // intentionally not propagated further here.
+        let _mapped = self.set_enabled_with_mem(true, 0x0000, mem)?;
         Ok(())
     }
 
@@ -613,45 +616,64 @@ impl BxIoApic {
     /// Enable or disable the I/O APIC MMIO region, optionally changing the base offset.
     ///
     /// When enabled, MMIO handlers are registered at `IOAPIC_BASE_ADDR | base_offset`.
-    /// When disabled, MMIO handlers are unregistered.
+    /// When disabled, MMIO handlers are unregistered. Toggling `base_offset` while
+    /// already enabled relocates the window (unregister old base, register new base).
+    ///
+    /// Returns `true` when the MMIO mapping actually changed, so callers can
+    /// invalidate CPU caches (TLB/icache) that may reference the affected pages.
     ///
     /// Bochs: `void bx_ioapic_c::set_enabled(bool _enabled, Bit16u base_offset)`
     /// (ioapic.cc)
-    fn set_enabled_with_mem(
+    pub(crate) fn set_enabled_with_mem(
         &mut self,
         new_enabled: bool,
         base_offset: u16,
         mem: &mut BxMemC,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<bool> {
+        let device_id = crate::memory::MemoryDeviceId::IoApic(self as *mut BxIoApic);
+        let mut changed = false;
         if new_enabled != self.enabled {
             if new_enabled {
-                // Bochs: base_addr = BX_IOAPIC_BASE_ADDR | base_offset; (ioapic.cc)
-                self.base_addr = IOAPIC_BASE_ADDR | (base_offset as u32);
-                // Register MMIO handlers
-                // Bochs: DEV_register_memory_handlers(..., base_addr, base_addr + 0xfff);
+                // Bochs: base_addr = BX_IOAPIC_BASE_ADDR | base_offset;
+                //        DEV_register_memory_handlers(..., base_addr, base_addr + 0xfff);
                 // (ioapic.cc)
+                self.base_addr = IOAPIC_BASE_ADDR | (base_offset as u32);
                 let base = self.base_addr as BxPhyAddress;
-                let device_id = crate::memory::MemoryDeviceId::IoApic(self as *mut BxIoApic);
                 mem.register_memory_handlers(
                     device_id,
                     base,
                     base + (IOAPIC_MMIO_SIZE as BxPhyAddress) - 1,
                 )?;
+            } else {
+                // Bochs: DEV_unregister_memory_handlers(..., base_addr, base_addr + 0xfff);
+                // (ioapic.cc)
+                let base = self.base_addr as BxPhyAddress;
+                mem.unregister_memory_handlers(
+                    device_id,
+                    base,
+                    base + (IOAPIC_MMIO_SIZE as BxPhyAddress) - 1,
+                )?;
             }
-            // Note: unregister_memory_handlers not yet implemented; on disable we just
-            // mark the flag. Bochs: DEV_unregister_memory_handlers(...) (ioapic.cc)
             self.enabled = new_enabled;
+            changed = true;
         } else if self.enabled && (base_offset as u32 != (self.base_addr & 0xFFFF)) {
-            // Base offset changed while enabled — re-register at new address
-            // Bochs: (ioapic.cc)
+            // Base offset changed while enabled — relocate the window.
+            // Bochs: DEV_unregister_memory_handlers(old); base_addr = ...;
+            //        DEV_register_memory_handlers(new) (ioapic.cc)
+            let old_base = self.base_addr as BxPhyAddress;
+            mem.unregister_memory_handlers(
+                device_id,
+                old_base,
+                old_base + (IOAPIC_MMIO_SIZE as BxPhyAddress) - 1,
+            )?;
             self.base_addr = IOAPIC_BASE_ADDR | (base_offset as u32);
             let base = self.base_addr as BxPhyAddress;
-            let device_id = crate::memory::MemoryDeviceId::IoApic(self as *mut BxIoApic);
             mem.register_memory_handlers(
                 device_id,
                 base,
                 base + (IOAPIC_MMIO_SIZE as BxPhyAddress) - 1,
             )?;
+            changed = true;
         }
 
         tracing::debug!(
@@ -659,7 +681,7 @@ impl BxIoApic {
             if self.enabled { "en" } else { "dis" },
             self.base_addr,
         );
-        Ok(())
+        Ok(changed)
     }
 
     /// Set the interrupt level on an input pin.
@@ -1576,5 +1598,59 @@ mod tests {
         );
         assert_eq!(IoApicDeliveryMode::from_raw(4), IoApicDeliveryMode::Nmi);
         assert_eq!(IoApicDeliveryMode::from_raw(7), IoApicDeliveryMode::ExtInt);
+    }
+
+    // Bochs ioapic.cc set_enabled(_enabled, base_offset): enable registers the
+    // MMIO window, disable unregisters it, and a base-offset change while
+    // enabled relocates it. Returns whether the mapping actually changed.
+    #[test]
+    fn set_enabled_with_mem_matches_bochs_state_machine() {
+        use crate::memory::{BxMemC, BxMemoryStubC};
+        let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
+        let mut mem = BxMemC::new(stub, false);
+
+        let mut ioapic = BxIoApic::new();
+        assert!(!ioapic.is_enabled());
+
+        // Enable at default base -> changed, mapped at 0xFEC00000.
+        assert!(ioapic
+            .set_enabled_with_mem(true, 0x0000, &mut mem)
+            .unwrap());
+        assert!(ioapic.is_enabled());
+        assert_eq!(ioapic.base_address(), 0xFEC0_0000);
+
+        // Re-enable at the same base -> no change.
+        assert!(!ioapic
+            .set_enabled_with_mem(true, 0x0000, &mut mem)
+            .unwrap());
+        assert!(ioapic.is_enabled());
+
+        // Disable -> changed, window unregistered.
+        assert!(ioapic
+            .set_enabled_with_mem(false, 0x0000, &mut mem)
+            .unwrap());
+        assert!(!ioapic.is_enabled());
+
+        // Re-disable -> no change.
+        assert!(!ioapic
+            .set_enabled_with_mem(false, 0x0000, &mut mem)
+            .unwrap());
+
+        // Enable at a relocated base -> changed, base moved.
+        assert!(ioapic
+            .set_enabled_with_mem(true, 0x0400, &mut mem)
+            .unwrap());
+        assert_eq!(ioapic.base_address(), 0xFEC0_0400);
+
+        // Relocate while enabled (Bochs: enabled && base_offset != base_addr&0xffff).
+        assert!(ioapic
+            .set_enabled_with_mem(true, 0x0800, &mut mem)
+            .unwrap());
+        assert_eq!(ioapic.base_address(), 0xFEC0_0800);
+
+        // Same base again -> no change.
+        assert!(!ioapic
+            .set_enabled_with_mem(true, 0x0800, &mut mem)
+            .unwrap());
     }
 }

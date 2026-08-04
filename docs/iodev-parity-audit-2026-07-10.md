@@ -11,6 +11,72 @@ convention.
 
 ---
 
+## 2026-07-25 status — the I/O parity backlog is CLOSED
+
+Everything actionable in this audit has now been resolved, and a large fraction
+of it turned out to be **already fixed or simply wrong** when re-verified against
+current code. Treat the per-finding text below as a 2026-07-10 snapshot, not as
+a to-do list; the entries that are still accurate are called out here.
+
+**Resolved in the 2026-07-25 pass** (21 commits on
+`feature/8-multi-processor-support`):
+
+| Finding | Outcome |
+|---|---|
+| #19 CMOS reset timer-sync | Applied instead of discarded (`dd976c2`) |
+| #22 DMA word I/O + maxlen | Registration mask 7, LSB fall-through, u16 truncation (`5f04741`) |
+| #23 PIC ICW1 / reset | Master ICW1 clears INTR; reset restores all fields (`20d5aba`) |
+| #25 harddrv absent drive | Bochs BX_ANY_IS_PRESENT taskfile reads + command handling (`4915cdb`) |
+| #27 ATAPI 0x42 | Ported — the "needs a CD backend" claim was **wrong**, `cdrom_base_c::read_sub_channel` is self-contained (`03efc63`) |
+| #28 APM 0xB2 | Resolved by the SMM implementation (`f2be059`); the load-bearing `apms=0` clear is gone |
+| #29 ACPI S3/S5 | S5 stops the machine, S3 writes CMOS 0xF=0xFE + hardware reset (`916b374`) |
+| #30 VGA cluster | All of it: registers, y_doublescan, chain-4 LFB, guest charmap, skip_update, vertical timer (`934864d`, `4b353b5`, `5041828`, `19c7b08`) |
+| #31 keyboard | Ring size 16 (`1a6c2ec`); scancode sets 1/2/3 (`f7b4fd5`); the rest already matched |
+| #33 CMOS details | 0x72/0x73 gated on a cmosimage, PIE quirk reproduced (`0dd65a9`), `clock:time0` implemented (`9f1327e`) |
+| #34 harddrv details | HOB scope, CHS wrap, SRST/0x90 drive_select, per-command error register, 0xA1 signature removed (`147d06e`, `44b0d98`, `0c2fdf5`) |
+| #35 PCI/ACPI details | BAR size-probe skip, 0xB044 mask, dead 0xB2 handler (`916b374`, `5be37f6`); i440FX regs and port relocation were already correct |
+| #36 port 0x8900 | Bochs `unmapped.cc` shutdown protocol ported (`99d4c97`) |
+| #37 housekeeping | The orphan `iodev/pic.rs` no longer exists |
+
+**Two deliberate divergences remain, both ratified:**
+
+- CMOS STAT_A divider-TEST values: Bochs `BX_PANIC`s, which is a
+  guest-triggerable host DoS. rusty accepts them, and its handling is
+  bit-identical to Bochs's own post-panic continuation.
+- The DMA HRQ engine is fully implemented (the older note calling it a stub is
+  wrong) — see `legacy_dma_drq_to_hlda_terminal_count_end_to_end`.
+
+**Lesson for future audits:** several entries here were confidently wrong.
+Re-verify any finding against current source before acting on it, and prefer
+reading the Bochs function over trusting a summary of it.
+
+---
+
+## 2026-07-24 status — this audit is substantially stale; re-verify before acting
+
+Many findings have been fixed in the ~2 weeks since 2026-07-10. Verified RESOLVED
+in current code this session (spot-check + the serial/keyboard cluster fixed
+outright):
+- **#1** CMOS malformed-date host-DoS — `cmos.rs timeutc` normalizes `mon %= 12`
+  and `mday - 1`, so out-of-range fields never index an array (comment documents
+  the fix).
+- **#2** Port 0xCF9 reset — now registered/routed (`devices.rs` read/write arms
+  for `0x0CF9`; `take_reset_request` drains `pci2isa.reset_request`).
+- **#3** ELCR → PIC `set_mode` — now drained (`devices.rs` forwards
+  `elcr1_changed`/`elcr2_changed` to `pic.set_mode`).
+- **#12** serial TX/RX/FIFO — TX timer, RX-trigger `==`, non-FIFO overrun, LSR
+  clears, and the IER pulse all fixed (commits db43214, 38ec370, 1142f43).
+- **#13** serial batched-IRQ chronology — fixed (1142f43).
+- **#14** keyboard `create_mouse_packet(0)` flush — fixed (3df933b).
+- **#15** keyboard IRQ latch timing — already at parity (`periodic()` snapshots
+  `retval` at entry and only latches the new IRQ; `KBD_IRQ_BIT_*` = Bochs
+  `irq1 | irq12<<1`).
+
+Everything else below is UNVERIFIED against current code — treat the CONFIRMED
+tags as of 2026-07-10 and re-check before fixing.
+
+---
+
 ## TIER 1 — Guest-breaking or host-DoS
 
 1. **CMOS: guest-triggerable host panic/hang on malformed date registers** —
@@ -102,6 +168,33 @@ convention.
     overrun drops the new byte and skips RDA (Bochs overwrites RBR + raises);
     IER write emits an unconditional raise/lower pulse. CONFIRMED. **subsystem**
     (timers), small for the rest.
+    - **TX timer RESOLVED 2026-07-24** — ported Bochs `serial.cc tx_timer`: a THR
+      write now moves the byte into the shift register and arms a per-UART
+      one-shot for `databyte_usec` instead of transmitting instantly; the timer
+      fire emits the byte, reloads the next FIFO/THR byte, and raises THRE once
+      per byte *actually transmitted* (fixing the 515-vs-242 THRE count). LSR now
+      reflects `tsr_empty`/`thr_empty` mid-transmission. Wiring: `TimerOwner::
+      SerialTx` + `DeviceTimerOwner::SerialTx`, snapshot v7. The RX FIFO-timeout
+      timer (`fifo_timer`) was wired in an earlier pass.
+    - **RX-trigger + overrun + LSR RESOLVED 2026-07-24** — three more sub-items
+      brought to `serial.cc` parity: (a) `rx_fifo_enq` FIFO trigger now fires
+      RXDATA only when the level equals the trigger exactly (Bochs `== 4/8/14`;
+      level-1 = every byte) and re-arms the character-timeout above it, replacing
+      the `>=` compare that re-raised and never re-armed; (b) the non-FIFO overrun
+      path now falls through to overwrite RBR + raise RXDATA (delivers the byte)
+      instead of `return`-ing early; (c) LSR read no longer clears `parity_error`
+      / `fifo_error` (Bochs clears only OE/FE/BI). Tests:
+      `serial_rx_trigger_raises_only_at_exact_level`,
+      `serial_non_fifo_overrun_overwrites_rbr_and_raises_rxdata`,
+      `serial_lsr_read_keeps_parity_and_fifo_error`.
+    - **IER-pulse + chronology RESOLVED 2026-07-24** (with #13): the IER write no
+      longer pulses raise/lower unconditionally — it tracks a promotion (`gen_int`)
+      / demotion (`needs_lower`) per changed enable bit and, in Bochs order, lowers
+      inline then raises once only if a promotion occurred. Combined with the #13
+      fix below, the line now settles to the exact Bochs state. Tests:
+      `serial_ier_enable_without_pending_source_raises_nothing`.
+    - **Still open:** RX byte *arrival* stays immediate (not baud-paced — a
+      deliberate, separate divergence, user-ratified).
 
 13. **Serial: batched IRQ actions reordered raise-before-lower** —
     `take_pending_irqs` always yields raise then lower regardless of chronology;
@@ -109,11 +202,24 @@ convention.
     LOW with `rx_interrupt` still true — a purely interrupt-driven guest can
     stall on the last byte. CONFIRMED structural, loss timing-dependent.
     **small**.
+    - **RESOLVED 2026-07-24** — `raise_interrupt`/`lower_interrupt` now coalesce to
+      the LAST edge per drain window (a raise clears any pending lower and vice
+      versa), so a lower→raise sequence nets HIGH like Bochs's synchronous
+      `DEV_pic_*`. This is exact because the PIC's `raise_irq`/`lower_irq` are
+      already idempotent/edge-latched on IRR, so emitting only the final edge
+      matches. Snapshot format unchanged (the two bools are now mutually
+      exclusive). Test: `serial_lower_then_raise_in_one_window_nets_raise`
+      (+ `serial_snapshot_resumes_partial_fifo_and_irq_state` updated).
 
 14. **Keyboard: `periodic()` never calls `create_mouse_packet(0)`** — Bochs
     flushes residual `delayed_dx/dy` when the kbd buffer is idle; Rust omits it,
     so clamped/deferred mouse motion sticks until the next host event → pointer
     lag/jump, likely felt on the current GUI branch. CONFIRMED. **one-liner**.
+    - **RESOLVED 2026-07-24** — `periodic()` now calls `create_mouse_packet(false)`
+      as the first statement of the idle (else) branch, matching Bochs
+      keyboard.cc, so residual motion is packetized and delivered on the service
+      tick. No-op when there is no pending motion (headless boot unaffected).
+      Test: `periodic_flushes_residual_mouse_motion`.
 
 15. **Keyboard: IRQ for a just-transferred byte delivered in the same periodic
     call** — Bochs snapshots `retval` at entry; the new `irq1_requested` reaches
@@ -207,6 +313,16 @@ convention.
 28. **APM port 0xB2** — Rust force-clears `apms=0` after each command (Bochs
     never does — the APM handshake polls 0xB3) and registers 0xB2 with mask 1 vs
     Bochs mask 3 (word writes to SMI_CMD dropped). CONFIRMED. **one-liners**.
+    - **BLOCKED 2026-07-24** — removing the `apms=0` force-clear was verified to
+      DETERMINISTICALLY BREAK the Bochs-BIOS boot (hangs in POST before ISOLINUX;
+      isolated via boot bisect). The force-clear is **load-bearing**: `apms` is
+      set by 0xB3 writes and, in real Bochs, the SMM APM handler produces the
+      status result the BIOS then polls; rusty has NO SMM APM handler
+      (`acpi.rs generate_smi` only toggles SCI_EN), so the clear compensates for
+      its absence. Making 0xB2 mask-3 also routes word writes into that stub.
+      Neither half is safely fixable without implementing SMM APM emulation —
+      the audit's "one-liner" classification is wrong. Leave as-is until SMM APM
+      is ported; the boot regression is the gate.
 
 29. **ACPI sleep states** — S5 (`sus_typ=0`): Bochs terminates the simulation;
     Rust logs and keeps running. S3 (`sus_typ=1`): Bochs writes CMOS 0xF=0xFE +

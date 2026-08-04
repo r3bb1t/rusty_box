@@ -1,5 +1,4 @@
-#![allow(non_camel_case_types, dead_code, non_snake_case)]
-//! ExtFloat80 to float32 conversion.
+//! ExtFloat80 to Float32 conversion.
 //! Ported from Berkeley SoftFloat 3e: extF80_to_f32.c
 
 use super::internals::*;
@@ -8,10 +7,10 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub fn extf80_to_f32(a: floatx80, status: &mut SoftFloatStatus) -> float32 {
+pub(in crate::cpu) fn extf80_to_f32(a: ExtFloat80, status: &mut SoftFloatStatus) -> Float32 {
     // Handle unsupported
     if extf80_is_unsupported(a) {
-        softfloat_raiseFlags(status, FLAG_INVALID);
+        softfloat_raise_flags(status, FLAG_INVALID);
         return FLOAT32_DEFAULT_NAN;
     }
 

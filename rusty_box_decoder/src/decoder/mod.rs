@@ -8,7 +8,10 @@ pub mod decode64;
 pub(crate) mod opmap;
 pub(crate) mod opmap_0f38;
 pub(crate) mod opmap_0f3a;
+pub(crate) mod evex_operands;
+pub(crate) mod opmap_evex;
 pub mod tables;
+pub(crate) mod vex_shared;
 mod x87;
 
 use crate::opcode::Opcode;

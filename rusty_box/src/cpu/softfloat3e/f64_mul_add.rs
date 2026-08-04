@@ -1,4 +1,3 @@
-#![allow(dead_code, non_snake_case, unused_assignments)]
 //! Float64 fused multiply-add: a*b + c (with operation modifier).
 //! Ported from Berkeley SoftFloat 3e f64_mulAdd.c.
 
@@ -11,13 +10,13 @@ use super::specialize::*;
 
 /// Float64 fused multiply-add: a*b + c (with operation modifier).
 /// op=0: a*b+c, op=1: a*b-c, op=2: -(a*b)+c, op=3: -(a*b)-c
-pub(crate) fn f64_mul_add(
-    a: float64,
-    b: float64,
-    c: float64,
+pub(in crate::cpu) fn f64_mul_add(
+    a: Float64,
+    b: Float64,
+    c: Float64,
     op: u8,
     status: &mut SoftFloatStatus,
-) -> float64 {
+) -> Float64 {
     let ui_a = a;
     let ui_b = b;
     let ui_c = c;
@@ -47,7 +46,7 @@ pub(crate) fn f64_mul_add(
     }
 
     // Denormals-are-zeros
-    if softfloat_denormalsAreZeros(status) {
+    if softfloat_denormals_are_zeros(status) {
         if exp_a == 0 {
             sig_a = 0;
         }
@@ -76,7 +75,7 @@ pub(crate) fn f64_mul_add(
     // Infinity handling for C
     if exp_c == 0x7FF {
         if (sig_a != 0 && exp_a == 0) || (sig_b != 0 && exp_b == 0) {
-            softfloat_raiseFlags(status, FLAG_DENORMAL);
+            softfloat_raise_flags(status, FLAG_DENORMAL);
         }
         return pack_to_f64(sign_c, 0x7FF, 0);
     }
@@ -86,11 +85,11 @@ pub(crate) fn f64_mul_add(
         if sig_a == 0 {
             // Denormal check for sigB before zeroProd
             if sig_b != 0 && exp_b == 0 {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             return zero_prod_f64(sign_z, sign_c, exp_c, sig_c, status);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f64_sig(sig_a);
         exp_a = norm.exp;
         sig_a = norm.sig;
@@ -100,7 +99,7 @@ pub(crate) fn f64_mul_add(
         if sig_b == 0 {
             return zero_prod_f64(sign_z, sign_c, exp_c, sig_c, status);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f64_sig(sig_b);
         exp_b = norm.exp;
         sig_b = norm.sig;
@@ -125,7 +124,7 @@ pub(crate) fn f64_mul_add(
             let sig_z = (sig128z_64 << 1) | ((sig128z_0 != 0) as u64);
             return round_pack_to_f64(sign_z, exp_z, sig_z, status);
         }
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
         let norm = norm_subnormal_f64_sig(sig_c);
         exp_c = norm.exp;
         sig_c = norm.sig;
@@ -171,7 +170,7 @@ pub(crate) fn f64_mul_add(
         } else if exp_diff == 0 {
             sig128z_64 = sig128z_64.wrapping_sub(sig_c);
             if (sig128z_64 | sig128z_0) == 0 {
-                return pack_to_f64(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0);
+                return pack_to_f64(softfloat_get_rounding_mode(status) == ROUND_MIN, 0, 0);
             }
             if sig128z_64 & 0x8000000000000000 != 0 {
                 sign_z = !sign_z;
@@ -212,17 +211,17 @@ fn zero_prod_f64(
     exp_c: i16,
     sig_c: u64,
     status: &mut SoftFloatStatus,
-) -> float64 {
+) -> Float64 {
     let mut ui_z = pack_to_f64(sign_c, exp_c, sig_c);
     if exp_c == 0 && sig_c != 0 {
-        softfloat_raiseFlags(status, FLAG_DENORMAL);
-        if softfloat_flushUnderflowToZero(status) {
-            softfloat_raiseFlags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
+        softfloat_raise_flags(status, FLAG_DENORMAL);
+        if softfloat_flush_underflow_to_zero(status) {
+            softfloat_raise_flags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
             return pack_to_f64(sign_c, 0, 0);
         }
     }
     if ((exp_c as u64) | sig_c) == 0 && sign_prod != sign_c {
-        ui_z = pack_to_f64(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0);
+        ui_z = pack_to_f64(softfloat_get_rounding_mode(status) == ROUND_MIN, 0, 0);
     }
     ui_z
 }
@@ -238,9 +237,9 @@ fn inf_prod_arg_f64(
     exp_c: i16,
     sig_c: u64,
     mag_bits: u64,
-    ui_c: float64,
+    ui_c: Float64,
     status: &mut SoftFloatStatus,
-) -> float64 {
+) -> Float64 {
     if mag_bits != 0 {
         let ui_z = pack_to_f64(sign_z, 0x7FF, 0);
         if sign_z == sign_c || exp_c != 0x7FF {
@@ -248,12 +247,12 @@ fn inf_prod_arg_f64(
                 || (sig_b != 0 && exp_b == 0)
                 || (sig_c != 0 && exp_c == 0)
             {
-                softfloat_raiseFlags(status, FLAG_DENORMAL);
+                softfloat_raise_flags(status, FLAG_DENORMAL);
             }
             return ui_z;
         }
     }
-    softfloat_raiseFlags(status, FLAG_INVALID);
+    softfloat_raise_flags(status, FLAG_INVALID);
     let ui_z = FLOAT64_DEFAULT_NAN;
     softfloat_propagate_nan_f64(ui_z, ui_c, status)
 }

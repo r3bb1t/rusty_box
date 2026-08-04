@@ -143,7 +143,7 @@ const PAGING_LEGACY_PAE_RESERVED_BITS: u64 = PAGING_PAE_PHY_RESERVED_BITS | 0x7F
 const PAGING_PAE_PDE2M_RESERVED_BITS: u64 = PAGING_PAE_PHY_RESERVED_BITS | 0x001F_E000;
 
 // PAE PDPTE reserved bits — matches Bochs `PAGING_PAE_PDPTE_RESERVED_BITS`
-// (cpu/paging.cc:953): PHY-reserved | bits 63:52 | bits 8:5 | bits 2:1.
+// (cpu/paging.cc): PHY-reserved | bits 63:52 | bits 8:5 | bits 2:1.
 //
 // Bochs/Intel deviation: Intel SDM Vol 3A Table 4-8 marks bits 62:52 (and bit
 // 63) as `Ignored` for legacy PAE PDPTE — only bits 51:M are reserved up
@@ -253,7 +253,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         user: bool,
         rw: MemoryAccessType,
         mem: &mut BxMemC,
-    ) -> Result<BxPhyAddress> {
+    ) -> Result<(BxPhyAddress, u32)> {
         // Get page directory base from CR3
         let cr3 = self.cr3;
         // Bochs paging.cc: in EPT-active mode CR3 itself is a guest-physical
@@ -333,20 +333,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // the EPT leaf is 4 KiB and the offset crosses a 4 KiB
             // boundary.
             let merged = ppf_4m | (laddr & 0x003F_FFFF);
-            return self.ept_translate_for_data(
-                merged,
-                laddr,
-                (combined & CombinedAccess::USER.bits()) != 0,
-                (combined & CombinedAccess::WRITE.bits()) != 0,
-                false,
-                if matches!(rw, MemoryAccessType::Execute) {
-                    BxRwAccess::Execute
-                } else if is_write {
-                    BxRwAccess::Write
-                } else {
-                    BxRwAccess::Read
-                },
-            );
+            return self
+                .ept_translate_for_data(
+                    merged,
+                    laddr,
+                    (combined & CombinedAccess::USER.bits()) != 0,
+                    (combined & CombinedAccess::WRITE.bits()) != 0,
+                    false,
+                    if matches!(rw, MemoryAccessType::Execute) {
+                        BxRwAccess::Execute
+                    } else if is_write {
+                        BxRwAccess::Write
+                    } else {
+                        BxRwAccess::Read
+                    },
+                )
+                .map(|paddr| (paddr, 0x003F_FFFFu32));
         }
 
         // PDE points at the PT in guest-physical space.
@@ -420,6 +422,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 BxRwAccess::Read
             },
         )
+        .map(|paddr| (paddr, 0xFFFu32))
     }
 
     /// Update accessed and dirty bits in page table entries — Bochs
@@ -465,6 +468,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Based on BX_CPU_C::translate_linear in paging.cc
     /// Returns Ok(paddr) on success, or Err with page fault info that caller should handle
     #[allow(clippy::too_many_arguments)]
+    /// Returns `(paddr, lpf_mask)` — Bochs translate_linear fills the caller's
+    /// TLB entry with the walk's true `lpf_mask` (0xFFF for 4 KiB, 0x3F_FFFF /
+    /// 0x1F_FFFF / 0x3FFF_FFFF for 4M/2M/1G leaves); the prefetch path needs
+    /// it to fill the ITLB so INVLPG can flush every frame of a large code
+    /// page (paging.cc: `ITLB.split_large = true` on large execute leaves).
     pub(super) fn translate_linear(
         &mut self,
         _tlb_entry: &TLBEntry,
@@ -473,7 +481,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         rw: MemoryAccessType,
         a20_mask: BxPhyAddress,
         mem: &mut BxMemC,
-    ) -> Result<BxPhyAddress> {
+    ) -> Result<(BxPhyAddress, u32)> {
         // Mask to 32 bits if not in long mode
         let laddr = if self.long_mode() {
             laddr
@@ -484,7 +492,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         // If paging is disabled, linear address = physical address (with A20 mask)
         if !self.cr0.pg() {
             let paddr = laddr & a20_mask;
-            return Ok(paddr);
+            return Ok((paddr, 0xFFF));
         }
 
         // Paging is enabled — dispatch to the appropriate paging mode.
@@ -498,11 +506,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
 
         match result {
-            Ok(paddr) => {
+            Ok((paddr, lpf_mask)) => {
                 // Apply A20 mask
                 let paddr = paddr & a20_mask;
 
-                Ok(paddr)
+                Ok((paddr, lpf_mask))
             }
             Err(e) => {
                 // Check if this is a not-present fault (unmapped memory)
@@ -531,7 +539,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     };
                     if self.instrumentation.fire_mem_unmapped(&ev) {
                         // Hook suppressed the fault — return dummy address
-                        return Ok(0);
+                        return Ok((0, 0xFFF));
                     }
                 }
 
@@ -567,6 +575,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     error_code |= PageFaultError::CODE_ACCESS.bits();
                 }
 
+                // Diagnostic tripwire — same gate as `page_fault` below.
+                #[cfg(feature = "std")]
+                if is_write && laddr < 0x1_0000 {
+                    self.null_write_fault_diag(laddr, error_code, user);
+                }
                 // Raise page fault exception (based on page_fault function in paging.cc)
                 self.exception(super::cpu::Exception::Pf, error_code as u16)?;
                 Err(e)
@@ -584,7 +597,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         user: bool,
         rw: MemoryAccessType,
         mem: &mut BxMemC,
-    ) -> Result<BxPhyAddress> {
+    ) -> Result<(BxPhyAddress, u32)> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
 
@@ -702,20 +715,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // `host_ppf | (paddress & 0xFFF)`; never re-OR offset bits on
             // top of the result.
             let merged = ppf | (laddr & 0x001F_FFFF);
-            return self.ept_translate_for_data(
-                merged,
-                laddr,
-                (combined_access & CombinedAccess::USER.bits()) != 0,
-                (combined_access & CombinedAccess::WRITE.bits()) != 0,
-                nx_page,
-                if matches!(rw, MemoryAccessType::Execute) {
-                    BxRwAccess::Execute
-                } else if matches!(rw, MemoryAccessType::Write) {
-                    BxRwAccess::Write
-                } else {
-                    BxRwAccess::Read
-                },
-            );
+            return self
+                .ept_translate_for_data(
+                    merged,
+                    laddr,
+                    (combined_access & CombinedAccess::USER.bits()) != 0,
+                    (combined_access & CombinedAccess::WRITE.bits()) != 0,
+                    nx_page,
+                    if matches!(rw, MemoryAccessType::Execute) {
+                        BxRwAccess::Execute
+                    } else if matches!(rw, MemoryAccessType::Write) {
+                        BxRwAccess::Write
+                    } else {
+                        BxRwAccess::Read
+                    },
+                )
+                .map(|paddr| (paddr, 0x001F_FFFFu32));
         }
 
         combined_access &= entry[BX_LEVEL_PDE].bits() as u32;
@@ -829,6 +844,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 BxRwAccess::Read
             },
         )
+        .map(|paddr| (paddr, 0xFFFu32))
     }
 
     /// Long mode paging translation (slow path, used by translate_linear for prefetch).
@@ -839,7 +855,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         user: bool,
         rw: MemoryAccessType,
         mem: &mut BxMemC,
-    ) -> Result<BxPhyAddress> {
+    ) -> Result<(BxPhyAddress, u32)> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
 
@@ -1053,6 +1069,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
         let merged = ppf | (laddr & u64::from(lpf_mask));
         self.ept_translate_for_data(merged, laddr, user_page, writeable_page, nx_page, ept_rw)
+            .map(|paddr| (paddr, lpf_mask))
     }
 }
 
@@ -1501,10 +1518,40 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         paddr & self.a20_mask
     }
 
+    /// Whether a physical address may be reached through the page-walk fast
+    /// path's direct host-RAM pointer.
+    ///
+    /// The legacy `0xA0000-0xFFFFF` window is not plain RAM: PAM shadowing,
+    /// the VGA aperture and SMRAM re-route reads and writes there, and Bochs
+    /// performs every paging-structure access through
+    /// `access_read_physical`/`access_write_physical`, which apply that
+    /// routing. `bx_guest_ram_span` alone excludes only the PCI hole, so
+    /// without this test a page table placed in the legacy window was read
+    /// and had its A/D bits written straight to host RAM, behind whatever
+    /// mapping the chipset had in effect. The DTLB fill uses the same test
+    /// when deciding whether to cache a `host_page_addr`.
+    #[inline]
+    fn is_plain_ram_for_walk(a20_addr: u64) -> bool {
+        a20_addr < 0xA0000 || a20_addr >= 0x100000
+    }
+
     /// Deliver a #PF exception.
-    fn page_fault(&mut self, fault: u32, laddr: u64, user: bool, is_write: bool) -> Result<()> {
+    pub(super) fn page_fault(
+        &mut self,
+        fault: u32,
+        laddr: u64,
+        user: bool,
+        is_write: bool,
+    ) -> Result<()> {
         self.cr2 = laddr;
         let error_code = fault | ((user as u32) << 2) | ((is_write as u32) << 1);
+        // Diagnostic tripwire: a write fault in the guest's low 64 KiB is
+        // never part of a healthy Linux boot (vm.mmap_min_addr). Gated on the
+        // RUSTY_BOX_PF_DIAG env var — no-op otherwise. See cpu/pf_diag.rs.
+        #[cfg(feature = "std")]
+        if is_write && laddr < 0x1_0000 {
+            self.null_write_fault_diag(laddr, error_code, user);
+        }
         self.exception(super::cpu::Exception::Pf, error_code as u16)
     }
 
@@ -1570,7 +1617,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let needed_bit = 1u32 << ((is_ss << 2) | ((is_write as u32) << 1) | (user as u32));
         {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
-            if tlb_entry.lpf == lpf && (tlb_entry.access_bits & needed_bit) != 0 {
+            // Bochs tlb.h isReadOK/isWriteOK AND the entry's protection-key
+            // allow-mask into every hit test, not just into the walk below.
+            // Shadow-stack accesses use bits 0x10/0x40, which the read side
+            // of the mask governs (Bochs isShadowStack*OK use rd_pkey/wr_pkey
+            // the same way).
+            let pkey_mask = if is_write {
+                self.wr_pkey[tlb_entry.pkey as usize]
+            } else {
+                self.rd_pkey[tlb_entry.pkey as usize]
+            };
+            if tlb_entry.lpf == lpf && (tlb_entry.access_bits & needed_bit & pkey_mask) != 0 {
                 // TLB hit — return cached physical address directly.
                 #[cfg(feature = "profiling")]
                 {
@@ -1634,6 +1691,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             if !is_write {
                 access_bits &= !(TlbAccess::SYS_WRITE_OK.bits() | TlbAccess::USER_WRITE_OK.bits());
             }
+
+            // Bochs paging.cc, inside the user-page arm of the TLB fill:
+            //
+            //     if (isExecute) { if (cr4.get_SMEP()) accessBits &= ~TLB_SysExecuteOK; }
+            //     else           { if (cr4.get_SMAP()) accessBits &= ~(TLB_SysReadOK | TLB_SysWriteOK); }
+            //
+            // The entry caches all four user/write combinations so later
+            // accesses of any kind can hit it, so the SMAP-forbidden ones must
+            // be stripped HERE. The walk's own SMAP check only runs on a miss:
+            // a fill performed by a legitimate user access would otherwise
+            // leave SYS_READ_OK cached on a user page, and the next supervisor
+            // access would hit the TLB and bypass SMAP entirely.
+            if (combined_access & CombinedAccess::USER.bits()) != 0 && self.cr4.smap() {
+                access_bits &=
+                    !(TlbAccess::SYS_READ_OK.bits() | TlbAccess::SYS_WRITE_OK.bits());
+            }
         }
 
         let ppf = paddr & LPF_MASK;
@@ -1676,7 +1749,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// Fast physical dword read for page walks — bypass full mem_read_dword overhead.
-    /// Page table entries are always in plain RAM, so we can use mem_host_base directly.
     /// Used by both &self and &mut self callers.
     #[inline(always)]
     fn page_walk_read_dword_ro(&self, paddr: u64) -> u32 {
@@ -1687,7 +1759,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn page_walk_read_dword(&self, paddr: u64) -> u32 {
         let a20_addr = paddr & self.a20_mask;
         let host_base = self.mem_host_base;
-        if !host_base.is_null() {
+        if !host_base.is_null() && Self::is_plain_ram_for_walk(a20_addr) {
             if let Some(span) = bx_guest_ram_span(a20_addr, 4, self.mem_host_len) {
                 return super::access::read_unaligned_u32(super::access::host_offset(
                     host_base, span.start,
@@ -1702,7 +1774,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let a20_addr = paddr & self.a20_mask;
         self.smc_write_check(a20_addr, 4);
         let host_base = self.mem_host_base;
-        if !host_base.is_null() {
+        if !host_base.is_null() && Self::is_plain_ram_for_walk(a20_addr) {
             if let Some(span) = bx_guest_ram_span(a20_addr, 4, self.mem_host_len) {
                 super::access::write_unaligned_u32(
                     super::access::host_offset_mut(host_base, span.start),
@@ -1718,7 +1790,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     fn page_walk_read_qword(&self, paddr: u64) -> u64 {
         let a20_addr = paddr & self.a20_mask;
         let host_base = self.mem_host_base;
-        if !host_base.is_null() {
+        if !host_base.is_null() && Self::is_plain_ram_for_walk(a20_addr) {
             if let Some(span) = bx_guest_ram_span(a20_addr, 8, self.mem_host_len) {
                 return super::access::read_unaligned_u64(super::access::host_offset(
                     host_base, span.start,
@@ -1733,7 +1805,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let a20_addr = paddr & self.a20_mask;
         self.smc_write_check(a20_addr, 8);
         let host_base = self.mem_host_base;
-        if !host_base.is_null() {
+        if !host_base.is_null() && Self::is_plain_ram_for_walk(a20_addr) {
             if let Some(span) = bx_guest_ram_span(a20_addr, 8, self.mem_host_len) {
                 super::access::write_unaligned_u64(
                     super::access::host_offset_mut(host_base, span.start),
@@ -2664,6 +2736,55 @@ mod tests {
     use core::ptr::NonNull;
 
 
+    /// Bochs access.cc funnels system reads through `access_read_linear`,
+    /// which raises a nested #PF (CR2 = laddr, supervisor read error code)
+    /// on a translation fault. A raw `Memory` error escaping instead makes
+    /// exception/interrupt delivery escalate straight to #DF (or bubble a
+    /// host-level error) where the architecture wants a recoverable #PF.
+    #[test]
+    fn system_read_fault_raises_nested_page_fault() {
+        const PAGE_DIRECTORY: u64 = 0x3000;
+        // PDE index 1 (vaddr 0x20_0000..0x40_0000) is never written → the
+        // walk fails with not-present at the PDE level.
+        const UNMAPPED_VADDR: u64 = 0x0020_0000;
+
+        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut mem = BxMemC::new(
+            BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
+            false,
+        );
+        let pin = CpuTlbPin::new(&cpu);
+        let pins = core::slice::from_ref(&pin);
+        cpu.wire_memory_access(NonNull::from(&mut mem), pins, &pin);
+
+        cpu.pdptrcache.entry[0] = PAGE_DIRECTORY | 0x1;
+        cpu.cr0 = BxCr0::PE | BxCr0::PG;
+        cpu.cr4 = BxCr4::PAE;
+        cpu.cpu_mode = CpuMode::Ia32Protected;
+
+        let err = cpu
+            .system_read_qword(UNMAPPED_VADDR)
+            .expect_err("the walk must fail");
+
+        // The raw memory error must have been converted into a delivered
+        // #PF (the delivery itself cascades without an IDT here, so the
+        // final error variant only needs to not be the raw one).
+        assert!(
+            !matches!(err, crate::cpu::CpuError::Memory(_)),
+            "a system-read translation fault must raise #PF, not return \
+             the raw walk error (Bochs access.cc access_read_linear): {err:?}"
+        );
+        #[cfg(feature = "std")]
+        {
+            let (_, vec, err_code, _) = cpu.exc_diag_ring[0];
+            assert_eq!(vec, 14, "first raised exception must be #PF");
+            assert_eq!(
+                err_code, 0,
+                "supervisor read of a not-present page → error code 0"
+            );
+        }
+    }
+
     #[test]
     fn page_walk_handler_write_qword_syncs_writer() {
         const PAGE_DIRECTORY: u64 = 0x3000;
@@ -2705,7 +2826,7 @@ mod tests {
                 &mut mem,
             )
             .unwrap(),
-            PAGE_TABLE
+            (PAGE_TABLE, 0xFFF)
         );
 
         let updated_pte = cpu.page_walk_read_qword(PAGE_TABLE);

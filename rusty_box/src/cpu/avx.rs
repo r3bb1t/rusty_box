@@ -13,9 +13,11 @@ use super::{
     decoder::{features::X86Feature, BxSegregs, Instruction},
     softfloat3e::{
         f128::{SOFTFLOAT_MULADD_SUB_C, SOFTFLOAT_MULADD_SUB_PROD},
+        f16_to_f32::f16_to_f32,
         f32_mul_add::f32_mul_add,
+        f32_to_f16::f32_to_f16,
         f64_mul_add::f64_mul_add,
-        softfloat::softfloat_getExceptionFlags,
+        softfloat::{softfloat_get_exception_flags, FLAG_DENORMAL},
     },
     sse_fp::mxcsr_to_softfloat_status_word,
     xmm::{BxPackedXmmRegister, BxPackedYmmRegister},
@@ -27,6 +29,18 @@ enum VexFpLogicalOp {
     AndNot,
     Or,
     Xor,
+}
+
+/// AVX2 per-element variable shifts (VEX.66.0F38 45/46/47).
+/// Bochs simd_int.h `xmm_psrlvd` / `xmm_psrlvq` / `xmm_psravd` /
+/// `xmm_psllvd` / `xmm_psllvq`.
+#[derive(Clone, Copy)]
+pub(super) enum VexVarShiftOp {
+    SrlD,
+    SrlQ,
+    SraD,
+    SllD,
+    SllQ,
 }
 
 #[derive(Clone, Copy)]
@@ -60,7 +74,7 @@ pub(super) enum VexScalarFmaOp {
 /// Bochs encodes this reorder in the opcode operand tuple; here `v`=DEST,
 /// `h`=vvvv, `w`=rm, matching the handler operand sourcing.
 #[inline]
-fn vex_fma_operands_u32(form: VexFmaForm, v: u32, h: u32, w: u32) -> (u32, u32, u32) {
+pub(super) fn vex_fma_operands_u32(form: VexFmaForm, v: u32, h: u32, w: u32) -> (u32, u32, u32) {
     match form {
         VexFmaForm::F132 => (v, w, h),
         VexFmaForm::F213 => (h, v, w),
@@ -69,7 +83,7 @@ fn vex_fma_operands_u32(form: VexFmaForm, v: u32, h: u32, w: u32) -> (u32, u32, 
 }
 
 #[inline]
-fn vex_fma_operands_u64(form: VexFmaForm, v: u64, h: u64, w: u64) -> (u64, u64, u64) {
+pub(super) fn vex_fma_operands_u64(form: VexFmaForm, v: u64, h: u64, w: u64) -> (u64, u64, u64) {
     match form {
         VexFmaForm::F132 => (v, w, h),
         VexFmaForm::F213 => (h, v, w),
@@ -93,7 +107,7 @@ fn scalar_fma_flags(op: VexScalarFmaOp) -> u8 {
 /// FMADDSUB subtracts on even lanes / adds on odd; FMSUBADD is the inverse
 /// (Bochs simd_pfp.h xmm_fmaddsubps / xmm_fmsubaddps).
 #[inline]
-fn packed_fma_flags(op: VexPackedFmaOp, lane: usize) -> u8 {
+pub(super) fn packed_fma_flags(op: VexPackedFmaOp, lane: usize) -> u8 {
     match op {
         VexPackedFmaOp::Fmadd => 0,
         VexPackedFmaOp::Fmsub => SOFTFLOAT_MULADD_SUB_C,
@@ -629,13 +643,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vprord(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let dst_idx = instr.src2(); // VEX.vvvv — for EVEX group opcodes, dst is in vvvv
+        let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
         let count = (instr.ib() & 31) as u32; // rotate count mod 32
 
-        // For EVEX group opcodes, rm (source) is in dst(), nnn is opcode extension
+        // The source is the rm operand in src1(); dst()/src2() both carry
+        // VEX.vvvv, which is the destination.
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -648,7 +663,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -668,13 +683,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
     pub(super) fn vprold(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let dst_idx = instr.src2(); // VEX.vvvv — for EVEX group opcodes, dst is in vvvv
+        let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
         let count = (instr.ib() & 31) as u32; // rotate count mod 32
 
-        // For EVEX group opcodes, rm (source) is in dst(), nnn is opcode extension
+        // The source is the rm operand in src1(); dst()/src2() both carry
+        // VEX.vvvv, which is the destination.
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -687,7 +703,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -1055,6 +1071,60 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.oszapc.set_zf(zf);
             self.oszapc.set_cf(cf);
         }
+        Ok(())
+    }
+
+    /// VTESTPS / VTESTPD — like VPTEST but restricted to the packed sign bits
+    /// (Bochs avx_pfp.cc VTESTPS_VpsWpsR / VTESTPD_VpdWpdR):
+    /// ZF = ((rm AND dst AND signmask) == 0), CF = ((rm AND NOT dst AND
+    /// signmask) == 0). No destination is written; OF/SF/AF/PF always clear.
+    ///
+    /// Bochs reads both operands as full YMM registers and iterates
+    /// `QWORD_ELEMENTS(len)`, so VL128 sees only the low two qwords.
+    pub(super) fn vtest(&mut self, instr: &Instruction, qword_elements: bool) -> super::Result<()> {
+        self.prepare_sse()?;
+        // Bochs seeds `result` with ZF|CF and clears the rest via
+        // setEFlagsOSZAPC, i.e. OF/SF/AF/PF are unconditionally cleared.
+        self.oszapc.set_oszapc_logic_32(1);
+        let sign_mask: u64 = if qword_elements {
+            0x8000_0000_0000_0000
+        } else {
+            0x8000_0000_8000_0000
+        };
+        // The memory form must touch exactly VL bytes (Bochs LOAD_Vector), so
+        // the two lengths take different read paths — a blanket ymmword read
+        // would fault on a VL128 operand at the end of a page.
+        let mut op1 = [0u64; 4];
+        let mut op2 = [0u64; 4];
+        let elements = if instr.get_vl() >= 1 {
+            let a = self.read_ymm_reg(instr.dst());
+            let b = self.vex_read_src2_ymm(instr)?;
+            for n in 0..4 {
+                op1[n] = a.ymm64u(n);
+                op2[n] = b.ymm64u(n);
+            }
+            4
+        } else {
+            let a = self.read_xmm_reg(instr.dst());
+            let b = self.vex_read_src2_xmm(instr)?;
+            for n in 0..2 {
+                op1[n] = a.xmm64u(n);
+                op2[n] = b.xmm64u(n);
+            }
+            2
+        };
+        let mut zf = true;
+        let mut cf = true;
+        for n in 0..elements {
+            if (op2[n] & op1[n] & sign_mask) != 0 {
+                zf = false;
+            }
+            if (op2[n] & !op1[n] & sign_mask) != 0 {
+                cf = false;
+            }
+        }
+        self.oszapc.set_zf(zf);
+        self.oszapc.set_cf(cf);
         Ok(())
     }
 
@@ -1483,13 +1553,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
     pub(super) fn vpslld_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let dst_idx = instr.src2(); // VEX.vvvv — for EVEX group opcodes, dst is in vvvv
+        let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
         let count = instr.ib() as u32;
 
-        // For EVEX group opcodes, rm (source) is in dst(), nnn is opcode extension
+        // The source is the rm operand in src1(); dst()/src2() both carry
+        // VEX.vvvv, which is the destination.
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -1504,7 +1575,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -1526,13 +1597,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
     pub(super) fn vpsrld_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let dst_idx = instr.src2(); // VEX.vvvv — for EVEX group opcodes, dst is in vvvv
+        let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
         let count = instr.ib() as u32;
 
-        // For EVEX group opcodes, rm (source) is in dst(), nnn is opcode extension
+        // The source is the rm operand in src1(); dst()/src2() both carry
+        // VEX.vvvv, which is the destination.
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -1547,7 +1619,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -2096,6 +2168,440 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// VPERMILPS — per-128-bit-lane single-precision permute with a variable
+    /// control vector (Bochs `HANDLE_AVX_3OP<xmm_permilps>`, simd_int.h
+    /// `xmm_permilps`). VEX.vvvv supplies the data, ModRM.rm the selectors;
+    /// each selector uses only its own lane, so no data crosses lanes.
+    pub(super) fn vpermilps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let data = self.read_ymm_reg(instr.src2());
+            let ctl = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..2 {
+                for n in 0..4 {
+                    let sel = (ctl.ymm32u(lane * 4 + n) & 0x3) as usize;
+                    result.set_ymm32u(lane * 4 + n, data.ymm32u(lane * 4 + sel));
+                }
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let data = self.read_xmm_reg(instr.src2());
+            let ctl = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            for n in 0..4 {
+                let sel = (ctl.xmm32u(n) & 0x3) as usize;
+                result.set_xmm32u(n, data.xmm32u(sel));
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPERMILPD — per-128-bit-lane double-precision permute with a variable
+    /// control vector (Bochs `HANDLE_AVX_3OP<xmm_permilpd>`, simd_int.h
+    /// `xmm_permilpd`). The selector for each qword is bit 1 of the *even*
+    /// dword of that qword pair — dwords 0 and 2 within the lane.
+    pub(super) fn vpermilpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.get_vl() >= 1 {
+            let data = self.read_ymm_reg(instr.src2());
+            let ctl = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..2 {
+                let base32 = lane * 4;
+                let base64 = lane * 2;
+                let s0 = ((ctl.ymm32u(base32) >> 1) & 0x1) as usize;
+                let s1 = ((ctl.ymm32u(base32 + 2) >> 1) & 0x1) as usize;
+                result.set_ymm64u(base64, data.ymm64u(base64 + s0));
+                result.set_ymm64u(base64 + 1, data.ymm64u(base64 + s1));
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let data = self.read_xmm_reg(instr.src2());
+            let ctl = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            let s0 = ((ctl.xmm32u(0) >> 1) & 0x1) as usize;
+            let s1 = ((ctl.xmm32u(2) >> 1) & 0x1) as usize;
+            result.set_xmm64u(0, data.xmm64u(s0));
+            result.set_xmm64u(1, data.xmm64u(s1));
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPERMILPS with an immediate control (Bochs avx.cc
+    /// `VPERMILPS_VpsWpsIbR`, which applies the same imm8 to every lane via
+    /// `xmm_shufps(result, op1, op1, Ib)`). Source is ModRM.rm; no vvvv.
+    pub(super) fn vpermilps_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let order = instr.ib();
+        if instr.get_vl() >= 1 {
+            let src = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..2 {
+                let base = lane * 4;
+                for n in 0..4 {
+                    let sel = ((order >> (n * 2)) & 0x3) as usize;
+                    result.set_ymm32u(base + n, src.ymm32u(base + sel));
+                }
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            for n in 0..4 {
+                let sel = ((order >> (n * 2)) & 0x3) as usize;
+                result.set_xmm32u(n, src.xmm32u(sel));
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VPERMILPD with an immediate control (Bochs avx.cc
+    /// `VPERMILPD_VpdWpdIbR`). Each lane consumes two imm8 bits — Bochs shifts
+    /// `order >>= 2` after every 128-bit lane, so the upper lane uses bits
+    /// [3:2] even though only one bit per qword is significant.
+    pub(super) fn vpermilpd_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let order = instr.ib();
+        if instr.get_vl() >= 1 {
+            let src = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..2 {
+                let base = lane * 2;
+                let bits = order >> (lane * 2);
+                result.set_ymm64u(base, src.ymm64u(base + (bits & 0x1) as usize));
+                result.set_ymm64u(base + 1, src.ymm64u(base + ((bits >> 1) & 0x1) as usize));
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let src = self.vex_read_src2_xmm(instr)?;
+            let mut result = BxPackedXmmRegister::default();
+            result.set_xmm64u(0, src.xmm64u((order & 0x1) as usize));
+            result.set_xmm64u(1, src.xmm64u(((order >> 1) & 0x1) as usize));
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// AVX2 per-element variable shifts — VPSRLVD/Q, VPSRAVD, VPSLLVD/Q
+    /// (Bochs `HANDLE_AVX_2OP<xmm_psrlvd>` and friends). VEX.vvvv holds the
+    /// values, ModRM.rm the per-element counts; a count wider than the element
+    /// yields 0 for the logical shifts and the replicated sign for VPSRAVD.
+    pub(super) fn vex_var_shift(
+        &mut self,
+        instr: &Instruction,
+        op: VexVarShiftOp,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let (values, counts) = if instr.get_vl() >= 1 {
+            (
+                self.read_ymm_reg(instr.src2()),
+                self.vex_read_src2_ymm(instr)?,
+            )
+        } else {
+            let v = self.read_xmm_reg(instr.src2());
+            let c = self.vex_read_src2_xmm(instr)?;
+            let (mut vy, mut cy) = (
+                BxPackedYmmRegister::default(),
+                BxPackedYmmRegister::default(),
+            );
+            vy.set_ymm128(0, v);
+            cy.set_ymm128(0, c);
+            (vy, cy)
+        };
+        let dwords = if instr.get_vl() >= 1 { 8 } else { 4 };
+        let qwords = dwords / 2;
+        let mut result = BxPackedYmmRegister::default();
+        match op {
+            VexVarShiftOp::SrlD => {
+                for n in 0..dwords {
+                    let shift = counts.ymm32u(n);
+                    result.set_ymm32u(n, if shift > 31 { 0 } else { values.ymm32u(n) >> shift });
+                }
+            }
+            VexVarShiftOp::SllD => {
+                for n in 0..dwords {
+                    let shift = counts.ymm32u(n);
+                    result.set_ymm32u(n, if shift > 31 { 0 } else { values.ymm32u(n) << shift });
+                }
+            }
+            VexVarShiftOp::SraD => {
+                for n in 0..dwords {
+                    let shift = counts.ymm32u(n);
+                    let v = values.ymm32s(n);
+                    let r = if shift > 31 {
+                        if v < 0 {
+                            -1i32
+                        } else {
+                            0
+                        }
+                    } else {
+                        v >> shift
+                    };
+                    result.set_ymm32u(n, r as u32);
+                }
+            }
+            VexVarShiftOp::SrlQ => {
+                for n in 0..qwords {
+                    let shift = counts.ymm64u(n);
+                    result.set_ymm64u(n, if shift > 63 { 0 } else { values.ymm64u(n) >> shift });
+                }
+            }
+            VexVarShiftOp::SllQ => {
+                for n in 0..qwords {
+                    let shift = counts.ymm64u(n);
+                    result.set_ymm64u(n, if shift > 63 { 0 } else { values.ymm64u(n) << shift });
+                }
+            }
+        }
+        if instr.get_vl() >= 1 {
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            self.write_xmm_reg(instr.dst(), result.ymm128(0));
+        }
+        Ok(())
+    }
+
+    /// Collapse the element sign bits of the `vvvv` mask register into a bit
+    /// per element. Bochs builds the same value with `xmm_pmovmskd` /
+    /// `xmm_pmovmskq` over the two 128-bit lanes (avx.cc VMASKMOVPS_VpsHpsMps).
+    fn vex_mask_bits(mask: &BxPackedYmmRegister, qword: bool, elements: usize) -> u32 {
+        let mut bits = 0u32;
+        for n in 0..elements {
+            let signed = if qword {
+                (mask.ymm64u(n) >> 63) != 0
+            } else {
+                (mask.ymm32u(n) >> 31) != 0
+            };
+            if signed {
+                bits |= 1 << n;
+            }
+        }
+        bits
+    }
+
+    /// Element count for a masked move at the instruction's vector length.
+    fn vex_mask_elements(instr: &Instruction, qword: bool) -> usize {
+        match (instr.get_vl() >= 1, qword) {
+            (true, false) => 8,
+            (true, true) => 4,
+            (false, false) => 4,
+            (false, true) => 2,
+        }
+    }
+
+    /// VMASKMOVPS / VMASKMOVPD / VPMASKMOVD / VPMASKMOVQ, load direction.
+    /// Bochs avx.cc `VMASKMOVPS_VpsHpsMps` via avx512_helpers.cc
+    /// `avx_masked_load32` / `avx_masked_load64`.
+    ///
+    /// Masked-off elements are read as zero and — critically — are never
+    /// accessed, so they cannot fault. The accesses stay element-at-a-time for
+    /// exactly that reason; a single wide load would turn suppressed faults
+    /// into real ones.
+    pub(super) fn vmaskmov_load(&mut self, instr: &Instruction, qword: bool) -> super::Result<()> {
+        self.prepare_avx()?;
+        let elements = Self::vex_mask_elements(instr, qword);
+        let mask = self.read_ymm_reg(instr.src2()); // vvvv
+        let bits = Self::vex_mask_bits(&mask, qword, elements);
+        let esize = if qword { 8u64 } else { 4u64 };
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
+
+        // Bochs checks every masked-in element for canonicality up front, so a
+        // non-canonical element raises #GP/#SS before any element is read.
+        if instr.as64_l() != 0 {
+            let laddr = self.get_laddr64(seg as usize, eaddr);
+            for n in 0..elements {
+                if (bits & (1 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(esize * n as u64))
+                {
+                    return self.exception(Self::seg_exception(seg), 0);
+                }
+            }
+        }
+
+        let mut result = BxPackedYmmRegister::default();
+        // Bochs walks high element to low so the highest address faults first.
+        for n in (0..elements).rev() {
+            if (bits & (1 << n)) == 0 {
+                continue; // masked off: stays zero, no memory access
+            }
+            let addr = eaddr.wrapping_add(esize * n as u64);
+            if qword {
+                let v = self.v_read_qword(seg, addr)?;
+                result.set_ymm64u(n, v);
+            } else {
+                let v = self.v_read_dword(seg, addr)?;
+                result.set_ymm32u(n, v);
+            }
+        }
+
+        if instr.get_vl() >= 1 {
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            self.write_xmm_reg(instr.dst(), result.ymm128(0));
+        }
+        Ok(())
+    }
+
+    /// VMASKMOVPS / VMASKMOVPD / VPMASKMOVD / VPMASKMOVQ, store direction.
+    /// Bochs avx.cc `VMASKMOVPS_MpsHpsVps` via avx512_helpers.cc
+    /// `avx_masked_store32` / `avx_masked_store64`.
+    ///
+    /// Bochs probes every masked-in element with an unlocked RMW read before
+    /// writing any of them, so the store either faults with memory untouched
+    /// or completes in full. Masked-off elements are left alone.
+    pub(super) fn vmaskmov_store(&mut self, instr: &Instruction, qword: bool) -> super::Result<()> {
+        self.prepare_avx()?;
+        let elements = Self::vex_mask_elements(instr, qword);
+        let mask = self.read_ymm_reg(instr.src2()); // vvvv
+        let data = self.read_ymm_reg(instr.dst()); // nnn
+        let bits = Self::vex_mask_bits(&mask, qword, elements);
+        let esize = if qword { 8u64 } else { 4u64 };
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
+
+        if instr.as64_l() != 0 {
+            let laddr = self.get_laddr64(seg as usize, eaddr);
+            for n in 0..elements {
+                if (bits & (1 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(esize * n as u64))
+                {
+                    return self.exception(Self::seg_exception(seg), 0);
+                }
+            }
+        }
+
+        // Probe pass — the read value is deliberately unused; this exists only
+        // so a fault on any element happens before the first write.
+        for n in (0..elements).rev() {
+            if (bits & (1 << n)) == 0 {
+                continue;
+            }
+            let addr = eaddr.wrapping_add(esize * n as u64);
+            if qword {
+                self.v_read_rmw_qword(seg, addr)?;
+            } else {
+                self.v_read_rmw_dword(seg, addr)?;
+            }
+        }
+
+        for n in 0..elements {
+            if (bits & (1 << n)) == 0 {
+                continue;
+            }
+            let addr = eaddr.wrapping_add(esize * n as u64);
+            if qword {
+                self.v_write_qword(seg, addr, data.ymm64u(n))?;
+            } else {
+                self.v_write_dword(seg, addr, data.ymm32u(n))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// VPCLMULQDQ — carry-less multiply, per 128-bit lane
+    /// (Bochs avx_pclmul.cc `VPCLMULQDQ_VdqHdqWdqIbR`). Unlike the legacy
+    /// 3-operand form this sources its first operand from VEX.vvvv, and the
+    /// 256-bit form (the VPCLMULQDQ extension) applies the same imm8 selectors
+    /// independently to each lane.
+    pub(super) fn vpclmulqdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_avx()?;
+        let imm8 = instr.ib();
+        let sel1 = (imm8 & 1) as usize;
+        let sel2 = ((imm8 >> 4) & 1) as usize;
+
+        if instr.get_vl() >= 1 {
+            let op1 = self.read_ymm_reg(instr.src2()); // vvvv
+            let op2 = self.vex_read_src2_ymm(instr)?;
+            let mut result = BxPackedYmmRegister::default();
+            for lane in 0..2 {
+                let a = op1.ymm64u(lane * 2 + sel1);
+                let b = op2.ymm64u(lane * 2 + sel2);
+                result.set_ymm128(lane, super::aes::xmm_pclmulqdq(a, b));
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            let op1 = self.read_xmm_reg(instr.src2()); // vvvv
+            let op2 = self.vex_read_src2_xmm(instr)?;
+            let result = super::aes::xmm_pclmulqdq(op1.xmm64u(sel1), op2.xmm64u(sel2));
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// VCVTPH2PS — widen packed half-precision to single-precision
+    /// (Bochs avx_cvt.cc `VCVTPH2PS_VpsWpsR`). The source is half the
+    /// destination width, so the memory form touches VL/2 bytes
+    /// (Bochs `LOAD_Half_Vector`).
+    pub(super) fn vcvtph2ps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_avx()?;
+        let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
+        // Bochs: ignore MXCSR.DAZ and never report #D for this conversion.
+        status.softfloat_denormals_are_zeros = false;
+        status.softfloat_suppress_exception = FLAG_DENORMAL;
+
+        let elements = if instr.get_vl() >= 1 { 8 } else { 4 };
+        let src = self.vex_pmov_read(instr, elements * 2)?;
+        let mut result = BxPackedYmmRegister::default();
+        for n in 0..elements {
+            let half = u16::from_le_bytes([src[n * 2], src[n * 2 + 1]]);
+            result.set_ymm32u(n, f16_to_f32(half, &mut status));
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        if instr.get_vl() >= 1 {
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            self.write_xmm_reg(instr.dst(), result.ymm128(0));
+        }
+        Ok(())
+    }
+
+    /// VCVTPS2PH — narrow packed single-precision to half-precision
+    /// (Bochs avx_cvt.cc `VCVTPS2PH_WpsVpsIb`). The destination is ModRM.rm
+    /// and is half the source width; nnn is the source. imm8[2] selects
+    /// MXCSR.RC, otherwise imm8[1:0] overrides the rounding mode.
+    pub(super) fn vcvtps2ph(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_avx()?;
+        let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
+        let control = instr.ib();
+        // Bochs: ignore MXCSR.FUZ; imm8 may override the rounding mode.
+        status.softfloat_flush_underflow_to_zero = false;
+        if (control & 0x4) == 0 {
+            status.softfloat_rounding_mode = control & 0x3;
+        }
+
+        let src = self.read_ymm_reg(instr.dst()); // nnn = source
+        let elements = if instr.get_vl() >= 1 { 8 } else { 4 };
+        let mut packed = BxPackedXmmRegister::default();
+        for n in 0..elements {
+            packed.set_xmm16u(n, f32_to_f16(src.ymm32u(n), &mut status));
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+
+        if instr.mod_c0() {
+            // Register destination: VL256 writes the full low xmm, VL128 only
+            // the low qword. Both clear everything above.
+            let mut out = BxPackedXmmRegister::default();
+            if instr.get_vl() >= 1 {
+                out = packed;
+            } else {
+                out.set_xmm64u(0, packed.xmm64u(0));
+            }
+            self.write_xmm_reg(instr.src1(), out); // rm = destination
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            if instr.get_vl() >= 1 {
+                self.v_write_xmmword(seg, eaddr, &packed)?;
+            } else {
+                self.v_write_qword(seg, eaddr, packed.xmm64u(0))?;
+            }
+        }
+        Ok(())
+    }
+
     /// VEX FMA packed single-precision helper.
     pub(super) fn vex_fma_packed_ps(
         &mut self,
@@ -2120,6 +2626,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
                 );
             }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_ymm_reg(dst_idx, result);
         } else {
             let v = self.read_xmm_reg(dst_idx);
@@ -2134,9 +2641,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     f32_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
                 );
             }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_xmm_reg(dst_idx, result);
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+        Ok(())
     }
 
     /// VEX FMA packed double-precision helper.
@@ -2163,6 +2671,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
                 );
             }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_ymm_reg(dst_idx, result);
         } else {
             let v = self.read_xmm_reg(dst_idx);
@@ -2177,9 +2686,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                     f64_mul_add(a, b, c, packed_fma_flags(op, lane), &mut status),
                 );
             }
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
             self.write_xmm_reg(dst_idx, result);
         }
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+        Ok(())
     }
 
     /// VEX FMA scalar single-precision helper.
@@ -2205,8 +2715,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
         let (a, b, c) = vex_fma_operands_u32(form, v, h, w);
         result.set_xmm32u(0, f32_mul_add(a, b, c, scalar_fma_flags(op), &mut status));
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.write_xmm_reg(dst_idx, result);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+        Ok(())
     }
 
     /// VEX FMA scalar double-precision helper.
@@ -2232,8 +2743,113 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         };
         let (a, b, c) = vex_fma_operands_u64(form, v, h, w);
         result.set_xmm64u(0, f64_mul_add(a, b, c, scalar_fma_flags(op), &mut status));
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.write_xmm_reg(dst_idx, result);
-        self.check_exceptions_sse(softfloat_getExceptionFlags(&status))
+        Ok(())
+    }
+
+    /// EVEX FMA scalar single-precision — Bochs avx512_fma.cc
+    /// `EVEX_FMA_SCALAR_SINGLE`.
+    ///
+    /// Differs from the VEX form in three ways: the whole computation is gated
+    /// on the scalar opmask bit; an inactive element is zeroed under
+    /// zero-masking and left alone under merge-masking; and the destination's
+    /// bits above 128 are cleared either way. The operand permutation for
+    /// 132/213/231 is the same one the VEX form uses — the def-file operand
+    /// tuples for the EVEX entries reorder identically.
+    pub(super) fn evex_fma_scalar_ss(
+        &mut self,
+        instr: &Instruction,
+        form: VexFmaForm,
+        op: VexScalarFmaOp,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let mut result = self.read_xmm_reg(dst_idx);
+
+        if self.scalar_element_mask(instr) {
+            let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
+            self.softfloat_rc_override(&mut status, instr);
+            let v = result.xmm32u(0);
+            let h = self.read_xmm_reg(instr.src2()).xmm32u(0);
+            let w = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1()).xmm32u(0)
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_dword(seg, eaddr)?
+            };
+            let (a, b, c) = vex_fma_operands_u32(form, v, h, w);
+            result.set_xmm32u(0, f32_mul_add(a, b, c, scalar_fma_flags(op), &mut status));
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_xmm_reg(dst_idx, result);
+            Ok(())
+        } else {
+            if instr.is_zero_masking() != 0 {
+                result.set_xmm32u(0, 0);
+            }
+            // Merge-masking leaves element 0 as it was; either way the write
+            // clears above 128 bits (Bochs BX_CLEAR_AVX_HIGH128).
+            self.write_xmm_reg(dst_idx, result);
+            Ok(())
+        }
+    }
+
+    /// EVEX FMA scalar double-precision — Bochs avx512_fma.cc
+    /// `EVEX_FMA_SCALAR_DOUBLE`.
+    pub(super) fn evex_fma_scalar_sd(
+        &mut self,
+        instr: &Instruction,
+        form: VexFmaForm,
+        op: VexScalarFmaOp,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let mut result = self.read_xmm_reg(dst_idx);
+
+        if self.scalar_element_mask(instr) {
+            let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
+            self.softfloat_rc_override(&mut status, instr);
+            let v = result.xmm64u(0);
+            let h = self.read_xmm_reg(instr.src2()).xmm64u(0);
+            let w = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1()).xmm64u(0)
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_qword(seg, eaddr)?
+            };
+            let (a, b, c) = vex_fma_operands_u64(form, v, h, w);
+            result.set_xmm64u(0, f64_mul_add(a, b, c, scalar_fma_flags(op), &mut status));
+            self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+            self.write_xmm_reg(dst_idx, result);
+            Ok(())
+        } else {
+            if instr.is_zero_masking() != 0 {
+                result.set_xmm64u(0, 0);
+            }
+            self.write_xmm_reg(dst_idx, result);
+            Ok(())
+        }
+    }
+
+    /// Bochs sse_pfp.cc `softfloat_status_word_rc_override` — on a register
+    /// operand with EVEX.b, L'L is the embedded rounding mode rather than the
+    /// vector length, and every exception is both suppressed and masked (the
+    /// SAE half of "static rounding, suppress all exceptions").
+    #[inline]
+    pub(super) fn softfloat_rc_override(
+        &self,
+        status: &mut crate::cpu::softfloat3e::softfloat::SoftFloatStatus,
+        instr: &Instruction,
+    ) {
+        if instr.mod_c0() && instr.get_evex_b() != 0 && instr.get_vl() == 2 {
+            status.softfloat_rounding_mode = instr.get_rc();
+            status.softfloat_suppress_exception =
+                crate::cpu::softfloat3e::softfloat::ALL_EXCEPTIONS_MASK;
+            status.softfloat_exception_masks =
+                crate::cpu::softfloat3e::softfloat::ALL_EXCEPTIONS_MASK;
+        }
     }
 
     /// #UD when the CPU model does not advertise FMA (Bochs `BX_ISA_AVX_FMA`).
@@ -3752,7 +4368,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -3767,7 +4383,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -3792,7 +4408,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -3807,7 +4423,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -3832,7 +4448,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -3847,7 +4463,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -3872,7 +4488,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -3887,7 +4503,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -3914,7 +4530,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = if count_raw > 15 { 15 } else { count_raw };
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -3927,7 +4543,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -3952,7 +4568,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = if count_raw > 31 { 31 } else { count_raw };
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -3965,7 +4581,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -3990,7 +4606,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let shift = if shift > 15 { 16 } else { shift };
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4013,7 +4629,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4040,7 +4656,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let shift = if shift > 15 { 16 } else { shift };
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4063,7 +4679,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);

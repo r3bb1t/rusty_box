@@ -459,6 +459,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
 
     // access to 32 bit instruction pointer
     #[inline]
+    /// Test-only view of the architectural fault RIP (Bochs `prev_rip`),
+    /// for crate tests outside the `cpu` module.
+    #[cfg(test)]
+    pub(crate) fn prev_rip_for_test(&self) -> u64 {
+        self.prev_rip
+    }
+
     pub fn rip(&self) -> u64 {
         self.gen_reg[BX_64BIT_REG_RIP].rrx()
     }

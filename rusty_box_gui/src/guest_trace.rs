@@ -172,7 +172,7 @@ impl GuestTracer {
         if let Err(e) = res {
             if !self.write_error_reported {
                 self.write_error_reported = true;
-                eprintln!("guest-trace: log write failed, tracing continues without log: {e}");
+                tracing::error!("guest-trace: log write failed, tracing continues without log: {e}");
             }
         }
     }
@@ -394,7 +394,7 @@ impl Drop for GuestTracer {
     fn drop(&mut self) {
         if let Err(e) = self.out.flush() {
             if !self.write_error_reported {
-                eprintln!("guest-trace: final log flush failed: {e}");
+                tracing::error!("guest-trace: final log flush failed: {e}");
             }
         }
     }

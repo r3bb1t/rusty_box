@@ -240,7 +240,10 @@ pub struct EmulatorConfig {
     pub host_memory_size: usize,
     /// Memory block size for allocation
     pub memory_block_size: usize,
-    /// Instructions per second for timing
+    /// Emulated instructions per second, used to calibrate emulated time
+    /// against wall-clock time. Bochs config.cc raised its default from 4M to
+    /// 50M — 4M badly under-reports modern hosts, which makes every guest
+    /// timeout fire early.
     pub ips: u32,
     /// Enable PCI support
     pub pci_enabled: bool,
@@ -278,6 +281,11 @@ pub struct EmulatorConfig {
     /// Bochs default `hardware`, which makes modern Linux trust the dumped
     /// multi-GHz TSC frequency and run all TSC-derived time `freq/ips` slow.
     pub cpuid_freq: CpuidFreq,
+    /// How the RTC is seeded at power-up — Bochs `clock: time0` (config.cc
+    /// BXPN_CLOCK_TIME0). Default `Local`, matching Bochs, so the guest RTC
+    /// shows host local wall-clock time; `Utc` or a fixed timestamp are
+    /// available for UTC guests / deterministic boots.
+    pub rtc_time0: crate::iodev::cmos::RtcInitTime,
 }
 
 impl Default for EmulatorConfig {
@@ -286,7 +294,7 @@ impl Default for EmulatorConfig {
             guest_memory_size: 32 * 1024 * 1024,
             host_memory_size: 32 * 1024 * 1024,
             memory_block_size: 128 * 1024,
-            ips: 4_000_000,
+            ips: 50_000_000,
             pci_enabled: true,
             pci_vga: false,
             cpu_params: BxParams::default(),
@@ -294,6 +302,7 @@ impl Default for EmulatorConfig {
             sync_realtime: false,
             smp_quantum: 16,
             cpuid_freq: CpuidFreq::default(),
+            rtc_time0: crate::iodev::cmos::RtcInitTime::default(),
         }
     }
 }
@@ -555,11 +564,19 @@ pub struct Emulator<'a, I: BxCpuIdTrait, T: Instrumentation = ()> {
     /// GUI instance (optional, can be None for headless operation)
     #[cfg(feature = "alloc")]
     gui: Option<Box<dyn BxGui>>,
-    /// BIOS output file for port 0x402/0x403/0xE9 messages (std feature only)
+    /// Output file for the port-0xE9 debug console (std feature only). BIOS
+    /// message ports 0x400-0x403/0x500-0x503 go to the log instead, exactly
+    /// like Bochs biosdev.cc.
     #[cfg(feature = "std")]
     bios_output_file: Option<std::fs::File>,
     /// Exit addresses for emu_start.
     pub(crate) exit_set: ExitSet,
+    /// Handle of the VGA vertical-retrace timer (Bochs vgacore.cc
+    /// `vga_vtimer_id`). Re-armed whenever the retrace period changes.
+    pub(crate) vga_vertical_timer_handle: Option<usize>,
+    /// Vertical period currently programmed into that timer, so it is only
+    /// re-armed when the guest actually changes the display timing.
+    pub(crate) vga_vertical_period_usec: u32,
     /// Shared stop flag: when set to true by the GUI thread, run_interactive exits the loop
     #[cfg(feature = "alloc")]
     pub stop_flag: Arc<AtomicBool>,
@@ -856,7 +873,15 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         }
 
         for (channel, irq) in [(0usize, 14u8), (1, 15)] {
-            if self.device_manager.harddrv.seek_complete_pending[channel] {
+            // An in-flight seek (armed "HD/CD seek" timer or an undrained arm
+            // latch) will raise/complete the IRQ when its deadline fires —
+            // the line level is legitimately transitional then.
+            let seek_in_flight = (0..2).any(|device| {
+                self.device_manager.harddrv.pending_seek_arm_usec[channel][device].is_some()
+                    || self.device_manager.harddrv.seek_timer_handles[channel][device]
+                        .is_some_and(|handle| self.pc_system.is_timer_active(handle))
+            });
+            if seek_in_flight {
                 continue;
             }
             if pic.irq_line_level(irq) != self.device_manager.harddrv.get_irq_level(channel)
@@ -1122,10 +1147,10 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     // the count move and hangs the AP bring-up.
                     let round_epoch = self.pc_system.time_ticks();
                     let cpu = self.cpu_mut_at(cpu_index);
-                    cpu.mark_icount_sync();
+                    cpu.mark_tick_sync();
                     cpu.lapic.current_ticks = round_epoch;
                     cpu.lapic.ticks_at_sync = round_epoch;
-                    cpu.lapic.icount_at_sync = cpu.icount;
+                    cpu.lapic.cpu_ticks_at_sync = cpu.cpu_ticks();
                 }
 
                 let mem_static = self.mem_nonnull_static();
@@ -1139,7 +1164,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut *mem_ptr);
                 let pins = core::slice::from_raw_parts(pins_ptr, pins_len);
                 let current_pin = &*pins_ptr.add(cpu_index);
-                let icount_before = self.cpu_ref(cpu_index).icount;
+                let ticks_before = self.cpu_ref(cpu_index).cpu_ticks();
                 let slice_result = if smp {
                     self.cpu_mut_at(cpu_index).cpu_run_trace_with_io(
                         mem_extended,
@@ -1181,7 +1206,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                             total_up_executed = total_up_executed.saturating_add(executed);
                         }
                         let elapsed = if smp {
-                            let delta = self.cpu_ref(cpu_index).icount_delta_since_sync();
+                            let delta = self.cpu_ref(cpu_index).tick_delta_since_sync();
                             if delta == 0 {
                                 self.smp_quantum_ticks()
                             } else {
@@ -1189,8 +1214,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                             }
                         } else {
                             self.cpu_ref(cpu_index)
-                                .icount
-                                .saturating_sub(icount_before)
+                                .cpu_ticks()
+                                .saturating_sub(ticks_before)
                         };
                         round_ticks = if smp {
                             round_ticks.saturating_add(elapsed)
@@ -1465,6 +1490,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             #[cfg(feature = "std")]
             core::ptr::addr_of_mut!((*ptr).bios_output_file).write(None);
             core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
+            core::ptr::addr_of_mut!((*ptr).vga_vertical_timer_handle).write(None);
+            core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
             core::ptr::addr_of_mut!((*ptr).stop_flag).write(Arc::new(AtomicBool::new(false)));
             Ok(alloc::boxed::Box::from_raw(ptr))
         }
@@ -1568,6 +1595,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         core::ptr::addr_of_mut!((*ptr).initialized).write(false);
         core::ptr::addr_of_mut!((*ptr).snapshot_restore_failed).write(false);
         core::ptr::addr_of_mut!((*ptr).exit_set).write(ExitSet::new());
+            core::ptr::addr_of_mut!((*ptr).vga_vertical_timer_handle).write(None);
+            core::ptr::addr_of_mut!((*ptr).vga_vertical_period_usec).write(0);
         core::ptr::addr_of_mut!((*ptr).stop_flag).write(AtomicBool::new(false));
         Ok(&mut *ptr)
     }
@@ -1610,6 +1639,26 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         )?;
         self.device_manager.keyboard.set_timer_handle(keyboard);
 
+        // Bochs hpet.cc init(): one one-shot timer per comparator with the
+        // comparator index as its param ("hpet").
+        for index in 0..crate::iodev::hpet::HPET_NUM_TIMERS {
+            let handle =
+                self.pc_system
+                    .register_timer(TimerOwner::Hpet(index), 0, false, false, "hpet")?;
+            self.device_manager.hpet.timer_handles[index] = Some(handle);
+        }
+
+        // Bochs vgacore.cc registers a continuous "vga vertical timer" at the
+        // vertical-retrace period; it latches the frame's CRTC start address and
+        // re-anchors the 0x3DA phase. Armed once the retrace timing is known.
+        self.vga_vertical_timer_handle = Some(self.pc_system.register_timer(
+            TimerOwner::VgaVertical,
+            0,
+            false,
+            false,
+            "vga vertical timer",
+        )?);
+
         self.device_manager.cmos.periodic_timer_handle = Some(self.pc_system.register_timer(
             TimerOwner::CmosPeriodic,
             0,
@@ -1651,6 +1700,16 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             self.device_manager
                 .serial
                 .set_fifo_timer_handle(port_index, Some(handle));
+            let tx_handle = self.pc_system.register_timer(
+                TimerOwner::SerialTx(port_index),
+                0,
+                false,
+                false,
+                "serial TX",
+            )?;
+            self.device_manager
+                .serial
+                .set_tx_timer_handle(port_index, Some(tx_handle));
         }
 
         for (owner, channel) in [
@@ -1661,6 +1720,24 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 .pc_system
                 .register_timer(owner, 0, false, false, "PIIX IDE")?;
             self.device_manager.pci_ide.bmdma[channel].timer_index = Some(handle);
+        }
+
+        // Bochs harddrv.cc init registers one "HD/CD seek" timer per
+        // configured drive (param = channel<<1 | device). Media may attach
+        // after device init here, so all four slots are registered up front;
+        // a slot whose drive stays absent simply never activates.
+        for channel in 0..2usize {
+            for device in 0..2usize {
+                let param = (channel << 1) | device;
+                let handle = self.pc_system.register_timer(
+                    TimerOwner::HdSeek(param),
+                    0,
+                    false,
+                    false,
+                    "HD/CD seek",
+                )?;
+                self.device_manager.harddrv.seek_timer_handles[channel][device] = Some(handle);
+            }
         }
 
         for cpu_index in 0..self.cpu_count() {
@@ -1770,6 +1847,12 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
 
         // Step 9: Initialize devices (line 1353)
         self.devices.init(&mut self.memory)?;
+
+        // Bochs clock:time0 — apply the RTC power-up seed source (local / utc /
+        // fixed) from config. The CMOS was seeded at construction with the Utc
+        // default; re-seed it here so the guest's RTC matches the configuration
+        // before any device reset or the BIOS reads it.
+        self.device_manager.cmos.set_time0(self.config.rtc_time0);
 
         // Initialize device manager (actual hardware + I/O handler registration)
         self.device_manager
@@ -1913,6 +1996,12 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
 
         // Step 9: Initialize devices (line 1353)
         self.devices.init(&mut self.memory)?;
+
+        // Bochs clock:time0 — apply the RTC power-up seed source (local / utc /
+        // fixed) from config. The CMOS was seeded at construction with the Utc
+        // default; re-seed it here so the guest's RTC matches the configuration
+        // before any device reset or the BIOS reads it.
+        self.device_manager.cmos.set_time0(self.config.rtc_time0);
 
         // Initialize device manager (actual hardware + I/O handler registration)
         self.device_manager
@@ -2063,6 +2152,21 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     /// Uses VGA update() function to process text mode and get update data
     pub fn update_gui(&mut self) {
         if let Some(ref mut gui) = self.gui {
+            // Bochs vgacore.cc skip_update() calls bx_gui->clear_screen() for a
+            // pending sequencer clear-screen request even on frames it skips.
+            if self.device_manager.vga.take_pending_clear_screen() {
+                gui.clear_screen();
+            }
+            // Bochs vgacore.cc publishes each completed DAC write to the GUI via
+            // palette_change_common(). Drained here because the VGA cannot reach
+            // the GUI directly.
+            {
+                let changes: alloc::vec::Vec<(u8, u8, u8, u8)> =
+                    self.device_manager.vga.take_dac_palette_changes().collect();
+                for (index, red, green, blue) in changes {
+                    let _accepted = gui.palette_change(index, red, green, blue);
+                }
+            }
             if let Some(update_result) = self.device_manager.vga.update() {
                 match update_result {
                     VgaDisplayUpdate::Text(update_result) => {
@@ -2092,6 +2196,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 update_result.fwidth,
                                 8,
                             );
+                        }
+
+                        // Bochs vgacore.cc update_charmap() pushes both guest
+                        // character generators to the GUI (set_text_charmap)
+                        // before the text is drawn with them.
+                        if update_result.charmap_updated {
+                            gui.set_text_charmap(0, self.device_manager.vga.charmap(0));
+                            gui.set_text_charmap(1, self.device_manager.vga.charmap(1));
                         }
 
                         gui.text_update(
@@ -2180,7 +2292,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         let current_ticks = self.pc_system.time_ticks();
         for owner in [
             DeviceTimerOwner::Pit,
-            DeviceTimerOwner::Keyboard,
             DeviceTimerOwner::CmosPeriodic,
             DeviceTimerOwner::CmosOneSecond,
             DeviceTimerOwner::CmosUip,
@@ -2195,6 +2306,10 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 DeviceTimerOwner::SerialFifo(port_index),
                 TimerRequest::Deactivate,
             );
+            self.devices.request_timer(
+                DeviceTimerOwner::SerialTx(port_index),
+                TimerRequest::Deactivate,
+            );
         }
 
         self.devices.request_timer_after_usec(
@@ -2202,19 +2317,37 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             current_ticks,
             self.device_manager.pit.next_event_usec(),
         );
-        self.devices.request_timer_after_usec(
-            DeviceTimerOwner::Keyboard,
-            current_ticks,
-            self.device_manager.keyboard.arm_keyboard_timer(),
-        );
+        // Bochs keyboard.cc init(): the 8042 timer is CONTINUOUS at the
+        // serial_delay period and never stops; (re)start it here where the
+        // IPS-based tick conversion is valid.
+        if let Some(handle) = self.device_manager.keyboard.timer_handle() {
+            if let Err(error) = self.pc_system.activate_timer_usec(
+                handle,
+                crate::iodev::keyboard::KBD_SERIAL_DELAY_USEC,
+                true,
+            ) {
+                tracing::error!("failed to start the 8042 serial-delay timer: {error:?}");
+            }
+        }
+        // Apply the timer-owner delta the CMOS produced during its own reset
+        // (stashed by DeviceManager::reset because it can't reach the timers);
+        // fall back to a fresh derivation if reset didn't run this path.
+        let cmos_sync = self
+            .device_manager
+            .cmos_reset_timer_sync
+            .take()
+            .unwrap_or_else(|| self.device_manager.cmos.timer_sync());
         self.devices
-            .apply_cmos_timer_sync(current_ticks, self.device_manager.cmos.timer_sync());
+            .apply_cmos_timer_sync(current_ticks, cmos_sync);
         self.devices.request_timer_after_usec(
             DeviceTimerOwner::AcpiPmOverflow,
             current_ticks,
             self.device_manager.acpi.overflow_delay_usec(current_ticks),
         );
         self.drain_device_timer_requests();
+        // Bochs hpet.cc reset() queued comparator deactivations and the
+        // PIT/RTC pin re-enables — apply them to the fresh machine.
+        self.drain_hpet_pending();
     }
 
     /// Perform a system reset
@@ -2354,12 +2487,14 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         // This is critical for kernel PIT-polling calibration loops (e.g., Alpine Linux).
         let ips = self.config.ips as u64;
         if ips > 0 {
-            self.device_manager
-                .pit
-                .init_icount_sync(self.cpu.icount, ips);
-            self.device_manager
-                .acpi
-                .init_icount_sync(self.cpu.icount, ips);
+            // The PIT/ACPI absolute time cursor lives in the system-tick
+            // domain — the same clock the port-I/O read paths pass via
+            // `system_ticks()`. At cold boot this equals icount (both 0);
+            // after HLT fast-forwards or fast-REP surpluses only the tick
+            // clock is correct.
+            let now_ticks = self.pc_system.time_ticks();
+            self.device_manager.pit.init_icount_sync(now_ticks, ips);
+            self.device_manager.acpi.init_icount_sync(now_ticks, ips);
             // Bochs `clock: sync=realtime` only when configured (pit.cc reads
             // bx_virt_timer with is_realtime from the clock option); with the
             // default sync=none the timers stay on emulated (icount) time.
@@ -2517,9 +2652,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     }
 
 
-    /// Set BIOS output file for port 0x402/0x403/0xE9 messages (requires std feature)
+    /// Set the output file for the port-0xE9 debug console (requires std
+    /// feature). BIOS message ports (0x400-0x403/0x500-0x503) are routed to
+    /// the log per Bochs biosdev.cc and never appear in this stream.
     ///
-    /// When set, BIOS debug output will be written to this file instead of stdout.
+    /// When set, port-0xE9 output will be written to this file instead of stdout.
     #[cfg(feature = "std")]
     pub fn set_bios_output_file(&mut self, file: std::fs::File) {
         self.bios_output_file = Some(file);
@@ -2580,24 +2717,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.device_manager.iac()
     }
 
-    /// Complete device work explicitly deferred until the issuing I/O
-    /// instruction has retired.
-    fn service_deferred_devices(&mut self) {
-        let dm = &mut self.device_manager;
-        for channel in 0..2 {
-            if dm.harddrv.seek_complete_pending[channel] {
-                dm.harddrv.seek_complete_pending[channel] = false;
-                let crate::iodev::devices::DeviceManager {
-                    harddrv,
-                    pic,
-                    pci_ide,
-                    ..
-                } = dm;
-                harddrv.ready_to_send_atapi(channel, pic, pci_ide);
-            }
-        }
-    }
-
     /// Drain pending host input (keyboard scancodes, mouse, serial) from the GUI
     /// into the device layer.
     ///
@@ -2621,14 +2740,21 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         let mut scancodes_to_send = Vec::new();
         let mut mouse_to_send = Vec::new();
         let mut serial_input = Vec::new();
+        let mut keys_to_send: Vec<(crate::iodev::scancodes::BxKey, bool)> = Vec::new();
         if let Some(gui) = &mut self.gui {
             gui.handle_events();
             scancodes_to_send = gui.get_pending_scancodes();
+            keys_to_send = gui.get_pending_keys();
             mouse_to_send = gui.get_pending_mouse();
             serial_input = gui.get_pending_serial_input();
         }
-        let keyboard_changed = !scancodes_to_send.is_empty() || !mouse_to_send.is_empty();
+        let keyboard_changed = !scancodes_to_send.is_empty()
+            || !keys_to_send.is_empty()
+            || !mouse_to_send.is_empty();
         let serial_changed = !serial_input.is_empty();
+        for (key, pressed) in keys_to_send {
+            self.device_manager.keyboard.gen_scancode(key, pressed);
+        }
         for scancode in scancodes_to_send {
             self.device_manager.keyboard.send_scancode(scancode);
         }
@@ -2645,19 +2771,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         }
 
         let current_ticks = self.pc_system.time_ticks();
-        if keyboard_changed {
-            if let Some(delay) = self
-                .device_manager
-                .keyboard
-                .take_keyboard_timer_update()
-            {
-                self.devices.request_timer_after_usec(
-                    DeviceTimerOwner::Keyboard,
-                    current_ticks,
-                    delay,
-                );
-            }
-        }
+        // Keyboard input needs no timer arming: the continuous 8042
+        // serial-delay timer (Bochs keyboard.cc) picks queued bytes up on
+        // its next fire.
         if serial_changed {
             if let Some(delay) = self.device_manager.serial.take_fifo_timer_update(0) {
                 self.devices.request_timer_after_usec(
@@ -2706,6 +2822,17 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         for entry in 0..count {
             match owners[entry] {
                 TimerOwner::NullTimer => {}
+                TimerOwner::VgaVertical => {
+                    // Bochs vgacore.cc vertical_timer(): latch the start address
+                    // for the frame and re-anchor the retrace phase. Coalesced —
+                    // only the newest retrace matters.
+                    let now_usec = if ips > 0 {
+                        (current_ticks as u128 * 1_000_000 / ips as u128) as u64
+                    } else {
+                        0
+                    };
+                    self.device_manager.vga.vertical_timer(now_usec);
+                }
                 TimerOwner::PciIdeCh0 => {
                     for _ in 0..counts[entry] {
                         let pins_ptr = self.tlb_pins().as_ptr();
@@ -2724,17 +2851,36 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                             .pci_ide_timer(1, &mut self.pc_system, &mut self.memory, pins);
                     }
                 }
+                TimerOwner::HdSeek(param) => {
+                    // Bochs harddrv.cc seek_timer — one-shot; the seek deadline
+                    // completes the read command (DRQ/IRQ or BM-DMA start).
+                    for _ in 0..counts[entry] {
+                        let crate::iodev::devices::DeviceManager {
+                            harddrv,
+                            pic,
+                            pci_ide,
+                            ..
+                        } = &mut self.device_manager;
+                        harddrv.seek_timer(param as u8, pic, pci_ide);
+                    }
+                }
                 TimerOwner::Pit => {
                     for _ in 0..counts[entry] {
                         let callback = self
                             .device_manager
                             .pit
                             .timer_callback(current_ticks, ips);
-                        let rising = DeviceManager::replay_pit_irq0_events(
-                            callback.irq0_transitions,
-                            callback.irq0_level,
-                            &mut self.device_manager.pic,
-                        );
+                        // Bochs pit.cc irq_handler: the HPET legacy-mode gate
+                        // drops OUT transitions before they reach the PIC.
+                        let rising = if self.device_manager.pit.irq_enabled {
+                            DeviceManager::replay_pit_irq0_events(
+                                callback.irq0_transitions,
+                                callback.irq0_level,
+                                &mut self.device_manager.pic,
+                            )
+                        } else {
+                            0
+                        };
                         if rising != 0 {
                             self.device_manager.diag_pit_fires += u64::from(rising);
                         }
@@ -2745,28 +2891,30 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         );
                     }
                 }
-                TimerOwner::Keyboard => {
+                TimerOwner::Hpet(index) => {
+                    // Bochs hpet.cc timer_handler → hpet_timer(): runs in
+                    // emulator context, so the queued IRQ edges and the
+                    // comparator re-arm drain immediately.
                     for _ in 0..counts[entry] {
-                        let elapsed_usec = self
-                            .device_manager
-                            .keyboard
-                            .arm_keyboard_timer()
-                            .unwrap_or(1);
-                        let callback = self
-                            .device_manager
-                            .keyboard
-                            .timer_callback(elapsed_usec);
-                        if callback.irq_mask & 0x01 != 0 {
+                        let ips = self.pc_system.ips();
+                        self.device_manager.hpet.set_now(current_ticks, ips);
+                        self.device_manager.hpet.timer_fired(index);
+                        self.drain_hpet_pending();
+                    }
+                }
+                TimerOwner::Keyboard => {
+                    // Bochs keyboard.cc timer_handler: the continuous
+                    // serial-delay timer runs periodic(1) every fire and
+                    // raises whatever IRQs the controller latched since the
+                    // previous fire. No rearm — pc_system reloads the period.
+                    for _ in 0..counts[entry] {
+                        let irq_mask = self.device_manager.keyboard.timer_callback();
+                        if irq_mask & 0x01 != 0 {
                             self.device_manager.pic.raise_irq(1);
                         }
-                        if callback.irq_mask & 0x02 != 0 {
+                        if irq_mask & 0x02 != 0 {
                             self.device_manager.pic.raise_irq(12);
                         }
-                        self.devices.request_timer_after_usec(
-                            DeviceTimerOwner::Keyboard,
-                            current_ticks,
-                            callback.next_delay_usec,
-                        );
                     }
                 }
                 TimerOwner::CmosPeriodic => {
@@ -2814,6 +2962,29 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 TimerOwner::SerialFifo(port_index) => {
                     for _ in 0..counts[entry] {
                         self.device_manager.serial.fifo_timer_fired(port_index);
+                    }
+                    for (irq, raise) in self.device_manager.serial.take_pending_irqs() {
+                        if raise {
+                            self.device_manager.pic.raise_irq(irq);
+                        } else {
+                            self.device_manager.pic.lower_irq(irq);
+                        }
+                    }
+                }
+                TimerOwner::SerialTx(port_index) => {
+                    for _ in 0..counts[entry] {
+                        self.device_manager.serial.tx_timer_fired(port_index);
+                    }
+                    // Re-arm for the next byte if transmission continues
+                    // (Bochs serial.cc tx_timer re-activates the timer).
+                    if let Some(delay) =
+                        self.device_manager.serial.take_tx_timer_update(port_index)
+                    {
+                        self.devices.request_timer_after_usec(
+                            DeviceTimerOwner::SerialTx(port_index),
+                            current_ticks,
+                            delay,
+                        );
                     }
                     for (irq, raise) in self.device_manager.serial.take_pending_irqs() {
                         if raise {
@@ -3152,7 +3323,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 let cpu = self.cpu_mut_at(cpu_index);
                 cpu.lapic.current_ticks = ticks_now;
                 cpu.lapic.ticks_at_sync = ticks_now;
-                cpu.lapic.icount_at_sync = cpu.icount;
+                cpu.lapic.cpu_ticks_at_sync = cpu.cpu_ticks();
                 let timer_handle = cpu.lapic.timer_handle;
                 let deactivate = cpu.lapic.timer_deactivate_request;
                 cpu.lapic.timer_deactivate_request = false;
@@ -3179,7 +3350,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     let cpu = self.cpu_mut_at(cpu_index);
                     cpu.lapic.current_ticks = ticks_now;
                     cpu.lapic.ticks_at_sync = ticks_now;
-                    cpu.lapic.icount_at_sync = cpu.icount;
+                    cpu.lapic.cpu_ticks_at_sync = cpu.cpu_ticks();
                     cpu.lapic.timer_fired = false;
                     cpu.lapic.diag_timer_fires += 1;
                     cpu.lapic.periodic(ticks_now);
@@ -3204,7 +3375,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 let cpu = self.cpu_mut_at(cpu_index);
                 cpu.lapic.current_ticks = ticks_now;
                 cpu.lapic.ticks_at_sync = ticks_now;
-                cpu.lapic.icount_at_sync = cpu.icount;
+                cpu.lapic.cpu_ticks_at_sync = cpu.cpu_ticks();
 
                 if cpu.lapic.intr {
                     cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
@@ -3261,9 +3432,6 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             || self.devices.has_pending_boundary_work()
             // Direct 8237 HRQ slot (producers outside I/O dispatch).
             || self.device_manager.dma.has_hrq_request()
-            // Deferred ATAPI seek-complete (service_deferred_devices).
-            || self.device_manager.harddrv.seek_complete_pending[0]
-            || self.device_manager.harddrv.seek_complete_pending[1]
             // A20, PAM/SMRAM/BAR re-registration, and reset requests.
             || self.device_manager.has_pending_machine_boundary()
             // IOAPIC deliveries deferred until the LAPIC bus is reachable
@@ -3285,10 +3453,58 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             // every sibling icache before another CPU runs (Bochs icache.cc
             // handleSMC).
             || self.memory.smc_has_pending()
+            // HPET side effects queued from MMIO context (drain_hpet_pending).
+            || self.device_manager.hpet.has_pending_work()
+    }
+
+    /// Keep the VGA vertical-retrace timer armed at the current display period.
+    ///
+    /// Bochs vgacore.cc re-activates `vga_vtimer_id` from
+    /// `start_vertical_timer()` whenever `calculate_retrace_timing()` produces a
+    /// new `vtotal_usec`. Here the period is polled at the scheduler boundary,
+    /// which covers every path that can change the CRTC timing registers.
+    fn sync_vga_vertical_timer(&mut self) {
+        let Some(handle) = self.vga_vertical_timer_handle else {
+            return;
+        };
+        let period = self.device_manager.vga.vertical_period_usec();
+        if period == 0 || period == self.vga_vertical_period_usec {
+            return;
+        }
+        match self.pc_system.activate_timer_usec(handle, period, true) {
+            Ok(()) => self.vga_vertical_period_usec = period,
+            Err(error) => {
+                tracing::warn!("failed to arm the VGA vertical timer: {error:?}");
+            }
+        }
     }
 
     pub fn service_scheduler_boundary(&mut self, elapsed_ticks: u64) -> CpuResult<bool> {
         self.clear_scheduler_raw_wiring();
+        self.sync_vga_vertical_timer();
+
+        // Bochs unmapped.cc port 0x8900: a completed "Shutdown" protocol sets
+        // `bx_user_quit = 1` and BX_FATALs. Translate that guest request into
+        // our run-loop stop flag (checked at the top of every batch) — a
+        // graceful stop at the next boundary in place of Bochs's immediate
+        // abort. Drained unconditionally (the flag lives on `devices`, outside
+        // `scheduler_boundary_work_pending`'s DeviceManager view).
+        if self.devices.take_shutdown_request() {
+            tracing::info!("port 0x8900 shutdown protocol complete — stopping emulation");
+            self.stop_flag
+                .store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+
+        // Bochs acpi.cc PM1_CNT SLP_EN with SLP_TYP=0 (S5 soft power off) sets
+        // `bx_user_quit = 1` and BX_FATALs. Same treatment as port 0x8900: stop
+        // the run loop gracefully instead of aborting. Drained unconditionally,
+        // before the `had_work` gate, so it can never trip the apply/quiesce
+        // convergence check on has_pending_machine_boundary.
+        if core::mem::take(&mut self.device_manager.acpi.soft_off_pending) {
+            tracing::info!("ACPI S5 soft power off — stopping emulation");
+            self.stop_flag
+                .store(true, core::sync::atomic::Ordering::Relaxed);
+        }
 
         // No-work fast path: when nothing is queued anywhere, every drain in
         // the prologue below is a no-op by construction, so skip straight to
@@ -3320,12 +3536,20 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             return Ok(true);
         }
 
+        // Bochs apic.cc apic_bus_deliver_smi(): an SMI raised by the ACPI
+        // controller (OUT to SMI_CMD 0xB2 with APMC_EN set) goes to CPU 0.
+        // Drained before the apply/quiesce loop below so the pending flag
+        // never trips its has_pending_machine_boundary convergence check.
+        if core::mem::take(&mut self.device_manager.acpi.smi_request_pending) {
+            self.cpu_mut_at(0).deliver_smi();
+        }
+
         // Source bus work before local control/EOI and captured-epoch timer
         // requests.
         self.drain_lapic_bus();
         self.service_lapic_local_events();
         self.service_lapic_timer_requests();
-        self.service_deferred_devices();
+        self.drain_hpet_pending();
 
         // Apply the final 8237 HRQ level (Bochs pc_system.cc set_HRQ). The
         // I/O-dispatch copy covers CPU-issued port traffic; the direct DMA
@@ -3385,7 +3609,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         }
         if !quiesced {
             #[cfg(test)]
-            eprintln!(
+            tracing::debug!(
                 "machine boundary failed to quiesce: pending={:?}",
                 (
                     self.device_manager.pci_ide_bar4_needs_reregister,
@@ -3456,10 +3680,97 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         Ok(false)
     }
 
+    /// Apply the side effects the HPET queued from MMIO context — the calls
+    /// Bochs hpet.cc performs synchronously inside its handlers
+    /// (`update_irq`, `activate_timer_nsec`, `deactivate_timer`,
+    /// `DEV_pit_enable_irq`, `DEV_cmos_enable_irq`, `DEV_MEM_WRITE_PHYSICAL`).
+    /// Comparator deadlines were pre-anchored at the access instant, so the
+    /// drain point does not shift them.
+    fn drain_hpet_pending(&mut self) {
+        if !self.device_manager.hpet.has_pending_work() {
+            return;
+        }
+        let pending = self.device_manager.hpet.take_pending();
+        if let Some(enabled) = pending.pit_irq_gate {
+            self.device_manager.pit.enable_irq(enabled);
+        }
+        if let Some(enabled) = pending.cmos_irq_gate {
+            self.device_manager.cmos.enable_irq(enabled);
+        }
+        for &(route, level) in &pending.irq_ops[..pending.irq_op_count] {
+            if route < 16 {
+                // Bochs DEV_pic_raise_irq/DEV_pic_lower_irq: the legacy PIC
+                // call also forwards the edge to the IOAPIC pin.
+                if level {
+                    self.device_manager.pic.raise_irq(route);
+                } else {
+                    self.device_manager.pic.lower_irq(route);
+                }
+            } else if route < 24 {
+                // GSI 16..23 exist only as IOAPIC pins here. PERMANENTLY
+                // RATIFIED Bochs deviation (user decision 2026-07-25) — this
+                // is a closed item, not an open one. Bochs update_irq() routes
+                // EVERY HPET pin through bx_pic_c::raise_irq(route,
+                // BX_IRQ_TYPE_ISA), whose unbounded `(irq_no < 8) ? master :
+                // slave` indexing reads slave IRQ_in[route & 7] for route >= 16
+                // — an out-of-range access that spuriously asserts ISA IRQ
+                // 8..15 (e.g. route 20 -> IRQ12) AND can trip its
+                // `BX_PANIC("ISA IRQ %d lost")` host abort. rusty_box declines
+                // to reproduce that hardware bug (a phantom ISA edge + possible
+                // host crash) and delivers only the architecturally correct
+                // IOAPIC pin. Per CLAUDE.md, correctness trumps Bochs
+                // literalness for a buggy/non-safe construct.
+                let DeviceManager {
+                    ref mut pic,
+                    ref mut ioapic,
+                    ..
+                } = self.device_manager;
+                ioapic.set_irq_level(route, level, Some(&mut *pic), None);
+            } else {
+                tracing::error!("HPET: interrupt route {route} beyond IOAPIC pins");
+            }
+        }
+        for &(address, value) in &pending.fsb_writes[..pending.fsb_write_count] {
+            // Bochs update_irq FSB path: DEV_MEM_WRITE_PHYSICAL of the
+            // 32-bit message. Bochs never advertises the FSB capability bit,
+            // so guests do not normally reach this.
+            let mut bytes = value.to_le_bytes();
+            if let Err(error) = self.memory.write_physical_page(
+                &[],
+                // DEV_MEM_WRITE_PHYSICAL — a device access, so it must not see
+                // SMRAM (Bochs memory.cc `cpu == NULL`).
+                crate::memory::CpuMemoryPolicy::device(),
+                address,
+                bytes.len(),
+                &mut bytes,
+            ) {
+                tracing::error!("HPET: FSB message write to {address:#x} failed: {error:?}");
+            }
+        }
+        for (index, op) in pending.timer_ops.iter().enumerate() {
+            let (Some(op), Some(handle)) =
+                (op.as_ref(), self.device_manager.hpet.timer_handles[index])
+            else {
+                continue;
+            };
+            let result = match op {
+                crate::iodev::hpet::HpetTimerOp::ArmAtTicks(deadline) => self
+                    .pc_system
+                    .activate_timer_at_ticks(handle, *deadline, false),
+                crate::iodev::hpet::HpetTimerOp::Deactivate => {
+                    self.pc_system.deactivate_timer(handle)
+                }
+            };
+            if let Err(error) = result {
+                tracing::error!("HPET: comparator {index} timer update failed: {error:?}");
+            }
+        }
+    }
+
     /// Apply fixed I/O owner requests after the raw device manager pointer has
     /// been cleared. Phase 2 owns the already registered IDE channels; later
     /// owners retain their table slots until Phase 3 registers their handles.
-    fn drain_device_timer_requests(&mut self) {
+    pub(crate) fn drain_device_timer_requests(&mut self) {
         let _boundary_requested = self.devices.take_scheduler_boundary_requested();
         let requests = self.devices.take_timer_requests();
         let owners = [
@@ -3514,6 +3825,26 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 "serial FIFO 3",
             ),
             (
+                DeviceTimerOwner::SerialTx(0),
+                self.device_manager.serial.tx_timer_handle(0),
+                "serial TX 0",
+            ),
+            (
+                DeviceTimerOwner::SerialTx(1),
+                self.device_manager.serial.tx_timer_handle(1),
+                "serial TX 1",
+            ),
+            (
+                DeviceTimerOwner::SerialTx(2),
+                self.device_manager.serial.tx_timer_handle(2),
+                "serial TX 2",
+            ),
+            (
+                DeviceTimerOwner::SerialTx(3),
+                self.device_manager.serial.tx_timer_handle(3),
+                "serial TX 3",
+            ),
+            (
                 DeviceTimerOwner::PciIdeCh0,
                 self.device_manager.pci_ide.bmdma[0].timer_index,
                 "BM-DMA ch0",
@@ -3522,6 +3853,26 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 DeviceTimerOwner::PciIdeCh1,
                 self.device_manager.pci_ide.bmdma[1].timer_index,
                 "BM-DMA ch1",
+            ),
+            (
+                DeviceTimerOwner::HdSeek(0),
+                self.device_manager.harddrv.seek_timer_handles[0][0],
+                "HD/CD seek 0-0",
+            ),
+            (
+                DeviceTimerOwner::HdSeek(1),
+                self.device_manager.harddrv.seek_timer_handles[0][1],
+                "HD/CD seek 0-1",
+            ),
+            (
+                DeviceTimerOwner::HdSeek(2),
+                self.device_manager.harddrv.seek_timer_handles[1][0],
+                "HD/CD seek 1-0",
+            ),
+            (
+                DeviceTimerOwner::HdSeek(3),
+                self.device_manager.harddrv.seek_timer_handles[1][1],
+                "HD/CD seek 1-1",
             ),
         ];
 
@@ -4192,6 +4543,36 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         #[cfg(feature = "std")]
         const MIPS_LOG_INTERVAL: u64 = 50_000_000;
 
+        // BENCHMARK-ONLY (temporary, mirrors the same patch in the Bochs bench
+        // worktree): emit (icount, host_usec) samples so a guest boot can be
+        // compared phase by phase against upstream instead of as one aggregate.
+        // Sampling on the instruction axis, not emulated ticks -- ticks advance
+        // during HLT and would credit idle time as throughput. Inert unless
+        // RUSTY_BOX_BENCH_FILE is set; costs one u64 compare per batch.
+        #[cfg(feature = "std")]
+        let mut bench_sink = std::env::var("RUSTY_BOX_BENCH_FILE")
+            .ok()
+            .and_then(|path| std::fs::File::create(path).ok());
+        #[cfg(feature = "std")]
+        let bench_interval: u64 = std::env::var("RUSTY_BOX_BENCH_INTERVAL")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(25_000_000);
+        #[cfg(feature = "std")]
+        let bench_start = std::time::Instant::now();
+        #[cfg(feature = "std")]
+        let mut bench_next: u64 = if bench_sink.is_some() {
+            bench_interval
+        } else {
+            u64::MAX
+        };
+        #[cfg(feature = "std")]
+        if let Some(sink) = bench_sink.as_mut() {
+            use std::io::Write;
+            writeln!(sink, "icount,host_usec,ticks").map_err(Error::Io)?;
+        }
+
         const INSTRUCTION_BATCH_SIZE: u64 = 100_000;
         const PROGRESS_LOG_INTERVAL: u64 = 10_000_000;
         let mut next_progress_log: i64 = PROGRESS_LOG_INTERVAL as i64;
@@ -4506,6 +4887,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 if self.device_manager.has_interrupt()
                                     && self.cpu.get_b_if() != 0
                                     && !self.cpu.interrupts_inhibited(0x01)
+                                    // Priority-4 debug traps come first —
+                                    // see the main loop's injection site.
+                                    && !self.cpu.debug_trap_pending()
                                 {
                                     let vec = self.iac();
                                     // SAFETY: see borrow_memory_for_cpu / inject_interrupt
@@ -4641,7 +5025,18 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     if self.device_manager.has_interrupt()
                         && self.cpu.get_b_if() != 0
                         && !self.cpu.interrupts_inhibited(0x01)
-                    // BX_INHIBIT_INTERRUPTS
+                        // BX_INHIBIT_INTERRUPTS
+                        //
+                        // Bochs event.cc handleAsyncEvent delivers Priority-4
+                        // traps on the previous instruction (TF single-step,
+                        // data/IO and code breakpoints) BEFORE Priority-5
+                        // external interrupts. This path implements only
+                        // Priority 5, and interrupt() unconditionally clears
+                        // debug_trap, so injecting here while a #DB is pending
+                        // silently destroyed it. Deferring by one boundary
+                        // keeps the interrupt latched in the PIC (iac() is not
+                        // called) and lets the CPU deliver #DB first.
+                        && !self.cpu.debug_trap_pending()
                     {
                         let vector = self.iac();
 
@@ -4707,6 +5102,40 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                         use std::io::Write;
                         let _ = std::io::stdout().write_all(serial_bytes.as_slice());
                         let _ = std::io::stdout().flush();
+                    }
+                }
+            }
+
+            // BENCHMARK-ONLY (temporary): see the bench_sink setup above.
+            #[cfg(feature = "std")]
+            {
+                let retired = self.total_cpu_icount();
+                if retired >= bench_next {
+                    if let Some(sink) = bench_sink.as_mut() {
+                        use std::io::Write;
+                        bench_next = retired + bench_interval;
+                        let ticks = self.pc_system.time_ticks();
+                        let rip = self.cpu.rip();
+                        writeln!(
+                            sink,
+                            "{retired},{},{ticks},{rip:x}",
+                            bench_start.elapsed().as_micros()
+                        )
+                        .map_err(Error::Io)?;
+                        let mut vec_error = None;
+                        crate::vec_diag::snapshot(|index, count| {
+                            if vec_error.is_none() {
+                                if let Err(error) =
+                                    writeln!(sink, "V,{retired},{index},{count}")
+                                {
+                                    vec_error = Some(error);
+                                }
+                            }
+                        });
+                        if let Some(error) = vec_error {
+                            return Err(Error::Io(error));
+                        }
+                        sink.flush().map_err(Error::Io)?;
                     }
                 }
             }
@@ -4791,8 +5220,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 } else {
                     0.0
                 };
-                // icount = instruction count (REP iterations count as separate ticks)
-                let bochs_ticks = self.cpu.icount;
+                // cpu_ticks = instruction count plus the fast-REP tick surplus
+                // (Bochs BX_TICK1-per-instruction + BX_TICKN time domain).
+                let bochs_ticks = self.cpu.cpu_ticks();
                 tracing::debug!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
             }
         }
@@ -4878,6 +5308,11 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             if self.device_manager.has_interrupt()
                 && self.cpu.get_b_if() != 0
                 && !self.cpu.interrupts_inhibited(0x01)
+                // Bochs event.cc delivers Priority-4 debug traps before
+                // Priority-5 external interrupts; defer one boundary so the
+                // CPU can deliver #DB first. The interrupt stays latched in
+                // the PIC because iac() is not called.
+                && !self.cpu.debug_trap_pending()
             {
                 let vector = self.iac();
                 // SAFETY: see borrow_memory_for_cpu / inject_interrupt
@@ -5062,6 +5497,13 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     ///
     /// For environments that handle keyboard input outside of `BxGui`
     /// (e.g. the WASM app processes egui events directly).
+    /// Deliver a guest key press/release, rendered through the guest's active
+    /// scancode set (Bochs keyboard.cc `gen_scancode`). Prefer this over
+    /// [`Emulator::send_scancode`], which bypasses the set selection.
+    pub fn send_key(&mut self, key: crate::iodev::scancodes::BxKey, pressed: bool) {
+        self.device_manager.keyboard.gen_scancode(key, pressed);
+    }
+
     pub fn send_scancode(&mut self, scancode: u8) {
         self.device_manager.keyboard.send_scancode(scancode);
     }
@@ -5559,6 +6001,13 @@ unsafe impl<I: BxCpuIdTrait + Send, T: Instrumentation + Send> Send for Emulator
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
+
+/// Emulator construction needs a bigger stack than the default 2 MiB test
+/// thread: `Emulator` is ~4 MiB and the debug build materialises a few
+/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
+/// enough concurrent reservations to intermittently exhaust the process
+/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::*;
     use crate::cpu::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::decoder::Instruction;
@@ -5596,6 +6045,70 @@ mod tests {
     const MAX_SUPPORTED_TEST_CPUS: u32 = 254;
     const CPUID_LEAF_FEATURE_INFO: u32 = 0x0000_0001;
     const CPUID_LEAF_EXTENDED_TOPOLOGY: u32 = 0x0000_000B;
+
+    /// Bochs cpu_loop's setjmp handler commits `prev_rip = RIP` whenever an
+    /// exception longjmps out — including one raised while DELIVERING an
+    /// external interrupt (event.cc HandleExtInterrupt only commits on the
+    /// success path). Our injection converts that unwind to `Ok`, so it must
+    /// perform the same commit itself: a stale prev_rip would make the next
+    /// fault in the nested handler push the WRONG return address.
+    #[test]
+    fn faulted_interrupt_delivery_commits_prev_rip() {
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let cfg = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    cfg,
+                    CpuSetupMode::FlatLong64,
+                )
+                .expect("new emulator");
+
+                const HANDLER: u64 = 0x0040_0000;
+                // Valid 16-byte long-mode interrupt gate for #GP (vector 13)
+                // at the reset IDT base (0). Vector 0x20's gate stays all
+                // zero (P=0), so delivering it raises #NP/#GP, which nests
+                // into this gate.
+                let mut gate = [0u8; 16];
+                gate[0..2].copy_from_slice(&(HANDLER as u16).to_le_bytes());
+                gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
+                gate[5] = 0x8E; // P=1 DPL=0 type=interrupt gate
+                gate[6..8].copy_from_slice(&(((HANDLER >> 16) & 0xFFFF) as u16).to_le_bytes());
+                gate[8..12].copy_from_slice(&((HANDLER >> 32) as u32).to_le_bytes());
+                // #NP (11) and #GP (13) share the same handler for this test.
+                emu.mem_write(11 * 16, &gate).expect("write #NP gate");
+                emu.mem_write(13 * 16, &gate).expect("write #GP gate");
+                emu.mem_write(HANDLER, &[0xEB, 0xFE]).expect("write handler");
+                // The FlatLong64 harness GDT (install_flat_gdt) holds a
+                // 32-bit code descriptor at selector 0x08 (the API loads
+                // descriptor CACHES directly); gate delivery reloads CS from
+                // the GDT and requires L=1 in long mode, so give it a real
+                // 64-bit code descriptor.
+                emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
+                    .expect("write 64-bit code descriptor");
+                emu.reg_write(X86Reg::Rsp, 0x0058_0000);
+
+                // SAFETY: memory-bus wiring invariants held by the emulator.
+                unsafe { emu.inject_interrupt(0x20) }.expect("inject");
+
+                assert_eq!(
+                    emu.cpu().rip(),
+                    HANDLER,
+                    "the nested exception must have been delivered; \
+                     exception ring: {:?}",
+                    &emu.cpu().exc_diag_ring[..8]
+                );
+                assert_eq!(
+                    emu.cpu().prev_rip_for_test(),
+                    HANDLER,
+                    "prev_rip must be committed to the nested handler's RIP \
+                     (Bochs cpu.cc setjmp: prev_rip = RIP)"
+                );
+            })
+            .expect("spawn test thread")
+            .join()
+            .expect("join test thread");
+    }
     const CPUID_LEAF1_LOGICAL_COUNT_SHIFT: u32 = 16;
     const CPUID_LEAF1_APIC_ID_SHIFT: u32 = 24;
     const CPUID_APIC_ID_BYTE_MASK: u32 = 0xFF;
@@ -5710,7 +6223,7 @@ mod tests {
     fn test_emulator_creation() {
         // BxICache contains ~19MB fixed arrays; debug-mode struct literal needs large stack
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -5729,7 +6242,7 @@ mod tests {
         impl crate::cpu::instrumentation::Instrumentation for NoopTracer {}
 
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE_ADDR: u64 = 0x1000;
                 let mut config = EmulatorConfig::default();
@@ -5762,7 +6275,7 @@ mod tests {
     #[test]
     fn test_emulator_initialization() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -5780,7 +6293,7 @@ mod tests {
     #[test]
     fn test_multiple_instances_independent() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
 
@@ -5807,7 +6320,7 @@ mod tests {
     #[test]
     fn strict_smp_deadline_keeps_bochs_idle_cpu_quantum_credit() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -5842,7 +6355,7 @@ mod tests {
     #[test]
     fn equal_smp_deadline_truncates_a_short_final_round() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -5889,9 +6402,43 @@ mod tests {
     }
 
     #[test]
+    fn strict_budget_stops_a_linked_branch_chain_exactly() {
+        // A hot dec/jnz loop links its back edge (Bochs cpu.cc linkTrace);
+        // the strict instruction budget must stop the linked chain at exactly
+        // the requested count — the link guard's `iteration < max` is the
+        // batch-capped UP form of linkTrace's ticks-left guard.
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    EmulatorConfig::default(),
+                    CpuSetupMode::FlatProtected32,
+                )
+                .unwrap();
+                const CODE: u64 = 0x1000;
+                emu.reg_write(X86Reg::Rcx, 1_000_000);
+                // dec ecx; jnz -3
+                emu.virt_write(CODE, &[0x49, 0x75, 0xFD]).unwrap();
+                emu.reg_write(X86Reg::Rip, CODE);
+
+                let executed =
+                    unsafe { emu.run_cpu_batch_with_strict_limit(501, true) }.unwrap();
+
+                assert_eq!(executed, 501, "strict budget must be exact");
+                // 501 instructions = 251 decs + 250 taken jnz.
+                assert_eq!(emu.reg_read(X86Reg::Rcx), 1_000_000 - 251);
+                // The loop is hot enough that the back edge must have linked;
+                // the budget stop above therefore covers the linked path.
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn run_cpu_batch_stops_at_the_next_exact_timer_deadline() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -5918,12 +6465,13 @@ mod tests {
     }
 
     #[test]
-    fn pit_generates_periodic_irq0_across_multiple_periods() {
-        // Linux check_timer() needs the 8254 PIT to deliver *repeated* IRQ0
-        // ticks. Program counter 0 in mode 2 (rate generator) and confirm the
-        // owner keeps firing, producing many IRQ0 rising edges — not one.
+    fn smi_apm_handshake_runs_the_guest_smm_handler() {
+        // The Bochs BIOS smm_init contract (rombios32.c): outb(0xb3, 1),
+        // outb(0xb2, 0) raises an SMI (APMC_EN set via ACPI config 0x58 bit
+        // 25); the CPU enters SMM at SMBASE+0x8000 = 0x38000 and the GUEST
+        // handler clears 0xb3 and RSMs. POST then polls 0xb3 until 0.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -5934,7 +6482,91 @@ mod tests {
                 emu.device_manager
                     .init(&mut emu.devices, &mut emu.memory)
                     .unwrap();
-                emu.pc_system.initialize(1_000_000); // 1 tick = 1 microsecond
+                emu.pc_system.initialize(1_000_000);
+                emu.devices.set_timer_ips(1_000_000);
+                emu.register_timer_owners().unwrap();
+
+                // BIOS smm_init: enable SMI generation on APMC writes.
+                emu.device_manager.acpi.pci_write(0x58, 1 << 25, 4);
+
+                // Guest code at 0x1000: apms := 1, then the SMI command.
+                //   mov al, 1 ; out 0xb3, al ; mov al, 0 ; out 0xb2, al ; nops
+                let mut code = [0x90u8; 64];
+                code[..8].copy_from_slice(&[0xB0, 0x01, 0xE6, 0xB3, 0xB0, 0x00, 0xE6, 0xB2]);
+                emu.virt_write(0x1000, &code).unwrap();
+                // SMM handler at 0x38000 (SMBASE 0x30000 + entry 0x8000):
+                //   mov al, 0 ; out 0xb3, al ; rsm
+                emu.virt_write(0x38000, &[0xB0, 0x00, 0xE6, 0xB3, 0x0F, 0xAA])
+                    .unwrap();
+                emu.reg_write(X86Reg::Rip, 0x1000);
+
+                // Run: OUT 0xB2 ends the slice (machine boundary), the
+                // boundary delivers the SMI to CPU 0, the next batch enters
+                // SMM, runs the handler, and RSM resumes the interrupted code.
+                // NOTE: sampling `smm_mode()` at batch boundaries cannot observe
+                // the SMM visit — entry, handler and RSM all complete inside a
+                // single batch, so the flag is already false at every sample.
+                // The deterministic proof that SMM ran is `apms == 0` below:
+                // only the handler at 0x38000 issues `out 0xb3, 0`, and that
+                // address is reachable only via SMI entry at SMBASE+0x8000.
+                for _ in 0..8 {
+                    let _ = unsafe { emu.run_cpu_batch(64) }.unwrap();
+                    emu.service_scheduler_boundary(0).unwrap();
+                    if emu.device_manager.pci2isa.apms == 0
+                        && !emu.cpu_mut_at(0).smm_mode()
+                        && emu.reg_read(X86Reg::Rip) > 0x1008
+                    {
+                        break;
+                    }
+                }
+
+                assert_eq!(
+                    emu.device_manager.pci2isa.apms, 0,
+                    "the guest SMM handler must clear apms (out 0xb3, 0) — this is \
+                     the proof that the SMI was delivered and SMM was entered, since \
+                     the handler at 0x38000 is only reachable via SMBASE+0x8000"
+                );
+                assert!(
+                    !emu.cpu_mut_at(0).smm_mode(),
+                    "RSM must have exited System Management Mode"
+                );
+                // Execution resumed past the OUT 0xB2 that raised the SMI (the
+                // interrupted instruction stream continues; where it stops among
+                // the trailing nops is irrelevant).
+                assert!(
+                    emu.reg_read(X86Reg::Rip) > 0x1008,
+                    "execution must resume after the OUT that raised the SMI"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn pit_generates_periodic_irq0_across_multiple_periods() {
+        // Linux check_timer() needs the 8254 PIT to deliver *repeated* IRQ0
+        // ticks. Program counter 0 in mode 2 (rate generator) and confirm the
+        // owner keeps firing, producing many IRQ0 rising edges — not one.
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                // 1 tick = 1 microsecond. The rate has to go in the config too,
+                // not just into pc_system: `service_scheduler_boundary` converts
+                // its budget through `config.ips`, so a config still holding the
+                // default would disagree with the clock programmed below.
+                let cfg = EmulatorConfig {
+                    ips: 1_000_000,
+                    ..EmulatorConfig::default()
+                };
+                let mut emu =
+                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
+                        .unwrap();
+                emu.devices.init(&mut emu.memory).unwrap();
+                emu.device_manager
+                    .init(&mut emu.devices, &mut emu.memory)
+                    .unwrap();
+                emu.pc_system.initialize(1_000_000);
                 emu.devices.set_timer_ips(1_000_000);
                 emu.register_timer_owners().unwrap();
 
@@ -5972,18 +6604,96 @@ mod tests {
     }
 
     #[test]
-    fn pit_irq0_delivers_through_ioapic_pin2_to_cpu0() {
-        // Linux check_timer()'s primary path: the 8259 masks IRQ0 and the
-        // timer is routed via IOAPIC pin 2 (GSI2, the IRQ0->GSI2 override) to
-        // CPU 0's LAPIC. A PIT tick must deliver the redirection vector.
+    fn atapi_seek_timer_completes_the_read_at_the_exact_deadline() {
+        // Bochs harddrv.cc start_seek/seek_timer: an ATAPI READ arms a
+        // distance-proportional seek timer; DRQ and the channel IRQ appear
+        // only when pc_system reaches that deadline — never before.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
+                use crate::iodev::harddrv::AtaStatus;
+
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
                 .unwrap();
+                emu.devices.init(&mut emu.memory).unwrap();
+                emu.device_manager
+                    .init(&mut emu.devices, &mut emu.memory)
+                    .unwrap();
+                emu.pc_system.initialize(1_000_000); // 1 tick = 1 microsecond
+                emu.devices.set_timer_ips(1_000_000);
+                emu.register_timer_owners().unwrap();
+
+                // 4-sector disc: media init parks curr_lba at 3; READ(10) of
+                // LBA 0 seeks |0 - 3 + 1| / 4 of the 80 ms stroke = 40000 us.
+                emu.device_manager
+                    .harddrv
+                    .attach_cdrom_data(0, 0, vec![0u8; 2048 * 4]);
+                {
+                    let crate::iodev::devices::DeviceManager {
+                        harddrv,
+                        pic,
+                        pci_ide,
+                        ..
+                    } = &mut emu.device_manager;
+                    harddrv.write(0x1f7, 0xA0, 1, pic, pci_ide); // PACKET
+                    let packet = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
+                    for word in packet.chunks_exact(2) {
+                        let value = u16::from_le_bytes([word[0], word[1]]) as u32;
+                        harddrv.write(0x1f0, value, 2, pic, pci_ide);
+                    }
+                }
+                // The I/O layer drains the arm right after the OUT dispatch
+                // (iodev/mod.rs) — mirror that contract here.
+                let now = emu.pc_system.time_ticks();
+                let arm = emu.device_manager.harddrv.take_pending_seek_arm(0, 0);
+                assert_eq!(arm, Some(40_000));
+                emu.devices.request_timer_after_usec(
+                    DeviceTimerOwner::HdSeek(0),
+                    now,
+                    arm.map(u64::from),
+                );
+                emu.drain_device_timer_requests();
+
+                // One tick before the deadline: still seeking, no DRQ, no IRQ.
+                emu.service_scheduler_boundary(39_999).unwrap();
+                let drive = &emu.device_manager.harddrv.channels[0].drives[0];
+                assert!(!drive.controller.status.contains(AtaStatus::DRQ));
+                assert!(!drive.controller.interrupt_pending);
+                assert!(!emu.device_manager.pic.irq_line_level(14));
+
+                // Crossing the deadline completes the command.
+                emu.service_scheduler_boundary(2).unwrap();
+                let drive = &emu.device_manager.harddrv.channels[0].drives[0];
+                assert!(drive.controller.status.contains(AtaStatus::DRQ));
+                assert!(drive.controller.interrupt_pending);
+                assert!(emu.device_manager.pic.irq_line_level(14));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn pit_irq0_delivers_through_ioapic_pin2_to_cpu0() {
+        // Linux check_timer()'s primary path: the 8259 masks IRQ0 and the
+        // timer is routed via IOAPIC pin 2 (GSI2, the IRQ0->GSI2 override) to
+        // CPU 0's LAPIC. A PIT tick must deliver the redirection vector.
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(|| {
+                // 1 tick = 1 microsecond, in the config as well as in pc_system —
+                // `service_scheduler_boundary` converts its budget through
+                // `config.ips`.
+                let cfg = EmulatorConfig {
+                    ips: 1_000_000,
+                    ..EmulatorConfig::default()
+                };
+                let mut emu =
+                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
+                        .unwrap();
                 emu.devices.init(&mut emu.memory).unwrap();
                 emu.device_manager
                     .init(&mut emu.devices, &mut emu.memory)
@@ -6052,7 +6762,7 @@ mod tests {
     #[test]
     fn keyboard_one_usec_deadline_ends_up_batch_and_raises_irq1() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -6072,9 +6782,24 @@ mod tests {
                 );
                 emu.drain_device_timer_requests();
 
+                // The tick-1 fire ends the batch and transfers the byte to the
+                // output buffer, but Bochs keyboard.cc periodic() only LATCHES
+                // the IRQ on a transfer — it is not raised until the next fire.
                 let executed = unsafe { emu.run_cpu_batch(4_096) }.unwrap();
-
                 assert_eq!(executed, 1);
+                assert!(emu.device_manager.keyboard.kbd_controller.outb);
+                assert_eq!(emu.device_manager.pic.master.irq_in[1], 0);
+
+                // The following serial-delay fire's top-of-function collection
+                // raises IRQ1 (one period after the transfer, exactly as Bochs).
+                let now = emu.pc_system.time_ticks();
+                emu.devices.request_timer_after_usec(
+                    DeviceTimerOwner::Keyboard,
+                    now,
+                    Some(1),
+                );
+                emu.drain_device_timer_requests();
+                unsafe { emu.run_cpu_batch(4_096) }.unwrap();
                 assert_ne!(emu.device_manager.pic.master.irq_in[1], 0);
             })
             .unwrap()
@@ -6085,7 +6810,7 @@ mod tests {
     #[test]
     fn deferred_continuous_timer_keeps_its_programmed_period() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const PROGRAMMING_TICKS: u64 = 100;
                 const PERIOD_TICKS: u64 = 10;
@@ -6133,7 +6858,7 @@ mod tests {
     #[test]
     fn deadline_scheduler_preserves_windows_timer_order() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu =
                     Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
@@ -6176,7 +6901,7 @@ mod tests {
     #[test]
     fn no_fixed_device_polling_state_remains() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
@@ -6254,7 +6979,7 @@ mod tests {
     #[test]
     fn phase1_tests_subpage_guest_blocks_fetch_sequential_instructions() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const BLOCK_SIZE: usize = 1024;
                 const START: u64 = (BLOCK_SIZE - 2) as u64;
@@ -6288,7 +7013,7 @@ mod tests {
     #[test]
     fn strict_cpu_batch_limit_does_not_execute_trace_tail() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const START: u64 = 0x1000;
                 let mut emu =
@@ -6316,7 +7041,7 @@ mod tests {
     #[test]
     fn memory_reinitialization_invalidates_every_cpu_host_pin() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
@@ -6352,7 +7077,7 @@ mod tests {
     #[test]
     fn run_interactive_stops_at_exact_instruction_limit_across_batches() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const START: u64 = 0x1000;
                 const LIMIT: u64 = 100_000 + 2;
@@ -6377,7 +7102,7 @@ mod tests {
     #[test]
     fn phase1_tests_emulator_loader_respects_sibling_tlb_pins() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
@@ -6417,7 +7142,7 @@ mod tests {
     #[test]
     fn run_cpu_batch_passes_all_cpu_tlb_pins_to_eviction() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
@@ -6483,7 +7208,7 @@ mod tests {
     #[test]
     fn phase1_tests_unsafe_cpu_mutation_keeps_cached_pin_valid() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
@@ -6522,7 +7247,7 @@ mod tests {
     #[test]
     fn rep_insw32_fast_path_retires_exact_iteration_count() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE_ADDR: u64 = 0x1000;
                 const DEST_ADDR: u64 = 0x2000;
@@ -6558,8 +7283,10 @@ mod tests {
                 let retired = emu.cpu_ref(BSP_INDEX).icount - before;
 
                 // The trace executes REP INSW plus the following parking jump.
-                // The REP contributes exactly COUNT retirements.
-                assert_eq!(executed, 2);
+                // The REP contributes exactly COUNT retirements, and the batch
+                // reports Bochs icount units (retired instructions, including
+                // repeat() iterations) — not handler dispatches.
+                assert_eq!(executed, retired);
                 assert_eq!(retired, COUNT + 1);
                 assert_eq!(emu.pc_system.time_ticks() - ticks_before, retired);
                 assert_eq!(
@@ -6578,7 +7305,7 @@ mod tests {
     #[test]
     fn rep_insw32_stops_at_event_budget_across_page_boundary() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE_ADDR: u64 = 0x1000;
                 const DEST_ADDR: u64 = 0x2ff0;
@@ -6646,7 +7373,7 @@ mod tests {
     #[test]
     fn smp_batch_with_parked_application_processors_reaches_timer_quantum() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -6682,7 +7409,7 @@ mod tests {
     #[test]
     fn halted_application_processors_do_not_force_trace_sized_batches() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -6723,7 +7450,7 @@ mod tests {
     #[test]
     fn parked_application_processor_ipi_breaks_bsp_batch_for_delivery() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -6769,7 +7496,7 @@ mod tests {
     #[test]
     fn smc_store_within_current_trace_stops_trace() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -6811,7 +7538,7 @@ mod tests {
     #[test]
     fn fw_cfg_dma_out_stops_cached_trace_before_following_instruction() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 const DESCRIPTOR: u64 = 0x3000;
@@ -6873,7 +7600,7 @@ mod tests {
     #[test]
     fn smp_cross_cpu_code_patch_invalidates_sibling_icache() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -6924,7 +7651,7 @@ mod tests {
     #[test]
     fn dma_write_to_cached_code_page_invalidates_icache() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 fn dma_read(_data: &[u8], _maxlen: u16) -> u16 {
                     0
@@ -6984,7 +7711,7 @@ mod tests {
     #[test]
     fn active_cpu_batch_has_no_fixed_millisecond_polling_cap() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -7025,7 +7752,7 @@ mod tests {
     #[test]
     fn keyboard_reset_ack_reaches_bios_poll_before_timeout_at_high_configured_ips() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.ips = 300_000_000;
@@ -7077,7 +7804,7 @@ mod tests {
     #[test]
     fn hlt_wait_step_uses_exact_next_timer_deadline() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -7092,7 +7819,7 @@ mod tests {
     #[test]
     fn hlt_wait_step_respects_near_pc_system_timer() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -7129,7 +7856,7 @@ mod tests {
     #[test]
     fn slowdown_owner_bounds_hlt_wait() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.sync_slowdown = true;
@@ -7153,7 +7880,7 @@ mod tests {
     #[test]
     fn slowdown_state_reanchors_on_restore() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 use std::io::Cursor;
                 let build = || {
@@ -7210,7 +7937,7 @@ mod tests {
     #[test]
     fn slowdown_config_mismatch_rejects_restore() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 use std::io::Cursor;
                 let build = |sync_slowdown: bool| {
@@ -7252,7 +7979,7 @@ mod tests {
     #[test]
     fn hardware_reset_rearms_exact_device_owners() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu =
                     Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
@@ -7273,7 +8000,10 @@ mod tests {
                     emu.device_manager.keyboard.timer_handle(),
                     Some(keyboard_handle)
                 );
-                assert!(!emu.pc_system.is_timer_active(keyboard_handle));
+                // Bochs keyboard.cc registers the 8042 serial-delay timer
+                // continuous and always active — reset restarts it at the
+                // serial_delay period instead of deactivating it.
+                assert!(emu.pc_system.is_timer_active(keyboard_handle));
                 assert!(emu.pc_system.is_timer_active(one_second_handle));
             })
             .unwrap()
@@ -7284,7 +8014,7 @@ mod tests {
     #[test]
     fn software_reset_requests_preserve_device_state() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -7328,7 +8058,7 @@ mod tests {
     #[test]
     fn pci_cf9_hardware_reset_resets_device_state() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
                 let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
@@ -7351,7 +8081,7 @@ mod tests {
     #[test]
     fn pam_boundary_flushes_all_cpu_mappings() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
@@ -7393,7 +8123,7 @@ mod tests {
     #[test]
     fn a20_port92_and_keyboard_transitions_flush_all_cpu_mappings() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const MIB: usize = 1024 * 1024;
                 let mut config = EmulatorConfig::default();
@@ -7480,7 +8210,7 @@ mod tests {
     #[test]
     fn all_reset_ports_stop_before_the_next_instruction() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 let reset_guest = |code: &[u8]| {
@@ -7539,7 +8269,7 @@ mod tests {
         // the triggering OUT: no pre-reset elapsed tick, deferred timer
         // request, or queued callback may reach the post-reset machine.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 for hardware in [false, true] {
                     let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
@@ -7600,7 +8330,7 @@ mod tests {
         // set_HRQ(0). The full chain must work through the deferred-request
         // transport: a DRQ must wake the CPU and the TC must drop HRQ.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 fn dma_write(data: &mut [u8], maxlen: u16) -> u16 {
                     let payload = [0xd1, 0xa5, 0x5e, 0x33];
@@ -7682,7 +8412,7 @@ mod tests {
         // A guest-triggered reset mid-batch must not commit the instructions
         // executed before the reset as post-reset virtual time.
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
@@ -7728,7 +8458,7 @@ mod tests {
     #[test]
     fn initialize_enables_configured_pci_vga() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 for (pci_enabled, pci_vga) in
                     [(false, false), (false, true), (true, false), (true, true)]
@@ -7755,7 +8485,7 @@ mod tests {
     #[test]
     fn emulator_new_builds_and_resets_all_configured_cpus() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -7786,7 +8516,7 @@ mod tests {
     #[test]
     fn nonflat_topology_reports_bochs_compatible_guest_tables() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default().with_topology(2, 2, 2).unwrap();
@@ -7878,7 +8608,7 @@ mod tests {
     #[test]
     fn cpuid_freq_config_reaches_every_cpu_through_cpuid_instruction() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 // `ips` mode: leaf 0x15 must report a crystal of `ips` Hz with
                 // a 1/1 ratio and leaf 0x16 the rate in MHz — on the BSP and
@@ -8027,7 +8757,7 @@ mod tests {
     #[test]
     fn cpu_masks_match_scan_oracle_for_scheduler_transition_matrix() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const FIXED_VECTOR: u32 = 0x42;
                 const LEVEL_VECTOR: u8 = 0xE0;
@@ -8211,7 +8941,7 @@ mod tests {
     #[test]
     fn run_cpu_batch_executes_application_processor_after_sipi() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -8243,7 +8973,7 @@ mod tests {
     #[test]
     fn bsp_icr_init_sipi_wakes_and_runs_application_processor() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const ICR_LOW: u64 = 0x300;
                 const ICR_HIGH: u64 = 0x310;
@@ -8302,7 +9032,7 @@ mod tests {
     #[test]
     fn bsp_icr_init_sipi_restarts_active_application_processor() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const SECOND_TRAMPOLINE_VECTOR: u8 = AP_TRAMPOLINE_VECTOR + 1;
                 const SECOND_TRAMPOLINE_ADDR: u64 = (SECOND_TRAMPOLINE_VECTOR as u64) << 12;
@@ -8367,7 +9097,7 @@ mod tests {
     #[test]
     fn init_does_not_recall_ipis_already_sent_by_active_ap() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const IN_FLIGHT_VECTOR: u32 = 0x44;
 
@@ -8426,7 +9156,7 @@ mod tests {
     #[test]
     fn init_ipi_to_active_ap_stays_pending_until_instruction_boundary() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -8468,7 +9198,7 @@ mod tests {
     #[test]
     fn smi_then_init_ipis_are_both_signaled_not_collapsed() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -8512,7 +9242,7 @@ mod tests {
     #[test]
     fn run_cpu_batch_uses_smp_time_when_peer_is_started_but_halted() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -8564,7 +9294,7 @@ mod tests {
     #[test]
     fn smp_batch_keeps_guest_time_at_the_frozen_round_epoch() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -8603,7 +9333,7 @@ mod tests {
     #[test]
     fn smp_batch_services_lapic_timer_at_round_boundary() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -8666,7 +9396,7 @@ mod tests {
     #[test]
     fn smp_lapic_tmcct_advances_across_rounds_without_scheduler_work() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const HUGE_TMICT: u32 = 0x0FFF_FFFF;
 
@@ -8730,7 +9460,7 @@ mod tests {
     #[test]
     fn bsp_hlt_fast_forward_stays_available_until_application_processors_start() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -8763,7 +9493,7 @@ mod tests {
     #[test]
     fn all_but_self_fixed_ipi_wakes_halted_application_processors() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const FIXED_IPI_VECTOR: u32 = 0xF1;
                 const ICR_ALL_BUT_SELF: u32 = 3 << 18;
@@ -8815,7 +9545,7 @@ mod tests {
     #[test]
     fn nmi_ipi_wakes_shutdown_application_processor() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const ICR_DELIVERY_NMI: u32 = 4 << 8;
                 const NMI_HANDLER_SEG: u16 = 0x0500;
@@ -8914,7 +9644,7 @@ mod tests {
     #[test]
     fn lapic_timer_request_is_activated_before_round_ticks_advance() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -8962,7 +9692,7 @@ mod tests {
     #[test]
     fn self_ipi_control_event_ends_up_batch() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 const SELF_NMI_IPI: u32 =
@@ -9020,7 +9750,7 @@ mod tests {
     #[test]
     fn up_lapic_timer_uses_programming_instruction_epoch() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 const INITIAL_COUNT: u32 = 4;
@@ -9094,7 +9824,7 @@ mod tests {
     #[test]
     fn halted_application_processor_lapic_timer_disables_bsp_hlt_fast_forward() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -9134,7 +9864,7 @@ mod tests {
     #[test]
     fn service_lapic_local_events_catches_up_overdue_periodic_ap_timers() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -9186,7 +9916,7 @@ mod tests {
     #[test]
     fn service_lapic_local_events_catches_up_overdue_periodic_ap_timers_beyond_previous_cap() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const ELAPSED_TICKS: u32 = 10_050;
                 const EXPECTED_FIRES: u64 = 1005;
@@ -9245,7 +9975,7 @@ mod tests {
     #[test]
     fn reset_deactivates_lapic_pc_timer_before_next_tick() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -9291,7 +10021,7 @@ mod tests {
     #[test]
     fn service_lapic_local_events_drains_level_triggered_eoi() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const VECTOR: u8 = 0x40;
                 const VECTOR_BIT: u32 = 1;
@@ -9334,7 +10064,7 @@ mod tests {
     #[test]
     fn wait_for_sipi_application_processors_credit_quantum_ticks() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default()
@@ -9408,7 +10138,7 @@ mod tests {
     #[test]
     fn pic_deferred_clear_cannot_erase_reasserted_int_pin() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -9438,7 +10168,7 @@ mod tests {
     #[test]
     fn scheduler_boundary_republishes_asserted_pic_without_edge_history() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -9467,7 +10197,7 @@ mod tests {
     #[test]
     fn rep_insw_respects_configured_page_write_permissions() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE_ADDR: u64 = 0x1000;
                 const DEST_ADDR: u64 = 0x2000;
@@ -9503,7 +10233,7 @@ mod tests {
     #[test]
     fn split_page_rmw_faults_before_first_mmio_read() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 use std::sync::{
                     atomic::{AtomicUsize, Ordering},
@@ -9557,7 +10287,7 @@ mod tests {
     #[test]
     fn insw_permission_fault_precedes_destructive_mmio_read() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 use std::sync::{
                     atomic::{AtomicUsize, Ordering},
@@ -9611,7 +10341,7 @@ mod tests {
     #[test]
     fn rep_insw_mmio_fallback_reads_once_per_input_word() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 use std::sync::{
                     atomic::{AtomicUsize, Ordering},
@@ -9664,7 +10394,7 @@ mod tests {
 
     fn phase6_large_stack(f: impl FnOnce() + Send + 'static) {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(f)
             .unwrap()
             .join()
@@ -10313,9 +11043,14 @@ mod tests {
         });
     }
 
+    /// Bochs unit contract (string.cc fast path vs cpu.cc repeat()):
+    /// the fast path charges elements to TICKS (`BX_TICKN(count-1)` →
+    /// `tick_surplus`) and retires one icount per chunk, while the scalar
+    /// repeat() loop retires one icount per element. Tick totals match
+    /// exactly; icount deliberately differs.
     #[cfg(feature = "instrumentation")]
     #[test]
-    fn fast_rep_icount_and_ticks_match_scalar_n_elements() {
+    fn fast_rep_charges_ticks_not_icount_and_matches_scalar_ticks() {
         phase6_large_stack(|| {
             const CODE: u64 = 0x1000;
             const SRC: u64 = 0x2FF8;
@@ -10334,8 +11069,10 @@ mod tests {
             fast.reg_write(X86Reg::Rdi, DST);
             fast.reg_write(X86Reg::Rcx, COUNT);
             let fast_before = fast.cpu_ref(BSP_INDEX).icount;
+            let fast_surplus_before = fast.cpu_ref(BSP_INDEX).tick_surplus;
             phase6_run(&mut fast);
             let fast_retired = fast.cpu_ref(BSP_INDEX).icount - fast_before;
+            let fast_surplus = fast.cpu_ref(BSP_INDEX).tick_surplus - fast_surplus_before;
             let fast_ticks = fast.ticks();
 
             let (trace, repeats) = phase6_repeat_trace();
@@ -10365,7 +11102,16 @@ mod tests {
             assert_eq!(fast.mem_read_vec(DST, (COUNT * 2) as usize).unwrap(), scalar.mem_read_vec(DST, (COUNT * 2) as usize).unwrap());
             assert_eq!(fast.reg_read(X86Reg::Rcx), 0);
             assert_eq!(scalar.reg_read(X86Reg::Rcx), 0);
-            assert_eq!(fast_retired, scalar_retired);
+            // Both batches execute the identical instruction tail (the REP
+            // plus one parking jump), so moving element charges into
+            // tick_surplus must conserve the tick total exactly while icount
+            // retires per chunk (fast) vs per element (scalar repeat()).
+            assert!(
+                fast_surplus > 0,
+                "fast path must charge elements to tick_surplus, not icount"
+            );
+            assert_eq!(fast_retired + fast_surplus, scalar_retired);
+            assert!(fast_retired < scalar_retired);
             assert_eq!(fast_ticks, scalar.ticks());
             assert_eq!(phase6_lock(&repeats).len(), COUNT as usize);
         });
@@ -10506,7 +11252,7 @@ mod tests {
     #[test]
     fn empty_memory_write_is_a_no_op() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
                     EmulatorConfig::default(),
@@ -10527,7 +11273,7 @@ mod tests {
     #[test]
     fn snapshot_rebuilds_runnable_and_lapic_work_masks_before_resume() {
         std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig {
                     guest_memory_size: 4 * 1024 * 1024,

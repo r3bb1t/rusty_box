@@ -25,7 +25,10 @@ use core::cell::{Cell, UnsafeCell};
 ///
 /// They deliberately live with the descriptor rather than the CPU: eviction
 /// checks may run while a CPU is mutably borrowed for instruction execution.
-pub(crate) const CPU_TLB_PIN_DTLB_SLOTS: usize = 4096;
+/// These mirror `BX_DTLB_SIZE` / `BX_ITLB_SIZE` (cpu.rs, Bochs cpu.h) and must
+/// stay `>=` them — each pin array is indexed by TLB slot, so under-sizing
+/// would let a slot index run past the end.
+pub(crate) const CPU_TLB_PIN_DTLB_SLOTS: usize = 2048;
 pub(crate) const CPU_TLB_PIN_ITLB_SLOTS: usize = 1024;
 
 /// Pin-visible host pointers copied out of one CPU.
@@ -133,15 +136,48 @@ impl CpuTlbPin {
             || state.dtlb_hosts.iter().copied().any(contains)
             || state.itlb_hosts.iter().copied().any(contains)
     }
+
+    /// Exact equality of every published host pin. Used by the Track B property
+    /// test to assert that incrementally maintained sidecars stay byte-identical
+    /// to a fresh `refresh_tlb_pin` rescan after each TLB operation.
+    #[cfg(test)]
+    pub(crate) fn state_matches(&self, other: &CpuTlbPin) -> bool {
+        // SAFETY: single-threaded test access; no concurrent sidecar mutation.
+        let a = unsafe { &*self.state.get() };
+        let b = unsafe { &*other.state.get() };
+        a.dtlb_hosts == b.dtlb_hosts
+            && a.itlb_hosts == b.itlb_hosts
+            && a.vmcb_host == b.vmcb_host
+            && a.fetch_window_start == b.fetch_window_start
+            && a.fetch_window_end == b.fetch_window_end
+    }
 }
 /// The only CPU state consumed by handler-aware physical-memory operations.
 ///
 /// It is computed while the CPU is ordinarily reborrowed, before memory is
 /// mutably borrowed.  Memory must never need a shared `BxCpuC` reference.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CpuMemoryPolicy {
     smm_mode: bool,
     monitor_hit: bool,
+    /// Whether this access comes from CPU context. Bochs memory.cc wraps the
+    /// whole SMRAM window in `if (cpu != NULL) { ... }`, so a device access
+    /// (DMA, an MMIO device writing memory) never reaches SMRAM through it
+    /// and falls through to the normal handler/VGA routing instead.
+    cpu_context: bool,
+}
+
+/// CPU context is the default: every production caller except the device
+/// paths below computes its policy from live CPU state, and defaulting the
+/// other way would silently hide SMRAM from the CPU.
+impl Default for CpuMemoryPolicy {
+    fn default() -> Self {
+        Self {
+            smm_mode: false,
+            monitor_hit: false,
+            cpu_context: true,
+        }
+    }
 }
 
 impl CpuMemoryPolicy {
@@ -150,7 +186,25 @@ impl CpuMemoryPolicy {
         Self {
             smm_mode,
             monitor_hit,
+            cpu_context: true,
         }
+    }
+
+    /// Policy for an access issued by a device rather than a CPU — Bochs's
+    /// `cpu == NULL`. Such accesses never see the SMRAM window.
+    #[inline]
+    pub(crate) const fn device() -> Self {
+        Self {
+            smm_mode: false,
+            monitor_hit: false,
+            cpu_context: false,
+        }
+    }
+
+    /// Bochs memory.cc `cpu != NULL` — gates the SMRAM shortcut.
+    #[inline]
+    pub(crate) const fn is_cpu_context(self) -> bool {
+        self.cpu_context
     }
 
     #[inline]
@@ -287,6 +341,7 @@ type Unsigned = u32;
 pub(crate) enum MemoryDeviceId {
     Vga(*mut crate::iodev::vga::BxVgaC),
     IoApic(*mut crate::iodev::ioapic::BxIoApic),
+    Hpet(*mut crate::iodev::hpet::BxHpetC),
     None,
 }
 
@@ -295,6 +350,7 @@ impl core::fmt::Debug for MemoryDeviceId {
         match self {
             Self::Vga(p) => write!(f, "Vga({:p})", p),
             Self::IoApic(p) => write!(f, "IoApic({:p})", p),
+            Self::Hpet(p) => write!(f, "Hpet({:p})", p),
             Self::None => write!(f, "None"),
         }
     }
@@ -327,6 +383,19 @@ impl MemoryDeviceId {
         }
     }
 
+    /// Dereference the HPET device pointer.
+    ///
+    /// # Safety (internal)
+    /// The raw pointer was set once at init and remains valid for the emulator lifetime.
+    /// Aliasing is the caller's responsibility (same as the prior inline `unsafe` blocks).
+    #[inline(always)]
+    pub(crate) fn hpet_mut(&self) -> Option<&mut crate::iodev::hpet::BxHpetC> {
+        match self {
+            MemoryDeviceId::Hpet(ptr) => Some(unsafe { &mut **ptr }),
+            _ => None,
+        }
+    }
+
     /// Whether two ids refer to the same device instance (pointer identity).
     /// Used by `unregister_memory_handlers` to match the handler to remove.
     #[inline]
@@ -334,6 +403,7 @@ impl MemoryDeviceId {
         match (self, other) {
             (MemoryDeviceId::Vga(a), MemoryDeviceId::Vga(b)) => core::ptr::eq(*a, *b),
             (MemoryDeviceId::IoApic(a), MemoryDeviceId::IoApic(b)) => core::ptr::eq(*a, *b),
+            (MemoryDeviceId::Hpet(a), MemoryDeviceId::Hpet(b)) => core::ptr::eq(*a, *b),
             (MemoryDeviceId::None, MemoryDeviceId::None) => true,
             _ => false,
         }
@@ -385,6 +455,12 @@ pub struct BxMemC<'a> {
     /// This is synchronized from BxPcSystemC when A20 state changes
     a20_mask: BxPhyAddress,
 
+    /// `(system_ticks, ips)` of the in-flight HPET MMIO access, stamped by
+    /// the CPU slow path before dispatch. The HPET converts this to the
+    /// nanosecond clock Bochs reads via `bx_pc_system.time_nsec()` inside
+    /// its handlers; a plain field would need `&mut` on read paths.
+    hpet_access_clock: core::cell::Cell<(u64, u64)>,
+
     /// Keeps the lifetime parameter used by callers (CPU borrows, emulator context).
     _marker: core::marker::PhantomData<&'a ()>,
 }
@@ -405,6 +481,21 @@ impl BxMemC<'_> {
     /// Get the current A20 mask
     pub fn a20_mask(&self) -> BxPhyAddress {
         self.a20_mask
+    }
+
+    /// Stamp the emulated clock for an in-flight HPET MMIO access — the CPU
+    /// slow path records its `system_ticks()`/`ips` pair here so the HPET
+    /// handler observes the same clock Bochs reads via
+    /// `bx_pc_system.time_nsec()` inside `hpet_read`/`hpet_write`.
+    #[inline]
+    pub(crate) fn stamp_hpet_access_clock(&self, system_ticks: u64, ips: u64) {
+        self.hpet_access_clock.set((system_ticks, ips));
+    }
+
+    /// The `(system_ticks, ips)` pair stamped for the current HPET access.
+    #[inline]
+    pub(crate) fn hpet_access_clock(&self) -> (u64, u64) {
+        self.hpet_access_clock.get()
     }
 
 
@@ -916,6 +1007,12 @@ impl<'m> BxMemC<'m> {
 
 #[cfg(all(test, feature = "std"))]
 mod phase1_tests {
+
+/// Emulator construction needs more than the default 2 MiB test stack, but
+/// far less than the 256 MiB previously reserved here: `Emulator` is ~4 MiB.
+/// Oversized reservations across many parallel tests intermittently exhausted
+/// the process and failed unrelated tests with STATUS_STACK_OVERFLOW.
+const TEST_STACK_SIZE: usize = 64 * MIB;
     use super::{
         memory_rusty_box::*, BxMemC, BxMemoryStubC, CpuMemoryPolicy, CpuTlbPin, MemoryError,
         MemorySnapshotGeometry, MemorySnapshotResidency,
@@ -1273,7 +1370,7 @@ mod phase1_tests {
     #[test]
     fn typed_physical_access_crosses_subpage_guest_blocks() {
         std::thread::Builder::new()
-            .stack_size(256 * MIB)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut mem = BxMemC::new(
                     BxMemoryStubC::create_and_init(MIB, MIB, 1024).unwrap(),
@@ -1311,7 +1408,7 @@ mod phase1_tests {
     #[test]
     fn cpu_tlb_pin_sidecar_refreshes_and_clears_without_cpu_probe() {
         std::thread::Builder::new()
-            .stack_size(256 * MIB)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
                 let mut mem = BxMemC::new(
@@ -1347,7 +1444,7 @@ mod phase1_tests {
     #[test]
     fn sibling_tlb_pin_blocks_loader_eviction() {
         std::thread::Builder::new()
-            .stack_size(256 * MIB)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut mem = BxMemC::new(
                     BxMemoryStubC::create_and_init(2 * MIB, MIB, MIB).unwrap(),
@@ -1392,7 +1489,7 @@ mod phase1_tests {
         // dedicated window interval is the only thing preventing a data
         // access from evicting the code block under a full swap cap.
         std::thread::Builder::new()
-            .stack_size(256 * MIB)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut mem = BxMemC::new(
                     BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).unwrap(),
@@ -1446,7 +1543,7 @@ mod phase1_tests {
     #[test]
     fn pinned_cross_block_failure_returns_committed_copy_prefix() {
         std::thread::Builder::new()
-            .stack_size(256 * MIB)
+            .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut mem = BxMemC::new(
                     BxMemoryStubC::create_and_init(2 * MIB, MIB, MIB).unwrap(),

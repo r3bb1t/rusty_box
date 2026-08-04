@@ -7,7 +7,10 @@
 //! BX_CPU_C::cpu_loop() switch statement.
 
 use super::{
-    avx::{VexFmaForm, VexPackedFmaOp, VexScalarFmaOp},
+    avx::{VexFmaForm, VexPackedFmaOp, VexScalarFmaOp, VexVarShiftOp},
+    avx512::PmovWiden,
+    avx512_gather::VexGatherForm,
+    avx512_misc::{PmovDst, PmovSat, PmovSrc},
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, Opcode},
@@ -1181,7 +1184,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::INT3 => self.int3(instr),
             Opcode::INT1 => self.int1(instr),
             // INTO: Bochs ia_opcodes.def BX_IA_INTO → BX_CPU_C::INTO.
-            // Decoder emits Opcode::Int0 for 0xCE (fetchdecode_opmap.h:1138).
+            // Decoder emits Opcode::Int0 for 0xCE (fetchdecode_opmap.h).
             Opcode::Int0 => self.into(instr),
             Opcode::IretOp16 => {
                 self.iret16(instr)?;
@@ -2659,6 +2662,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::HsubpsVpsWps => self.hsubps_vps_wps(instr),
             Opcode::HsubpdVpdWpd => self.hsubpd_vpd_wpd(instr),
 
+            // SSE3 Add/Subtract (sse_pfp.rs)
+            Opcode::AddsubpsVpsWps => self.addsubps_vps_wps(instr),
+            Opcode::AddsubpdVpdWpd => self.addsubpd_vpd_wpd(instr),
+
             // SSE4.1 Dot Products (sse_pfp.rs)
             Opcode::DppsVpsWpsIb => self.dpps_vps_wps_ib(instr),
             Opcode::DppdVpdWpdIb => self.dppd_vpd_wpd_ib(instr),
@@ -3005,7 +3012,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // =========================================================================
             // AVX/AVX-512 specific opcodes
             // =========================================================================
-            Opcode::EvexVpermi2dVdqHdqWdqKmask => self.vpermi2d(instr),
             // VPRORD/VPROLD: dispatched below with other EVEX rotate handlers
 
             // EVEX AVX-512F integer instructions (avx512.rs handlers)
@@ -3041,28 +3047,28 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 if instr.mod_c0() {
                     self.evex_vmovdqu32_load_r(instr)
                 } else {
-                    self.evex_vmovdqu32_load_m(instr)
+                    self.evex_vmovaps_load_m(instr)
                 }
             }
             Opcode::EvexVmovdqa32WdqVdq | Opcode::EvexVmovdqa32WdqVdqKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu32_store_r(instr)
                 } else {
-                    self.evex_vmovdqu32_store_m(instr)
+                    self.evex_vmovaps_store_m(instr)
                 }
             }
             Opcode::EvexVmovdqa64VdqWdq | Opcode::EvexVmovdqa64VdqWdqKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu64_load_r(instr)
                 } else {
-                    self.evex_vmovdqu64_load_m(instr)
+                    self.evex_vmovaps_load_m(instr)
                 }
             }
             Opcode::EvexVmovdqa64WdqVdq | Opcode::EvexVmovdqa64WdqVdqKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu64_store_r(instr)
                 } else {
-                    self.evex_vmovdqu64_store_m(instr)
+                    self.evex_vmovaps_store_m(instr)
                 }
             }
             Opcode::EvexVpadddVdqHdqWdq | Opcode::EvexVpadddVdqHdqWdqKmask => {
@@ -3085,22 +3091,19 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             Opcode::EvexVpordVdqHdqWdq | Opcode::EvexVpordVdqHdqWdqKmask => self.evex_vpord(instr),
             Opcode::EvexVporqVdqHdqWdq | Opcode::EvexVporqVdqHdqWdqKmask => {
-                // VPORQ uses qword masking granularity but the bitwise OR operation is identical
-                self.evex_vpord(instr)
+                self.evex_vporq(instr)
             }
             Opcode::EvexVpanddVdqHdqWdq | Opcode::EvexVpanddVdqHdqWdqKmask => {
                 self.evex_vpandd(instr)
             }
             Opcode::EvexVpandqVdqHdqWdq | Opcode::EvexVpandqVdqHdqWdqKmask => {
-                // VPANDQ uses qword masking granularity — same bitwise AND, different mask element size
-                self.evex_vpandd(instr)
+                self.evex_vpandq(instr)
             }
             Opcode::EvexVpandndVdqHdqWdq | Opcode::EvexVpandndVdqHdqWdqKmask => {
                 self.evex_vpandnd(instr)
             }
             Opcode::EvexVpandnqVdqHdqWdq | Opcode::EvexVpandnqVdqHdqWdqKmask => {
-                // VPANDNQ uses qword masking granularity
-                self.evex_vpandnd(instr)
+                self.evex_vpandnq(instr)
             }
             Opcode::EvexVpbroadcastdVdqWd | Opcode::EvexVpbroadcastdVdqWdKmask => {
                 self.evex_vpbroadcastd(instr)
@@ -3167,6 +3170,365 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             // Packed compare → opmask
             Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            // --- F16C. VCVTPH2PSX/VCVTPS2PHX are AVX512_FP16 and stay #UD. ---
+            Opcode::EvexVcvtph2psVpsWps | Opcode::EvexVcvtph2psVpsWpsKmask => {
+                self.evex_vcvtph2ps(instr)
+            }
+            Opcode::EvexVcvtps2phWpsVpsIb | Opcode::EvexVcvtps2phWpsVpsIbKmask => {
+                self.evex_vcvtps2ph(instr)
+            }
+
+            // --- VRCP14 / VRSQRT14 (table-driven, raise no exception) ---
+            Opcode::EvexVrcp14psVpsWpsKmask => {
+                self.evex_vrcp14ps(instr)
+            }
+            Opcode::EvexVrcp14pdVpdWpdKmask => {
+                self.evex_vrcp14pd(instr)
+            }
+            Opcode::EvexVrsqrt14psVpsWpsKmask => {
+                self.evex_vrsqrt14ps(instr)
+            }
+            Opcode::EvexVrsqrt14pdVpdWpdKmask => {
+                self.evex_vrsqrt14pd(instr)
+            }
+            Opcode::EvexVrcp14ssVssHpsWssKmask => {
+                self.evex_vrcp14ss(instr)
+            }
+            Opcode::EvexVrcp14sdVsdHpdWsdKmask => {
+                self.evex_vrcp14sd(instr)
+            }
+            Opcode::EvexVrsqrt14ssVssHpsWssKmask => {
+                self.evex_vrsqrt14ss(instr)
+            }
+            Opcode::EvexVrsqrt14sdVsdHpdWsdKmask => {
+                self.evex_vrsqrt14sd(instr)
+            }
+
+            // --- VFIXUPIMM, VEXPAND, VCOMPRESS ---
+            Opcode::EvexVfixupimmpsVpsHpsWpsIb | Opcode::EvexVfixupimmpsVpsHpsWpsIbKmask => {
+                self.evex_vfixupimmps(instr)
+            }
+            Opcode::EvexVfixupimmpdVpdHpdWpdIb | Opcode::EvexVfixupimmpdVpdHpdWpdIbKmask => {
+                self.evex_vfixupimmpd(instr)
+            }
+            Opcode::EvexVfixupimmssVssHssWssIbKmask => {
+                self.evex_vfixupimmss(instr)
+            }
+            Opcode::EvexVfixupimmsdVsdHsdWsdIbKmask => {
+                self.evex_vfixupimmsd(instr)
+            }
+            Opcode::EvexVexpandpsVpsWps | Opcode::EvexVexpandpsVpsWpsKmask => {
+                self.evex_vexpandps(instr)
+            }
+            Opcode::EvexVexpandpdVpdWpd | Opcode::EvexVexpandpdVpdWpdKmask => {
+                self.evex_vexpandpd(instr)
+            }
+            Opcode::EvexVcompresspsWpsVps | Opcode::EvexVcompresspsWpsVpsKmask => {
+                self.evex_vcompressps(instr)
+            }
+            Opcode::EvexVcompresspdWpdVpd | Opcode::EvexVcompresspdWpdVpdKmask => {
+                self.evex_vcompresspd(instr)
+            }
+
+            // --- insert/extract, conflict, opmask broadcast, VDBPSADBW ---
+            // The insert and extract forms take no writemask, so upstream's EVEX
+            // def entries name the same VEX and legacy symbols used here.
+            Opcode::EvexVpinsrbVdqEbIb => self.vpinsrb(instr),
+            Opcode::EvexVpinsrwVdqEwIb => self.vpinsrw(instr),
+            Opcode::EvexVpinsrdVdqEdIb => self.vpinsrd(instr),
+            Opcode::EvexVpinsrqVdqEqIb => self.vpinsrq(instr),
+            Opcode::EvexVpextrbEdVdqIbR => self.pextrb_ed_vdq_ib_r(instr),
+            Opcode::EvexVpextrbMbVdqIbM => self.pextrb_mb_vdq_ib_m(instr),
+            Opcode::EvexVpextrwEdVdqIbR => self.pextrw_ed_vdq_ib_r(instr),
+            Opcode::EvexVpextrwMwVdqIbM => self.pextrw_mw_vdq_ib_m(instr),
+            Opcode::EvexVpextrwGdUdqIb => self.pextrw_gd_udq_ib(instr),
+            Opcode::EvexVpextrdEdVdqIb => self.pextrd_ed_vdq_ib(instr),
+            Opcode::EvexVpextrqEqVdqIb => self.pextrq_eq_vdq_ib(instr),
+            Opcode::EvexVinsertpsVpsWssIb => self.vinsertps(instr),
+            Opcode::EvexVpconflictqVdqWdqKmask => self.evex_vpconflictq(instr),
+            Opcode::EvexVpbroadcastmb2qVdqKeb => self.evex_vpbroadcastmb2q(instr),
+            Opcode::EvexVpbroadcastmw2dVdqKew => self.evex_vpbroadcastmw2d(instr),
+            Opcode::EvexVdbpsadbwVdqHdqWdqIbKmask => self.evex_vdbpsadbw(instr),
+            // VBROADCASTI32x2 is the integer spelling of the same operation and
+            // shares upstream's handler.
+            Opcode::EvexVbroadcastf32x2VpsWq
+            | Opcode::EvexVbroadcastf32x2VpsWqKmask
+            | Opcode::EvexVbroadcasti32x2VdqWq
+            | Opcode::EvexVbroadcasti32x2VdqWqKmask => self.evex_vbroadcastf32x2(instr),
+
+            // --- VMOVDQU8 / VMOVDQU16 (byte- and word-granular masked moves) ---
+            Opcode::EvexVmovdqu8VdqWdq | Opcode::EvexVmovdqu8VdqWdqKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu8_load_r(instr)
+                } else {
+                    self.evex_vmovdqu8_load_m(instr)
+                }
+            }
+            Opcode::EvexVmovdqu8WdqVdq | Opcode::EvexVmovdqu8WdqVdqKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu8_store_r(instr)
+                } else {
+                    self.evex_vmovdqu8_store_m(instr)
+                }
+            }
+            Opcode::EvexVmovdqu16VdqWdq | Opcode::EvexVmovdqu16VdqWdqKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu16_load_r(instr)
+                } else {
+                    self.evex_vmovdqu16_load_m(instr)
+                }
+            }
+            Opcode::EvexVmovdqu16WdqVdq | Opcode::EvexVmovdqu16WdqVdqKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu16_store_r(instr)
+                } else {
+                    self.evex_vmovdqu16_store_m(instr)
+                }
+            }
+
+            // --- EVEX MOVD/MOVQ/MOVHLPS/MOVLHPS/MOVHP/MOVLP ---
+            // Upstream's EVEX def entries name these same legacy and VEX
+            // symbols: none of them takes a writemask, and the register-form
+            // writers already clear the upper register file exactly when the
+            // encoding is VEX or EVEX (Bochs BX_WRITE_XMM_REGZ's `if (vlen)`).
+            Opcode::EvexVmovdVdqEd => {
+                if instr.mod_c0() {
+                    self.movd_vdq_ed_r(instr)
+                } else {
+                    self.movd_vdq_ed_m(instr)
+                }
+            }
+            Opcode::EvexVmovdEdVd => {
+                if instr.mod_c0() {
+                    self.movd_ed_vdq_r(instr)
+                } else {
+                    self.movd_ed_vdq_m(instr)
+                }
+            }
+            Opcode::EvexVmovqVqWq => {
+                if instr.mod_c0() {
+                    self.movq_vq_wq_r(instr)
+                } else {
+                    self.movq_vq_wq_m(instr)
+                }
+            }
+            Opcode::EvexVmovqWqVq => {
+                if instr.mod_c0() {
+                    self.movq_wq_vq_r(instr)
+                } else {
+                    self.movq_wq_vq_m(instr)
+                }
+            }
+            Opcode::EvexVmovqVdqEq => self.movq_vdq_eq(instr),
+            Opcode::EvexVmovqEqVq => self.movq_eq_vq(instr),
+            Opcode::EvexVmovhlpsVpsHpsWps => self.vmovhlps(instr),
+            Opcode::EvexVmovlhpsVpsHpsWps => self.vmovlhps(instr),
+            Opcode::EvexVmovhpsMqVps => self.movhps_mq_vps(instr),
+            Opcode::EvexVmovhpdMqVsd => self.movhps_mq_vps(instr),
+            Opcode::EvexVmovlpsMqVps => self.movlps_mq_vps(instr),
+            Opcode::EvexVmovlpdMqVsd => self.movlps_mq_vps(instr),
+            Opcode::EvexVmovhpsVpsHpsMq | Opcode::EvexVmovhpdVpdHpdMq => {
+                self.vmovhp(instr)
+            }
+            Opcode::EvexVmovlpsVpsHpsMq | Opcode::EvexVmovlpdVpdHpdMq => {
+                self.vmovlp(instr)
+            }
+
+            // --- two-table permutes, VPERMW/PD variable forms, VPMULLQ ---
+            // The PS/PD spellings are bit-identical to the D/Q ones; upstream
+            // gives them separate symbols with the same body.
+            Opcode::EvexVpermt2dVdqHdqWdqKmask => self.evex_vpermt2d(instr),
+            Opcode::EvexVpermt2psVpsHpsWpsKmask => self.evex_vpermt2d(instr),
+            Opcode::EvexVpermi2dVdqHdqWdqKmask => self.evex_vpermi2d(instr),
+            Opcode::EvexVpermi2psVpsHpsWpsKmask => self.evex_vpermi2d(instr),
+            Opcode::EvexVpermt2qVdqHdqWdqKmask => self.evex_vpermt2q(instr),
+            Opcode::EvexVpermt2pdVpdHpdWpdKmask => self.evex_vpermt2q(instr),
+            Opcode::EvexVpermi2qVdqHdqWdqKmask => self.evex_vpermi2q(instr),
+            Opcode::EvexVpermi2pdVpdHpdWpdKmask => self.evex_vpermi2q(instr),
+            Opcode::EvexVpermt2wVdqHdqWdqKmask => self.evex_vpermt2w(instr),
+            Opcode::EvexVpermi2wVdqHdqWdqKmask => self.evex_vpermi2w(instr),
+            Opcode::EvexVpermwVdqHdqWdqKmask => self.evex_vpermw(instr),
+            Opcode::EvexVpermpdVpdHpdWpdKmask => self.evex_vpermpd_var(instr),
+            Opcode::EvexVpermilpdVpdHpdWpd | Opcode::EvexVpermilpdVpdHpdWpdKmask => {
+                self.evex_vpermilpd_reg(instr)
+            }
+            Opcode::EvexVpmullqVdqHdqWdq | Opcode::EvexVpmullqVdqHdqWdqKmask => {
+                self.evex_vpmullq(instr)
+            }
+
+            // --- element duplication, align, FP blend, scalar compare ---
+            Opcode::EvexVmovsldupVpsWps | Opcode::EvexVmovsldupVpsWpsKmask => {
+                self.evex_vmovsldup(instr)
+            }
+            Opcode::EvexVmovshdupVpsWps | Opcode::EvexVmovshdupVpsWpsKmask => {
+                self.evex_vmovshdup(instr)
+            }
+            Opcode::EvexVmovddupVpdWpd | Opcode::EvexVmovddupVpdWpdKmask => {
+                self.evex_vmovddup(instr)
+            }
+            Opcode::EvexVpshuflwVdqWdqIb | Opcode::EvexVpshuflwVdqWdqIbKmask => {
+                self.evex_vpshuflw(instr)
+            }
+            Opcode::EvexVpshufhwVdqWdqIb | Opcode::EvexVpshufhwVdqWdqIbKmask => {
+                self.evex_vpshufhw(instr)
+            }
+            Opcode::EvexValigndVdqHdqWdqIbKmask => self.evex_valignd(instr),
+            Opcode::EvexValignqVdqHdqWdqIbKmask => self.evex_valignq(instr),
+            Opcode::EvexVcmpssKgbHssWssIb => self.evex_vcmpss(instr),
+            Opcode::EvexVcmpsdKgbHsdWsdIb => self.evex_vcmpsd(instr),
+            // VBLENDMPS/PD select per mask bit exactly as VPBLENDMD/Q do —
+            // upstream implements both with the same simd_blendp[sd].
+            Opcode::EvexVblendmpsVpsHpsWps => self.evex_vpblendmd(instr),
+            Opcode::EvexVblendmpdVpdHpdWpd => self.evex_vpblendmq(instr),
+            // COMISS/UCOMISS set EFLAGS and have no vvvv operand, so the
+            // legacy handlers are the EVEX behaviour unchanged.
+            Opcode::EvexVcomissVssWss => self.comiss_vss_wss(instr),
+            Opcode::EvexVcomisdVsdWsd => self.comisd_vsd_wsd(instr),
+            Opcode::EvexVucomissVssWss => self.ucomiss_vss_wss(instr),
+            Opcode::EvexVucomisdVsdWsd => self.ucomisd_vsd_wsd(instr),
+
+            // --- EVEX scalar GPR <-> float conversions ---
+            // The float -> signed GPR forms have no vvvv operand and are
+            // byte-identical to the legacy handlers, which already apply the
+            // EVEX embedded-rounding override; upstream's def file names those
+            // same symbols for its EVEX entries.
+            Opcode::EvexVcvtss2siGdWss => self.cvtss2si_gd_wss(instr),
+            Opcode::EvexVcvtss2siGqWss => self.cvtss2si_gq_wss(instr),
+            Opcode::EvexVcvtsd2siGdWsd => self.cvtsd2si_gd_wsd(instr),
+            Opcode::EvexVcvtsd2siGqWsd => self.cvtsd2si_gq_wsd(instr),
+            Opcode::EvexVcvttss2siGdWss => self.cvttss2si_gd_wss(instr),
+            Opcode::EvexVcvttss2siGqWss => self.cvttss2si_gq_wss(instr),
+            Opcode::EvexVcvttsd2siGdWsd => self.cvttsd2si_gd_wsd(instr),
+            Opcode::EvexVcvttsd2siGqWsd => self.cvttsd2si_gq_wsd(instr),
+            Opcode::EvexVcvtss2usiGdWss => self.evex_vcvtss2usi_gd(instr),
+            Opcode::EvexVcvtss2usiGqWss => self.evex_vcvtss2usi_gq(instr),
+            Opcode::EvexVcvttss2usiGdWss => self.evex_vcvttss2usi_gd(instr),
+            Opcode::EvexVcvttss2usiGqWss => self.evex_vcvttss2usi_gq(instr),
+            Opcode::EvexVcvtsd2usiGdWsd => self.evex_vcvtsd2usi_gd(instr),
+            Opcode::EvexVcvtsd2usiGqWsd => self.evex_vcvtsd2usi_gq(instr),
+            Opcode::EvexVcvttsd2usiGdWsd => self.evex_vcvttsd2usi_gd(instr),
+            Opcode::EvexVcvttsd2usiGqWsd => self.evex_vcvttsd2usi_gq(instr),
+            Opcode::EvexVcvtsi2ssVssEd => self.evex_vcvtsi2ss_ed(instr),
+            Opcode::EvexVcvtsi2ssVssEq => self.evex_vcvtsi2ss_eq(instr),
+            Opcode::EvexVcvtsi2sdVsdEd => self.evex_vcvtsi2sd_ed(instr),
+            Opcode::EvexVcvtsi2sdVsdEq => self.evex_vcvtsi2sd_eq(instr),
+            Opcode::EvexVcvtusi2ssVssEd => self.evex_vcvtusi2ss_ed(instr),
+            Opcode::EvexVcvtusi2ssVssEq => self.evex_vcvtusi2ss_eq(instr),
+            Opcode::EvexVcvtusi2sdVsdEd => self.evex_vcvtusi2sd_ed(instr),
+            Opcode::EvexVcvtusi2sdVsdEq => self.evex_vcvtusi2sd_eq(instr),
+            Opcode::EvexVcvtsd2ssVssWsd | Opcode::EvexVcvtsd2ssVssWsdKmask => {
+                self.evex_vcvtsd2ss(instr)
+            }
+            Opcode::EvexVcvtss2sdVsdWss | Opcode::EvexVcvtss2sdVsdWssKmask => {
+                self.evex_vcvtss2sd(instr)
+            }
+
+            // --- VFPCLASS / VREDUCE / VRANGE (avx512_cmp.rs, avx512_round.rs, avx512_scalar.rs) ---
+            Opcode::EvexVfpclasspsKgwWpsIbKmask => self.evex_vfpclassps(instr),
+            Opcode::EvexVfpclasspdKgbWpdIbKmask => self.evex_vfpclasspd(instr),
+            Opcode::EvexVfpclassssKgbWssIbKmask => self.evex_vfpclassss(instr),
+            Opcode::EvexVfpclasssdKgbWsdIbKmask => self.evex_vfpclasssd(instr),
+            Opcode::EvexVreducepsVpsWpsIbKmask => self.evex_vreduceps(instr),
+            Opcode::EvexVreducepdVpdWpdIbKmask => self.evex_vreducepd(instr),
+            Opcode::EvexVreducessVssHpsWssIbKmask => self.evex_vreducess(instr),
+            Opcode::EvexVreducesdVsdHpdWsdIbKmask => self.evex_vreducesd(instr),
+            Opcode::EvexVrangepsVpsHpsWpsIbKmask => self.evex_vrangeps(instr),
+            Opcode::EvexVrangepdVpdHpdWpdIbKmask => self.evex_vrangepd(instr),
+            Opcode::EvexVrangessVssHpsWssIbKmask => self.evex_vrangess(instr),
+            Opcode::EvexVrangesdVsdHpdWsdIbKmask => self.evex_vrangesd(instr),
+
+            // --- AVX512_DQ qword <-> float conversions (avx512_cvt.rs) ---
+            Opcode::EvexVcvtpd2qqVdqWpd | Opcode::EvexVcvtpd2qqVdqWpdKmask => {
+                self.evex_vcvtpd2qq(instr)
+            }
+            Opcode::EvexVcvttpd2qqVdqWpd | Opcode::EvexVcvttpd2qqVdqWpdKmask => {
+                self.evex_vcvttpd2qq(instr)
+            }
+            Opcode::EvexVcvtpd2uqqVdqWpd | Opcode::EvexVcvtpd2uqqVdqWpdKmask => {
+                self.evex_vcvtpd2uqq(instr)
+            }
+            Opcode::EvexVcvttpd2uqqVdqWpd | Opcode::EvexVcvttpd2uqqVdqWpdKmask => {
+                self.evex_vcvttpd2uqq(instr)
+            }
+            Opcode::EvexVcvtqq2pdVpdWdq | Opcode::EvexVcvtqq2pdVpdWdqKmask => {
+                self.evex_vcvtqq2pd(instr)
+            }
+            Opcode::EvexVcvtuqq2pdVpdWdq | Opcode::EvexVcvtuqq2pdVpdWdqKmask => {
+                self.evex_vcvtuqq2pd(instr)
+            }
+            Opcode::EvexVcvtqq2psVpsWdq | Opcode::EvexVcvtqq2psVpsWdqKmask => {
+                self.evex_vcvtqq2ps(instr)
+            }
+            Opcode::EvexVcvtuqq2psVpsWdq | Opcode::EvexVcvtuqq2psVpsWdqKmask => {
+                self.evex_vcvtuqq2ps(instr)
+            }
+            Opcode::EvexVcvtps2qqVdqWps | Opcode::EvexVcvtps2qqVdqWpsKmask => {
+                self.evex_vcvtps2qq(instr)
+            }
+            Opcode::EvexVcvttps2qqVdqWps | Opcode::EvexVcvttps2qqVdqWpsKmask => {
+                self.evex_vcvttps2qq(instr)
+            }
+            Opcode::EvexVcvtps2uqqVdqWps | Opcode::EvexVcvtps2uqqVdqWpsKmask => {
+                self.evex_vcvtps2uqq(instr)
+            }
+            Opcode::EvexVcvttps2uqqVdqWps | Opcode::EvexVcvttps2uqqVdqWpsKmask => {
+                self.evex_vcvttps2uqq(instr)
+            }
+            Opcode::EvexVcvtudq2pdVpdWdq | Opcode::EvexVcvtudq2pdVpdWdqKmask => {
+                self.evex_vcvtudq2pd(instr)
+            }
+
+            // --- EVEX scalar getexp/scalef/getmant + pd->udq (avx512_scalar.rs, avx512_cvt.rs) ---
+            Opcode::EvexVgetexpssVssHpsWss | Opcode::EvexVgetexpssVssHpsWssKmask => {
+                self.evex_vgetexpss(instr)
+            }
+            Opcode::EvexVgetexpsdVsdHpdWsd | Opcode::EvexVgetexpsdVsdHpdWsdKmask => {
+                self.evex_vgetexpsd(instr)
+            }
+            Opcode::EvexVscalefssVssHpsWss | Opcode::EvexVscalefssVssHpsWssKmask => {
+                self.evex_vscalefss(instr)
+            }
+            Opcode::EvexVscalefsdVsdHpdWsd | Opcode::EvexVscalefsdVsdHpdWsdKmask => {
+                self.evex_vscalefsd(instr)
+            }
+            Opcode::EvexVcvtpd2udqVdqWpd | Opcode::EvexVcvtpd2udqVdqWpdKmask => {
+                self.evex_vcvtpd2udq(instr)
+            }
+            Opcode::EvexVcvttpd2udqVdqWpd | Opcode::EvexVcvttpd2udqVdqWpdKmask => {
+                self.evex_vcvttpd2udq(instr)
+            }
+            Opcode::EvexVgetmantssVssHpsWssIbKmask => self.evex_vgetmantss(instr),
+            Opcode::EvexVgetmantsdVsdHpdWsdIbKmask => self.evex_vgetmantsd(instr),
+
+            // --- byte/word opmask<->vector, blends, GPR broadcasts ---
+            Opcode::EvexVpmovm2bVdqKeq => self.evex_vpmovm2b(instr),
+            Opcode::EvexVpmovm2wVdqKed => self.evex_vpmovm2w(instr),
+            Opcode::EvexVpmovb2mKgqWdq => self.evex_vpmovb2m(instr),
+            Opcode::EvexVpmovw2mKgdWdq => self.evex_vpmovw2m(instr),
+            Opcode::EvexVpblendmbVdqHdqWdq => self.evex_vpblendmb(instr),
+            Opcode::EvexVpblendmwVdqHdqWdq => self.evex_vpblendmw(instr),
+            Opcode::EvexVpbroadcastbVdqEb | Opcode::EvexVpbroadcastbVdqEbKmask => {
+                self.evex_vpbroadcastb_gpr(instr)
+            }
+            Opcode::EvexVpbroadcastwVdqEw | Opcode::EvexVpbroadcastwVdqEwKmask => {
+                self.evex_vpbroadcastw_gpr(instr)
+            }
+
+            // --- byte/word/qword compares producing an opmask (avx512_cmp.rs) ---
+            Opcode::EvexVpcmpeqbKgqHdqWdq => self.evex_vpcmpeqb(instr),
+            Opcode::EvexVpcmpeqwKgdHdqWdq => self.evex_vpcmpeqw(instr),
+            Opcode::EvexVpcmpgtbKgqHdqWdq => self.evex_vpcmpgtb(instr),
+            Opcode::EvexVpcmpgtwKgdHdqWdq => self.evex_vpcmpgtw(instr),
+            Opcode::EvexVptestmbKgqHdqWdq => self.evex_vptestmb(instr),
+            Opcode::EvexVptestmwKgdHdqWdq => self.evex_vptestmw(instr),
+            Opcode::EvexVptestnmbKgqHdqWdq => self.evex_vptestnmb(instr),
+            Opcode::EvexVptestnmwKgdHdqWdq => self.evex_vptestnmw(instr),
+            Opcode::EvexVpcmpbKgqHdqWdqIb => self.evex_vpcmpb(instr),
+            Opcode::EvexVpcmpwKgdHdqWdqIb => self.evex_vpcmpw(instr),
+            Opcode::EvexVpcmpubKgqHdqWdqIb => self.evex_vpcmpub(instr),
+            Opcode::EvexVpcmpuwKgdHdqWdqIb => self.evex_vpcmpuw(instr),
+            Opcode::EvexVpcmpqKgbHdqWdqIb => self.evex_vpcmpq(instr),
+            Opcode::EvexVpcmpuqKgbHdqWdqIb => self.evex_vpcmpuq(instr),
             Opcode::EvexVpcmpudKgwHdqWdqIb => self.evex_vpcmpud(instr),
             // Multiply / Min / Max
             Opcode::EvexVpmulldVdqHdqWdq | Opcode::EvexVpmulldVdqHdqWdqKmask => {
@@ -3247,58 +3609,119 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVpcmpgtdKgwHdqWdq => self.evex_vpcmpgtd(instr),
             Opcode::EvexVpcmpeqqKgbHdqWdq => self.evex_vpcmpeqq(instr),
             Opcode::EvexVpcmpgtqKgbHdqWdq => self.evex_vpcmpgtq(instr),
-            // Sign/zero extend
+            // --- VPMOVSX / VPMOVZX widening conversions ---
+            Opcode::EvexVpmovsxbwVdqWdq | Opcode::EvexVpmovsxbwVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Bw, true)
+            }
+            Opcode::EvexVpmovsxbdVdqWdq | Opcode::EvexVpmovsxbdVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Bd, true)
+            }
+            Opcode::EvexVpmovsxbqVdqWdq | Opcode::EvexVpmovsxbqVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Bq, true)
+            }
+            Opcode::EvexVpmovsxwdVdqWdq | Opcode::EvexVpmovsxwdVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Wd, true)
+            }
+            Opcode::EvexVpmovsxwqVdqWdq | Opcode::EvexVpmovsxwqVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Wq, true)
+            }
             Opcode::EvexVpmovsxdqVdqWdq | Opcode::EvexVpmovsxdqVdqWdqKmask => {
-                self.evex_vpmovsxdq(instr)
+                self.evex_vpmov_widen(instr, PmovWiden::Dq, true)
+            }
+            Opcode::EvexVpmovzxbwVdqWdq | Opcode::EvexVpmovzxbwVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Bw, false)
+            }
+            Opcode::EvexVpmovzxbdVdqWdq | Opcode::EvexVpmovzxbdVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Bd, false)
+            }
+            Opcode::EvexVpmovzxbqVdqWdq | Opcode::EvexVpmovzxbqVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Bq, false)
+            }
+            Opcode::EvexVpmovzxwdVdqWdq | Opcode::EvexVpmovzxwdVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Wd, false)
+            }
+            Opcode::EvexVpmovzxwqVdqWdq | Opcode::EvexVpmovzxwqVdqWdqKmask => {
+                self.evex_vpmov_widen(instr, PmovWiden::Wq, false)
             }
             Opcode::EvexVpmovzxdqVdqWdq | Opcode::EvexVpmovzxdqVdqWdqKmask => {
-                self.evex_vpmovzxdq(instr)
+                self.evex_vpmov_widen(instr, PmovWiden::Dq, false)
             }
             // VPALIGNR EVEX
             Opcode::EvexVpalignrVdqHdqWdqIb | Opcode::EvexVpalignrVdqHdqWdqIbKmask => {
                 self.evex_vpalignr(instr)
             }
-            // VMOVUPS/VMOVUPD/VMOVAPS/VMOVAPD (EVEX) — all reuse VMOVDQU32 handlers
-            Opcode::EvexVmovupsVpsWps
-            | Opcode::EvexVmovupsVpsWpsKmask
-            | Opcode::EvexVmovapsVpsWps
-            | Opcode::EvexVmovapsVpsWpsKmask => {
+            // VMOVUPS/VMOVUPD reuse the VMOVDQU handlers directly. VMOVAPS and
+            // VMOVAPD are the same operation except that the memory form must
+            // be aligned to the full vector width, so they take the checking
+            // wrapper — Bochs avx512_move.cc raises #GP(0) there.
+            Opcode::EvexVmovupsVpsWps | Opcode::EvexVmovupsVpsWpsKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu32_load_r(instr)
                 } else {
                     self.evex_vmovdqu32_load_m(instr)
                 }
             }
-            Opcode::EvexVmovupsWpsVps
-            | Opcode::EvexVmovupsWpsVpsKmask
-            | Opcode::EvexVmovapsWpsVps
-            | Opcode::EvexVmovapsWpsVpsKmask => {
+            Opcode::EvexVmovapsVpsWps | Opcode::EvexVmovapsVpsWpsKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu32_load_r(instr)
+                } else {
+                    self.evex_vmovaps_load_m(instr)
+                }
+            }
+            Opcode::EvexVmovupsWpsVps | Opcode::EvexVmovupsWpsVpsKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu32_store_r(instr)
                 } else {
                     self.evex_vmovdqu32_store_m(instr)
                 }
             }
-            Opcode::EvexVmovupdVpdWpd
-            | Opcode::EvexVmovupdVpdWpdKmask
-            | Opcode::EvexVmovapdVpdWpd
-            | Opcode::EvexVmovapdVpdWpdKmask => {
+            Opcode::EvexVmovapsWpsVps | Opcode::EvexVmovapsWpsVpsKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu32_store_r(instr)
+                } else {
+                    self.evex_vmovaps_store_m(instr)
+                }
+            }
+            Opcode::EvexVmovupdVpdWpd | Opcode::EvexVmovupdVpdWpdKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu64_load_r(instr)
                 } else {
                     self.evex_vmovdqu64_load_m(instr)
                 }
             }
-            Opcode::EvexVmovupdWpdVpd
-            | Opcode::EvexVmovupdWpdVpdKmask
-            | Opcode::EvexVmovapdWpdVpd
-            | Opcode::EvexVmovapdWpdVpdKmask => {
+            Opcode::EvexVmovapdVpdWpd | Opcode::EvexVmovapdVpdWpdKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu64_load_r(instr)
+                } else {
+                    self.evex_vmovaps_load_m(instr)
+                }
+            }
+            Opcode::EvexVmovupdWpdVpd | Opcode::EvexVmovupdWpdVpdKmask => {
                 if instr.mod_c0() {
                     self.evex_vmovdqu64_store_r(instr)
                 } else {
                     self.evex_vmovdqu64_store_m(instr)
                 }
             }
+            Opcode::EvexVmovapdWpdVpd | Opcode::EvexVmovapdWpdVpdKmask => {
+                if instr.mod_c0() {
+                    self.evex_vmovdqu64_store_r(instr)
+                } else {
+                    self.evex_vmovaps_store_m(instr)
+                }
+            }
+            // VMOVNT* are memory-only and unmasked, but otherwise the aligned
+            // full-vector move. Bochs routes them to VMOVAPS_*psM.
+            Opcode::EvexVmovntdqaVdqMdq => self.evex_vmovaps_load_m(instr),
+            Opcode::EvexVmovntdqMdqVdq
+            | Opcode::EvexVmovntpsMpsVps
+            | Opcode::EvexVmovntpdMpdVpd => self.evex_vmovaps_store_m(instr),
+            // The FP gathers are bit-identical to the integer ones: the
+            // element width, not the interpretation, is all that matters.
+            Opcode::EvexVgatherdpsVpsVsib => self.evex_vpgatherdd(instr),
+            Opcode::EvexVgatherdpdVpdVsib => self.evex_vpgatherdq(instr),
+            Opcode::EvexVgatherqpsVpsVsib => self.evex_vpgatherqd(instr),
+            Opcode::EvexVgatherqpdVpdVsib => self.evex_vpgatherqq(instr),
 
             // --- EVEX FP scalar (avx512_scalar.rs) ---
             Opcode::EvexVaddssVssHpsWss | Opcode::EvexVaddssVssHpsWssKmask => {
@@ -3692,6 +4115,43 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVfnmsub231pdVpdHpdWpd | Opcode::EvexVfnmsub231pdVpdHpdWpdKmask => {
                 self.evex_vfnmsub231pd(instr)
             }
+            // --- EVEX alternating add/sub FMA (avx512_fma.rs) ---
+            Opcode::EvexVfmaddsub132psVpsHpsWps | Opcode::EvexVfmaddsub132psVpsHpsWpsKmask => {
+                self.evex_vfmaddsub132ps(instr)
+            }
+            Opcode::EvexVfmaddsub132pdVpdHpdWpd | Opcode::EvexVfmaddsub132pdVpdHpdWpdKmask => {
+                self.evex_vfmaddsub132pd(instr)
+            }
+            Opcode::EvexVfmaddsub213psVpsHpsWps | Opcode::EvexVfmaddsub213psVpsHpsWpsKmask => {
+                self.evex_vfmaddsub213ps(instr)
+            }
+            Opcode::EvexVfmaddsub213pdVpdHpdWpd | Opcode::EvexVfmaddsub213pdVpdHpdWpdKmask => {
+                self.evex_vfmaddsub213pd(instr)
+            }
+            Opcode::EvexVfmaddsub231psVpsHpsWps | Opcode::EvexVfmaddsub231psVpsHpsWpsKmask => {
+                self.evex_vfmaddsub231ps(instr)
+            }
+            Opcode::EvexVfmaddsub231pdVpdHpdWpd | Opcode::EvexVfmaddsub231pdVpdHpdWpdKmask => {
+                self.evex_vfmaddsub231pd(instr)
+            }
+            Opcode::EvexVfmsubadd132psVpsHpsWps | Opcode::EvexVfmsubadd132psVpsHpsWpsKmask => {
+                self.evex_vfmsubadd132ps(instr)
+            }
+            Opcode::EvexVfmsubadd132pdVpdHpdWpd | Opcode::EvexVfmsubadd132pdVpdHpdWpdKmask => {
+                self.evex_vfmsubadd132pd(instr)
+            }
+            Opcode::EvexVfmsubadd213psVpsHpsWps | Opcode::EvexVfmsubadd213psVpsHpsWpsKmask => {
+                self.evex_vfmsubadd213ps(instr)
+            }
+            Opcode::EvexVfmsubadd213pdVpdHpdWpd | Opcode::EvexVfmsubadd213pdVpdHpdWpdKmask => {
+                self.evex_vfmsubadd213pd(instr)
+            }
+            Opcode::EvexVfmsubadd231psVpsHpsWps | Opcode::EvexVfmsubadd231psVpsHpsWpsKmask => {
+                self.evex_vfmsubadd231ps(instr)
+            }
+            Opcode::EvexVfmsubadd231pdVpdHpdWpd | Opcode::EvexVfmsubadd231pdVpdHpdWpdKmask => {
+                self.evex_vfmsubadd231pd(instr)
+            }
 
             // --- EVEX FP compare (avx512_cmp.rs) ---
             Opcode::EvexVcmppsKgwHpsWpsIb => {
@@ -3753,6 +4213,88 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
             Opcode::EvexVpsubwVdqHdqWdq | Opcode::EvexVpsubwVdqHdqWdqKmask => {
                 self.evex_vpsubw(instr)
+            }
+
+            // --- AVX512_BW word shifts (avx512_bw.rs) ---
+            Opcode::EvexVpsrlwVdqHdqWdq | Opcode::EvexVpsrlwVdqHdqWdqKmask => {
+                self.evex_vpsrlw_reg(instr)
+            }
+            Opcode::EvexVpsrlwUdqIb | Opcode::EvexVpsrlwUdqIbKmask => {
+                self.evex_vpsrlw_imm(instr)
+            }
+            Opcode::EvexVpsrawVdqHdqWdq | Opcode::EvexVpsrawVdqHdqWdqKmask => {
+                self.evex_vpsraw_reg(instr)
+            }
+            Opcode::EvexVpsrawUdqIb | Opcode::EvexVpsrawUdqIbKmask => {
+                self.evex_vpsraw_imm(instr)
+            }
+            Opcode::EvexVpsllwVdqHdqWdq | Opcode::EvexVpsllwVdqHdqWdqKmask => {
+                self.evex_vpsllw_reg(instr)
+            }
+            Opcode::EvexVpsllwUdqIb | Opcode::EvexVpsllwUdqIbKmask => {
+                self.evex_vpsllw_imm(instr)
+            }
+            Opcode::EvexVpsrlvwVdqHdqWdq | Opcode::EvexVpsrlvwVdqHdqWdqKmask => {
+                self.evex_vpsrlvw(instr)
+            }
+            Opcode::EvexVpsravwVdqHdqWdq | Opcode::EvexVpsravwVdqHdqWdqKmask => {
+                self.evex_vpsravw(instr)
+            }
+            Opcode::EvexVpsllvwVdqHdqWdq | Opcode::EvexVpsllvwVdqHdqWdqKmask => {
+                self.evex_vpsllvw(instr)
+            }
+
+            // --- AVX512_BW saturating / min-max / pack / abs (avx512_bw.rs) ---
+            Opcode::EvexVpaddsbVdqHdqWdq | Opcode::EvexVpaddsbVdqHdqWdqKmask => {
+                self.evex_vpaddsb(instr)
+            }
+            Opcode::EvexVpaddswVdqHdqWdq | Opcode::EvexVpaddswVdqHdqWdqKmask => {
+                self.evex_vpaddsw(instr)
+            }
+            Opcode::EvexVpaddusbVdqHdqWdq | Opcode::EvexVpaddusbVdqHdqWdqKmask => {
+                self.evex_vpaddusb(instr)
+            }
+            Opcode::EvexVpadduswVdqHdqWdq | Opcode::EvexVpadduswVdqHdqWdqKmask => {
+                self.evex_vpaddusw(instr)
+            }
+            Opcode::EvexVpsubsbVdqHdqWdq | Opcode::EvexVpsubsbVdqHdqWdqKmask => {
+                self.evex_vpsubsb(instr)
+            }
+            Opcode::EvexVpsubswVdqHdqWdq | Opcode::EvexVpsubswVdqHdqWdqKmask => {
+                self.evex_vpsubsw(instr)
+            }
+            Opcode::EvexVpsubusbVdqHdqWdq | Opcode::EvexVpsubusbVdqHdqWdqKmask => {
+                self.evex_vpsubusb(instr)
+            }
+            Opcode::EvexVpsubuswVdqHdqWdq | Opcode::EvexVpsubuswVdqHdqWdqKmask => {
+                self.evex_vpsubusw(instr)
+            }
+            Opcode::EvexVpminsbVdqHdqWdq | Opcode::EvexVpminsbVdqHdqWdqKmask => {
+                self.evex_vpminsb(instr)
+            }
+            Opcode::EvexVpmaxsbVdqHdqWdq | Opcode::EvexVpmaxsbVdqHdqWdqKmask => {
+                self.evex_vpmaxsb(instr)
+            }
+            Opcode::EvexVpminuwVdqHdqWdq | Opcode::EvexVpminuwVdqHdqWdqKmask => {
+                self.evex_vpminuw(instr)
+            }
+            Opcode::EvexVpmaxuwVdqHdqWdq | Opcode::EvexVpmaxuwVdqHdqWdqKmask => {
+                self.evex_vpmaxuw(instr)
+            }
+            Opcode::EvexVpmulhrswVdqHdqWdq | Opcode::EvexVpmulhrswVdqHdqWdqKmask => {
+                self.evex_vpmulhrsw(instr)
+            }
+            Opcode::EvexVpacksswbVdqHdqWdq | Opcode::EvexVpacksswbVdqHdqWdqKmask => {
+                self.evex_vpacksswb(instr)
+            }
+            Opcode::EvexVpackuswbVdqHdqWdq | Opcode::EvexVpackuswbVdqHdqWdqKmask => {
+                self.evex_vpackuswb(instr)
+            }
+            Opcode::EvexVpabsbVdqWdq | Opcode::EvexVpabsbVdqWdqKmask => {
+                self.evex_vpabsb(instr)
+            }
+            Opcode::EvexVpabswVdqWdq | Opcode::EvexVpabswVdqWdqKmask => {
+                self.evex_vpabsw(instr)
             }
             Opcode::EvexVpmullwVdqHdqWdq | Opcode::EvexVpmullwVdqHdqWdqKmask => {
                 self.evex_vpmullw(instr)
@@ -3975,14 +4517,62 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVpexpandqVdqWdq | Opcode::EvexVpexpandqVdqWdqKmask => {
                 self.evex_vpexpandq(instr)
             }
-            Opcode::EvexVpmovdbWdqVdq | Opcode::EvexVpmovdbWdqVdqKmask => {
-                self.evex_vpmovdb_r(instr)
+            // --- VPMOV narrowing conversions (register forms) ---
+            // Source width, destination width, and how an out-of-range value
+            // is reduced: truncate, signed-saturate (S), unsigned-saturate (US).
+            Opcode::EvexVpmovqbWdqVdq | Opcode::EvexVpmovqbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Byte, PmovSat::Truncate)
             }
-            Opcode::EvexVpmovdwWdqVdq | Opcode::EvexVpmovdwWdqVdqKmask => {
-                self.evex_vpmovdw_r(instr)
+            Opcode::EvexVpmovqwWdqVdq | Opcode::EvexVpmovqwWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Word, PmovSat::Truncate)
             }
             Opcode::EvexVpmovqdWdqVdq | Opcode::EvexVpmovqdWdqVdqKmask => {
-                self.evex_vpmovqd_r(instr)
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Dword, PmovSat::Truncate)
+            }
+            Opcode::EvexVpmovdbWdqVdq | Opcode::EvexVpmovdbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Dword, PmovDst::Byte, PmovSat::Truncate)
+            }
+            Opcode::EvexVpmovdwWdqVdq | Opcode::EvexVpmovdwWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Dword, PmovDst::Word, PmovSat::Truncate)
+            }
+            Opcode::EvexVpmovwbWdqVdq | Opcode::EvexVpmovwbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Word, PmovDst::Byte, PmovSat::Truncate)
+            }
+            Opcode::EvexVpmovsqbWdqVdq | Opcode::EvexVpmovsqbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Byte, PmovSat::Signed)
+            }
+            Opcode::EvexVpmovsqwWdqVdq | Opcode::EvexVpmovsqwWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Word, PmovSat::Signed)
+            }
+            Opcode::EvexVpmovsqdWdqVdq | Opcode::EvexVpmovsqdWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Dword, PmovSat::Signed)
+            }
+            Opcode::EvexVpmovsdbWdqVdq | Opcode::EvexVpmovsdbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Dword, PmovDst::Byte, PmovSat::Signed)
+            }
+            Opcode::EvexVpmovsdwWdqVdq | Opcode::EvexVpmovsdwWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Dword, PmovDst::Word, PmovSat::Signed)
+            }
+            Opcode::EvexVpmovswbWdqVdq | Opcode::EvexVpmovswbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Word, PmovDst::Byte, PmovSat::Signed)
+            }
+            Opcode::EvexVpmovusqbWdqVdq | Opcode::EvexVpmovusqbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Byte, PmovSat::Unsigned)
+            }
+            Opcode::EvexVpmovusqwWdqVdq | Opcode::EvexVpmovusqwWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Word, PmovSat::Unsigned)
+            }
+            Opcode::EvexVpmovusqdWdqVdq | Opcode::EvexVpmovusqdWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Qword, PmovDst::Dword, PmovSat::Unsigned)
+            }
+            Opcode::EvexVpmovusdbWdqVdq | Opcode::EvexVpmovusdbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Dword, PmovDst::Byte, PmovSat::Unsigned)
+            }
+            Opcode::EvexVpmovusdwWdqVdq | Opcode::EvexVpmovusdwWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Dword, PmovDst::Word, PmovSat::Unsigned)
+            }
+            Opcode::EvexVpmovuswbWdqVdq | Opcode::EvexVpmovuswbWdqVdqKmask => {
+                self.evex_vpmov_narrow(instr, PmovSrc::Word, PmovDst::Byte, PmovSat::Unsigned)
             }
             Opcode::EvexVpconflictdVdqWdqKmask => self.evex_vpconflictd(instr),
             Opcode::EvexVplzcntdVdqWdqKmask => self.evex_vplzcntd(instr),
@@ -3994,26 +4584,124 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVgatherqdVdqVsib => self.evex_vpgatherqd(instr),
             Opcode::EvexVgatherqqVdqVsib => self.evex_vpgatherqq(instr),
 
-            // --- EVEX FP logical (reuse integer bitwise handlers) ---
+            // --- EVEX scalar FMA (48 opcodes) ---
+            // Bochs avx512_fma.cc EVEX_FMA_SCALAR_{SINGLE,DOUBLE}. The
+            // 132/213/231 suffix selects the operand permutation, shared with
+            // the VEX forms; ss/sd selects the element width.
+            Opcode::EvexVfmadd132ssVpsHssWss | Opcode::EvexVfmadd132ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::EvexVfmadd132sdVpdHsdWsd | Opcode::EvexVfmadd132sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::EvexVfmadd213ssVpsHssWss | Opcode::EvexVfmadd213ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F213, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::EvexVfmadd213sdVpdHsdWsd | Opcode::EvexVfmadd213sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F213, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::EvexVfmadd231ssVpsHssWss | Opcode::EvexVfmadd231ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F231, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::EvexVfmadd231sdVpdHsdWsd | Opcode::EvexVfmadd231sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F231, VexScalarFmaOp::Fmadd)
+            }
+            Opcode::EvexVfmsub132ssVpsHssWss | Opcode::EvexVfmsub132ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::EvexVfmsub132sdVpdHsdWsd | Opcode::EvexVfmsub132sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::EvexVfmsub213ssVpsHssWss | Opcode::EvexVfmsub213ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F213, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::EvexVfmsub213sdVpdHsdWsd | Opcode::EvexVfmsub213sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F213, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::EvexVfmsub231ssVpsHssWss | Opcode::EvexVfmsub231ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F231, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::EvexVfmsub231sdVpdHsdWsd | Opcode::EvexVfmsub231sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F231, VexScalarFmaOp::Fmsub)
+            }
+            Opcode::EvexVfnmadd132ssVpsHssWss | Opcode::EvexVfnmadd132ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::EvexVfnmadd132sdVpdHsdWsd | Opcode::EvexVfnmadd132sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::EvexVfnmadd213ssVpsHssWss | Opcode::EvexVfnmadd213ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F213, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::EvexVfnmadd213sdVpdHsdWsd | Opcode::EvexVfnmadd213sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F213, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::EvexVfnmadd231ssVpsHssWss | Opcode::EvexVfnmadd231ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F231, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::EvexVfnmadd231sdVpdHsdWsd | Opcode::EvexVfnmadd231sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F231, VexScalarFmaOp::Fnmadd)
+            }
+            Opcode::EvexVfnmsub132ssVpsHssWss | Opcode::EvexVfnmsub132ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::EvexVfnmsub132sdVpdHsdWsd | Opcode::EvexVfnmsub132sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::EvexVfnmsub213ssVpsHssWss | Opcode::EvexVfnmsub213ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F213, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::EvexVfnmsub213sdVpdHsdWsd | Opcode::EvexVfnmsub213sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F213, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::EvexVfnmsub231ssVpsHssWss | Opcode::EvexVfnmsub231ssVpsHssWssKmask => {
+                self.evex_fma_scalar_ss(instr, VexFmaForm::F231, VexScalarFmaOp::Fnmsub)
+            }
+            Opcode::EvexVfnmsub231sdVpdHsdWsd | Opcode::EvexVfnmsub231sdVpdHsdWsdKmask => {
+                self.evex_fma_scalar_sd(instr, VexFmaForm::F231, VexScalarFmaOp::Fnmsub)
+            }
+
+            // --- EVEX scatter (0F38 A0-A3) ---
+            // The integer and FP forms differ only in how the source register
+            // is named; the store is the same width either way, so each pair
+            // shares a handler.
+            Opcode::EvexVscatterddVsibVdq | Opcode::EvexVscatterdpsVsibVps => {
+                self.evex_vscatter_d_dword(instr)
+            }
+            Opcode::EvexVscatterdqVsibVdq | Opcode::EvexVscatterdpdVsibVpd => {
+                self.evex_vscatter_d_qword(instr)
+            }
+            Opcode::EvexVscatterqdVsibVdq | Opcode::EvexVscatterqpsVsibVps => {
+                self.evex_vscatter_q_dword(instr)
+            }
+            Opcode::EvexVscatterqqVsibVdq | Opcode::EvexVscatterqpdVsibVpd => {
+                self.evex_vscatter_q_qword(instr)
+            }
+
+            // --- EVEX FP logical (reuse the integer bitwise handlers) ---
+            // The single-precision forms are dword-granular and the
+            // double-precision forms qword-granular: the bit result is the same
+            // either way, but opmask bits and embedded broadcast are counted in
+            // elements, so each must use the handler of its own width.
             Opcode::EvexVandpsVpsHpsWps | Opcode::EvexVandpsVpsHpsWpsKmask => {
                 self.evex_vpandd(instr)
             }
             Opcode::EvexVandpdVpdHpdWpd | Opcode::EvexVandpdVpdHpdWpdKmask => {
-                self.evex_vpandd(instr)
+                self.evex_vpandq(instr)
             }
             Opcode::EvexVandnpsVpsHpsWps | Opcode::EvexVandnpsVpsHpsWpsKmask => {
                 self.evex_vpandnd(instr)
             }
             Opcode::EvexVandnpdVpdHpdWpd | Opcode::EvexVandnpdVpdHpdWpdKmask => {
-                self.evex_vpandnd(instr)
+                self.evex_vpandnq(instr)
             }
             Opcode::EvexVorpsVpsHpsWps | Opcode::EvexVorpsVpsHpsWpsKmask => self.evex_vpord(instr),
-            Opcode::EvexVorpdVpdHpdWpd | Opcode::EvexVorpdVpdHpdWpdKmask => self.evex_vpord(instr),
+            Opcode::EvexVorpdVpdHpdWpd | Opcode::EvexVorpdVpdHpdWpdKmask => self.evex_vporq(instr),
             Opcode::EvexVxorpsVpsHpsWps | Opcode::EvexVxorpsVpsHpsWpsKmask => {
                 self.evex_vpxord(instr)
             }
             Opcode::EvexVxorpdVpdHpdWpd | Opcode::EvexVxorpdVpdHpdWpdKmask => {
-                self.evex_vpxord(instr)
+                self.evex_vpxorq(instr)
             }
 
             // --- VEX FP logical (Bochs HANDLE_AVX_2OP<xmm_*ps>) ---
@@ -4299,6 +4987,94 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             // VEX-encoded logical compare (Bochs avx.cc VPTEST_VdqWdqR)
             Opcode::VptestVdqWdq => self.vptest(instr),
 
+            // VEX-encoded packed sign-bit compare (Bochs avx_pfp.cc
+            // VTESTPS_VpsWpsR / VTESTPD_VpdWpdR)
+            Opcode::VtestpsVpsWps => self.vtest(instr, false),
+            Opcode::VtestpdVpdWpd => self.vtest(instr, true),
+
+            // AVX in-lane FP permutes (Bochs HANDLE_AVX_3OP<xmm_permilps> and
+            // avx.cc VPERMILPS_VpsWpsIbR / VPERMILPD_VpdWpdIbR)
+            Opcode::VpermilpsVpsHpsWps => self.vpermilps(instr),
+            Opcode::VpermilpdVpdHpdWpd => self.vpermilpd(instr),
+            Opcode::VpermilpsVpsWpsIb => self.vpermilps_imm(instr),
+            Opcode::VpermilpdVpdWpdIb => self.vpermilpd_imm(instr),
+
+            // AVX2 cross-lane FP permutes. Bochs maps these onto the integer
+            // handlers (ia_opcodes.def: VPERMPS → VPERMD_VdqHdqWdqR,
+            // VPERMPD → VPERMQ_VdqWdqIbR) — the lane shuffle is identical.
+            Opcode::V256VpermpsVpsHpsWps => self.vpermd(instr),
+            Opcode::V256VpermpdVpdWpdIb => self.vpermq(instr),
+
+            // VPCLMULQDQ under VEX — 3-operand, vvvv is the first source
+            // (Bochs avx_pclmul.cc VPCLMULQDQ_VdqHdqWdqIbR).
+            Opcode::V128VpclmulqdqVdqHdqWdqIb | Opcode::V256VpclmulqdqVdqHdqWdqIb => {
+                self.vpclmulqdq(instr)
+            }
+
+            // VEX VL128-only forms that reuse the legacy SSE handlers. The
+            // operands are identical (none of these take vvvv); the VEX-only
+            // difference — clearing bits above 128 — is handled inside the
+            // handler via write_xmm_regz.
+            Opcode::V128VpextrbEdVdqIbR => self.pextrb_ed_vdq_ib_r(instr),
+            Opcode::V128VpextrbMbVdqIbM => self.pextrb_mb_vdq_ib_m(instr),
+            Opcode::V128VpextrwEdVdqIbR => self.pextrw_ed_vdq_ib_r(instr),
+            Opcode::V128VpextrwMwVdqIbM => self.pextrw_mw_vdq_ib_m(instr),
+            Opcode::V128VpextrdEdVdqIb => self.pextrd_ed_vdq_ib(instr),
+            Opcode::V128VpextrqEqVdqIb => self.pextrq_eq_vdq_ib(instr),
+            Opcode::V128VpcmpestrmVdqWdqIb => self.pcmpestrm_vdq_wdq_ib(instr),
+            Opcode::V128VpcmpestriVdqWdqIb => self.pcmpestri_vdq_wdq_ib(instr),
+            Opcode::V128VpcmpistrmVdqWdqIb => self.pcmpistrm_vdq_wdq_ib(instr),
+            Opcode::V128VpcmpistriVdqWdqIb => self.pcmpistri_vdq_wdq_ib(instr),
+
+            // These legacy SSE4.1 forms had no dispatcher arm at all, so they
+            // raised #UD where Bochs implements them. MOVNTDQA maps to
+            // MOVAPS_VpsWpsM in Bochs; PEXTRW r/m16 is the 0F3A 15 encoding
+            // (distinct from the 0F C5 GPR-only form already wired below).
+            Opcode::MovntdqaVdqMdq => self.movdqa_load_sse(instr),
+            Opcode::PextrwEdVdqIbR => self.pextrw_ed_vdq_ib_r(instr),
+            Opcode::PextrwMwVdqIbM => self.pextrw_mw_vdq_ib_m(instr),
+
+            // AVX2 VSIB gathers (Bochs gather.cc VGATHERDPS_VpsHps and
+            // siblings). The integer and FP names of each shape load the
+            // same bits, so they share a handler.
+            Opcode::VgatherddVdqHdq | Opcode::VgatherdpsVpsHps => {
+                self.vex_vgather(instr, VexGatherForm::DIndexDword)
+            }
+            Opcode::VgatherqdVdqHdq | Opcode::VgatherqpsVpsHps => {
+                self.vex_vgather(instr, VexGatherForm::QIndexDword)
+            }
+            Opcode::VgatherdqVdqHdq | Opcode::VgatherdpdVpdHpd => {
+                self.vex_vgather(instr, VexGatherForm::DIndexQword)
+            }
+            Opcode::VgatherqqVdqHdq | Opcode::VgatherqpdVpdHpd => {
+                self.vex_vgather(instr, VexGatherForm::QIndexQword)
+            }
+
+            // AVX/AVX2 masked moves (Bochs avx.cc VMASKMOVPS_VpsHpsMps and
+            // avx512_helpers.cc avx_masked_load32 / avx_masked_store32). The
+            // element width follows the opcode, not VEX.W's usual meaning:
+            // PS/D are dword, PD/Q are qword.
+            Opcode::VmaskmovpsVpsHpsMps => self.vmaskmov_load(instr, false),
+            Opcode::VmaskmovdVdqHdqMdq => self.vmaskmov_load(instr, false),
+            Opcode::VmaskmovpdVpdHpdMpd => self.vmaskmov_load(instr, true),
+            Opcode::VmaskmovqVdqHdqMdq => self.vmaskmov_load(instr, true),
+            Opcode::VmaskmovpsMpsHpsVps => self.vmaskmov_store(instr, false),
+            Opcode::VmaskmovdMdqHdqVdq => self.vmaskmov_store(instr, false),
+            Opcode::VmaskmovpdMpdHpdVpd => self.vmaskmov_store(instr, true),
+            Opcode::VmaskmovqMdqHdqVdq => self.vmaskmov_store(instr, true),
+
+            // F16C half-precision conversions (Bochs avx_cvt.cc
+            // VCVTPH2PS_VpsWpsR / VCVTPS2PH_WpsVpsIb)
+            Opcode::Vcvtph2psVpsWps => self.vcvtph2ps(instr),
+            Opcode::Vcvtps2phWpsVpsIb => self.vcvtps2ph(instr),
+
+            // AVX2 per-element variable shifts (Bochs HANDLE_AVX_2OP<xmm_psrlvd>)
+            Opcode::VpsrlvdVdqHdqWdq => self.vex_var_shift(instr, VexVarShiftOp::SrlD),
+            Opcode::VpsrlvqVdqHdqWdq => self.vex_var_shift(instr, VexVarShiftOp::SrlQ),
+            Opcode::VpsravdVdqHdqWdq => self.vex_var_shift(instr, VexVarShiftOp::SraD),
+            Opcode::VpsllvdVdqHdqWdq => self.vex_var_shift(instr, VexVarShiftOp::SllD),
+            Opcode::VpsllvqVdqHdqWdq => self.vex_var_shift(instr, VexVarShiftOp::SllQ),
+
             // VEX-encoded zero/sign extend (Bochs avx2.cc VPMOVSX*/VPMOVZX*)
             Opcode::V128VpmovsxbwVdqWq | Opcode::V256VpmovsxbwVdqWdq => self.vpmovsxbw(instr),
             Opcode::V128VpmovsxbdVdqWd | Opcode::V256VpmovsxbdVdqWq => self.vpmovsxbd(instr),
@@ -4573,6 +5349,23 @@ mod tests {
         cpu: &mut BxCpuC<'_, I, T>,
     ) {
         cpu.cr4.insert(BxCr4::OSFXSR);
+        // `BxCpuBuilder::build()` only runs `initialize()`, not a hardware
+        // reset, so MXCSR is left at the zeroed-allocation value — a state
+        // no real CPU can be in, and one in which every exception is
+        // *unmasked*. Now that the FP handlers actually consult MXCSR, an
+        // inexact result there would raise #XM (or #UD, since these tests
+        // leave CR4.OSXMMEXCPT clear). Apply the architectural reset value.
+        cpu.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET;
+
+        // A VEX-encoded write clears only as much of the register file as
+        // XCR0 has made architecturally visible (Bochs `maxvl`). A builder-made
+        // CPU has CR4.OSXSAVE and XCR0 clear, which on real hardware is a state
+        // where every VEX instruction would #UD before reaching a handler — so
+        // give these tests the register file an AVX-512-capable guest actually
+        // runs with, rather than asserting against an unreachable one.
+        cpu.cr4.insert(BxCr4::OSXSAVE);
+        cpu.xcr0.set32(0xE7);
+        cpu.handle_avx_mode_change();
     }
 
     fn make_legacy_round_instr(opcode: Opcode, dst: u8, src: u8, imm: u8) -> Instruction {
@@ -5519,10 +6312,10 @@ mod tests {
         let (a, b, c) = (h, v, w);
 
         let mut st_rne = SoftFloatStatus::default();
-        st_rne.softfloat_roundingMode = ROUND_NEAR_EVEN;
+        st_rne.softfloat_rounding_mode = ROUND_NEAR_EVEN;
         let expect_rne = f32_mul_add(a, b, c, 0, &mut st_rne);
         let mut st_rtz = SoftFloatStatus::default();
-        st_rtz.softfloat_roundingMode = ROUND_TO_ZERO;
+        st_rtz.softfloat_rounding_mode = ROUND_TO_ZERO;
         let expect_rtz = f32_mul_add(a, b, c, 0, &mut st_rtz);
         assert_ne!(
             expect_rne, expect_rtz,
@@ -5610,6 +6403,137 @@ mod tests {
             expect_daz,
             "FMA must honor MXCSR.DAZ (flush subnormal input)"
         );
+    }
+
+    /// A legacy two-operand SSE instruction, register form.
+    fn make_legacy_sse_instr(opcode: Opcode, dst: u8, src: u8) -> Instruction {
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(opcode);
+        instr.init(0, 0, 1, 1);
+        instr.assert_mod_c0();
+        instr.set_src_reg(0, dst);
+        instr.set_src_reg(1, src);
+        instr.set_seg(BxSegregs::Ds);
+        instr
+    }
+
+    // ── The SSE floating-point surface goes through SoftFloat, so MXCSR is
+    // live. None of the four properties below could hold on the native-float
+    // path this replaced. ──────────────────────────────────────────────────
+
+    #[test]
+    fn sse_scalar_fp_honors_mxcsr_rounding_mode() {
+        // 1.0 / 5.0 is inexact and rounds *up* under round-to-nearest, so
+        // round-toward-zero lands one ulp lower. (1/3 would not
+        // discriminate — its residue rounds down under both modes.)
+        let one = 1.0f64.to_bits();
+        let five = 5.0f64.to_bits();
+
+        let mut nearest = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut nearest);
+        nearest.vmm[1].set_zmm64u(0, one);
+        nearest.vmm[3].set_zmm64u(0, five);
+        nearest
+            .execute_instruction(&make_legacy_sse_instr(Opcode::DivsdVsdWsd, 1, 3))
+            .unwrap();
+
+        let mut toward_zero = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut toward_zero);
+        toward_zero.mxcsr.mxcsr = 0x1F80 | 0x6000; // RC = toward zero
+        toward_zero.vmm[1].set_zmm64u(0, one);
+        toward_zero.vmm[3].set_zmm64u(0, five);
+        toward_zero
+            .execute_instruction(&make_legacy_sse_instr(Opcode::DivsdVsdWsd, 1, 3))
+            .unwrap();
+
+        assert_eq!(nearest.vmm[1].zmm64u(0), 0x3FC9_9999_9999_999A);
+        assert_eq!(
+            toward_zero.vmm[1].zmm64u(0),
+            0x3FC9_9999_9999_9999,
+            "DIVSD must round per MXCSR.RC"
+        );
+    }
+
+    #[test]
+    fn sse_packed_fp_sets_mxcsr_sticky_exception_flags() {
+        use crate::cpu::xmm::Mxcsr;
+
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        assert!(!cpu.mxcsr.flags().contains(Mxcsr::PE));
+
+        // ADDPS lane 0: 2^24 + 1 is inexact in f32. Other lanes are exact.
+        cpu.vmm[1].set_zmm32u(0, 16_777_216.0f32.to_bits());
+        cpu.vmm[3].set_zmm32u(0, 1.0f32.to_bits());
+        cpu.execute_instruction(&make_legacy_sse_instr(Opcode::AddpsVpsWps, 1, 3))
+            .unwrap(); // masked → no fault
+
+        assert!(
+            cpu.mxcsr.flags().contains(Mxcsr::PE),
+            "inexact packed add must set MXCSR.PE"
+        );
+        assert_eq!(cpu.vmm[1].zmm32u(0), 16_777_216.0f32.to_bits());
+    }
+
+    #[test]
+    fn sse_unmasked_divide_by_zero_raises_and_leaves_destination_alone() {
+        use crate::cpu::xmm::Mxcsr;
+
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        cpu.cr4.insert(BxCr4::OSXMMEXCPT);
+        // All masked except #Z (bit 9 = ZM).
+        cpu.mxcsr.mxcsr = 0x1F80 & !Mxcsr::ZM.bits();
+
+        let poison = 0xDEAD_BEEF_CAFE_BABEu64;
+        cpu.vmm[1].set_zmm64u(0, 1.0f64.to_bits());
+        cpu.vmm[1].set_zmm64u(1, poison);
+        cpu.vmm[3].set_zmm64u(0, 0.0f64.to_bits());
+
+        let err = cpu
+            .execute_instruction(&make_legacy_sse_instr(Opcode::DivsdVsdWsd, 1, 3))
+            .unwrap_err();
+        assert!(matches!(err, crate::cpu::CpuError::CpuLoopRestart));
+
+        assert!(cpu.mxcsr.flags().contains(Mxcsr::ZE), "ZE must be recorded");
+        assert_eq!(
+            cpu.vmm[1].zmm64u(0),
+            1.0f64.to_bits(),
+            "an unmasked exception must abort before the destination is written"
+        );
+        assert_eq!(cpu.vmm[1].zmm64u(1), poison);
+    }
+
+    #[test]
+    fn sse_minmax_take_the_second_operand_on_nan() {
+        // MINSD/MAXSD return the source operand whenever the comparison is
+        // not strictly less/greater — including any NaN and ±0.0 ties.
+        for (opcode, expect_snan_passthrough) in
+            [(Opcode::MinsdVsdWsd, true), (Opcode::MaxsdVsdWsd, true)]
+        {
+            let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+            enable_sse(&mut cpu);
+            let src = 2.0f64.to_bits();
+            cpu.vmm[1].set_zmm64u(0, f64::NAN.to_bits());
+            cpu.vmm[3].set_zmm64u(0, src);
+            cpu.execute_instruction(&make_legacy_sse_instr(opcode, 1, 3))
+                .unwrap();
+            assert!(expect_snan_passthrough);
+            assert_eq!(
+                cpu.vmm[1].zmm64u(0),
+                src,
+                "{opcode:?} with a NaN first operand must return the second"
+            );
+        }
+
+        // -0.0 vs +0.0 compare equal, so the second operand wins.
+        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        enable_sse(&mut cpu);
+        cpu.vmm[1].set_zmm64u(0, (-0.0f64).to_bits());
+        cpu.vmm[3].set_zmm64u(0, 0.0f64.to_bits());
+        cpu.execute_instruction(&make_legacy_sse_instr(Opcode::MinsdVsdWsd, 1, 3))
+            .unwrap();
+        assert_eq!(cpu.vmm[1].zmm64u(0), 0.0f64.to_bits());
     }
 
     fn all_vpminmax_cases() -> [VpminmaxCase; 24] {

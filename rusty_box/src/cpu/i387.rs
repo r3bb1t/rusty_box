@@ -3,7 +3,7 @@ use core::fmt::Debug;
 
 use crate::config::BxAddress;
 
-use super::softfloat3e::softfloat_types::floatx80;
+use super::softfloat3e::softfloat_types::ExtFloat80;
 
 // Tag word values (from tag_w.h)
 pub const FPU_TAG_VALID: u16 = 0x00;
@@ -73,7 +73,7 @@ pub struct I387 {
     pub(crate) fcs: u16,
     pub(crate) fds: u16,
 
-    pub(crate) st_space: [floatx80; 8],
+    pub(in crate::cpu) st_space: [ExtFloat80; 8],
 
     pub(crate) tos: u8,
     pub(crate) align1: u8,
@@ -109,7 +109,7 @@ impl I387 {
         self.fdp = 0;
 
         for reg in &mut self.st_space {
-            *reg = floatx80::default();
+            *reg = ExtFloat80::default();
         }
     }
 
@@ -172,18 +172,18 @@ impl I387 {
     }
 
     #[inline]
-    pub fn fpu_read_regi(&self, stnr: i32) -> floatx80 {
+    pub(in crate::cpu) fn fpu_read_regi(&self, stnr: i32) -> ExtFloat80 {
         self.st_space[((self.tos as usize) + (stnr as usize)) & 7]
     }
 
     #[inline]
-    pub fn fpu_save_regi(&mut self, reg: floatx80, stnr: i32) {
+    pub(in crate::cpu) fn fpu_save_regi(&mut self, reg: ExtFloat80, stnr: i32) {
         self.st_space[((self.tos as usize) + (stnr as usize)) & 7] = reg;
         self.fpu_settagi_valid(stnr);
     }
 
     #[inline]
-    pub fn fpu_save_regi_with_tag(&mut self, reg: floatx80, tag: i32, stnr: i32) {
+    pub(in crate::cpu) fn fpu_save_regi_with_tag(&mut self, reg: ExtFloat80, tag: i32, stnr: i32) {
         self.st_space[((self.tos as usize) + (stnr as usize)) & 7] = reg;
         self.fpu_settagi(tag, stnr);
     }

@@ -45,8 +45,12 @@ pub struct SharedDisplay {
     pub start_pending: bool,
     /// Current instructions per second for status display
     pub ips: u32,
-    /// Custom palette (index → [R, G, B]), initially standard VGA 16-color
-    pub palette: [[u8; 3]; 16],
+    /// Host colour for each DAC (PEL) register, published by the VGA through
+    /// `palette_change`. This is DAC-sized, not 16 entries: VGA text mode maps
+    /// the bright attributes to DAC indices 0x38-0x3F through the attribute
+    /// palette, so a 16-entry table silently loses every bright colour.
+    /// Bochs keeps the same full-size table (`bx_gui_c::palette_change_common`).
+    pub palette: [[u8; 3]; 256],
     /// Set by GUI to request emulator restart; cleared by emulator thread when restart begins
     pub reset_requested: bool,
     /// Last emulator startup/runtime error reported by the worker thread
@@ -60,7 +64,39 @@ pub struct SharedDisplay {
     pub serial_log: String,
     /// ASCII bytes from GUI to inject into serial port RX (for console input)
     pub pending_serial_input: Vec<u8>,
+    /// Guest key press/release events queued for the emulator thread. Rendered
+    /// to bytes by the keyboard controller through the guest's active scancode
+    /// set (Bochs keyboard.cc `gen_scancode`).
+    pub pending_keys: Vec<(crate::iodev::scancodes::BxKey, bool)>,
+    /// The two guest character generators, 256 glyphs x 32 bytes each, as raw
+    /// VGA bitmaps (MSB-first: bit 7 is the leftmost pixel).
+    /// Bochs: `bx_gui_c::vga_charmap[2][0x2000]` (gui.h), filled by
+    /// `set_text_charmap` from `bx_vgacore_c::update_charmap()`.
+    pub vga_charmap: [Vec<u8>; 2],
+    /// True once the guest has programmed a character generator. Until then the
+    /// built-in font is used, so guests that never load one still render.
+    pub charmap_loaded: bool,
 }
+
+/// Power-on DAC contents: the standard 16 VGA colours occupy both the low
+/// entries and the 0x38-0x3F block the attribute palette points at in text
+/// mode, matching how the VGA BIOS programs the DAC.
+fn default_dac_palette() -> [[u8; 3]; 256] {
+    let mut palette = [[0u8; 3]; 256];
+    for (i, colour) in VGA_DEFAULT_PALETTE_16.iter().enumerate() {
+        palette[i] = *colour;
+    }
+    for (i, colour) in VGA_DEFAULT_PALETTE_16.iter().enumerate().skip(8) {
+        palette[0x38 + (i - 8)] = *colour;
+    }
+    palette
+}
+
+/// Bytes per guest character generator: 256 glyphs x 32 bytes.
+/// Bochs: the 0x2000-byte buffers in `bx_gui_c::vga_charmap` (gui.h).
+const GUEST_CHARMAP_LEN: usize = 0x2000;
+/// Bytes per glyph in a guest character generator (Bochs `(ch << 5)` stride).
+const GUEST_CHARMAP_GLYPH_BYTES: usize = 32;
 
 impl SharedDisplay {
     /// Create a new SharedDisplay with default 80x25 text mode (720x400 px).
@@ -86,13 +122,16 @@ impl SharedDisplay {
             emu_running: false,
             start_pending: false,
             ips: 0,
-            palette: VGA_DEFAULT_PALETTE_16,
+            palette: default_dac_palette(),
             reset_requested: false,
             runtime_error: None,
             startup_status: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
             serial_log: String::new(),
             pending_serial_input: Vec::new(),
+            pending_keys: Vec::new(),
+            vga_charmap: [Vec::new(), Vec::new()],
+            charmap_loaded: false,
         }
     }
 
@@ -174,6 +213,20 @@ impl SharedDisplay {
     /// - `start_address`: CRTC start address (byte offset into text buffer)
     /// - `line_offset`: CRTC line offset (bytes per row in VGA memory)
     #[allow(clippy::too_many_arguments)]
+    /// Install one of the guest character generators.
+    ///
+    /// Bochs `bx_gui_c::set_text_charmap` (gui.cc): copies 0x2000 bytes into
+    /// `vga_charmap[map]` and flags a full text redraw. `data` is raw VGA glyph
+    /// bitmap (32 bytes per glyph, MSB-first).
+    pub fn set_text_charmap(&mut self, map: usize, data: &[u8]) {
+        let slot = &mut self.vga_charmap[map & 1];
+        slot.clear();
+        slot.extend_from_slice(data);
+        if data.iter().any(|&b| b != 0) {
+            self.charmap_loaded = true;
+        }
+    }
+
     pub fn render_text_to_framebuffer(
         &mut self,
         text: &[u8],
@@ -192,6 +245,18 @@ impl SharedDisplay {
         let fh = self.font_height;
         let stride = self.fb_width * 4;
         let palette = self.palette; // Copy for parallel access
+        // Guest character generators, when the guest has programmed one.
+        // Bochs gui.cc draw_char_common indexes vga_charmap[font2][(ch<<5)+fy],
+        // where font2 comes from attribute bit 3 (harmless when both maps hold
+        // the same glyphs, which is what update_charmap guarantees).
+        let guest_charmap: Option<[&[u8]; 2]> = if self.charmap_loaded
+            && self.vga_charmap[0].len() >= GUEST_CHARMAP_LEN
+            && self.vga_charmap[1].len() >= GUEST_CHARMAP_LEN
+        {
+            Some([&self.vga_charmap[0], &self.vga_charmap[1]])
+        } else {
+            None
+        };
 
         // Helper closure: render a single character cell into framebuffer slice
         let render_cell =
@@ -199,25 +264,28 @@ impl SharedDisplay {
                 // ACTL palette indirection (Bochs gui.cc)
                 let fg_idx = actl_palette[(attr & 0x0F) as usize] as usize;
                 let bg_idx = actl_palette[((attr >> 4) & 0x07) as usize] as usize;
-                let fg = if fg_idx < 16 {
-                    palette[fg_idx]
-                } else {
-                    [0xFF, 0xFF, 0xFF]
-                };
-                let bg = if bg_idx < 16 {
-                    palette[bg_idx]
-                } else {
-                    [0x00, 0x00, 0x00]
-                };
+                // Both indices are DAC registers (u8), so the table always
+                // covers them — no fallback, which used to turn every bright
+                // colour (DAC 0x38-0x3F) white.
+                let fg = palette[fg_idx];
+                let bg = palette[bg_idx];
 
                 let px = col * fw;
                 let py = row * fh;
 
                 for scanline in 0..fh {
-                    let font_byte = if (scanline as usize) < 16 {
-                        VGA_FONT_8X16[ch][scanline as usize]
-                    } else {
-                        0
+                    // A guest-programmed generator supplies raw VGA glyph rows
+                    // (32 bytes per glyph). Those are MSB-first, so they are
+                    // bit-reversed here into the LSB-first convention the loop
+                    // below (and the built-in font) uses.
+                    let font_byte = match guest_charmap {
+                        Some(maps) if (scanline as usize) < GUEST_CHARMAP_GLYPH_BYTES => {
+                            let map = usize::from(attr & 0x08 != 0);
+                            maps[map][(ch << 5) + scanline as usize].reverse_bits()
+                        }
+                        Some(_) => 0,
+                        None if (scanline as usize) < 16 => VGA_FONT_8X16[ch][scanline as usize],
+                        None => 0,
                     };
                     let cursor_invert = is_cursor
                         && cs_start <= cs_end
@@ -341,7 +409,7 @@ impl Default for SharedDisplay {
 
 #[cfg(test)]
 mod tests {
-    use super::SharedDisplay;
+    use super::{SharedDisplay, GUEST_CHARMAP_GLYPH_BYTES, GUEST_CHARMAP_LEN};
     use core::sync::atomic::Ordering;
 
     #[test]
@@ -363,6 +431,108 @@ mod tests {
 
         assert_eq!(shared.drain_serial_input(), b"boot\n");
         assert!(shared.drain_serial_input().is_empty());
+    }
+
+    // A guest character generator holds raw VGA glyph bitmaps, which are
+    // MSB-first (bit 7 = leftmost pixel) — Bochs gui.cc draw_char_common shifts
+    // left and tests bit 8. rusty's built-in VGA_FONT_8X16 is stored LSB-first
+    // instead, so guest glyphs must be bit-reversed on the way in. Getting this
+    // backwards mirrors every character, which is easy to miss because most
+    // glyphs still "look like text". Pin it with an asymmetric pattern.
+    #[test]
+    fn guest_charmap_glyphs_render_msb_first() {
+        let mut shared = SharedDisplay::new();
+        shared.resize(2, 1, 8, 1);
+
+        // Glyph 'A' (0x41): a single lit pixel at the LEFTMOST column.
+        // MSB-first, that is 0x80.
+        let mut map = vec![0u8; GUEST_CHARMAP_LEN];
+        map[0x41usize << 5] = 0x80;
+        shared.set_text_charmap(0, &map);
+        shared.set_text_charmap(1, &map);
+        assert!(shared.charmap_loaded);
+
+        // One cell: character 0x41, attribute 0x0F (white on black).
+        let text = [0x41u8, 0x0F, 0x20, 0x0F];
+        let palette_identity: [u8; 16] = core::array::from_fn(|i| i as u8);
+        shared.render_text_to_framebuffer(&text, 0xffff, 0xffff, 0, 0, false, 0, 4, &palette_identity);
+
+        let stride = shared.fb_width as usize * 4;
+        let pixel = |x: usize| {
+            let o = x * 4;
+            [
+                shared.framebuffer[o],
+                shared.framebuffer[o + 1],
+                shared.framebuffer[o + 2],
+            ]
+        };
+        assert!(stride >= 8 * 4, "framebuffer must span the whole cell");
+        let lit = pixel(0);
+        let unlit = pixel(7);
+        assert_ne!(
+            lit, unlit,
+            "the glyph must not be uniform — one edge is lit, the other is not"
+        );
+        assert_eq!(
+            lit,
+            [0xFF, 0xFF, 0xFF],
+            "0x80 in a guest glyph lights the LEFTMOST pixel (MSB-first)"
+        );
+        assert_eq!(
+            unlit,
+            [0x00, 0x00, 0x00],
+            "the rightmost pixel stays background — a mirrored glyph would light it"
+        );
+    }
+
+    // VGA text mode routes attributes through the attribute palette into the
+    // DAC, and the standard mapping sends the bright attributes (8-15) to DAC
+    // registers 0x38-0x3F. A 16-entry host palette cannot represent those, and
+    // the old code substituted white for any index >= 16 — which silently turned
+    // every bright colour white. Bochs keeps a full DAC-sized table
+    // (bx_gui_c::palette_change_common).
+    #[test]
+    fn bright_text_attributes_use_the_high_dac_entries_not_white() {
+        let mut shared = SharedDisplay::new();
+        shared.resize(1, 1, 8, 1);
+
+        // Give DAC 0x3C (where attribute 12 = bright red lands) a distinct colour.
+        shared.palette[0x3C] = [0xFE, 0x02, 0x03];
+
+        // Standard VGA text attribute palette: 0-7 direct, 8-15 -> 0x38-0x3F.
+        let mut actl = [0u8; 16];
+        for i in 0..8 {
+            actl[i] = i as u8;
+        }
+        for i in 8..16 {
+            actl[i] = 0x38 + (i as u8 - 8);
+        }
+
+        // One cell: a space on a bright-red foreground (attribute 0x0C).
+        let text = [b' ', 0x0C];
+        shared.render_text_to_framebuffer(&text, 0xffff, 0xffff, 0, 0, false, 0, 2, &actl);
+
+        // A blank glyph paints the background everywhere, so check the fg path
+        // by drawing a full-block glyph instead.
+        let mut map = vec![0u8; GUEST_CHARMAP_LEN];
+        for row in 0..GUEST_CHARMAP_GLYPH_BYTES {
+            map[(0xDBusize << 5) + row] = 0xFF;
+        }
+        shared.set_text_charmap(0, &map);
+        shared.set_text_charmap(1, &map);
+        let text = [0xDBu8, 0x0C];
+        shared.render_text_to_framebuffer(&text, 0xffff, 0xffff, 0, 0, false, 0, 2, &actl);
+
+        let pixel = [
+            shared.framebuffer[0],
+            shared.framebuffer[1],
+            shared.framebuffer[2],
+        ];
+        assert_eq!(
+            pixel,
+            [0xFE, 0x02, 0x03],
+            "bright attribute must resolve through DAC 0x3C, not fall back to white"
+        );
     }
 
     #[test]

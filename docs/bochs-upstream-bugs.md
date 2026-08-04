@@ -1,0 +1,247 @@
+# Bochs Upstream Bugs — Device Models & Timers
+
+Genuine bugs in upstream Bochs (`cpp_orig/bochs/`) discovered during the
+Rusty Box Bochs-parity work on the HPET, i8042, PIT/CMOS, and BIOS message
+devices (2026-07). Each entry is written to be filed directly as an upstream
+issue. Line numbers are from the vendored snapshot and may rebase; the file +
+symbol is authoritative.
+
+Rusty Box intentionally does **not** reproduce these bugs (it implements the
+architecturally correct behavior); the divergences are documented at each
+Rusty Box call site.
+
+Related bug inventories:
+- `docs/bochs_bugs_found.md` — AVX-512 handler bugs (VPCONFLICT off-by-one, KSHIFT threshold, VPSRLQ shift-by-64 UB).
+- `docs/bochs-cpudb-cpuid-audit-2026-07-13.md` — 13 verified CPUID/cpudb bugs (2 guest-breaking).
+- `docs/bochs-upstream-issue-tsc-cpuid.md` — TSC/CPUID max-leaf issue (filed as bochs-emu/Bochs#791).
+
+---
+
+## 1. HPET interrupt routes 16–23 corrupt the slave PIC (and can panic the host)
+
+**Severity**: Correctness bug + host abort. A guest can inject a phantom ISA
+IRQ (8–15) or crash the emulator by programming an HPET timer's interrupt
+route to a legal, advertised GSI in 16–23.
+
+**Location**:
+- `iodev/hpet.cc` — `bx_hpet_c::update_irq()` (the non-legacy routing path).
+- `iodev/pic.cc` — `bx_pic_c::raise_irq()` / `bx_pic_c::lower_irq()`.
+
+**Root cause**: For a non-legacy HPET timer (or timer 0/1 outside legacy
+mode), `update_irq()` computes `route = timer_int_route(timer)` and calls
+`DEV_pic_raise_irq(route)` / `DEV_pic_lower_irq(route)`, which expand to
+`bx_pic_c::raise_irq(route, BX_IRQ_TYPE_ISA)`. `raise_irq` assumes the IRQ
+number is a legacy PIC line (0–15):
+
+```cpp
+// iodev/pic.cc  bx_pic_c::raise_irq
+void bx_pic_c::raise_irq(unsigned irq_no, Bit8u irq_type)
+{
+  bx_pic_t *pic = (irq_no < 8) ? &BX_PIC_THIS s.master_pic : &BX_PIC_THIS s.slave_pic;
+  Bit8u mask = (1 << (irq_no & 7));
+  if ((irq_type == BX_IRQ_TYPE_ISA) && ((pic->IRQ_in[irq_no & 7] & ~irq_type) != 0)) {
+    BX_PANIC(("ISA IRQ %d lost", irq_no));            // <-- host abort
+  }
+  if ((pic->IRQ_in[irq_no & 7] & ~irq_type) == 0) {
+    pic->IRQ_in[irq_no & 7] |= irq_type;              // <-- writes slave IRQ_in[route & 7]
+    ...
+    if (DEV_ioapic_present() && (irq_no != 2)) {
+      DEV_ioapic_set_irq_level(irq_no, 1);            // <-- also forwards the (correct) IOAPIC pin
+    }
+  }
+}
+```
+
+For `route >= 8` the code selects the **slave PIC** and indexes
+`IRQ_in[route & 7]`. When `route` is in 16–23 the `& 7` mask silently folds it
+onto ISA IRQ 8–15:
+
+| HPET route (GSI) | `route & 7` | Phantom ISA IRQ asserted |
+|---|---|---|
+| 16 | 0 | IRQ 8 (RTC) |
+| 20 | 4 | IRQ 12 (PS/2 mouse) |
+| 22 | 6 | IRQ 14 (primary IDE) |
+
+So the HPET fires a spurious slave-PIC edge on an unrelated ISA device **in
+addition** to the intended IOAPIC pin. If that slave line already carries a
+non-ISA assertion, the `BX_PANIC("ISA IRQ %d lost")` guard aborts the host.
+
+**Reachability**: `hpet.cc` advertises `HPET_ROUTING_CAP = 0xffffff` (all 24
+GSIs legal for every timer), and `HPET_TN_CFG_WRITE_MASK` (0x7f4e) keeps all
+five `TN_INT_ROUTE` bits writable, so a guest can legally program any timer to
+route 16–23. In APIC mode an OS routinely picks a non-legacy HPET GSI ≥ 16
+from the routing-cap bitmap.
+
+**Expected**: A route ≥ 16 is an IOAPIC-only GSI and must not touch the
+8259 PIC at all. Only routes 0–15 are legacy PIC lines.
+
+**Suggested fix**: In `update_irq()`, gate the legacy-PIC call on
+`route < 16` and drive routes ≥ 16 through the IOAPIC only — e.g.
+
+```cpp
+if (route < 16) {
+  set ? DEV_pic_raise_irq(route) : DEV_pic_lower_irq(route);
+}
+// (the IOAPIC forward already happens for route < BX_IOAPIC_NUM_PINS)
+```
+
+Alternatively bound-check `irq_no` inside `bx_pic_c::raise_irq`/`lower_irq`.
+
+**Rusty Box behavior**: delivers only the correct IOAPIC pin for routes
+16–23; documented in `rusty_box/src/emulator.rs` `drain_hpet_pending`. The
+deviation was **permanently ratified** on 2026-07-25 — it is a closed decision,
+not an open item.
+
+**Filing status**: NOT FILED. The text above is issue-ready for
+`bochs-emu/Bochs` (same shape as the already-filed #791). Hand it to the
+maintainer/user to file — do not open the issue autonomously.
+
+---
+
+## 2. Mouse "Set Scaling 1:1" (0xE6) sets scaling to 2:1
+
+**Severity**: Minor correctness bug — a copy/paste error that makes the PS/2
+mouse report the wrong scaling in its status byte.
+
+**Location**: `iodev/keyboard.cc` — `bx_keyb_c::kbd_ctrl_to_mouse()`, case `0xe6`.
+
+**Root cause**: The "Set Scaling to 1:1" handler sets `scaling = 2` — identical
+to the "Set Scaling to 2:1" (`0xe7`) handler just below it:
+
+```cpp
+// iodev/keyboard.cc  kbd_ctrl_to_mouse()
+case 0xe6: // Set Mouse Scaling to 1:1
+  controller_enQ(0xFA, 1); // ACK
+  BX_KEY_THIS s.mouse.scaling = 2;          // <-- BUG: should be 1
+  BX_DEBUG(("mouse: scaling set to 1:1"));
+  break;
+case 0xe7: // Set Mouse Scaling to 2:1
+  controller_enQ(0xFA, 1); // ACK
+  BX_KEY_THIS s.mouse.scaling = 2;
+  BX_DEBUG(("mouse: scaling set to 2:1"));
+  break;
+```
+
+**Manifestation**: The PS/2 "Get Info" command (`0xE9`) returns a status byte
+whose bit 4 is set iff `scaling != 1` (`get_status_byte`:
+`ret |= (scaling == 1) ? 0 : (1 << 4)`). After a `0xE6` (1:1) command Bochs
+reports bit 4 **set**, telling the guest driver the mouse is in 2:1 scaling
+when the guest explicitly requested 1:1.
+
+**Expected**: `case 0xe6` should set `s.mouse.scaling = 1;`.
+
+**Rusty Box behavior**: currently matches Bochs bug-for-bug (`scaling = 2`)
+for status-byte parity, with a comment flagging the upstream quirk
+(`rusty_box/src/iodev/keyboard.rs`, `MOUSE_CMD_SET_SCALING_1_1`). Will flip to
+`1` if/when upstream fixes it.
+
+---
+
+## 3. HPET save/restore drops the counter reference epoch (lower confidence)
+
+**Severity**: Minor / possibly by-design. After a state restore, an enabled
+HPET's main counter reads absolute emulated time rather than its saved value.
+
+**Location**: `iodev/hpet.cc` — `bx_hpet_c::register_state()`.
+
+**Observation**: `register_state()` serializes `config`, `isr`,
+`hpet_counter`, and per-timer `{config, cmp, fsb, period}`, but **not**
+`hpet_reference_value`, `hpet_reference_time`, or per-timer `last_checked`.
+Bochs restores onto a freshly-constructed device where those are zero, so if
+the HPET was enabled at save time, the first post-restore `hpet_get_ticks()`
+returns `ns_to_ticks(time_nsec())` (absolute time since the restored machine's
+boot) instead of the saved counter — a discontinuity a guest clocksource
+would observe.
+
+**Note**: this may be an accepted limitation of Bochs's state model rather
+than an intended-precise restore; filed as low confidence. Rusty Box
+deliberately reproduces Bochs's behavior here (zeroes the reference fields on
+restore) for parity — see `rusty_box/src/iodev/hpet.rs` `restore_snapshot_v3`.
+
+---
+
+## VRSQRT14 returns the wrong result for exact powers of two with an odd unbiased exponent
+
+**Files**: `cpu/avx/avx512_rsqrt14.cc` — `approximate_rsqrt14(float16)`,
+`approximate_rsqrt14(float32)`, `approximate_rsqrt14(float64)`
+**Confidence**: high — arithmetic, reproducible from the source alone
+**Rusty Box**: reproduced deliberately for parity, see
+`rusty_box/src/cpu/avx512_rcp14.rs` and the test
+`rsqrt14_reproduces_the_upstream_power_of_two_bug`
+
+VRSQRT14 selects one of two 32K-entry tables by the parity of the biased
+exponent, because halving an odd unbiased exponent leaves a factor of
+sqrt(2) that the table has to absorb. `rsqrt14_table0` covers the odd
+unbiased exponents (its entry 0 is ~0.4142 = 2/sqrt(2) - 1) and
+`rsqrt14_table1` the even ones (entry 0 ~1.0).
+
+All three width variants then do:
+
+```c
+  const Bit16u *rsqrt_table = (exp & 1) ? rsqrt14_table1 : rsqrt14_table0;
+  exp = 0x7E - ((exp - 0x7F) >> 1);
+  if (fraction)
+    fraction = rsqrt_table[fraction >> 8];
+  else
+    exp++;                       // <-- only valid on rsqrt14_table1
+```
+
+The `else exp++` shortcut assumes a zero significand means the result is an
+exact power of two. That holds on the even-exponent table — 1/sqrt(2^2k) is
+2^-k — but not on the odd one, where the significand should come from table
+entry 0 instead. So for any exact power of two with an odd unbiased
+exponent the answer is the reciprocal square root of the *next* power of
+two:
+
+| input | Bochs  | hardware / correct |
+|-------|--------|--------------------|
+| 2.0   | 1.0    | 0.70709…           |
+| 8.0   | 0.5    | 0.35355…           |
+| 32.0  | 0.25   | 0.17677…           |
+| 0.5   | 2.0    | 1.41418…           |
+
+That is a relative error of about 41%, far outside the 2^-14 the
+instruction guarantees. Even-exponent powers of two (1.0, 4.0, 16.0) and
+all non-power-of-two inputs are unaffected.
+
+The fix is to consult the table in both cases and keep `exp++` for the
+even-exponent table only, or equivalently to seed `fraction` from
+`rsqrt_table[0]` before the branch.
+
+---
+
+## EVEX opcode groups that the master table never references
+
+**Found 2026-08-01**, while generating rusty's EVEX opcode maps from
+`cpu/decoder/fetchdecode_opmap_evex.cc`.
+
+Four groups are defined in that file and then never referenced from
+`BxOpcodeTableEVEX`, so nothing can ever select them:
+
+| group | instructions | ISA |
+|---|---|---|
+| `BxOpcodeGroup_EVEX_0F38D2` | VPDPWSUD, VPDPWSUDS | AVX-VNNI-INT16 |
+| `BxOpcodeGroup_EVEX_0F38D3` | VPDPWUSD, VPDPWUSDS | AVX-VNNI-INT16 |
+| `BxOpcodeGroup_EVEX_0F38DA` | VSM4KEY4 | SM4 |
+| `BxOpcodeGroup_EVEX_0F38DB` | VSM4RNDS4 | SM4 |
+
+`BxOpcodeGroup_EVEX_0F38DB` is not referenced at all — not even by its own
+definition site being reachable — and the other three appear exactly once,
+at their definition. The corresponding master-table slots hold
+`BxOpcodeGroup_ERR`, so a guest executing any of these encodings takes #UD
+even on a CPU model that advertises the ISA.
+
+The handlers exist (`BX_IA_EVEX_VPDPWSUD_VdqHdqWdq` and friends are defined
+in `ia_opcodes_evex.def` with real execute functions), so this is missing
+wiring rather than missing implementation — the same shape of defect as the
+gap this project hit on its own side: an opcode can have a correct,
+dispatched handler and still be unreachable because no decoder table slot
+produces it.
+
+Reproduced deliberately in rusty for parity: `scripts/gen_opmap_evex.py`
+transcribes the master table as it stands, so those slots are empty there
+too. 14 of the 19 EVEX opcodes rusty cannot reach are these; if upstream
+wires them up, regenerating picks them up automatically.
+
+Detection is mechanical — for each `BxOpcodeGroup_EVEX_*` definition, count
+references in the same file; a count of one means the group is orphaned.
