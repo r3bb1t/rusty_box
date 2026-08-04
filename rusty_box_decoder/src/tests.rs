@@ -1107,37 +1107,37 @@ fn opcode_isa_table_is_in_sync_with_the_opcode_enum() {
 #[test]
 fn opcode_prepare_table_is_in_sync_with_the_opcode_enum() {
     use crate::opcode_isa::{
-        opcode_prepare_class, OPCODE_PREPARE, OPCODE_VARIANT_COUNT, STATE_AVX,
-        STATE_AVX_OPCODE_COUNT, STATE_EVEX, STATE_EVEX_OPCODE_COUNT, STATE_NONE, STATE_SSE,
+        opcode_state, CpuState, OPCODE_STATE, OPCODE_VARIANT_COUNT, STATE_AVX_OPCODE_COUNT,
+        STATE_EVEX_OPCODE_COUNT,
     };
 
-    assert_eq!(OPCODE_PREPARE.len(), OPCODE_VARIANT_COUNT);
+    assert_eq!(OPCODE_STATE.len(), OPCODE_VARIANT_COUNT);
     assert_eq!(
-        OPCODE_PREPARE.iter().filter(|c| **c == STATE_AVX).count(),
+        OPCODE_STATE.iter().filter(|c| **c == CpuState::Avx).count(),
         STATE_AVX_OPCODE_COUNT
     );
     assert_eq!(
-        OPCODE_PREPARE.iter().filter(|c| **c == STATE_EVEX).count(),
+        OPCODE_STATE.iter().filter(|c| **c == CpuState::Evex).count(),
         STATE_EVEX_OPCODE_COUNT
     );
 
     // Spot-checks against Bochs ia_opcodes.def field 10.
-    assert_eq!(opcode_prepare_class(Opcode::VtestpsVpsWps), STATE_AVX);
-    assert_eq!(opcode_prepare_class(Opcode::V256VpaddbVdqHdqWdq), STATE_AVX);
-    assert_eq!(opcode_prepare_class(Opcode::PaddbVdqWdq), STATE_SSE);
+    assert_eq!(opcode_state(Opcode::VtestpsVpsWps), CpuState::Avx);
+    assert_eq!(opcode_state(Opcode::V256VpaddbVdqHdqWdq), CpuState::Avx);
+    assert_eq!(opcode_state(Opcode::PaddbVdqWdq), CpuState::Sse);
 
     // VEX encoding does NOT imply AVX state: the BMI instructions are
     // VEX-encoded but operate on GPRs, and Bochs gives them
     // BX_PROTECTED_MODE_ONLY / 0 rather than BX_PREPARE_AVX. Gating them on
     // XCR0 would #UD them on a CPU that never enables AVX.
-    assert_eq!(opcode_prepare_class(Opcode::AndnGdBdEd), STATE_NONE);
-    assert_eq!(opcode_prepare_class(Opcode::TzcntGdEd), STATE_NONE);
+    assert_eq!(opcode_state(Opcode::AndnGdBdEd), CpuState::Base);
+    assert_eq!(opcode_state(Opcode::TzcntGdEd), CpuState::Base);
 
     // The fault sentinels must never be gated, or resolving one would
     // substitute another and loop.
-    assert_eq!(opcode_prepare_class(Opcode::NoAvxState), STATE_NONE);
-    assert_eq!(opcode_prepare_class(Opcode::NoEvexState), STATE_NONE);
-    assert_eq!(opcode_prepare_class(Opcode::IaError), STATE_NONE);
+    assert_eq!(opcode_state(Opcode::NoAvxState), CpuState::Base);
+    assert_eq!(opcode_state(Opcode::NoEvexState), CpuState::Base);
+    assert_eq!(opcode_state(Opcode::IaError), CpuState::Base);
 
     // Nothing that is actually a vector encoding may be left ungated: the
     // icache state gate would wave it through for a guest that never enabled
@@ -1152,8 +1152,8 @@ fn opcode_prepare_table_is_in_sync_with_the_opcode_enum() {
             || name.starts_with("V512");
         if vector {
             assert_ne!(
-                opcode_prepare_class(opcode),
-                STATE_NONE,
+                opcode_state(opcode),
+                CpuState::Base,
                 "{name} is a vector encoding but requires no CPU state — add it \
                  to STATE_OVERRIDES in scripts/gen_opcode_isa.py and regenerate"
             );
