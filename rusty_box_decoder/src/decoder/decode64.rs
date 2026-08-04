@@ -1150,11 +1150,28 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
     }
 
-    // Post-decode LOCK validation (Bochs fetchdecode64.cc)
-    // LOCK prefix on register operand (modC0) is always invalid → #UD
+    // Post-decode LOCK validation (Bochs fetchdecode64.cc, tail of
+    // fetchDecode64). A LOCK on a register-form operand is #UD — except on the
+    // MOV CR0 forms, where AMD's ALT_MOV_CR8 redefines `LOCK MOV CR0` as an
+    // access to CR8. That is how 32-bit AMD code reaches the task priority
+    // register, which otherwise needs REX.R and so is 64-bit only.
+    //
+    // Upstream expresses this by marking those opcodes `BX_LOCKABLE` in
+    // `init_FetchDecodeTables` *only when the feature is present*, then
+    // extending CR0 -> CR8 here. This port cannot: the decoder is a separate
+    // crate with no view of the CPU's feature set. So the extension happens
+    // unconditionally and the feature check lives in the MOV CR handlers,
+    // which do have it. Same two outcomes, decided one step later.
+    //
+    // Bochs writes the CR index to operand slot 1 for the read direction; this
+    // decoder carries it in slot 0 (`dst()`) for both, which is what
+    // `mov_rq_cr0` documents and reads.
     let has_lock = has_lock_prefix_bits(metainfo1_bits);
     if has_lock && mod_c0 {
-        return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+        match instr.get_ia_opcode() {
+            Opcode::MovCr0rq | Opcode::MovRqCr0 => instr.set_src_reg(0, 8),
+            _ => return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode)),
+        }
     }
 
     Ok(instr)
