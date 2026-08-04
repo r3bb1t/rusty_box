@@ -3097,9 +3097,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.evex_vpxorq(instr)
             }
             Opcode::EvexVpordVdqHdqWdq | Opcode::EvexVpordVdqHdqWdqKmask => self.evex_vpord(instr),
-            Opcode::EvexVporqVdqHdqWdq | Opcode::EvexVporqVdqHdqWdqKmask => {
-                self.evex_vporq(instr)
-            }
+            Opcode::EvexVporqVdqHdqWdq | Opcode::EvexVporqVdqHdqWdqKmask => self.evex_vporq(instr),
             Opcode::EvexVpanddVdqHdqWdq | Opcode::EvexVpanddVdqHdqWdqKmask => {
                 self.evex_vpandd(instr)
             }
@@ -3186,30 +3184,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
 
             // --- VRCP14 / VRSQRT14 (table-driven, raise no exception) ---
-            Opcode::EvexVrcp14psVpsWpsKmask => {
-                self.evex_vrcp14ps(instr)
-            }
-            Opcode::EvexVrcp14pdVpdWpdKmask => {
-                self.evex_vrcp14pd(instr)
-            }
-            Opcode::EvexVrsqrt14psVpsWpsKmask => {
-                self.evex_vrsqrt14ps(instr)
-            }
-            Opcode::EvexVrsqrt14pdVpdWpdKmask => {
-                self.evex_vrsqrt14pd(instr)
-            }
-            Opcode::EvexVrcp14ssVssHpsWssKmask => {
-                self.evex_vrcp14ss(instr)
-            }
-            Opcode::EvexVrcp14sdVsdHpdWsdKmask => {
-                self.evex_vrcp14sd(instr)
-            }
-            Opcode::EvexVrsqrt14ssVssHpsWssKmask => {
-                self.evex_vrsqrt14ss(instr)
-            }
-            Opcode::EvexVrsqrt14sdVsdHpdWsdKmask => {
-                self.evex_vrsqrt14sd(instr)
-            }
+            Opcode::EvexVrcp14psVpsWpsKmask => self.evex_vrcp14ps(instr),
+            Opcode::EvexVrcp14pdVpdWpdKmask => self.evex_vrcp14pd(instr),
+            Opcode::EvexVrsqrt14psVpsWpsKmask => self.evex_vrsqrt14ps(instr),
+            Opcode::EvexVrsqrt14pdVpdWpdKmask => self.evex_vrsqrt14pd(instr),
+            Opcode::EvexVrcp14ssVssHpsWssKmask => self.evex_vrcp14ss(instr),
+            Opcode::EvexVrcp14sdVsdHpdWsdKmask => self.evex_vrcp14sd(instr),
+            Opcode::EvexVrsqrt14ssVssHpsWssKmask => self.evex_vrsqrt14ss(instr),
+            Opcode::EvexVrsqrt14sdVsdHpdWsdKmask => self.evex_vrsqrt14sd(instr),
 
             // --- VFIXUPIMM, VEXPAND, VCOMPRESS ---
             Opcode::EvexVfixupimmpsVpsHpsWpsIb | Opcode::EvexVfixupimmpsVpsHpsWpsIbKmask => {
@@ -3218,12 +3200,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVfixupimmpdVpdHpdWpdIb | Opcode::EvexVfixupimmpdVpdHpdWpdIbKmask => {
                 self.evex_vfixupimmpd(instr)
             }
-            Opcode::EvexVfixupimmssVssHssWssIbKmask => {
-                self.evex_vfixupimmss(instr)
-            }
-            Opcode::EvexVfixupimmsdVsdHsdWsdIbKmask => {
-                self.evex_vfixupimmsd(instr)
-            }
+            Opcode::EvexVfixupimmssVssHssWssIbKmask => self.evex_vfixupimmss(instr),
+            Opcode::EvexVfixupimmsdVsdHsdWsdIbKmask => self.evex_vfixupimmsd(instr),
             Opcode::EvexVexpandpsVpsWps | Opcode::EvexVexpandpsVpsWpsKmask => {
                 self.evex_vexpandps(instr)
             }
@@ -3334,12 +3312,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVmovhpdMqVsd => self.movhps_mq_vps(instr),
             Opcode::EvexVmovlpsMqVps => self.movlps_mq_vps(instr),
             Opcode::EvexVmovlpdMqVsd => self.movlps_mq_vps(instr),
-            Opcode::EvexVmovhpsVpsHpsMq | Opcode::EvexVmovhpdVpdHpdMq => {
-                self.vmovhp(instr)
-            }
-            Opcode::EvexVmovlpsVpsHpsMq | Opcode::EvexVmovlpdVpdHpdMq => {
-                self.vmovlp(instr)
-            }
+            Opcode::EvexVmovhpsVpsHpsMq | Opcode::EvexVmovhpdVpdHpdMq => self.vmovhp(instr),
+            Opcode::EvexVmovlpsVpsHpsMq | Opcode::EvexVmovlpdVpdHpdMq => self.vmovlp(instr),
 
             // --- two-table permutes, VPERMW/PD variable forms, VPMULLQ ---
             // The PS/PD spellings are bit-identical to the D/Q ones; upstream
@@ -4226,21 +4200,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVpsrlwVdqHdqWdq | Opcode::EvexVpsrlwVdqHdqWdqKmask => {
                 self.evex_vpsrlw_reg(instr)
             }
-            Opcode::EvexVpsrlwUdqIb | Opcode::EvexVpsrlwUdqIbKmask => {
-                self.evex_vpsrlw_imm(instr)
-            }
+            Opcode::EvexVpsrlwUdqIb | Opcode::EvexVpsrlwUdqIbKmask => self.evex_vpsrlw_imm(instr),
             Opcode::EvexVpsrawVdqHdqWdq | Opcode::EvexVpsrawVdqHdqWdqKmask => {
                 self.evex_vpsraw_reg(instr)
             }
-            Opcode::EvexVpsrawUdqIb | Opcode::EvexVpsrawUdqIbKmask => {
-                self.evex_vpsraw_imm(instr)
-            }
+            Opcode::EvexVpsrawUdqIb | Opcode::EvexVpsrawUdqIbKmask => self.evex_vpsraw_imm(instr),
             Opcode::EvexVpsllwVdqHdqWdq | Opcode::EvexVpsllwVdqHdqWdqKmask => {
                 self.evex_vpsllw_reg(instr)
             }
-            Opcode::EvexVpsllwUdqIb | Opcode::EvexVpsllwUdqIbKmask => {
-                self.evex_vpsllw_imm(instr)
-            }
+            Opcode::EvexVpsllwUdqIb | Opcode::EvexVpsllwUdqIbKmask => self.evex_vpsllw_imm(instr),
             Opcode::EvexVpsrlvwVdqHdqWdq | Opcode::EvexVpsrlvwVdqHdqWdqKmask => {
                 self.evex_vpsrlvw(instr)
             }
@@ -4297,12 +4265,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::EvexVpackuswbVdqHdqWdq | Opcode::EvexVpackuswbVdqHdqWdqKmask => {
                 self.evex_vpackuswb(instr)
             }
-            Opcode::EvexVpabsbVdqWdq | Opcode::EvexVpabsbVdqWdqKmask => {
-                self.evex_vpabsb(instr)
-            }
-            Opcode::EvexVpabswVdqWdq | Opcode::EvexVpabswVdqWdqKmask => {
-                self.evex_vpabsw(instr)
-            }
+            Opcode::EvexVpabsbVdqWdq | Opcode::EvexVpabsbVdqWdqKmask => self.evex_vpabsb(instr),
+            Opcode::EvexVpabswVdqWdq | Opcode::EvexVpabswVdqWdqKmask => self.evex_vpabsw(instr),
             Opcode::EvexVpmullwVdqHdqWdq | Opcode::EvexVpmullwVdqHdqWdqKmask => {
                 self.evex_vpmullw(instr)
             }
@@ -5291,8 +5255,210 @@ mod tests {
     use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
     use crate::cpu::crregs::BxCr4;
     use crate::cpu::decoder::BxSegregs;
-    use crate::memory::{ BxMemC, BxMemoryStubC, CpuTlbPin };
+    use crate::memory::{BxMemC, BxMemoryStubC, CpuTlbPin};
     use std::ptr::NonNull;
+
+    /// Every opcode a CPU model admits must have somewhere to go.
+    ///
+    /// `execute_instruction` ends in a catch-all that returns
+    /// `CpuError::UnimplementedOpcode` — an *emulator* error, which stops the
+    /// host rather than faulting the guest. Upstream has no such state: Bochs
+    /// points an unsupported opcode at `BxError`, and the guest takes #UD.
+    ///
+    /// The ISA gate (`isa_resolve_opcode`) is what keeps the two apart here: it
+    /// rewrites an opcode whose CPUID feature the model lacks to
+    /// `Opcode::IaError` before it can reach the dispatcher. That only holds if
+    /// the set of opcodes a model *admits* is a subset of the set the
+    /// dispatcher *handles* — and nothing enforced that. Advertising one more
+    /// feature than the handlers cover turns a guest #UD into a host abort.
+    ///
+    /// As of writing, 410 EVEX opcodes decode but have no handler (AVX512-FP16,
+    /// AVX10.2, VBMI2, AMX, VNNI, VAES, GFNI, BF16, …). Every one is gated on a
+    /// feature neither shipped model advertises, so none is reachable. This
+    /// test is what keeps that true.
+    ///
+    /// The handled set is read out of this file rather than probed by executing
+    /// each opcode: executing would run real handlers against a synthetic
+    /// instruction, which can fault, loop or trip a debug assertion, none of
+    /// which distinguishes "handled" from "broken". Every `Opcode::` in the
+    /// non-test body of this file is a match pattern — there are no comparison
+    /// or call-position uses — so the parse is exact.
+    #[test]
+    fn every_opcode_a_model_admits_has_a_dispatcher_arm() {
+        use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
+        use crate::cpu::decoder::Opcode;
+        use rusty_box_decoder::opcode_isa::OPCODE_VARIANT_COUNT;
+
+        let source = include_str!("dispatcher.rs");
+        let body = source.split("#[cfg(test)]").next().expect("non-test body");
+        let mut handled = std::collections::HashSet::new();
+        for line in body.lines() {
+            let line = line.split("//").next().unwrap_or("");
+            let mut rest = line;
+            while let Some(at) = rest.find("Opcode::") {
+                rest = &rest[at + "Opcode::".len()..];
+                let end = rest
+                    .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .unwrap_or(rest.len());
+                handled.insert(rest[..end].to_string());
+            }
+        }
+        assert!(
+            handled.len() > 2000,
+            "parsed only {} dispatcher arms — the parse broke, not the dispatcher",
+            handled.len()
+        );
+
+        fn missing<I: BxCpuIdTrait>(handled: &std::collections::HashSet<String>) -> Vec<String> {
+            let cpu = BxCpuBuilder::<I>::new().build().unwrap();
+            (0..OPCODE_VARIANT_COUNT)
+                .map(|i| Opcode::from_u16_const(i as u16))
+                .filter(|op| cpu.isa_resolve_opcode(*op) == *op)
+                .map(|op| std::format!("{op:?}"))
+                .filter(|name| !handled.contains(name))
+                .collect()
+        }
+
+        // Only a decodable opcode matters: an `Opcode` variant no table can
+        // emit is unreachable however the gate resolves it, and there are 77 of
+        // those. The decoder's own tables are the authority, so they are read
+        // the same way this file was.
+        const DECODER_SRC: &[&str] = &[
+            include_str!("../../../rusty_box_decoder/src/decoder/opmap.rs"),
+            include_str!("../../../rusty_box_decoder/src/decoder/opmap_0f38.rs"),
+            include_str!("../../../rusty_box_decoder/src/decoder/opmap_0f3a.rs"),
+            include_str!("../../../rusty_box_decoder/src/decoder/opmap_evex.rs"),
+            include_str!("../../../rusty_box_decoder/src/decoder/vex_shared.rs"),
+            include_str!("../../../rusty_box_decoder/src/decoder/decode32.rs"),
+            include_str!("../../../rusty_box_decoder/src/decoder/decode64.rs"),
+            include_str!("../../../rusty_box_decoder/src/decoder/x87.rs"),
+        ];
+        // Collect every identifier, not just `Opcode::`-qualified ones:
+        // `remap_sse_to_vex` does `use Opcode::*` and writes its arms bare, so
+        // matching on the qualified form alone misses every VEX opcode the
+        // remap produces — which is most of them.
+        let mut decodable = std::collections::HashSet::new();
+        for src in DECODER_SRC {
+            for line in src.lines() {
+                let line = line.split("//").next().unwrap_or("");
+                for word in line.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+                    if word.starts_with(|c: char| c.is_ascii_uppercase()) {
+                        decodable.insert(word.to_string());
+                    }
+                }
+            }
+        }
+
+        // Decodable, advertised and unhandled: a guest running one of these
+        // aborts the emulator instead of taking #UD. These are defects; the
+        // list must shrink, never grow.
+        const REACHABLE_GAPS: &[&str] = &[
+            // MMX <-> packed-FP conversions (SSE/SSE2), Bochs sse_pfp.cc.
+            "Cvtpi2psVpsQq",
+            "Cvtps2piPqWps",
+            "Cvttps2piPqWps",
+            "Cvtpi2pdVpdQq",
+            "Cvtpd2piPqWpd",
+            "Cvttpd2piPqWpd",
+            // SSSE3 horizontal add/subtract, and their VEX forms, which
+            // remap_sse_to_vex produces from the same legacy opcode.
+            "PhaddwVdqWdq",
+            "PhadddVdqWdq",
+            "PhaddswVdqWdq",
+            "PhsubwVdqWdq",
+            "PhsubdVdqWdq",
+            "PhsubswVdqWdq",
+            "V128VphaddwVdqHdqWdq",
+            "V256VphaddwVdqHdqWdq",
+            "V128VphadddVdqHdqWdq",
+            "V256VphadddVdqHdqWdq",
+            "V128VphaddswVdqHdqWdq",
+            "V256VphaddswVdqHdqWdq",
+            "V128VphsubwVdqHdqWdq",
+            "V256VphsubwVdqHdqWdq",
+            "V128VphsubdVdqHdqWdq",
+            "V256VphsubdVdqHdqWdq",
+            "V128VphsubswVdqHdqWdq",
+            "V256VphsubswVdqHdqWdq",
+            // SSE4.1 integer min/max.
+            "PminsbVdqWdq",
+            "PminsdVdqWdq",
+            "PminuwVdqWdq",
+            "PmaxsbVdqWdq",
+            "PmaxsdVdqWdq",
+            "PmaxuwVdqWdq",
+            // SSE4.1 / SSE4.2 compare, pack and extract.
+            "PcmpeqqVdqWdq",
+            "PcmpgtqVdqWdq",
+            "PackusdwVdqWdq",
+            "ExtractpsEdVpsIb",
+            // VEX forms whose legacy counterpart IS implemented, but whose
+            // V128/V256 opcode has no arm of its own.
+            "V128VpsignbVdqHdqWdq",
+            "V256VpsignbVdqHdqWdq",
+            "V128VpsignwVdqHdqWdq",
+            "V256VpsignwVdqHdqWdq",
+            "V128VpsigndVdqHdqWdq",
+            "V256VpsigndVdqHdqWdq",
+            "V128VpavgbVdqWdq",
+            "V256VpavgbVdqWdq",
+            "V128VpavgwVdqWdq",
+            "V256VpavgwVdqWdq",
+            "V128VpmaddwdVdqHdqWdq",
+            "V256VpmaddwdVdqHdqWdq",
+            "V128VpmaddubswVdqHdqWdq",
+            "V256VpmaddubswVdqHdqWdq",
+            "V128VpacksswbVdqHdqWdq",
+            "V256VpacksswbVdqHdqWdq",
+            "V128VpackuswbVdqHdqWdq",
+            "V256VpackuswbVdqHdqWdq",
+            "V128VpackssdwVdqHdqWdq",
+            "V256VpackssdwVdqHdqWdq",
+            "V128VpackusdwVdqHdqWdq",
+            "V256VpackusdwVdqHdqWdq",
+            // SSE4A. Only AmdRyzen advertises it (`IsaSse4a`), which is why
+            // these show up on that model and not on Corei7SkylakeX.
+            "ExtrqVdqUq",
+            "ExtrqUdqIbIb",
+            "InsertqVdqUdq",
+            "InsertqVdqUqIbIb",
+            "MovntssMssVss",
+            "MovntsdMsdVsd",
+        ];
+
+        // The ledger spans every model, because a gap on one model is a defect
+        // whether or not another model happens to hide it. AMD-only SSE4A is
+        // the case in point.
+        let mut reachable = std::collections::BTreeSet::new();
+        for gaps in [
+            missing::<Corei7SkylakeX>(&handled),
+            missing::<AmdRyzen>(&handled),
+        ] {
+            reachable.extend(gaps.into_iter().filter(|g| decodable.contains(g)));
+        }
+
+        let unexpected: Vec<_> = reachable
+            .iter()
+            .filter(|g| !REACHABLE_GAPS.contains(&g.as_str()))
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "{} decodable opcode(s) a shipped model admits have no dispatcher \
+             arm, so a guest running one aborts the emulator instead of taking \
+             #UD. Implement them, or stop advertising the feature: {unexpected:?}",
+            unexpected.len()
+        );
+
+        let fixed: Vec<_> = REACHABLE_GAPS
+            .iter()
+            .filter(|k| !reachable.contains(**k))
+            .collect();
+        assert!(
+            fixed.is_empty(),
+            "these now have handlers -- delete them from REACHABLE_GAPS so the \
+             list keeps shrinking: {fixed:?}"
+        );
+    }
 
     #[derive(Clone, Copy)]
     enum LaneWidth {
