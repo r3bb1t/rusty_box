@@ -196,6 +196,15 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
+        // A gather's elements are independent accesses, not one wide access, so
+        // Bochs disables alignment checking across the whole element loop and
+        // restores it afterwards. A fault inside the loop leaves it disabled,
+        // exactly as upstream's `exception()` longjmp does: the mask is rebuilt
+        // by `handle_alignment_check` on the CPL change that delivering the
+        // fault causes.
+        let saved_ac = self.alignment_check_mask;
+        self.alignment_check_mask = 0;
+
         for n in 0..pad {
             if n >= num_elements {
                 // Above the vector length: both mask and destination read zero.
@@ -239,6 +248,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
+        self.alignment_check_mask = saved_ac;
+
         // Bochs clears the register bits above the result width in both the
         // destination and the mask (BX_CLEAR_AVX_HIGH256, or HIGH128 for the
         // qword-index/dword-element form).
@@ -273,6 +284,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let nelements = dword_elements(vl);
         let seg = BxSegregs::from(instr.seg());
 
+        // Alignment checking is off across the element loop — see `vex_vgather`
+        // for why, and for what a fault inside the loop leaves behind.
+        let saved_ac = self.alignment_check_mask;
+        self.alignment_check_mask = 0;
+
         let mut opmask = self.opmask[k as usize].rrx();
         for n in 0..nelements {
             let mask_bit = 1u64 << n;
@@ -284,6 +300,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.bx_write_opmask(k as usize, opmask);
             }
         }
+
+        self.alignment_check_mask = saved_ac;
+
         // Final opmask clear + zero bytes above VL (Bochs BX_CLEAR_AVX_REGZ).
         self.bx_write_opmask(k as usize, 0);
         for i in nelements..16 {
@@ -311,6 +330,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let nelements = qword_elements(vl);
         let seg = BxSegregs::from(instr.seg());
 
+        // Alignment checking is off across the element loop — see `vex_vgather`.
+        let saved_ac = self.alignment_check_mask;
+        self.alignment_check_mask = 0;
+
         let mut opmask = self.opmask[k as usize].rrx();
         for n in 0..nelements {
             let mask_bit = 1u64 << n;
@@ -322,6 +345,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.bx_write_opmask(k as usize, opmask);
             }
         }
+
+        self.alignment_check_mask = saved_ac;
+
         self.bx_write_opmask(k as usize, 0);
         for i in nelements..8 {
             self.vmm[dst as usize].set_zmm64u(i, 0);
@@ -349,6 +375,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let nelements = qword_elements(vl);
         let seg = BxSegregs::from(instr.seg());
 
+        // Alignment checking is off across the element loop — see `vex_vgather`.
+        let saved_ac = self.alignment_check_mask;
+        self.alignment_check_mask = 0;
+
         let mut opmask = self.opmask[k as usize].rrx();
         for n in 0..nelements {
             let mask_bit = 1u64 << n;
@@ -360,6 +390,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.bx_write_opmask(k as usize, opmask);
             }
         }
+
+        self.alignment_check_mask = saved_ac;
+
         self.bx_write_opmask(k as usize, 0);
         // Zero all dwords above the gathered range.
         for i in nelements..16 {
@@ -386,6 +419,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let nelements = qword_elements(vl);
         let seg = BxSegregs::from(instr.seg());
 
+        // Alignment checking is off across the element loop — see `vex_vgather`.
+        let saved_ac = self.alignment_check_mask;
+        self.alignment_check_mask = 0;
+
         let mut opmask = self.opmask[k as usize].rrx();
         for n in 0..nelements {
             let mask_bit = 1u64 << n;
@@ -397,6 +434,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.bx_write_opmask(k as usize, opmask);
             }
         }
+
+        self.alignment_check_mask = saved_ac;
+
         self.bx_write_opmask(k as usize, 0);
         for i in nelements..8 {
             self.vmm[dst as usize].set_zmm64u(i, 0);
