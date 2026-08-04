@@ -100,9 +100,21 @@ pub(super) const fn vex_modrm_dst(b1: u32, is_vex_or_evex: bool) -> Option<VexMo
 /// Which slots of Bochs's `BxOpcodeTableVEX` hold a real opcode group, as one
 /// 256-bit map per VEX opcode map.
 ///
-/// Transcribed from `BxOpcodeTableVEX` in fetchdecode_opmap_avx.cc with
-/// `BX_SUPPORT_AMX` off, which is what this port implements. The AMX-only VEX
-/// maps 5 and 7 are rejected earlier, when the prefix is parsed.
+/// Derived from `BxOpcodeTableVEX` in fetchdecode_opmap_avx.cc with
+/// `BX_SUPPORT_AMX` off, which is what this port implements. **Regenerate this
+/// after syncing upstream opcodes** — new VEX instructions land as new slots
+/// here, and one that is missing decodes as #UD:
+///
+/// ```text
+/// python scripts/gen_vex_slots.py --verify   # reports drift, exit 1
+/// python scripts/gen_vex_slots.py            # emit the replacement table
+/// ```
+///
+/// Upstream's table also carries maps 4-7. Maps 4 and 6 are empty, map 5 sits
+/// behind `BX_SUPPORT_AMX`, and map 7 holds only WRMSRNS/RDMSR/UWRMSR/URDMSR,
+/// gated on `BX_ISA_MSR_IMM` and `BX_ISA_USER_MSR` — features `Corei7SkylakeX`
+/// does not advertise, so rejecting the map when the prefix is parsed is
+/// observationally identical to Bochs's #UD on the ISA check.
 const VEX_POPULATED_SLOTS: [[u64; 4]; 3] = [
     // map 1 (0F) — 126 slots
     [
@@ -1742,5 +1754,186 @@ pub(super) const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
         // No remap — instruction either has no VEX form, is already VEX, or
         // works correctly as-is (e.g. 2-operand loads where VEX.vvvv must be 1111b)
         _ => op,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decoder::decode64::fetch_decode64;
+    use std::vec::Vec;
+
+    /// Build a 3-byte VEX encoding for one (map, opcode) slot.
+    ///
+    /// Trailing zero padding stands in for whatever immediate or ModRM tail the
+    /// instruction turns out to want, so a slot is never rejected merely for
+    /// running off the end of the buffer.
+    fn vex_encoding(map: u8, opcode: u8, pp: u8, w: u8, l: u8, modrm: u8) -> [u8; 12] {
+        let mut bytes = [0u8; 12];
+        bytes[0] = 0xC4;
+        bytes[1] = 0xE0 | map; // RXB = 111 (no extension), mmmmm = map
+        bytes[2] = (w << 7) | (0b1111 << 3) | (l << 2) | pp; // vvvv = 1111
+        bytes[3] = opcode;
+        bytes[4] = modrm;
+        bytes
+    }
+
+    /// Every ModRM byte worth trying: both addressing forms crossed with all
+    /// eight `reg` values, because group opcodes such as `0F 71 /2` and the BMI
+    /// group at `0F38 F3 /1` select the instruction from that field and have no
+    /// valid encoding at `reg == 0`.
+    fn candidate_modrms() -> impl Iterator<Item = u8> {
+        (0..8u8).flat_map(|reg| [0xC0 | (reg << 3), reg << 3])
+    }
+
+    /// Run `f` over every VEX encoding shape of one slot.
+    fn for_each_encoding(map: u8, opcode: u8, mut f: impl FnMut(&[u8])) {
+        for pp in 0..4u8 {
+            for w in 0..2u8 {
+                for l in 0..2u8 {
+                    for modrm in candidate_modrms() {
+                        f(&vex_encoding(map, opcode, pp, w, l, modrm));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The VEX slots this port deliberately leaves unimplemented.
+    ///
+    /// Each belongs to an ISA family `Corei7SkylakeX` does not advertise, so
+    /// Bochs decodes the encoding and then raises #UD on the missing ISA bit
+    /// while this port raises #UD at decode — the same observable behaviour,
+    /// which is why the plan scoped them out. Implementing a family means
+    /// deleting its line here; a slot appearing that is *not* listed is a real
+    /// spurious #UD on an instruction the CPU claims to support.
+    const UNIMPLEMENTED_VEX_SLOTS: &[(u8, &[u8], &str)] = &[
+        (2, &[0x50, 0x51, 0x52, 0x53], "AVX-VNNI / VNNI-INT8"),
+        (2, &[0x72, 0xB0, 0xB1], "AVX-NE-CONVERT"),
+        (2, &[0xB4, 0xB5], "AVX-IFMA"),
+        (2, &[0xD2, 0xD3], "VNNI-INT16"),
+        (2, &[0xDA], "SM3"),
+        (
+            2,
+            &[
+                0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC,
+                0xED, 0xEE, 0xEF,
+            ],
+            "CMPCCXADD",
+        ),
+        (3, &[0x48, 0x49], "VPERMIL2PS/PD (FMA4-era)"),
+        (
+            3,
+            &[
+                0x5C, 0x5D, 0x5E, 0x5F, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x78,
+                0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
+            ],
+            "FMA4",
+        ),
+        (3, &[0xDE], "SM3"),
+    ];
+
+    fn expected_unimplemented() -> Vec<(u8, u8)> {
+        let mut slots: Vec<(u8, u8)> = UNIMPLEMENTED_VEX_SLOTS
+            .iter()
+            .flat_map(|(map, opcodes, _)| opcodes.iter().map(move |op| (*map, *op)))
+            .collect();
+        slots.sort_unstable();
+        slots
+    }
+
+    /// Every slot Bochs populates must decode under *some* VEX encoding, unless
+    /// it belongs to a family this port knowingly does not implement.
+    ///
+    /// The slot gate is a whitelist: if it says a byte carries a VEX
+    /// instruction but no encoding of that byte decodes, the gate and the
+    /// opcode tables disagree and a real AVX instruction takes a spurious #UD.
+    /// That is the direction that breaks guests, so it is checked exhaustively
+    /// rather than by sampling, and pinned to an exact set rather than a bound.
+    #[test]
+    fn every_populated_vex_slot_decodes_unless_deliberately_unimplemented() {
+        let mut unreachable = Vec::new();
+
+        for map in 1..=3u8 {
+            for opcode in 0..=255u8 {
+                if !vex_slot_populated(map, opcode) {
+                    continue;
+                }
+                let mut decoded = false;
+                for_each_encoding(map, opcode, |bytes| {
+                    if let Ok(instr) = fetch_decode64(bytes) {
+                        decoded |= instr.get_ia_opcode() != Opcode::IaError;
+                    }
+                });
+                if !decoded {
+                    unreachable.push((map, opcode));
+                }
+            }
+        }
+
+        unreachable.sort_unstable();
+        let expected = expected_unimplemented();
+
+        let surprises: Vec<_> = unreachable
+            .iter()
+            .filter(|slot| !expected.contains(slot))
+            .collect();
+        assert!(
+            surprises.is_empty(),
+            "these slots are populated in Bochs's BxOpcodeTableVEX but no VEX \
+             encoding of them decodes here, and they are not on the \
+             deliberately-unimplemented list — a valid AVX instruction would \
+             take a spurious #UD: {surprises:02X?}"
+        );
+
+        let now_reachable: Vec<_> = expected
+            .iter()
+            .filter(|slot| !unreachable.contains(slot))
+            .collect();
+        assert!(
+            now_reachable.is_empty(),
+            "these slots decode now but are still listed as unimplemented — \
+             drop them from UNIMPLEMENTED_VEX_SLOTS: {now_reachable:02X?}"
+        );
+    }
+
+    /// A VEX decode must never come back as a *legacy* SSE opcode.
+    ///
+    /// This port shares the legacy opcode tables with the VEX path and converts
+    /// whatever they return through `remap_sse_to_vex`. `vex_slot_populated`
+    /// closes the case where a byte has no VEX form at all, but within a
+    /// populated slot a legacy entry can still match a VEX decmask — and if
+    /// `remap_sse_to_vex` has no arm for it, the legacy opcode survives. That
+    /// would run two-operand SSE semantics for a three-operand VEX encoding and
+    /// leave the upper lane of the destination undisturbed.
+    ///
+    /// Every correctly-remapped opcode is a fixed point of `remap_sse_to_vex`,
+    /// so an opcode the remap would still rewrite is one the remap never saw.
+    #[test]
+    fn no_vex_encoding_decodes_to_an_unremapped_legacy_opcode() {
+        let mut leaked = Vec::new();
+
+        for map in 1..=3u8 {
+            for opcode in 0..=255u8 {
+                if !vex_slot_populated(map, opcode) {
+                    continue;
+                }
+                for_each_encoding(map, opcode, |bytes| {
+                    let Ok(instr) = fetch_decode64(bytes) else {
+                        return;
+                    };
+                    let op = instr.get_ia_opcode();
+                    if op != Opcode::IaError && remap_sse_to_vex(op, instr.get_vl()) != op {
+                        leaked.push((map, opcode, op));
+                    }
+                });
+            }
+        }
+
+        assert!(
+            leaked.is_empty(),
+            "a VEX encoding decoded to a legacy opcode that remap_sse_to_vex \
+             would have rewritten, meaning the remap never ran for it: {leaked:02X?}"
+        );
     }
 }

@@ -5366,6 +5366,14 @@ mod tests {
         cpu.cr4.insert(BxCr4::OSXSAVE);
         cpu.xcr0.set32(0xE7);
         cpu.handle_avx_mode_change();
+
+        // `BxNoAVX` (Bochs proc_ctrl.cc) rejects every VEX encoding outside
+        // protected mode, so a builder-made CPU — which comes up in real mode —
+        // is the same unreachable configuration the comment above is about: a
+        // guest cannot have XCR0.YMM enabled and still be in real mode. Put the
+        // CPU in protected mode so handlers that gate on AVX availability, as
+        // the VEX-only ones must, see a state a guest can actually reach.
+        cpu.cpu_mode = CpuMode::Ia32Protected;
     }
 
     fn make_legacy_round_instr(opcode: Opcode, dst: u8, src: u8, imm: u8) -> Instruction {

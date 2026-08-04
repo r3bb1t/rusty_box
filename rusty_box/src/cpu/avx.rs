@@ -1,4 +1,3 @@
-#![allow(unused_assignments, dead_code)]
 //! AVX/AVX2/AVX-512 instruction handlers for VEX.256 and EVEX operations
 //!
 //! Implements the subset of VEX.256 and EVEX instructions used by the Linux kernel,
@@ -20,7 +19,7 @@ use super::{
         softfloat::{softfloat_get_exception_flags, FLAG_DENORMAL},
     },
     sse_fp::mxcsr_to_softfloat_status_word,
-    xmm::{BxPackedXmmRegister, BxPackedYmmRegister},
+    xmm::{BxPackedXmmRegister, BxPackedYmmRegister, BxPackedZmmRegister},
 };
 
 #[derive(Clone, Copy)]
@@ -273,19 +272,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 let val = self.read_xmm_reg(instr.src1());
                 self.v_write_xmmword(seg, eaddr, &val)?;
             }
-        }
-        Ok(())
-    }
-
-    /// VMOVDQA/VMOVAPS/VMOVAPD register-to-register — VEX.L aware
-    pub(super) fn vmovdqa_reg(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        if instr.get_vl() >= 1 {
-            let val = self.read_ymm_reg(instr.src1());
-            self.write_ymm_reg(instr.dst(), val);
-        } else {
-            let val = self.read_xmm_reg(instr.src1());
-            self.write_xmm_reg(instr.dst(), val);
         }
         Ok(())
     }
@@ -574,149 +560,11 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // AVX-512 specific instructions (EVEX only)
     // ========================================================================
 
-    /// VPERMI2D — Full Permute of Dwords from Two Sources
-    /// EVEX.66.0F38.W0 76 /r
-    /// For each dword element i in dest:
-    ///   index = dest[i] (low bits select from concatenation of src1:src2)
-    ///   result[i] = (src1:src2)[index]
-    /// where src1 = VEX.vvvv, src2 = r/m
-    pub(super) fn vpermi2d(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let dst_idx = instr.dst();
-        let src1_idx = instr.src2(); // VEX.vvvv
-
-        if instr.get_vl() >= 1 {
-            // 256-bit: 8 dwords, index bits 2:0 select from 16-element pool (8+8)
-            let src2 = if instr.mod_c0() {
-                self.read_ymm_reg(instr.src1())
-            } else {
-                let seg = BxSegregs::from(instr.seg());
-                let eaddr = self.resolve_addr(instr);
-                self.v_read_ymmword(seg, eaddr)?
-            };
-            let src1 = self.read_ymm_reg(src1_idx);
-            let indices = self.read_ymm_reg(dst_idx);
-            let mut result = BxPackedYmmRegister::default();
-
-            // Concatenate src1 (elements 0-7) and src2 (elements 8-15)
-            let num_elements = 8usize; // 256-bit / 32-bit = 8 elements
-            let index_mask = (num_elements * 2 - 1) as u32; // 0xF for 16-element pool
-            for i in 0..num_elements {
-                let idx = (indices.ymm32u(i) & index_mask) as usize;
-                if idx < num_elements {
-                    result.set_ymm32u(i, src1.ymm32u(idx));
-                } else {
-                    result.set_ymm32u(i, src2.ymm32u(idx - num_elements));
-                }
-            }
-            self.write_ymm_reg(dst_idx, result);
-        } else {
-            // 128-bit: 4 dwords, index bits 2:0 select from 8-element pool (4+4)
-            let src2 = if instr.mod_c0() {
-                self.read_xmm_reg(instr.src1())
-            } else {
-                let seg = BxSegregs::from(instr.seg());
-                let eaddr = self.resolve_addr(instr);
-                self.v_read_xmmword(seg, eaddr)?
-            };
-            let src1 = self.read_xmm_reg(src1_idx);
-            let indices = self.read_xmm_reg(dst_idx);
-            let mut result = BxPackedXmmRegister::default();
-
-            let num_elements = 4usize;
-            let index_mask = (num_elements * 2 - 1) as u32; // 0x7 for 8-element pool
-            for i in 0..num_elements {
-                let idx = (indices.xmm32u(i) & index_mask) as usize;
-                if idx < num_elements {
-                    result.set_xmm32u(i, src1.xmm32u(idx));
-                } else {
-                    result.set_xmm32u(i, src2.xmm32u(idx - num_elements));
-                }
-            }
-            self.write_xmm_reg(dst_idx, result);
-        }
-        Ok(())
-    }
-
-    /// VPRORD — Packed Rotate Right Dwords by immediate
-    /// EVEX.66.0F.W0 72 /0 ib
-    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
-    pub(super) fn vprord(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
-        let count = (instr.ib() & 31) as u32; // rotate count mod 32
-
-        // The source is the rm operand in src1(); dst()/src2() both carry
-        // VEX.vvvv, which is the destination.
-        if instr.get_vl() >= 1 {
-            let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.src1())
-            } else {
-                let seg = BxSegregs::from(instr.seg());
-                let eaddr = self.resolve_addr(instr);
-                self.v_read_ymmword(seg, eaddr)?
-            };
-            let mut result = BxPackedYmmRegister::default();
-            for i in 0..8 {
-                result.set_ymm32u(i, src.ymm32u(i).rotate_right(count));
-            }
-            self.write_ymm_reg(dst_idx, result);
-        } else {
-            let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.src1())
-            } else {
-                let seg = BxSegregs::from(instr.seg());
-                let eaddr = self.resolve_addr(instr);
-                self.v_read_xmmword(seg, eaddr)?
-            };
-            let mut result = BxPackedXmmRegister::default();
-            for i in 0..4 {
-                result.set_xmm32u(i, src.xmm32u(i).rotate_right(count));
-            }
-            self.write_xmm_reg(dst_idx, result);
-        }
-        Ok(())
-    }
-
-    /// VPROLD — Packed Rotate Left Dwords by immediate
-    /// EVEX.66.0F.W0 72 /1 ib
-    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
-    pub(super) fn vprold(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
-        let count = (instr.ib() & 31) as u32; // rotate count mod 32
-
-        // The source is the rm operand in src1(); dst()/src2() both carry
-        // VEX.vvvv, which is the destination.
-        if instr.get_vl() >= 1 {
-            let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.src1())
-            } else {
-                let seg = BxSegregs::from(instr.seg());
-                let eaddr = self.resolve_addr(instr);
-                self.v_read_ymmword(seg, eaddr)?
-            };
-            let mut result = BxPackedYmmRegister::default();
-            for i in 0..8 {
-                result.set_ymm32u(i, src.ymm32u(i).rotate_left(count));
-            }
-            self.write_ymm_reg(dst_idx, result);
-        } else {
-            let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.src1())
-            } else {
-                let seg = BxSegregs::from(instr.seg());
-                let eaddr = self.resolve_addr(instr);
-                self.v_read_xmmword(seg, eaddr)?
-            };
-            let mut result = BxPackedXmmRegister::default();
-            for i in 0..4 {
-                result.set_xmm32u(i, src.xmm32u(i).rotate_left(count));
-            }
-            self.write_xmm_reg(dst_idx, result);
-        }
-        Ok(())
-    }
+    // VPRORD/VPROLD live in avx512.rs as `evex_vprord_imm` / `evex_vprold_imm`,
+    // reached from the EvexVprordUdqIb / EvexVproldUdqIb dispatcher arms. The
+    // VEX-shaped copies that used to sit here were never dispatched from
+    // anywhere — VPRORD and VPROLD are AVX-512 only, with no VEX encoding — and
+    // the blanket dead-code allow at the top of this file kept them invisible.
 
     // ========================================================================
     // VPMOVSX/VPMOVZX — sign/zero extension (Bochs avx2.cc VPMOVSXBW_VdqWdqR
@@ -1082,7 +930,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs reads both operands as full YMM registers and iterates
     /// `QWORD_ELEMENTS(len)`, so VL128 sees only the low two qwords.
     pub(super) fn vtest(&mut self, instr: &Instruction, qword_elements: bool) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         // Bochs seeds `result` with ZF|CF and clears the rest via
         // setEFlagsOSZAPC, i.e. OF/SF/AF/PF are unconditionally cleared.
         self.oszapc.set_oszapc_logic_32(1);
@@ -1550,9 +1398,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPSLLD — Packed Shift Left Logical Dwords by immediate (VEX.L aware)
     /// Used in EVEX as EVEX.66.0F.W0 72 /6 ib
-    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpslld_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
         let count = instr.ib() as u32;
 
@@ -1594,9 +1442,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPSRLD — Packed Shift Right Logical Dwords by immediate (VEX.L aware)
     /// Used in EVEX as EVEX.66.0F.W0 72 /2 ib
-    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpsrld_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
         let count = instr.ib() as u32;
 
@@ -2128,7 +1976,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPERMD — Permute dwords in YMM using index from another YMM (AVX2)
     /// Bochs: avx2.cc V256_VPERMD_VdqHdqWdq
     pub(super) fn vpermd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let idx = self.read_ymm_reg(instr.src2()); // VEX.vvvv = index
         let src = if instr.mod_c0() {
             self.read_ymm_reg(instr.src1())
@@ -2150,7 +1998,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs: avx2.cc VPERMQ_VdqWdqIbR / simd_int.h ymm_vpermq.
     /// Operand W is the ModRM r/m source; VEX.vvvv is unused for this form.
     pub(super) fn vpermq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let src = if instr.mod_c0() {
             self.read_ymm_reg(instr.src1())
         } else {
@@ -2173,7 +2021,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `xmm_permilps`). VEX.vvvv supplies the data, ModRM.rm the selectors;
     /// each selector uses only its own lane, so no data crosses lanes.
     pub(super) fn vpermilps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         if instr.get_vl() >= 1 {
             let data = self.read_ymm_reg(instr.src2());
             let ctl = self.vex_read_src2_ymm(instr)?;
@@ -2203,7 +2051,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `xmm_permilpd`). The selector for each qword is bit 1 of the *even*
     /// dword of that qword pair — dwords 0 and 2 within the lane.
     pub(super) fn vpermilpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         if instr.get_vl() >= 1 {
             let data = self.read_ymm_reg(instr.src2());
             let ctl = self.vex_read_src2_ymm(instr)?;
@@ -2234,7 +2082,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `VPERMILPS_VpsWpsIbR`, which applies the same imm8 to every lane via
     /// `xmm_shufps(result, op1, op1, Ib)`). Source is ModRM.rm; no vvvv.
     pub(super) fn vpermilps_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let order = instr.ib();
         if instr.get_vl() >= 1 {
             let src = self.vex_read_src2_ymm(instr)?;
@@ -2264,7 +2112,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `order >>= 2` after every 128-bit lane, so the upper lane uses bits
     /// [3:2] even though only one bit per qword is significant.
     pub(super) fn vpermilpd_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let order = instr.ib();
         if instr.get_vl() >= 1 {
             let src = self.vex_read_src2_ymm(instr)?;
@@ -2295,7 +2143,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         instr: &Instruction,
         op: VexVarShiftOp,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let (values, counts) = if instr.get_vl() >= 1 {
             (
                 self.read_ymm_reg(instr.src2()),
@@ -2394,54 +2242,33 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// VMASKMOVPS / VMASKMOVPD / VPMASKMOVD / VPMASKMOVQ, load direction.
-    /// Bochs avx.cc `VMASKMOVPS_VpsHpsMps` via avx512_helpers.cc
-    /// `avx_masked_load32` / `avx_masked_load64`.
+    /// Bochs avx.cc `VMASKMOVPS_VpsHpsMps`, which turns the sign bits of the
+    /// `vvvv` vector into an element mask and then defers entirely to
+    /// avx512_helpers.cc `avx_masked_load32` / `avx_masked_load64` — the same
+    /// helpers the EVEX masked moves use, ported in `avx512_load.rs`.
     ///
-    /// Masked-off elements are read as zero and — critically — are never
-    /// accessed, so they cannot fault. The accesses stay element-at-a-time for
-    /// exactly that reason; a single wide load would turn suppressed faults
-    /// into real ones.
+    /// Going through them rather than open-coding the loop is what keeps the
+    /// fault behaviour right: the canonicality pre-pass, the high-to-low walk,
+    /// the zero fill of inactive lanes, and the suppression of #AC across the
+    /// element accesses all live there.
     pub(super) fn vmaskmov_load(&mut self, instr: &Instruction, qword: bool) -> super::Result<()> {
         self.prepare_avx()?;
         let elements = Self::vex_mask_elements(instr, qword);
         let mask = self.read_ymm_reg(instr.src2()); // vvvv
-        let bits = Self::vex_mask_bits(&mask, qword, elements);
-        let esize = if qword { 8u64 } else { 4u64 };
-        let seg = BxSegregs::from(instr.seg());
+        let bits = u64::from(Self::vex_mask_bits(&mask, qword, elements));
         let eaddr = self.resolve_addr(instr);
 
-        // Bochs checks every masked-in element for canonicality up front, so a
-        // non-canonical element raises #GP/#SS before any element is read.
-        if instr.as64_l() != 0 {
-            let laddr = self.get_laddr64(seg as usize, eaddr);
-            for n in 0..elements {
-                if (bits & (1 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(esize * n as u64))
-                {
-                    return self.exception(Self::seg_exception(seg), 0);
-                }
-            }
-        }
-
-        let mut result = BxPackedYmmRegister::default();
-        // Bochs walks high element to low so the highest address faults first.
-        for n in (0..elements).rev() {
-            if (bits & (1 << n)) == 0 {
-                continue; // masked off: stays zero, no memory access
-            }
-            let addr = eaddr.wrapping_add(esize * n as u64);
-            if qword {
-                let v = self.v_read_qword(seg, addr)?;
-                result.set_ymm64u(n, v);
-            } else {
-                let v = self.v_read_dword(seg, addr)?;
-                result.set_ymm32u(n, v);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        if qword {
+            self.avx_masked_load64(instr, eaddr, &mut result, bits)?;
+        } else {
+            self.avx_masked_load32(instr, eaddr, &mut result, bits)?;
         }
 
         if instr.get_vl() >= 1 {
-            self.write_ymm_reg(instr.dst(), result);
+            self.write_ymm_reg(instr.dst(), result.zmm256(0));
         } else {
-            self.write_xmm_reg(instr.dst(), result.ymm128(0));
+            self.write_xmm_reg(instr.dst(), result.zmm128(0));
         }
         Ok(())
     }
@@ -2450,55 +2277,22 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs avx.cc `VMASKMOVPS_MpsHpsVps` via avx512_helpers.cc
     /// `avx_masked_store32` / `avx_masked_store64`.
     ///
-    /// Bochs probes every masked-in element with an unlocked RMW read before
-    /// writing any of them, so the store either faults with memory untouched
-    /// or completes in full. Masked-off elements are left alone.
+    /// Those helpers probe every active element with an unlocked RMW read
+    /// before committing any of them, so the store either faults with memory
+    /// untouched or completes in full, and they suppress #AC while doing it.
     pub(super) fn vmaskmov_store(&mut self, instr: &Instruction, qword: bool) -> super::Result<()> {
         self.prepare_avx()?;
         let elements = Self::vex_mask_elements(instr, qword);
         let mask = self.read_ymm_reg(instr.src2()); // vvvv
-        let data = self.read_ymm_reg(instr.dst()); // nnn
-        let bits = Self::vex_mask_bits(&mask, qword, elements);
-        let esize = if qword { 8u64 } else { 4u64 };
-        let seg = BxSegregs::from(instr.seg());
+        let bits = u64::from(Self::vex_mask_bits(&mask, qword, elements));
+        let data = self.vmm[instr.dst() as usize]; // nnn
         let eaddr = self.resolve_addr(instr);
 
-        if instr.as64_l() != 0 {
-            let laddr = self.get_laddr64(seg as usize, eaddr);
-            for n in 0..elements {
-                if (bits & (1 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(esize * n as u64))
-                {
-                    return self.exception(Self::seg_exception(seg), 0);
-                }
-            }
+        if qword {
+            self.avx_masked_store64(instr, eaddr, &data, bits)
+        } else {
+            self.avx_masked_store32(instr, eaddr, &data, bits)
         }
-
-        // Probe pass — the read value is deliberately unused; this exists only
-        // so a fault on any element happens before the first write.
-        for n in (0..elements).rev() {
-            if (bits & (1 << n)) == 0 {
-                continue;
-            }
-            let addr = eaddr.wrapping_add(esize * n as u64);
-            if qword {
-                self.v_read_rmw_qword(seg, addr)?;
-            } else {
-                self.v_read_rmw_dword(seg, addr)?;
-            }
-        }
-
-        for n in 0..elements {
-            if (bits & (1 << n)) == 0 {
-                continue;
-            }
-            let addr = eaddr.wrapping_add(esize * n as u64);
-            if qword {
-                self.v_write_qword(seg, addr, data.ymm64u(n))?;
-            } else {
-                self.v_write_dword(seg, addr, data.ymm32u(n))?;
-            }
-        }
-        Ok(())
     }
 
     /// VPCLMULQDQ — carry-less multiply, per 128-bit lane
@@ -2859,26 +2653,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             return self.exception(Exception::Ud, 0);
         }
         Ok(())
-    }
-
-    /// VFMADD132PS — V * W + H, packed single-precision (VEX FMA)
-    pub(super) fn vfmadd132ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.vex_fma_packed_ps(instr, VexFmaForm::F132, VexPackedFmaOp::Fmadd)
-    }
-
-    /// VFMADD132PD — V * W + H, packed double-precision (VEX FMA)
-    pub(super) fn vfmadd132pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.vex_fma_packed_pd(instr, VexFmaForm::F132, VexPackedFmaOp::Fmadd)
-    }
-
-    /// VFMADD132SS — scalar single: low f32 = V * W + H.
-    pub(super) fn vfmadd132ss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.vex_fma_scalar_ss(instr, VexFmaForm::F132, VexScalarFmaOp::Fmadd)
-    }
-
-    /// VFMADD132SD — scalar double: low f64 = V * W + H.
-    pub(super) fn vfmadd132sd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.vex_fma_scalar_sd(instr, VexFmaForm::F132, VexScalarFmaOp::Fmadd)
     }
 
     // ========================================================================
@@ -4361,9 +4135,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ========================================================================
 
     /// VPSRLQ — Packed Shift Right Logical Qwords by immediate (VEX.L aware)
-    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpsrlq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
@@ -4401,9 +4175,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// VPSLLQ — Packed Shift Left Logical Qwords by immediate (VEX.L aware)
-    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpsllq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
@@ -4441,9 +4215,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// VPSRLW — Packed Shift Right Logical Words by immediate (VEX.L aware)
-    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpsrlw_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
@@ -4481,9 +4255,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// VPSLLW — Packed Shift Left Logical Words by immediate (VEX.L aware)
-    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpsllw_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
@@ -4521,10 +4295,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// VPSRAW — Packed Shift Right Arithmetic Words by immediate (VEX.L aware)
-    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     /// Arithmetic shift sign-extends; count clamped to 15 if > 15.
     pub(super) fn vpsraw_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let count_raw = instr.ib() as u32;
         let count = if count_raw > 15 { 15 } else { count_raw };
@@ -4559,10 +4333,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     /// VPSRAD — Packed Shift Right Arithmetic Dwords by immediate (VEX.L aware)
-    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     /// Arithmetic shift sign-extends; count clamped to 31 if > 31.
     pub(super) fn vpsrad_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let count_raw = instr.ib() as u32;
         let count = if count_raw > 31 { 31 } else { count_raw };
@@ -4598,9 +4372,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPSLLDQ — Packed Shift Left Double Quadword by immediate (VEX.L aware)
     /// Byte-granularity left shift of each 128-bit lane. Immediate = byte count (0-15).
-    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpslldq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let shift = instr.ib() as usize;
         let shift = if shift > 15 { 16 } else { shift };
@@ -4648,9 +4422,9 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPSRLDQ — Packed Shift Right Double Quadword by immediate (VEX.L aware)
     /// Byte-granularity right shift of each 128-bit lane. Immediate = byte count (0-15).
-    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpsrldq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
+        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let shift = instr.ib() as usize;
         let shift = if shift > 15 { 16 } else { shift };
