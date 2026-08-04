@@ -143,9 +143,17 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.cr4.get()
     }
 
+    /// CR4 controls SSE and AVX readiness through OSFXSR and OSXSAVE, and the
+    /// icache state gate reads that readiness out of `fetch_mode_mask`. Refresh
+    /// it here for the same reason `set_cr4` does after a guest `MOV CR4`:
+    /// leaving it stale would let the gate admit an AVX instruction the guest
+    /// has just disabled, or reject one it has just enabled.
     #[inline]
     pub(crate) fn set_cr4_raw_for_api(&mut self, v: u32) {
         self.cr4.set32(v);
+        self.handle_fpu_mmx_mode_change();
+        self.handle_sse_mode_change();
+        self.handle_avx_mode_change();
     }
 
     /// CR8 is not modeled as a dedicated field — it's sourced from the
@@ -167,6 +175,12 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Write CR0 without BOCHS-level checks. Used by `reg_write` where
     /// the caller has taken responsibility for validity.
+    ///
+    /// CR0.TS and CR0.EM feed the SSE/AVX readiness bits that the icache state
+    /// gate reads out of `fetch_mode_mask`, and `update_fetch_mode_mask` alone
+    /// would not refresh them — it deliberately preserves the FPU/SSE/AVX bits
+    /// and only recomputes D_B and LONG64. They stay correct here because
+    /// `handle_cpu_mode_change` ends by calling `handle_avx_mode_change`.
     #[inline]
     pub(crate) fn set_cr0_raw_for_api(&mut self, v: u32) {
         self.cr0.set32(v);

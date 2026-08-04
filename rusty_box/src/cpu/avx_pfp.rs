@@ -160,7 +160,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VCVTDQ2PS — packed i32 → f32 over VL.
     pub(super) fn vcvtdq2ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let mut op = self.vex_read_src2_ymm(instr)?;
             let mut status = self.sse_status();
@@ -247,7 +246,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VCVTDQ2PD — 2 (VL=128) or 4 (VL=256) i32 → f64. Exact for every i32,
     /// so Bochs performs no exception check.
     pub(super) fn vcvtdq2pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op2 = self.vex_read_widening_src(instr)?;
         if instr.get_vl() >= 1 {
             let mut result = BxPackedYmmRegister::default();
@@ -266,7 +264,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VCVTPS2PD — 2 (VL=128) or 4 (VL=256) f32 → f64.
     pub(super) fn vcvtps2pd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op2 = self.vex_read_widening_src(instr)?;
         let mut status = self.sse_status();
         if instr.get_vl() >= 1 {
@@ -289,7 +286,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VCVTPD2PS — 2 (VL=128) or 4 (VL=256) f64 → f32 into an xmm result;
     /// unused upper lanes zeroed.
     pub(super) fn vcvtpd2ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut result = BxPackedXmmRegister::default();
         if instr.get_vl() >= 1 {
             let op2 = self.vex_read_src2_ymm(instr)?;
@@ -454,7 +450,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vsqrtss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
         let mut status = self.sse_status();
@@ -467,7 +462,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vsqrtsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
         let mut status = self.sse_status();
@@ -500,7 +494,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vcmpss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let predicate = instr.ib() & 0x1F;
         let w = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
@@ -513,7 +506,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vcmpsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let predicate = instr.ib() & 0x1F;
         let w = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
@@ -531,7 +523,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ════════════════════════════════════════════════════════════════════
 
     pub(super) fn vshufps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let order = instr.ib() as usize;
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
@@ -559,7 +550,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vshufpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let order = instr.ib() as usize;
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
@@ -625,7 +615,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ════════════════════════════════════════════════════════════════════
 
     pub(super) fn vblendps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut mask = instr.ib();
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
@@ -648,7 +637,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vblendpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut mask = instr.ib();
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
@@ -678,7 +666,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ════════════════════════════════════════════════════════════════════
 
     pub(super) fn vblendvps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
             let op2 = self.vex_read_src2_ymm(instr)?;
@@ -701,7 +688,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vblendvpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
             let op2 = self.vex_read_src2_ymm(instr)?;
@@ -730,7 +716,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ════════════════════════════════════════════════════════════════════
 
     pub(super) fn vdpps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mask = instr.ib();
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
@@ -757,7 +742,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vdppd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.src2());
         let op2 = self.vex_read_src2_xmm(instr)?;
         let mut status = self.sse_status();
@@ -773,7 +757,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ════════════════════════════════════════════════════════════════════
 
     pub(super) fn vunpcklps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
             let op2 = self.vex_read_src2_ymm(instr)?;
@@ -800,7 +783,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vunpckhps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
             let op2 = self.vex_read_src2_ymm(instr)?;
@@ -827,7 +809,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vunpcklpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
             let op2 = self.vex_read_src2_ymm(instr)?;
@@ -857,7 +838,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VMOVSS xmm1, xmm2, xmm3 (0F 10 reg) / VMOVSS xmm1, m32 (0F 10 mem).
     pub(super) fn vmovss_load(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             let mut result = self.read_xmm_reg(instr.src2());
             result.set_xmm32u(0, self.read_xmm_reg(instr.src1()).xmm32u(0));
@@ -873,7 +853,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VMOVSD xmm1, xmm2, xmm3 (F2 0F 10 reg) / VMOVSD xmm1, m64 (mem).
     pub(super) fn vmovsd_load(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             let mut result = self.read_xmm_reg(instr.src2());
             result.set_xmm64u(0, self.read_xmm_reg(instr.src1()).xmm64u(0));
@@ -890,7 +869,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VMOVSS xmm1, xmm2, xmm3 (0F 11 reg — rm register is the destination,
     /// roles normalized by decode) / VMOVSS m32, xmm1 (mem store).
     pub(super) fn vmovss_store(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             let mut result = self.read_xmm_reg(instr.src2());
             result.set_xmm32u(0, self.read_xmm_reg(instr.src1()).xmm32u(0));
@@ -906,7 +884,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VMOVSD store form (F2 0F 11).
     pub(super) fn vmovsd_store(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             let mut result = self.read_xmm_reg(instr.src2());
             result.set_xmm64u(0, self.read_xmm_reg(instr.src1()).xmm64u(0));
@@ -928,7 +905,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VMOVLPS/VMOVLPD xmm1, xmm2, m64.
     pub(super) fn vmovlp(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val = self.v_read_qword(seg, eaddr)?;
@@ -940,7 +916,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VMOVHPS/VMOVHPD xmm1, xmm2, m64.
     pub(super) fn vmovhp(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val = self.v_read_qword(seg, eaddr)?;
@@ -952,7 +927,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VMOVHLPS xmm1, xmm2, xmm3 — low qword = xmm3 high qword.
     pub(super) fn vmovhlps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut result = self.read_xmm_reg(instr.src2());
         result.set_xmm64u(0, self.read_xmm_reg(instr.src1()).xmm64u(1));
         self.write_xmm_reg(instr.dst(), result);
@@ -961,7 +935,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VMOVLHPS xmm1, xmm2, xmm3 — high qword = xmm3 low qword.
     pub(super) fn vmovlhps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut result = self.read_xmm_reg(instr.src2());
         result.set_xmm64u(1, self.read_xmm_reg(instr.src1()).xmm64u(0));
         self.write_xmm_reg(instr.dst(), result);
@@ -975,7 +948,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ════════════════════════════════════════════════════════════════════
 
     pub(super) fn vmovsldup(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let op2 = self.vex_read_src2_ymm(instr)?;
             let mut result = BxPackedYmmRegister::default();
@@ -997,7 +969,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vmovshdup(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let op2 = self.vex_read_src2_ymm(instr)?;
             let mut result = BxPackedYmmRegister::default();
@@ -1021,7 +992,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VMOVDDUP — VL=128 duplicates the low qword (memory form reads m64);
     /// VL=256 duplicates the even qwords per 128-bit lane.
     pub(super) fn vmovddup(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let op2 = self.vex_read_src2_ymm(instr)?;
             let mut result = BxPackedYmmRegister::default();
@@ -1055,7 +1025,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ════════════════════════════════════════════════════════════════════
 
     pub(super) fn vcvtss2sd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
         let mut status = self.sse_status();
@@ -1067,7 +1036,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vcvtsd2ss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
         let mut status = self.sse_status();
@@ -1105,7 +1073,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VCVTSI2SD (dword source) — exact for every i32, so no status check.
     pub(super) fn vcvtsi2sd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op2 = self.vcvtsi_read_src32(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
         result.set_xmm64u(0, i32_to_f64(op2));
@@ -1114,7 +1081,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vcvtsi2sd_eq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op2 = self.vcvtsi_read_src64(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
         let mut status = self.sse_status();
@@ -1127,7 +1093,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vcvtsi2ss_ed(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op2 = self.vcvtsi_read_src32(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
         let mut status = self.sse_status();
@@ -1140,7 +1105,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vcvtsi2ss_eq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op2 = self.vcvtsi_read_src64(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
         let mut status = self.sse_status();
@@ -1158,7 +1122,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ════════════════════════════════════════════════════════════════════
 
     pub(super) fn vroundps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let imm8 = instr.ib();
         if instr.get_vl() >= 1 {
             let mut op = self.vex_read_src2_ymm(instr)?;
@@ -1183,7 +1146,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vroundpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let imm8 = instr.ib();
         if instr.get_vl() >= 1 {
             let mut op = self.vex_read_src2_ymm(instr)?;
@@ -1208,7 +1170,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vroundss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let imm8 = instr.ib();
         let w = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
@@ -1222,7 +1183,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vroundsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let imm8 = instr.ib();
         let w = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
@@ -1297,7 +1257,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vunpckhpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
             let op2 = self.vex_read_src2_ymm(instr)?;

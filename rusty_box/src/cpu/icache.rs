@@ -749,9 +749,14 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
             // here, once per trace fill, so the dispatch loop is untouched. The
             // decoded length is preserved: Bochs's decode also succeeds, only
             // the handler changes.
+            // Bochs assignHandler additionally swaps the handler for BxNoAVX /
+            // BxNoEVEX when the instruction needs CPU state the guest has not
+            // enabled. Applied after the ISA gate and in the same place, for
+            // the same reason; safe to cache because the icache is keyed on
+            // fetch_mode_mask, so enabling AVX yields different entries.
             if decode_result.is_ok() {
                 let decoded = self.i_cache.mpool[current_mpindex].get_ia_opcode();
-                let resolved = self.isa_resolve_opcode(decoded);
+                let resolved = self.state_resolve_opcode(self.isa_resolve_opcode(decoded));
                 if resolved != decoded {
                     self.i_cache.mpool[current_mpindex].set_ia_opcode(resolved);
                 }

@@ -194,7 +194,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VZEROUPPER — Zero upper 128 bits of all YMM registers.
     /// Bochs avx.cc: for i in 0..nregs { vmm[i].set_ymm128(1, 0); }
     pub(super) fn vzeroupper(&mut self, _instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let nregs = if self.long64_mode() { 16 } else { 8 };
         for i in 0..nregs {
             // Clear upper 128 bits (ymm128[1]) and ZMM upper 256 bits
@@ -208,7 +207,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VZEROALL — Zero all YMM registers (all 256 bits).
     /// Bochs avx.cc: for i in 0..nregs { vmm[i] = 0; }
     pub(super) fn vzeroall(&mut self, _instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let nregs = if self.long64_mode() { 16 } else { 8 };
         for i in 0..nregs {
             self.vmm[i].clear();
@@ -224,7 +222,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VMOVDQU load — VEX.L=0: XMM <- M128, VEX.L=1: YMM <- M256
     /// Also handles register form (mod=11): dst_reg <- src_reg
     pub(super) fn vmovdqu_load(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             // Register form: copy src1 (rm) to dst (nnn)
             if instr.get_vl() >= 1 {
@@ -251,7 +248,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VMOVDQU store — VEX.L=0: M128 <- XMM, VEX.L=1: M256 <- YMM
     /// Also handles register form (mod=11): dst_reg <- src_reg
     pub(super) fn vmovdqu_store(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             // Register form: copy src1 (nnn) to dst (rm)
             if instr.get_vl() >= 1 {
@@ -279,7 +275,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VMOVDQA/VMOVAPS load — VEX.L=0: XMM <- M128, VEX.L=1: YMM <- M256 (aligned)
     /// Also handles register form (mod=11): dst_reg <- src_reg
     pub(super) fn vmovdqa_load(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             // Register form: copy src1 (rm) to dst (nnn)
             if instr.get_vl() >= 1 {
@@ -306,7 +301,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VMOVDQA store — VEX.L=0: M128 <- XMM, VEX.L=1: M256 <- YMM (aligned)
     /// Also handles register form (mod=11): dst_reg <- src_reg
     pub(super) fn vmovdqa_store(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             // Register form: copy src1 (nnn) to dst (rm)
             if instr.get_vl() >= 1 {
@@ -348,7 +342,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPADDD — Packed Add Dwords (VEX.L aware)
     /// dst = src1 + src2 (element-wise 32-bit add)
     pub(super) fn vpaddd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -388,7 +381,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPXOR / VPXORD — Packed XOR (VEX.L aware)
     /// dst = src1 ^ src2
     pub(super) fn vpxor(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -425,7 +417,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPAND / VPANDD — Packed AND (VEX.L aware)
     pub(super) fn vpand(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -463,7 +454,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPCMPEQD — Packed Compare Equal Dwords (VEX.L aware)
     /// dst[i] = (src1[i] == src2[i]) ? 0xFFFFFFFF : 0
     pub(super) fn vpcmpeqd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -515,7 +505,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSHUFD — Packed Shuffle Dwords (VEX.L aware)
     /// dst[i] = src[imm8[i*2+1:i*2]] for each dword lane
     pub(super) fn vpshufd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let imm = instr.ib();
         if instr.get_vl() >= 1 {
@@ -596,7 +585,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPMOVSXBW — sign-extend 8 (VL128) / 16 (VL256) bytes to words.
     pub(super) fn vpmovsxbw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let src = self.vex_pmov_read(instr, 16)?;
             let mut result = BxPackedYmmRegister::default();
@@ -617,7 +605,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPMOVSXBD — sign-extend 4 (VL128) / 8 (VL256) bytes to dwords.
     pub(super) fn vpmovsxbd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let src = self.vex_pmov_read(instr, 8)?;
             let mut result = BxPackedYmmRegister::default();
@@ -638,7 +625,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPMOVSXBQ — sign-extend 2 (VL128) / 4 (VL256) bytes to qwords.
     pub(super) fn vpmovsxbq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let src = self.vex_pmov_read(instr, 4)?;
             let mut result = BxPackedYmmRegister::default();
@@ -659,7 +645,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPMOVSXWD — sign-extend 4 (VL128) / 8 (VL256) words to dwords.
     pub(super) fn vpmovsxwd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let src = self.vex_pmov_read(instr, 16)?;
             let mut result = BxPackedYmmRegister::default();
@@ -682,7 +667,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPMOVSXWQ — sign-extend 2 (VL128) / 4 (VL256) words to qwords.
     pub(super) fn vpmovsxwq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let src = self.vex_pmov_read(instr, 8)?;
             let mut result = BxPackedYmmRegister::default();
@@ -705,7 +689,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPMOVSXDQ — sign-extend 2 (VL128) / 4 (VL256) dwords to qwords.
     pub(super) fn vpmovsxdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let src = self.vex_pmov_read(instr, 16)?;
             let mut result = BxPackedYmmRegister::default();
@@ -738,7 +721,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPMOVZXBW — zero-extend 8 (VL128) / 16 (VL256) bytes to words.
     pub(super) fn vpmovzxbw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let src = self.vex_pmov_read(instr, 16)?;
             let mut result = BxPackedYmmRegister::default();
@@ -759,7 +741,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPMOVZXBD — zero-extend 4 (VL128) / 8 (VL256) bytes to dwords.
     pub(super) fn vpmovzxbd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let src = self.vex_pmov_read(instr, 8)?;
             let mut result = BxPackedYmmRegister::default();
@@ -780,7 +761,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPMOVZXBQ — zero-extend 2 (VL128) / 4 (VL256) bytes to qwords.
     pub(super) fn vpmovzxbq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let src = self.vex_pmov_read(instr, 4)?;
             let mut result = BxPackedYmmRegister::default();
@@ -801,7 +781,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPMOVZXWD — zero-extend 4 (VL128) / 8 (VL256) words to dwords.
     pub(super) fn vpmovzxwd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let src = self.vex_pmov_read(instr, 16)?;
             let mut result = BxPackedYmmRegister::default();
@@ -824,7 +803,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPMOVZXWQ — zero-extend 2 (VL128) / 4 (VL256) words to qwords.
     pub(super) fn vpmovzxwq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let src = self.vex_pmov_read(instr, 8)?;
             let mut result = BxPackedYmmRegister::default();
@@ -847,7 +825,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPMOVZXDQ — zero-extend 2 (VL128) / 4 (VL256) dwords to qwords.
     pub(super) fn vpmovzxdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let src = self.vex_pmov_read(instr, 16)?;
             let mut result = BxPackedYmmRegister::default();
@@ -885,7 +862,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPTEST — logical compare over the full VL (Bochs avx.cc VPTEST_VdqWdqR):
     /// ZF = ((rm AND dst) == 0), CF = ((rm AND NOT dst) == 0).
     pub(super) fn vptest(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         // Bochs avx.cc VPTEST_VdqWdqR: clearEFlagsOSZAPC()
         self.oszapc.set_oszapc_logic_32(1);
         if instr.get_vl() >= 1 {
@@ -930,7 +906,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs reads both operands as full YMM registers and iterates
     /// `QWORD_ELEMENTS(len)`, so VL128 sees only the low two qwords.
     pub(super) fn vtest(&mut self, instr: &Instruction, qword_elements: bool) -> super::Result<()> {
-        self.prepare_avx()?;
         // Bochs seeds `result` with ZF|CF and clears the rest via
         // setEFlagsOSZAPC, i.e. OF/SF/AF/PF are unconditionally cleared.
         self.oszapc.set_oszapc_logic_32(1);
@@ -979,7 +954,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VMOVMSKPS — dword sign bits over VL (Bochs avx.cc VMOVMSKPS_GdUps):
     /// 4-bit (VL128) or 8-bit (VL256) mask, zero-extended into the GPR.
     pub(super) fn vmovmskps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut mask: u32 = 0;
         if instr.get_vl() >= 1 {
             let src = self.read_ymm_reg(instr.src1());
@@ -1003,7 +977,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VMOVMSKPD — qword sign bits over VL (Bochs avx.cc VMOVMSKPD_GdUpd):
     /// 2-bit (VL128) or 4-bit (VL256) mask, zero-extended into the GPR.
     pub(super) fn vmovmskpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut mask: u32 = 0;
         if instr.get_vl() >= 1 {
             let src = self.read_ymm_reg(instr.src1());
@@ -1026,7 +999,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPABSB — per-byte absolute value over VL (Bochs HANDLE_AVX_1OP<xmm_pabsb>).
     pub(super) fn vpabsb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let mut op = self.vex_read_src2_ymm(instr)?;
             for lane in 0..2 {
@@ -1045,7 +1017,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPABSW — per-word absolute value over VL (Bochs HANDLE_AVX_1OP<xmm_pabsw>).
     pub(super) fn vpabsw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let mut op = self.vex_read_src2_ymm(instr)?;
             for lane in 0..2 {
@@ -1064,7 +1035,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPABSD — per-dword absolute value over VL (Bochs HANDLE_AVX_1OP<xmm_pabsd>).
     pub(super) fn vpabsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let mut op = self.vex_read_src2_ymm(instr)?;
             for lane in 0..2 {
@@ -1084,7 +1054,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VINSERTPS — insert dword with zero mask (Bochs avx.cc
     /// VINSERTPS_VpsHpsWssIbR/M); vvvv is the first source, upper bits zeroed.
     pub(super) fn vinsertps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let control = instr.ib();
         let op2 = if instr.mod_c0() {
             self.read_xmm_reg(instr.src1())
@@ -1105,7 +1074,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// 3-operand: dst = src1(vvvv) with byte at imm8[3:0] replaced by src2 (r/m).
     /// Decoder maps src2()=vvvv (base), src1()=rm (value), dst()=destination.
     pub(super) fn vpinsrb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let mut op1 = self.read_xmm_reg(instr.src2()); // vvvv = base vector
         let op2 = if instr.mod_c0() {
             // BX_READ_8BIT_REGL — always low byte, never AH/CH/DH/BH
@@ -1123,7 +1091,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPINSRW — insert word from GPR/memory into a copy of the vvvv source.
     /// VEX.128.66.0F.W0 C4 /r ib. Bochs avx.cc `VPINSRW_VdqHdqEwIbR/M`.
     pub(super) fn vpinsrw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let mut op1 = self.read_xmm_reg(instr.src2()); // vvvv = base vector
         let op2 = if instr.mod_c0() {
             self.get_gpr16(instr.src1().into())
@@ -1140,7 +1107,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPINSRD — insert dword from GPR/memory into a copy of the vvvv source.
     /// VEX.128.66.0F3A.W0 22 /r ib. Bochs avx.cc `VPINSRD_VdqHdqEdIbR/M`.
     pub(super) fn vpinsrd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let mut op1 = self.read_xmm_reg(instr.src2()); // vvvv = base vector
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src1().into())
@@ -1157,7 +1123,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPINSRQ — insert qword from GPR/memory into a copy of the vvvv source.
     /// VEX.128.66.0F3A.W1 22 /r ib (64-bit mode only). Bochs `VPINSRQ_VdqHdqEqIbR/M`.
     pub(super) fn vpinsrq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let mut op1 = self.read_xmm_reg(instr.src2()); // vvvv = base vector
         let op2 = if instr.mod_c0() {
             self.get_gpr64(instr.src1().into())
@@ -1174,7 +1139,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VMPSADBW — multiple SADs, per-128-bit lane (Bochs avx2.cc
     /// VMPSADBW_VdqHdqWdqIbR); the upper lane consumes imm8 bits [5:3].
     pub(super) fn vmpsadbw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let ib = instr.ib();
         if instr.get_vl() >= 1 {
             let op1 = self.read_ymm_reg(instr.src2());
@@ -1200,7 +1164,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPHMINPOSUW — horizontal minimum unsigned word (Bochs sse.cc
     /// PHMINPOSUW_VdqWdqR shared by the V128 form), upper bits zeroed.
     pub(super) fn vphminposuw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.vex_read_src2_xmm(instr)?;
         let result = super::sse::phminposuw_core(&op);
         self.write_xmm_reg(instr.dst(), result);
@@ -1210,7 +1173,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VMOVQ VqWq (VEX.128.F3.0F 7E) — load/move low qword, zero the rest
     /// (Bochs ia_opcodes.def BX_IA_VMOVQ_VqWq → MOVQ_VqWqR / MOVSD_VsdWsdM).
     pub(super) fn vmovq_vq_wq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let val = if instr.mod_c0() {
             self.xmm_lo_qword(instr.src1())
         } else {
@@ -1228,7 +1190,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// zeroes the destination above bit 63 (Bochs ia_opcodes.def
     /// BX_IA_VMOVQ_WqVq → MOVQ_VqWqR / MOVSD_WsdVsdM).
     pub(super) fn vmovq_wq_vq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             let mut op = BxPackedXmmRegister::default();
             op.set_xmm64u(0, self.xmm_lo_qword(instr.src1()));
@@ -1246,7 +1207,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// via simd_int.h xmm_pblendvb). The mask register is is4 (imm8[7:4],
     /// decoded into src3); blending is per-byte sign bit, per 128-bit lane.
     pub(super) fn vpblendvb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let mut result = self.read_ymm_reg(instr.src2());
             let op2 = self.vex_read_src2_ymm(instr)?;
@@ -1271,7 +1231,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// 128-bit: dst = [src1[0], src2[0], src1[1], src2[1]]
     /// 256-bit: same per 128-bit lane
     pub(super) fn vpunpckldq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -1316,7 +1275,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPUNPCKHDQ — Unpack and Interleave High Dwords (VEX.L aware)
     pub(super) fn vpunpckhdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -1361,7 +1319,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPSUBD — Packed Subtract Dwords (VEX.L aware)
     pub(super) fn vpsubd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -1400,7 +1357,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Used in EVEX as EVEX.66.0F.W0 72 /6 ib
     /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpslld_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
         let count = instr.ib() as u32;
 
@@ -1444,7 +1400,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Used in EVEX as EVEX.66.0F.W0 72 /2 ib
     /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpsrld_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
         let count = instr.ib() as u32;
 
@@ -1486,7 +1441,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPOR / VPORD — Packed OR (VEX.L aware)
     pub(super) fn vpor(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -1529,7 +1483,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// only a naming distinction.
     /// dst = src1 (VEX.vvvv) with 128-bit lane[imm8[0]] replaced by src2 (rm)
     pub(super) fn vinsert_f128_i128(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         // Read the full 256-bit source (VEX.vvvv)
         let mut result = self.read_ymm_reg(instr.src2());
         let imm = instr.ib();
@@ -1562,7 +1515,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// If imm8[0]=0: dst = src[127:0]; if imm8[0]=1: dst = src[255:128]
     /// Our decoder: dst() = nnn (source YMM), src1() = rm (destination XMM)
     pub(super) fn vextracti128(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let src_idx = instr.dst(); // nnn — source YMM register
         let imm = instr.ib();
         let src = self.read_ymm_reg(src_idx);
@@ -1597,7 +1549,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// bit 3 zeros that half; bit 1 selects op2 instead of op1; bit 0 selects
     /// the 128-bit half of the chosen source.
     pub(super) fn vperm2f128(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_ymm_reg(instr.src2()); // VEX.vvvv
         let op2 = if instr.mod_c0() {
             self.read_ymm_reg(instr.src1()) // rm
@@ -1634,7 +1585,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Matches Bochs VPSHUFB (avx512.cc) — per-lane byte shuffle
     /// dst[i] = (mask[i] & 0x80) ? 0 : data[mask[i] & 0xF]  (within each 128-bit lane)
     pub(super) fn vpshufb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let data_idx = instr.src2(); // VEX.vvvv — data source
 
@@ -1703,7 +1653,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs: op1 = src1 (vvv), op2 = src2 (rm); xmm_palignr(&op2, &op1, imm8);
     ///        write op2 to dst.
     pub(super) fn vpalignr(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let shift = instr.ib() as usize;
 
         if instr.get_vl() >= 1 {
@@ -1798,7 +1747,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// For each dword lane i: dst[i] = (imm8 & (1<<i)) ? src2[i] : src1[i]
     /// src1 = VEX.vvvv (src2()), src2 = rm (src1())
     pub(super) fn vpblendd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let imm8 = instr.ib();
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
@@ -1852,7 +1800,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPBROADCASTB — broadcast byte from XMM[0] to all bytes of dst
     pub(super) fn vpbroadcastb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_byte = if instr.mod_c0() {
             let src = self.read_xmm_reg(instr.src1());
             src.xmmubyte(0)
@@ -1879,7 +1826,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPBROADCASTW — broadcast word from XMM[0] to all words of dst
     pub(super) fn vpbroadcastw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_word = if instr.mod_c0() {
             let src = self.read_xmm_reg(instr.src1());
             src.xmm16u(0)
@@ -1906,7 +1852,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPBROADCASTD — broadcast dword from XMM[0] to all dwords of dst
     pub(super) fn vpbroadcastd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_dword = if instr.mod_c0() {
             let src = self.read_xmm_reg(instr.src1());
             src.xmm32u(0)
@@ -1933,7 +1878,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPBROADCASTQ — broadcast qword from XMM[0] to all qwords of dst
     pub(super) fn vpbroadcastq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_qword = if instr.mod_c0() {
             let src = self.read_xmm_reg(instr.src1());
             src.xmm64u(0)
@@ -1961,7 +1905,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VBROADCASTF128 / VBROADCASTI128 — load 128-bit from memory, copy to both YMM lanes
     /// Bochs: avx.cc VBROADCASTF128_VdqMdq (shared handler for both F128 and I128)
     pub(super) fn vbroadcast_f128_i128(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let src = self.v_read_xmmword(seg, eaddr)?;
@@ -1976,7 +1919,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPERMD — Permute dwords in YMM using index from another YMM (AVX2)
     /// Bochs: avx2.cc V256_VPERMD_VdqHdqWdq
     pub(super) fn vpermd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let idx = self.read_ymm_reg(instr.src2()); // VEX.vvvv = index
         let src = if instr.mod_c0() {
             self.read_ymm_reg(instr.src1())
@@ -1998,7 +1940,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Bochs: avx2.cc VPERMQ_VdqWdqIbR / simd_int.h ymm_vpermq.
     /// Operand W is the ModRM r/m source; VEX.vvvv is unused for this form.
     pub(super) fn vpermq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let src = if instr.mod_c0() {
             self.read_ymm_reg(instr.src1())
         } else {
@@ -2021,7 +1962,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `xmm_permilps`). VEX.vvvv supplies the data, ModRM.rm the selectors;
     /// each selector uses only its own lane, so no data crosses lanes.
     pub(super) fn vpermilps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         if instr.get_vl() >= 1 {
             let data = self.read_ymm_reg(instr.src2());
             let ctl = self.vex_read_src2_ymm(instr)?;
@@ -2051,7 +1991,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `xmm_permilpd`). The selector for each qword is bit 1 of the *even*
     /// dword of that qword pair — dwords 0 and 2 within the lane.
     pub(super) fn vpermilpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         if instr.get_vl() >= 1 {
             let data = self.read_ymm_reg(instr.src2());
             let ctl = self.vex_read_src2_ymm(instr)?;
@@ -2082,7 +2021,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `VPERMILPS_VpsWpsIbR`, which applies the same imm8 to every lane via
     /// `xmm_shufps(result, op1, op1, Ib)`). Source is ModRM.rm; no vvvv.
     pub(super) fn vpermilps_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let order = instr.ib();
         if instr.get_vl() >= 1 {
             let src = self.vex_read_src2_ymm(instr)?;
@@ -2112,7 +2050,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// `order >>= 2` after every 128-bit lane, so the upper lane uses bits
     /// [3:2] even though only one bit per qword is significant.
     pub(super) fn vpermilpd_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let order = instr.ib();
         if instr.get_vl() >= 1 {
             let src = self.vex_read_src2_ymm(instr)?;
@@ -2143,7 +2080,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         instr: &Instruction,
         op: VexVarShiftOp,
     ) -> super::Result<()> {
-        self.prepare_avx()?;
         let (values, counts) = if instr.get_vl() >= 1 {
             (
                 self.read_ymm_reg(instr.src2()),
@@ -2252,7 +2188,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// the zero fill of inactive lanes, and the suppression of #AC across the
     /// element accesses all live there.
     pub(super) fn vmaskmov_load(&mut self, instr: &Instruction, qword: bool) -> super::Result<()> {
-        self.prepare_avx()?;
         let elements = Self::vex_mask_elements(instr, qword);
         let mask = self.read_ymm_reg(instr.src2()); // vvvv
         let bits = u64::from(Self::vex_mask_bits(&mask, qword, elements));
@@ -2281,7 +2216,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// before committing any of them, so the store either faults with memory
     /// untouched or completes in full, and they suppress #AC while doing it.
     pub(super) fn vmaskmov_store(&mut self, instr: &Instruction, qword: bool) -> super::Result<()> {
-        self.prepare_avx()?;
         let elements = Self::vex_mask_elements(instr, qword);
         let mask = self.read_ymm_reg(instr.src2()); // vvvv
         let bits = u64::from(Self::vex_mask_bits(&mask, qword, elements));
@@ -2301,7 +2235,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// 256-bit form (the VPCLMULQDQ extension) applies the same imm8 selectors
     /// independently to each lane.
     pub(super) fn vpclmulqdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let imm8 = instr.ib();
         let sel1 = (imm8 & 1) as usize;
         let sel2 = ((imm8 >> 4) & 1) as usize;
@@ -2330,7 +2263,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// destination width, so the memory form touches VL/2 bytes
     /// (Bochs `LOAD_Half_Vector`).
     pub(super) fn vcvtph2ps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
         // Bochs: ignore MXCSR.DAZ and never report #D for this conversion.
         status.softfloat_denormals_are_zeros = false;
@@ -2357,7 +2289,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// and is half the source width; nnn is the source. imm8[2] selects
     /// MXCSR.RC, otherwise imm8[1:0] overrides the rounding mode.
     pub(super) fn vcvtps2ph(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
         let control = instr.ib();
         // Bochs: ignore MXCSR.FUZ; imm8 may override the rounding mode.
@@ -2403,7 +2334,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         form: VexFmaForm,
         op: VexPackedFmaOp,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         self.require_fma()?;
         let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
         let dst_idx = instr.dst();
@@ -2448,7 +2378,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         form: VexFmaForm,
         op: VexPackedFmaOp,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         self.require_fma()?;
         let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
         let dst_idx = instr.dst();
@@ -2493,7 +2422,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         form: VexFmaForm,
         op: VexScalarFmaOp,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         self.require_fma()?;
         let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
         let dst_idx = instr.dst();
@@ -2521,7 +2449,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         form: VexFmaForm,
         op: VexScalarFmaOp,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         self.require_fma()?;
         let mut status = mxcsr_to_softfloat_status_word(self.mxcsr);
         let dst_idx = instr.dst();
@@ -2557,7 +2484,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         form: VexFmaForm,
         op: VexScalarFmaOp,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let mut result = self.read_xmm_reg(dst_idx);
 
@@ -2597,7 +2523,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         form: VexFmaForm,
         op: VexScalarFmaOp,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let mut result = self.read_xmm_reg(dst_idx);
 
@@ -2662,7 +2587,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPUNPCKLBW — Unpack and Interleave Low Bytes (VEX.L aware)
     /// Per 128-bit lane: result[2i] = src1[i], result[2i+1] = src2[i] for i in 0..8
     pub(super) fn vpunpcklbw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -2708,7 +2632,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPUNPCKHBW — Unpack and Interleave High Bytes (VEX.L aware)
     /// Per 128-bit lane: result[2i] = src1[8+i], result[2i+1] = src2[8+i] for i in 0..8
     pub(super) fn vpunpckhbw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -2754,7 +2677,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPUNPCKLWD — Unpack and Interleave Low Words (VEX.L aware)
     /// Per 128-bit lane: result[2i] = src1[i], result[2i+1] = src2[i] for i in 0..4
     pub(super) fn vpunpcklwd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -2800,7 +2722,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPUNPCKHWD — Unpack and Interleave High Words (VEX.L aware)
     /// Per 128-bit lane: result[2i] = src1[4+i], result[2i+1] = src2[4+i] for i in 0..4
     pub(super) fn vpunpckhwd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -2846,7 +2767,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPUNPCKLQDQ — Unpack and Interleave Low Qwords (VEX.L aware)
     /// Per 128-bit lane: result[0] = src1[0], result[1] = src2[0]
     pub(super) fn vpunpcklqdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -2886,7 +2806,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPUNPCKHQDQ — Unpack and Interleave High Qwords (VEX.L aware)
     /// Per 128-bit lane: result[0] = src1[1], result[1] = src2[1]
     pub(super) fn vpunpckhqdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -2930,7 +2849,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPADDQ — Packed Add Qwords (VEX.L aware)
     /// dst[i] = vvvv[i] + src[i] (element-wise 64-bit wrapping add)
     pub(super) fn vpaddq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -2968,7 +2886,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPADDW — Packed Add Words (VEX.L aware)
     /// dst[i] = vvvv[i] + src[i] (element-wise 16-bit wrapping add)
     pub(super) fn vpaddw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3006,7 +2923,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPADDB — Packed Add Bytes (VEX.L aware)
     /// dst[i] = vvvv[i] + src[i] (element-wise 8-bit wrapping add)
     pub(super) fn vpaddb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3044,7 +2960,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSUBQ — Packed Subtract Qwords (VEX.L aware)
     /// dst[i] = vvvv[i] - src[i] (element-wise 64-bit wrapping sub)
     pub(super) fn vpsubq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3082,7 +2997,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSUBW — Packed Subtract Words (VEX.L aware)
     /// dst[i] = vvvv[i] - src[i] (element-wise 16-bit wrapping sub)
     pub(super) fn vpsubw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3120,7 +3034,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSUBB — Packed Subtract Bytes (VEX.L aware)
     /// dst[i] = vvvv[i] - src[i] (element-wise 8-bit wrapping sub)
     pub(super) fn vpsubb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3162,7 +3075,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPANDN — Packed AND NOT (VEX.L aware)
     /// dst[i] = NOT(vvvv[i]) AND src[i]
     pub(super) fn vpandn(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3205,7 +3117,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// dst_q[i] = (vvvv_d[i*2] as u64) * (src_d[i*2] as u64)
     /// Uses even-numbered dwords only, produces qword results
     pub(super) fn vpmuludq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3244,7 +3155,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// dst_q[i] = (vvvv_d[i*2] as i32 as i64) * (src_d[i*2] as i32 as i64)
     /// Uses even-numbered dwords only (signed), produces qword results
     pub(super) fn vpmuldq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3286,7 +3196,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPMULLD — Packed Multiply Low Dwords (VEX.L aware)
     /// dst[i] = (vvvv[i] as i32).wrapping_mul(src[i] as i32) as u32
     pub(super) fn vpmulld(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3324,7 +3233,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPMULLW — Packed Multiply Low Words (VEX.L aware)
     /// dst[i] = low 16 bits of (vvvv[i] * src[i])
     pub(super) fn vpmullw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3364,7 +3272,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPMULHW — Packed Multiply High Words Signed (VEX.L aware)
     /// dst[i] = high 16 bits of (vvvv[i] as i16 * src[i] as i16)
     pub(super) fn vpmulhw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3404,7 +3311,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPMULHUW — Packed Multiply High Words Unsigned (VEX.L aware)
     /// dst[i] = high 16 bits of (vvvv[i] as u16 * src[i] as u16)
     pub(super) fn vpmulhuw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3444,7 +3350,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPMULHRSW — Packed Multiply High with Round and Scale (VEX.L aware)
     /// Bochs simd_int.h: result[i] = (((src1[i] * src2[i]) >> 14) + 1) >> 1
     pub(super) fn vpmulhrsw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -3566,7 +3471,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 
     pub(super) fn vpsadbw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         // Bochs simd_int.h xmm_psadbw.
         if instr.get_vl() >= 1 {
@@ -3830,7 +3734,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSRLQ — Packed Shift Right Logical Qwords by XMM count (VEX.L aware)
     /// Count is from bits [63:0] of src XMM. If count > 63, result is zero.
     pub(super) fn vpsrlq_reg(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
                                      // Shift count from ModRM source (register or memory)
@@ -3869,7 +3772,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSLLD — Packed Shift Left Logical Dwords by XMM count (VEX.L aware)
     /// Count is from bits [63:0] of src XMM. If count > 31, result is zero.
     pub(super) fn vpslld_reg(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         let count = if instr.mod_c0() {
@@ -3907,7 +3809,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSLLQ — Packed Shift Left Logical Qwords by XMM count (VEX.L aware)
     /// Count is from bits [63:0] of src XMM. If count > 63, result is zero.
     pub(super) fn vpsllq_reg(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         let count = if instr.mod_c0() {
@@ -3945,7 +3846,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSRLW — Packed Shift Right Logical Words by XMM count (VEX.L aware)
     /// Count is from bits [63:0] of src XMM. If count > 15, result is zero.
     pub(super) fn vpsrlw_reg(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         let count = if instr.mod_c0() {
@@ -3983,7 +3883,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSRLD — Packed Shift Right Logical Dwords by XMM count (VEX.L aware)
     /// Count is from bits [63:0] of src XMM. If count > 31, result is zero.
     pub(super) fn vpsrld_reg(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         let count = if instr.mod_c0() {
@@ -4021,7 +3920,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSRAW — Packed Shift Right Arithmetic Words by XMM count (VEX.L aware)
     /// Count is from bits [63:0] of src XMM. If count > 15, count is clamped to 15.
     pub(super) fn vpsraw_reg(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         let count_raw = if instr.mod_c0() {
@@ -4058,7 +3956,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSRAD — Packed Shift Right Arithmetic Dwords by XMM count (VEX.L aware)
     /// Count is from bits [63:0] of src XMM. If count > 31, count is clamped to 31.
     pub(super) fn vpsrad_reg(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         let count_raw = if instr.mod_c0() {
@@ -4095,7 +3992,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSLLW — Packed Shift Left Logical Words by XMM count (VEX.L aware)
     /// Count is from bits [63:0] of src XMM. If count > 15, result is zero.
     pub(super) fn vpsllw_reg(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         let count = if instr.mod_c0() {
@@ -4137,7 +4033,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSRLQ — Packed Shift Right Logical Qwords by immediate (VEX.L aware)
     /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpsrlq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
@@ -4177,7 +4072,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSLLQ — Packed Shift Left Logical Qwords by immediate (VEX.L aware)
     /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpsllq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
@@ -4217,7 +4111,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSRLW — Packed Shift Right Logical Words by immediate (VEX.L aware)
     /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpsrlw_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
@@ -4257,7 +4150,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPSLLW — Packed Shift Left Logical Words by immediate (VEX.L aware)
     /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpsllw_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
@@ -4298,7 +4190,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     /// Arithmetic shift sign-extends; count clamped to 15 if > 15.
     pub(super) fn vpsraw_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let count_raw = instr.ib() as u32;
         let count = if count_raw > 15 { 15 } else { count_raw };
@@ -4336,7 +4227,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     /// Arithmetic shift sign-extends; count clamped to 31 if > 31.
     pub(super) fn vpsrad_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let count_raw = instr.ib() as u32;
         let count = if count_raw > 31 { 31 } else { count_raw };
@@ -4374,7 +4264,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Byte-granularity left shift of each 128-bit lane. Immediate = byte count (0-15).
     /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpslldq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let shift = instr.ib() as usize;
         let shift = if shift > 15 { 16 } else { shift };
@@ -4424,7 +4313,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Byte-granularity right shift of each 128-bit lane. Immediate = byte count (0-15).
     /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vpsrldq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_avx()?;
         let dst_idx = instr.src2(); // VEX.vvvv
         let shift = instr.ib() as usize;
         let shift = if shift > 15 { 16 } else { shift };
@@ -4477,7 +4365,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPCMPEQB — Packed Compare Equal Bytes (VEX.L aware)
     /// dst[i] = (vvvv[i] == src[i]) ? 0xFF : 0x00
     pub(super) fn vpcmpeqb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -4529,7 +4416,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPCMPEQW — Packed Compare Equal Words (VEX.L aware)
     /// dst[i] = (vvvv[i] == src[i]) ? 0xFFFF : 0x0000
     pub(super) fn vpcmpeqw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -4581,7 +4467,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPCMPEQQ — Packed Compare Equal Qwords (VEX.L aware)
     /// dst[i] = (vvvv[i] == src[i]) ? 0xFFFF_FFFF_FFFF_FFFF : 0
     pub(super) fn vpcmpeqq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -4633,7 +4518,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPCMPGTB — Packed Compare Greater Than Bytes, signed (VEX.L aware)
     /// dst[i] = ((vvvv[i] as i8) > (src[i] as i8)) ? 0xFF : 0x00
     pub(super) fn vpcmpgtb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -4685,7 +4569,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPCMPGTW — Packed Compare Greater Than Words, signed (VEX.L aware)
     /// dst[i] = ((vvvv[i] as i16) > (src[i] as i16)) ? 0xFFFF : 0x0000
     pub(super) fn vpcmpgtw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -4737,7 +4620,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPCMPGTD — Packed Compare Greater Than Dwords, signed (VEX.L aware)
     /// dst[i] = ((vvvv[i] as i32) > (src[i] as i32)) ? 0xFFFFFFFF : 0
     pub(super) fn vpcmpgtd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -4789,7 +4671,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPCMPGTQ — Packed Compare Greater Than Qwords, signed (VEX.L aware)
     /// dst[i] = ((vvvv[i] as i64) > (src[i] as i64)) ? 0xFFFF_FFFF_FFFF_FFFF : 0
     pub(super) fn vpcmpgtq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -4845,7 +4726,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// VPMOVMSKB — Extract MSB of each byte, packed into GPR (VEX.L aware)
     /// Result is a bitmask: bit i = MSB of byte i in source XMM/YMM
     pub(super) fn vpmovmskb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_gpr = instr.dst() as usize;
         if instr.get_vl() >= 1 {
             // 256-bit: 32 bytes -> 32-bit mask
@@ -4879,7 +4759,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// In each 128-bit lane: words 0-3 are copied unchanged, words 4-7 are shuffled
     /// by imm8[1:0], imm8[3:2], imm8[5:4], imm8[7:6]
     pub(super) fn vpshufhw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let imm = instr.ib();
         if instr.get_vl() >= 1 {
@@ -4939,7 +4818,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// In each 128-bit lane: words 4-7 are copied unchanged, words 0-3 are shuffled
     /// by imm8[1:0], imm8[3:2], imm8[5:4], imm8[7:6]
     pub(super) fn vpshuflw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let imm = instr.ib();
         if instr.get_vl() >= 1 {
@@ -5001,7 +4879,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPADDSB — Packed Add Signed Saturating Bytes (VEX.L aware)
     pub(super) fn vpaddsb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -5038,7 +4915,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPADDSW — Packed Add Signed Saturating Words (VEX.L aware)
     pub(super) fn vpaddsw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -5075,7 +4951,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPSUBSB — Packed Subtract Signed Saturating Bytes (VEX.L aware)
     pub(super) fn vpsubsb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -5112,7 +4987,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPSUBSW — Packed Subtract Signed Saturating Words (VEX.L aware)
     pub(super) fn vpsubsw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -5149,7 +5023,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPADDUSB — Packed Add Unsigned Saturating Bytes (VEX.L aware)
     pub(super) fn vpaddusb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -5186,7 +5059,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPADDUSW — Packed Add Unsigned Saturating Words (VEX.L aware)
     pub(super) fn vpaddusw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -5223,7 +5095,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPSUBUSB — Packed Subtract Unsigned Saturating Bytes (VEX.L aware)
     pub(super) fn vpsubusb(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {
@@ -5260,7 +5131,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// VPSUBUSW — Packed Subtract Unsigned Saturating Words (VEX.L aware)
     pub(super) fn vpsubusw(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
         if instr.get_vl() >= 1 {

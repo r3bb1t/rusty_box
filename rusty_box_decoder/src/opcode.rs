@@ -4390,6 +4390,18 @@ back_to_enum! {
         EvexVmovrsdVdqWdqKmask,
         EvexVmovrsqVdqWdq,
         EvexVmovrsqVdqWdqKmask,
+
+        // Internal sentinels, appended last so the discriminants of real
+        // opcodes never move. The icache fill path substitutes one of these
+        // when the decoded instruction needs CPU state the guest has not
+        // enabled, mirroring how Bochs `assignHandler` swaps the handler for
+        // `BxNoAVX` / `BxNoEVEX`. They exist as opcodes rather than as a flag
+        // because the fault is not always #UD — with CR0.TS set the guest is
+        // owed #NM, and only the handler can tell the two apart.
+        /// Decoded instruction requires AVX state the guest has not enabled.
+        NoAvxState,
+        /// Decoded instruction requires AVX-512 state the guest has not enabled.
+        NoEvexState,
     }
 }
 

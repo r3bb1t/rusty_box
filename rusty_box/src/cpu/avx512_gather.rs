@@ -159,7 +159,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         instr: &Instruction,
         form: VexGatherForm,
     ) -> super::Result<()> {
-        self.prepare_avx()?;
         let dst = instr.dst() as usize;
         let mask_reg = instr.src2() as usize; // VEX.vvvv
         // VEX has no V' extension, so the SIB index field is the whole
