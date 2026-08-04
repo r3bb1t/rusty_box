@@ -643,13 +643,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vprord(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let dst_idx = instr.src2(); // VEX.vvvv — for EVEX group opcodes, dst is in vvvv
+        let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
         let count = (instr.ib() & 31) as u32; // rotate count mod 32
 
-        // For EVEX group opcodes, rm (source) is in dst(), nnn is opcode extension
+        // The source is the rm operand in src1(); dst()/src2() both carry
+        // VEX.vvvv, which is the destination.
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -662,7 +663,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -682,13 +683,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
     pub(super) fn vprold(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let dst_idx = instr.src2(); // VEX.vvvv — for EVEX group opcodes, dst is in vvvv
+        let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
         let count = (instr.ib() & 31) as u32; // rotate count mod 32
 
-        // For EVEX group opcodes, rm (source) is in dst(), nnn is opcode extension
+        // The source is the rm operand in src1(); dst()/src2() both carry
+        // VEX.vvvv, which is the destination.
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -701,7 +703,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -1551,13 +1553,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
     pub(super) fn vpslld_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let dst_idx = instr.src2(); // VEX.vvvv — for EVEX group opcodes, dst is in vvvv
+        let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
         let count = instr.ib() as u32;
 
-        // For EVEX group opcodes, rm (source) is in dst(), nnn is opcode extension
+        // The source is the rm operand in src1(); dst()/src2() both carry
+        // VEX.vvvv, which is the destination.
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -1572,7 +1575,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -1594,13 +1597,14 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
     pub(super) fn vpsrld_imm(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let dst_idx = instr.src2(); // VEX.vvvv — for EVEX group opcodes, dst is in vvvv
+        let dst_idx = instr.src2(); // VEX.vvvv — the destination for these groups
         let count = instr.ib() as u32;
 
-        // For EVEX group opcodes, rm (source) is in dst(), nnn is opcode extension
+        // The source is the rm operand in src1(); dst()/src2() both carry
+        // VEX.vvvv, which is the destination.
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -1615,7 +1619,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4364,7 +4368,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4379,7 +4383,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4404,7 +4408,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4419,7 +4423,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4444,7 +4448,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4459,7 +4463,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4484,7 +4488,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = instr.ib() as u32;
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4499,7 +4503,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4526,7 +4530,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = if count_raw > 15 { 15 } else { count_raw };
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4539,7 +4543,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4564,7 +4568,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let count = if count_raw > 31 { 31 } else { count_raw };
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4577,7 +4581,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4602,7 +4606,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let shift = if shift > 15 { 16 } else { shift };
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4625,7 +4629,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4652,7 +4656,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let shift = if shift > 15 { 16 } else { shift };
         if instr.get_vl() >= 1 {
             let src = if instr.mod_c0() {
-                self.read_ymm_reg(instr.dst())
+                self.read_ymm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
@@ -4675,7 +4679,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             self.write_ymm_reg(dst_idx, result);
         } else {
             let src = if instr.mod_c0() {
-                self.read_xmm_reg(instr.dst())
+                self.read_xmm_reg(instr.src1())
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr(instr);
