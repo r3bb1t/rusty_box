@@ -2297,3 +2297,48 @@ fn vex_unpopulated_opcode_slots_are_ud() {
     assert!(fetch_decode64(&[0x0F, 0xA2]).is_ok()); // CPUID
     assert!(fetch_decode32(&[0x0F, 0x31], true).is_ok()); // RDTSC
 }
+
+/// `LOCK MOV CR0` is AMD's ALT_MOV_CR8 alias and must decode as an access to
+/// CR8, not as #UD.
+///
+/// A LOCK prefix on a register-form operand is otherwise always illegal, and
+/// this port used to reject it unconditionally — which is right for every
+/// opcode except these four. Bochs carves them out in the tail of
+/// `fetchDecode64` / `fetchDecode32`, extending CR0 to CR8. Whether the CPU is
+/// actually allowed to do that is a feature question the decoder cannot answer,
+/// so it always extends and the MOV CR handlers veto it; see
+/// `check_alt_mov_cr8` in cpu/crregs.rs.
+///
+/// The CR index lives in operand slot 0 (`dst()`) for both directions in this
+/// decoder, unlike Bochs, which uses slot 1 for the read form.
+#[test]
+fn lock_mov_cr0_decodes_as_the_cr8_alias() {
+    // MOV CR0, rax  =  0F 22 C0   (ModRM C0: mod=11, reg=CR0, rm=rax)
+    let plain = fetch_decode64(&[0x0F, 0x22, 0xC0]).unwrap();
+    assert_eq!(plain.get_ia_opcode(), Opcode::MovCr0rq);
+    assert_eq!(plain.dst(), 0, "without LOCK the destination stays CR0");
+
+    // LOCK MOV CR0, rax  =  F0 0F 22 C0
+    let locked = fetch_decode64(&[0xF0, 0x0F, 0x22, 0xC0]).unwrap();
+    assert_eq!(locked.get_ia_opcode(), Opcode::MovCr0rq);
+    assert_eq!(locked.dst(), 8, "LOCK redirects the write to CR8");
+    assert!(locked.get_lock(), "the handler needs the prefix to gate on");
+
+    // LOCK MOV rax, CR0  =  F0 0F 20 C0 — the read direction.
+    let locked_read = fetch_decode64(&[0xF0, 0x0F, 0x20, 0xC0]).unwrap();
+    assert_eq!(locked_read.get_ia_opcode(), Opcode::MovRqCr0);
+    assert_eq!(locked_read.dst(), 8, "LOCK redirects the read to CR8");
+
+    // Every other register-form opcode still rejects LOCK.
+    // LOCK ADD eax, ecx  =  F0 01 C8
+    assert!(
+        fetch_decode64(&[0xF0, 0x01, 0xC8]).is_err(),
+        "LOCK on a register destination is #UD for everything else"
+    );
+
+    // 32-bit mode is where this actually matters: CR8 has no other encoding
+    // there, because REX.R does not exist.
+    let i32 = fetch_decode32(&[0xF0, 0x0F, 0x22, 0xC0], true).unwrap();
+    assert_eq!(i32.get_ia_opcode(), Opcode::MovCr0rd);
+    assert_eq!(i32.dst(), 8, "32-bit LOCK MOV CR0 must reach CR8 too");
+}
