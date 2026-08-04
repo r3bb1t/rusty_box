@@ -1027,11 +1027,18 @@ pub const fn fetch_decode32_inplace(
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
     }
 
-    // Post-decode LOCK validation (Bochs fetchdecode32.cc)
+    // Post-decode LOCK validation (Bochs fetchdecode32.cc). See the matching
+    // block in decode64.rs for why the ALT_MOV_CR8 carve-out is split between
+    // here and the handler: `LOCK MOV CR0` is AMD's way of reaching CR8, and it
+    // matters most in 32-bit code, where REX.R is not available to encode CR8
+    // any other way.
     let has_lock = has_lock_prefix_bits(metainfo1_bits);
     let mod_c0 = (metainfo1_bits & InstructionFlags::ModC0.bits()) != 0;
     if has_lock && mod_c0 {
-        return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+        match instr.opcode {
+            Opcode::MovCr0rd | Opcode::MovRdCr0 => instr.set_src_reg(0, 8),
+            _ => return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode)),
+        }
     }
 
     Ok(())

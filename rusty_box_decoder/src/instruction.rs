@@ -507,8 +507,11 @@ impl Instruction {
     }
 
     /// Set source register by index (0=dst, 1=src1, 2=src2, 3=src3)
+    ///
+    /// `const` so the decoders, which are `const fn`, can rewrite an operand —
+    /// `LOCK MOV CR0` extending CR0 to CR8 needs it. Matches `get_src_reg`.
     #[inline]
-    pub fn set_src_reg(&mut self, src: usize, reg: u8) {
+    pub const fn set_src_reg(&mut self, src: usize, reg: u8) {
         match src {
             0 => self.operands.dst = reg,
             1 => self.operands.src1 = reg,

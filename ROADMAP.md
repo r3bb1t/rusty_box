@@ -9,7 +9,7 @@ are deliberate decisions to stop rather than unfinished work.
 
 **Where the project stands:** DLX Linux boots to a bash shell, Alpine boots
 fully, Ubuntu 26.04 reaches userspace with AVX-512 on, Windows 7 SP1 reaches
-Setup. Gates: 824 `rusty_box` tests, 159 decoder tests, `--no-default-features`
+Setup. Gates: 826 `rusty_box` tests, 163 decoder tests, `--no-default-features`
 warning-free.
 
 ---
@@ -44,7 +44,47 @@ is untrustworthy — thermal state and background builds move it by more than th
 effects being measured, and within-binary variance has been observed up to 4×
 from ISO cache state alone.
 
----
+### 1.3 62 advertised instructions abort the emulator instead of executing
+
+`execute_instruction` ends in a catch-all returning `CpuError::UnimplementedOpcode`
+— an *emulator* error that stops the host, where Bochs would point the opcode at
+`BxError` and let the guest take #UD. The ISA gate normally prevents that by
+rewriting unsupported opcodes to `IaError` first, but it only helps when the
+model does not advertise the feature.
+
+62 opcodes are decodable, advertised by a shipped model, and have no dispatcher
+arm. Every one is a live host abort a guest can trigger:
+
+| Group | Count | Bochs home |
+|---|---|---|
+| SSSE3 horizontal add/sub — PHADDW/D/SW, PHSUBW/D/SW | 6 | `simd_int.h` |
+| SSE4.1 integer min/max — PMINSB/SD/UW, PMAXSB/SD/UW | 6 | `simd_int.h` |
+| PCMPEQQ, PCMPGTQ, PACKUSDW, EXTRACTPS | 4 | `simd_int.h` / `simd_compare.h` |
+| MMX <-> packed-FP conversions — CVTPI2PS/PD, CVT(T)PS2PI, CVT(T)PD2PI | 6 | `sse_pfp.cc` |
+| VEX forms whose V128/V256 opcode has no arm of its own | 34 | as above, per lane |
+| SSE4A — EXTRQ, INSERTQ, MOVNTSS, MOVNTSD | 6 | `sse.cc` |
+
+The SSE4A six appear only on `AmdRyzen`, which advertises `IsaSse4a`. Checking a
+single model would have missed them.
+
+Pinned by `dispatcher.rs`
+`every_opcode_a_model_admits_has_a_dispatcher_arm`, which is a ratchet: the list
+may shrink, never grow, and a new gap on **any** model fails the build.
+
+**Where the work goes** (the file layout mirrors Bochs, so this is not a
+choice): the `xmm_*` primitives from `simd_int.h` / `simd_compare.h` belong in
+`sse.rs`, which already hosts that header's blend helpers as `*_lane` functions
+shared with `avx_pfp.rs` — **not** in a new `simd_int.rs`. The six conversions
+go in `sse_pfp.rs`. The 34 VEX forms go in `avx.rs` and call the same lane
+helpers per 128-bit lane, which first requires extracting the shared operation
+out of the existing inline legacy handlers, exactly as the blend helpers were.
+EXTRACTPS is a one-line dispatcher arm onto the existing PEXTRD handler —
+upstream defines it as literally the same function.
+
+**Do not classify these by opcode name.** `remap_sse_to_vex` does `use
+Opcode::*` and writes its arms bare, so a scan for `Opcode::`-qualified names
+misses every VEX opcode the remap produces. That mistake is why this was first
+measured at 22 instead of 62.
 
 ## 2. Deliberate parity gaps
 
@@ -74,7 +114,30 @@ which doubles as the ledger. **Implementing a family means deleting its line
 from `UNIMPLEMENTED_VEX_SLOTS`** — the test fails if the two disagree in either
 direction.
 
-### 2.2 XOP
+### 2.2 EVEX map — swept 2026-08-04, no action needed
+
+Recorded so the sweep is not repeated. The EVEX map does **not** have the
+problem the VEX map had: `opmap_evex.rs` is generated from
+`fetchdecode_opmap_evex.cc` by `scripts/gen_opmap_evex.py`, so it is a
+transcription and cannot drift from upstream by hand.
+
+410 EVEX opcodes decode but have no handler — AVX512-FP16 (194), AVX10.2 (142),
+VBMI2 (20), AMX (12), AVX10.2-MOVRS (8), VNNI (8), VAES/VPCLMULQDQ (5), VBMI,
+IFMA52, BF16, GFNI, BITALG, VP2INTERSECT, VPOPCNTDQ. Every one is gated on a
+feature **neither shipped model advertises**, verified against the model
+definitions rather than assumed, so all become a guest #UD at the ISA gate and
+none can reach the dispatcher catch-all.
+
+That stops being true the moment a model advertises one of those features — an
+Icelake or Sapphire Rapids cpudb entry would bring GFNI, VAES, VBMI, VNNI, BF16
+and FP16 with it. The §1.3 ratchet is what will catch that, and the answer then
+is to implement the family, not to widen the ledger.
+
+The one gap worth closing regardless: `gen_opmap_evex.py` has no `--verify`
+mode, so drift after an upstream sync goes unnoticed. `gen_vex_slots.py
+--verify` is the model to copy.
+
+### 2.3 XOP
 
 `0x8F` returns `BxIllegalVexXopOpcodeMap`. Bochs has `decoder_xop32`/
 `decoder_xop64` and a 91-entry table. Neither shipped model advertises XOP:
@@ -84,22 +147,50 @@ grep -oE "X86Feature::Isa\w+" rusty_box/src/cpu/cpudb/amd/amd_ryzen.rs | sort -u
 ```
 
 `AmdRyzen` advertises AVX, AVX2, F16C, FMA and SSE4A — **not** XOP, FMA4 or TBM.
-So adding the AMD model did not make §2.1 or §2.2 observable, contrary to what
-the old AVX plan assumed.
+So adding the AMD model did not make §2.1 or this section observable, contrary
+to what the old AVX plan assumed. It did make SSE4A observable, which is where
+six of the §1.3 gaps come from.
 
-### 2.3 VEX map 7
+### 2.4 VEX map 7
 
 Holds only WRMSRNS/RDMSR/UWRMSR/URDMSR, gated on `BX_ISA_MSR_IMM` and
 `BX_ISA_USER_MSR`. Rejected when the prefix is parsed. Note map 7 takes a
 **dword** immediate, not a byte, if it is ever implemented.
 
-### 2.4 AMX
+### 2.5 AMX
 
 Not implemented. The tile state struct exists but nothing decodes to it. All
 Bochs tables here are extracted with `BX_SUPPORT_AMX = 0`, including the VEX
 slot bitmap — see `scripts/gen_vex_slots.py`.
 
-### 2.5 Skylake CPUID max leaf 0x14
+### 2.6 How the ISA gate differs from upstream (deliberate)
+
+Bochs gates instructions by **mutating a process-global table** once per CPU at
+init: `init_FetchDecodeTables` (`fetchdecode32.cc`) walks every opcode and, where
+the CPU lacks the feature, overwrites `BxOpcodesTable[n].execute1/execute2` with
+`BxError` and zeroes `opflags` (the last part is what stops a now-#UD opcode
+from also running `prepare_SSE`).
+
+That table is a non-const file-scope global. Every CPU writes it, so it is not
+thread safe and cannot represent two CPUs with different models — last writer
+wins. Under CLAUDE.md's "thread safety trumps Bochs literalness" rule this port
+deliberately diverges: `isa_resolve_opcode` is a pure function over the
+immutable generated `OPCODE_ISA` plus **this CPU's own**
+`ia_extensions_bitmask`, applied at icache fill. Nothing is mutated, and the
+`opflags = 0` trick needs no analogue because `IaError` dispatches straight to
+`bx_error` and is classified `CpuState::Base`, so no state gate runs on it.
+
+Both implement the same three special cases: the 3DNow!Ext rescue of 15 MMX-era
+opcodes, AVX10.1 subsuming the 12 AVX-512 sub-extensions, and LZCNT/TZCNT
+falling back to BSR/BSF rather than #UD.
+
+Bochs's fourth special case — `BX_ISA_ALT_MOV_CR8` marking the MOV CR0 opcodes
+`BX_LOCKABLE` so `LOCK MOV CR0` becomes an access to CR8 — was missing here and
+is now implemented, split differently: the decoders always extend CR0 -> CR8
+when the prefix is present (they cannot see CPU features), and
+`check_alt_mov_cr8` in `cpu/crregs.rs` vetoes it on a model without the feature.
+
+### 2.7 Skylake CPUID max leaf 0x14
 
 Ratified deviation, filed upstream as bochs-emu/Bochs#791. Do not re-litigate.
 

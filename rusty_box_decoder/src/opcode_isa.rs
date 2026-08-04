@@ -7431,7 +7431,6 @@ pub const EVEX_FLAGGED_OPCODE_COUNT: usize = 1328;
 /// class breaks every consumer at compile time instead of silently
 /// falling through a catch-all arm and leaving instructions ungated.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(u8)]
 pub enum CpuState {
     /// Base ISA — no state beyond an ordinary integer instruction.
     Base,

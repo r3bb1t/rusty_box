@@ -758,7 +758,27 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         Ok(())
     }
 
+    /// A LOCK prefix on `MOV CRn` is AMD's ALT_MOV_CR8 alias: it redirects the
+    /// access to CR8, which is otherwise only encodable with REX.R and so out
+    /// of reach of 32-bit code. The decoders extend CR0 -> CR8 whenever the
+    /// prefix is present, because they cannot see the CPU's feature set; this
+    /// is where that gets vetoed on a model without the feature.
+    ///
+    /// Bochs does the same test one step earlier, by marking the four MOV CR0
+    /// opcodes `BX_LOCKABLE` in `init_FetchDecodeTables` only when
+    /// `BX_ISA_ALT_MOV_CR8` is present, and raising #UD at decode otherwise
+    /// (`fetchdecode64.cc`, tail of fetchDecode64). Same two outcomes.
+    fn check_alt_mov_cr8(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.get_lock()
+            && !self.bx_cpuid_support_isa_extension(super::decoder::X86Feature::IsaAltMovCr8)
+        {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        Ok(())
+    }
+
     pub fn mov_rd_cr0(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_alt_mov_cr8(instr)?;
         self.check_cpl0_for_cr_dr()?;
         // Bochs crregs.cc MOV_RdCR0 — SVM CR0 read intercept.
         if self.in_svm_guest && self.svm_cr_read_intercepted(0) {
@@ -817,6 +837,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // ----- MOV CRn, Rd (writes) -----
 
     pub fn mov_cr0_rd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_alt_mov_cr8(instr)?;
         self.check_cpl0_for_cr_dr()?;
         self.invalidate_prefetch_q();
         let src = instr.src1();
@@ -1341,6 +1362,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// not). With REX.R the destination index can be 8, in which case
     /// Bochs routes the write to CR8 (TPR alias).
     pub fn mov_cr0_rq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_alt_mov_cr8(instr)?;
         self.check_cpl0_for_cr_dr()?;
         self.invalidate_prefetch_q();
 
@@ -1756,6 +1778,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // =========================================================================
 
     pub fn mov_rq_cr0(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_alt_mov_cr8(instr)?;
         self.check_cpl0_for_cr_dr()?;
         // Bochs MOV_RqCR0: the CR index (extended by REX.R) is carried in
         // dst() in the rusty_box decoder; instr.src() carries the GPR.
@@ -1846,6 +1869,58 @@ mod tests {
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
     use crate::cpu::{BxCpuC, ResetReason};
+
+    /// `LOCK MOV CR0` is AMD's ALT_MOV_CR8 alias for CR8, and is the only way
+    /// 32-bit code can reach the task priority register — CR8 otherwise needs
+    /// REX.R, which does not exist outside 64-bit mode.
+    ///
+    /// The decoders extend CR0 -> CR8 whenever the prefix is present, because
+    /// they cannot see the CPU's feature set. This is the other half: a model
+    /// without `IsaAltMovCr8` must reject it. Bochs makes the same split
+    /// differently, marking the opcodes `BX_LOCKABLE` in
+    /// `init_FetchDecodeTables` only when the feature is present, so the #UD
+    /// falls out at decode instead.
+    #[test]
+    fn lock_mov_cr0_reaches_cr8_only_on_a_model_that_advertises_it() {
+        use crate::cpu::cpudb::amd::amd_ryzen::AmdRyzen;
+        use crate::cpu::decoder::{Instruction, Opcode, X86Feature};
+
+        fn locked_mov_cr0_write() -> Instruction {
+            let mut i = Instruction::default();
+            i.set_ia_opcode(Opcode::MovCr0rq);
+            i.init(0, 0, 1, 1);
+            i.assert_mod_c0();
+            i.set_lock();
+            i.set_src_reg(0, 8); // what the decoder does with the LOCK prefix
+            i.set_src_reg(1, 1); // source GPR
+            i
+        }
+
+        // AMD advertises ALT_MOV_CR8: the write must land on the LAPIC TPR.
+        let mut amd = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        amd.reset(ResetReason::Hardware);
+        assert!(amd.bx_cpuid_support_isa_extension(X86Feature::IsaAltMovCr8));
+        amd.set_gpr64(1, 0x0F);
+        amd.mov_cr0_rq(&locked_mov_cr0_write()).unwrap();
+        assert_eq!(
+            amd.lapic.get_tpr(),
+            0xF0,
+            "LOCK MOV CR0 must write CR8, i.e. the task priority register"
+        );
+
+        // Intel does not advertise it, so the same instruction is #UD.
+        let mut intel = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        intel.reset(ResetReason::Hardware);
+        assert!(!intel.bx_cpuid_support_isa_extension(X86Feature::IsaAltMovCr8));
+        let before = intel.lapic.get_tpr();
+        intel.set_gpr64(1, 0x0F);
+        let _ = intel.mov_cr0_rq(&locked_mov_cr0_write());
+        assert_eq!(
+            intel.lapic.get_tpr(),
+            before,
+            "without ALT_MOV_CR8 the alias must not touch the TPR"
+        );
+    }
 
     #[test]
     fn write_cr8_lowering_tpr_signals_pending_lapic_event() {

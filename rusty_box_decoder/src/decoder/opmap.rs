@@ -1496,14 +1496,14 @@ pub(super) const BxOpcodeTableMultiByteNOP: [u64; 1] = [form_opcode(attrs!(), Op
 
 // opcode 0F 20
 pub(super) const BxOpcodeTable0F20_32: [u64; 4] = [
-    form_opcode(attrs!(NNN0), Opcode::MovRdCr0),
+    form_opcode_lockable(attrs!(NNN0), Opcode::MovRdCr0),
     form_opcode(attrs!(NNN2), Opcode::MovRdCr2),
     form_opcode(attrs!(NNN3), Opcode::MovRdCr3),
     form_opcode(attrs!(NNN4), Opcode::MovRdCr4),
 ];
 
 pub(super) const BxOpcodeTable0F20_64: [u64; 4] = [
-    form_opcode(attrs!(NNN0), Opcode::MovRqCr0),
+    form_opcode_lockable(attrs!(NNN0), Opcode::MovRqCr0),
     form_opcode(attrs!(NNN2), Opcode::MovRqCr2),
     form_opcode(attrs!(NNN3), Opcode::MovRqCr3),
     form_opcode(attrs!(NNN4), Opcode::MovRqCr4),
@@ -1515,14 +1515,14 @@ pub(super) const BxOpcodeTable0F21_64: [u64; 1] = [form_opcode(attrs!(), Opcode:
 
 // opcode 0F 22
 pub(super) const BxOpcodeTable0F22_32: [u64; 4] = [
-    form_opcode(attrs!(NNN0), Opcode::MovCr0rd),
+    form_opcode_lockable(attrs!(NNN0), Opcode::MovCr0rd),
     form_opcode(attrs!(NNN2), Opcode::MovCr2rd),
     form_opcode(attrs!(NNN3), Opcode::MovCr3rd),
     form_opcode(attrs!(NNN4), Opcode::MovCr4rd),
 ];
 
 pub(super) const BxOpcodeTable0F22_64: [u64; 4] = [
-    form_opcode(attrs!(NNN0), Opcode::MovCr0rq),
+    form_opcode_lockable(attrs!(NNN0), Opcode::MovCr0rq),
     form_opcode(attrs!(NNN2), Opcode::MovCr2rq),
     form_opcode(attrs!(NNN3), Opcode::MovCr3rq),
     form_opcode(attrs!(NNN4), Opcode::MovCr4rq),
