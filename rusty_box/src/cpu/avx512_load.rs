@@ -1023,6 +1023,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Bochs avx512_helpers.cc `avx_masked_store8`. Byte granularity, so the
     /// opmask can reach all 64 bits at VL512.
+    ///
+    /// Unlike the wider flavours this does not suppress alignment checking, and
+    /// neither does upstream: a one-byte access has no alignment requirement to
+    /// violate, so there is nothing for #AC to fire on.
     pub(super) fn avx_masked_store8(
         &mut self,
         instr: &Instruction,
@@ -1042,8 +1046,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             }
         }
 
-        let saved_ac = self.alignment_check_mask;
-        self.alignment_check_mask = 0;
         // Probe every active element before committing any of them.
         for n in (0..elements).rev() {
             if (mask & (1u64 << n)) != 0 {
@@ -1055,7 +1057,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
                 self.v_write_byte(seg, eaddr.wrapping_add(n as u64), op.zmmubyte(n))?;
             }
         }
-        self.alignment_check_mask = saved_ac;
         Ok(())
     }
 
