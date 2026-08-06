@@ -134,7 +134,12 @@ fn run_dlxlinux() -> Result<()> {
         workspace_root.join("binaries/bios/VGABIOS-lgpl-latest.bin"),
         workspace_root.join("binaries/bios/VGABIOS-lgpl-latest-cirrus.bin"),
         workspace_root.join("binaries/bios/VGABIOS-lgpl-latest-debug.bin"),
-        // Mirrored Bochs BIOS directory
+        // Mirrored Bochs BIOS directory (upstream keeps LGPL VGA BIOSes in a
+        // VGABIOS-lgpl/ subdirectory; older snapshots had them alongside the
+        // system BIOS, so both layouts are probed)
+        workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest-cirrus.bin"),
+        workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest-debug.bin"),
         workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin"),
         workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest-cirrus.bin"),
         workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest-debug.bin"),
@@ -451,6 +456,10 @@ fn run_dlxlinux() -> Result<()> {
     // the TTY input buffer, but do_keyboard_interrupt() still calls unblank_screen()
     // and resets the inactivity timer).
     const KEEP_ALIVE_SCANCODE: &[u8] = &[0x12, 0xF0, 0x12]; // Left Shift
+    // Enter make+break: boots the default image at the `LILO boot:` prompt.
+    // The DLX image's LILO is configured with `prompt` and no timeout, so it
+    // waits for a keypress indefinitely.
+    const LILO_ENTER_SCANCODES: &[u8] = &[0x5A, 0xF0, 0x5A];
 
     // In headless mode: run in 20M-instruction phases. After the kernel HLTs (~132M),
     // inject a Shift keep-alive every phase to prevent the console blank timer from
@@ -463,6 +472,7 @@ fn run_dlxlinux() -> Result<()> {
         let mut total_executed: u64 = 0;
         let mut run_result: Result<u64> = Ok(0);
         let mut logged_in = false;
+        let mut lilo_boot_entered = false;
         let phase_size: u64 = 1_000_000;
 
         'phases: loop {
@@ -486,6 +496,20 @@ fn run_dlxlinux() -> Result<()> {
                 if total_executed % print_interval == 0 || !logged_in {
                     let rows = emu.vga_all_text_rows();
                     let has_login = rows.iter().any(|r| r.contains("login:"));
+
+                    // Boot the default image at the LILO prompt (waits forever
+                    // otherwise — DLX's LILO has `prompt` with no timeout).
+                    let at_lilo = rows.iter().any(|r| r.contains("LILO boot:"));
+                    if at_lilo && !lilo_boot_entered {
+                        println!(
+                            "(headless) LILO prompt detected — injecting Enter at {}M instructions",
+                            total_executed / 1_000_000
+                        );
+                        for &sc in LILO_ENTER_SCANCODES {
+                            emu.send_scancode(sc);
+                        }
+                        lilo_boot_entered = true;
+                    }
 
                     let non_empty: Vec<&str> = rows
                         .iter()
