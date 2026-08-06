@@ -372,47 +372,50 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
                         }
                     }
                 }
-                TimerOwner::CmosPeriodic => {
-                    for _ in 0..counts[entry] {
-                        self.device_manager.cmos.periodic_timer();
-                    }
-                    if self.device_manager.cmos.check_irq8() {
-                        self.device_manager.pic.raise_irq(8);
-                    }
-                }
-                TimerOwner::CmosOneSecond => {
-                    for _ in 0..counts[entry] {
-                        if self.device_manager.cmos.one_second_timer() {
-                            self.devices.request_timer_after_usec(
-                                DeviceTimerOwner::CmosUip,
-                                current_ticks,
-                                Some(244),
-                            );
-                        }
-                    }
-                }
-                TimerOwner::CmosUip => {
-                    for _ in 0..counts[entry] {
-                        self.device_manager.cmos.uip_timer();
-                    }
-                    if self.device_manager.cmos.check_irq8() {
-                        self.device_manager.pic.raise_irq(8);
-                    }
-                }
+                // The RTC raises IRQ8 and arms its own UIP pulse from inside
+                // the callback, as Bochs cmos.cc does.
+                TimerOwner::CmosPeriodic => self.fire_cmos_timer(
+                    crate::iodev::cmos::BxCmosC::PERIODIC_TIMER_LOCAL,
+                    counts[entry],
+                    current_ticks,
+                ),
+                TimerOwner::CmosOneSecond => self.fire_cmos_timer(
+                    crate::iodev::cmos::BxCmosC::ONE_SECOND_TIMER_LOCAL,
+                    counts[entry],
+                    current_ticks,
+                ),
+                TimerOwner::CmosUip => self.fire_cmos_timer(
+                    crate::iodev::cmos::BxCmosC::UIP_TIMER_LOCAL,
+                    counts[entry],
+                    current_ticks,
+                ),
                 TimerOwner::AcpiPmOverflow => {
-                    for _ in 0..counts[entry] {
-                        let delay = self.device_manager.acpi.overflow_timer(current_ticks);
-                        self.devices.request_timer_after_usec(
-                            DeviceTimerOwner::AcpiPmOverflow,
-                            current_ticks,
-                            delay,
-                        );
-                    }
-                    if self.device_manager.acpi.irq9_level {
-                        self.device_manager.pic.raise_irq(9);
-                    } else {
-                        self.device_manager.pic.lower_irq(9);
-                    }
+                    let mut handles = crate::iodev::wiring::TimerHandles::default();
+                    handles.set(
+                        crate::iodev::acpi::BxAcpiCtrl::OVERFLOW_TIMER_LOCAL,
+                        self.device_manager.acpi.overflow_timer_handle,
+                    );
+                    let crate::iodev::devices::DeviceManager {
+                        ref mut acpi,
+                        ref mut pic,
+                        ..
+                    } = self.device_manager;
+                    let mut irq = crate::iodev::wiring::PicIrqSink { pic };
+                    let mut timers = crate::iodev::wiring::WheelTimerService {
+                        pc_system: &mut self.pc_system,
+                        handles,
+                    };
+                    let mut ctx = crate::iodev::device_api::DeviceCtx {
+                        now_ticks: current_ticks,
+                        irq: &mut irq,
+                        timers: &mut timers,
+                    };
+                    crate::iodev::device_api::TimedDevice::timer_fired(
+                        acpi,
+                        crate::iodev::acpi::BxAcpiCtrl::OVERFLOW_TIMER_LOCAL,
+                        counts[entry],
+                        &mut ctx,
+                    );
                 }
                 // Both UART timers run through the device API: the device
                 // raises its own interrupts and re-arms itself from inside the
@@ -542,6 +545,39 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
             timers: &mut timers,
         };
         action(serial, &mut ctx)
+    }
+
+    /// Service one expiry of an RTC timer through the device API.
+    fn fire_cmos_timer(&mut self, local: u16, fires: u32, current_ticks: u64) {
+        let mut handles = crate::iodev::wiring::TimerHandles::default();
+        handles.set(
+            crate::iodev::cmos::BxCmosC::PERIODIC_TIMER_LOCAL,
+            self.device_manager.cmos.periodic_timer_handle,
+        );
+        handles.set(
+            crate::iodev::cmos::BxCmosC::ONE_SECOND_TIMER_LOCAL,
+            self.device_manager.cmos.one_second_timer_handle,
+        );
+        handles.set(
+            crate::iodev::cmos::BxCmosC::UIP_TIMER_LOCAL,
+            self.device_manager.cmos.uip_timer_handle,
+        );
+        let crate::iodev::devices::DeviceManager {
+            ref mut cmos,
+            ref mut pic,
+            ..
+        } = self.device_manager;
+        let mut irq = crate::iodev::wiring::PicIrqSink { pic };
+        let mut timers = crate::iodev::wiring::WheelTimerService {
+            pc_system: &mut self.pc_system,
+            handles,
+        };
+        let mut ctx = crate::iodev::device_api::DeviceCtx {
+            now_ticks: current_ticks,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        crate::iodev::device_api::TimedDevice::timer_fired(cmos, local, fires, &mut ctx);
     }
 
     /// Service one expiry of a UART timer.

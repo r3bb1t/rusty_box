@@ -1082,8 +1082,57 @@ impl BxCmosC {
     }
 
 
-    /// Check and clear IRQ8 raise pending flag
+    /// The three scheduler timers the RTC owns — Bochs cmos.cc registers a
+    /// periodic timer, a one-second clock tick, and the UIP pre-update pulse.
+    pub(crate) const PERIODIC_TIMER_LOCAL: u16 = 0;
+    pub(crate) const ONE_SECOND_TIMER_LOCAL: u16 = 1;
+    pub(crate) const UIP_TIMER_LOCAL: u16 = 2;
+
     #[inline]
+    const fn timer_key(local: u16) -> crate::iodev::device_api::TimerKey {
+        crate::iodev::device_api::TimerKey {
+            device: crate::iodev::device_api::DeviceKind::Cmos,
+            local,
+        }
+    }
+
+    /// Apply a timer plan produced by a register write.
+    ///
+    /// The periodic and one-second timers are continuous (Bochs cmos.cc
+    /// activate_timer with continuous = 1); the UIP pulse is a one-shot.
+    fn apply_timer_sync(
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        sync: CmosTimerSync,
+    ) {
+        for (local, action, continuous) in [
+            (Self::PERIODIC_TIMER_LOCAL, sync.periodic, true),
+            (Self::ONE_SECOND_TIMER_LOCAL, sync.one_second, true),
+            (Self::UIP_TIMER_LOCAL, sync.uip, false),
+        ] {
+            let key = Self::timer_key(local);
+            match action {
+                CmosTimerAction::Unchanged => {}
+                CmosTimerAction::Restart(delay) if continuous => {
+                    ctx.timers.arm_periodic_usec(key, delay)
+                }
+                CmosTimerAction::Restart(delay) => ctx.timers.arm_oneshot_usec(key, delay),
+                CmosTimerAction::Deactivate => ctx.timers.cancel(key),
+            }
+        }
+    }
+
+    /// Deliver the IRQ8 transition a read or timer fire produced. Bochs
+    /// cmos.cc lowers on a status-register read and raises when an enabled
+    /// interrupt condition latches.
+    fn drain_irq8(&mut self, ctx: &mut crate::iodev::device_api::DeviceCtx<'_>) {
+        if self.check_irq8_lower() {
+            ctx.irq.lower(crate::iodev::device_api::IrqLine(8));
+        }
+        if self.check_irq8() {
+            ctx.irq.raise(crate::iodev::device_api::IrqLine(8));
+        }
+    }
+
     pub fn check_irq8(&mut self) -> bool {
         let pending = self.irq8_pending;
         self.irq8_pending = false;
@@ -1491,6 +1540,71 @@ fn cmos_periodic_interval_usec(stat_a: u8) -> io::Result<u32> {
         .ok_or_else(|| cmos_snapshot_invalid("CMOS periodic interval overflows"))?;
     u32::try_from(numerator / 32_768)
         .map_err(|_| cmos_snapshot_invalid("CMOS periodic interval is out of range"))
+}
+
+// ─── Device-API conversion ───────────────────────────────────────────────────
+
+impl crate::iodev::device_api::PioDevice for BxCmosC {
+    fn pio_read(
+        &mut self,
+        port: u16,
+        len: crate::iodev::device_api::IoLen,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) -> u32 {
+        let value = self.read(port, len.bytes());
+        self.drain_irq8(ctx);
+        value
+    }
+
+    fn pio_write(
+        &mut self,
+        port: u16,
+        value: u32,
+        len: crate::iodev::device_api::IoLen,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) {
+        let sync = self.write(port, value, len.bytes());
+        Self::apply_timer_sync(ctx, sync);
+        self.drain_irq8(ctx);
+    }
+}
+
+impl crate::iodev::device_api::TimedDevice for BxCmosC {
+    fn timer_fired(
+        &mut self,
+        local: u16,
+        fires: u32,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) {
+        match local {
+            Self::PERIODIC_TIMER_LOCAL => {
+                for _ in 0..fires {
+                    self.periodic_timer();
+                }
+            }
+            Self::ONE_SECOND_TIMER_LOCAL => {
+                for _ in 0..fires {
+                    // A rollover starts the UIP pulse that precedes the next
+                    // update cycle (Bochs cmos.cc one_second_timer).
+                    if self.one_second_timer() {
+                        ctx.timers.arm_oneshot_usec(
+                            Self::timer_key(Self::UIP_TIMER_LOCAL),
+                            CmosTimerSync::UIP_DELAY_USEC,
+                        );
+                    }
+                }
+            }
+            Self::UIP_TIMER_LOCAL => {
+                for _ in 0..fires {
+                    self.uip_timer();
+                }
+            }
+            other => {
+                tracing::error!("CMOS timer fired for unknown local id {other}");
+            }
+        }
+        self.drain_irq8(ctx);
+    }
 }
 
 #[cfg(test)]

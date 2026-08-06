@@ -77,14 +77,14 @@ impl WheelTimerService<'_> {
     }
 }
 
-impl TimerService for WheelTimerService<'_> {
-    fn arm_oneshot_usec(&mut self, key: TimerKey, delay_usec: u64) {
+impl WheelTimerService<'_> {
+    fn arm(&mut self, key: TimerKey, delay_usec: u64, continuous: bool) {
         let Some(handle) = self.handles.get(key.local) else {
             return;
         };
         match self
             .pc_system
-            .activate_timer_usec(handle, Self::clamp_usec(delay_usec), false)
+            .activate_timer_usec(handle, Self::clamp_usec(delay_usec), continuous)
         {
             Ok(()) => {}
             Err(error) => {
@@ -96,6 +96,16 @@ impl TimerService for WheelTimerService<'_> {
                 );
             }
         }
+    }
+}
+
+impl TimerService for WheelTimerService<'_> {
+    fn arm_oneshot_usec(&mut self, key: TimerKey, delay_usec: u64) {
+        self.arm(key, delay_usec, false);
+    }
+
+    fn arm_periodic_usec(&mut self, key: TimerKey, period_usec: u64) {
+        self.arm(key, period_usec, true);
     }
 
     fn cancel(&mut self, key: TimerKey) {

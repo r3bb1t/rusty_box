@@ -70,6 +70,8 @@ pub struct TimerKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
     Serial,
+    Acpi,
+    Cmos,
 }
 
 /// Interrupt delivery, as seen by a device.
@@ -97,6 +99,10 @@ pub trait TimerService {
     /// Arm `key` as a one-shot, `delay_usec` microseconds of emulated time
     /// from now. Re-arming an already-armed timer replaces its deadline.
     fn arm_oneshot_usec(&mut self, key: TimerKey, delay_usec: u64);
+
+    /// Arm `key` to fire every `period_usec` microseconds until cancelled —
+    /// Bochs `activate_timer(..., continuous = 1)`.
+    fn arm_periodic_usec(&mut self, key: TimerKey, period_usec: u64);
 
     /// Disarm `key`. Disarming an already-idle timer is a no-op.
     fn cancel(&mut self, key: TimerKey);

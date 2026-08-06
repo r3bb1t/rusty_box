@@ -594,17 +594,16 @@ impl BxDevicesC {
                     (DeviceId::Serial, Some(width)) => {
                         Self::serial_read(dm, pc_system, port, width, current_ticks)
                     }
+                    (DeviceId::Acpi, Some(width)) => {
+                        Self::acpi_read(dm, pc_system, port, width, current_ticks)
+                    }
+                    (DeviceId::Cmos, Some(width)) => {
+                        Self::cmos_read(dm, pc_system, port, width, current_ticks)
+                    }
                     _ => Self::dispatch_read(dm, device_id, port, io_len, current_ticks),
                 };
                 timer_update =
-                    Self::timer_update_after_dispatch(dm, device_id, current_ticks);
-                if device_id == DeviceId::Acpi {
-                    if dm.acpi.irq9_level {
-                        dm.pic.raise_irq(9);
-                    } else {
-                        dm.pic.lower_irq(9);
-                    }
-                }
+                    Self::timer_update_after_dispatch(dm, device_id);
                 let (fwds, count) = dm.pic.take_ioapic_forwards();
                 hrq_level = dm.dma.take_hrq_request();
                 let devices::DeviceManager {
@@ -670,6 +669,12 @@ impl BxDevicesC {
                     (DeviceId::Serial, Some(width)) => {
                         Self::serial_write(dm, pc_system, port, value, width, current_ticks);
                     }
+                    (DeviceId::Acpi, Some(width)) => {
+                        Self::acpi_write(dm, pc_system, port, value, width, current_ticks);
+                    }
+                    (DeviceId::Cmos, Some(width)) => {
+                        Self::cmos_write(dm, pc_system, port, value, width, current_ticks);
+                    }
                     _ => {
                         cmos_timer_sync = Self::dispatch_write(
                             dm,
@@ -680,7 +685,7 @@ impl BxDevicesC {
                             current_ticks,
                         );
                         timer_update =
-                            Self::timer_update_after_dispatch(dm, device_id, current_ticks);
+                            Self::timer_update_after_dispatch(dm, device_id);
                     }
                 }
                 // Seek-timer arms latched by harddrv during this dispatch —
@@ -689,13 +694,6 @@ impl BxDevicesC {
                 for (channel, channel_arms) in seek_arms.iter_mut().enumerate() {
                     for (device, arm) in channel_arms.iter_mut().enumerate() {
                         *arm = dm.harddrv.take_pending_seek_arm(channel, device);
-                    }
-                }
-                if device_id == DeviceId::Acpi {
-                    if dm.acpi.irq9_level {
-                        dm.pic.raise_irq(9);
-                    } else {
-                        dm.pic.lower_irq(9);
                     }
                 }
                 let (fwds, count) = dm.pic.take_ioapic_forwards();
@@ -1054,18 +1052,145 @@ impl BxDevicesC {
     fn timer_update_after_dispatch(
         dm: &mut devices::DeviceManager,
         id: DeviceId,
-        current_ticks: u64,
     ) -> Option<(DeviceTimerOwner, Option<u64>)> {
         match id {
             DeviceId::Pit => Some((DeviceTimerOwner::Pit, dm.pit.next_event_usec())),
             // Keyboard: no per-dispatch arming — the 8042 timer is continuous
             // (Bochs keyboard.cc init) and collects latched work every fire.
-            DeviceId::Acpi => Some((
-                DeviceTimerOwner::AcpiPmOverflow,
-                dm.acpi.overflow_delay_usec(current_ticks),
-            )),
             _ => None,
         }
+    }
+
+    /// Dispatch to one converted device with a [`device_api::DeviceCtx`] built
+    /// from the machine's PIC and the scheduler.
+    ///
+    /// A macro rather than a function because the context borrows the PIC out
+    /// of the same device manager that owns the device: the split has to be
+    /// visible to the borrow checker at the call site.
+    fn acpi_read(
+        dm: &mut devices::DeviceManager,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
+        port: u16,
+        width: device_api::IoLen,
+        current_ticks: u64,
+    ) -> u32 {
+        let mut handles = wiring::TimerHandles::default();
+        handles.set(
+            acpi::BxAcpiCtrl::OVERFLOW_TIMER_LOCAL,
+            dm.acpi.overflow_timer_handle,
+        );
+        let devices::DeviceManager {
+            ref mut acpi,
+            ref mut pic,
+            ..
+        } = *dm;
+        let mut irq = wiring::PicIrqSink { pic };
+        let mut timers = wiring::WheelTimerService { pc_system, handles };
+        let mut ctx = device_api::DeviceCtx {
+            now_ticks: current_ticks,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        device_api::PioDevice::pio_read(acpi, port, width, &mut ctx)
+    }
+
+    fn acpi_write(
+        dm: &mut devices::DeviceManager,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
+        port: u16,
+        value: u32,
+        width: device_api::IoLen,
+        current_ticks: u64,
+    ) {
+        let mut handles = wiring::TimerHandles::default();
+        handles.set(
+            acpi::BxAcpiCtrl::OVERFLOW_TIMER_LOCAL,
+            dm.acpi.overflow_timer_handle,
+        );
+        {
+            let devices::DeviceManager {
+                ref mut acpi,
+                ref mut pic,
+                ..
+            } = *dm;
+            let mut irq = wiring::PicIrqSink { pic };
+            let mut timers = wiring::WheelTimerService { pc_system, handles };
+            let mut ctx = device_api::DeviceCtx {
+                now_ticks: current_ticks,
+                irq: &mut irq,
+                timers: &mut timers,
+            };
+            device_api::PioDevice::pio_write(acpi, port, value, width, &mut ctx);
+        }
+        // Bochs acpi.cc PM1_CNT suspend-to-ram (S3) calls DEV_cmos_set_reg(0xF,
+        // 0xFE) — the shutdown-status byte the BIOS reads on the resume path.
+        // A cross-device store, so it stays outside the device's own context
+        // until chipset effects carry it.
+        if core::mem::take(&mut dm.acpi.suspend_to_ram_pending) {
+            dm.cmos.ram[0x0F] = 0xFE;
+        }
+    }
+
+    /// Scheduler handles owned by the RTC.
+    fn cmos_timer_handles(cmos: &cmos::BxCmosC) -> wiring::TimerHandles {
+        let mut handles = wiring::TimerHandles::default();
+        handles.set(
+            cmos::BxCmosC::PERIODIC_TIMER_LOCAL,
+            cmos.periodic_timer_handle,
+        );
+        handles.set(
+            cmos::BxCmosC::ONE_SECOND_TIMER_LOCAL,
+            cmos.one_second_timer_handle,
+        );
+        handles.set(cmos::BxCmosC::UIP_TIMER_LOCAL, cmos.uip_timer_handle);
+        handles
+    }
+
+    fn cmos_read(
+        dm: &mut devices::DeviceManager,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
+        port: u16,
+        width: device_api::IoLen,
+        current_ticks: u64,
+    ) -> u32 {
+        let handles = Self::cmos_timer_handles(&dm.cmos);
+        let devices::DeviceManager {
+            ref mut cmos,
+            ref mut pic,
+            ..
+        } = *dm;
+        let mut irq = wiring::PicIrqSink { pic };
+        let mut timers = wiring::WheelTimerService { pc_system, handles };
+        let mut ctx = device_api::DeviceCtx {
+            now_ticks: current_ticks,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        device_api::PioDevice::pio_read(cmos, port, width, &mut ctx)
+    }
+
+    fn cmos_write(
+        dm: &mut devices::DeviceManager,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
+        port: u16,
+        value: u32,
+        width: device_api::IoLen,
+        current_ticks: u64,
+    ) {
+        let handles = Self::cmos_timer_handles(&dm.cmos);
+        let devices::DeviceManager {
+            ref mut cmos,
+            ref mut pic,
+            ..
+        } = *dm;
+        let mut irq = wiring::PicIrqSink { pic };
+        let mut timers = wiring::WheelTimerService { pc_system, handles };
+        let mut ctx = device_api::DeviceCtx {
+            now_ticks: current_ticks,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        device_api::PioDevice::pio_write(cmos, port, value, width, &mut ctx);
     }
 
     /// Snapshot the scheduler handles the UART owns for one port, so its
@@ -1160,13 +1285,8 @@ impl BxDevicesC {
                 dm.drain_pit_irq0();
                 result
             }
-            DeviceId::Cmos => {
-                let result = dm.cmos.read(port, io_len);
-                if dm.cmos.check_irq8_lower() {
-                    dm.pic.lower_irq(8);
-                }
-                result
-            }
+            // Routed through the device API by `inp`/`outp` before this match.
+            DeviceId::Cmos => 0xFFFF_FFFF,
             DeviceId::Dma => dm.dma.read(port, io_len),
             DeviceId::Keyboard => {
                 if port == keyboard::KBD_DATA_PORT {
@@ -1213,9 +1333,6 @@ impl BxDevicesC {
         io_len: u8,
         current_ticks: u64,
     ) -> Option<cmos::CmosTimerSync> {
-        if id == DeviceId::Cmos {
-            return Some(dm.cmos.write(port, value, io_len));
-        }
         match id {
             DeviceId::Pic => dm.pic.write(port, value, io_len),
             DeviceId::Pit => {

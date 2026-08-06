@@ -838,6 +838,35 @@ impl BxAcpiCtrl {
         self.overflow_remaining_from_usec(self.live_time_usec(system_ticks))
     }
 
+    /// The device's single scheduler timer — the PM-clock overflow.
+    pub(crate) const OVERFLOW_TIMER_LOCAL: u16 = 0;
+
+    #[inline]
+    const fn overflow_timer_key() -> crate::iodev::device_api::TimerKey {
+        crate::iodev::device_api::TimerKey {
+            device: crate::iodev::device_api::DeviceKind::Acpi,
+            local: Self::OVERFLOW_TIMER_LOCAL,
+        }
+    }
+
+    /// Publish the SCI line and the freshly predicted overflow deadline.
+    ///
+    /// Bochs acpi.cc re-evaluates both after every PM1 register access, so the
+    /// guest observes them before execution resumes; here they land on the
+    /// interrupt and timer capabilities directly rather than being latched.
+    fn drain_effects(
+        &mut self,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+        delay_usec: Option<u64>,
+    ) {
+        ctx.irq
+            .set_level(crate::iodev::device_api::IrqLine(9), self.irq9_level);
+        match delay_usec {
+            Some(delay) => ctx.timers.arm_oneshot_usec(Self::overflow_timer_key(), delay),
+            None => ctx.timers.cancel(Self::overflow_timer_key()),
+        }
+    }
+
     /// Service the ACPI PM-overflow timer owner and return a rearm delay.
     ///
     /// A realtime pc-system deadline is only a prediction. If its callback is
@@ -1275,6 +1304,52 @@ fn muldiv64(a: u64, b: u32, c: u32) -> u64 {
     let res_lo = ((rh % c) << 32 | rl) / c;
 
     (res_hi << 32) | res_lo
+}
+
+// ─── Device-API conversion ───────────────────────────────────────────────────
+
+impl crate::iodev::device_api::PioDevice for BxAcpiCtrl {
+    fn pio_read(
+        &mut self,
+        port: u16,
+        len: crate::iodev::device_api::IoLen,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) -> u32 {
+        let value = self.read(port, len.bytes(), ctx.now_ticks);
+        let delay = self.overflow_delay_usec(ctx.now_ticks);
+        self.drain_effects(ctx, delay);
+        value
+    }
+
+    fn pio_write(
+        &mut self,
+        port: u16,
+        value: u32,
+        len: crate::iodev::device_api::IoLen,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) {
+        self.write(port, value, len.bytes(), ctx.now_ticks);
+        let delay = self.overflow_delay_usec(ctx.now_ticks);
+        self.drain_effects(ctx, delay);
+    }
+}
+
+impl crate::iodev::device_api::TimedDevice for BxAcpiCtrl {
+    /// The PM clock is free-running, so a coalesced expiry is serviced once
+    /// per elapsed period — Bochs acpi.cc re-arms from inside the callback and
+    /// each pass re-predicts the next overflow.
+    fn timer_fired(
+        &mut self,
+        _local: u16,
+        fires: u32,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) {
+        let mut delay = None;
+        for _ in 0..fires {
+            delay = self.overflow_timer(ctx.now_ticks);
+        }
+        self.drain_effects(ctx, delay);
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
