@@ -97,7 +97,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// Read the op2 operand: register if modC0, else read qword from memory.
     /// This is the most common pattern in MMX instructions.
     #[inline]
-    fn mmx_read_op2_qq(&mut self, instr: &Instruction) -> super::Result<BxPackedRegister> {
+    pub(super) fn mmx_read_op2_qq(&mut self, instr: &Instruction) -> super::Result<BxPackedRegister> {
         if instr.mod_c0() {
             Ok(self.read_mmx_reg(instr.src1()))
         } else {
@@ -112,7 +112,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
     /// Read op2 as dword (for PUNPCKL* instructions that read 32-bit from memory)
     #[inline]
-    fn mmx_read_op2_qd(&mut self, instr: &Instruction) -> super::Result<BxPackedRegister> {
+    pub(super) fn mmx_read_op2_qd(&mut self, instr: &Instruction) -> super::Result<BxPackedRegister> {
         if instr.mod_c0() {
             Ok(self.read_mmx_reg(instr.src1()))
         } else {

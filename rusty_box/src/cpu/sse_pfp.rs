@@ -51,6 +51,7 @@ use super::{
     decoder::{BxSegregs, Instruction},
     sse_fp::mxcsr_to_softfloat_status_word,
     xmm::BxPackedXmmRegister,
+    i387::BxPackedRegister,
 };
 
 /// Bochs sse_pfp.cc `mxcsr_to_softfloat_status_word_imm_override` — the
@@ -948,6 +949,59 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Conversions: Packed Int32 <-> Float
     // Bochs: CVTDQ2PS, CVTPS2DQ, CVTTPS2DQ, CVTDQ2PD, CVTPD2DQ, CVTTPD2DQ
     // ========================================================================
+
+    /// CVTPI2PS — Convert 2 Packed Int32 to 2 Packed Singles
+    pub(super) fn cvtpi2ps_vps_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = if instr.mod_c0() {
+            self.fpu_check_pending_exceptions()?;
+            self.read_mmx_reg(instr.src1())
+        } else {
+            // Bochs sse_pfp.cc CVTPI2PS_VpsQqM: no MMX state transition —
+            // no MMX register touched
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            BxPackedRegister { bytes: self.v_read_qword(seg, eaddr)?.to_le_bytes() }
+        };
+        let mut dst = self.read_xmm_reg(instr.dst());
+        let mut status = self.sse_status();
+        for i in 0..2 {
+            dst.set_xmm32u(i, i32_to_f32(op.S32(i), &mut status));
+        }
+        if instr.mod_c0() {
+            self.prepare_fpu2mmx();
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_lo_qword(instr.dst(), dst.xmm64u(0));
+        Ok(())
+    }
+
+    /// CVTPS2PI — Convert 2 Packed Singles to 2 Packed Int32
+    pub(super) fn cvtps2pi_pq_wps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        self.fpu_check_pending_exceptions()?;
+        let op = if instr.mod_c0() {
+            self.read_xmm_reg(instr.src1())
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            BxPackedXmmRegister { bytes: {
+                let mut bytes = [0u8; 16];
+                bytes[..8].copy_from_slice(&self.v_read_qword(seg, eaddr)?.to_le_bytes());
+                bytes
+            } }
+        };
+        let mut dst = self.read_mmx_reg(instr.dst());
+        let mut status = self.sse_status();
+        let rc = softfloat_get_rounding_mode(&status);
+        self.prepare_fpu2mmx();
+        for i in 0..2 {
+            dst.set_S32(i, f32_to_i32(op.xmm32u(i), rc, true, &mut status));
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_mmx_reg(instr.dst(), dst);
+        Ok(())
+    }
 
     /// CVTDQ2PS — Convert 4 Packed Int32 to 4 Packed Singles
     pub(super) fn cvtdq2ps_vps_wdq(&mut self, instr: &Instruction) -> super::Result<()> {

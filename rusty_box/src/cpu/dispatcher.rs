@@ -2641,6 +2641,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
             Opcode::Cvtpd2psVpsWpd => self.cvtpd2ps_vps_wpd(instr),
             Opcode::Cvtss2sdVsdWss => self.cvtss2sd_vsd_wss(instr),
             Opcode::Cvtsd2ssVssWsd => self.cvtsd2ss_vss_wsd(instr),
+            Opcode::Cvtpi2psVpsQq => self.cvtpi2ps_vps_qq(instr),
+            Opcode::Cvtps2piPqWps => self.cvtps2pi_pq_wps(instr),
             Opcode::Cvtdq2psVpsWdq => self.cvtdq2ps_vps_wdq(instr),
             Opcode::Cvtps2dqVdqWps => self.cvtps2dq_vdq_wps(instr),
             Opcode::Cvttps2dqVdqWps => self.cvttps2dq_vdq_wps(instr),
@@ -5354,8 +5356,6 @@ mod tests {
         // list must shrink, never grow.
         const REACHABLE_GAPS: &[&str] = &[
             // MMX <-> packed-FP conversions (SSE/SSE2), Bochs sse_pfp.cc.
-            "Cvtpi2psVpsQq",
-            "Cvtps2piPqWps",
             "Cvttps2piPqWps",
             "Cvtpi2pdVpdQq",
             "Cvtpd2piPqWpd",
