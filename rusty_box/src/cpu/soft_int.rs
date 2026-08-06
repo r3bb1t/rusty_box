@@ -37,7 +37,7 @@ fn topology_level_ecx(subleaf: u32, level_type: u32) -> u32 {
     subleaf | (level_type << CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT)
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // =========================================================================
     // Unified interrupt dispatch — matches Bochs interrupt() in exception.cc
     // =========================================================================
@@ -1351,7 +1351,7 @@ mod tests {
             .with_topology(2, 4, 2)
             .unwrap()
             .cpu_topology();
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.configure_smp(CONFIGURED_APIC_ID, topology);
         let instr = Instruction::default();
 
@@ -1371,7 +1371,7 @@ mod tests {
         cpu.cpuid(&instr).unwrap();
         assert_eq!(
             cpu.eax(),
-            BxCpuC::<Corei7SkylakeX>::bochs_topology_shift(topology.package_logical_count())
+            BxCpuC::<()>::bochs_topology_shift(topology.package_logical_count())
         );
         assert_eq!(cpu.ebx(), 8);
         assert_eq!(
@@ -1395,7 +1395,7 @@ mod tests {
             .with_topology(2, 2, 2)
             .unwrap()
             .cpu_topology();
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.initialize(BxParams::default()).unwrap();
         cpu.configure_smp(LEAF1_TEST_APIC_ID, topology);
         cpu.reset(crate::cpu::ResetReason::Hardware);

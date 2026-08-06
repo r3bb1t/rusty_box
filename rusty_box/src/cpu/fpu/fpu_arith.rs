@@ -3,7 +3,6 @@
 //! Ported from Bochs cpu/fpu/fpu_arith.cc
 
 use super::super::cpu::BxCpuC;
-use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::{BxSegregs, Instruction};
 use super::super::softfloat3e::extf80_addsub::{extf80_add, extf80_sub};
 use super::super::softfloat3e::extf80_div::extf80_div;
@@ -191,7 +190,7 @@ fn fpu_handle_nan_f64(a: ExtFloat80, b: u64, status: &mut SoftFloatStatus) -> Op
     None
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // ================================================================
     // FADD variants
     // ================================================================

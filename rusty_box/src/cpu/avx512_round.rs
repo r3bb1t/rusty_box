@@ -35,7 +35,6 @@ use super::softfloat3e::softfloat::{
 use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
@@ -68,8 +67,8 @@ fn qword_elements(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -83,16 +82,16 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register with dword-granularity masking, zeroing upper beyond VL
-fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -114,8 +113,8 @@ fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// Write ZMM register with qword-granularity masking, zeroing upper beyond VL
-fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -136,7 +135,7 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Read packed SP source: register or memory, dword-element granularity
     #[inline]
     fn read_src_ps(
@@ -858,8 +857,8 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 /// Write a scalar single result: element 0 masked, elements 1..3 from `src1`,
 /// everything above cleared. Bochs BX_WRITE_XMM_REG_CLEAR_HIGH on the merged
 /// operand.
-fn write_scalar_ss_round<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_scalar_ss_round<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
     result_elem0: Float32,
@@ -881,8 +880,8 @@ fn write_scalar_ss_round<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 }
 
 /// Qword counterpart of [`write_scalar_ss_round`].
-fn write_scalar_sd_round<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_scalar_sd_round<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     dst_reg: u8,
     src1: &BxPackedZmmRegister,
     result_elem0: Float64,
@@ -962,8 +961,8 @@ mod tests {
         i
     }
 
-    fn cpu() -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC<'static, AmdRyzen>> {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+    fn cpu() -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC<'static>> {
+        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
         c.mxcsr.mxcsr = MXCSR_RESET;
         c
     }

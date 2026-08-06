@@ -2,11 +2,10 @@
 //! Matching Bochs bit.cc
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // =========================================================================
     // SETcc Eb — Set byte on condition (0F 90..9F)
     // =========================================================================

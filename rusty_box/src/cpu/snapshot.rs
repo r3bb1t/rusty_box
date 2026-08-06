@@ -9,7 +9,6 @@ use crate::snapshot::{
 
 use super::{
     cpu::{BxCpuC, CpuActivityState, CpuMode, BX_MSR_MAX_INDEX},
-    cpuid::BxCpuIdTrait,
     crregs::{BxCr0, BxCr4, BxDr6, BxDr7, BxEfer, Xcr0},
     eflags::EFlags,
 };
@@ -19,7 +18,7 @@ use super::{
 // V3 streaming CPU record
 // ============================================================================
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Exact byte count for one CPU body in the v3 CPU section. The enclosing
     /// CPU section owns its version and per-record `{ cpu_id, state_len }`
     /// framing, so this method deliberately has neither.
@@ -1308,7 +1307,7 @@ mod tests {
     /// any save/restore misalignment earlier in the blob corrupts them.
     #[test]
     fn snapshot_round_trips_virtualization_state() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(ResetReason::Hardware);
 
         cpu.in_vmx = true;
@@ -1345,7 +1344,7 @@ mod tests {
         let mut blob = Vec::new();
         cpu.save_snapshot_v3_body(&mut blob).unwrap();
 
-        let mut restored = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut restored = BxCpuBuilder::new().build().unwrap();
         restored.reset(ResetReason::Hardware);
         // The v3 codec treats the live VMCB cache allocation as immutable
         // host topology: it must exist before a with-VMCB snapshot decodes.
@@ -1396,14 +1395,14 @@ mod tests {
     /// VMCB-carrying CPU instead of silently dropping the live allocation.
     #[test]
     fn snapshot_round_trips_absent_vmcb() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(ResetReason::Hardware);
         assert!(cpu.vmcb.is_none());
 
         let mut blob = Vec::new();
         cpu.save_snapshot_v3_body(&mut blob).unwrap();
 
-        let mut restored = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut restored = BxCpuBuilder::new().build().unwrap();
         restored.reset(ResetReason::Hardware);
         let mut reader =
             SnapshotReader::new(Cursor::new(blob.clone()), blob.len() as u64).unwrap();
@@ -1413,7 +1412,7 @@ mod tests {
         reader.finish_exact().unwrap();
         assert!(restored.vmcb.is_none());
 
-        let mut mismatched = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut mismatched = BxCpuBuilder::new().build().unwrap();
         mismatched.reset(ResetReason::Hardware);
         mismatched.vmcb = Some(VmcbCache::default());
         let mut reader =
@@ -1429,7 +1428,7 @@ mod tests {
 
     #[test]
     fn v3_restore_rebuilds_cpu_derived_state() {
-        let mut source = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut source = BxCpuBuilder::new().build().unwrap();
         source.reset(ResetReason::Hardware);
 
         source.cr0.insert(BxCr0::PE | BxCr0::AM | BxCr0::TS);
@@ -1458,7 +1457,7 @@ mod tests {
         let mut bytes = Vec::new();
         source.save_snapshot_v3_body(&mut bytes).unwrap();
 
-        let mut restored = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut restored = BxCpuBuilder::new().build().unwrap();
         restored.reset(ResetReason::Hardware);
         // None of these caches are serialized authoritatively. Seed them with
         // values that cannot accidentally satisfy the restored architecture.

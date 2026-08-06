@@ -356,7 +356,7 @@ fn run_emulator(boot: &BootConfig, shared: Arc<Mutex<SharedDisplay>>) -> Result<
         ..EmulatorConfig::default()
     };
 
-    let mut emu = Emulator::<Corei7SkylakeX, StraceTracer>::new_with_instrumentation(
+    let mut emu = Emulator::<StraceTracer>::new_with_instrumentation(
         config,
         StraceTracer::default(),
     )?;

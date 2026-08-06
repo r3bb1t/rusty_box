@@ -24,9 +24,9 @@ const DEST: u64 = 0x0021_0100;
 ///
 /// `FlatProtected32` leaves paging off, so linear and physical addresses match
 /// and `[disp32]` operands address memory directly.
-fn protected32_emulator() -> Box<Emulator<'static, Corei7SkylakeX>> {
+fn protected32_emulator() -> Box<Emulator<'static>> {
     let cfg = EmulatorConfig::default();
-    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
         .expect("emulator");
     // CR4.OSFXSR | CR4.OSXSAVE
     emu.reg_write(
@@ -43,7 +43,7 @@ fn protected32_emulator() -> Box<Emulator<'static, Corei7SkylakeX>> {
     emu
 }
 
-fn run(emu: &mut Emulator<'static, Corei7SkylakeX>, code: &[u8], steps: u64) {
+fn run(emu: &mut Emulator<'static>, code: &[u8], steps: u64) {
     let park = CODE + code.len() as u64;
     let mut image = code.to_vec();
     image.extend_from_slice(&[0xEB, 0xFE]); // jmp $

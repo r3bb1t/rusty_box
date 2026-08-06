@@ -4,7 +4,7 @@ use crate::{
     cpu::{
         cpu::CpuActivityState,
         instrumentation::Instrumentation,
-        BxCpuC, BxCpuIdTrait,
+        BxCpuC,
     },
     Result,
 };
@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use super::Emulator;
 
-impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: Instrumentation> Emulator<'a, T> {
     #[cfg(feature = "alloc")]
     /// Update GUI with VGA text mode changes
     ///
@@ -349,7 +349,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     self.service_lapic_local_events();
                     if self.cpu.lapic.intr && (self.cpu.interrupts_enabled() || mwait_if) {
                         self.cpu
-                            .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                            .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                         break;
                     }
                     let step = self.hlt_wait_step_ticks();
@@ -365,7 +365,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 }
                 if self.cpu.lapic_has_intr() {
                     self.cpu
-                        .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                        .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                 }
             }
 

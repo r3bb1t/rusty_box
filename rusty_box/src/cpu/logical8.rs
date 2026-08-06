@@ -4,11 +4,10 @@
 
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction, BX_64BIT_REG_RIP},
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // =========================================================================
     // Flag update helpers
     // =========================================================================

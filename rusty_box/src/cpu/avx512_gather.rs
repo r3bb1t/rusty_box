@@ -33,7 +33,6 @@
 
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
 };
 use rusty_box_decoder::BX_NIL_REGISTER;
@@ -74,7 +73,7 @@ pub(super) enum VexGatherForm {
     QIndexQword,
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // ========================================================================
     // VSIB resolver helpers — mirror Bochs `BxResolveGatherD` /
     // `BxResolveGatherQ` (cpu/avx/gather.cc).
@@ -623,7 +622,7 @@ mod tests {
         for n in 0..16u8 {
             let i = make_vsib_instr(Opcode::EvexVgatherddVdqVsib, 0, n, 0, 0, 0, 1);
             assert_eq!(
-                super::BxCpuC::<AmdRyzen>::vsib_index_reg(&i),
+                super::BxCpuC::<()>::vsib_index_reg(&i),
                 n,
                 "V'=0 must pass sib_index unchanged"
             );
@@ -631,7 +630,7 @@ mod tests {
         for n in 0..16u8 {
             let i = make_vsib_instr(Opcode::EvexVgatherddVdqVsib, 0, n + 16, 0, 0, 0, 1);
             assert_eq!(
-                super::BxCpuC::<AmdRyzen>::vsib_index_reg(&i),
+                super::BxCpuC::<()>::vsib_index_reg(&i),
                 n + 16,
                 "V'=1 must extend sib_index into vmm16..31"
             );
@@ -640,7 +639,7 @@ mod tests {
 
     #[test]
     fn resolve_gather_d_signed_index_as64() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
         cpu.set_gpr64(
             rusty_box_decoder::instruction::GprIndex::Rbx as usize,
             0x4000,
@@ -662,7 +661,7 @@ mod tests {
 
     #[test]
     fn resolve_gather_q_uses_qword_index() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
         cpu.set_gpr64(
             rusty_box_decoder::instruction::GprIndex::Rax as usize,
             0x10000,
@@ -684,7 +683,7 @@ mod tests {
 
     #[test]
     fn vpgather_dst_index_alias_raises_ud() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
         for op in [
             Opcode::EvexVgatherddVdqVsib,
             Opcode::EvexVgatherdqVdqVsib,
@@ -706,7 +705,7 @@ mod tests {
 
     #[test]
     fn vpgatherdd_zero_opmask_skips_loads_and_clears_opmask() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
         for n in 0..16 {
             cpu.vmm[10].set_zmm32u(n, 0xDEAD_BEEF);
         }
@@ -763,7 +762,7 @@ mod tests {
         assert_eq!(i.get_evex_v_prime(), 1, "~V'=0 → V'=1");
         assert_eq!(i.sib_index(), 5);
         assert_eq!(
-            super::BxCpuC::<AmdRyzen>::vsib_index_reg(&i),
+            super::BxCpuC::<()>::vsib_index_reg(&i),
             21,
             "combined V' || sib.idx must address zmm21"
         );
@@ -830,7 +829,7 @@ mod tests {
     fn scatter_with_zero_opmask_writes_nothing() {
         // No opmask bit set means no store and no address computation, so this
         // runs to completion on a CPU with no memory bus wired up at all.
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
         for n in 0..16 {
             cpu.vmm[10].set_zmm32u(n, 0xDEAD_BEEF);
         }

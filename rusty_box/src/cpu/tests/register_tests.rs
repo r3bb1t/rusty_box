@@ -6,7 +6,7 @@ mod register_preservation_tests {
     use crate::memory::BxMemC;
 
     /// Helper: Create a minimal CPU for testing
-    fn create_test_cpu() -> BxCpuC<Corei7SkylakeX> {
+    fn create_test_cpu() -> BxCpuC {
         // This is a simplified version - actual implementation would need proper initialization
         unimplemented!("TODO: Implement test CPU creation")
     }

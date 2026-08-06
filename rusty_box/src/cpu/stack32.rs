@@ -2,9 +2,9 @@
 //!
 //! Based on Bochs stack32.cc
 
-use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, eflags::EFlags};
+use super::{cpu::BxCpuC, decoder::Instruction, eflags::EFlags};
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // =========================================================================
     // 32-bit PUSH instructions
     // Based on Bochs stack32.cc

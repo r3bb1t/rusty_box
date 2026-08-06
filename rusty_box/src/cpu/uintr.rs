@@ -11,9 +11,9 @@
 use super::cpu::Exception;
 use super::decoder::BxSegregs;
 use super::instrumentation::Instrumentation;
-use super::{BxCpuC, BxCpuIdTrait, Result};
+use super::{BxCpuC, Result};
 
-impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
+impl<T: Instrumentation> BxCpuC<'_, T> {
     /// Bochs uintr.cc uintr_masked — the user-level interrupt can be delivered
     /// only when running long-64 mode + UIF=1 + CPL=3.
     #[inline]

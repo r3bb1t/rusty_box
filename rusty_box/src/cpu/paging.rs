@@ -4,7 +4,7 @@
 //! Based on Bochs cpu/paging.cc
 //! Implements page table walking and address translation
 
-use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, vmx::BxRwAccess, Result};
+use super::{cpu::BxCpuC, vmx::BxRwAccess, Result};
 use crate::{
     config::{BxAddress, BxPhyAddress},
     cpu::{
@@ -173,7 +173,7 @@ const PRIV_CHECK: [u8; 32] = [
     0, 0, 0, 0, 1, 0, 1, 1, // user access
 ];
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
 
 
     /// Read a physical dword for a page-table walk without going through the
@@ -463,7 +463,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Translate a linear address to a physical address
     /// Based on BX_CPU_C::translate_linear in paging.cc
     /// Returns Ok(paddr) on success, or Err with page fault info that caller should handle
@@ -588,7 +588,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// PAE paging translation (slow path, used by translate_linear for prefetch).
     /// Based on Bochs translate_linear_PAE in paging.cc.
     fn translate_linear_pae_slow(
@@ -1073,7 +1073,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Page table walk for system writes (CPL=0).
     /// Updates Accessed/Dirty bits on PDE/PTE as required by x86 paging.
     /// Used by system_write_byte/word/dword for TSS, descriptor table writes.
@@ -2748,7 +2748,7 @@ mod tests {
         // walk fails with not-present at the PDE level.
         const UNMAPPED_VADDR: u64 = 0x0020_0000;
 
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
@@ -2791,7 +2791,7 @@ mod tests {
         const PAGE_TABLE: u64 = 0x4000;
         const PAGE_ENTRY: u64 = PAGE_TABLE | 0x3; // present + writable
 
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,

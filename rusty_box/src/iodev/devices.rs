@@ -2147,8 +2147,8 @@ mod tests {
     }
     const GUEST_TEST_CODE: u64 = 0x1000;
 
-    fn guest_emulator(pci_vga: bool) -> Box<Emulator<'static, Corei7SkylakeX>> {
-        let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+    fn guest_emulator(pci_vga: bool) -> Box<Emulator<'static>> {
+        let mut emu = Emulator::new_with_mode(
             EmulatorConfig::default(),
             CpuSetupMode::FlatProtected32,
         )
@@ -2165,7 +2165,7 @@ mod tests {
     }
 
     fn guest_pci_bar_write(
-        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        emu: &mut Emulator<'static>,
         devfunc: u8,
         register: u8,
         value: u32,
@@ -2190,7 +2190,7 @@ mod tests {
         unsafe { emu.run_cpu_batch(64) }
     }
 
-    fn guest_inb(emu: &mut Emulator<'static, Corei7SkylakeX>, port: u16) -> crate::cpu::Result<u8> {
+    fn guest_inb(emu: &mut Emulator<'static>, port: u16) -> crate::cpu::Result<u8> {
         let code = [
             0xBA,
             port as u8,
@@ -2207,7 +2207,7 @@ mod tests {
     }
 
     fn guest_memory_read(
-        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        emu: &mut Emulator<'static>,
         address: u32,
     ) -> crate::cpu::Result<u64> {
         let code_address =

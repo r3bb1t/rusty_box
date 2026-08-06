@@ -3,7 +3,7 @@ use crate::{
         apic::{LocalApicCpuEvent, LocalApicTimerActivation, PendingIpi},
         cpu::CpuActivityState,
         instrumentation::Instrumentation,
-        BxCpuC, BxCpuIdTrait, CpuError, Result as CpuResult,
+        BxCpuC, CpuError, Result as CpuResult,
     },
     memory::{BxMemC, CpuTlbPin}, Result,
 };
@@ -11,7 +11,7 @@ use crate::{
 
 use super::{CpuMask, Emulator, BOCHS_APIC_BUS_ID_MASK};
 
-impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: Instrumentation> Emulator<'a, T> {
     /// Extend the borrow of memory owned by this Emulator to match lifetime 'a.
     ///
     /// # Safety
@@ -110,8 +110,8 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 cpu.is_unmasked_event_pending(u32::MAX)
                     || cpu.lapic.intr
                     || (cpu.pending_event
-                        & (BxCpuC::<I>::BX_EVENT_PENDING_INTR
-                            | BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR))
+                        & (BxCpuC::<()>::BX_EVENT_PENDING_INTR
+                            | BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR))
                         != 0
             }
             _ => {
@@ -578,7 +578,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     }
 }
 
-impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: Instrumentation> Emulator<'a, T> {
     /// Check for pending reset requests (keyboard 0xFE, port 92h, PCI CF9).
     /// If a reset is pending, clears the request flags and performs that reset type.
     /// Returns true if a reset was performed.
@@ -654,7 +654,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.apply_lapic_cpu_event(target, cpu_event);
         if signal_lapic_intr {
             self.cpu_mut_at(target)
-                .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
         }
         self.refresh_cpu_masks(target);
     }
@@ -933,7 +933,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                     cpu.lapic.periodic(ticks_now);
 
                     if cpu.lapic.intr {
-                        cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                        cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                     }
 
                     let timer_handle = cpu.lapic.timer_handle;
@@ -955,7 +955,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                 cpu.lapic.cpu_ticks_at_sync = cpu.cpu_ticks();
 
                 if cpu.lapic.intr {
-                    cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                    cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                 }
 
                 let timer_handle = cpu.lapic.timer_handle;
@@ -1273,17 +1273,17 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             || self.device_manager.pic.irq_pending
             || self.pc_system.intr_raised;
         if pic_asserted {
-            self.cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
+            self.cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
         } else {
-            self.cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
+            self.cpu.clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
         }
 
         for cpu_index in 0..self.cpu_count() {
             let cpu = self.cpu_mut_at(cpu_index);
             if cpu.lapic.intr || cpu.lapic.intr_pending {
-                cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
             } else {
-                cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                cpu.clear_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
             }
         }
     }
@@ -1298,9 +1298,9 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
         self.device_manager.pic.irq_pending = false;
         self.device_manager.pic.irq_cleared = false;
         if asserted {
-            self.cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
+            self.cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
         } else {
-            self.cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
+            self.cpu.clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
         }
 
         // PIC forwarding has already changed IOAPIC levels; now route its
@@ -1326,18 +1326,18 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
             cursor = cpu_index + 1;
             let cpu = self.cpu_mut_at(cpu_index);
             if cpu.lapic.intr_pending {
-                cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                 cpu.lapic.intr_pending = false;
             }
             self.refresh_cpu_masks(cpu_index);
         }
 
         if self.pc_system.intr_raised {
-            self.cpu.signal_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
+            self.cpu.signal_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
             self.pc_system.intr_raised = false;
         }
         if self.pc_system.intr_cleared {
-            self.cpu.clear_event(BxCpuC::<I>::BX_EVENT_PENDING_INTR);
+            self.cpu.clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
             self.pc_system.intr_cleared = false;
         }
         if self.pc_system.async_event_pending {

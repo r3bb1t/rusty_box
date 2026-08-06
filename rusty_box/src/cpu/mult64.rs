@@ -4,12 +4,11 @@
 
 use super::{
     cpu::{BxCpuC, Exception},
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     error::Result,
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // =========================================================================
     // 64-bit Multiplication and Division
     // =========================================================================

@@ -3,9 +3,9 @@
 //! Based on Bochs data_xfer64.cc
 
 use crate::cpu::decoder::{BxSegregs, Instruction};
-use crate::cpu::{BxCpuC, BxCpuIdTrait, Result};
+use crate::cpu::{BxCpuC, Result};
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // =========================================================================
     // 64-bit MOV instructions
     // =========================================================================

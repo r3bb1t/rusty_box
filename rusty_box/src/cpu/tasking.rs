@@ -5,7 +5,6 @@
 
 use super::{
     cpu::Exception,
-    cpuid::BxCpuIdTrait,
     decoder::BxSegregs,
     descriptor::{
         is_code_segment, is_code_segment_non_conforming, is_code_segment_readable, is_data_segment,
@@ -23,8 +22,8 @@ pub(super) const BX_TASK_FROM_IRET: u32 = 1;
 pub(super) const BX_TASK_FROM_JUMP: u32 = 2;
 pub(super) const BX_TASK_FROM_INT: u32 = 3;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
-    super::cpu::BxCpuC<'_, I, T>
+impl<T: crate::cpu::instrumentation::Instrumentation>
+    super::cpu::BxCpuC<'_, T>
 {
     /// Perform task switch
     /// Based on BX_CPU_C::task_switch in tasking.cc

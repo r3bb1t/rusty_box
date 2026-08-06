@@ -169,11 +169,11 @@ fn run() -> Status {
     // 1. CPU (~17-50MB, mostly BxICache fixed arrays)
     info!(
         "Allocating CPU ({} bytes)...",
-        core::mem::size_of::<BxCpuC<Corei7SkylakeX>>()
+        core::mem::size_of::<BxCpuC>()
     );
-    let cpu_ptr: *mut BxCpuC<Corei7SkylakeX> = alloc_zeroed_for();
+    let cpu_ptr: *mut BxCpuC = alloc_zeroed_for();
     let cpu = unsafe {
-        match BxCpuBuilder::<Corei7SkylakeX>::init_cpu_at(cpu_ptr, ()) {
+        match BxCpuBuilder::new().init_cpu_at(cpu_ptr, ()) {
             Ok(cpu) => cpu,
             Err(e) => bail!("CPU init failed: {:?}", e),
         }
@@ -209,11 +209,11 @@ fn run() -> Status {
     // 3. Emulator struct (~2-3MB, embeds DeviceManager with VGA/IDE buffers)
     info!(
         "Allocating Emulator ({} bytes)...",
-        core::mem::size_of::<Emulator<Corei7SkylakeX>>()
+        core::mem::size_of::<Emulator>()
     );
-    let emu_ptr: *mut Emulator<Corei7SkylakeX> = alloc_zeroed_for();
+    let emu_ptr: *mut Emulator = alloc_zeroed_for();
     let emu = unsafe {
-        match Emulator::<Corei7SkylakeX>::init_at(emu_ptr, cpu, mem_stub, config) {
+        match Emulator::init_at(emu_ptr, cpu, mem_stub, config) {
             Ok(e) => e,
             Err(e) => bail!("Emulator init failed: {:?}", e),
         }

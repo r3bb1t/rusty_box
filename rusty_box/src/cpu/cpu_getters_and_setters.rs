@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use super::{
-    cpuid::BxCpuIdTrait,
     decoder::{
         BxSegregs, BX_16BIT_REG_IP, BX_32BIT_REG_EIP, BX_64BIT_REG_RIP, BX_64BIT_REG_SSP,
         BX_TMP_REGISTER,
@@ -10,7 +9,7 @@ use super::{
 };
 
 // according to RFC #344, we use "set_<name>" for setters
-impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
+impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     // getters for 8 bit general registers
     #[inline]
     pub fn al(&self) -> u8 {

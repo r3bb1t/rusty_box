@@ -5,7 +5,7 @@
 //! Mirrors Bochs cpu/fred.cc — FRED event delivery, ERETS/ERETU return
 //! instructions, and LKGS helper.
 
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
+use crate::cpu::{BxCpuC};
 
 use super::cpu::Exception;
 use super::decoder::{BxSegregs, Instruction};
@@ -17,7 +17,7 @@ use super::Result;
 /// Selector RPL mask: clears RPL bits.
 const BX_SELECTOR_RPL_MASK: u64 = 0xFFFC;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // ========================================================================
     // CSL (Current Stack Level) — low 2 bits of ia32_fred_cfg
     // ========================================================================

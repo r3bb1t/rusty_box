@@ -2420,7 +2420,7 @@ impl DiskCreatorPanel {
 
 #[cfg(target_arch = "wasm32")]
 type WebEmulator =
-    Box<rusty_box::emulator::Emulator<'static, rusty_box::cpu::core_i7_skylake::Corei7SkylakeX>>;
+    Box<rusty_box::emulator::Emulator<'static>>;
 
 #[cfg(target_arch = "wasm32")]
 pub struct WebShellApp {

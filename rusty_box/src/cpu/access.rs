@@ -17,7 +17,7 @@ use super::descriptor::{
     SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
 };
 use super::rusty_box::MemoryAccessType;
-use super::{BxCpuC, BxCpuIdTrait, Result};
+use super::{BxCpuC, Result};
 use crate::{
     config::{BxAddress, BxPhyAddress, BxPtrEquiv},
     memory::memory_rusty_box::bx_guest_ram_span,
@@ -222,7 +222,7 @@ fn addr_write_u64(addr: BxPtrEquiv, val: u64) {
     unsafe { (addr as *mut u64).write_unaligned(val) }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // ===== Canonical address check (Bochs access.cc IsCanonicalAccess) =====
 
     pub(super) fn is_canonical_access(
@@ -2821,7 +2821,7 @@ mod tests {
         const HIGH_GPA: u64 = 0x1_0000_0100;
         const PCI_HOLE: u64 = 0xC000_0000;
 
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         let fake_base = 0x1000usize as *mut u8;
         // This test exercises pointer selection only; no returned pointer is
         // dereferenced. The synthetic extent avoids a multi-GiB allocation

@@ -14,7 +14,6 @@
 
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     i387::BxPackedRegister,
 };
@@ -59,7 +58,7 @@ fn saturate_dword_s_to_word_s(val: i32) -> i16 {
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // ========================================================================
     // MMX infrastructure
     // ========================================================================

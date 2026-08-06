@@ -41,7 +41,7 @@ pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
 // ResetReason is defined in cpu/mod.rs (always available without alloc)
 use super::ResetReason;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     pub fn initialize(&mut self, _config: BxParams) -> Result<()> {
         tracing::debug!("Initialized cpu model {}", self.cpuid.get_name());
 

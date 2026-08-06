@@ -14,10 +14,10 @@
 // ADD_COUT_VEC / SUB_COUT_VEC carry-vector formulas used by the 32-bit
 // counterparts in cpu.rs.
 
-use super::{BxCpuC, BxCpuIdTrait};
+use super::BxCpuC;
 use crate::cpu::decoder::{BxSegregs, Instruction};
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // =========================================================================
     // Flag update helpers for 64-bit arithmetic
     // =========================================================================

@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types, unused_variables, unused_assignments, dead_code)]
 
-use super::{cpuid::BxCpuIdTrait, decoder::Instruction, BxCpuC};
+use super::{decoder::Instruction, BxCpuC};
 
 // CR0 notes:
 //   Each x86 level has its own quirks regarding how it handles
@@ -731,7 +731,7 @@ type XSaveStateInUsePtr_tR = fn() -> bool;
 type XSavePtr_tR = fn(&Instruction, usize);
 type XRestorPtr_tR = fn(&Instruction, usize);
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     pub(super) fn xsave_xrestor_init(&mut self) {
         //self
     }
@@ -742,7 +742,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 // Matching Bochs crregs.cc
 // =========================================================================
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // ----- MOV Rd, CRn (reads) -----
     // All MOV CRn require CPL=0, matching Bochs crregs.cc
 
@@ -1897,7 +1897,7 @@ mod tests {
         }
 
         // AMD advertises ALT_MOV_CR8: the write must land on the LAPIC TPR.
-        let mut amd = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut amd = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
         amd.reset(ResetReason::Hardware);
         assert!(amd.bx_cpuid_support_isa_extension(X86Feature::IsaAltMovCr8));
         amd.set_gpr64(1, 0x0F);
@@ -1909,7 +1909,7 @@ mod tests {
         );
 
         // Intel does not advertise it, so the same instruction is #UD.
-        let mut intel = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut intel = BxCpuBuilder::new().build().unwrap();
         intel.reset(ResetReason::Hardware);
         assert!(!intel.bx_cpuid_support_isa_extension(X86Feature::IsaAltMovCr8));
         let before = intel.lapic.get_tpr();
@@ -1924,7 +1924,7 @@ mod tests {
 
     #[test]
     fn write_cr8_lowering_tpr_signals_pending_lapic_event() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(ResetReason::Hardware);
         cpu.lapic.write_aligned(0x0F0, 0x1FF, 0);
         cpu.lapic.set_tpr(0x40);
@@ -1934,12 +1934,12 @@ mod tests {
 
         cpu.pending_event = 0;
         cpu.async_event = 0;
-        cpu.unmask_event(BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_LAPIC_INTR);
+        cpu.unmask_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
         cpu.write_cr8(0).unwrap();
 
         assert!(cpu.lapic.intr);
         assert!(!cpu.lapic.intr_pending);
-        assert!((cpu.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_LAPIC_INTR) != 0);
+        assert!((cpu.pending_event & BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR) != 0);
         assert!(cpu.async_event != 0);
     }
 }

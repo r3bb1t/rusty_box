@@ -1,7 +1,7 @@
 #![allow(non_snake_case, unused_variables, unused_assignments, dead_code)]
 #![allow(unused_unsafe)]
 
-use core::{cell::Cell, marker::PhantomData, ptr::NonNull};
+use core::{cell::Cell, ptr::NonNull};
 
 use crate::{
     config::{BxAddress, BxPhyAddress, BxPtrEquiv},
@@ -332,11 +332,11 @@ impl From<CpuActivityState> for u8 {
 
 #[allow(unused)]
 //#[derive(Debug)]
-pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentation = ()> {
+pub struct BxCpuC<'c, T: super::instrumentation::Instrumentation = ()> {
     pub(super) bx_cpuid: u32,
     pub(super) cpu_topology: CpuTopology,
 
-    pub(super) cpuid: I,
+    pub(super) cpuid: crate::cpu::cpudb::CpuModel,
 
     pub(super) ia_extensions_bitmask: [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE],
 
@@ -752,7 +752,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
     /* Now other not so obvious fields */
     pub(super) smram_map: [u32; SMMRAM_Fields::SMRAM_FIELD_LAST as _],
 
-    pub(super) phantom: PhantomData<I>,
 
 
     /// Used for direct memory access on TLB hits, bypassing pinned host mapping.
@@ -823,21 +822,21 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
 /// Clears transient direct-memory wiring even when CPU execution exits through
 /// an error path. It holds only a raw pointer to the currently borrowed CPU;
 /// the guard itself never aliases CPU state and cannot outlive the call.
-struct CpuMemoryWiringGuard<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> {
-    cpu: *mut BxCpuC<'c, I, T>,
+struct CpuMemoryWiringGuard<'c, T: crate::cpu::instrumentation::Instrumentation> {
+    cpu: *mut BxCpuC<'c, T>,
 }
 
-impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
-    CpuMemoryWiringGuard<'c, I, T>
+impl<'c, T: crate::cpu::instrumentation::Instrumentation>
+    CpuMemoryWiringGuard<'c, T>
 {
     #[inline]
-    fn new(cpu: &mut BxCpuC<'c, I, T>) -> Self {
+    fn new(cpu: &mut BxCpuC<'c, T>) -> Self {
         Self { cpu }
     }
 }
 
-impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Drop
-    for CpuMemoryWiringGuard<'c, I, T>
+impl<'c, T: crate::cpu::instrumentation::Instrumentation> Drop
+    for CpuMemoryWiringGuard<'c, T>
 {
     fn drop(&mut self) {
         // SAFETY: `new` receives the live CPU borrowed by its enclosing
@@ -846,7 +845,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Drop
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
     /// Persistent sleep sentinel set by enter_sleep_state (HLT/MWAIT).
     /// Matches Bochs proc_ctrl.cc `async_event = 1` — survives the
@@ -1031,7 +1030,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 }
 
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     #[inline]
     pub(crate) fn active_tlb_pins(&self) -> &[crate::memory::CpuTlbPin] {
         if self.active_tlb_pins.is_null() {
@@ -1466,7 +1465,7 @@ pub struct BxRegsMsr {
     pub(crate) ia32_spec_ctrl: u32, // SCA
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /* CPL == 3 */
     #[inline]
     pub(super) fn user_pl(&self) -> bool {
@@ -1617,9 +1616,9 @@ impl Uintr {
 }
 
 /// Type alias for instruction handler function pointer
-pub(super) type InstructionHandler<I, T> = fn(&mut BxCpuC<'_, I, T>, &Instruction) -> Result<()>;
+pub(super) type InstructionHandler<T> = fn(&mut BxCpuC<'_, T>, &Instruction) -> Result<()>;
 
-impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
+impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     /// Bochs `signal_event()`: set event bit and force async check.
     /// Called by PIC (via raw pointer) when master int_pin asserts.
     #[inline]
@@ -1881,13 +1880,13 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
     /// Initialize a BxCpuC on a pre-allocated, zeroed buffer.
     ///
     /// # Safety
-    /// `ptr` must point to a zeroed buffer of at least `size_of::<BxCpuC<I, T>>()`
+    /// `ptr` must point to a zeroed buffer of at least `size_of::<BxCpuC<T>>()`
     /// bytes, properly aligned, exclusively owned, and valid for `'static`.
     pub unsafe fn init_on_ptr(ptr: *mut Self)
     where
         T: Default,
     {
-        core::ptr::addr_of_mut!((*ptr).cpuid).write(I::new());
+        core::ptr::addr_of_mut!((*ptr).cpuid).write(crate::cpu::cpudb::CpuModel::default());
         core::ptr::addr_of_mut!((*ptr).ignore_bad_msrs).write(true);
         core::ptr::addr_of_mut!((*ptr).a20_mask).write(0xFFFF_FFFF_FFFF_FFFF);
         core::ptr::addr_of_mut!((*ptr).last_exception_type).write(-1);
@@ -3990,7 +3989,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         &mut self,
         instr: &mut Instruction,
         fetch_mode_mask: super::opcodes_table::FetchModeMask,
-    ) -> Result<(bool, Option<InstructionHandler<I, T>>)> {
+    ) -> Result<(bool, Option<InstructionHandler<T>>)> {
         use super::opcodes_table::{get_opcode_entry, FetchModeMask, OpFlags};
         use crate::cpu::decoder::Opcode;
 
@@ -4007,7 +4006,7 @@ impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpu
         let is_reg_form = instr.mod_c0();
 
         // Handler assignment logic (matching original lines 2045-2061)
-        let mut selected_handler: Option<InstructionHandler<I, T>> = None;
+        let mut selected_handler: Option<InstructionHandler<T>> = None;
         let mut is_bx_error = false; // Track if BxError handler was assigned
 
         if let Some(entry) = &opcode_entry {
@@ -4198,7 +4197,7 @@ mod tests {
         // invalidation path must clear both the pointer and the pin.
         static CODE: [u8; 0x80] = [0x90; 0x80];
 
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
@@ -4235,7 +4234,7 @@ mod tests {
         const PAE_TABLE: u64 = 0x4000;
         const PAGE_ENTRY: u64 = CODE_PAGE | 0x3; // present + writable
 
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.linaddr_width = 48;
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
@@ -4372,7 +4371,7 @@ mod tests {
         const NEW_SECOND_CODE_PAGE: u64 = 0x5000;
         const SPLIT_RIP: u64 = 0x0ffe;
 
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.linaddr_width = 48;
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
@@ -4476,7 +4475,7 @@ mod tests {
             .with_topology(1, 2, 1)
             .unwrap()
             .cpu_topology();
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.configure_smp(1, topology);
 
         let mut pc = BxPcSystemC::new();
@@ -4494,7 +4493,7 @@ mod tests {
 
     #[test]
     fn scheduler_boundary_request_is_distinct_and_taken_explicitly() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.async_event = BX_ASYNC_EVENT_STOP_TRACE;
 
         cpu.request_scheduler_boundary();
@@ -4512,7 +4511,7 @@ mod tests {
 
     #[test]
     fn fatal_execution_error_tears_down_memory_wiring() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
@@ -4545,7 +4544,7 @@ mod tests {
     fn unwired_tlb_mutation_refreshes_pin_before_next_memory_scope() {
         const TARGET: u64 = 0x4000;
 
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
@@ -4576,7 +4575,7 @@ mod tests {
         const TARGET: u64 = 0x4000;
         const OLD_LPF: u64 = 0x8000;
 
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
@@ -4615,7 +4614,7 @@ mod tests {
         const DTLB_TARGET: u64 = 0x4000;
         const ITLB_TARGET: u64 = 0x8000;
 
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
@@ -4658,7 +4657,7 @@ mod tests {
         // The full-flush memset zeros `vmcb_host`, but the flush does not change
         // SVM state — under-pinning the VMCB backing would be a use-after-free.
         // `clear_active_tlb_pin_hosts` re-publishes it while in an SVM guest.
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,
@@ -4693,7 +4692,7 @@ mod tests {
         const MIB: usize = 1024 * 1024;
 
         for &svm in &[false, true] {
-            let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+            let mut cpu = BxCpuBuilder::new().build().unwrap();
             let mut mem = BxMemC::new(
                 BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).unwrap(),
                 false,
@@ -4789,7 +4788,7 @@ mod tests {
         use super::{BX_MONITOR_ARMED_BY_MONITOR, CpuActivityState};
 
         // Full flush also wakes an MWAIT sleep to ACTIVE.
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
         cpu.activity_state = CpuActivityState::Mwait;
         assert!(cpu.monitor.armed());
@@ -4802,19 +4801,19 @@ mod tests {
         );
 
         // Non-global flush disarms too.
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
         cpu.tlb_flush_non_global();
         assert!(!cpu.monitor.armed(), "tlb_flush_non_global must disarm the monitor");
 
         // Single-page invlpg disarms too.
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
         cpu.tlb_invlpg(0x2000);
         assert!(!cpu.monitor.armed(), "tlb_invlpg must disarm the monitor");
 
         // Host-side rewire must PRESERVE the monitor across its internal flush.
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
         cpu.invalidate_host_memory_mappings();
         assert!(
@@ -4828,7 +4827,7 @@ mod tests {
         const MIB: usize = 1024 * 1024;
         const TARGET: u64 = 4 * MIB as u64;
 
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(5 * MIB, MIB, MIB).unwrap(),
             false,
@@ -4871,7 +4870,7 @@ mod tests {
 
     #[test]
     fn svm_pin_sidecar_tracks_guest_state_transitions() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
             false,

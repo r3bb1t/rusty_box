@@ -4,12 +4,11 @@
 //! Ported from Bochs cpu/fpu/fpu.cc
 
 use super::super::cpu::{BxCpuC, CpuMode};
-use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::{BxSegregs, Instruction};
 use super::super::i387::*;
 use super::super::softfloat3e::softfloat_types::ExtFloat80;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// FNINIT — Initialize FPU state
     pub fn fninit(&mut self, _instr: &Instruction) -> super::super::Result<()> {
         self.the_i387.init();

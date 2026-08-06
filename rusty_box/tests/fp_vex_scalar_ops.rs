@@ -261,7 +261,7 @@ fn vex_scalar_double_ops_match_host_ieee() {
 
 fn run_all_cases() {
     let cfg = EmulatorConfig::default();
-    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
         .expect("new emulator in flat long mode");
 
     // Enable SSE/AVX the way the API tests do (CR4.OSFXSR | CR4.OSXSAVE).
@@ -376,7 +376,7 @@ fn go_runtime_integer_ops_aes_and_bytemask() {
 
 fn run_go_runtime_cases() {
     let cfg = EmulatorConfig::default();
-    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
         .expect("new emulator in flat long mode");
     emu.reg_write(
         X86Reg::Cr4,
@@ -405,7 +405,7 @@ fn run_go_runtime_cases() {
             .expect("write park jump");
     }
     fn run(
-        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        emu: &mut Emulator<'static>,
         programs: &[(&str, &[u8], u64)],
         idx: usize,
     ) {
@@ -495,7 +495,7 @@ fn unaligned_vector_loads_across_page_boundaries() {
 
 fn run_split_load_cases() {
     let cfg = EmulatorConfig::default();
-    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
         .expect("new emulator in flat long mode");
     emu.reg_write(
         X86Reg::Cr4,
@@ -527,7 +527,7 @@ fn run_split_load_cases() {
             .expect("write park jump");
     }
     fn run(
-        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        emu: &mut Emulator<'static>,
         programs: &[(&str, &[u8], u64)],
         idx: usize,
     ) {
@@ -621,7 +621,7 @@ fn run_split_load_cases() {
 /// still zero — a configuration in which every VEX encoding would #UD, and in
 /// which `maxvl` leaves the upper half of the register file architecturally
 /// invisible, so a VEX write does not clear it.
-fn enable_guest_avx_state(emu: &mut Emulator<'static, Corei7SkylakeX>) {
+fn enable_guest_avx_state(emu: &mut Emulator<'static>) {
     const XSETBV_SETUP_BASE: u64 = CASE_BASE + 0x800;
     emu.reg_write(X86Reg::Rax, 0x7);
     emu.reg_write(X86Reg::Rcx, 0);
@@ -643,7 +643,7 @@ fn vex_vpinsrw_sources_vvvv_and_clears_upper() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
             emu.reg_write(
                 X86Reg::Cr4,
@@ -717,7 +717,7 @@ fn vex_vtestps_vtestpd_set_zf_cf_from_sign_bits() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
             emu.reg_write(
                 X86Reg::Cr4,
@@ -895,12 +895,12 @@ fn ymm_from_u64(v: [u64; 4]) -> [u8; 32] {
 
 /// Boot an emulator with guest AVX state enabled, run `code` at CASE_BASE
 /// after `setup`, and hand the parked emulator back for assertions.
-fn with_avx_emu(f: impl FnOnce(&mut Emulator<'static, Corei7SkylakeX>) + Send + 'static) {
+fn with_avx_emu(f: impl FnOnce(&mut Emulator<'static>) + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
             emu.reg_write(
                 X86Reg::Cr4,
@@ -921,7 +921,7 @@ fn with_avx_emu(f: impl FnOnce(&mut Emulator<'static, Corei7SkylakeX>) + Send + 
         .expect("join test thread");
 }
 
-fn run_one(emu: &mut Emulator<'static, Corei7SkylakeX>, name: &str, code: &[u8]) {
+fn run_one(emu: &mut Emulator<'static>, name: &str, code: &[u8]) {
     let mut prog = code.to_vec();
     prog.extend_from_slice(&[0xEB, 0xFE]); // park
     emu.mem_write(CASE_BASE, &prog).expect("write code");
@@ -1693,7 +1693,7 @@ fn indexbyte_avx2_ingredients() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
             emu.reg_write(
                 X86Reg::Cr4,
@@ -1767,7 +1767,7 @@ fn go_aeshash17to32_is_address_independent() {
 
 fn run_aeshash_cases() {
     let cfg = EmulatorConfig::default();
-    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
         .expect("new emulator in flat long mode");
     emu.reg_write(
         X86Reg::Cr4,
@@ -1806,7 +1806,7 @@ fn run_aeshash_cases() {
     let seed0 = 0x243F_6A88_85A3_08D3_1319_8A2E_0370_7344_u128; // arbitrary
     let seed1 = 0xA409_3822_299F_31D0_082E_FA98_EC4E_6C89_u128;
 
-    let hash_at = |emu: &mut Emulator<'static, Corei7SkylakeX>, addr: u64| -> [u8; 16] {
+    let hash_at = |emu: &mut Emulator<'static>, addr: u64| -> [u8; 16] {
         emu.mem_write(addr, key).expect("write key");
         emu.reg_write(X86Reg::Rax, addr);
         emu.reg_write(X86Reg::Rcx, key.len() as u64);
@@ -1883,7 +1883,7 @@ fn vex_packed_fp_upper_zeroing_and_legacy_minmax() {
 
 fn run_packed_cases() {
     let cfg = EmulatorConfig::default();
-    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
         .expect("new emulator in flat long mode");
     emu.reg_write(
         X86Reg::Cr4,
@@ -1928,7 +1928,7 @@ fn run_packed_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park jump");
     }
-    fn run(emu: &mut Emulator<'static, Corei7SkylakeX>, programs: &[(&str, &[u8])], idx: usize) {
+    fn run(emu: &mut Emulator<'static>, programs: &[(&str, &[u8])], idx: usize) {
         let (name, code) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;
@@ -2175,7 +2175,7 @@ fn sse3_sse41_hadd_blend_dpp_families() {
 
 fn run_hadd_blend_dpp_cases() {
     let cfg = EmulatorConfig::default();
-    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
         .expect("new emulator in flat long mode");
     emu.reg_write(
         X86Reg::Cr4,
@@ -2221,7 +2221,7 @@ fn run_hadd_blend_dpp_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park jump");
     }
-    fn run(emu: &mut Emulator<'static, Corei7SkylakeX>, programs: &[(&str, &[u8])], idx: usize) {
+    fn run(emu: &mut Emulator<'static>, programs: &[(&str, &[u8])], idx: usize) {
         let (name, code) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;
@@ -2392,7 +2392,7 @@ fn vex_vl_aware_and_three_operand_integer_ops() {
 
 fn run_vex_integer_cases() {
     let cfg = EmulatorConfig::default();
-    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
         .expect("new emulator in flat long mode");
     emu.reg_write(
         X86Reg::Cr4,
@@ -2439,7 +2439,7 @@ fn run_vex_integer_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park jump");
     }
-    fn run(emu: &mut Emulator<'static, Corei7SkylakeX>, programs: &[(&str, &[u8])], idx: usize) {
+    fn run(emu: &mut Emulator<'static>, programs: &[(&str, &[u8])], idx: usize) {
         let (name, code) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;
@@ -2707,7 +2707,7 @@ fn cvt_float_to_int_boundary_semantics() {
 
 fn run_cvt_boundary_cases() {
     let cfg = EmulatorConfig::default();
-    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
         .expect("new emulator in flat long mode");
     emu.reg_write(
         X86Reg::Cr4,
@@ -2729,7 +2729,7 @@ fn run_cvt_boundary_cases() {
         emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
             .expect("write park jump");
     }
-    fn run(emu: &mut Emulator<'static, Corei7SkylakeX>, programs: &[(&str, &[u8])], idx: usize) {
+    fn run(emu: &mut Emulator<'static>, programs: &[(&str, &[u8])], idx: usize) {
         let (name, code) = programs[idx];
         let addr = CASE_BASE + idx as u64 * CASE_STRIDE;
         let park = addr + code.len() as u64;
@@ -2832,7 +2832,7 @@ fn vex_remap_gap_families() {
 
 fn run_remap_gap_cases() {
     let cfg = EmulatorConfig::default();
-    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
         .expect("new emulator");
     emu.reg_write(
         X86Reg::Cr4,
@@ -2865,7 +2865,7 @@ fn run_remap_gap_cases() {
             .expect("write park");
     }
     fn run(
-        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        emu: &mut Emulator<'static>,
         programs: &[(&str, &[u8], u64)],
         idx: usize,
     ) {
@@ -2996,7 +2996,7 @@ fn evex_is_reachable_by_a_guest_end_to_end() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
             emu.reg_write(
                 X86Reg::Cr4,
@@ -3069,7 +3069,7 @@ fn xsave_xrstor_round_trips_the_avx512_components() {
             const BUF: u64 = CASE_BASE + 0x1_0000; // 64-byte aligned scratch
 
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
             emu.reg_write(
                 X86Reg::Cr4,
@@ -3173,7 +3173,7 @@ fn evex_vpternlogd_selects_the_right_source_for_each_imm8() {
             ] {
                 let cfg = EmulatorConfig::default();
                 let mut emu =
-                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                         .expect("new emulator");
                 emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
                 emu.reg_write(X86Reg::Rax, 0xE7);
@@ -3212,7 +3212,7 @@ fn evex_vprord_rotates_each_dword_right() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
             emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
             emu.reg_write(X86Reg::Rax, 0xE7);
@@ -3255,7 +3255,7 @@ fn evex_vpermi2d_reads_the_first_table_from_vvvv() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
             emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
             emu.reg_write(X86Reg::Rax, 0xE7);
@@ -3310,7 +3310,7 @@ fn evex_vpcmpeqb_sets_one_opmask_bit_per_equal_byte() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
             emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
             emu.reg_write(X86Reg::Rax, 0xE7);
@@ -3366,7 +3366,7 @@ fn evex_vextractf32x4_writes_the_rm_operand() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
             emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
             emu.reg_write(X86Reg::Rax, 0xE7);
@@ -3421,7 +3421,7 @@ fn evex_vcvtudq2pd_converts_unsigned() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
             emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
             emu.reg_write(X86Reg::Rax, 0xE7);
@@ -3493,7 +3493,7 @@ fn evex_float_to_qword_conversions() {
             for (name, enc, src, want) in cases {
                 let cfg = EmulatorConfig::default();
                 let mut emu =
-                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                         .expect("new emulator");
                 emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
                 emu.reg_write(X86Reg::Rax, 0xE7);
@@ -3533,7 +3533,7 @@ fn evex_unsigned_int_to_float_conversions() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
-            fn mk(emu: &mut Emulator<'static, Corei7SkylakeX>) {
+            fn mk(emu: &mut Emulator<'static>) {
                 emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18));
                 emu.reg_write(X86Reg::Rax, 0xE7);
                 emu.reg_write(X86Reg::Rcx, 0);
@@ -3545,7 +3545,7 @@ fn evex_unsigned_int_to_float_conversions() {
 
             // VCVTUQQ2PD xmm1, xmm2 — EVEX.128.F3.0F.W1 7A
             {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(), CpuSetupMode::FlatLong64).expect("emu");
                 mk(&mut emu);
                 let vals: [u64; 2] = [5, 0x8000_0000_0000_0000];
@@ -3567,7 +3567,7 @@ fn evex_unsigned_int_to_float_conversions() {
 
             // VCVTUDQ2PS xmm1, xmm2 — EVEX.128.F2.0F.W0 7A
             {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(), CpuSetupMode::FlatLong64).expect("emu");
                 mk(&mut emu);
                 let vals: [u32; 4] = [1, 7, 0x8000_0000, 0xFFFF_FF00];
@@ -3589,7 +3589,7 @@ fn evex_unsigned_int_to_float_conversions() {
 
             // VCVTUQQ2PS xmm1, xmm2 — EVEX.128.F2.0F.W1 7A (2 qwords -> 2 floats)
             {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(), CpuSetupMode::FlatLong64).expect("emu");
                 mk(&mut emu);
                 let vals: [u64; 2] = [9, 0xFFFF_FFFF_0000_0000];
@@ -3635,7 +3635,7 @@ fn evex_vcvtusi2_scalar_conversions() {
             ];
 
             for (name, enc, val, is32) in cases {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatLong64,
                 )
@@ -3689,7 +3689,7 @@ fn evex_vcvtudq2pd_memory_form_scales_disp8() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             const DATA: u64 = CASE_BASE + 0x1_0000;
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+            let mut emu = Emulator::new_with_mode(
                 EmulatorConfig::default(),
                 CpuSetupMode::FlatLong64,
             )
@@ -3736,7 +3736,7 @@ fn evex_vcvtudq2pd_kmask_merges() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+            let mut emu = Emulator::new_with_mode(
                 EmulatorConfig::default(),
                 CpuSetupMode::FlatLong64,
             )

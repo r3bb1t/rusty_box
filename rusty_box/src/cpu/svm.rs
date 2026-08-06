@@ -368,14 +368,13 @@ pub const BX_EVENT_SVM_VIRQ_PENDING: u32 = 1 << 8;
 use super::{
     cet::canonicalize_address,
     cpu::{BxCpuC, Exception},
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     eflags::EFlags,
     exception::InterruptType,
     segment_ctrl_pro::parse_selector,
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // =====================================================================
     //  VMCB physical-memory access helpers
     // =====================================================================

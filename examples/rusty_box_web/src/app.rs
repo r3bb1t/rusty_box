@@ -58,7 +58,7 @@ enum BootMode {
 /// The eframe application — owns the emulator and display directly.
 pub struct WasmEmulatorApp {
     boot_mode: BootMode,
-    emulator: Option<Box<Emulator<'static, Corei7SkylakeX>>>,
+    emulator: Option<Box<Emulator<'static>>>,
     display: SharedDisplay,
     texture: Option<egui::TextureHandle>,
     initialized: bool,
@@ -111,8 +111,8 @@ impl WasmEmulatorApp {
             ..Default::default()
         };
 
-        let result = (|| -> rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>> {
-            let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
+        let result = (|| -> rusty_box::Result<Box<Emulator<'static>>> {
+            let mut emu = Emulator::new(config)?;
             emu.init_memory_and_pc_system()?;
 
             let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
@@ -155,8 +155,8 @@ impl WasmEmulatorApp {
             ..Default::default()
         };
 
-        let result = (|| -> rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>> {
-            let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
+        let result = (|| -> rusty_box::Result<Box<Emulator<'static>>> {
+            let mut emu = Emulator::new(config)?;
             emu.init_memory_and_pc_system()?;
 
             let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
@@ -190,7 +190,7 @@ impl WasmEmulatorApp {
         self.finish_init(result);
     }
 
-    fn finish_init(&mut self, result: rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>>) {
+    fn finish_init(&mut self, result: rusty_box::Result<Box<Emulator<'static>>>) {
         match result {
             Ok(emu) => {
                 self.emulator = Some(emu);

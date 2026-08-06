@@ -10,13 +10,12 @@
 
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::BxSegregs,
     descriptor::{SEG_ACCESS_ROK, SEG_ACCESS_WOK, SEG_VALID_CACHE},
     eflags::EFlags,
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Return from protected mode (CPL=0) to V8086 mode via IRET.
     ///
     /// Bochs: BX_CPU_C::stack_return_to_v86() in vm8086.cc

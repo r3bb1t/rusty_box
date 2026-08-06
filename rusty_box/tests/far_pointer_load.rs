@@ -50,7 +50,7 @@ fn lss_reads_the_far_pointer_through_linear_addresses() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
 
             // Repoint virtual [0x60_0000, 0x80_0000) at NEW_BACKING so the
@@ -105,7 +105,7 @@ fn lss_faults_on_an_unmapped_far_pointer() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
 
             // Unmap the 2 MiB page holding the far pointer entirely.

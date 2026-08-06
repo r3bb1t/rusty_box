@@ -25,7 +25,6 @@ use crate::cpu::instrumentation::{
     MemHookEvent, MemHookType,
 };
 use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, X86Reg};
-use crate::cpu::BxCpuIdTrait;
 #[cfg(feature = "alloc")]
 use crate::cpu::ResetReason;
 use crate::emulator::Emulator;
@@ -76,7 +75,7 @@ impl StopHandle {
 // feature-gated. When the feature is off, the methods simply do not exist.
 
 #[cfg(all(feature = "instrumentation", feature = "alloc"))]
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
     /// Register a hook fired before each instruction whose RIP is in `range`.
     /// Callback receives `(rip, &Instruction)`.
     pub fn hook_add_code<R, F>(&mut self, range: R, cb: F) -> HookHandle
@@ -218,7 +217,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
 // ─────────────────────────── reg_read / reg_write ───────────────────────────
 
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
     /// Read any register by enum tag. Narrower registers are zero-extended
     /// into the returned `u64`.
     pub fn reg_read(&self, reg: X86Reg) -> u64 {
@@ -330,7 +329,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
 // ─────────────────────────── Wide register read/write ───────────────────────────
 
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
     /// Read an x87 FPU register as 10 bytes (80-bit extended precision).
     /// `reg` must be Fpr0..Fpr7.
     pub fn reg_read_fp80(&self, reg: X86Reg) -> [u8; 10] {
@@ -572,7 +571,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
 // ─────────────────────────── mem_read / mem_write ───────────────────────────
 
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
     /// Read bytes from guest physical memory into the caller's buffer.
     /// Returns the number of bytes read (always `buf.len()` on success).
     /// Bypasses MMIO handlers — matches Unicorn `uc_mem_read` semantics.
@@ -824,7 +823,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 
 // ─────────────────────────── emu_start / emu_stop ───────────────────────────
 
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
     /// Obtain a cross-thread [`StopHandle`] that breaks the `emu_start` loop
     /// at its next batch boundary.
     #[cfg(feature = "alloc")]
@@ -928,7 +927,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
 // ─────────────────────────── CpuSetupMode builders ───────────────────────────
 
 #[cfg(feature = "alloc")]
-impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
+impl<'a> Emulator<'a, ()> {
     /// Create a new emulator with guest memory allocated but no BIOS loaded,
     /// pre-configured for the given CPU mode. See [`CpuSetupMode`].
     ///
@@ -947,7 +946,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I, ()> {
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
     /// Create a new emulator pre-configured for the given CPU mode with a
     /// monomorphized tracer. Combines `new_with_instrumentation` + `setup_cpu_mode`.
     pub fn new_with_mode_and_instrumentation(
@@ -963,7 +962,7 @@ impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emula
     }
 }
 
-impl<'a, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: crate::cpu::instrumentation::Instrumentation> Emulator<'a, T> {
     /// Reconfigure an existing emulator for the given CPU mode, skipping BIOS.
     /// Must be called after `initialize()` (or from `new_with_mode`).
     pub fn setup_cpu_mode(&mut self, mode: CpuSetupMode) -> Result<()> {
@@ -1111,7 +1110,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.reg_write(X86Reg::Rax, 0xDEAD_BEEF_CAFE_BABE);
                 assert_eq!(emu.reg_read(X86Reg::Rax), 0xDEAD_BEEF_CAFE_BABE);
                 assert_eq!(emu.reg_read(X86Reg::Eax), 0xCAFE_BABE);
@@ -1133,7 +1132,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.initialize().unwrap();
                 let data: [u8; 16] = [
                     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
@@ -1172,7 +1171,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let emu = Emulator::new(config).unwrap();
                 let handle = emu.stop_handle();
                 assert!(!handle.is_stopping());
                 handle.stop();
@@ -1192,7 +1191,7 @@ mod tests {
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
                 let emu =
-                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
                         .unwrap();
                 // CR0.PE should be set
                 let cr0 = emu.reg_read(X86Reg::Cr0);
@@ -1217,7 +1216,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                let emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                     .unwrap();
                 let cr0 = emu.reg_read(X86Reg::Cr0);
                 assert!(cr0 & 0x1 != 0, "CR0.PE not set");
@@ -1241,7 +1240,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let mut emu = Emulator::new(cfg).unwrap();
                 let h = emu.hook_add_code(.., |_, _| {});
                 assert!(emu.hook_del(h).is_ok());
                 assert!(emu.hook_del(h).is_err(), "double-delete must fail");
@@ -1258,7 +1257,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let mut emu = Emulator::new(cfg).unwrap();
                 let val: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 0x00, 0x40]; // ~2.0 in FP80
                 emu.reg_write_fp80(X86Reg::Fpr0, val);
                 let read_back = emu.reg_read_fp80(X86Reg::Fpr0);
@@ -1276,7 +1275,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let mut emu = Emulator::new(cfg).unwrap();
                 let val: [u8; 16] = [
                     0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x02, 0x03, 0x04, 0x05,
                     0x06, 0x07, 0x08,
@@ -1300,7 +1299,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let mut emu = Emulator::new(cfg).unwrap();
                 let mut val = [0u8; 32];
                 for (i, b) in val.iter_mut().enumerate() {
                     *b = i as u8;
@@ -1324,7 +1323,7 @@ mod tests {
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
                 let mut emu =
-                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                         .unwrap();
                 let code_addr = 0x20_0000;
 
@@ -1391,7 +1390,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let mut emu = Emulator::new(cfg).unwrap();
                 emu.set_exits(&[0x1000, 0x2000, 0x3000]);
                 emu.remove_exit(0x2000);
                 emu.add_exit(0x4000);
@@ -1410,7 +1409,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let mut emu = Emulator::new(cfg).unwrap();
                 let h = emu.hook_add_block(.., |_rip, _size| {});
                 assert!(emu.hook_del(h).is_ok());
             })
@@ -1427,7 +1426,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(cfg).unwrap();
+                let mut emu = Emulator::new(cfg).unwrap();
                 let h = emu.hook_add_invalid_insn(|_rip| false);
                 assert!(emu.hook_del(h).is_ok());
             })

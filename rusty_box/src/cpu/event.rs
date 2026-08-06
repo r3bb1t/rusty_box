@@ -1,6 +1,5 @@
 use super::{
     cpu::CpuActivityState,
-    cpuid::BxCpuIdTrait,
     decoder::BxSegregs,
     eflags::EFlags,
     svm::{SvmVmexit, BX_VM_CR_MSR_INIT_REDIRECT_MASK, SVM_INTERCEPT0_INIT, SVM_INTERCEPT0_SMI},
@@ -8,7 +7,7 @@ use super::{
     BxCpuC,
 };
 
-impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
+impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     /// Handle async events - matches Bochs event.cc handleAsyncEvent()
     /// Returns true if should return from cpu_loop
     pub(super) fn handle_async_event(
@@ -793,8 +792,8 @@ mod tests {
             .cpu_topology()
     }
 
-    fn make_cpu(cpu_id: u32) -> alloc::boxed::Box<BxCpuC<'static, Corei7SkylakeX>> {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+    fn make_cpu(cpu_id: u32) -> alloc::boxed::Box<BxCpuC<'static>> {
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.configure_smp(cpu_id, smp_topology());
         cpu
     }
@@ -820,7 +819,7 @@ mod tests {
             "AP must not advertise BSP bit"
         );
         assert_ne!(
-            ap.async_event & BxCpuC::<Corei7SkylakeX>::BX_ASYNC_EVENT_SLEEP,
+            ap.async_event & BxCpuC::<()>::BX_ASYNC_EVENT_SLEEP,
             0
         );
     }
@@ -847,7 +846,7 @@ mod tests {
 
         ap.deliver_init();
         assert_ne!(
-            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT,
+            ap.pending_event & BxCpuC::<()>::BX_EVENT_INIT,
             0
         );
         let exited = ap.handle_async_event(None, None, None, &[]);
@@ -872,8 +871,8 @@ mod tests {
         let exited = ap.handle_async_event(None, None, None, &[]);
 
         assert!(!exited);
-        assert!(ap.is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI));
-        assert!(ap.is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT));
+        assert!(ap.is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_SMI));
+        assert!(ap.is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_INIT));
         assert!(!ap.in_smm, "SMI must not enter SMM while GIF=0");
         assert_eq!(ap.activity_state, CpuActivityState::Active);
         assert_eq!(
@@ -884,7 +883,7 @@ mod tests {
 
         // STGI: with GIF set again, the held INIT is processed. Drop the SMI
         // first so this test does not depend on SMM entry machinery.
-        ap.clear_event(BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI);
+        ap.clear_event(BxCpuC::<()>::BX_EVENT_SMI);
         ap.svm_gif = true;
         let exited = ap.handle_async_event(None, None, None, &[]);
 
@@ -913,7 +912,7 @@ mod tests {
         assert!(!ap.in_svm_guest, "SMI intercept must exit SVM guest mode");
         assert!(!ap.svm_gif, "GIF must be clear after SVM VMEXIT");
         assert!(
-            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI != 0,
+            ap.pending_event & BxCpuC::<()>::BX_EVENT_SMI != 0,
             "intercepted SMI must stay pending"
         );
         assert!(!ap.in_smm, "SMI intercept must preempt SMM entry");
@@ -939,7 +938,7 @@ mod tests {
         assert!(!ap.in_svm_guest, "INIT intercept must exit SVM guest mode");
         assert!(!ap.svm_gif, "GIF must be clear after SVM VMEXIT");
         assert!(
-            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT != 0,
+            ap.pending_event & BxCpuC::<()>::BX_EVENT_INIT != 0,
             "intercepted INIT must stay pending"
         );
         // An INIT reset would park the AP in WAIT_FOR_SIPI; the intercept
@@ -968,7 +967,7 @@ mod tests {
         let bits = cpu.code_breakpoint_match(0x1234);
         assert_ne!(bits & 0x1, 0, "B0 status bit must be set on a match");
         assert_ne!(
-            bits & BxCpuC::<Corei7SkylakeX>::BX_DEBUG_TRAP_HIT,
+            bits & BxCpuC::<()>::BX_DEBUG_TRAP_HIT,
             0,
             "HIT must be set because DR0 is enabled in DR7"
         );
@@ -1003,7 +1002,7 @@ mod tests {
 
         let bits = cpu.pending_code_breakpoint_trap();
         assert_ne!(
-            bits & BxCpuC::<Corei7SkylakeX>::BX_DEBUG_TRAP_HIT,
+            bits & BxCpuC::<()>::BX_DEBUG_TRAP_HIT,
             0,
             "a DR0 armed on CS.base + EIP must hit (Bochs event.cc \
              code_breakpoint_match(get_laddr(CS, prev_rip)))"
@@ -1033,7 +1032,7 @@ mod tests {
         let bits = cpu.code_breakpoint_match(0x2000);
         assert_ne!(bits & 0x1, 0, "B0 status bit still reported for a match");
         assert_eq!(
-            bits & BxCpuC::<Corei7SkylakeX>::BX_DEBUG_TRAP_HIT,
+            bits & BxCpuC::<()>::BX_DEBUG_TRAP_HIT,
             0,
             "HIT must NOT be set: DR0 is not enabled in DR7"
         );
@@ -1045,9 +1044,9 @@ mod tests {
         ap.reset(ResetReason::Hardware);
         ap.deliver_sipi(TEST_SIPI_VECTOR);
 
-        let held = BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI
-            | BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI
-            | BxCpuC::<Corei7SkylakeX>::BX_EVENT_VMX_VIRTUAL_NMI;
+        let held = BxCpuC::<()>::BX_EVENT_SMI
+            | BxCpuC::<()>::BX_EVENT_NMI
+            | BxCpuC::<()>::BX_EVENT_VMX_VIRTUAL_NMI;
 
         // SMI delivery enters SMM at the next instruction boundary.
         ap.deliver_smi();
@@ -1067,7 +1066,7 @@ mod tests {
         let exited = ap.handle_async_event(None, None, None, &[]);
         assert!(!exited);
         assert_ne!(
-            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI,
+            ap.pending_event & BxCpuC::<()>::BX_EVENT_NMI,
             0,
             "NMI during SMM must stay pending until RSM"
         );
@@ -1087,7 +1086,7 @@ mod tests {
             "RSM must unmask SMI, NMI, and VMX virtual-NMI"
         );
         assert_ne!(
-            ap.pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI,
+            ap.pending_event & BxCpuC::<()>::BX_EVENT_NMI,
             0,
             "the held NMI is still pending after RSM for the next boundary"
         );
@@ -1170,12 +1169,12 @@ mod tests {
         );
         assert_eq!(
             ap.event_mask
-                & (BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI | BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI),
+                & (BxCpuC::<()>::BX_EVENT_SMI | BxCpuC::<()>::BX_EVENT_NMI),
             0,
             "SIPI unmasks SMI/NMI before the VMexit (Bochs deliver_SIPI)"
         );
         assert_ne!(
-            ap.event_mask & BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT,
+            ap.event_mask & BxCpuC::<()>::BX_EVENT_INIT,
             0,
             "the VMexit itself re-masks INIT (Bochs vmx.cc: INIT is \
              disabled in VMX root mode)"

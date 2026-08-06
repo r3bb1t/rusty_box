@@ -4,7 +4,7 @@ use crate::cpu::{
     decoder::features::X86Feature,
 };
 
-use super::{cpuid::BxCpuIdTrait, BxCpuC, Result};
+use super::{BxCpuC, Result};
 
 /// Interrupt type, based on BX_INTERRUPT_TYPE in Bochs
 #[derive(Debug, Clone, Copy)]
@@ -248,7 +248,7 @@ const EXCEPTIONS_INFO: [BxExceptionInfo; BX_CPU_HANDLED_EXCEPTIONS as _] = [
     },
 ];
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Bochs `BX_CPU_C::get_exception_type` — returns the exception-type
     /// classification (BENIGN/CONTRIBUTORY/PAGE_FAULT/DOUBLE_FAULT) for
     /// the given vector. Out-of-range vectors return BENIGN. #CP and

@@ -227,7 +227,7 @@ fn run_alpine() -> Result<()> {
         "Creating emulator with {} MB RAM (boot mode: {})...",
         ram_mb, boot_mode
     );
-    let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
+    let mut emu = Emulator::new(config)?;
 
     // Initialize memory + PC system
     emu.init_memory_and_pc_system()?;

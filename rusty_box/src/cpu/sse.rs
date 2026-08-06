@@ -17,7 +17,6 @@
 
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     xmm::BxPackedXmmRegister,
 };
@@ -211,7 +210,7 @@ pub(super) fn insertps_core(op1: &mut BxPackedXmmRegister, op2: u32, control: u8
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // ========================================================================
     // SSE helper: read op2 (register or memory)
     // ========================================================================

@@ -206,7 +206,7 @@ fn run_emulator(
         ..Default::default()
     };
 
-    let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
+    let mut emu = Emulator::new(config)?;
 
     emu.stop_flag = {
         let d = shared.lock().unwrap();

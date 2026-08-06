@@ -229,7 +229,7 @@ fn run_dlxlinux() -> Result<()> {
         config.ips / 1_000_000,
     );
 
-    let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
+    let mut emu = Emulator::new(config)?;
 
     // =========================================================================
     // Set up GUI (must be done BEFORE initialize() to match original Bochs)

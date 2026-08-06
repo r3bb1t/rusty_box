@@ -15,7 +15,6 @@ use super::{
         write_unaligned_u32,
     },
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
     eflags::EFlags,
 };
@@ -26,7 +25,7 @@ use crate::{
     memory::memory_rusty_box::bx_guest_ram_span,
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // =========================================================================
     // Helper: Get direction flag (DF)
     // =========================================================================

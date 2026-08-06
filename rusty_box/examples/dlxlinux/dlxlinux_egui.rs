@@ -178,7 +178,7 @@ fn run_emulator(
         ..Default::default()
     };
 
-    let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
+    let mut emu = Emulator::new(config)?;
 
     // Wire the shared stop_flag so the GUI reset button can interrupt run_interactive
     emu.stop_flag = {

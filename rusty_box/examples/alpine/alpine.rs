@@ -80,13 +80,13 @@ fn parse_chs(s: &str) -> Option<(u16, u8, u8)> {
     Some((c, h, s))
 }
 
-fn read_guest_u32(emu: &mut Emulator<'_, Corei7SkylakeX>, addr: u64) -> Option<u32> {
+fn read_guest_u32(emu: &mut Emulator<'_>, addr: u64) -> Option<u32> {
     let mut bytes = [0; 4];
     emu.mem_read(addr, &mut bytes).ok()?;
     Some(u32::from_le_bytes(bytes))
 }
 
-fn read_guest_u16(emu: &mut Emulator<'_, Corei7SkylakeX>, addr: u64) -> Option<u16> {
+fn read_guest_u16(emu: &mut Emulator<'_>, addr: u64) -> Option<u16> {
     let mut bytes = [0; 2];
     emu.mem_read(addr, &mut bytes).ok()?;
     Some(u16::from_le_bytes(bytes))
@@ -294,7 +294,7 @@ fn run_alpine() -> Result<()> {
         ..Default::default()
     };
 
-    let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
+    let mut emu = Emulator::new(config)?;
 
     // =========================================================================
     // Set up GUI

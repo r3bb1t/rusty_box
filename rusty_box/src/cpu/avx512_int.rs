@@ -7,7 +7,6 @@
 
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::Instruction,
     xmm::BxPackedZmmRegister,
 };
@@ -53,8 +52,8 @@ fn qword_elements(vl: u8) -> usize {
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
-fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_opmask_for_write<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, T>,
     instr: &Instruction,
 ) -> u64 {
     let k = instr.opmask();
@@ -68,16 +67,16 @@ fn read_opmask_for_write<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instru
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
-fn read_zmm<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<'_, I, T>,
+fn read_zmm<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &BxCpuC<'_, T>,
     reg: u8,
 ) -> BxPackedZmmRegister {
     cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register for dword operations with masking
-fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -99,8 +98,8 @@ fn write_zmm_masked<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumenta
 }
 
 /// Write ZMM register for qword operations with masking
-fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_q<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -122,8 +121,8 @@ fn write_zmm_masked_q<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 }
 
 /// Write ZMM register for word operations with masking
-fn write_zmm_masked_w<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn write_zmm_masked_w<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     reg: u8,
     result: &BxPackedZmmRegister,
     mask: u64,
@@ -156,8 +155,8 @@ fn write_zmm_masked_w<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumen
 
 /// Read src2 as dwords — callers (VPMINUD, VPMAXUD) pair
 /// `LOAD_BROADCAST_VectorD` with `LOAD_BROADCAST_MASK_VectorD`.
-fn read_rm_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_rm_dwords<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -170,8 +169,8 @@ fn read_rm_dwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 
 /// Read src2 as qwords — callers (VPMULDQ, VPMIN/MAXUQ, VPMIN/MAXSQ) pair
 /// `LOAD_BROADCAST_VectorQ` with `LOAD_BROADCAST_MASK_VectorQ`.
-fn read_rm_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_rm_qwords<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -185,8 +184,8 @@ fn read_rm_qwords<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentati
 /// Read src2 as words — VPMULHUW / VPMULHW pair `LOAD_Vector` with
 /// `LOAD_MASK_VectorW`. VPMADDWD uses `LOAD_Vector` for both entries and so
 /// calls `evex_load_vector` directly rather than using this.
-fn read_rm_words<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_rm_words<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -199,8 +198,8 @@ fn read_rm_words<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentatio
 
 /// Read src2 as raw bytes — callers (VPMADDUBSW, VPSADBW) use `LOAD_Vector`
 /// for every entry, so there is no masked variant to select.
-fn read_rm_bytes<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+fn read_rm_bytes<T: crate::cpu::instrumentation::Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     instr: &Instruction,
     _vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
@@ -227,7 +226,7 @@ fn saturate_i16(val: i32) -> i16 {
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // ========================================================================
     // VPMULDQ — Signed multiply packed dwords, return qword results
     // EVEX.66.0F38.W1 28

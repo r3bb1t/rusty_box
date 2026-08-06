@@ -1,9 +1,9 @@
 #![allow(unused_variables)]
 #![allow(unused_unsafe)]
 
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
+use crate::cpu::{BxCpuC};
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     pub(super) fn handle_cpu_context_change(&mut self) {
         self.tlb_flush();
 
@@ -4171,7 +4171,7 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
                 // Make SVME a supported bit so the reserved-bits gate doesn't
                 // shadow the SVMDIS check (AmdRyzen advertises IsaSvm so this
                 // is already set, but force it for clarity).
@@ -4205,7 +4205,7 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
                 cpu.efer_suppmask |= BxEfer::SVME.bits();
                 cpu.msr.svm_vm_cr = 0;
 
@@ -4223,7 +4223,7 @@ mod tests {
 
     #[test]
     fn wired_system_ticks_include_live_icount_delta() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
         let mut pc_system = BxPcSystemC::new();
         pc_system.initialize(1_000_000);
         pc_system.tickn(1_234);
@@ -4239,7 +4239,7 @@ mod tests {
 
     #[test]
     fn wired_smp_system_ticks_remain_at_round_epoch() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
         let mut pc_system = BxPcSystemC::new();
         pc_system.initialize(1_000_000);
         pc_system.tickn(1_234);
@@ -4258,7 +4258,7 @@ mod tests {
 
     #[test]
     fn tsc_deadline_msr_arms_local_apic_timer() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         let mut pc_system = BxPcSystemC::new();
         pc_system.initialize(1_000_000);
         pc_system.tickn(2_000);
@@ -4291,7 +4291,7 @@ mod tests {
 
     #[test]
     fn guest_tsc_paths_use_virtual_offset_but_aperf_mperf_stay_physical() {
-        let mut cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
         cpu.icount = 77;
         cpu.set_tsc(1_000, cpu.system_ticks());
         cpu.tsc_offset = 55;
@@ -4322,7 +4322,7 @@ mod tests {
 
     #[test]
     fn feature_control_allows_idempotent_locked_firmware_write() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(crate::cpu::ResetReason::Hardware);
 
         cpu.wrmsr_value(BX_MSR_IA32_FEATURE_CONTROL, 0x5).unwrap();
@@ -4339,7 +4339,7 @@ mod tests {
 
     #[test]
     fn wrmsr_apicbase_updates_lapic_base_and_mode() {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(crate::cpu::ResetReason::Hardware);
 
         let relocated_xapic_base = 0xfee1_0800u64;
@@ -4377,7 +4377,7 @@ mod tests {
             .with_topology(8, 1, 1)
             .unwrap()
             .cpu_topology();
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.configure_smp(SOURCE_APIC_ID, topology);
         cpu.reset(crate::cpu::ResetReason::Hardware);
         cpu.configure_smp(SOURCE_APIC_ID, topology);
@@ -4420,8 +4420,8 @@ mod avx_mode_tests {
     const XCR0_YMM: u32 = 1 << 2;
     const XCR0_AVX512: u32 = (1 << 5) | (1 << 6) | (1 << 7);
 
-    fn cpu_with(xcr0: u32) -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC<'static, AmdRyzen>> {
-        let mut c = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+    fn cpu_with(xcr0: u32) -> alloc::boxed::Box<crate::cpu::cpu::BxCpuC<'static>> {
+        let mut c = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
         c.cr0.insert(BxCr0::PE);
         // protected_mode() reads cpu_mode, which CR0.PE alone does not update.
         c.cpu_mode = crate::cpu::cpu::CpuMode::Ia32Protected;

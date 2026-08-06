@@ -85,8 +85,8 @@ pub(super) fn set_segment_ar_data(
     d.valid != 0
 }
 
-impl<I: super::cpuid::BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>
-    super::cpu::BxCpuC<'_, I, T>
+impl<T: crate::cpu::instrumentation::Instrumentation>
+    super::cpu::BxCpuC<'_, T>
 {
     /// Fetch raw descriptor from GDT or LDT
     /// Based on BX_CPU_C::fetch_raw_descriptor in segment_ctrl_pro.cc

@@ -7,7 +7,6 @@
 //! a special real-mode-like execution environment at smbase + 0x8000.
 
 use super::{
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction, BX_GENERAL_REGISTERS},
     descriptor::{
         SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
@@ -133,7 +132,7 @@ pub(super) enum SMMRAM_Fields {
 
 use SMMRAM_Fields::*;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     pub(super) fn init_smram() -> Result<[u32; SMRAM_FIELD_LAST as _]> {
         let mut smram_map = [0; SMRAM_FIELD_LAST as _];
         smram_map[SMRAM_FIELD_SMBASE_OFFSET as usize] = smram_translate(0x7f00);
@@ -941,7 +940,7 @@ mod tests {
     /// BSP with 4 MiB of real backing memory attached — enough to cover the
     /// default SMBASE 0x30000 save area at 0x3fe00..0x40000.
     fn cpu_with_memory() -> (
-        alloc::boxed::Box<BxCpuC<'static, Corei7SkylakeX>>,
+        alloc::boxed::Box<BxCpuC<'static>>,
         alloc::boxed::Box<BxMemC<'static>>,
     ) {
         let mut mem = alloc::boxed::Box::new(BxMemC::new(
@@ -950,7 +949,7 @@ mod tests {
             false,
         ));
         mem.set_a20_mask(u64::MAX);
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(ResetReason::Hardware);
         cpu.set_mem_bus_ptr(NonNull::from(mem.as_mut()));
         (cpu, mem)

@@ -5,7 +5,7 @@
 use super::cpu::Exception;
 use super::decoder::{BxSegregs, Instruction};
 use super::instrumentation::Instrumentation;
-use super::{BxCpuC, BxCpuIdTrait, Result};
+use super::{BxCpuC, Result};
 
 // Bochs vmx.h BX_IA32_FEATURE_CONTROL_* bits.
 pub const BX_IA32_FEATURE_CONTROL_LOCK_BIT: u32 = 0x1;
@@ -1121,7 +1121,7 @@ pub type BxVmxCap = VmxCap;
 #[derive(Debug, Default)]
 pub struct VmxCap {}
 
-impl<I: BxCpuIdTrait, T: Instrumentation> BxCpuC<'_, I, T> {
+impl<T: Instrumentation> BxCpuC<'_, T> {
     // =========================================================================
     // VMX flag-based result helpers — Bochs cpu.h VMsucceed / VMfailInvalid
     // and vmx.cc BX_CPU_C::VMfail.

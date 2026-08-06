@@ -87,7 +87,7 @@ fn run(mode: &str) {
     }
 }
 
-fn build_machine(config: &HarnessConfig) -> Box<Emulator<'static, Corei7SkylakeX>> {
+fn build_machine(config: &HarnessConfig) -> Box<Emulator<'static>> {
     let workspace_root = workspace_root();
     let bios = std::fs::read(
         workspace_root.join("cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
@@ -107,7 +107,7 @@ fn build_machine(config: &HarnessConfig) -> Box<Emulator<'static, Corei7SkylakeX
         ..EmulatorConfig::default()
     };
 
-    let mut emu = Emulator::<Corei7SkylakeX>::new(emulator_config).expect("build emulator");
+    let mut emu = Emulator::new(emulator_config).expect("build emulator");
     emu.set_gui(NoGui::new());
     emu.init_memory_and_pc_system().expect("init memory/pc-system");
 
@@ -136,7 +136,7 @@ fn workspace_root() -> std::path::PathBuf {
     }
 }
 
-fn run_instructions(emu: &mut Emulator<'static, Corei7SkylakeX>, budget: u64) -> u64 {
+fn run_instructions(emu: &mut Emulator<'static>, budget: u64) -> u64 {
     let mut executed_total = 0u64;
     while executed_total < budget {
         let chunk = (budget - executed_total).min(50_000_000);

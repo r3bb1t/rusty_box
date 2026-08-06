@@ -5,7 +5,7 @@
 //! Safe structs backed by byte arrays with inline accessor methods.
 //! On x86 targets LLVM optimises from_le_bytes/to_le_bytes to identical code as union access.
 
-use crate::cpu::{decoder::Instruction, BxCpuC, BxCpuIdTrait};
+use crate::cpu::{decoder::Instruction, BxCpuC};
 
 pub(super) const MXCSR_RESET: u32 = Mxcsr::RESET.bits();
 pub(super) const MXCSR_MASK: u32 = 0x0000_FFBF; // Valid bits mask (no bit 6 DAZ on older CPUs)
@@ -406,7 +406,7 @@ pub(super) const MXCSR_EXCEPTIONS: u32 = Mxcsr::IE
 // CPU helper methods for XMM register access
 // ============================================================================
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Clear a vector register (all 512 bits to zero)
     #[allow(non_snake_case)]
     pub(super) fn BX_CLEAR_AVX_REG(&mut self, index: usize) {
@@ -579,8 +579,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const STACK_TOP: u64 = 0x30_0000;
 
 
-    fn avx_emulator() -> alloc::boxed::Box<Emulator<'static, Corei7SkylakeX>> {
-        Emulator::<Corei7SkylakeX>::new_with_mode(
+    fn avx_emulator() -> alloc::boxed::Box<Emulator<'static>> {
+        Emulator::new_with_mode(
             EmulatorConfig::default(),
             CpuSetupMode::FlatLong64,
         )
@@ -588,7 +588,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     fn install_exception_gate(
-        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        emu: &mut Emulator<'static>,
         vector: u8,
         handler: u64,
     ) {
@@ -603,7 +603,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         emu.mem_write(handler, &[0xf4]).unwrap();
     }
 
-    fn install_avx_exception_handlers(emu: &mut Emulator<'static, Corei7SkylakeX>) {
+    fn install_avx_exception_handlers(emu: &mut Emulator<'static>) {
         emu.reg_write(X86Reg::IdtrBase, IDT_BASE);
         emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
         emu.reg_write(X86Reg::Rsp, STACK_TOP);
@@ -617,7 +617,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
-    fn enable_guest_avx(emu: &mut Emulator<'static, Corei7SkylakeX>) {
+    fn enable_guest_avx(emu: &mut Emulator<'static>) {
         emu.reg_write(
             X86Reg::Cr4,
             emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
@@ -631,7 +631,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     fn run_one(
-        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        emu: &mut Emulator<'static>,
         address: u64,
         code: &[u8],
     ) -> crate::error::Result<()> {
@@ -641,7 +641,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     fn assert_fault_at_original_rip(
-        emu: &mut Emulator<'static, Corei7SkylakeX>,
+        emu: &mut Emulator<'static>,
         vector: Exception,
         handler: u64,
         rip: u64,
@@ -751,7 +751,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
     use crate::cpu::decoder::{Opcode, X86Feature};
 
-    fn set_feature(emu: &mut Emulator<'static, Corei7SkylakeX>, f: X86Feature, on: bool) {
+    fn set_feature(emu: &mut Emulator<'static>, f: X86Feature, on: bool) {
         let index = f as usize;
         let (word, bit) = (index / 32, 1u32 << (index % 32));
         let cpu = emu.cpu_mut();

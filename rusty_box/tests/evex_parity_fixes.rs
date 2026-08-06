@@ -12,10 +12,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 const CODE: u64 = 0x0020_0000;
 
 /// Build an emulator in flat long mode with the full AVX-512 XCR0 enabled.
-fn evex_emulator() -> Box<Emulator<'static, Corei7SkylakeX>> {
+fn evex_emulator() -> Box<Emulator<'static>> {
     let cfg = EmulatorConfig::default();
     let mut emu =
-        Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("emulator");
+        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("emulator");
     emu.reg_write(
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),

@@ -43,7 +43,7 @@ fn pf_diag_tripwire_reports_a_null_page_write_fault() {
             std::env::set_var("RUSTY_BOX_PF_DIAG", &diag_path);
 
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
 
             // xor eax,eax ; invlpg [rax] ; mov [rax],rax ; jmp $

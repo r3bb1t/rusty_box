@@ -6,7 +6,7 @@
 //!
 //! This is the no-alloc equivalent of `Emulator::setup_direct_linux_boot`.
 
-use crate::cpu::{cpu::BxCpuC, cpuid::BxCpuIdTrait, instrumentation::Instrumentation};
+use crate::cpu::{cpu::BxCpuC, instrumentation::Instrumentation};
 use crate::memory::{BxMemC, CpuTlbPin};
 
 /// Error from boot setup (no alloc — uses static strings).
@@ -46,8 +46,8 @@ const MADT_MAX_LEN: usize = MADT_HEADER_LEN
 /// * `cmdline` - Kernel command line (ASCII, max 2047 bytes)
 /// * `ram_size` - Total guest RAM in bytes
 /// * `cpu_count` - Logical CPU count to advertise in the no-alloc MADT
-pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+pub fn setup_direct_linux_boot<T: Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     memory: &mut BxMemC<'_>,
     bzimage: &[u8],
     initramfs: Option<&[u8]>,
@@ -64,8 +64,8 @@ pub fn setup_direct_linux_boot<I: BxCpuIdTrait, T: Instrumentation>(
     )
 }
 
-pub(crate) fn setup_direct_linux_boot_with_pins<I: BxCpuIdTrait, T: Instrumentation>(
-    cpu: &mut BxCpuC<'_, I, T>,
+pub(crate) fn setup_direct_linux_boot_with_pins<T: Instrumentation>(
+    cpu: &mut BxCpuC<'_, T>,
     memory: &mut BxMemC<'_>,
     pins: &[CpuTlbPin],
     bzimage: &[u8],

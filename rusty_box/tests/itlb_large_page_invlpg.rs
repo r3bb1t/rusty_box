@@ -45,7 +45,7 @@ fn invlpg_flushes_every_itlb_frame_of_a_large_code_page() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatLong64)
+            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
                 .expect("new emulator");
 
             // Old bytes (identity phys of V_FN): mov rbx, 0x11111111 ; ret

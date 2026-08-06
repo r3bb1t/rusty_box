@@ -1,7 +1,7 @@
 //! `HookCtx` — Unicorn-style hook context giving callbacks full CPU access.
 //!
 //! Exposed through a type-erased trait (`CpuAccess`) so hook signatures don't
-//! need to be generic over `I` / `T`. `BxCpuC<'c, I, T>` implements
+//! need to be generic over `I` / `T`. `BxCpuC<'c, T>` implements
 //! `CpuAccess` for all `I: BxCpuIdTrait`, `T: Instrumentation`.
 
 use super::types::{InstrAction, X86Reg};

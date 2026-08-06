@@ -6,9 +6,9 @@
 //! Note: handle_interrupt_mask_change is defined in init.rs
 
 use super::eflags::EFlags;
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
+use crate::cpu::BxCpuC;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Check if interrupts are enabled (EFLAGS.IF = 1)
     #[inline]
     pub fn interrupts_enabled(&self) -> bool {

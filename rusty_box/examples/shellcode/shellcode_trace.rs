@@ -110,7 +110,7 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ..Default::default()
     };
     let mut emu =
-        Emulator::<Corei7SkylakeX, Tracer>::new_with_instrumentation(cfg.clone(), tracer)?;
+        Emulator::<Tracer>::new_with_instrumentation(cfg.clone(), tracer)?;
     emu.init_memory_and_pc_system()?;
     unsafe { emu.cpu_mut_unchecked() }.reset(ResetReason::Hardware);
     emu.setup_cpu_mode(CpuSetupMode::FlatLong64)?;

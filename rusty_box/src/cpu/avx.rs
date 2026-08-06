@@ -8,7 +8,6 @@
 
 use super::{
     cpu::{BxCpuC, Exception},
-    cpuid::BxCpuIdTrait,
     decoder::{features::X86Feature, BxSegregs, Instruction},
     softfloat3e::{
         f128::{SOFTFLOAT_MULADD_SUB_C, SOFTFLOAT_MULADD_SUB_PROD},
@@ -186,7 +185,7 @@ impl AMX {
     }
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // ========================================================================
     // VZEROUPPER / VZEROALL (VEX.0F 77)
     // ========================================================================

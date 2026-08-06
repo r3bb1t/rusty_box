@@ -5,7 +5,7 @@
 //! Mirrors Bochs cpu/cet.cc — ENDBR32/ENDBR64, shadow stack helpers,
 //! indirect branch tracking, and legacy endbranch treatment.
 
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
+use crate::cpu::{BxCpuC};
 
 use super::decoder::{BxSegregs, Instruction};
 use super::Result;
@@ -58,7 +58,7 @@ pub(super) fn is_invalid_cet_control(val: u64) -> bool {
     false
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // =========================================================================
     // CET query helpers — Bochs cet.cc
     // =========================================================================
@@ -872,8 +872,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
     /// Build a fresh CPU and switch it into protected mode with CET enabled in CR4.
     /// Caller fills in the IA32_S_CET / IA32_U_CET MSR for the specific test.
-    fn make_cet_cpu() -> alloc::boxed::Box<BxCpuC<'static, Corei7SkylakeX>> {
-        let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+    fn make_cet_cpu() -> alloc::boxed::Box<BxCpuC<'static>> {
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.cpu_mode = CpuMode::Ia32Protected;
         cpu.cr4 = BxCr4::CET;
         // Default to CPL=0 (kernel) by clearing CS RPL.

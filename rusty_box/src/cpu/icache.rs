@@ -6,7 +6,7 @@ use crate::{
         cpu::BX_ASYNC_EVENT_STOP_TRACE,
         decoder::{decode32, decode64, DecodeError, Instruction, Opcode},
         tlb::{lpf_of, page_offset, ppf_of},
-        BxCpuC, BxCpuIdTrait, Result,
+        BxCpuC, Result,
     },
     memory::BxMemC,
 };
@@ -616,7 +616,7 @@ fn is_trace_end_opcode(opcode: Opcode) -> bool {
     )
 }
 
-impl<'c, I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, I, T> {
+impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     fn bx_end_trace(&mut self) {
         self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
     }
@@ -1228,7 +1228,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 for opcode in [0x19, 0x39] {
-                    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    let mut emu = Emulator::new_with_mode(
                         EmulatorConfig::default(),
                         CpuSetupMode::FlatLong64,
                     )
@@ -1296,7 +1296,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatLong64,
                 )
@@ -1353,7 +1353,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatLong64,
                 )

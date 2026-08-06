@@ -13,7 +13,7 @@ mod tests;
 pub use super::error::Result;
 use crate::{
     config::{BxPhyAddress, MAX_HANDLER_OVERFLOW, MAX_MEM_BLOCKS},
-    cpu::{BxCpuC, BxCpuIdTrait},
+    cpu::{BxCpuC},
 };
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -73,8 +73,8 @@ pub(crate) struct CpuTlbPin {
 }
 
 impl CpuTlbPin {
-    pub(crate) fn new<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation>(
-        cpu: &BxCpuC<'_, I, T>,
+    pub(crate) fn new<T: crate::cpu::instrumentation::Instrumentation>(
+        cpu: &BxCpuC<'_, T>,
     ) -> Self {
         let pin = Self {
             state: UnsafeCell::new(CpuTlbPinState::empty()),
@@ -1310,7 +1310,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                     false,
                 );
                 mem.set_a20_mask(u64::MAX);
-                let cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+                let cpu = BxCpuBuilder::new().build().unwrap();
                 let pins = [CpuTlbPin::new(&*cpu)];
                 let mut written = [0x11, 0x22, 0x33, 0x44];
                 mem.write_physical_page(
@@ -1343,7 +1343,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+                let mut cpu = BxCpuBuilder::new().build().unwrap();
                 let mut mem = BxMemC::new(
                     BxMemoryStubC::create_and_init(MIB, MIB, MIB).unwrap(),
                     false,
@@ -1384,7 +1384,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                     false,
                 );
                 mem.set_a20_mask(u64::MAX);
-                let mut sibling = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+                let mut sibling = BxCpuBuilder::new().build().unwrap();
                 mem.write_ram(&[], 0, &[0x5a]).unwrap();
                 let pins = [CpuTlbPin::new(&*sibling)];
                 let host_ptr = mem
@@ -1429,7 +1429,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                     false,
                 );
                 mem.set_a20_mask(u64::MAX);
-                let cpu = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+                let cpu = BxCpuBuilder::new().build().unwrap();
                 let pins = [CpuTlbPin::new(&*cpu)];
 
                 // Make guest block 0 resident and locate its host span.
@@ -1486,7 +1486,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                 let start = MIB as u64 - 2;
                 assert_eq!(mem.write_ram(&[], start, &[0x11, 0x22]).unwrap(), 2);
 
-                let mut sibling = BxCpuBuilder::<Corei7SkylakeX>::new().build().unwrap();
+                let mut sibling = BxCpuBuilder::new().build().unwrap();
                 let pins = [CpuTlbPin::new(&*sibling)];
                 let resident_base = mem
                     .get_host_mem_addr_pinned(

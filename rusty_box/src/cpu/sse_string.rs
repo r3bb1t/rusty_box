@@ -8,7 +8,7 @@
 //! - PCMPISTRM (66 0F 3A 62): Implicit-length (null-terminated), result to XMM0
 //! - PCMPISTRI (66 0F 3A 63): Implicit-length, index to ECX
 
-use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, xmm::BxPackedXmmRegister};
+use super::{cpu::BxCpuC, decoder::Instruction, xmm::BxPackedXmmRegister};
 
 // ============================================================================
 // Helper functions (free functions matching Bochs static helpers)
@@ -408,7 +408,7 @@ fn aggregate(bool_res: &[[u8; 16]; 16], len1: usize, len2: usize, imm: u8) -> u1
 // SSE4.2 instruction handlers
 // ============================================================================
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// PCMPESTRM — Packed Compare Explicit-Length Strings, Return Mask (66 0F 3A 60)
     ///
     /// Lengths from EAX/RAX (op1 length) and EDX/RDX (op2 length).

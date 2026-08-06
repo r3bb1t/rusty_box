@@ -1,6 +1,6 @@
 use crate::{
     cpu::{
-        instrumentation::Instrumentation, BxCpuIdTrait,
+        instrumentation::Instrumentation,
     },
     iodev::{
         devices::DeviceManager, DeviceTimerOwner, TimerRequest,
@@ -12,7 +12,7 @@ use super::Emulator;
 #[cfg(feature = "std")]
 use super::SLOWDOWN_QUANTUM_USEC;
 
-impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: Instrumentation> Emulator<'a, T> {
     /// Initialize the emulator
     ///
     /// This runs the full initialization sequence from Bochs main.cc (bx_init_hardware):

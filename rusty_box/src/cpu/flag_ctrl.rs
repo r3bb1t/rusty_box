@@ -3,9 +3,9 @@
 
 use super::decoder::BxSegregs;
 use super::eflags::EFlags;
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
+use crate::cpu::{BxCpuC};
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     pub(super) fn clc(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         self.set_cf(false);
         Ok(())

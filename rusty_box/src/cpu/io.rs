@@ -5,11 +5,11 @@
 
 use super::{
     decoder::{BxSegregs, Instruction},
-    BxCpuC, BxCpuIdTrait,
+    BxCpuC,
 };
 use crate::cpu::rusty_box::MemoryAccessType;
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // ========================================================================
     // I/O Privilege Check — Bochs io.cc
     // ========================================================================

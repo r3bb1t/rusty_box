@@ -2,11 +2,10 @@
 //! Matching Bochs bit64.cc and logical64.cc (BT variants)
 use super::{
     cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
 };
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     // =========================================================================
     // BSF / BSR — Bit Scan Forward / Reverse (64-bit)
     // Matching Bochs bit64.cc BSF_GqEq / BSR_GqEq

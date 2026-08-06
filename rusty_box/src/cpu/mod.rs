@@ -151,3 +151,4 @@ pub use cpuid::{BxCpuIdTrait, CpuidFreq};
 
 pub use cpudb::amd::amd_ryzen::AmdRyzen;
 pub use cpudb::intel::*;
+pub use cpudb::CpuModel;

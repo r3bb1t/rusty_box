@@ -8,11 +8,11 @@ pub use rusty_box_decoder::instruction::{
 };
 pub use rusty_box_decoder::opcode::Opcode;
 
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
+use crate::cpu::{BxCpuC};
 
 /// The ISA gate itself is needed by the icache fill path, which compiles
 /// without `alloc`, so it lives outside the alloc-gated block below.
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Resolve a freshly decoded opcode against this CPU's CPUID feature set.
     ///
     /// Returns the opcode to place in the trace: the original when the model
@@ -170,7 +170,7 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
 
 // The remaining init-time reporting is only reachable from the alloc build.
 #[cfg(feature = "alloc")]
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// Validate CPU feature bitmask and configure decode tables.
     ///
     /// Bochs fetchdecode32.cc: loops all opcodes and disables those

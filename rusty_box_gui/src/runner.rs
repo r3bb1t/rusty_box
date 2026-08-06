@@ -138,7 +138,7 @@ where
     };
 
     #[cfg(not(feature = "guest-trace"))]
-    let mut emu = Emulator::<Corei7SkylakeX>::new(emulator_config)?;
+    let mut emu = Emulator::new(emulator_config)?;
     // Diagnostic build: run the CPU with the guest-death tracer installed.
     // Single-CPU only — new_with_instrumentation rejects SMP configs.
     #[cfg(feature = "guest-trace")]
@@ -152,7 +152,7 @@ where
             }
         })?;
         tracing::info!("guest-trace: recording guest evidence to {trace_log}");
-        Emulator::<Corei7SkylakeX, crate::guest_trace::GuestTracer>::new_with_instrumentation(
+        Emulator::<crate::guest_trace::GuestTracer>::new_with_instrumentation(
             emulator_config,
             tracer,
         )?

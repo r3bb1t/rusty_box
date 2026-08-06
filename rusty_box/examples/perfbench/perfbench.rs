@@ -132,7 +132,7 @@ fn run() {
         ..EmulatorConfig::default()
     };
 
-    let mut emu = Emulator::<Corei7SkylakeX>::new(cfg.clone()).expect("new");
+    let mut emu = Emulator::new(cfg.clone()).expect("new");
     emu.init_memory_and_pc_system().expect("init memory");
     unsafe { emu.cpu_mut_unchecked() }.reset(ResetReason::Hardware);
     emu.setup_cpu_mode(CpuSetupMode::FlatLong64).expect("mode");

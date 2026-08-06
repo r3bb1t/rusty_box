@@ -1519,7 +1519,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let vga_id = MemoryDeviceId::Vga(&mut vga as *mut BxVgaC);
                 mem.register_memory_handlers(vga_id, 0xA0000, 0xBFFFF).unwrap();
 
-                let cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                let cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
                 let pins = [CpuTlbPin::new(&*cpu)];
 
                 // SMRAM open (DOPEN, unrestricted): the write must land in RAM,
@@ -1583,7 +1583,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let mut mem = test_mem();
                 mem.set_a20_mask(0xFFFF_FFFF_FFFF_FFFF); // A20 enabled: no address wraparound
 
-                let cpu = BxCpuBuilder::<AmdRyzen>::new().build().unwrap();
+                let cpu = BxCpuBuilder::new_with_model(crate::cpu::CpuModel::amd_ryzen()).build().unwrap();
                 let pins = [CpuTlbPin::new(&*cpu)];
 
                 // High BIOS mirror: any address >= bios_rom_addr (default

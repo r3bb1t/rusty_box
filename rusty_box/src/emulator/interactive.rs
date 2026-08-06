@@ -1,4 +1,4 @@
-use crate::cpu::{instrumentation::Instrumentation, BxCpuIdTrait};
+use crate::cpu::{instrumentation::Instrumentation};
 #[cfg(feature = "alloc")]
 use crate::{
     cpu::{cpu::CpuActivityState, BxCpuC},
@@ -16,7 +16,7 @@ use super::Emulator;
 #[cfg(feature = "std")]
 use super::status_ips_from_retired_instructions;
 
-impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: Instrumentation> Emulator<'a, T> {
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
     fn total_cpu_icount(&self) -> u64 {
         (0..self.cpu_count()).fold(0u64, |total, cpu_index| {
@@ -25,7 +25,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
     }
 }
 
-impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
+impl<'a, T: Instrumentation> Emulator<'a, T> {
     #[cfg(feature = "alloc")]
     /// Run emulator interactively with GUI event handling
     ///
@@ -389,7 +389,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                     && (self.cpu.interrupts_enabled() || mwait_if)
                                 {
                                     self.cpu
-                                        .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                                        .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                                     break;
                                 }
                                 // 2. Advance halted virtual time in a device-friendly quantum.
@@ -408,7 +408,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                             // If LAPIC has a pending interrupt, signal CPU
                             if self.cpu.lapic_has_intr() {
                                 self.cpu
-                                    .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                                    .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                             }
 
                             // Tight MWAIT loop: process multiple wake→execute→MWAIT
@@ -492,7 +492,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                         && (self.cpu.interrupts_enabled() || mwait_if2)
                                     {
                                         self.cpu
-                                            .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                                            .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                                         break;
                                     }
                                     let step = self.hlt_wait_step_ticks();
@@ -508,7 +508,7 @@ impl<'a, I: BxCpuIdTrait, T: Instrumentation> Emulator<'a, I, T> {
                                 }
                                 if self.cpu.lapic_has_intr() {
                                     self.cpu
-                                        .signal_event(BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR);
+                                        .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                                 }
                             }
                         }

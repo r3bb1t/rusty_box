@@ -66,7 +66,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     cfg,
                     CpuSetupMode::FlatLong64,
                 )
@@ -127,7 +127,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const CPUID_TOPOLOGY_LEVEL_TYPE_SMT: u32 = 1;
     const CPUID_TOPOLOGY_LEVEL_TYPE_CORE: u32 = 2;
 
-    fn resident_host_base(emu: &mut Emulator<'_, Corei7SkylakeX>) -> *mut u8 {
+    fn resident_host_base(emu: &mut Emulator<'_>) -> *mut u8 {
         let pins_ptr = emu.tlb_pins().as_ptr();
         let pins_len = emu.tlb_pins().len();
         // Stable CPU pin storage outlives the exclusive memory borrow.
@@ -154,7 +154,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const ICR_LEVEL_ASSERT: u32 = 1 << 14;
     const ICR_TRIGGER_LEVEL: u32 = 1 << 15;
 
-    fn send_bsp_icr_init(emu: &mut Emulator<'_, Corei7SkylakeX, ()>) {
+    fn send_bsp_icr_init(emu: &mut Emulator<'_, ()>) {
         let bsp = emu.cpu_mut_at(BSP_INDEX);
         bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24, 0);
         bsp.lapic.write_aligned(ICR_LOW, ((crate::cpu::apic::ApicDeliveryMode::Init as u32) << 8)
@@ -164,7 +164,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         emu.refresh_cpu_masks(BSP_INDEX);
     }
 
-    fn send_bsp_icr_sipi(emu: &mut Emulator<'_, Corei7SkylakeX, ()>, vector: u8) {
+    fn send_bsp_icr_sipi(emu: &mut Emulator<'_, ()>, vector: u8) {
         let bsp = emu.cpu_mut_at(BSP_INDEX);
         bsp.lapic.write_aligned(ICR_HIGH, ICR_TARGET_AP << 24, 0);
         bsp.lapic.write_aligned(ICR_LOW, vector as u32
@@ -234,7 +234,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let emu = Emulator::new(config).unwrap();
                 #[cfg(feature = "std")]
                 assert!(emu.bios_output_file.is_none());
             })
@@ -257,7 +257,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpuid_freq = crate::cpu::cpuid::CpuidFreq::Ips;
                 config.ips = 120_000_000;
                 let mut emu =
-                    Emulator::<Corei7SkylakeX, NoopTracer>::new_with_mode_and_instrumentation(
+                    Emulator::<NoopTracer>::new_with_mode_and_instrumentation(
                         config,
                         CpuSetupMode::FlatProtected32,
                         NoopTracer,
@@ -286,7 +286,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 assert!(!emu.is_initialized());
 
                 let result = emu.initialize();
@@ -305,8 +305,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 let config = EmulatorConfig::default();
 
-                let mut emu1 = Emulator::<Corei7SkylakeX>::new(config.clone()).unwrap();
-                let emu2 = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu1 = Emulator::new(config.clone()).unwrap();
+                let emu2 = Emulator::new(config).unwrap();
 
                 emu1.initialize().unwrap();
 
@@ -334,7 +334,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -369,7 +369,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -418,7 +418,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -448,7 +448,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -481,7 +481,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -568,7 +568,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     ..EmulatorConfig::default()
                 };
                 let mut emu =
-                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
                         .unwrap();
                 emu.devices.init(&mut emu.memory).unwrap();
                 emu.device_manager
@@ -621,7 +621,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 use crate::iodev::harddrv::AtaStatus;
 
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -700,7 +700,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     ..EmulatorConfig::default()
                 };
                 let mut emu =
-                    Emulator::<Corei7SkylakeX>::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
+                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
                         .unwrap();
                 emu.devices.init(&mut emu.memory).unwrap();
                 emu.device_manager
@@ -752,7 +752,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 assert_ne!(
                     emu.cpu.pending_event
-                        & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_LAPIC_INTR,
+                        & BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR,
                     0,
                     "IOAPIC pin-2 timer interrupt never raised LAPIC INTR on CPU 0"
                 );
@@ -772,7 +772,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -823,7 +823,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 const PROGRAMMING_TICKS: u64 = 100;
                 const PERIOD_TICKS: u64 = 10;
                 let mut emu =
-                    Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
+                    Emulator::new(EmulatorConfig::default()).unwrap();
                 emu.pc_system.initialize(1_000_000);
                 emu.devices.set_timer_ips(1_000_000);
                 let handle = emu
@@ -869,7 +869,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu =
-                    Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
+                    Emulator::new(EmulatorConfig::default()).unwrap();
                 emu.pc_system.initialize(1_000_000);
                 emu.devices.set_timer_ips(1_000_000);
                 emu.register_timer_owners().unwrap();
@@ -912,7 +912,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -995,7 +995,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.guest_memory_size = 1024 * 1024;
                 config.host_memory_size = 1024 * 1024;
                 config.memory_block_size = BLOCK_SIZE;
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1025,7 +1025,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 const START: u64 = 0x1000;
                 let mut emu =
-                    Emulator::<Corei7SkylakeX>::new_with_mode(
+                    Emulator::new_with_mode(
                         EmulatorConfig::default(),
                         CpuSetupMode::FlatProtected32,
                     )
@@ -1057,7 +1057,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.host_memory_size = 2 * MIB;
                 config.memory_block_size = MIB;
                 config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 let old_host_base = resident_host_base(&mut emu) as usize;
 
                 for cpu_index in 0..emu.cpu_count() {
@@ -1090,7 +1090,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 const START: u64 = 0x1000;
                 const LIMIT: u64 = 100_000 + 2;
                 let mut emu =
-                    Emulator::<Corei7SkylakeX>::new_with_mode(
+                    Emulator::new_with_mode(
                         EmulatorConfig::default(),
                         CpuSetupMode::FlatProtected32,
                     )
@@ -1119,7 +1119,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 config.memory_block_size = MIB;
                 config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.memory.set_a20_mask(u64::MAX);
 
                 emu.load_ram(&[0x5a], 0).unwrap();
@@ -1158,7 +1158,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.host_memory_size = 2 * MIB;
                 config.memory_block_size = MIB;
                 config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1223,17 +1223,17 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.guest_memory_size = 2 * MIB;
                 config.host_memory_size = MIB;
                 config.memory_block_size = MIB;
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.memory.set_a20_mask(u64::MAX);
 
                 emu.load_ram(&[0x5a], 0).unwrap();
                 let host_base = resident_host_base(&mut emu);
-                let cpu_address = emu.cpu() as *const BxCpuC<Corei7SkylakeX>;
+                let cpu_address = emu.cpu() as *const BxCpuC;
                 let entry = &mut unsafe { emu.cpu_mut_unchecked() }.dtlb.entries[0];
                 entry.lpf = 0;
                 entry.host_page_addr = host_base as _;
 
-                assert_eq!(cpu_address, emu.cpu() as *const BxCpuC<Corei7SkylakeX>);
+                assert_eq!(cpu_address, emu.cpu() as *const BxCpuC);
                 assert!(!emu.tlb_pins()[BSP_INDEX]
                     .is_range_pinned(host_base as usize, host_base as usize + MIB));
                 emu.refresh_tlb_pins();
@@ -1262,7 +1262,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 const COUNT: u64 = 64;
                 const UNMAPPED_PORT: u64 = 0x1234;
 
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1321,7 +1321,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 const COUNT: u64 = 24;
                 const IDE_DATA_PORT: u64 = 0x1f0;
 
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1387,7 +1387,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(8, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1423,7 +1423,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(8, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1464,7 +1464,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(2, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1506,7 +1506,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1552,7 +1552,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 const DESCRIPTOR: u64 = 0x3000;
                 const KEY: u16 = 0x1234;
 
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1614,7 +1614,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(2, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1671,7 +1671,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     len as u16
                 }
 
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1721,7 +1721,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1738,7 +1738,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 let mut high_ips_config = EmulatorConfig::default();
                 high_ips_config.ips = 300_000_000;
-                let mut high_ips_emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut high_ips_emu = Emulator::new_with_mode(
                     high_ips_config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1764,7 +1764,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.ips = 300_000_000;
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -1815,7 +1815,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let emu = Emulator::new(config).unwrap();
 
                 assert_eq!(emu.hlt_wait_step_ticks(), u32::MAX);
             })
@@ -1830,7 +1830,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.pc_system.initialize(emu.config.ips);
                 emu.pc_system
                     .register_timer(TimerOwner::Lapic(0), 37, false, true, "near_timer")
@@ -1868,7 +1868,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.sync_slowdown = true;
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.pc_system.initialize(emu.config.ips);
                 emu.devices.set_timer_ips(u64::from(emu.config.ips));
                 emu.register_timer_owners().unwrap();
@@ -1898,7 +1898,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                         sync_slowdown: true,
                         ..EmulatorConfig::default()
                     };
-                    let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                    let mut emu = Emulator::new(config).unwrap();
                     emu.initialize().unwrap();
                     emu.reset(ResetReason::Hardware).unwrap();
                     emu
@@ -1955,7 +1955,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                         sync_slowdown,
                         ..EmulatorConfig::default()
                     };
-                    let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                    let mut emu = Emulator::new(config).unwrap();
                     emu.initialize().unwrap();
                     emu.reset(ResetReason::Hardware).unwrap();
                     emu
@@ -1990,7 +1990,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let mut emu =
-                    Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
+                    Emulator::new(EmulatorConfig::default()).unwrap();
                 emu.pc_system.initialize(emu.config.ips);
                 emu.devices.set_timer_ips(u64::from(emu.config.ips));
                 emu.register_timer_owners().unwrap();
@@ -2025,7 +2025,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
                 emu.device_manager.pic.master.imr = 0x00;
 
@@ -2069,7 +2069,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 let config = EmulatorConfig::default();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
                 emu.device_manager.pic.master.imr = 0x00;
                 emu.device_manager.pci2isa.reset_request = Some(ResetReason::Hardware);
@@ -2097,7 +2097,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.host_memory_size = 2 * MIB;
                 config.memory_block_size = MIB;
                 config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
                 let host_base = resident_host_base(&mut emu) as usize;
 
@@ -2139,7 +2139,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.host_memory_size = 2 * MIB;
                 config.memory_block_size = MIB;
                 config.cpu_params = BxParams::default().with_topology(2, 1, 1).unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
                 let host_base = resident_host_base(&mut emu) as usize;
 
@@ -2222,7 +2222,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 let reset_guest = |code: &[u8]| {
-                    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    let mut emu = Emulator::new_with_mode(
                         EmulatorConfig::default(),
                         CpuSetupMode::FlatProtected32,
                     )
@@ -2280,7 +2280,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 for hardware in [false, true] {
-                    let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                    let mut emu = Emulator::new_with_mode(
                         EmulatorConfig::default(),
                         CpuSetupMode::FlatProtected32,
                     )
@@ -2351,7 +2351,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 }
 
                 const CODE: u64 = 0x1000;
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -2423,7 +2423,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
                 const CODE: u64 = 0x1000;
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -2474,7 +2474,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     let mut config = EmulatorConfig::default();
                     config.pci_enabled = pci_enabled;
                     config.pci_vga = pci_vga;
-                    let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                    let mut emu = Emulator::new(config).unwrap();
                     emu.initialize().unwrap();
 
                     let expected = pci_enabled && pci_vga;
@@ -2499,7 +2499,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
 
                 assert_eq!(emu.cpu_count(), TEST_SMP_PACKAGES as usize);
                 assert_eq!(emu.cpu_ref(BSP_INDEX).lapic.get_id(), BSP_INDEX as u32);
@@ -2528,7 +2528,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default().with_topology(2, 2, 2).unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 let instr = Instruction::default();
 
                 assert_eq!(emu.cpu_count(), NONFLAT_TOPOLOGY_CPUS as usize);
@@ -2565,7 +2565,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     cpu.set_eax(CPUID_LEAF_EXTENDED_TOPOLOGY);
                     cpu.set_ecx(CPUID_TOPOLOGY_SUBLEAF_CORE);
                     cpu.cpuid(&instr).unwrap();
-                    assert_eq!(cpu.eax(), BxCpuC::<Corei7SkylakeX>::bochs_topology_shift(4));
+                    assert_eq!(cpu.eax(), BxCpuC::<()>::bochs_topology_shift(4));
                     assert_eq!(cpu.ebx(), 4);
                     assert_eq!(
                         cpu.ecx(),
@@ -2625,7 +2625,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default().with_topology(1, 2, 1).unwrap();
                 config.ips = 120_000_000;
                 config.cpuid_freq = CpuidFreq::Ips;
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 let instr = Instruction::default();
 
                 for cpu_index in 0..emu.cpu_count() {
@@ -2656,7 +2656,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 // Default config (CpuidFreq::None): the frequency leaves read
                 // as not enumerated so guests PIT-calibrate the true rate.
-                let mut emu = Emulator::<Corei7SkylakeX>::new(EmulatorConfig::default()).unwrap();
+                let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
                 let cpu = emu.cpu_mut_at(0);
                 cpu.set_eax(0x15);
                 cpu.set_ecx(0);
@@ -2740,7 +2740,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         // of megabytes), so the production associated fn is exercised at the
         // mask level across every word boundary the full machine would hit;
         // the 2-CPU transition matrix covers the live plumbing.
-        type TestEmu<'a> = Emulator<'a, Corei7SkylakeX>;
+        type TestEmu<'a> = Emulator<'a>;
         const MAX: usize = 254;
         assert!(!TestEmu::ap_fast_forward_allowed(runnable, MAX), "bit 32+253");
         assert!(TestEmu::ap_fast_forward_allowed(CpuMask::default(), MAX));
@@ -2776,7 +2776,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
 
                 // Reset leaves the BSP runnable and the AP waiting for SIPI.
@@ -2955,7 +2955,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
                 emu.load_ram(&[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN], AP_TRAMPOLINE_ADDR)
                     .unwrap();
@@ -2993,7 +2993,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3049,7 +3049,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3113,7 +3113,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3147,7 +3147,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 );
                 assert!(emu
                     .cpu_ref(AP_INDEX)
-                    .is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT));
+                    .is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_INIT));
 
                 let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
                 assert!(executed > 0);
@@ -3170,7 +3170,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3189,7 +3189,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 );
                 assert!(emu
                     .cpu_ref(AP_INDEX)
-                    .is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT));
+                    .is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_INIT));
 
                 let executed = unsafe { emu.run_cpu_batch(AP_BATCH_INSTRUCTIONS) }.unwrap();
                 assert!(executed > 0);
@@ -3212,7 +3212,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3233,11 +3233,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // pending_event and destroy the SMI.
                 let ap = emu.cpu_ref(AP_INDEX);
                 assert!(
-                    ap.is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_SMI),
+                    ap.is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_SMI),
                     "SMI queued before INIT must survive the drain"
                 );
                 assert!(
-                    ap.is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_INIT),
+                    ap.is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_INIT),
                     "INIT must be pending alongside the SMI"
                 );
                 assert_eq!(ap.activity_state, CpuActivityState::Active);
@@ -3256,7 +3256,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3308,7 +3308,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3347,7 +3347,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3412,7 +3412,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3440,7 +3440,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // an APIC-timer calibration loop.
                 emu.service_scheduler_boundary(0).unwrap();
 
-                let read_tmcct = |emu: &mut Emulator<'_, Corei7SkylakeX>| {
+                let read_tmcct = |emu: &mut Emulator<'_>| {
                     let ap = emu.cpu_mut_at(AP_INDEX);
                     let icount = ap.icount;
                     ap.lapic.read_aligned(0x390, icount)
@@ -3474,7 +3474,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(8, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
 
                 assert!(
@@ -3508,7 +3508,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 let mut config = EmulatorConfig::default();
                 config.cpu_params = BxParams::default().with_topology(2, 2, 2).unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
 
                 for cpu_index in 0..emu.cpu_count() {
@@ -3535,7 +3535,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     );
                     assert!(
                         emu.cpu_ref(cpu_index).pending_event
-                            & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_LAPIC_INTR
+                            & BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR
                             != 0,
                         "AP {cpu_index} did not get a CPU LAPIC event bit"
                     );
@@ -3563,7 +3563,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
 
                 // Real-mode IVT entry 2 (NMI) -> NMI_HANDLER_SEG:0000, handler = HLT.
@@ -3610,7 +3610,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 assert!(
                     emu.cpu_ref(AP_INDEX)
-                        .is_unmasked_event_pending(BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI),
+                        .is_unmasked_event_pending(BxCpuC::<()>::BX_EVENT_NMI),
                     "NMI IPI was not signaled on the shutdown AP"
                 );
                 assert!(
@@ -3654,7 +3654,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3705,7 +3705,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 const CODE: u64 = 0x1000;
                 const SELF_NMI_IPI: u32 =
                     (crate::cpu::apic::ApicDeliveryMode::Nmi as u32) << 8;
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3745,7 +3745,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 );
                 assert_ne!(
                     emu.cpu_ref(BSP_INDEX).pending_event
-                        & BxCpuC::<Corei7SkylakeX>::BX_EVENT_NMI,
+                        & BxCpuC::<()>::BX_EVENT_NMI,
                     0,
                     "the queued self-targeted NMI was not committed at the boundary"
                 );
@@ -3762,7 +3762,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .spawn(|| {
                 const CODE: u64 = 0x1000;
                 const INITIAL_COUNT: u32 = 4;
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3838,7 +3838,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu = Emulator::new(config).unwrap();
                 emu.reset(ResetReason::Hardware).unwrap();
                 emu.cpu_mut().activity_state = CpuActivityState::Hlt;
 
@@ -3878,7 +3878,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3934,7 +3934,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(TEST_SMP_PACKAGES, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -3971,7 +3971,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 assert!(emu.cpu_ref(AP_INDEX).lapic.intr);
                 assert_ne!(
                     emu.cpu_ref(AP_INDEX).pending_event
-                        & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_LAPIC_INTR,
+                        & BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR,
                     0
                 );
             })
@@ -3985,7 +3985,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -4034,7 +4034,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 const VECTOR: u8 = 0x40;
                 const VECTOR_BIT: u32 = 1;
 
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -4078,7 +4078,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 config.cpu_params = BxParams::default()
                     .with_topology(8, TEST_SMP_CORES, TEST_SMP_THREADS)
                     .unwrap();
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     config,
                     CpuSetupMode::FlatProtected32,
                 )
@@ -4115,13 +4115,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
                 .unwrap();
                 emu.cpu
-                    .clear_event(BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_INTR);
+                    .clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
                 emu.device_manager.pic.irq_pending = true;
                 emu.device_manager.pic.irq_cleared = true;
                 emu.device_manager.pic.master.int_pin = true;
@@ -4129,7 +4129,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.sync_event_flags();
 
                 assert_ne!(
-                    emu.cpu().pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_INTR,
+                    emu.cpu().pending_event & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
                     0
                 );
                 assert!(!emu.device_manager.pic.irq_pending);
@@ -4145,7 +4145,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -4154,12 +4154,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.device_manager.pic.irq_pending = false;
                 emu.device_manager.pic.irq_cleared = false;
                 emu.cpu
-                    .clear_event(BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_INTR);
+                    .clear_event(BxCpuC::<()>::BX_EVENT_PENDING_INTR);
 
                 emu.sync_event_flags();
 
                 assert_ne!(
-                    emu.cpu().pending_event & BxCpuC::<Corei7SkylakeX>::BX_EVENT_PENDING_INTR,
+                    emu.cpu().pending_event & BxCpuC::<()>::BX_EVENT_PENDING_INTR,
                     0
                 );
             })
@@ -4178,7 +4178,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 const DEST_ADDR: u64 = 0x2000;
                 const UNMAPPED_PORT: u64 = 0x1234;
 
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -4222,7 +4222,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 let reads = Arc::new(AtomicUsize::new(0));
                 let read_count = Arc::clone(&reads);
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatLong64,
                 )
@@ -4277,7 +4277,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let writes = Arc::new(AtomicUsize::new(0));
                 let read_count = Arc::clone(&reads);
                 let write_count = Arc::clone(&writes);
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -4331,7 +4331,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let writes = Arc::new(AtomicUsize::new(0));
                 let read_count = Arc::clone(&reads);
                 let write_count = Arc::clone(&writes);
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -4383,8 +4383,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
 
-    fn phase6_flat32() -> Box<Emulator<'static, Corei7SkylakeX>> {
-        Emulator::<Corei7SkylakeX>::new_with_mode(
+    fn phase6_flat32() -> Box<Emulator<'static>> {
+        Emulator::new_with_mode(
             EmulatorConfig::default(),
             CpuSetupMode::FlatProtected32,
         )
@@ -4392,7 +4392,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     fn phase6_prepare_fw_cfg<T: crate::cpu::instrumentation::Instrumentation>(
-        emu: &mut Emulator<'_, Corei7SkylakeX, T>,
+        emu: &mut Emulator<'_, T>,
         stream: &[u8],
     ) {
         emu.devices.init(&mut emu.memory).unwrap();
@@ -4410,7 +4410,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     fn phase6_next_fw_cfg_byte<T: crate::cpu::instrumentation::Instrumentation>(
-        emu: &mut Emulator<'_, Corei7SkylakeX, T>,
+        emu: &mut Emulator<'_, T>,
     ) -> u8 {
         emu.device_manager
             .fw_cfg
@@ -4418,7 +4418,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     }
 
     fn phase6_run<T: crate::cpu::instrumentation::Instrumentation>(
-        emu: &mut Emulator<'_, Corei7SkylakeX, T>,
+        emu: &mut Emulator<'_, T>,
     ) {
         unsafe { emu.run_cpu_batch(1) }.unwrap();
     }
@@ -4702,7 +4702,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             let (trace, repeats) = phase6_repeat_trace();
             let exec_events = Arc::clone(&events);
             let mut emu =
-                Emulator::<Corei7SkylakeX, Phase6RepeatTrace>::new_with_mode_and_instrumentation(
+                Emulator::<Phase6RepeatTrace>::new_with_mode_and_instrumentation(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                     trace,
@@ -4802,7 +4802,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
             let (trace, repeats) = phase6_repeat_trace();
             let mut emu =
-                Emulator::<Corei7SkylakeX, Phase6RepeatTrace>::new_with_mode_and_instrumentation(
+                Emulator::<Phase6RepeatTrace>::new_with_mode_and_instrumentation(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                     trace,
@@ -4826,7 +4826,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
             let (trace, repeats) = phase6_repeat_trace();
             let mut emu =
-                Emulator::<Corei7SkylakeX, Phase6RepeatTrace>::new_with_mode_and_instrumentation(
+                Emulator::<Phase6RepeatTrace>::new_with_mode_and_instrumentation(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                     trace,
@@ -4850,7 +4850,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
             let (trace, repeats) = phase6_repeat_trace();
             let mut emu =
-                Emulator::<Corei7SkylakeX, Phase6RepeatTrace>::new_with_mode_and_instrumentation(
+                Emulator::<Phase6RepeatTrace>::new_with_mode_and_instrumentation(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                     trace,
@@ -5052,7 +5052,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
             let (trace, repeats) = phase6_repeat_trace();
             let mut scalar =
-                Emulator::<Corei7SkylakeX, Phase6RepeatTrace>::new_with_mode_and_instrumentation(
+                Emulator::<Phase6RepeatTrace>::new_with_mode_and_instrumentation(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                     trace,
@@ -5133,7 +5133,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 (&[0xF3, 0x48, 0xA5, 0xEB, 0xFE][..], false),
                 (&[0xF3, 0x48, 0xAB, 0xEB, 0xFE][..], true),
             ] {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatLong64,
                 )
@@ -5166,7 +5166,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             const DEST: u64 = 0x20_0000;
             const SECOND_LARGE_PAGE_PDE: u64 = 0x3008;
 
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+            let mut emu = Emulator::new_with_mode(
                 EmulatorConfig::default(),
                 CpuSetupMode::FlatLong64,
             )
@@ -5198,7 +5198,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             const DEST: u64 = 0x20_0000;
             const SECOND_LARGE_PAGE_PDE: u64 = 0x3008;
 
-            let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+            let mut emu = Emulator::new_with_mode(
                 EmulatorConfig::default(),
                 CpuSetupMode::FlatLong64,
             )
@@ -5229,7 +5229,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::<Corei7SkylakeX>::new_with_mode(
+                let mut emu = Emulator::new_with_mode(
                     EmulatorConfig::default(),
                     CpuSetupMode::FlatProtected32,
                 )
@@ -5256,7 +5256,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     cpu_params: BxParams::default().with_topology(2, 1, 1).unwrap(),
                     ..EmulatorConfig::default()
                 };
-                let mut source = Emulator::<Corei7SkylakeX>::new(config.clone()).unwrap();
+                let mut source = Emulator::new(config.clone()).unwrap();
                 source.initialize().unwrap();
                 source.reset(ResetReason::Hardware).unwrap();
                 source.cpu_mut_at(BSP_INDEX).activity_state = CpuActivityState::Active;
@@ -5268,7 +5268,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let mut snapshot = Vec::new();
                 source.save_snapshot(&mut snapshot).unwrap();
 
-                let mut restored = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut restored = Emulator::new(config).unwrap();
                 restored.initialize().unwrap();
                 restored.reset(ResetReason::Hardware).unwrap();
                 restored.runnable_mask.assign(AP_INDEX, true);

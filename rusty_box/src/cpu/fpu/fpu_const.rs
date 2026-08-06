@@ -3,7 +3,6 @@
 //! Ported from Bochs cpu/fpu/fpu_const.cc
 
 use super::super::cpu::BxCpuC;
-use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::Instruction;
 use super::super::i387::{FPU_CW_RC, FPU_RC_DOWN, FPU_RC_UP};
 use super::super::softfloat3e::softfloat_types::ExtFloat80;
@@ -54,7 +53,7 @@ fn down_or_chop(cwd: u16) -> bool {
     (cwd & FPU_CW_RC & FPU_RC_DOWN) != 0
 }
 
-impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, I, T> {
+impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
     /// FLDL2T — Load log2(10)
     pub fn fldl2t(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;

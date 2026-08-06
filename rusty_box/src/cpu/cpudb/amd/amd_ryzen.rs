@@ -136,6 +136,8 @@ bitflags! {
 pub struct AmdRyzen {}
 
 impl BxCpuIdTrait for AmdRyzen {
+    const INIT: Self = Self {};
+
     fn get_name(&self) -> &'static str {
         "amd_ryzen"
     }
@@ -164,7 +166,7 @@ impl BxCpuIdTrait for AmdRyzen {
     }
 
     fn new() -> Self {
-        Self {}
+        Self::INIT
     }
 
     /// Mirrors Bochs ryzen.cc enable_cpu_extension calls in ryzen_t::ryzen_t().
