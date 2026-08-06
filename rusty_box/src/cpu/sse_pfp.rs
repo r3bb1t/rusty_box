@@ -994,10 +994,10 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         let mut dst = self.read_mmx_reg(instr.dst());
         let mut status = self.sse_status();
         let rc = softfloat_get_rounding_mode(&status);
-        self.prepare_fpu2mmx();
         for i in 0..2 {
             dst.set_S32(i, f32_to_i32(op.xmm32u(i), rc, true, &mut status));
         }
+        self.prepare_fpu2mmx();
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.write_mmx_reg(instr.dst(), dst);
         Ok(())
