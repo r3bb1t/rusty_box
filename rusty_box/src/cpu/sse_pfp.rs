@@ -949,6 +949,37 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     // Bochs: CVTDQ2PS, CVTPS2DQ, CVTTPS2DQ, CVTDQ2PD, CVTPD2DQ, CVTTPD2DQ
     // ========================================================================
 
+    /// CVTPI2PS — Convert 2 Packed Int32 to 2 Packed Singles
+    pub(super) fn cvtpi2ps_vps_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let mut op = self.mmx_read_op2_qq(instr)?;
+        let mut dst = self.read_xmm_reg(instr.dst());
+        let mut status = self.sse_status();
+        self.prepare_fpu2mmx();
+        for i in 0..2 {
+            dst.set_xmm32u(i, i32_to_f32(op.S32(i), &mut status));
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_xmm_lo_qword(instr.dst(), dst.xmm64u(0));
+        Ok(())
+    }
+
+    /// CVTPS2PI — Convert 2 Packed Singles to 2 Packed Int32
+    pub(super) fn cvtps2pi_pq_wps(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let mut op = self.sse_pfp_read_op2_xmm(instr)?;
+        let mut dst = self.read_mmx_reg(instr.dst());
+        let mut status = self.sse_status();
+        let rc = softfloat_get_rounding_mode(&status);
+        self.prepare_fpu2mmx();
+        for i in 0..2 {
+            dst.set_S32(i, f32_to_i32(op.xmm32u(i), rc, true, &mut status));
+        }
+        self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
+        self.write_mmx_reg(instr.dst(), dst);
+        Ok(())
+    }
+
     /// CVTDQ2PS — Convert 4 Packed Int32 to 4 Packed Singles
     pub(super) fn cvtdq2ps_vps_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
