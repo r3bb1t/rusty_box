@@ -12,6 +12,8 @@ use std::{
 use adb_client::{server::ADBServer, server_device::ADBServerDevice, ADBDeviceExt};
 use std::net::{Ipv4Addr, SocketAddrV4};
 
+pub mod ci;
+
 const CMDLINE_TOOLS_VERSION: &str = "14742923";
 const ANDROID_PLATFORM: &str = "android-34";
 const BUILD_TOOLS_VERSION: &str = "35.0.0";
@@ -69,6 +71,8 @@ pub struct AndroidCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XtaskCommand {
     Android(AndroidCommand),
+    Ci(ci::CiCommand),
+    PerfBaseline(ci::PerfBaselineCommand),
 }
 
 struct AndroidContext {
@@ -150,10 +154,12 @@ where
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
         return Err(usage());
     }
-    if args[0] != "android" {
-        return Err(format!("unknown xtask command {:?}\n{}", args[0], usage()));
+    match args[0].as_str() {
+        "android" => parse_android_args(&args[1..]).map(XtaskCommand::Android),
+        "ci" => ci::parse_ci_args(&args[1..]).map(XtaskCommand::Ci),
+        "perf-baseline" => Ok(XtaskCommand::PerfBaseline(ci::PerfBaselineCommand::default())),
+        _ => Err(format!("unknown xtask command {:?}\n{}", args[0], usage())),
     }
-    parse_android_args(&args[1..]).map(XtaskCommand::Android)
 }
 
 pub fn command_line_tools_url(os: HostOs) -> &'static str {
@@ -214,6 +220,8 @@ pub fn adb_start_args() -> Vec<&'static str> {
 fn execute(command: XtaskCommand) -> Result<(), String> {
     match command {
         XtaskCommand::Android(command) => execute_android(command),
+        XtaskCommand::Ci(command) => ci::execute_ci(command),
+        XtaskCommand::PerfBaseline(command) => ci::execute_perf_baseline(command),
     }
 }
 
@@ -874,7 +882,7 @@ fn keytool_program(host: HostOs) -> PathBuf {
 
 fn usage() -> String {
     format!(
-        "Usage:\n  cargo xtask android build [--sdk PATH] [--iso PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--iso PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]"
+        "Usage:\n  cargo xtask android build [--sdk PATH] [--iso PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--iso PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]\n  cargo xtask ci [--full] [--skip-boot]\n  cargo xtask perf-baseline"
     )
 }
 
