@@ -46,7 +46,9 @@ pub use crate::pic;
 #[cfg(feature = "alloc")]
 pub mod geforce;
 pub mod pit;
+pub mod device_api;
 pub mod serial;
+pub(crate) mod wiring;
 pub mod vga;
 
 // Re-export device types for convenience
@@ -72,17 +74,21 @@ pub const IO_PORTS: usize = 0x10000;
 /// Number of serial timer-owner slots reserved by the no-allocation I/O
 /// scheduler transport. The current machine wires one UART; the remaining
 /// slots make the transport independent of a later topology expansion.
+/// Maximum number of UARTs the machine can carry (Bochs serial.h
+/// BX_N_SERIAL_PORTS). Bounds the scheduler's `TimerOwner::Serial*` port
+/// index when validating a restored snapshot.
 pub(crate) const BX_FIXED_SERIAL_TIMER_OWNERS: usize = 4;
 
 /// Number of fixed device timer owners carried across the raw I/O boundary.
 ///
 /// LAPIC requests use their CPU-local transport. Every device request below
 /// has exactly one stable slot, so a producer can overwrite its own pending
-/// work without allocating or scanning a timer list. Each UART reserves two
-/// slots (RX FIFO-timeout + TX shift). The final four slots are the ATA/ATAPI
-/// seek timers (Bochs harddrv.cc "HD/CD seek", one per drive).
-pub(crate) const BX_FIXED_TIMER_OWNER_COUNT: usize =
-    6 + 2 * BX_FIXED_SERIAL_TIMER_OWNERS + 2 + 4;
+/// work without allocating or scanning a timer list. The final four slots are
+/// the ATA/ATAPI seek timers (Bochs harddrv.cc "HD/CD seek", one per drive).
+///
+/// This table is transitional: a device converted to the device API arms its
+/// timers directly and gives up its slots here. The UART already has.
+pub(crate) const BX_FIXED_TIMER_OWNER_COUNT: usize = 6 + 2 + 4;
 
 /// A device-owned timer slot in the fixed scheduler transport.
 #[allow(dead_code)] // Phase 3 device producers fill the reserved owner slots.
@@ -94,10 +100,6 @@ pub(crate) enum DeviceTimerOwner {
     CmosOneSecond,
     CmosUip,
     AcpiPmOverflow,
-    SerialFifo(usize),
-    /// TX shift-register pacing timer for the UART index (Bochs serial.cc
-    /// tx_timer).
-    SerialTx(usize),
     PciIdeCh0,
     PciIdeCh1,
     /// ATA/ATAPI seek timer — Bochs harddrv.cc "HD/CD seek". The argument is
@@ -115,15 +117,9 @@ impl DeviceTimerOwner {
             Self::CmosOneSecond => Some(3),
             Self::CmosUip => Some(4),
             Self::AcpiPmOverflow => Some(5),
-            Self::SerialFifo(index) if index < BX_FIXED_SERIAL_TIMER_OWNERS => Some(6 + index),
-            Self::SerialFifo(_) => None,
-            Self::SerialTx(index) if index < BX_FIXED_SERIAL_TIMER_OWNERS => {
-                Some(6 + BX_FIXED_SERIAL_TIMER_OWNERS + index)
-            }
-            Self::SerialTx(_) => None,
-            Self::PciIdeCh0 => Some(6 + 2 * BX_FIXED_SERIAL_TIMER_OWNERS),
-            Self::PciIdeCh1 => Some(7 + 2 * BX_FIXED_SERIAL_TIMER_OWNERS),
-            Self::HdSeek(param) if param < 4 => Some(8 + 2 * BX_FIXED_SERIAL_TIMER_OWNERS + param),
+            Self::PciIdeCh0 => Some(6),
+            Self::PciIdeCh1 => Some(7),
+            Self::HdSeek(param) if param < 4 => Some(8 + param),
             Self::HdSeek(_) => None,
         }
     }
@@ -572,21 +568,36 @@ impl BxDevicesC {
 
     /// Read from an I/O port.
     #[inline]
-    pub fn inp(&mut self, port: u16, io_len: u8, current_ticks: u64) -> u32 {
+    pub fn inp(
+        &mut self,
+        port: u16,
+        io_len: u8,
+        current_ticks: u64,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
+    ) -> u32 {
         self.diag_io_reads += 1;
         let entry = &self.read_handlers[port as usize];
         let device_id = entry.device_id;
         let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
-        let has_handler = device_id != DeviceId::None && (entry.mask & len_mask) != 0;
+        // A width outside {1,2,4} has no architectural encoding, so it can
+        // never reach a device model — the default handler answers it.
+        let io_width = device_api::IoLen::from_bytes(io_len);
+        let has_handler =
+            device_id != DeviceId::None && (entry.mask & len_mask) != 0 && io_width.is_some();
 
         let mut pic_intr_level = None;
         let mut hrq_level = None;
         let mut timer_update = None;
         let value = if has_handler {
             if let Some(dm) = self.device_manager_mut() {
-                let result = Self::dispatch_read(dm, device_id, port, io_len, current_ticks);
+                let result = match (device_id, io_width) {
+                    (DeviceId::Serial, Some(width)) => {
+                        Self::serial_read(dm, pc_system, port, width, current_ticks)
+                    }
+                    _ => Self::dispatch_read(dm, device_id, port, io_len, current_ticks),
+                };
                 timer_update =
-                    Self::timer_update_after_dispatch(dm, device_id, port, current_ticks);
+                    Self::timer_update_after_dispatch(dm, device_id, current_ticks);
                 if device_id == DeviceId::Acpi {
                     if dm.acpi.irq9_level {
                         dm.pic.raise_irq(9);
@@ -629,12 +640,22 @@ impl BxDevicesC {
 
     /// Write to an I/O port.
     #[inline]
-    pub fn outp(&mut self, port: u16, value: u32, io_len: u8, current_ticks: u64) {
+    pub fn outp(
+        &mut self,
+        port: u16,
+        value: u32,
+        io_len: u8,
+        current_ticks: u64,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
+    ) {
         self.diag_io_writes += 1;
         let entry = &self.write_handlers[port as usize];
         let device_id = entry.device_id;
         let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
-        let has_handler = device_id != DeviceId::None && (entry.mask & len_mask) != 0;
+        // See `inp`: an unencodable width never reaches a device model.
+        let io_width = device_api::IoLen::from_bytes(io_len);
+        let has_handler =
+            device_id != DeviceId::None && (entry.mask & len_mask) != 0 && io_width.is_some();
 
         if has_handler {
             let mut pic_intr_level = None;
@@ -642,23 +663,24 @@ impl BxDevicesC {
             let mut ide_timer_delays = [None; 2];
             let mut seek_arms = [[None; 2]; 2];
             let mut timer_update = None;
-            let mut serial_tx_update: Option<(usize, Option<u64>)> = None;
             let mut cmos_timer_sync = None;
             let mut machine_boundary_pending = false;
             let dispatched = if let Some(dm) = self.device_manager_mut() {
-                cmos_timer_sync =
-                    Self::dispatch_write(dm, device_id, port, value, io_len, current_ticks);
-                timer_update =
-                    Self::timer_update_after_dispatch(dm, device_id, port, current_ticks);
-                // Serial TX shift timer — a THR write may have moved a byte into
-                // the shift register (Bochs serial.cc activate_timer(tx_timer_
-                // index)). Collected separately from the FIFO-timeout arming
-                // because both UART timers can be pending at once.
-                if device_id == DeviceId::Serial {
-                    if let Some(index) = dm.serial.port_index_for_address(port) {
-                        if let Some(delay) = dm.serial.take_tx_timer_update(index) {
-                            serial_tx_update = Some((index, delay));
-                        }
+                match (device_id, io_width) {
+                    (DeviceId::Serial, Some(width)) => {
+                        Self::serial_write(dm, pc_system, port, value, width, current_ticks);
+                    }
+                    _ => {
+                        cmos_timer_sync = Self::dispatch_write(
+                            dm,
+                            device_id,
+                            port,
+                            value,
+                            io_len,
+                            current_ticks,
+                        );
+                        timer_update =
+                            Self::timer_update_after_dispatch(dm, device_id, current_ticks);
                     }
                 }
                 // Seek-timer arms latched by harddrv during this dispatch —
@@ -700,13 +722,6 @@ impl BxDevicesC {
             }
             if let Some((owner, delay)) = timer_update {
                 self.request_timer_after_usec(owner, current_ticks, delay);
-            }
-            if let Some((index, delay)) = serial_tx_update {
-                self.request_timer_after_usec(
-                    DeviceTimerOwner::SerialTx(index),
-                    current_ticks,
-                    delay,
-                );
             }
             if let Some(level) = pic_intr_level {
                 self.pic_intr_level = Some(level);
@@ -1039,7 +1054,6 @@ impl BxDevicesC {
     fn timer_update_after_dispatch(
         dm: &mut devices::DeviceManager,
         id: DeviceId,
-        port: u16,
         current_ticks: u64,
     ) -> Option<(DeviceTimerOwner, Option<u64>)> {
         match id {
@@ -1050,25 +1064,81 @@ impl BxDevicesC {
                 DeviceTimerOwner::AcpiPmOverflow,
                 dm.acpi.overflow_delay_usec(current_ticks),
             )),
-            DeviceId::Serial => {
-                let index = dm.serial.port_index_for_address(port)?;
-                dm.serial
-                    .take_fifo_timer_update(index)
-                    .map(|delay| (DeviceTimerOwner::SerialFifo(index), delay))
-            }
             _ => None,
         }
     }
 
-    #[inline]
-    fn forward_serial_irqs(dm: &mut devices::DeviceManager) {
-        for (irq, raise) in dm.serial.take_pending_irqs() {
-            if raise {
-                dm.pic.raise_irq(irq);
-            } else {
-                dm.pic.lower_irq(irq);
-            }
+    /// Snapshot the scheduler handles the UART owns for one port, so its
+    /// timer requests can be applied while the device itself is borrowed.
+    fn serial_timer_handles(
+        serial: &serial::BxSerialC,
+        port_index: Option<usize>,
+    ) -> wiring::TimerHandles {
+        let mut handles = wiring::TimerHandles::default();
+        if let Some(index) = port_index {
+            handles.set(
+                serial::BxSerialC::fifo_timer_local(index),
+                serial.fifo_timer_handle(index),
+            );
+            handles.set(
+                serial::BxSerialC::tx_timer_local(index),
+                serial.tx_timer_handle(index),
+            );
         }
+        handles
+    }
+
+    /// Dispatch a UART port read through the device API.
+    ///
+    /// The UART raises interrupts and arms its FIFO/TX timers from inside this
+    /// call, exactly as Bochs serial.cc does, instead of leaving them latched
+    /// for the dispatcher to forward afterwards.
+    fn serial_read(
+        dm: &mut devices::DeviceManager,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
+        port: u16,
+        width: device_api::IoLen,
+        current_ticks: u64,
+    ) -> u32 {
+        let handles = Self::serial_timer_handles(&dm.serial, dm.serial.port_index_for_address(port));
+        let devices::DeviceManager {
+            ref mut serial,
+            ref mut pic,
+            ..
+        } = *dm;
+        let mut irq = wiring::PicIrqSink { pic };
+        let mut timers = wiring::WheelTimerService { pc_system, handles };
+        let mut ctx = device_api::DeviceCtx {
+            now_ticks: current_ticks,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        device_api::PioDevice::pio_read(serial, port, width, &mut ctx)
+    }
+
+    /// Dispatch a UART port write through the device API. See [`Self::serial_read`].
+    fn serial_write(
+        dm: &mut devices::DeviceManager,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
+        port: u16,
+        value: u32,
+        width: device_api::IoLen,
+        current_ticks: u64,
+    ) {
+        let handles = Self::serial_timer_handles(&dm.serial, dm.serial.port_index_for_address(port));
+        let devices::DeviceManager {
+            ref mut serial,
+            ref mut pic,
+            ..
+        } = *dm;
+        let mut irq = wiring::PicIrqSink { pic };
+        let mut timers = wiring::WheelTimerService { pc_system, handles };
+        let mut ctx = device_api::DeviceCtx {
+            now_ticks: current_ticks,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        device_api::PioDevice::pio_write(serial, port, value, width, &mut ctx);
     }
 
     /// Dispatch a port read to the device identified by `id`.
@@ -1118,11 +1188,10 @@ impl BxDevicesC {
                 } = dm;
                 harddrv.read(port, io_len, pic, pci_ide)
             }
-            DeviceId::Serial => {
-                let result = dm.serial.read(port, io_len);
-                Self::forward_serial_irqs(dm);
-                result
-            }
+            // The UART is routed through the device API by `inp` before this
+            // match, so it never arrives here. Answering as an unclaimed port
+            // keeps that a visibly dead read rather than a plausible one.
+            DeviceId::Serial => 0xFFFF_FFFF,
             DeviceId::Vga => dm.vga.read_port(port, io_len, current_ticks),
             DeviceId::Port92 => dm.port92_read(port, io_len),
             DeviceId::Pci => dm.pci_read(port, io_len),
@@ -1164,17 +1233,15 @@ impl BxDevicesC {
                 } = dm;
                 harddrv.write(port, value, io_len, pic, pci_ide)
             }
-            DeviceId::Serial => {
-                dm.serial.write(port, value, io_len);
-                Self::forward_serial_irqs(dm);
-            }
             DeviceId::Vga => dm.vga.write_port(port, value, io_len),
             DeviceId::Port92 => dm.port92_write(port, value, io_len),
             DeviceId::Pci => dm.pci_write(port, value, io_len),
             DeviceId::Acpi => dm.acpi_write(port, value, io_len, current_ticks),
             DeviceId::PciIde => dm.pci_ide_write(port, value, io_len),
             DeviceId::FwCfg => dm.fw_cfg_write(port, value, io_len),
-            DeviceId::Cmos | DeviceId::Ioapic | DeviceId::None => {}
+            // Serial is routed through the device API by `outp` before this
+            // match and never arrives here.
+            DeviceId::Serial | DeviceId::Cmos | DeviceId::Ioapic | DeviceId::None => {}
         }
         None
     }
@@ -1452,11 +1519,12 @@ mod tests {
     #[test]
     fn test_default_handlers() {
         let mut devices = boxed_devices();
+        let mut pc_system = crate::pc_system::BxPcSystemC::new();
 
         // Reading unhandled port should return 0xFF/0xFFFF/0xFFFFFFFF
-        assert_eq!(devices.inp(0x1234, 1, 0), 0xFF);
-        assert_eq!(devices.inp(0x1234, 2, 0), 0xFFFF);
-        assert_eq!(devices.inp(0x1234, 4, 0), 0xFFFFFFFF);
+        assert_eq!(devices.inp(0x1234, 1, 0, &mut pc_system), 0xFF);
+        assert_eq!(devices.inp(0x1234, 2, 0, &mut pc_system), 0xFFFF);
+        assert_eq!(devices.inp(0x1234, 4, 0, &mut pc_system), 0xFFFFFFFF);
     }
 
     // Bochs unmapped.cc port 0x8900 "Shutdown" protocol: the ASCII bytes of
@@ -1494,15 +1562,16 @@ mod tests {
     #[test]
     fn bios_message_ports_stay_out_of_the_e9_console_stream() {
         let mut devices = boxed_devices();
+        let mut pc_system = crate::pc_system::BxPcSystemC::new();
 
         // Bochs biosdev.cc: rombios/vgabios message ports flush to the log on
         // newline and must never reach the guest-visible 0xE9 console stream
         // (this leaked BIOS text onto the COM1 stdout mirror).
         for byte in b"PIIX3/PIIX4 init: elcr=60 70\n" {
-            devices.outp(0x0402, u32::from(*byte), 1, 0);
+            devices.outp(0x0402, u32::from(*byte), 1, 0, &mut pc_system);
         }
         for byte in b"VBE present\n" {
-            devices.outp(0x0500, u32::from(*byte), 1, 0);
+            devices.outp(0x0500, u32::from(*byte), 1, 0, &mut pc_system);
         }
         assert!(devices.port_e9_output.is_empty());
         assert_eq!(devices.bios_message_i, 0, "newline must flush the rombios buffer");
@@ -1511,19 +1580,20 @@ mod tests {
         // A line longer than the Bochs 80-byte buffer flushes on overflow and
         // keeps accumulating the remainder.
         for _ in 0..BX_BIOS_MESSAGE_SIZE + 5 {
-            devices.outp(0x0403, u32::from(b'x'), 1, 0);
+            devices.outp(0x0403, u32::from(b'x'), 1, 0, &mut pc_system);
         }
         assert_eq!(devices.bios_message_i, 5);
         assert!(devices.port_e9_output.is_empty());
 
         // The genuine port-0xE9 debug console still lands in the stream.
-        devices.outp(0x00E9, u32::from(b'X'), 1, 0);
+        devices.outp(0x00E9, u32::from(b'X'), 1, 0, &mut pc_system);
         assert_eq!(devices.port_e9_output.len(), 1);
     }
 
     #[test]
     fn test_multiple_instances() {
         let mut dev1 = boxed_devices();
+        let mut pc_system = crate::pc_system::BxPcSystemC::new();
         let mut dev2 = boxed_devices();
 
         // Register handler only on dev1
@@ -1531,13 +1601,14 @@ mod tests {
 
         // dev1 has a device registered, dev2 does not.
         // Without a device_manager, both return default.
-        assert_eq!(dev1.inp(0x100, 1, 0), 0xFF);
-        assert_eq!(dev2.inp(0x100, 1, 0), 0xFF);
+        assert_eq!(dev1.inp(0x100, 1, 0, &mut pc_system), 0xFF);
+        assert_eq!(dev2.inp(0x100, 1, 0, &mut pc_system), 0xFF);
     }
 
     #[test]
     fn timer_request_table_overwrites_only_its_owner_and_latches_boundary() {
         let mut devices = boxed_devices();
+        let mut pc_system = crate::pc_system::BxPcSystemC::new();
 
         devices.request_timer(
             DeviceTimerOwner::PciIdeCh0,
@@ -1583,6 +1654,7 @@ mod tests {
     #[test]
     fn reset_discards_pre_reset_scheduler_transport() {
         let mut devices = boxed_devices();
+        let mut pc_system = crate::pc_system::BxPcSystemC::new();
         devices.pic_intr_level = Some(true);
         devices.request_timer(
             DeviceTimerOwner::PciIdeCh0,
@@ -1609,6 +1681,7 @@ mod tests {
     fn pic_clear_then_reassert_collapses_to_asserted_level() {
         on_big_stack(|| {
             let mut io = boxed_devices();
+            let mut pc_system = crate::pc_system::BxPcSystemC::new();
             let mut dm = devices::DeviceManager::new();
             // A clear notification followed by a later assertion can coexist
             // before the raw I/O borrow is released. The transport must
@@ -1619,7 +1692,7 @@ mod tests {
 
             io.register_io_read_handler(DeviceId::Pic, 0x20, "PIC", 0x1);
             io.set_device_manager(core::ptr::NonNull::from(&mut dm));
-            let _ = io.inp(0x20, 1, 91);
+            let _ = io.inp(0x20, 1, 91, &mut pc_system);
             io.clear_device_manager();
 
             assert_eq!(io.take_pic_intr_level(), Some(true));
@@ -1630,6 +1703,7 @@ mod tests {
     fn keyboard_port60_read_lowers_irq_and_arms_no_owner_request() {
         on_big_stack(|| {
             let mut io = boxed_devices();
+            let mut pc_system = crate::pc_system::BxPcSystemC::new();
             let mut dm = devices::DeviceManager::new();
             dm.keyboard.send_scancode(0x1E);
             // Bochs keyboard.cc periodic(): the transfer fire makes the byte
@@ -1646,7 +1720,7 @@ mod tests {
             io.set_timer_ips(1_000_000);
             io.register_io_read_handler(DeviceId::Keyboard, keyboard::KBD_DATA_PORT, "Keyboard", 0x1);
             io.set_device_manager(core::ptr::NonNull::from(&mut dm));
-            assert_eq!(io.inp(keyboard::KBD_DATA_PORT, 1, 77), delivered);
+            assert_eq!(io.inp(keyboard::KBD_DATA_PORT, 1, 77, &mut pc_system), delivered);
             io.clear_device_manager();
 
             assert_eq!(dm.pic.master.irq_in[1], 0);

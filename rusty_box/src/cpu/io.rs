@@ -1595,8 +1595,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         #[cfg(feature = "alloc")]
         let current_ticks = self.system_ticks();
         #[cfg(feature = "alloc")]
-        let value = if let Some(io) = self.io_bus_mut() {
-            let value = io.inp(port, len, current_ticks);
+        let value = if let Some((io, pc_system)) = self.io_and_pc_system_mut() {
+            let value = io.inp(port, len, current_ticks, pc_system);
             self.sync_io_events();
             value
         } else {
@@ -1662,8 +1662,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_, T> {
         #[cfg(feature = "alloc")]
         let current_ticks = self.system_ticks();
         #[cfg(feature = "alloc")]
-        let dispatched = if let Some(io) = self.io_bus_mut() {
-            io.outp(port, value, len, current_ticks);
+        let dispatched = if let Some((io, pc_system)) = self.io_and_pc_system_mut() {
+            io.outp(port, value, len, current_ticks, pc_system);
             true
         } else {
             false

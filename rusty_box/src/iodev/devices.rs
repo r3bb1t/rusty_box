@@ -2443,6 +2443,7 @@ mod tests {
 
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
+            let mut pc_system = crate::pc_system::BxPcSystemC::new();
 
             // BAR4 assigned; BM-DMA ports registered on the I/O bus.
             assert!(dm.pci_ide.pci_write(0x20, 0x0000_C001, 4));
@@ -2452,8 +2453,8 @@ mod tests {
 
             // Guest programs DTPR and starts the engine. Bochs requests the
             // one-tick BM-DMA callback at this issuing instruction's epoch.
-            io.outp(0xC004, 0x8000, 4, 41);
-            io.outp(0xC000, 0x09, 1, 41);
+            io.outp(0xC004, 0x8000, 4, 41, &mut pc_system);
+            io.outp(0xC000, 0x09, 1, 41, &mut pc_system);
             io.clear_device_manager();
 
             assert_eq!(
@@ -2509,6 +2510,7 @@ mod tests {
         on_big_stack(|| {
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
+            let mut pc_system = crate::pc_system::BxPcSystemC::new();
             dm.register_pci_handlers(&mut io);
 
             assert_eq!(
@@ -2525,8 +2527,8 @@ mod tests {
             io.set_device_manager(core::ptr::NonNull::from(&mut dm));
             // Set reset type = hardware (bit1), then trigger (bit1|bit2) —
             // Bochs pci2isa.cc write case 0x0cf9.
-            io.outp(0x0CF9, 0x02, 1, 0);
-            io.outp(0x0CF9, 0x06, 1, 0);
+            io.outp(0x0CF9, 0x02, 1, 0, &mut pc_system);
+            io.outp(0x0CF9, 0x06, 1, 0, &mut pc_system);
             io.clear_device_manager();
 
             assert_eq!(
@@ -2536,7 +2538,7 @@ mod tests {
             );
 
             io.set_device_manager(core::ptr::NonNull::from(&mut dm));
-            let value = io.inp(0x0CF9, 1, 0);
+            let value = io.inp(0x0CF9, 1, 0, &mut pc_system);
             io.clear_device_manager();
             assert_eq!(
                 value, 0x02,
@@ -2552,12 +2554,13 @@ mod tests {
         on_big_stack(|| {
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
+            let mut pc_system = crate::pc_system::BxPcSystemC::new();
             dm.register_pci_handlers(&mut io);
 
             io.set_device_manager(core::ptr::NonNull::from(&mut dm));
             // ELCR1 bit5 -> IRQ5 level-triggered (Bochs pci2isa.cc write case
             // 0x04d0: DEV_pic_set_mode(1, elcr1)).
-            io.outp(0x04D0, 0x20, 1, 0);
+            io.outp(0x04D0, 0x20, 1, 0, &mut pc_system);
             io.clear_device_manager();
 
             assert_eq!(dm.pci2isa.elcr1, 0x20);
@@ -2573,7 +2576,7 @@ mod tests {
             io.set_device_manager(core::ptr::NonNull::from(&mut dm));
             // ELCR2 bit2 -> IRQ10 level-triggered (Bochs pci2isa.cc write case
             // 0x04d1: DEV_pic_set_mode(0, elcr2)).
-            io.outp(0x04D1, 0x04, 1, 0);
+            io.outp(0x04D1, 0x04, 1, 0, &mut pc_system);
             io.clear_device_manager();
 
             assert_eq!(dm.pci2isa.elcr2, 0x04);
@@ -2593,11 +2596,12 @@ mod tests {
         on_big_stack(|| {
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
+            let mut pc_system = crate::pc_system::BxPcSystemC::new();
             dm.register_pci_handlers(&mut io);
 
             // Mark IRQ5 level-triggered via the real ELCR1 port write path.
             io.set_device_manager(core::ptr::NonNull::from(&mut dm));
-            io.outp(0x04D0, 0x20, 1, 0);
+            io.outp(0x04D0, 0x20, 1, 0, &mut pc_system);
             io.clear_device_manager();
             assert_eq!(dm.pic.master.edge_level, 0x20);
 
@@ -2754,6 +2758,7 @@ mod tests {
 
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
+            let mut pc_system = crate::pc_system::BxPcSystemC::new();
             let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
             let mut mem = BxMemC::new(stub, false);
 
@@ -2811,6 +2816,7 @@ mod tests {
 
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
+            let mut pc_system = crate::pc_system::BxPcSystemC::new();
             let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
             let mut mem = BxMemC::new(stub, false);
 
@@ -2862,17 +2868,18 @@ mod tests {
 
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
+            let mut pc_system = crate::pc_system::BxPcSystemC::new();
             dm.register_pci_handlers(&mut io);
             let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
             let mut mem = BxMemC::new(stub, false);
 
             io.set_device_manager(core::ptr::NonNull::from(&mut dm));
-            io.outp(0x0CF8, conf_addr(0x00, 0x59), 4, 11);
-            io.outp(0x0CFD, 0x30, 1, 11);
-            io.outp(0x0CF8, conf_addr(0x00, 0x72), 4, 11);
-            io.outp(0x0CFE, 0x48, 1, 11);
-            io.outp(0x0CF8, conf_addr(0x08, 0x4E), 4, 11);
-            io.outp(0x0CFE, 0x04, 1, 11);
+            io.outp(0x0CF8, conf_addr(0x00, 0x59), 4, 11, &mut pc_system);
+            io.outp(0x0CFD, 0x30, 1, 11, &mut pc_system);
+            io.outp(0x0CF8, conf_addr(0x00, 0x72), 4, 11, &mut pc_system);
+            io.outp(0x0CFE, 0x48, 1, 11, &mut pc_system);
+            io.outp(0x0CF8, conf_addr(0x08, 0x4E), 4, 11, &mut pc_system);
+            io.outp(0x0CFE, 0x04, 1, 11, &mut pc_system);
             io.clear_device_manager();
 
             assert!(io.take_scheduler_boundary_requested());
@@ -2932,6 +2939,7 @@ mod tests {
 
             let mut target = DeviceManager::new();
             let mut io = BxDevicesC::new();
+            let mut pc_system = crate::pc_system::BxPcSystemC::new();
             let mut mem = BxMemC::new(
                 BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap(),
                 false,

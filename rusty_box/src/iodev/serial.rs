@@ -10,6 +10,9 @@
 //!   COM3: 0x3E8-0x3EF, IRQ 4
 //!   COM4: 0x2E8-0x2EF, IRQ 3
 
+use super::device_api::{
+    DeviceCtx, DeviceKind, IoLen, IrqLine, PioDevice, TimedDevice, TimerKey,
+};
 use crate::ring_buffer::RingBuffer;
 #[cfg(feature = "std")]
 use std::io::{self, Error, ErrorKind, Read, Write};
@@ -2045,6 +2048,114 @@ impl BxSerialC {
             port.databyte_usec = databyte_usec;
         }
         Ok(())
+    }
+}
+
+// ============================================================================
+// Device-API conversion
+//
+// The UART's own logic is untouched: it still records interrupt transitions
+// and timer deadlines in its internal latches, exactly as Bochs serial.cc
+// does through its `s.` state. What changes is who drains them. Previously the
+// central I/O dispatcher reached into the device afterwards to forward IRQs
+// and to copy timer deadlines into a side table for later replay. Now the
+// device drains its own latches into the capabilities it was handed, so the
+// effects land during the access — the synchronous shape Bochs has.
+
+impl BxSerialC {
+    /// Timer id for a port's RX FIFO-timeout — Bochs serial.cc `fifo_timer`.
+    #[inline]
+    pub(crate) const fn fifo_timer_local(port_index: usize) -> u16 {
+        (port_index as u16) * 2
+    }
+
+    /// Timer id for a port's TX shift register — Bochs serial.cc `tx_timer`.
+    #[inline]
+    pub(crate) const fn tx_timer_local(port_index: usize) -> u16 {
+        (port_index as u16) * 2 + 1
+    }
+
+    #[inline]
+    const fn timer_key(local: u16) -> TimerKey {
+        TimerKey {
+            device: DeviceKind::Serial,
+            local,
+        }
+    }
+
+    /// Deliver every interrupt transition the just-completed operation
+    /// produced. Replaces the dispatcher's `forward_serial_irqs`.
+    fn drain_irqs(&mut self, ctx: &mut DeviceCtx<'_>) {
+        for (irq, level) in self.take_pending_irqs() {
+            ctx.irq.set_level(IrqLine(irq), level);
+        }
+    }
+
+    /// Apply the port's pending timer deadlines. A `None` update means the
+    /// operation did not touch that deadline, which must leave an armed timer
+    /// running rather than restarting it.
+    fn drain_timers(&mut self, ctx: &mut DeviceCtx<'_>, port_index: usize) {
+        if let Some(update) = self.take_fifo_timer_update(port_index) {
+            let key = Self::timer_key(Self::fifo_timer_local(port_index));
+            match update {
+                Some(delay_usec) => ctx.timers.arm_oneshot_usec(key, delay_usec),
+                None => ctx.timers.cancel(key),
+            }
+        }
+        if let Some(update) = self.take_tx_timer_update(port_index) {
+            let key = Self::timer_key(Self::tx_timer_local(port_index));
+            match update {
+                Some(delay_usec) => ctx.timers.arm_oneshot_usec(key, delay_usec),
+                None => ctx.timers.cancel(key),
+            }
+        }
+    }
+
+    /// Drain both latch kinds for whichever port an access addressed.
+    fn drain_effects(&mut self, ctx: &mut DeviceCtx<'_>, port_index: Option<usize>) {
+        self.drain_irqs(ctx);
+        if let Some(index) = port_index {
+            self.drain_timers(ctx, index);
+        }
+    }
+
+    /// Drain latched work produced outside a port access or timer fire — a
+    /// host byte delivered to the receive path leaves the same interrupt and
+    /// FIFO-timeout state a guest-visible access would.
+    pub(crate) fn drain_pending_effects(&mut self, ctx: &mut DeviceCtx<'_>, port_index: usize) {
+        self.drain_effects(ctx, Some(port_index));
+    }
+}
+
+impl PioDevice for BxSerialC {
+    fn pio_read(&mut self, port: u16, len: IoLen, ctx: &mut DeviceCtx<'_>) -> u32 {
+        let value = self.read(port, len.bytes());
+        self.drain_effects(ctx, self.port_index_for_address(port));
+        value
+    }
+
+    fn pio_write(&mut self, port: u16, value: u32, len: IoLen, ctx: &mut DeviceCtx<'_>) {
+        self.write(port, value, len.bytes());
+        self.drain_effects(ctx, self.port_index_for_address(port));
+    }
+}
+
+impl TimedDevice for BxSerialC {
+    /// `local` encodes the port and which of its two timers fired; see
+    /// [`BxSerialC::fifo_timer_local`] and [`BxSerialC::tx_timer_local`].
+    ///
+    /// Both are one-shots, so a coalesced multi-period expiry is serviced once
+    /// — Bochs re-arms from inside the callback rather than accumulating.
+    fn timer_fired(&mut self, local: u16, _fires: u32, ctx: &mut DeviceCtx<'_>) {
+        let port_index = (local / 2) as usize;
+        if local % 2 == 0 {
+            // A timeout that finds the FIFO no longer eligible is a cancelled
+            // callback; the device reports that and nothing else happens.
+            let _asserted = self.fifo_timer_fired(port_index);
+        } else {
+            self.tx_timer_fired(port_index);
+        }
+        self.drain_effects(ctx, Some(port_index));
     }
 }
 

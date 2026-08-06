@@ -9,7 +9,7 @@ use crate::{
     Result,
 };
 #[cfg(feature = "alloc")]
-use crate::{cpu::CpuError, iodev::DeviceTimerOwner, Error};
+use crate::{cpu::CpuError, Error};
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -171,20 +171,10 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
         // serial-delay timer (Bochs keyboard.cc) picks queued bytes up on
         // its next fire.
         if serial_changed {
-            if let Some(delay) = self.device_manager.serial.take_fifo_timer_update(0) {
-                self.devices.request_timer_after_usec(
-                    DeviceTimerOwner::SerialFifo(0),
-                    current_ticks,
-                    delay,
-                );
-            }
-            for (irq, raise) in self.device_manager.serial.take_pending_irqs() {
-                if raise {
-                    self.device_manager.pic.raise_irq(irq);
-                } else {
-                    self.device_manager.pic.lower_irq(irq);
-                }
-            }
+            // A host byte arriving at the UART leaves the same latched
+            // interrupt and FIFO-timeout work a guest-visible access would, so
+            // it is drained through the device API rather than by hand.
+            self.drain_serial_effects(0, current_ticks);
         }
         // A reset applied here needs no branch: host input reaches a machine
         // that resumes at the reset vector either way.

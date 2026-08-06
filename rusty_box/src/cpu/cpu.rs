@@ -1937,6 +1937,30 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
         self.pc_system_ptr.map(|p| unsafe { p.as_ref() })
     }
 
+    /// Both buses at once, for port I/O.
+    ///
+    /// A device handler may arm a scheduler timer while it runs — Bochs
+    /// devices call `bx_pc_system.activate_timer` straight from their port
+    /// handlers — so dispatch needs the timer wheel as well as the I/O bus.
+    /// Taking them through one accessor is what makes that expressible:
+    /// `io_bus_mut` and `pc_system_mut` each borrow `self` mutably, so they
+    /// cannot both be held.
+    ///
+    /// The two are distinct, disjoint fields of the emulator, and the wiring
+    /// is installed and cleared around a single CPU slice, so the derived
+    /// references never alias.
+    #[inline(always)]
+    pub(super) fn io_and_pc_system_mut(
+        &mut self,
+    ) -> Option<(
+        &mut crate::iodev::BxDevicesC,
+        &mut crate::pc_system::BxPcSystemC,
+    )> {
+        let mut io = self.io_bus?;
+        let mut pc_system = self.pc_system_ptr?;
+        Some(unsafe { (io.as_mut(), pc_system.as_mut()) })
+    }
+
 
     /// Snapshot the CPU state handler-aware memory needs before it is
     /// mutably borrowed. `addr` is already A20-adjusted so MONITOR observes
@@ -2180,8 +2204,8 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'c, T> {
     #[inline]
     pub(crate) fn debug_putc(&mut self, ch: u8) {
         let current_ticks = self.system_ticks();
-        let dispatched = if let Some(io) = self.io_bus_mut() {
-            io.outp(0x00E9, ch as u32, 1, current_ticks);
+        let dispatched = if let Some((io, pc_system)) = self.io_and_pc_system_mut() {
+            io.outp(0x00E9, ch as u32, 1, current_ticks, pc_system);
             true
         } else {
             false

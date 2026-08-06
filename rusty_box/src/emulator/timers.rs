@@ -205,15 +205,20 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
         ] {
             self.devices.request_timer(owner, TimerRequest::Deactivate);
         }
+        // The UART owns its scheduler slots directly, so its timers are
+        // disarmed on the wheel rather than through the request table.
         for port_index in 0..self.device_manager.serial.configured_port_count() {
-            self.devices.request_timer(
-                DeviceTimerOwner::SerialFifo(port_index),
-                TimerRequest::Deactivate,
-            );
-            self.devices.request_timer(
-                DeviceTimerOwner::SerialTx(port_index),
-                TimerRequest::Deactivate,
-            );
+            for handle in [
+                self.device_manager.serial.fifo_timer_handle(port_index),
+                self.device_manager.serial.tx_timer_handle(port_index),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Err(error) = self.pc_system.deactivate_timer(handle) {
+                    tracing::error!("serial timer {handle} failed to disarm on reset: {error:?}");
+                }
+            }
         }
 
         self.devices.request_timer_after_usec(
@@ -409,40 +414,24 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
                         self.device_manager.pic.lower_irq(9);
                     }
                 }
+                // Both UART timers run through the device API: the device
+                // raises its own interrupts and re-arms itself from inside the
+                // callback, as Bochs serial.cc tx_timer does.
                 TimerOwner::SerialFifo(port_index) => {
-                    for _ in 0..counts[entry] {
-                        self.device_manager.serial.fifo_timer_fired(port_index);
-                    }
-                    for (irq, raise) in self.device_manager.serial.take_pending_irqs() {
-                        if raise {
-                            self.device_manager.pic.raise_irq(irq);
-                        } else {
-                            self.device_manager.pic.lower_irq(irq);
-                        }
-                    }
+                    self.fire_serial_timer(
+                        port_index,
+                        crate::iodev::serial::BxSerialC::fifo_timer_local(port_index),
+                        counts[entry],
+                        current_ticks,
+                    );
                 }
                 TimerOwner::SerialTx(port_index) => {
-                    for _ in 0..counts[entry] {
-                        self.device_manager.serial.tx_timer_fired(port_index);
-                    }
-                    // Re-arm for the next byte if transmission continues
-                    // (Bochs serial.cc tx_timer re-activates the timer).
-                    if let Some(delay) =
-                        self.device_manager.serial.take_tx_timer_update(port_index)
-                    {
-                        self.devices.request_timer_after_usec(
-                            DeviceTimerOwner::SerialTx(port_index),
-                            current_ticks,
-                            delay,
-                        );
-                    }
-                    for (irq, raise) in self.device_manager.serial.take_pending_irqs() {
-                        if raise {
-                            self.device_manager.pic.raise_irq(irq);
-                        } else {
-                            self.device_manager.pic.lower_irq(irq);
-                        }
-                    }
+                    self.fire_serial_timer(
+                        port_index,
+                        crate::iodev::serial::BxSerialC::tx_timer_local(port_index),
+                        counts[entry],
+                        current_ticks,
+                    );
                 }
                 TimerOwner::Lapic(cpu_index) => {
                     if cpu_index < self.cpu_count() {
@@ -515,6 +504,62 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     /// Bochs hpet.cc performs synchronously inside its handlers
     /// (`update_irq`, `activate_timer_nsec`, `deactivate_timer`,
     /// `DEV_pit_enable_irq`, `DEV_cmos_enable_irq`, `DEV_MEM_WRITE_PHYSICAL`).
+    /// Run `action` against the UART with the same capabilities it receives
+    /// during port I/O, so interrupts it raises and timers it arms take effect
+    /// immediately instead of being latched for a later boundary.
+    pub(super) fn with_serial_ctx<R>(
+        &mut self,
+        port_index: usize,
+        current_ticks: u64,
+        action: impl FnOnce(
+            &mut crate::iodev::serial::BxSerialC,
+            &mut crate::iodev::device_api::DeviceCtx<'_>,
+        ) -> R,
+    ) -> R {
+        let mut handles = crate::iodev::wiring::TimerHandles::default();
+        handles.set(
+            crate::iodev::serial::BxSerialC::fifo_timer_local(port_index),
+            self.device_manager.serial.fifo_timer_handle(port_index),
+        );
+        handles.set(
+            crate::iodev::serial::BxSerialC::tx_timer_local(port_index),
+            self.device_manager.serial.tx_timer_handle(port_index),
+        );
+
+        let crate::iodev::devices::DeviceManager {
+            ref mut serial,
+            ref mut pic,
+            ..
+        } = self.device_manager;
+        let mut irq = crate::iodev::wiring::PicIrqSink { pic };
+        let mut timers = crate::iodev::wiring::WheelTimerService {
+            pc_system: &mut self.pc_system,
+            handles,
+        };
+        let mut ctx = crate::iodev::device_api::DeviceCtx {
+            now_ticks: current_ticks,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        action(serial, &mut ctx)
+    }
+
+    /// Service one expiry of a UART timer.
+    fn fire_serial_timer(&mut self, port_index: usize, local: u16, fires: u32, current_ticks: u64) {
+        self.with_serial_ctx(port_index, current_ticks, |serial, ctx| {
+            crate::iodev::device_api::TimedDevice::timer_fired(serial, local, fires, ctx)
+        });
+    }
+
+    /// Deliver interrupt and timer work the UART latched outside guest I/O —
+    /// a host byte pushed into the receive path leaves the same state a
+    /// guest-visible access would.
+    pub(super) fn drain_serial_effects(&mut self, port_index: usize, current_ticks: u64) {
+        self.with_serial_ctx(port_index, current_ticks, |serial, ctx| {
+            serial.drain_pending_effects(ctx, port_index)
+        });
+    }
+
     /// Comparator deadlines were pre-anchored at the access instant, so the
     /// drain point does not shift them.
     pub(super) fn drain_hpet_pending(&mut self) {
@@ -634,46 +679,6 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
                 DeviceTimerOwner::AcpiPmOverflow,
                 self.device_manager.acpi.overflow_timer_handle,
                 "ACPI PM overflow",
-            ),
-            (
-                DeviceTimerOwner::SerialFifo(0),
-                self.device_manager.serial.fifo_timer_handle(0),
-                "serial FIFO 0",
-            ),
-            (
-                DeviceTimerOwner::SerialFifo(1),
-                self.device_manager.serial.fifo_timer_handle(1),
-                "serial FIFO 1",
-            ),
-            (
-                DeviceTimerOwner::SerialFifo(2),
-                self.device_manager.serial.fifo_timer_handle(2),
-                "serial FIFO 2",
-            ),
-            (
-                DeviceTimerOwner::SerialFifo(3),
-                self.device_manager.serial.fifo_timer_handle(3),
-                "serial FIFO 3",
-            ),
-            (
-                DeviceTimerOwner::SerialTx(0),
-                self.device_manager.serial.tx_timer_handle(0),
-                "serial TX 0",
-            ),
-            (
-                DeviceTimerOwner::SerialTx(1),
-                self.device_manager.serial.tx_timer_handle(1),
-                "serial TX 1",
-            ),
-            (
-                DeviceTimerOwner::SerialTx(2),
-                self.device_manager.serial.tx_timer_handle(2),
-                "serial TX 2",
-            ),
-            (
-                DeviceTimerOwner::SerialTx(3),
-                self.device_manager.serial.tx_timer_handle(3),
-                "serial TX 3",
             ),
             (
                 DeviceTimerOwner::PciIdeCh0,
