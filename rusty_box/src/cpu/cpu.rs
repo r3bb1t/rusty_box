@@ -719,31 +719,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait, T: super::instrumentation::Instrumentatio
 
     pub(super) stats: BxCpuStatistics,
 
-    #[cfg(feature = "bx_debugger")]
-    pub(super) watchpoint: BxPhyAddress,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) break_point: u8,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) magic_break: u8,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) stop_reason: u8,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) trace: bool,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) trace_reg: bool,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) trace_mem: bool,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) mode_break: bool,
-
-    #[cfg(feature = "bx_debugger")]
-    pub(super) vmexit_break: bool,
-
-    #[cfg(feature = "bx_debugger")]
-    pub(super) show_flag: u32,
-    #[cfg(feature = "bx_debugger")]
-    pub(super) guard_found: BxGuardFound,
-
     /// Instrumentation: monomorphized tracer + closure hooks.
     /// With `T = ()` and no closures registered, this is 4 bytes (the bitmask).
     pub(crate) instrumentation: super::instrumentation::InstrumentationRegistry<T>,
@@ -1639,26 +1614,6 @@ impl Uintr {
     fn senduipi_enabled(&self) -> bool {
         (self.uitt_addr & 0x1) != 0
     }
-}
-
-#[cfg(feature = "bx_debugger")]
-#[derive(Debug, Default)]
-pub(super) struct BxDbgGuardState {
-    /// cs:eip and linear addr of instruction at guard point
-    cs: u32,
-    eip: BxAddress,
-    laddr: BxAddress,
-    // 00 - 16 bit, 01 - 32 bit, 10 - 64-bit, 11 - illegal
-    code_32_64: u32, // CS seg size at guard point
-}
-
-#[cfg(feature = "bx_debugger")]
-#[derive(Debug, Default)]
-pub(super) struct BxGuardFound {
-    guard_found: u32,
-    icount_max: u64, // stop after completing this many instructions
-    iaddr_index: u32,
-    guard_state: BxDbgGuardState,
 }
 
 /// Type alias for instruction handler function pointer

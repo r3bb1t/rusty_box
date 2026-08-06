@@ -393,17 +393,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
         self.esp_page_window_size = 0;
         self.esp_host_ptr = None;
 
-        #[cfg(feature = "bx_debugger")]
-        {
-            self.stop_reason = 0;
-            self.magic_break = 0;
-            self.trace = false;
-            self.trace_reg = false;
-            self.trace_mem = false;
-            self.mode_break = false;
-            self.vmexit_break = false;
-        }
-
         // Reset the Floating Point Unit
         if source == ResetReason::Hardware {
             self.the_i387.reset();

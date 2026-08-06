@@ -812,73 +812,6 @@ impl<'m> BxMemC<'m> {
         Ok(copied)
     }
 
-    /// Debugger physical write through the block-aware RAM path.
-    ///
-    /// Debugger writes are all-or-nothing from the debugger's perspective:
-    /// a PCI hole, out-of-range address, or short source buffer reports
-    /// failure rather than exposing a partial flat backing write.
-    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
-    pub(crate) fn dbg_set_mem(
-        &mut self,
-        pins: &[CpuTlbPin],
-        addr: BxPhyAddress,
-        len: u32,
-        buf: &[u8],
-    ) -> Result<bool> {
-        let requested = usize::try_from(len)?;
-        if buf.len() < requested {
-            return Ok(false);
-        }
-        Ok(self.write_ram(pins, addr, &buf[..requested])? == requested)
-    }
-
-    /// Compute the Bochs debugger CRC32 through fixed-size block-aware reads.
-    ///
-    /// The first PCI-hole or short/out-of-range read fails the request. This
-    /// deliberately never substitutes `0xff` bytes from a flat host backing.
-    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
-    pub(crate) fn dbg_crc32(
-        &mut self,
-        pins: &[CpuTlbPin],
-        addr1: BxPhyAddress,
-        addr2: BxPhyAddress,
-        crc: &mut u32,
-    ) -> Result<bool> {
-        let mut c = 0xFFFF_FFFFu32;
-        if addr1 > addr2 {
-            *crc = c;
-            return Ok(true);
-        }
-        let mut remaining = addr2
-            .checked_sub(addr1)
-            .and_then(|span| span.checked_add(1))
-            .ok_or(MemoryError::Internal("debugger CRC address range overflow"))?;
-        let mut addr = addr1;
-        let mut scratch = [0u8; 4096];
-        while remaining != 0 {
-            let chunk = usize::try_from(remaining.min(scratch.len() as u64))?;
-            if self.read_ram(pins, addr, &mut scratch[..chunk])? != chunk {
-                return Ok(false);
-            }
-            for &byte in &scratch[..chunk] {
-                c ^= u32::from(byte);
-                for _ in 0..8 {
-                    let mask = 0u32.wrapping_sub(c & 1);
-                    c = (c >> 1) ^ (0xEDB8_8320 & mask);
-                }
-            }
-            remaining -= chunk as u64;
-            if remaining != 0 {
-                addr = addr
-                    .checked_add(chunk as u64)
-                    .ok_or(MemoryError::Internal("debugger CRC address overflow"))?;
-            }
-        }
-        *crc = c;
-        Ok(true)
-    }
-
-
     pub(crate) fn get_memory_len(&self) -> usize {
         self.inherited_memory_stub.len
     }
@@ -1595,57 +1528,6 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .unwrap();
     }
 
-    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
-    fn debugger_reference_crc32(bytes: &[u8]) -> u32 {
-        let mut crc = 0xFFFF_FFFFu32;
-        for &byte in bytes {
-            for bit in 0..8 {
-                let feedback = ((crc ^ (u32::from(byte) >> bit)) & 1) != 0;
-                crc >>= 1;
-                if feedback {
-                    crc ^= 0xEDB8_8320;
-                }
-            }
-        }
-        crc
-    }
-
-    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
-    #[test]
-    fn debugger_set_crc_cross_swapped_blocks() {
-        let mut mem = BxMemC::new(
-            BxMemoryStubC::create_and_init(2 * MIB, MIB, MIB).unwrap(),
-            false,
-        );
-        mem.set_a20_mask(u64::MAX);
-
-        let start = (MIB - 47) as u64;
-        let data: Vec<u8> = (0..128).map(|byte| byte as u8 ^ 0xA5).collect();
-        assert!(mem
-            .dbg_set_mem(&[], start, data.len() as u32, &data)
-            .unwrap());
-
-        let mut copied = vec![0; data.len()];
-        assert_eq!(mem.read_ram(&[], start, &mut copied).unwrap(), data.len());
-        assert_eq!(copied, data);
-
-        let mut crc = 0;
-        assert!(mem
-            .dbg_crc32(&[], start, start + data.len() as u64 - 1, &mut crc)
-            .unwrap());
-        assert_eq!(crc, debugger_reference_crc32(&data));
-
-        let mut rejected_crc = 0xA5A5_5A5A;
-        assert!(!mem
-            .dbg_crc32(
-                &[],
-                BX_PCI_HOLE_START,
-                BX_PCI_HOLE_START,
-                &mut rejected_crc,
-            )
-            .unwrap());
-        assert_eq!(rejected_crc, 0xA5A5_5A5A);
-    }
 
     #[test]
     fn failed_reload_leaves_target_block_swapped_until_retry() {

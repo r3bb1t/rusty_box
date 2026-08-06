@@ -119,6 +119,4 @@ Emulator::init_at(emu_ptr, cpu, mem_stub, config)   // Emulator at raw pointer
 - `alloc` -- Heap allocation. Enables `Emulator::new()`, GUI, diagnostic methods, StopHandle.
 - `gui-egui` -- Graphical UI using egui.
 - `instrumentation` -- Closure-based CPU hooks. Implies `alloc`.
-- `bx_debugger` -- Built-in debugger.
-- `bx_gdb_stub` -- GDB remote stub.
 - `profiling` -- Profiling support. Implies `std`.
