@@ -953,7 +953,6 @@ impl<I: BxCpuIdTrait, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<'_
     /// CVTPI2PS — Convert 2 Packed Int32 to 2 Packed Singles
     pub(super) fn cvtpi2ps_vps_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        self.fpu_check_pending_exceptions()?;
         let op = if instr.mod_c0() {
             self.fpu_check_pending_exceptions()?;
             self.read_mmx_reg(instr.src1())
