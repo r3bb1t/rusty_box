@@ -342,15 +342,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
                     // serial-delay timer runs periodic(1) every fire and
                     // raises whatever IRQs the controller latched since the
                     // previous fire. No rearm — pc_system reloads the period.
-                    for _ in 0..counts[entry] {
-                        let irq_mask = self.device_manager.keyboard.timer_callback();
-                        if irq_mask & 0x01 != 0 {
-                            self.device_manager.pic.raise_irq(1);
-                        }
-                        if irq_mask & 0x02 != 0 {
-                            self.device_manager.pic.raise_irq(12);
-                        }
-                    }
+                    self.fire_keyboard_timer(counts[entry], current_ticks);
                 }
                 // The RTC raises IRQ8 and arms its own UIP pulse from inside
                 // the callback, as Bochs cmos.cc does.
@@ -529,6 +521,28 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
             timers: &mut timers,
         };
         action(serial, &mut ctx)
+    }
+
+    /// Service the 8042's continuous serial-delay timer through the device API.
+    fn fire_keyboard_timer(&mut self, fires: u32, current_ticks: u64) {
+        let pc_system_ips = self.pc_system.ips();
+        let crate::iodev::devices::DeviceManager {
+            ref mut keyboard,
+            ref mut pic,
+            ..
+        } = self.device_manager;
+        let mut irq = crate::iodev::wiring::PicIrqSink { pic };
+        let mut timers = crate::iodev::wiring::WheelTimerService {
+            pc_system: &mut self.pc_system,
+            handles: crate::iodev::wiring::TimerHandles::default(),
+        };
+        let mut ctx = crate::iodev::device_api::DeviceCtx {
+            now_ticks: current_ticks,
+            ips: pc_system_ips,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        crate::iodev::device_api::TimedDevice::timer_fired(keyboard, 0, fires, &mut ctx);
     }
 
     /// Service one expiry of the PIT's event timer through the device API.

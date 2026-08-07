@@ -73,6 +73,7 @@ pub enum DeviceKind {
     Acpi,
     Cmos,
     Pit,
+    Keyboard,
 }
 
 /// Interrupt delivery, as seen by a device.

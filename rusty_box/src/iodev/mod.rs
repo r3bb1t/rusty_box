@@ -602,6 +602,9 @@ impl BxDevicesC {
                     (DeviceId::Pit, Some(width)) => {
                         Self::pit_read(dm, pc_system, port, width, current_ticks)
                     }
+                    (DeviceId::Keyboard, Some(width)) => {
+                        Self::keyboard_read(dm, pc_system, port, width, current_ticks)
+                    }
                     _ => Self::dispatch_read(dm, device_id, port, io_len, current_ticks),
                 };
                 let (fwds, count) = dm.pic.take_ioapic_forwards();
@@ -672,6 +675,9 @@ impl BxDevicesC {
                     }
                     (DeviceId::Pit, Some(width)) => {
                         Self::pit_write(dm, pc_system, port, value, width, current_ticks);
+                    }
+                    (DeviceId::Keyboard, Some(width)) => {
+                        Self::keyboard_write(dm, pc_system, port, value, width, current_ticks);
                     }
                     _ => {
                         cmos_timer_sync = Self::dispatch_write(
@@ -1167,6 +1173,64 @@ impl BxDevicesC {
         device_api::PioDevice::pio_write(pit, port, value, width, &mut ctx);
     }
 
+    /// The 8042 owns no scheduler slot it arms itself — its timer is
+    /// continuous and registered by the machine — so its context carries no
+    /// timer handles.
+    fn keyboard_read(
+        dm: &mut devices::DeviceManager,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
+        port: u16,
+        width: device_api::IoLen,
+        current_ticks: u64,
+    ) -> u32 {
+        let devices::DeviceManager {
+            ref mut keyboard,
+            ref mut pic,
+            ..
+        } = *dm;
+        let mut irq = wiring::PicIrqSink { pic };
+        let pc_system_ips = pc_system.ips();
+        let mut timers = wiring::WheelTimerService {
+            pc_system,
+            handles: wiring::TimerHandles::default(),
+        };
+        let mut ctx = device_api::DeviceCtx {
+            now_ticks: current_ticks,
+            ips: pc_system_ips,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        device_api::PioDevice::pio_read(keyboard, port, width, &mut ctx)
+    }
+
+    fn keyboard_write(
+        dm: &mut devices::DeviceManager,
+        pc_system: &mut crate::pc_system::BxPcSystemC,
+        port: u16,
+        value: u32,
+        width: device_api::IoLen,
+        current_ticks: u64,
+    ) {
+        let devices::DeviceManager {
+            ref mut keyboard,
+            ref mut pic,
+            ..
+        } = *dm;
+        let mut irq = wiring::PicIrqSink { pic };
+        let pc_system_ips = pc_system.ips();
+        let mut timers = wiring::WheelTimerService {
+            pc_system,
+            handles: wiring::TimerHandles::default(),
+        };
+        let mut ctx = device_api::DeviceCtx {
+            now_ticks: current_ticks,
+            ips: pc_system_ips,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        device_api::PioDevice::pio_write(keyboard, port, value, width, &mut ctx);
+    }
+
     /// Scheduler handles owned by the RTC.
     fn cmos_timer_handles(cmos: &cmos::BxCmosC) -> wiring::TimerHandles {
         let mut handles = wiring::TimerHandles::default();
@@ -1326,17 +1390,8 @@ impl BxDevicesC {
             // Routed through the device API by `inp`/`outp` before this match.
             DeviceId::Cmos => 0xFFFF_FFFF,
             DeviceId::Dma => dm.dma.read(port, io_len),
-            DeviceId::Keyboard => {
-                if port == keyboard::KBD_DATA_PORT {
-                    let result = dm.keyboard.read_data_port_for_device_manager();
-                    if let Some(irq) = result.irq_to_lower {
-                        dm.pic.lower_irq(irq);
-                    }
-                    result.value
-                } else {
-                    dm.keyboard.read(port, io_len)
-                }
-            }
+            // Routed through the device API by `inp`/`outp` before this match.
+            DeviceId::Keyboard => 0xFFFF_FFFF,
             DeviceId::HardDrive => {
                 let devices::DeviceManager {
                     harddrv,
@@ -1374,7 +1429,6 @@ impl BxDevicesC {
         match id {
             DeviceId::Pic => dm.pic.write(port, value, io_len),
             DeviceId::Dma => dm.dma.write(port, value, io_len),
-            DeviceId::Keyboard => dm.keyboard.write(port, value, io_len),
             DeviceId::HardDrive => {
                 let devices::DeviceManager {
                     harddrv,
@@ -1395,6 +1449,7 @@ impl BxDevicesC {
             DeviceId::Serial
             | DeviceId::Cmos
             | DeviceId::Pit
+            | DeviceId::Keyboard
             | DeviceId::Ioapic
             | DeviceId::None => {}
         }
