@@ -72,6 +72,7 @@ pub enum DeviceKind {
     Serial,
     Acpi,
     Cmos,
+    Pit,
 }
 
 /// Interrupt delivery, as seen by a device.
@@ -81,6 +82,14 @@ pub enum DeviceKind {
 /// pic.cc `set_irq_level`).
 pub trait IrqSink {
     fn set_level(&mut self, line: IrqLine, level: bool);
+
+    /// Current level of `line` at the controller's input.
+    ///
+    /// Bochs devices never ask — they only drive. This exists because a device
+    /// that replays a burst of edges needs to know whether the line was
+    /// already asserted to account for them correctly, and the controller is
+    /// the only authority on that.
+    fn level(&self, line: IrqLine) -> bool;
 
     #[inline]
     fn raise(&mut self, line: IrqLine) {
@@ -116,6 +125,9 @@ pub struct DeviceCtx<'a> {
     /// Emulated time at the access, in scheduler ticks. Bochs devices read
     /// `bx_pc_system.time_ticks()` for the same purpose.
     pub now_ticks: u64,
+    /// Emulated instructions per second — Bochs `bx_pc_system.m_ips`. A device
+    /// that converts between ticks and wall-clock microseconds needs it.
+    pub ips: u64,
     pub irq: &'a mut dyn IrqSink,
     pub timers: &'a mut dyn TimerService,
 }

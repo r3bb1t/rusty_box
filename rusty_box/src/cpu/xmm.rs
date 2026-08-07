@@ -654,6 +654,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         assert_eq!(u64::from_le_bytes(pushed_rip), rip);
     }
 
+    // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
+    // (or a `debug_assert!`), which do not exist in a release build.
+    #[cfg(debug_assertions)]
     #[test]
     fn vpinsr_and_vextract_require_avx_state() {
         std::thread::Builder::new()
@@ -780,6 +783,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     /// "Which vector incremented" is therefore a direct probe of the call
     /// site: a missing call or a too-narrow mask shows up as #PF, a too-wide
     /// mask fires #AC on a naturally aligned access.
+    // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
+    // (or a `debug_assert!`), which do not exist in a release build.
+    #[cfg(debug_assertions)]
     #[test]
     fn ac_check_is_wired_into_every_scalar_linear_accessor() {
         std::thread::Builder::new()
@@ -876,6 +882,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .unwrap();
     }
 
+    // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
+    // (or a `debug_assert!`), which do not exist in a release build.
+    #[cfg(debug_assertions)]
     #[test]
     fn misaligned_user_access_raises_ac_when_armed() {
         std::thread::Builder::new()

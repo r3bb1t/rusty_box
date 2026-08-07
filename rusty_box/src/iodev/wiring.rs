@@ -28,6 +28,11 @@ impl IrqSink for PicIrqSink<'_> {
             None => {}
         }
     }
+
+    #[inline]
+    fn level(&self, line: IrqLine) -> bool {
+        self.pic.irq_line_level(line.0)
+    }
 }
 
 /// The scheduler slots one converted device owns, snapshotted before dispatch.
@@ -57,6 +62,19 @@ impl TimerHandles {
     fn get(&self, local: u16) -> Option<usize> {
         self.slots.get(local as usize).copied().flatten()
     }
+}
+
+/// A timer service that accepts and discards every request.
+///
+/// For contexts with no scheduler: unit tests that exercise a device's
+/// interrupt behaviour in isolation, and CPU-only emulation, where no machine
+/// timer wheel exists.
+pub(crate) struct NullTimerService;
+
+impl TimerService for NullTimerService {
+    fn arm_oneshot_usec(&mut self, _key: TimerKey, _delay_usec: u64) {}
+    fn arm_periodic_usec(&mut self, _key: TimerKey, _period_usec: u64) {}
+    fn cancel(&mut self, _key: TimerKey) {}
 }
 
 /// Arms and cancels scheduler timers on behalf of a converted device.

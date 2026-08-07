@@ -873,7 +873,6 @@ impl BxPicC {
     /// Deliberately reads the line state, not IRR: edge-latch history such as
     /// an IRR bit consumed by interrupt acknowledge while the line stays high
     /// must not look like a device/PIC disagreement.
-    #[cfg(feature = "std")]
     #[inline]
     pub(crate) fn irq_line_level(&self, irq_no: u8) -> bool {
         if irq_no < 8 {

@@ -54,19 +54,19 @@ struct Step {
 const MATRIX: &[Step] = &[
     Step {
         name: "decoder tests",
-        args: &["test", "-p", "rusty_box_decoder"],
+        args: &["test", "--release", "-p", "rusty_box_decoder"],
         envs: &[],
         stdout_marker: None,
     },
     Step {
         name: "lib tests (default features)",
-        args: &["test", "-p", "rusty_box", "--lib"],
+        args: &["test", "--release", "-p", "rusty_box", "--lib"],
         envs: &[],
         stdout_marker: None,
     },
     Step {
         name: "no_std + no_alloc check",
-        args: &["check", "-p", "rusty_box", "--no-default-features"],
+        args: &["check", "--release", "-p", "rusty_box", "--no-default-features"],
         envs: &[],
         stdout_marker: None,
     },
@@ -74,6 +74,7 @@ const MATRIX: &[Step] = &[
         name: "no_std + alloc check",
         args: &[
             "check",
+            "--release",
             "-p",
             "rusty_box",
             "--no-default-features",
@@ -87,6 +88,7 @@ const MATRIX: &[Step] = &[
         name: "bare-metal target check",
         args: &[
             "check",
+            "--release",
             "-p",
             "rusty_box",
             "--no-default-features",
@@ -113,6 +115,7 @@ const MATRIX: &[Step] = &[
         name: "wasm target check (lib, alloc)",
         args: &[
             "check",
+            "--release",
             "-p",
             "rusty_box",
             "--no-default-features",
@@ -126,7 +129,7 @@ const MATRIX: &[Step] = &[
     },
     Step {
         name: "all-features check",
-        args: &["check", "-p", "rusty_box", "--all-features"],
+        args: &["check", "--release", "-p", "rusty_box", "--all-features"],
         envs: &[],
         stdout_marker: None,
     },
@@ -135,7 +138,7 @@ const MATRIX: &[Step] = &[
 const FULL_MATRIX: &[Step] = &[
     Step {
         name: "full test suite (integration included)",
-        args: &["test", "-p", "rusty_box"],
+        args: &["test", "--release", "-p", "rusty_box"],
         envs: &[],
         stdout_marker: None,
     },

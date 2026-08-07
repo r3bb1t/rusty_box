@@ -832,6 +832,12 @@ pub struct BxPitC {
     pub(crate) total_ticks: u64,
     /// One-shot PC-system owner timer handle for all PIT counter events.
     pub(crate) timer_handle: Option<usize>,
+    /// Diagnostic: IRQ0 rising edges applied to the PIC.
+    pub(crate) diag_fires: u64,
+    /// Diagnostic: rising edges applied while IRQ0 was low.
+    pub(crate) diag_irq0_latched: u64,
+    /// Diagnostic: rising edges applied while IRQ0 was already high.
+    pub(crate) diag_irq0_already_high: u64,
     /// Bochs pit.cc s.speaker_data_on — port 0x61 bit 1 (write) / bit 1 (read)
     pub(crate) speaker_data_on: bool,
     /// Bochs pit.cc s.speaker_active — tracks (port 0x61 & 3) == 3 while
@@ -879,6 +885,9 @@ impl BxPitC {
             irq_enabled: true,
             total_ticks: 0,
             timer_handle: None,
+            diag_fires: 0,
+            diag_irq0_latched: 0,
+            diag_irq0_already_high: 0,
             speaker_data_on: false,
             speaker_active: false,
             speaker_level: false,
@@ -1170,6 +1179,77 @@ impl BxPitC {
             irq0_transitions,
             irq0_level,
             rearm_usec: self.next_event_usec(),
+        }
+    }
+
+    /// The PIT's single scheduler timer.
+    pub(crate) const EVENT_TIMER_LOCAL: u16 = 0;
+
+    #[inline]
+    const fn event_timer_key() -> crate::iodev::device_api::TimerKey {
+        crate::iodev::device_api::TimerKey {
+            device: crate::iodev::device_api::DeviceKind::Pit,
+            local: Self::EVENT_TIMER_LOCAL,
+        }
+    }
+
+    /// Replay a burst of OUT-pin transitions onto IRQ0.
+    ///
+    /// Bochs pit.cc calls irq_handler once per transition; a coalesced batch is
+    /// replayed as at most three alternating edges ending at `level`, which is
+    /// enough for the PIC to observe the same final state and the same
+    /// intervening rising edge. Returns the number of rising edges applied.
+    fn replay_irq0(
+        transitions: u32,
+        level: bool,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) -> u32 {
+        if transitions == 0 {
+            return 0;
+        }
+        let replay = transitions.min(3);
+        // The k-th replayed level, ending at `level`, alternating backwards.
+        let mut lvl = if replay % 2 == 1 { level } else { !level };
+        for _ in 0..replay {
+            ctx.irq
+                .set_level(crate::iodev::device_api::IrqLine(0), lvl);
+            lvl = !lvl;
+        }
+        if level {
+            transitions.div_ceil(2)
+        } else {
+            transitions / 2
+        }
+    }
+
+    /// Drain pending OUT transitions to IRQ0 and update the PIT's own
+    /// diagnostics.
+    ///
+    /// With `irq_enabled` clear (HPET legacy mode) Bochs pit.cc consumes the
+    /// transitions but never reaches the PIC, so they are dropped here too.
+    /// Returns the number of rising edges applied to the PIC.
+    pub(crate) fn drain_irq0(&mut self, ctx: &mut crate::iodev::device_api::DeviceCtx<'_>) -> u32 {
+        let (transitions, level) = self.drain_irq0_events();
+        if !self.irq_enabled {
+            return 0;
+        }
+        let was_high = ctx.irq.level(crate::iodev::device_api::IrqLine(0));
+        let rising = Self::replay_irq0(transitions, level, ctx);
+        if rising > 0 {
+            self.diag_fires += u64::from(rising);
+            self.diag_irq0_latched += 1;
+            if was_high {
+                self.diag_irq0_already_high += 1;
+            }
+        }
+        rising
+    }
+
+    /// Publish the next one-shot deadline for the PIT's own timer.
+    fn arm_next_event(&mut self, ctx: &mut crate::iodev::device_api::DeviceCtx<'_>) {
+        match self.next_event_usec() {
+            Some(delay) => ctx.timers.arm_oneshot_usec(Self::event_timer_key(), delay),
+            None => ctx.timers.cancel(Self::event_timer_key()),
         }
     }
 
@@ -1646,6 +1726,67 @@ fn validate_pit_phase(
         return Err(pit_snapshot_invalid("PIT tick remainder is invalid"));
     }
     Ok(())
+}
+
+// ─── Device-API conversion ───────────────────────────────────────────────────
+
+impl crate::iodev::device_api::PioDevice for BxPitC {
+    fn pio_read(
+        &mut self,
+        port: u16,
+        len: crate::iodev::device_api::IoLen,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) -> u32 {
+        // Bochs pit.cc runs handle_timer() before reading a register, which
+        // can clock counter 0's OUT pin — so the read itself can produce an
+        // IRQ0 edge that must reach the PIC before the guest resumes.
+        let value = self.read(port, len.bytes(), ctx.now_ticks);
+        self.drain_irq0(ctx);
+        self.arm_next_event(ctx);
+        value
+    }
+
+    fn pio_write(
+        &mut self,
+        port: u16,
+        value: u32,
+        len: crate::iodev::device_api::IoLen,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) {
+        self.write(port, value, len.bytes(), ctx.now_ticks);
+        self.drain_irq0(ctx);
+        self.arm_next_event(ctx);
+    }
+}
+
+impl crate::iodev::device_api::TimedDevice for BxPitC {
+    /// `fires` is ignored: the callback re-synchronises the counters to the
+    /// current tick, so a coalesced expiry is caught up in one pass rather
+    /// than by replaying each period (Bochs pit.cc handle_timer).
+    fn timer_fired(
+        &mut self,
+        _local: u16,
+        _fires: u32,
+        ctx: &mut crate::iodev::device_api::DeviceCtx<'_>,
+    ) {
+        let ips = ctx.ips;
+        let callback = self.timer_callback(ctx.now_ticks, ips);
+        if self.irq_enabled {
+            let was_high = ctx.irq.level(crate::iodev::device_api::IrqLine(0));
+            let rising = Self::replay_irq0(callback.irq0_transitions, callback.irq0_level, ctx);
+            if rising > 0 {
+                self.diag_fires += u64::from(rising);
+                self.diag_irq0_latched += 1;
+                if was_high {
+                    self.diag_irq0_already_high += 1;
+                }
+            }
+        }
+        match callback.rearm_usec {
+            Some(delay) => ctx.timers.arm_oneshot_usec(Self::event_timer_key(), delay),
+            None => ctx.timers.cancel(Self::event_timer_key()),
+        }
+    }
 }
 
 #[cfg(test)]

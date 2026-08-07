@@ -234,12 +234,6 @@ pub struct DeviceManager {
     /// emulator drains this in `rearm_device_timers_after_hardware_reset`
     /// (transient — set and consumed within a single reset, never snapshotted).
     pub(crate) cmos_reset_timer_sync: Option<super::cmos::CmosTimerSync>,
-    /// Diagnostic: PIT IRQ0 rising edges applied to the PIC
-    pub diag_pit_fires: u64,
-    /// Diagnostic: raise_irq(0) latched (irq_in was 0)
-    pub diag_irq0_latched: u64,
-    /// Diagnostic: raise_irq(0) skipped (irq_in was already 1)
-    pub diag_irq0_already_high: u64,
     /// Diagnostic: iac() calls
     pub diag_iac_count: u64,
     /// Diagnostic: iac vector histogram [0..256]
@@ -359,9 +353,6 @@ impl DeviceManager {
             ioapic_enable_needs_update: false,
             bios_1meg_access_pending: None,
             cmos_reset_timer_sync: None,
-            diag_pit_fires: 0,
-            diag_irq0_latched: 0,
-            diag_irq0_already_high: 0,
             diag_iac_count: 0,
             diag_vector_hist: [0; 256],
             mem_ptr: None,
@@ -1161,29 +1152,6 @@ impl DeviceManager {
         }
     }
 
-    pub(crate) fn service_pit_irq0(pit: &mut BxPitC, pic: &mut BxPicC) -> u32 {
-        let (transitions, level) = pit.drain_irq0_events();
-        // Bochs pit.cc irq_handler: with irq_enabled clear (HPET legacy
-        // mode), OUT transitions are consumed but never reach the PIC.
-        if !pit.irq_enabled {
-            return 0;
-        }
-        Self::replay_pit_irq0_events(transitions, level, pic)
-    }
-
-    /// Drain PIT IRQ0 transitions into the PIC and update diagnostics.
-    pub(crate) fn drain_pit_irq0(&mut self) {
-        let was_high = self.pic.master.irq_in[0] != 0;
-        let rising = Self::service_pit_irq0(&mut self.pit, &mut self.pic);
-        if rising > 0 {
-            self.diag_pit_fires += rising as u64;
-            self.diag_irq0_latched += 1;
-            if was_high {
-                self.diag_irq0_already_high += 1;
-            }
-        }
-    }
-
 
     /// Check if an interrupt is pending
     pub fn has_interrupt(&self) -> bool {
@@ -1261,8 +1229,8 @@ impl DeviceManager {
              PIC slave:  ISR={:#04x} IRR={:#04x} IMR={:#04x} int_pin={} irq_in[0..8]=[{},{},{},{},{},{},{},{}]\n\
              PIC master_offset={:#04x} slave_offset={:#04x}\n\
              IAC calls={} vector_hist[0x20]={} vector_hist[0x21]={} vector_hist[0x08]={} vector_hist[0x2E]={}",
-            self.diag_pit_fires,
-            self.diag_irq0_latched, self.diag_irq0_already_high,
+            self.pit.diag_fires,
+            self.pit.diag_irq0_latched, self.pit.diag_irq0_already_high,
             c0.mode, c0.inlatch, c0.count, c0.count_written, c0.gate, c0.output, c0.first_pass,
             self.pic.master.isr, self.pic.master.irr, self.pic.master.imr,
             self.pic.master.int_pin,
@@ -2014,6 +1982,21 @@ impl DeviceManager {
 
 #[cfg(test)]
 mod tests {
+    /// Drive the PIT's own IRQ0 drain through the device API, with no
+    /// scheduler attached — the behaviour under test is the PIC edge
+    /// sequence, not timer arming.
+    fn drain_pit_irq0_for_test(pit: &mut BxPitC, pic: &mut BxPicC) -> u32 {
+        let mut irq = crate::iodev::wiring::PicIrqSink { pic };
+        let mut timers = crate::iodev::wiring::NullTimerService;
+        let mut ctx = crate::iodev::device_api::DeviceCtx {
+            now_ticks: 0,
+            ips: 1_000_000,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        pit.drain_irq0(&mut ctx)
+    }
+
     use super::*;
     use crate::cpu::{
         core_i7_skylake::Corei7SkylakeX,
@@ -2084,23 +2067,23 @@ mod tests {
         pit.write(PIT_CONTROL, 0x34, 1, 0);
         pit.write(PIT_COUNTER0, 10, 1, 0);
         pit.write(PIT_COUNTER0, 0, 1, 0);
-        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 0);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 0);
 
         // Ticks 1..=10 (pit82c54.cc clock_all domain): OUT pulses LOW.
         pit.clock_pit_ticks(10);
-        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 0);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 0);
         assert_eq!(pic.master.irq_in[0], 0);
 
         // Tick 11: reload → OUT HIGH → IRQ0 raised and latched.
         pit.clock_pit_ticks(1);
-        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 1);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 1);
         assert_eq!(pic.master.irq_in[0], 1);
         assert_ne!(pic.master.irr & 0x01, 0);
 
         // A full period in one batch: lower then raise (in order), ending
         // with the line high and a fresh edge latched.
         pit.clock_pit_ticks(10);
-        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 1);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 1);
         assert_eq!(pic.master.irq_in[0], 1);
         assert_ne!(pic.master.irr & 0x01, 0);
     }
@@ -2115,14 +2098,14 @@ mod tests {
 
         // Mode 0 control word forces OUT low (power-on OUT is high).
         pit.write(PIT_CONTROL, 0x30, 1, 0);
-        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 0);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 0);
         assert_eq!(pic.master.irq_in[0], 0);
 
         // Count 5: terminal count at tick 6 → OUT high → IRQ0 raised.
         pit.write(PIT_COUNTER0, 5, 1, 0);
         pit.write(PIT_COUNTER0, 0, 1, 0);
         pit.clock_pit_ticks(6);
-        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 1);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 1);
         assert_eq!(pic.master.irq_in[0], 1);
         assert_ne!(pic.master.irr & 0x01, 0);
 
@@ -2130,7 +2113,7 @@ mod tests {
         // the lower (line drops, IRR bit cleared) purely from the
         // control-word write.
         pit.write(PIT_CONTROL, 0x30, 1, 0);
-        assert_eq!(DeviceManager::service_pit_irq0(&mut pit, &mut pic), 0);
+        assert_eq!(drain_pit_irq0_for_test(&mut pit, &mut pic), 0);
         assert_eq!(pic.master.irq_in[0], 0);
         assert_eq!(pic.master.irr & 0x01, 0);
     }

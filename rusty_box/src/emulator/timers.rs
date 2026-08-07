@@ -319,31 +319,11 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
                         harddrv.seek_timer(param as u8, pic, pci_ide);
                     }
                 }
+                // The PIT replays its own OUT transitions onto IRQ0 and re-arms
+                // itself from inside the callback (Bochs pit.cc handle_timer).
                 TimerOwner::Pit => {
                     for _ in 0..counts[entry] {
-                        let callback = self
-                            .device_manager
-                            .pit
-                            .timer_callback(current_ticks, ips);
-                        // Bochs pit.cc irq_handler: the HPET legacy-mode gate
-                        // drops OUT transitions before they reach the PIC.
-                        let rising = if self.device_manager.pit.irq_enabled {
-                            DeviceManager::replay_pit_irq0_events(
-                                callback.irq0_transitions,
-                                callback.irq0_level,
-                                &mut self.device_manager.pic,
-                            )
-                        } else {
-                            0
-                        };
-                        if rising != 0 {
-                            self.device_manager.diag_pit_fires += u64::from(rising);
-                        }
-                        self.devices.request_timer_after_usec(
-                            DeviceTimerOwner::Pit,
-                            current_ticks,
-                            callback.rearm_usec,
-                        );
+                        self.fire_pit_timer(current_ticks);
                     }
                 }
                 TimerOwner::Hpet(index) => {
@@ -401,12 +381,14 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
                         ..
                     } = self.device_manager;
                     let mut irq = crate::iodev::wiring::PicIrqSink { pic };
+                    let pc_system_ips = self.pc_system.ips();
                     let mut timers = crate::iodev::wiring::WheelTimerService {
                         pc_system: &mut self.pc_system,
                         handles,
                     };
                     let mut ctx = crate::iodev::device_api::DeviceCtx {
                         now_ticks: current_ticks,
+                        ips: pc_system_ips,
                         irq: &mut irq,
                         timers: &mut timers,
                     };
@@ -535,16 +517,50 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
             ..
         } = self.device_manager;
         let mut irq = crate::iodev::wiring::PicIrqSink { pic };
+        let pc_system_ips = self.pc_system.ips();
         let mut timers = crate::iodev::wiring::WheelTimerService {
             pc_system: &mut self.pc_system,
             handles,
         };
         let mut ctx = crate::iodev::device_api::DeviceCtx {
             now_ticks: current_ticks,
+            ips: pc_system_ips,
             irq: &mut irq,
             timers: &mut timers,
         };
         action(serial, &mut ctx)
+    }
+
+    /// Service one expiry of the PIT's event timer through the device API.
+    fn fire_pit_timer(&mut self, current_ticks: u64) {
+        let mut handles = crate::iodev::wiring::TimerHandles::default();
+        handles.set(
+            crate::iodev::pit::BxPitC::EVENT_TIMER_LOCAL,
+            self.device_manager.pit.timer_handle,
+        );
+        let pc_system_ips = self.pc_system.ips();
+        let crate::iodev::devices::DeviceManager {
+            ref mut pit,
+            ref mut pic,
+            ..
+        } = self.device_manager;
+        let mut irq = crate::iodev::wiring::PicIrqSink { pic };
+        let mut timers = crate::iodev::wiring::WheelTimerService {
+            pc_system: &mut self.pc_system,
+            handles,
+        };
+        let mut ctx = crate::iodev::device_api::DeviceCtx {
+            now_ticks: current_ticks,
+            ips: pc_system_ips,
+            irq: &mut irq,
+            timers: &mut timers,
+        };
+        crate::iodev::device_api::TimedDevice::timer_fired(
+            pit,
+            crate::iodev::pit::BxPitC::EVENT_TIMER_LOCAL,
+            1,
+            &mut ctx,
+        );
     }
 
     /// Service one expiry of an RTC timer through the device API.
@@ -568,12 +584,14 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
             ..
         } = self.device_manager;
         let mut irq = crate::iodev::wiring::PicIrqSink { pic };
+        let pc_system_ips = self.pc_system.ips();
         let mut timers = crate::iodev::wiring::WheelTimerService {
             pc_system: &mut self.pc_system,
             handles,
         };
         let mut ctx = crate::iodev::device_api::DeviceCtx {
             now_ticks: current_ticks,
+            ips: pc_system_ips,
             irq: &mut irq,
             timers: &mut timers,
         };

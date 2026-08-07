@@ -1964,8 +1964,8 @@ impl<T: Instrumentation> Emulator<'_, T> {
         tracing::trace!("--- Exact Timer Diag ---");
         tracing::trace!(
             "  pit_fires={} irq0_latched={} iac_count={}",
-            self.device_manager.diag_pit_fires,
-            self.device_manager.diag_irq0_latched,
+            self.device_manager.pit.diag_fires,
+            self.device_manager.pit.diag_irq0_latched,
             self.device_manager.diag_iac_count
         );
         tracing::trace!(

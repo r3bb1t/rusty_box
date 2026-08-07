@@ -597,10 +597,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .request_timer_after_usec(DeviceTimerOwner::Pit, now, delay);
                 emu.drain_device_timer_requests();
 
-                let before = emu.device_manager.diag_pit_fires;
+                let before = emu.device_manager.pit.diag_fires;
                 // Advance 2 ms; a ~84 us period should fire ~23 times.
                 emu.service_scheduler_boundary(2_000).unwrap();
-                let fires = emu.device_manager.diag_pit_fires - before;
+                let fires = emu.device_manager.pit.diag_fires - before;
                 assert!(
                     fires >= 5,
                     "PIT mode 2 must generate repeated IRQ0 edges, got {fires}"
@@ -4546,6 +4546,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         });
     }
 
+    // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
+    // (or a `debug_assert!`), which do not exist in a release build.
+    #[cfg(debug_assertions)]
     #[cfg(feature = "instrumentation")]
     #[test]
     fn rep_string_io_checks_permission_once_even_when_count_zero() {
@@ -5158,6 +5161,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         });
     }
 
+    // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
+    // (or a `debug_assert!`), which do not exist in a release build.
+    #[cfg(debug_assertions)]
     #[test]
     fn cold_tlb_rep_movsb_propagates_one_page_fault_without_committing() {
         phase6_large_stack(|| {
@@ -5191,6 +5197,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         });
     }
 
+    // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
+    // (or a `debug_assert!`), which do not exist in a release build.
+    #[cfg(debug_assertions)]
     #[test]
     fn cold_tlb_rep_insw_propagates_one_fault_without_consuming_port_input() {
         phase6_large_stack(|| {

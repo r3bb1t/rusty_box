@@ -1217,6 +1217,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         assert_eq!(smc_cache_line_mask(0x0f80, 0x0080), 1 << 31);
     }
 
+    // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
+    // (or a `debug_assert!`), which do not exist in a release build.
+    #[cfg(debug_assertions)]
     #[test]
     fn boundary_reserved_vvvv_executes_ia_error_not_decoder_failure() {
         const CODE: u64 = 0x20_0ffe;

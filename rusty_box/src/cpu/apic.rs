@@ -3152,6 +3152,9 @@ mod tests {
         assert!(!lapic.timer_active);
     }
 
+    // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
+    // (or a `debug_assert!`), which do not exist in a release build.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "LAPIC timer current count overdue")]
     fn current_timer_count_panics_when_active_timer_is_overdue() {
