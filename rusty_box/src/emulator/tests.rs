@@ -637,26 +637,22 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // 4-sector disc: media init parks curr_lba at 3; READ(10) of
                 // LBA 0 seeks |0 - 3 + 1| / 4 of the 80 ms stroke = 40000 us.
                 emu.device_manager
-                    .harddrv
+                    .ide.drives
                     .attach_cdrom_data(0, 0, vec![0u8; 2048 * 4]);
                 {
-                    let crate::iodev::devices::DeviceManager {
-                        harddrv,
-                        pic,
-                        pci_ide,
-                        ..
-                    } = &mut emu.device_manager;
-                    harddrv.write(0x1f7, 0xA0, 1, pic, pci_ide); // PACKET
+                    let crate::iodev::devices::DeviceManager { ide, pic, .. } =
+                        &mut emu.device_manager;
+                    ide.write(0x1f7, 0xA0, 1, pic); // PACKET
                     let packet = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
                     for word in packet.chunks_exact(2) {
                         let value = u16::from_le_bytes([word[0], word[1]]) as u32;
-                        harddrv.write(0x1f0, value, 2, pic, pci_ide);
+                        ide.write(0x1f0, value, 2, pic);
                     }
                 }
                 // The I/O layer drains the arm right after the OUT dispatch
                 // (iodev/mod.rs) — mirror that contract here.
                 let now = emu.pc_system.time_ticks();
-                let arm = emu.device_manager.harddrv.take_pending_seek_arm(0, 0);
+                let arm = emu.device_manager.ide.drives.take_pending_seek_arm(0, 0);
                 assert_eq!(arm, Some(40_000));
                 emu.devices.request_timer_after_usec(
                     DeviceTimerOwner::HdSeek(0),
@@ -667,14 +663,14 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 // One tick before the deadline: still seeking, no DRQ, no IRQ.
                 emu.service_scheduler_boundary(39_999).unwrap();
-                let drive = &emu.device_manager.harddrv.channels[0].drives[0];
+                let drive = &emu.device_manager.ide.drives.channels[0].drives[0];
                 assert!(!drive.controller.status.contains(AtaStatus::DRQ));
                 assert!(!drive.controller.interrupt_pending);
                 assert!(!emu.device_manager.pic.irq_line_level(14));
 
                 // Crossing the deadline completes the command.
                 emu.service_scheduler_boundary(2).unwrap();
-                let drive = &emu.device_manager.harddrv.channels[0].drives[0];
+                let drive = &emu.device_manager.ide.drives.channels[0].drives[0];
                 assert!(drive.controller.status.contains(AtaStatus::DRQ));
                 assert!(drive.controller.interrupt_pending);
                 assert!(emu.device_manager.pic.irq_line_level(14));
@@ -1331,7 +1327,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .init(&mut emu.devices, &mut emu.memory)
                     .unwrap();
                 emu.attach_disk_data(0, 0, vec![0xa5; 512], 1, 1, 1);
-                let drive = &mut emu.device_manager.harddrv.channels[0].drives[0];
+                let drive = &mut emu.device_manager.ide.drives.channels[0].drives[0];
                 drive
                     .controller
                     .status

@@ -33,12 +33,10 @@ use super::acpi::BxAcpiCtrl;
 use super::cmos::{BxCmosC, CMOS_ADDR, CMOS_DATA};
 use super::dma::BxDmaC;
 use super::fw_cfg::BxFwCfg;
-use super::harddrv::BxHardDriveC;
 use super::ioapic::BxIoApic;
 use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT};
 use super::pci::BxPciBridge;
 use super::pci2isa::BxPiix3;
-use super::pci_ide::BxPciIde;
 use super::pic::{BxPicC, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA};
 use super::pit::{
     BxPitC, PIT_CONTROL, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_SYSTEM_CONTROL_B,
@@ -170,7 +168,7 @@ pub struct DeviceManager {
     /// High Precision Event Timer (Bochs iodev/hpet.cc)
     pub(crate) hpet: super::hpet::BxHpetC,
     /// ATA/IDE Hard Drive Controller
-    pub(crate) harddrv: BxHardDriveC,
+    pub(crate) ide: super::ide::IdeSubsystem,
     /// VGA Display Controller
     pub(crate) vga: BxVgaC,
     /// I/O APIC (82093AA) — interrupt routing for APIC-based systems
@@ -187,7 +185,6 @@ pub struct DeviceManager {
     pub(crate) pci2isa: BxPiix3,
     /// PIIX3 PCI IDE Controller (bus 0, dev 1, func 1)
     /// Bochs: `bx_pci_ide_c *pluginPciIdeController` (iodev/iodev.h)
-    pub(crate) pci_ide: BxPciIde,
     /// 16550 UART Serial Port Controller (COM1-COM4)
     /// Bochs: `bx_serial_c *pluginSerial` (iodev/iodev.h)
     pub(crate) serial: BxSerialC,
@@ -255,8 +252,6 @@ pub struct DeviceManager {
     /// a pointer into the channel bounce buffer; here the drive callbacks need
     /// `&mut BxPciIde` (abort/IRQ paths) while that buffer lives inside it, so
     /// sectors stage through this scratch instead. Sized to the largest PRD
-    /// chunk (0x10000) so no transfer is ever clamped.
-    pub(crate) bmdma_scratch: [u8; 0x10000],
     /// System Control Port (Port 92h) — A20 gate and fast reset
     pub(crate) port92: SystemControlPort,
 }
@@ -333,13 +328,12 @@ impl DeviceManager {
             dma: BxDmaC::new(),
             keyboard: BxKeyboardC::new(),
             hpet: super::hpet::BxHpetC::new(),
-            harddrv: BxHardDriveC::new(),
+            ide: super::ide::IdeSubsystem::new(),
             vga: BxVgaC::new(),
             ioapic: BxIoApic::new(),
             acpi: BxAcpiCtrl::new(),
             pci_bridge: BxPciBridge::new(),
             pci2isa: BxPiix3::new(),
-            pci_ide: BxPciIde::new(),
             serial: BxSerialC::new(1), // COM1 only
             fw_cfg: BxFwCfg::new(),
             pci_conf_addr: 0,
@@ -361,7 +355,6 @@ impl DeviceManager {
             bmdma_ports_base: 0,
             pm_ports_base: 0,
             sm_ports_base: 0,
-            bmdma_scratch: [0; 0x10000],
             port92: SystemControlPort::new(),
         }
     }
@@ -393,7 +386,7 @@ impl DeviceManager {
         // 6. Keyboard
         self.keyboard.init();
         // 7. Hard drive
-        self.harddrv.init();
+        self.ide.drives.init();
         // 8. I/O APIC (Bochs: pluginIOAPIC->init() in devices.cc)
         self.ioapic.init(mem)?;
         // 8b. HPET (Bochs: PLUGTYPE_STANDARD hpet plugin — hpet.cc init()
@@ -410,7 +403,7 @@ impl DeviceManager {
         {
             self.pci_bridge.reset();
             self.pci2isa.reset();
-            self.pci_ide.reset();
+            self.ide.bus_master.reset();
         }
 
         // Register I/O handlers for each device (order doesn't matter for handlers)
@@ -425,7 +418,7 @@ impl DeviceManager {
         self.register_pci_handlers(io);
         self.register_fw_cfg_handlers(io);
         // Register BM-DMA ports if BAR4 is pre-configured (for direct boot without BIOS)
-        if self.pci_ide.bmdma_base > 0 {
+        if self.ide.bus_master.bmdma_base > 0 {
             self.register_pci_ide_bmdma_ports(io);
         }
 
@@ -447,7 +440,7 @@ impl DeviceManager {
         self.cmos_reset_timer_sync = Some(self.cmos.reset());
         self.dma.reset();
         self.keyboard.reset();
-        self.harddrv.reset();
+        self.ide.drives.reset();
         self.vga.reset();
         self.serial.reset();
         self.ioapic.reset();
@@ -459,10 +452,10 @@ impl DeviceManager {
         {
             self.pci_bridge.reset();
             self.pci2isa.reset();
-            self.pci_ide.reset();
+            self.ide.bus_master.reset();
             self.pci_conf_addr = 0;
             self.pci_ide_bar4_needs_reregister =
-                self.bmdma_ports_base != self.pci_ide.bmdma_base as u16;
+                self.bmdma_ports_base != self.ide.bus_master.bmdma_base as u16;
             self.acpi_pm_needs_reregister =
                 self.pm_ports_base != self.acpi.pm_base as u16;
             self.acpi_sm_needs_reregister =
@@ -729,9 +722,9 @@ impl DeviceManager {
             0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 | 0x0CF9 => self.pci2isa.read(address),
             _ => {
                 // BM-DMA ports
-                let base = self.pci_ide.bmdma_base as u16;
+                let base = self.ide.bus_master.bmdma_base as u16;
                 if base > 0 && address >= base && address < base + 16 {
-                    self.pci_ide.bmdma_read(address, io_len)
+                    self.ide.bus_master.bmdma_read(address, io_len)
                 } else {
                     0xFFFF_FFFF
                 }
@@ -748,7 +741,7 @@ impl DeviceManager {
             // Device 1, Func 0: PIIX3 PCI-to-ISA bridge
             0x08 => self.pci2isa.pci_read(address, io_len),
             // Device 1, Func 1: PIIX3 IDE controller
-            0x09 => self.pci_ide.pci_read(address, io_len),
+            0x09 => self.ide.bus_master.pci_read(address, io_len),
             // Device 1, Func 3: PIIX4 ACPI controller
             0x0B => self.acpi.pci_read(address, io_len),
             // Device 2, Func 0: PCI VGA (returns 0xFFFFFFFF when pci_vga is off)
@@ -761,20 +754,20 @@ impl DeviceManager {
     /// Relocate PCI IDE BM-DMA I/O ports to the currently programmed BAR4.
     fn register_pci_ide_bmdma_ports(&mut self, io: &mut BxDevicesC) {
         let old_base = self.bmdma_ports_base;
-        let new_base = self.pci_ide.bmdma_base as u16;
+        let new_base = self.ide.bus_master.bmdma_base as u16;
         if old_base == new_base {
             return;
         }
         if old_base != 0 {
             for offset in 0..16u16 {
-                if self.pci_ide.bmdma_io_mask(offset as u8) != 0 {
+                if self.ide.bus_master.bmdma_io_mask(offset as u8) != 0 {
                     io.unregister_io_handler(old_base + offset);
                 }
             }
         }
         if new_base != 0 {
             for offset in 0..16u16 {
-                let mask = self.pci_ide.bmdma_io_mask(offset as u8);
+                let mask = self.ide.bus_master.bmdma_io_mask(offset as u8);
                 if mask != 0 {
                     io.register_io_handler(
                         DeviceId::Pci,
@@ -949,12 +942,11 @@ impl DeviceManager {
             return;
         }
         let DeviceManager {
-            ref mut pci_ide,
-            ref mut harddrv,
+            ref mut ide,
             ref mut pic,
-            ref mut bmdma_scratch,
             ..
         } = *self;
+        let (harddrv, pci_ide, ide_scratch) = ide.split();
 
         // Bochs pci_ide.cc timer: engine stopped or no PRD — nothing to do.
         if (pci_ide.bmdma[channel].status & 0x01) == 0 || pci_ide.bmdma[channel].prd_current == 0 {
@@ -994,16 +986,16 @@ impl DeviceManager {
                 let mut sector_size = count as u32;
                 if harddrv.bmdma_read_sector(
                     channel as u8,
-                    bmdma_scratch,
+                    ide_scratch,
                     &mut sector_size,
                     pic,
                     pci_ide,
                 ) {
                     let top = pci_ide.bmdma[channel].buffer_top;
-                    let len = (sector_size as usize).min(bmdma_scratch.len());
+                    let len = (sector_size as usize).min(ide_scratch.len());
                     let end = (top + len).min(pci_ide.bmdma[channel].buffer.len());
                     pci_ide.bmdma[channel].buffer[top..end]
-                        .copy_from_slice(&bmdma_scratch[..end - top]);
+                        .copy_from_slice(&ide_scratch[..end - top]);
                     pci_ide.bmdma[channel].buffer_top = end;
                     count -= sector_size as i64;
                 } else {
@@ -1058,9 +1050,9 @@ impl DeviceManager {
                 (pci_ide.bmdma[channel].buffer_top - pci_ide.bmdma[channel].buffer_idx) as i64;
             while count > 511 {
                 let idx = pci_ide.bmdma[channel].buffer_idx;
-                bmdma_scratch[..512]
+                ide_scratch[..512]
                     .copy_from_slice(&pci_ide.bmdma[channel].buffer[idx..idx + 512]);
-                if harddrv.bmdma_write_sector(channel as u8, &bmdma_scratch[..512], pic, pci_ide) {
+                if harddrv.bmdma_write_sector(channel as u8, &ide_scratch[..512], pic, pci_ide) {
                     pci_ide.bmdma[channel].buffer_idx += 512;
                     count -= 512;
                 } else {
@@ -1215,7 +1207,7 @@ impl DeviceManager {
     #[cfg(feature = "alloc")]
     /// Get ATA controller diagnostic string
     pub fn ata_diag(&self) -> String {
-        self.harddrv.diag_string()
+        self.ide.drives.diag_string()
     }
 
     #[cfg(feature = "alloc")]
@@ -1325,7 +1317,7 @@ impl DeviceManager {
                         if let Some((addr, val, len)) =
                             pci_write_common_gate(reg_addr, value, io_len)
                         {
-                            if self.pci_ide.pci_write(addr, val, len) {
+                            if self.ide.bus_master.pci_write(addr, val, len) {
                                 self.pci_ide_bar4_needs_reregister = true;
                             }
                         }
@@ -1379,9 +1371,9 @@ impl DeviceManager {
                 }
             }
             _ => {
-                let base = self.pci_ide.bmdma_base as u16;
+                let base = self.ide.bus_master.bmdma_base as u16;
                 if base > 0 && address >= base && address < base + 16 {
-                    self.pci_ide.bmdma_write(address, value, io_len);
+                    self.ide.bus_master.bmdma_write(address, value, io_len);
                 }
             }
         }
@@ -1412,12 +1404,12 @@ impl DeviceManager {
 
     /// PCI IDE I/O read dispatch (BM-DMA ports)
     pub(crate) fn pci_ide_read(&self, address: u16, io_len: u8) -> u32 {
-        self.pci_ide.bmdma_read(address, io_len)
+        self.ide.bus_master.bmdma_read(address, io_len)
     }
 
     /// PCI IDE I/O write dispatch (BM-DMA ports)
     pub(crate) fn pci_ide_write(&mut self, address: u16, value: u32, io_len: u8) {
-        self.pci_ide.bmdma_write(address, value, io_len);
+        self.ide.bus_master.bmdma_write(address, value, io_len);
     }
 
     /// fw_cfg I/O write dispatch — reconstructs the stable active pin slice.
@@ -1724,7 +1716,7 @@ impl DeviceManager {
         writer.write_u16(self.bmdma_ports_base)?;
         writer.write_u16(self.pm_ports_base)?;
         writer.write_u16(self.sm_ports_base)?;
-        writer.write_u32(self.pci_ide.bmdma_base)?;
+        writer.write_u32(self.ide.bus_master.bmdma_base)?;
         writer.write_u32(self.acpi.pm_base)?;
         writer.write_u32(self.acpi.sm_base)?;
         writer.write_u32(committed_vga.lfb_base)?;
@@ -1825,7 +1817,7 @@ impl DeviceManager {
             self.bmdma_ports_base,
             self.pm_ports_base,
             self.sm_ports_base,
-            self.pci_ide.bmdma_base,
+            self.ide.bus_master.bmdma_base,
             self.acpi.pm_base,
             self.acpi.sm_base,
             committed_vga.lfb_base,
@@ -1940,7 +1932,7 @@ impl DeviceManager {
         self.smram_needs_update = false;
         self.bios_write_needs_update = false;
 
-        self.pci_ide.bmdma_base = pci.bmdma_base;
+        self.ide.bus_master.bmdma_base = pci.bmdma_base;
         self.register_pci_ide_bmdma_ports(io);
         self.pci_ide_bar4_needs_reregister = false;
 
@@ -2302,20 +2294,20 @@ mod tests {
             let handle = pcs
                 .register_timer(TimerOwner::PciIdeCh0, 0, false, false, "test bmdma")
                 .unwrap();
-            dm.pci_ide.bmdma[0].timer_index = Some(handle);
+            dm.ide.bus_master.bmdma[0].timer_index = Some(handle);
 
             // In-memory disk: 2 sectors with a recognizable pattern.
             let disk: &'static [u8] =
                 alloc::vec::Vec::leak((0..1024u32).map(|i| (i % 251) as u8).collect());
             {
-                let drive = &mut dm.harddrv.channels[0].drives[0];
+                let drive = &mut dm.ide.drives.channels[0].drives[0];
                 drive.device_type = DeviceType::Disk;
                 drive.attach_data_ref(disk);
             }
 
             // BIOS assigns BAR4 → BM-DMA present.
-            assert!(dm.pci_ide.pci_write(0x20, 0x0000_C001, 4));
-            assert!(dm.pci_ide.bmdma_present());
+            assert!(dm.ide.bus_master.pci_write(0x20, 0x0000_C001, 4));
+            assert!(dm.ide.bus_master.bmdma_present());
             // Guest builds a single-entry PRD table in one swapped block and
             // targets a second swapped block with the disk payload.
             let mut prd = [0u8; 8];
@@ -2328,42 +2320,40 @@ mod tests {
             // Guest issues READ DMA (LBA 0, 2 sectors) via the port interface.
             {
                 let DeviceManager {
-                    ref mut harddrv,
+                    ref mut ide,
                     ref mut pic,
-                    ref mut pci_ide,
                     ..
                 } = dm;
-                harddrv.write(0x1F2, 2, 1, pic, pci_ide); // sector count
-                harddrv.write(0x1F3, 0, 1, pic, pci_ide); // LBA 7:0
-                harddrv.write(0x1F4, 0, 1, pic, pci_ide); // LBA 15:8
-                harddrv.write(0x1F5, 0, 1, pic, pci_ide); // LBA 23:16
-                harddrv.write(0x1F6, 0xE0, 1, pic, pci_ide); // LBA mode, drive 0
-                harddrv.write(0x1F7, 0xC8, 1, pic, pci_ide); // READ DMA
+                ide.write(0x1F2, 2, 1, pic); // sector count
+                ide.write(0x1F3, 0, 1, pic); // LBA 7:0
+                ide.write(0x1F4, 0, 1, pic); // LBA 15:8
+                ide.write(0x1F5, 0, 1, pic); // LBA 23:16
+                ide.write(0x1F6, 0xE0, 1, pic); // LBA mode, drive 0
+                ide.write(0x1F7, 0xC8, 1, pic); // READ DMA
             }
             // Bochs harddrv.cc: READ DMA arms the seek timer; only its
             // deadline (seek_timer) signals bmdma_start_transfer.
             assert!(
-                !dm.pci_ide.bmdma[0].data_ready,
+                !dm.ide.bus_master.bmdma[0].data_ready,
                 "READ DMA must not start BM-DMA before the seek deadline"
             );
-            assert!(dm.harddrv.take_pending_seek_arm(0, 0).is_some());
+            assert!(dm.ide.drives.take_pending_seek_arm(0, 0).is_some());
             {
                 let DeviceManager {
-                    ref mut harddrv,
+                    ref mut ide,
                     ref mut pic,
-                    ref mut pci_ide,
                     ..
                 } = dm;
-                harddrv.seek_timer(0b00, pic, pci_ide);
+                ide.seek_timer(0b00, pic);
             }
             assert!(
-                dm.pci_ide.bmdma[0].data_ready,
+                dm.ide.bus_master.bmdma[0].data_ready,
                 "seek_timer must signal bmdma_start_transfer"
             );
 
-            dm.pci_ide.bmdma_write(0xC004, 0x0020_0000, 4);
-            dm.pci_ide.bmdma_write(0xC000, 0x09, 1);
-            let arm = dm.pci_ide.take_pending_timer_arm(0);
+            dm.ide.bus_master.bmdma_write(0xC004, 0x0020_0000, 4);
+            dm.ide.bus_master.bmdma_write(0xC000, 0x09, 1);
+            let arm = dm.ide.bus_master.take_pending_timer_arm(0);
             assert_eq!(arm, Some(1));
             pcs.activate_timer_usec(handle, 1, false).unwrap();
 
@@ -2384,11 +2374,11 @@ mod tests {
                 mem.smc_seq_next() > before_smc,
                 "BM-DMA guest writes must emit SMC invalidations"
             );
-            let status = dm.pci_ide.bmdma[0].status;
+            let status = dm.ide.bus_master.bmdma[0].status;
             assert_eq!(status & 0x01, 0, "engine active bit must clear on EOT");
             assert_ne!(status & 0x04, 0, "IRQ bit must set on EOT");
-            assert_eq!(dm.pci_ide.bmdma[0].prd_current, 0);
-            let drive = &dm.harddrv.channels[0].drives[0];
+            assert_eq!(dm.ide.bus_master.bmdma[0].prd_current, 0);
+            let drive = &dm.ide.drives.channels[0].drives[0];
             assert!(
                 drive.controller.interrupt_pending,
                 "bmdma_complete must raise the drive interrupt"
@@ -2429,7 +2419,7 @@ mod tests {
             let mut pc_system = crate::pc_system::BxPcSystemC::new();
 
             // BAR4 assigned; BM-DMA ports registered on the I/O bus.
-            assert!(dm.pci_ide.pci_write(0x20, 0x0000_C001, 4));
+            assert!(dm.ide.bus_master.pci_write(0x20, 0x0000_C001, 4));
             dm.register_pci_ide_bmdma_ports(&mut io);
 
             // The engine needs real scheduler slots to arm.
@@ -2440,8 +2430,8 @@ mod tests {
             let ch1 = pc_system
                 .register_timer(TimerOwner::PciIdeCh1, 0, false, false, "PIIX IDE")
                 .unwrap();
-            dm.pci_ide.bmdma[0].timer_index = Some(ch0);
-            dm.pci_ide.bmdma[1].timer_index = Some(ch1);
+            dm.ide.bus_master.bmdma[0].timer_index = Some(ch0);
+            dm.ide.bus_master.bmdma[1].timer_index = Some(ch1);
 
             io.set_device_manager(core::ptr::NonNull::from(&mut dm));
 
@@ -2452,7 +2442,7 @@ mod tests {
             io.clear_device_manager();
 
             assert_eq!(
-                dm.pci_ide.take_pending_timer_arm(0),
+                dm.ide.bus_master.take_pending_timer_arm(0),
                 None,
                 "I/O transport must drain the IDE producer"
             );
@@ -2729,7 +2719,7 @@ mod tests {
             dm.pci_conf_addr = conf_addr(PCI_IDE, 0x20);
             dm.pci_write(0x0CFC, 0x0000_C001, 4);
             assert!(
-                dm.pci_ide.bmdma_present(),
+                dm.ide.bus_master.bmdma_present(),
                 "BAR4 write must reach the device through the filter"
             );
         });

@@ -131,7 +131,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
             let handle = self
                 .pc_system
                 .register_timer(owner, 0, false, false, "PIIX IDE")?;
-            self.device_manager.pci_ide.bmdma[channel].timer_index = Some(handle);
+            self.device_manager.ide.bus_master.bmdma[channel].timer_index = Some(handle);
         }
 
         // Bochs harddrv.cc init registers one "HD/CD seek" timer per
@@ -148,7 +148,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
                     false,
                     "HD/CD seek",
                 )?;
-                self.device_manager.harddrv.seek_timer_handles[channel][device] = Some(handle);
+                self.device_manager.ide.drives.seek_timer_handles[channel][device] = Some(handle);
             }
         }
 
@@ -310,13 +310,9 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
                     // Bochs harddrv.cc seek_timer — one-shot; the seek deadline
                     // completes the read command (DRQ/IRQ or BM-DMA start).
                     for _ in 0..counts[entry] {
-                        let crate::iodev::devices::DeviceManager {
-                            harddrv,
-                            pic,
-                            pci_ide,
-                            ..
-                        } = &mut self.device_manager;
-                        harddrv.seek_timer(param as u8, pic, pci_ide);
+                        let crate::iodev::devices::DeviceManager { ide, pic, .. } =
+                            &mut self.device_manager;
+                        ide.seek_timer(param as u8, pic);
                     }
                 }
                 // The PIT replays its own OUT transitions onto IRQ0 and re-arms
@@ -755,32 +751,32 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
             ),
             (
                 DeviceTimerOwner::PciIdeCh0,
-                self.device_manager.pci_ide.bmdma[0].timer_index,
+                self.device_manager.ide.bus_master.bmdma[0].timer_index,
                 "BM-DMA ch0",
             ),
             (
                 DeviceTimerOwner::PciIdeCh1,
-                self.device_manager.pci_ide.bmdma[1].timer_index,
+                self.device_manager.ide.bus_master.bmdma[1].timer_index,
                 "BM-DMA ch1",
             ),
             (
                 DeviceTimerOwner::HdSeek(0),
-                self.device_manager.harddrv.seek_timer_handles[0][0],
+                self.device_manager.ide.drives.seek_timer_handles[0][0],
                 "HD/CD seek 0-0",
             ),
             (
                 DeviceTimerOwner::HdSeek(1),
-                self.device_manager.harddrv.seek_timer_handles[0][1],
+                self.device_manager.ide.drives.seek_timer_handles[0][1],
                 "HD/CD seek 0-1",
             ),
             (
                 DeviceTimerOwner::HdSeek(2),
-                self.device_manager.harddrv.seek_timer_handles[1][0],
+                self.device_manager.ide.drives.seek_timer_handles[1][0],
                 "HD/CD seek 1-0",
             ),
             (
                 DeviceTimerOwner::HdSeek(3),
-                self.device_manager.harddrv.seek_timer_handles[1][1],
+                self.device_manager.ide.drives.seek_timer_handles[1][1],
                 "HD/CD seek 1-1",
             ),
         ];

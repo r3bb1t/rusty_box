@@ -47,6 +47,7 @@ pub use crate::pic;
 pub mod geforce;
 pub mod pit;
 pub mod device_api;
+pub mod ide;
 pub mod serial;
 pub(crate) mod wiring;
 pub mod vga;
@@ -760,12 +761,11 @@ impl BxDevicesC {
         let bytes_read = if let Some(dm) = self.device_manager_mut() {
             let result = {
                 let devices::DeviceManager {
-                    ref mut harddrv,
+                    ref mut ide,
                     ref mut pic,
-                    ref mut pci_ide,
                     ..
                 } = *dm;
-                harddrv.bulk_read_data(port, io_len, buf, pic, pci_ide)
+                ide.bulk_read_data(port, io_len, buf, pic)
             };
             {
                 let (fwds, count) = dm.pic.take_ioapic_forwards();
@@ -1227,20 +1227,20 @@ impl BxDevicesC {
             for device in 0..2usize {
                 handles.set(
                     harddrv::BxHardDriveC::seek_timer_local(channel, device),
-                    dm.harddrv.seek_timer_handles[channel][device],
+                    dm.ide.drives.seek_timer_handles[channel][device],
                 );
             }
             handles.set(
                 pci_ide::BxPciIde::bmdma_timer_local(channel),
-                dm.pci_ide.bmdma[channel].timer_index,
+                dm.ide.bus_master.bmdma[channel].timer_index,
             );
         }
         let devices::DeviceManager {
-            ref mut harddrv,
-            ref mut pci_ide,
+            ref mut ide,
             ref mut pic,
             ..
         } = *dm;
+        let (harddrv, pci_ide, _scratch) = ide.split();
         let mut irq = wiring::PicIrqSink { pic };
         let pc_system_ips = pc_system.ips();
         let mut timers = wiring::WheelTimerService {
@@ -1436,13 +1436,8 @@ impl BxDevicesC {
             // Routed through the device API by `inp`/`outp` before this match.
             DeviceId::Keyboard => 0xFFFF_FFFF,
             DeviceId::HardDrive => {
-                let devices::DeviceManager {
-                    harddrv,
-                    pic,
-                    pci_ide,
-                    ..
-                } = dm;
-                harddrv.read(port, io_len, pic, pci_ide)
+                let devices::DeviceManager { ide, pic, .. } = dm;
+                ide.read(port, io_len, pic)
             }
             // The UART is routed through the device API by `inp` before this
             // match, so it never arrives here. Answering as an unclaimed port
@@ -1473,13 +1468,8 @@ impl BxDevicesC {
             DeviceId::Pic => dm.pic.write(port, value, io_len),
             DeviceId::Dma => dm.dma.write(port, value, io_len),
             DeviceId::HardDrive => {
-                let devices::DeviceManager {
-                    harddrv,
-                    pic,
-                    pci_ide,
-                    ..
-                } = dm;
-                harddrv.write(port, value, io_len, pic, pci_ide)
+                let devices::DeviceManager { ide, pic, .. } = dm;
+                ide.write(port, value, io_len, pic)
             }
             DeviceId::Vga => dm.vga.write_port(port, value, io_len),
             DeviceId::Port92 => dm.port92_write(port, value, io_len),

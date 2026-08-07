@@ -354,9 +354,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<'_, T> {
         write_section(writer, SEC_DMA, self.device_manager.dma.snapshot_v3_len()?, |s| self.device_manager.dma.save_snapshot_v3(s))?;
         write_section(writer, SEC_KEYBOARD, self.device_manager.keyboard.snapshot_v3_len()?, |s| self.device_manager.keyboard.save_snapshot_v3(s))?;
         write_section(writer, SEC_SERIAL, self.device_manager.serial.snapshot_v3_len()?, |s| self.device_manager.serial.save_snapshot_v3(s))?;
-        write_section(writer, SEC_HARDDRV, self.device_manager.harddrv.snapshot_v3_len()?, |s| self.device_manager.harddrv.save_snapshot_v3(s))?;
-        let pci_len = checked_snapshot_len_add(4, checked_snapshot_len_add(self.device_manager.pci_bridge.snapshot_v3_body_len()?, checked_snapshot_len_add(self.device_manager.pci2isa.snapshot_v3_body_len()?, self.device_manager.pci_ide.snapshot_v3_body_len()?)?)?)?;
-        write_section(writer, SEC_PCI, pci_len, |s| { s.write_u32(SNAPSHOT_SECTION_VERSION)?; self.device_manager.pci_bridge.save_snapshot_v3_body(s)?; self.device_manager.pci2isa.save_snapshot_v3_body(s)?; self.device_manager.pci_ide.save_snapshot_v3_body(s) })?;
+        write_section(writer, SEC_HARDDRV, self.device_manager.ide.drives.snapshot_v3_len()?, |s| self.device_manager.ide.drives.save_snapshot_v3(s))?;
+        let pci_len = checked_snapshot_len_add(4, checked_snapshot_len_add(self.device_manager.pci_bridge.snapshot_v3_body_len()?, checked_snapshot_len_add(self.device_manager.pci2isa.snapshot_v3_body_len()?, self.device_manager.ide.bus_master.snapshot_v3_body_len()?)?)?)?;
+        write_section(writer, SEC_PCI, pci_len, |s| { s.write_u32(SNAPSHOT_SECTION_VERSION)?; self.device_manager.pci_bridge.save_snapshot_v3_body(s)?; self.device_manager.pci2isa.save_snapshot_v3_body(s)?; self.device_manager.ide.bus_master.save_snapshot_v3_body(s) })?;
         write_section(writer, SEC_ACPI, self.device_manager.acpi.snapshot_v3_len()?, |s| self.device_manager.acpi.save_snapshot_v3(s))?;
         write_section(writer, SEC_VGA, self.device_manager.vga.snapshot_v3_len()?, |s| self.device_manager.vga.save_snapshot_v3(s))?;
         write_section(writer, SEC_IOAPIC, self.device_manager.ioapic.snapshot_v3_len()?, |s| self.device_manager.ioapic.save_snapshot_v3(s))?;
@@ -466,7 +466,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<'_, T> {
                             Some(self.device_manager.keyboard.restore_snapshot_v3(&mut section)?);
                     }
                     SEC_SERIAL => self.device_manager.serial.restore_snapshot_v3(&mut section)?,
-                    SEC_HARDDRV => self.device_manager.harddrv.restore_snapshot_v3(&mut section)?,
+                    SEC_HARDDRV => self.device_manager.ide.drives.restore_snapshot_v3(&mut section)?,
                     SEC_PCI => {
                         if section.read_u32()? != SNAPSHOT_SECTION_VERSION {
                             return Err(invalid_snapshot(
@@ -481,7 +481,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<'_, T> {
                             .restore_snapshot_v3_body(&mut section)?;
                         pci = Some(
                             self.device_manager
-                                .pci_ide
+                                .ide.bus_master
                                 .restore_snapshot_v3_body(&mut section)?,
                         );
                     }
@@ -542,7 +542,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> Emulator<'_, T> {
         self.memory.set_a20_mask(self.pc_system.a20_mask());
         self.invalidate_all_cpu_host_mappings();
         self.validate_post_restore_handles(pit, cmos, keyboard, acpi)?;
-        self.device_manager.pci_ide.validate_snapshot_v3_timer_owners(&self.pc_system)?;
+        self.device_manager.ide.bus_master.validate_snapshot_v3_timer_owners(&self.pc_system)?;
         self.device_manager.serial.validate_snapshot_v3_timer_handles(
             |port, handle| self.pc_system.validate_timer_handle_owner(handle, TimerOwner::SerialFifo(port)),
             |port, handle| self.pc_system.validate_timer_handle_owner(handle, TimerOwner::SerialTx(port)),
@@ -845,28 +845,23 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             // 4-sector disc, media init parks curr_lba at 3: READ(10) of
             // LBA 0 arms |0 - 3 + 1| / 4 of the 80 ms stroke = 40000 us.
             emu.device_manager
-                .harddrv
+                .ide.drives
                 .attach_cdrom_data(0, 0, vec![0u8; 2048 * 4]);
             {
                 let dm = &mut emu.device_manager;
-                let crate::iodev::devices::DeviceManager {
-                    harddrv,
-                    pic,
-                    pci_ide,
-                    ..
-                } = dm;
-                harddrv.write(0x1f7, 0xA0, 1, pic, pci_ide); // PACKET
+                let crate::iodev::devices::DeviceManager { ide, pic, .. } = dm;
+                ide.write(0x1f7, 0xA0, 1, pic); // PACKET
                 let packet = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
                 for word in packet.chunks_exact(2) {
                     let value = u16::from_le_bytes([word[0], word[1]]) as u32;
-                    harddrv.write(0x1f0, value, 2, pic, pci_ide);
+                    ide.write(0x1f0, value, 2, pic);
                 }
             }
             // Apply the arm the way the I/O layer does after the OUT.
             let now = emu.pc_system.time_ticks();
             let arm_usec = emu
                 .device_manager
-                .harddrv
+                .ide.drives
                 .take_pending_seek_arm(0, 0)
                 .expect("ATAPI READ must arm the seek timer");
             assert_eq!(arm_usec, 40_000);
@@ -883,7 +878,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
             // Advance to mid-seek and snapshot with the timer still armed.
             emu.service_scheduler_boundary(seek_ticks / 2).unwrap();
-            let drive = &emu.device_manager.harddrv.channels[0].drives[0];
+            let drive = &emu.device_manager.ide.drives.channels[0].drives[0];
             assert!(!drive.controller.interrupt_pending, "seek must still be in flight");
 
             let mut saved = Vec::new();
@@ -894,10 +889,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             // The restored machine completes the seek at the original
             // deadline: nothing right after restore, DRQ + IRQ14 once the
             // remaining seek time elapses.
-            let drive = &emu.device_manager.harddrv.channels[0].drives[0];
+            let drive = &emu.device_manager.ide.drives.channels[0].drives[0];
             assert!(!drive.controller.interrupt_pending);
             emu.service_scheduler_boundary(seek_ticks / 2 + 2).unwrap();
-            let drive = &emu.device_manager.harddrv.channels[0].drives[0];
+            let drive = &emu.device_manager.ide.drives.channels[0].drives[0];
             assert!(drive.controller.interrupt_pending);
             assert!(emu.device_manager.pic.irq_line_level(14));
         });
@@ -1159,7 +1154,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             const MMIO: u32 = 0xf100_0000;
 
             let mut source = relocation_machine();
-            assert!(source.device_manager.pci_ide.pci_write(0x20, BMDMA | 1, 4));
+            assert!(source.device_manager.ide.bus_master.pci_write(0x20, BMDMA | 1, 4));
             source.device_manager.pci_ide_bar4_needs_reregister = true;
             let (pm_changed, _) = source.device_manager.acpi.pci_write(0x40, PM | 1, 4);
             let (_, sm_changed) = source.device_manager.acpi.pci_write(0x90, SM | 1, 4);
@@ -1176,7 +1171,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 .device_manager
                 .vga
                 .snapshot_v3_committed_mapping_target();
-            assert_eq!(source.device_manager.pci_ide.bmdma_base, BMDMA);
+            assert_eq!(source.device_manager.ide.bus_master.bmdma_base, BMDMA);
             assert_eq!(source.device_manager.acpi.pm_base, PM);
             assert_eq!(source.device_manager.acpi.sm_base, SM);
             assert_eq!(desired_vga.lfb_base, LFB);
@@ -1190,7 +1185,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 .vga
                 .snapshot_v3_committed_mapping_target();
             assert_ne!(old_vga.lfb_base, LFB);
-            assert_ne!(restored.device_manager.pci_ide.bmdma_base, BMDMA);
+            assert_ne!(restored.device_manager.ide.bus_master.bmdma_base, BMDMA);
             assert_ne!(restored.device_manager.acpi.pm_base, PM);
             assert_ne!(restored.device_manager.acpi.sm_base, SM);
 
@@ -1200,7 +1195,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 .device_manager
                 .vga
                 .snapshot_v3_committed_mapping_target();
-            assert_eq!(restored.device_manager.pci_ide.bmdma_base, BMDMA);
+            assert_eq!(restored.device_manager.ide.bus_master.bmdma_base, BMDMA);
             assert_eq!(restored.device_manager.acpi.pm_base, PM);
             assert_eq!(restored.device_manager.acpi.sm_base, SM);
             assert_eq!(restored_vga, desired_vga);

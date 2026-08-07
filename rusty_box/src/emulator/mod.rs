@@ -603,14 +603,14 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
             // latch) will raise/complete the IRQ when its deadline fires —
             // the line level is legitimately transitional then.
             let seek_in_flight = (0..2).any(|device| {
-                self.device_manager.harddrv.pending_seek_arm_usec[channel][device].is_some()
-                    || self.device_manager.harddrv.seek_timer_handles[channel][device]
+                self.device_manager.ide.drives.pending_seek_arm_usec[channel][device].is_some()
+                    || self.device_manager.ide.drives.seek_timer_handles[channel][device]
                         .is_some_and(|handle| self.pc_system.is_timer_active(handle))
             });
             if seek_in_flight {
                 continue;
             }
-            if pic.irq_line_level(irq) != self.device_manager.harddrv.get_irq_level(channel)
+            if pic.irq_line_level(irq) != self.device_manager.ide.drives.get_irq_level(channel)
             {
                 return Err(mismatch("ATA IRQ"));
             }
@@ -1580,7 +1580,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
         spt: u8,
     ) -> std::io::Result<()> {
         self.device_manager
-            .harddrv
+            .ide.drives
             .attach_disk(channel, drive, path, cylinders, heads, spt)
     }
 
@@ -1593,7 +1593,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
         path: &str,
     ) -> std::io::Result<()> {
         self.device_manager
-            .harddrv
+            .ide.drives
             .attach_cdrom_image(channel, drive, path)
     }
 
@@ -1655,7 +1655,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     /// Attach a CD-ROM ISO from in-memory data (for UEFI, WASM, or any environment).
     pub fn attach_cdrom_data(&mut self, channel: usize, drive: usize, data: alloc::vec::Vec<u8>) {
         self.device_manager
-            .harddrv
+            .ide.drives
             .attach_cdrom_data(channel, drive, data);
     }
 
@@ -1674,14 +1674,14 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
         spt: u8,
     ) {
         self.device_manager
-            .harddrv
+            .ide.drives
             .attach_disk_data(channel, drive, data, cylinders, heads, spt);
     }
 
     /// Attach a CD-ROM ISO from a static byte slice (no-alloc).
     pub fn attach_cdrom_data_ref(&mut self, channel: usize, drive: usize, data: &'static [u8]) {
         self.device_manager
-            .harddrv
+            .ide.drives
             .attach_cdrom_data_ref(channel, drive, data);
     }
 
@@ -1696,7 +1696,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
         spt: u8,
     ) {
         self.device_manager
-            .harddrv
+            .ide.drives
             .attach_disk_data_ref(channel, drive, data, cylinders, heads, spt);
     }
 
@@ -1736,7 +1736,7 @@ impl<'a, T: Instrumentation> Emulator<'a, T> {
     #[cfg(feature = "alloc")]
     /// Get ATA channel 1 (CD-ROM) controller state + interrupt routing diagnostics.
     pub fn ata_ch1_diag(&self) -> String {
-        let ch1 = &self.device_manager.harddrv.channels[1];
+        let ch1 = &self.device_manager.ide.drives.channels[1];
         let d = ch1.selected_drive();
         let (vec15, masked15, trig15, _dmode15) =
             self.device_manager.ioapic.redirect_entry_diag(15);
@@ -1990,7 +1990,7 @@ impl<T: Instrumentation> Emulator<'_, T> {
         // ATA channel diagnostics
         tracing::trace!("--- ATA Diag ---");
         tracing::trace!("  cmd_history (last 10):");
-        let hist: Vec<(u8, u8, u32)> = self.device_manager.harddrv.cmd_history.iter().collect();
+        let hist: Vec<(u8, u8, u32)> = self.device_manager.ide.drives.cmd_history.iter().collect();
         let start = if hist.len() > 10 { hist.len() - 10 } else { 0 };
         for (ch, cmd, lba) in &hist[start..] {
             tracing::trace!("    ch={} cmd={:#04x} lba={}", ch, cmd, lba);
